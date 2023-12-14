@@ -1,0 +1,5 @@
+[sleep]
+
+description = "Sleep for a number of seconds"
+
+exec = ["python", "-m", "sleep"]

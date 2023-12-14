@@ -1,0 +1,10 @@
+[hello]
+
+description = """
+Say hello to my friend.
+
+Sample operation that prints a greeting.
+"""
+
+exec = "python hello.py"
+config = "hello.py"

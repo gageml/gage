@@ -1,0 +1,7 @@
+/dist
+/build
+/scratch.md
+*.egg-info
+*.pyc
+profile.*
+gage.spec

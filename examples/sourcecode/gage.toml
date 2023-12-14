@@ -1,0 +1,31 @@
+[default]
+
+description = "Uses the default source code copy rules"
+exec = "ls"
+
+[pyfiles]
+
+description = "Copies only *.py files"
+exec = "ls"
+sourcecode = "*.py"
+
+
+[exclude-data]
+
+description = "Uses default rules but excludes data.txt"
+exec = "ls"
+sourcecode = "-data.txt"
+
+[text]
+
+description = "Copies all text files"
+exec = "ls"
+sourcecode = [
+    "**/* text"
+]
+
+[all-files]
+
+description = "Copied everything as source code"
+exec = "ls"
+sourcecode = "**/*"

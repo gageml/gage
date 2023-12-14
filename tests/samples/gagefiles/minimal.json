@@ -1,0 +1,5 @@
+{
+    "train": {
+        "exec": "echo hello"
+    }
+}

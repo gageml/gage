@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gage.org/userconfig",
+  "title": "Gage ML User Config File",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repos": {
+      "type": "object",
+      "title": "Gage repositories",
+      "additionalProperties": false,
+      "patternProperties": {
+        ".+": {
+          "type": "object",
+          "title": "repository",
+          "oneOf": [
+            {
+              "required": ["type"]
+            },
+            {
+              "required": ["path"]
+            }
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "title": "Repository type"
+            },
+            "path": {
+              "type": "string",
+              "title": "Local repository path"
+            }
+          }
+        }
+      }
+    }
+  }
+}

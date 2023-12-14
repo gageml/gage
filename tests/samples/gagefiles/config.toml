@@ -1,0 +1,19 @@
+[train]
+
+[train.sourcecode]
+
+include = [
+    "*.py",
+    "data.txt",
+    "config.json"
+]
+
+[[train.config]]
+
+keys = "config.json"
+
+[[train.config.bind]]
+
+targe = "lr"
+name = "train-lr"
+description = "Train learning rate"

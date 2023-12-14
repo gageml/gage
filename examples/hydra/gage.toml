@@ -1,0 +1,5 @@
+[my_app]
+
+description = "Replicates the Hydra Get Started example."
+exec = "python my_app.py"
+config = "conf/**/*.yaml#**.*"

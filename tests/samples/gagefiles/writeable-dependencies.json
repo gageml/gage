@@ -1,0 +1,20 @@
+{
+  "train": {
+    "requires": [
+      "file:bar.txt",
+      "https://examples.com/data.csv",
+      "run:prepare-data",
+      {
+        "resource": "file:foobar",
+        "writeable": true,
+        "select": ["some/path"]
+      },
+      {
+        "resource": "run:prepare-data?where='loss < 0.1'"
+      },
+      {
+        "resource": "run:happy-camper"
+      }
+    ]
+  }
+}

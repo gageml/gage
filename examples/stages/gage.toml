@@ -1,0 +1,42 @@
+[explicit]
+
+description = "Shows "
+
+exec.stage-sourcecode    = "cp train.py $run_dir"
+exec.stage-dependencies  = "cp data.txt $run_dir"
+exec.run                 = "python -m train"
+
+[implicit]
+
+exec = "python train.py"
+sourcecode = "train.py"
+requires = "data.txt"
+
+[virtualenv]
+
+decription = "Use a virtual env for a run"
+
+[virtualenv.exec]
+
+stage-sourcecode = """
+cp -r **/*.py $run_dir
+cp pyproject.toml $run_dir
+"""
+
+stage-runtime = """
+virtualenv .venv
+.venv/bin/pip install .
+"""
+
+stage-dependencies = """
+dvc pull
+cp data.txt $run_dir
+"""
+
+run = """
+.venv/bin/python train.py
+"""
+
+finalize-run = """
+rm -rf .venv
+"""

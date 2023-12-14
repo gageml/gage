@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gage.org/gagefile",
+  "title": "Gage ML Project File",
+
+  "$defs": {
+    "shell-cmd": {
+      "type": "string",
+      "title": "Shell command"
+    },
+    "cmd-args": {
+      "type": "array",
+      "title": "Command arguments",
+      "items": {
+        "title": "Command argument",
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "exec-cmd": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/shell-cmd"
+        },
+        {
+          "$ref": "#/$defs/cmd-args"
+        }
+      ]
+    },
+    "files-pattern": {
+      "title": "Files pattern",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "keys-pattern": {
+      "title": "Keys pattern",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "title": "Run configuration",
+      "additionalProperties": false,
+      "required": ["keys"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "title": "Configuration description"
+        },
+        "prefix": {
+          "type": "string",
+          "title": "Prefix to apply to keys"
+        },
+        "strip-prefix": {
+          "type": "string",
+          "title": "Prefix to remove from keys"
+        },
+        "rename": {
+          "type": "string",
+          "title": "Alternative name for keys"
+        },
+        "keys": {
+          "$ref": "#/$defs/keys-pattern",
+          "title": "Configuration keys"
+        }
+      }
+    },
+    "depends": {
+      "type": "object",
+      "title": "Dependency",
+      "oneOf": [
+        {
+          "type": "object",
+          "title": "Project files dependency",
+          "additionalProperties": false,
+          "required": ["files"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["project-files"]
+            },
+            "description": {
+              "title": "Dependency description",
+              "type": "string"
+            },
+            "files": {
+              "$ref": "#/$defs/files-pattern"
+            },
+            "link": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "title": "Run files dependency",
+          "additionalProperties": false,
+          "required": ["run-select"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["run-files"]
+            },
+            "description": {
+              "title": "Dependency description",
+              "type": "string"
+            },
+            "run-select": {
+              "type": "string",
+              "title": "Run select criteria"
+            },
+            "files": {
+              "$ref": "#/$defs/files-pattern"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "title": "Runs summary dependency",
+          "additionalProperties": false,
+          "required": ["type", "runs-select"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["runs-summary"]
+            },
+            "description": {
+              "title": "Dependency description",
+              "type": "string"
+            },
+            "runs-select": {
+              "type": "string",
+              "title": "Runs select criteria"
+            },
+            "summary-filename": {
+              "type": "string",
+              "title": "Summary file name"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "patternProperties": {
+    ".+": {
+      "type": "object",
+      "title": "Operation definition",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "default": {
+          "type": "boolean"
+        },
+        "exec": {
+          "title": "Exec spec",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/exec-cmd"
+            },
+            {
+              "type": "object",
+              "title": "Full exec spec",
+              "additionalProperties": false,
+              "properties": {
+                "stage-sourcecode": {
+                  "$ref": "#/$defs/exec-cmd"
+                },
+                "stage-runtime": {
+                  "$ref": "#/$defs/exec-cmd"
+                },
+                "stage-dependencies": {
+                  "$ref": "#/$defs/exec-cmd"
+                },
+                "run": {
+                  "$ref": "#/$defs/exec-cmd"
+                },
+                "finalize-run": {
+                  "$ref": "#/$defs/exec-cmd"
+                }
+              }
+            }
+          ]
+        },
+        "sourcecode": {
+          "title": "Operation source code",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/files-pattern"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        },
+        "config": {
+          "title": "Operation configuration",
+          "oneOf": [
+            {
+              "title": "Operation config keys",
+              "$ref": "#/$defs/keys-pattern"
+            },
+            {
+              "$ref": "#/$defs/config"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/config"
+              }
+            }
+          ]
+        },
+        "depends": {
+          "title": "Operation dependencies",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/depends"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/depends"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

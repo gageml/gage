@@ -1,0 +1,12 @@
+{
+  "train": {
+    "exec": {
+      "stage-sourcecode": "cp * $run_dir",
+      "stage-dependencies": null,
+      "stage-runtime": [123],
+      "run": {
+        "foo": "bar"
+      }
+    }
+  }
+}

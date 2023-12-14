@@ -1,0 +1,43 @@
+[a]
+
+description = "Shows progress for run phases"
+
+[a.exec]
+
+stage-sourcecode = """
+echo Patching foobar.py
+touch foobar.py
+sleep 1
+"""
+
+stage-runtime = """
+echo Creating virtual env
+touch venv
+sleep 1
+"""
+
+stage-dependencies = """
+echo Downloading data set
+touch data.csv
+touch data.tmp
+sleep 1
+"""
+
+run = """
+python -u -c "
+import time
+for i in range(10):
+    print(f'Step {i}')
+    time.sleep(0.5)
+"
+"""
+
+finalize-run = """
+echo Deleting temp files
+rm -f *.tmp
+echo Finishing up other important work
+for i in `seq 3`; do
+    echo "Item $i"
+    sleep 1
+done
+"""

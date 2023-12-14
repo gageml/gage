@@ -1,0 +1,138 @@
+[a]
+
+description = "Basic config"
+default = true
+
+exec = "python train.py"
+
+sourcecode = ["*.py", "*.yaml", "-*.tmp.*"]
+config = "config.yaml"
+
+[b]
+
+# =================================================================
+# Config
+# =================================================================
+
+description = "Config as list of keys"
+
+config = [
+  "config.yaml#lr",
+  "config.yaml#epochs"
+]
+
+[c]
+
+description = "Config as include/exclude patterns"
+
+config = [
+  "config/*.yaml",
+  "-config/example.yaml"
+]
+
+# =================================================================
+# Exec specs
+# =================================================================
+
+[d]
+
+description = "Phase-specific exec"
+
+[d.exec]
+
+stage-sourcecode = """
+cp -r src $run_dir/src
+cp pyproject.toml $run_dir
+"""
+
+stage-runtime = """
+virtualenv venv
+venv/bin/pip install .
+"""
+
+run = """
+venv/bin/python python -m myapp
+"""
+
+# =================================================================
+# Complex config
+# =================================================================
+
+[e]
+
+description = "Complex config"
+
+[[e.config]]
+
+keys = "train.py#*"
+prefix = "train."
+
+[[e.config]]
+
+keys = [
+  "eval.py#*",
+  "-eval.py#priv*"
+]
+prefix = "eval."
+
+# =================================================================
+# Disable / default source code
+# =================================================================
+
+[f]
+
+description = "Disabled sourcecode"
+sourcecode = false
+
+[g]
+
+description = "Disabled sourcecode v2"
+sourcecode = []
+
+[h]
+
+description = "Default source code rules"
+sourcecode = true
+
+# =================================================================
+# Dependencies
+# =================================================================
+
+[i]
+
+description = "Various dependencies"
+
+sourcecode = [
+  "-data.*"
+]
+
+[[i.depends]]
+
+files = [
+  "data.txt",
+  "data.csv"
+]
+
+[[i.depends]]
+
+type = "project-files"  # default
+files = "very-big-data.tar.gz"
+link = true
+
+[[i.depends]]
+
+run-select = "op = prepare"  # Implies type = "run-files"
+files = "*.h5"
+
+[[i.depends]]
+
+type = "run-files"
+description = "Generated files from latest train or train2 run"
+run-select = "op in [train, train2]"
+
+[[i.depends]]
+
+type = "runs-summary"
+description = "Runs for a summary operation"
+runs-select = "op = preview and started after 30 days ago"
+summary-filename = "runs.json"
