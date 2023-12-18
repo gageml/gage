@@ -1,0 +1,10 @@
+[hello]
+
+description = "Sample hello op"
+exec = "python -m hello"
+
+[hello.config]
+
+# hello.py can repeat the greeting by setting `times>1` - we just want
+# to greet once so just use `name` as config
+keys = "hello.py#name"

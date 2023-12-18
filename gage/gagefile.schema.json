@@ -66,6 +66,10 @@
       "additionalProperties": false,
       "required": ["keys"],
       "properties": {
+        "keys": {
+          "$ref": "#/$defs/keys-pattern",
+          "title": "Configuration keys"
+        },
         "description": {
           "type": "string",
           "title": "Configuration description"
@@ -81,10 +85,6 @@
         "rename": {
           "type": "string",
           "title": "Alternative name for keys"
-        },
-        "keys": {
-          "$ref": "#/$defs/keys-pattern",
-          "title": "Configuration keys"
         }
       }
     },

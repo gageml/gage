@@ -35,7 +35,7 @@ def read_project_config(src_dir: str, opdef: OpDef):
         files_config = _selected_files_config(src_dir, parsed_paths)
         keys = _select_keys(src_dir, files_config, parsed_paths)
         for path, file_config in files_config:
-            config.update(file_config)
+            config.update({key: file_config[key] for key in keys if key in file_config})
     return config
 
 

@@ -166,7 +166,7 @@ Parse a path with both a file and key part.
                key_pattern='x',
                key_exclude=False)
 
-A file part without a key part implies '*' for the key (matches
+A file part without a key part implies '\*' for the key (matches
 top-level keys).
 
     >>> _parse_path("train.py")  # -space
@@ -566,7 +566,7 @@ Run a modified `op.py` script.
 ## Reading project configuration
 
 `read_project_config()` reads configuration from a source directory
-given op def settings.
+given an op def.
 
 Create a directory with configuration sources.
 
@@ -584,18 +584,27 @@ Create a directory with configuration sources.
     ... }
     ... """)
 
-
-Create an op def that includes `hello.py` as config.
+Create an op def that includes `hello.py` as config. This is equivalent
+of specifying `test.py#*` for the config `keys`. This treats all
+top-level, non-nested globals as config.
 
     >>> opdef = OpDef("test", {
     ...   "config": "test.py"
     ... })
 
-Read the configuration from the directory.
+Read the configuration from the directory. Note that only top-level
+config is read.
 
-    >>> config = read_project_config(".", opdef)
+    >>> read_project_config(".", opdef)  # +pprint
+    {'a': 1, 'b': 'Hello'}
 
-    >>> config  # +pprint
+Expand the config to include all values.
+
+    >>> opdef = OpDef("test", {
+    ...   "config": "test.py#**.*"
+    ... })
+
+    >>> read_project_config(".", opdef)  # +pprint
     {'a': 1,
      'b': 'Hello',
      'c.d': 123,
@@ -603,6 +612,15 @@ Read the configuration from the directory.
      'c.e.1': 7,
      'c.e.2': 8,
      'c.f.g': 1.123}
+
+Include just `c`.
+
+    >>> opdef = OpDef("test", {
+    ...   "config": "test.py#c.**.*"
+    ... })
+
+    >>> read_project_config(".", opdef)  # +pprint
+    {'c.d': 123, 'c.e.0': 6, 'c.e.1': 7, 'c.e.2': 8, 'c.f.g': 1.123}
 
 ## To Do / Notes
 
@@ -615,7 +633,7 @@ TODO: maybe a 'rename', which is short hand for prefix/strip-prefix
 
 For example:
 
-``` toml
+```toml
 [a.config]
 
 path = "config.json#resnet50.train.hparams.*"
@@ -625,7 +643,7 @@ strip-prefix = "resnet50.train.hparams."
 
 Could be written as:
 
-``` toml
+```toml
 [a.config]
 
 path = "config.json#resnet50.train.hparams.*"
@@ -634,7 +652,7 @@ rename = "resnet50.train.hparams. train."
 
 Rename could be a list.
 
-``` toml
+```toml
 [a.config]
 
 path = "train.py"
@@ -643,7 +661,7 @@ rename = ["x X", "y Y"]
 
 Rename could used on a single key.
 
-``` toml
+```toml
 [a.config]
 
 path = "train.py#x"
@@ -659,7 +677,7 @@ TODO: Show how namespace is used to deal with that edge case.
 TODO: Application of config needs to be per `config` section due to
 namespace potential.
 
-TODO: Note somewhere the idea of a *path prefix*, which is a config
+TODO: Note somewhere the idea of a _path prefix_, which is a config
 setting that indicates that a path-based prefix should be used with
 selected keys. This would be handle for Hydra main config, which is
 setup with a `config_path`, under which files and subdirectories form
@@ -668,7 +686,7 @@ key prefixes.
 `path-prefix-root` specifies the root directory from which prefixes are
 applied to selected keys.
 
-``` toml
+```toml
 [a.config]
 
 path = "conf/**.*#**.*"
@@ -686,7 +704,7 @@ cares to track.
 OTOH, learning rate for a model training run is something the user cares
 about. But this can be more specifically exposed via op config.
 
-``` toml
+```toml
 [a.config]
 
 path = "conf/resnet50/train.yaml"
