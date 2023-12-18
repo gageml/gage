@@ -1,0 +1,4 @@
+// JSON comments must be on their own line
+{
+    "op": {}  // This comment is not okay
+}

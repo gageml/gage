@@ -153,3 +153,16 @@ configurations.
     >>> run("gage check kitchen-sink.toml")
     kitchen-sink.toml is a valid Gage file
     <0>
+
+## JSON with comments
+
+Comments are supported but must be on their own line.
+
+    >>> run("gage check jsonc-valid.json")
+    jsonc-valid.json is a valid Gage file
+    <0>
+
+    >>> run("gage check jsonc-invalid.json")
+    Error loading jsonc-invalid.json: Expecting ',' delimiter: line 2 column 15 (char 16)
+    <1>
+    

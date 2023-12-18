@@ -1,0 +1,6 @@
+// JSON based config may contain comments
+{
+    // This is
+    // okay
+    "op": {}
+}
