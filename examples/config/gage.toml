@@ -8,3 +8,15 @@ exec = "python -m hello"
 # hello.py can repeat the greeting by setting `times>1` - we just want
 # to greet once so just use `name` as config
 keys = "hello.py#name"
+
+[hello-2]
+
+description = "Alternative config using a single string"
+exec = 'python -m hello'
+config = "hello.py#name"
+
+[hello-3]
+
+description = "Alternative config using a list of strings"
+exec = 'python -m hello'
+config = ["hello.py#name"]

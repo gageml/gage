@@ -40,3 +40,16 @@ Run preview:
     ⤶
     Continue? (Y/n)
     <-9>
+
+## Alternative config
+
+Operations `hello-2` and `hello-3` provide the same configuration but
+using different semantics.
+
+    >>> run("gage run hello-2 -y")
+    Hello, Joe
+    <0>
+
+    >>> run("gage run hello-3 -y")
+    Hello, Joe
+    <0>

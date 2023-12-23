@@ -1,0 +1,35 @@
+[hello]
+
+config = "hello.py"
+
+[hello-2]
+
+config = ["hello.py"]
+
+[hello-3]
+
+config = ["hello.py", "goodbye.json"]
+
+[hello-4.config]
+
+keys = "hello.py"
+
+[hello-5.config]
+
+keys = ["hello.py"]
+
+[[hello-6.config]]
+
+keys = "hello.py"
+
+[[hello-7.config]]
+
+keys = ["hello.py"]
+
+[[hello-8.config]]
+
+keys = "hello.py"
+
+[[hello-8.config]]
+
+keys = ["goodbye.py"]

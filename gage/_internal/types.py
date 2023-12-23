@@ -218,6 +218,8 @@ class OpDef:
             val = [{"keys": val}]
         elif isinstance(val, dict):
             val = [val]
+        else:
+            val = [{"keys": item} if isinstance(item, str) else item for item in val]
         return [OpDefConfig(item) for item in val]
 
     def get_dependencies(self) -> list[OpDefDependency]:

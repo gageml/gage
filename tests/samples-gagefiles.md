@@ -145,6 +145,14 @@ At a minimum, `files` is required for `depends`.
     ...
     <1>
 
+## Config
+
+Gage supports a variety of config specs.
+
+    >>> run("gage check config.toml")
+    config.toml is a valid Gage file
+    <0>
+
 ## Kitchen sink
 
 `kitchen-sink.json` is intended to demonstrate a variety of
@@ -165,4 +173,3 @@ Comments are supported but must be on their own line.
     >>> run("gage check jsonc-invalid.json")
     Error loading jsonc-invalid.json: Expecting ',' delimiter: line 2 column 15 (char 16)
     <1>
-    
