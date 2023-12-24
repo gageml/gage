@@ -28,11 +28,10 @@ Only the first 8 chars are used to calculate the name.
     ... # spellchecker: disable-next-line
     'kafom-fikud'
 
-IDs must be at least 8 chars.
+IDs can be less than 8 chars.
 
     >>> run_name_for_id('60a82')
-    Traceback (most recent call last):
-    ValueError: run ID is too short: '60a82'
+    'babak-bopaf'
 
 The first 8 chars must be hexadecimal.
 

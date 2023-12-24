@@ -79,12 +79,13 @@ Temp to simulate group:
     >>> group_id = make_run_id(1)
     >>> group = RunGroup(group_id, path_join(runs_dir, group_id + ".group"))
 
-Create some runs for a group.
+Create some runs for a group. Use explicit run IDs to define the group
+later.
 
     >>> from gage._internal.run_util import make_run
-    >>> run1 = make_run(OpRef("test", "test"), runs_dir, 2)
-    >>> run2 = make_run(OpRef("test", "test"), runs_dir, 3)
-    >>> run3 = make_run(OpRef("test", "test"), runs_dir, 4)
+    >>> run1 = make_run(OpRef("test", "test"), runs_dir, "aaa")
+    >>> run2 = make_run(OpRef("test", "test"), runs_dir, "bbb")
+    >>> run3 = make_run(OpRef("test", "test"), runs_dir, "ccc")
 
 Create the group dir.
 
@@ -93,34 +94,27 @@ Create the group dir.
 
     >>> ls(runs_dir)  # +parse
     {group_id:run_id}.group/id
-    {run1_id:run_id}.meta/opref
-    {run2_id:run_id}.meta/opref
-    {run3_id:run_id}.meta/opref
+    aaa.meta/opref
+    bbb.meta/opref
+    ccc.meta/opref
 
     >>> assert group_id == group.id
-    >>> assert run1_id == run1.id
-    >>> assert run2_id == run2.id
-    >>> assert run3_id == run3.id
 
 Write the group attributes.
 
     >>> log_attrs(group.group_dir, "test", {
     ...     "label": "Sample group",
     ...     "tag:color=green": "",
-    ...     f"run:{run1.id}": "",
-    ...     f"run:{run2.id}": "",
-    ...     f"run:{run3.id}": ""
+    ...     "run:aaa": "",
+    ...     "run:bbb": "",
+    ...     "run:ccc": ""
     ... })
 
     >>> get_attrs(group.group_dir)  # +parse +json
     {
       "label": "Sample group",
-      "run:{run1_id:run_id}": "",
-      "run:{run2_id:run_id}": "",
-      "run:{run3_id:run_id}": "",
+      "run:aaa": "",
+      "run:bbb": "",
+      "run:ccc": "",
       "tag:color=green": ""
     }
-
-    >>> assert run1_id == run1.id
-    >>> assert run2_id == run2.id
-    >>> assert run3_id == run3.id

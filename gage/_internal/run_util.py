@@ -244,6 +244,20 @@ _ATTR_READERS = {
 # =================================================================
 
 
+def _run_other_dir(run: Run, name: str):
+    if run.run_dir.endswith(".deleted"):
+        return "".join([run.run_dir[:-8], ".", name, ".deleted"])
+    return "".join([run.run_dir, ".", name])
+
+
+def run_project_ref(run: Run):
+    return _run_other_dir(run, "project")
+
+
+def run_user_dir(run: Run):
+    return _run_other_dir(run, "user")
+
+
 def run_project_dir(run: Run):
     ref_filename = run_project_ref(run)
     try:
@@ -265,14 +279,6 @@ def run_project_dir(run: Run):
                 log.warning("Unexpected project ref encoding in \"%s\"", ref_filename)
                 return None
             return uri[5:]
-
-
-def run_project_ref(run: Run):
-    return run.run_dir + ".project"
-
-
-def run_user_dir(run: Run):
-    return run.run_dir + ".user"
 
 
 # =================================================================
@@ -380,23 +386,30 @@ def _meta_timestamp_filename(run: Run, name: RunTimestamp):
 def run_for_meta_dir(meta_dir: str):
     try:
         opref = _load_opref(meta_dir)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError):
         return None
     else:
-        try:
-            run_id = _load_run_id(meta_dir)
-        except (OSError, ValueError):
-            return None
-        else:
-            run_dir = _run_dir_for_meta_dir(meta_dir)
-            run_name = run_name_for_id(run_id)
-            return Run(run_id, opref, meta_dir, run_dir, run_name)
+        run_dir = _run_dir_for_meta_dir(meta_dir)
+        run_id = _run_id_for_meta_dir(meta_dir)
+        run_name = run_name_for_id(run_id)
+        return Run(run_id, opref, meta_dir, run_dir, run_name)
 
 
 def _load_opref(meta_dir: str):
     filename = os.path.join(meta_dir, "opref")
     with open(filename) as f:
         return decode_opref(f.read())
+
+
+def _run_id_for_meta_dir(meta_dir: str):
+    try:
+        return _load_run_id(meta_dir)
+    except (OSError, ValueError):
+        dir_basename = os.path.basename(meta_dir)
+        if meta_dir.endswith(".meta.deleted"):
+            return dir_basename[:-13]
+        assert dir_basename.endswith(".meta")
+        return dir_basename[:-5]
 
 
 def _load_run_id(meta_dir: str):
@@ -409,7 +422,7 @@ def _run_dir_for_meta_dir(meta_dir: str):
     if meta_dir.endswith(".meta"):
         return meta_dir[:-5]
     if meta_dir.endswith(".meta.deleted"):
-        return meta_dir[:-13]
+        return meta_dir[:-13] + ".deleted"
     assert False, meta_dir
 
 
@@ -418,8 +431,8 @@ def _run_dir_for_meta_dir(meta_dir: str):
 # =================================================================
 
 
-def make_run(opref: OpRef, location: str | None = None, _id_time: int = 0):
-    run_id = make_run_id(_id_time)
+def make_run(opref: OpRef, location: str | None = None, id: str | None = None):
+    run_id = id or make_run_id()
     location = location or sys_config.get_runs_home()
     run_dir = os.path.join(location, run_id)
     meta_dir = run_dir + ".meta"
@@ -442,8 +455,6 @@ def make_run_id(_id_time: int = 0):
 
 
 def run_name_for_id(run_id: str) -> str:
-    if len(run_id) < 8:
-        raise ValueError(f"run ID is too short: {run_id!r}")
     return uint2quint(int(run_id[:8], 16))
 
 

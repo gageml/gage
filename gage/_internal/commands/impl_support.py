@@ -182,7 +182,7 @@ def _col_style(name: str, deleted: bool):
         case "#", False:
             return cli.STYLE_TABLE_HEADER
         case "#", True:
-            return f"strike dim {cli.STYLE_TABLE_HEADER}"
+            return f"dim"
         case "name", False:
             return "dim"
         case "operation", False:

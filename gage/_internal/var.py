@@ -55,7 +55,7 @@ def _all_runs_filter(run: Run):
 
 def _iter_runs(root: str, deleted: bool = False):
     try:
-        names = set(os.listdir(root))
+        names = os.listdir(root)
     except OSError:
         pass
     else:
@@ -114,38 +114,30 @@ def delete_runs(runs: list[Run], permanent: bool = False):
 
 
 def _delete_run(run: Run, permanent: bool):
+    for src in _existing_run_sources(run):
+        _handle_delete_run_source(src, permanent)
+
+
+def _handle_delete_run_source(src: str, permanent: bool):
     if permanent:
-        for src in _run_sources(run):
-            _delete_tree(src)
+        safe_delete_tree(src)
     else:
-        deleted_meta_dir = _deleted_meta_dir(run)
-        ensure_safe_delete_tree(deleted_meta_dir)
-        _move(run.meta_dir, deleted_meta_dir)
+        deleted_src_target = src + ".deleted"
+        ensure_safe_delete_tree(deleted_src_target)
+        os.rename(src, deleted_src_target)
 
 
-def _run_sources(run: Run):
-    if os.path.exists(run.meta_dir):
-        yield run.meta_dir
-    if os.path.exists(run.run_dir):
-        yield run.run_dir
-    user_dir = run_user_dir(run)
-    if os.path.exists(user_dir):
-        yield user_dir
-    project_ref = run_project_ref(run)
-    if os.path.exists(project_ref):
-        yield project_ref
+def _existing_run_sources(run: Run):
+    return [path for path in _canonical_run_sources(run) if os.path.exists(path)]
 
 
-def _deleted_meta_dir(run: Run):
-    return run.meta_dir + ".deleted"
-
-
-def _delete_tree(dirname: str):
-    safe_delete_tree(dirname)
-
-
-def _move(src: str, dest: str):
-    os.rename(src, dest)
+def _canonical_run_sources(run: Run):
+    return [
+        run.meta_dir,
+        run.run_dir,
+        run_user_dir(run),
+        run_project_ref(run),
+    ]
 
 
 # =================================================================
@@ -166,11 +158,27 @@ def restore_runs(runs: list[Run]):
 
 
 def _restore_run(run: Run):
-    assert run.meta_dir.endswith(".deleted")
-    restored_meta_dir = run.meta_dir[:-8]
-    if os.path.exists(restored_meta_dir):
-        raise FileExistsError(restored_meta_dir)
-    _move(run.meta_dir, restored_meta_dir)
+    for src, target in _safe_restorable(run):
+        assert not os.path.exists(target)
+        os.rename(src, target)
+
+
+def _safe_restorable(run: Run):
+    sources = _canonical_run_sources(run)
+    targets = _restore_targets(sources)
+    for path in targets:
+        if os.path.exists(path):
+            raise FileExistsError(path)
+    return [
+        (src, target)
+        for src, target in zip(sources, targets)  # \
+        if os.path.exists(src)
+    ]
+
+
+def _restore_targets(sources: list[str]):
+    assert all(src.endswith(".deleted") for src in sources), sources
+    return [src[:-8] for src in sources]
 
 
 # =================================================================
