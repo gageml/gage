@@ -1093,7 +1093,7 @@ def _write_patched(run: Run, diffs: list[tuple[str, UnifiedDiff]]):
 
 
 class RunExecError(Exception):
-    def __init__(self, phase_name: str, proc_args: list[str], exit_code: int):
+    def __init__(self, phase_name: str, proc_args: str | list[str], exit_code: int):
         self.phase_name = phase_name
         self.proc_args = proc_args
         self.exit_code = exit_code
