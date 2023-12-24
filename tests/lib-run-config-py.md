@@ -113,11 +113,9 @@ Use `apply()` to update the script and re-run it.
 Keys correspond to top-level assignments of config values. Keys are
 comprised of the top-level variable and nested keys separated by dots.
 
-Create a function to list keys for module source.
-
-Variables must be assigned config values to be considered keys. A config
-value is a string, number, or boolean. Config values may be contained in
-lists and dictionaries.
+Variables must be assigned values to be considered keys. A config value
+is a string, number, or boolean. Config values may be contained in lists
+and dictionaries.
 
     >>> config = PythonConfig("""
     ... i = 1
@@ -201,6 +199,76 @@ Assignments to tuples are not treated as config value assignments.
     ... x, y = 1, 2
     ... """))
     <none>
+
+### Values
+
+Python config supports these value types: int, float, string, boolean,
+and None.
+
+    >>> print_config(PythonConfig("""
+    ... a = 1
+    ... b = 1.1
+    ... c = "abc"
+    ... d = True
+    ... e = False
+    ... f = None
+    ... """))
+    a: 1
+    b: 1.1
+    c: abc
+    d: True
+    e: False
+    f: None
+
+Minus operator:
+
+    >>> print_config(PythonConfig("""
+    ... a = -1
+    ... b = -1.1
+    ... c = -True
+    ... d = -False
+    ... """))
+    a: -1
+    b: -1.1
+    c: -1
+    d: 0
+
+Plus operator:
+
+    >>> print_config(PythonConfig("""
+    ... a = +1
+    ... b = +1.1
+    ... c = +True
+    ... d = +False
+    ... """))
+    a: 1
+    b: 1.1
+    c: 1
+    d: 0
+
+Bit invert operator:
+
+    >>> print_config(PythonConfig("""
+    ... a = ~1
+    ... b = ~True
+    ... c = ~False
+    ... """))
+    a: -2
+    b: -2
+    c: -1
+
+Various float notation:
+
+    >>> print_config(PythonConfig("""
+    ... a = 1e2
+    ... b = 1.2e2
+    ... c = 1e-2
+    ... d = 1.2e-2
+    ... """))
+    a: 100.0
+    b: 120.0
+    c: 0.01
+    d: 0.012
 
 ## Preserving comments and whitespace
 

@@ -94,6 +94,8 @@ _NAMES: dict[str, Literal[True, False, None]] = {
     "None": None,
 }
 
+_SimpleVal = int | float | str | bool | None
+
 
 def _simple_val(val: cst.BaseExpression):
     if isinstance(val, cst.Integer):
@@ -107,6 +109,20 @@ def _simple_val(val: cst.BaseExpression):
             return _NAMES[val.value]
         except KeyError:
             raise TypeError()
+    if isinstance(val, cst.UnaryOperation):
+        return _apply_unary(val.operator, _simple_val(val.expression))
+    raise TypeError()
+
+
+def _apply_unary(op: cst.BaseUnaryOp, val: _SimpleVal):
+    assert isinstance(val, (int, float, bool)), val
+    if isinstance(op, cst.Minus):
+        return -val
+    if isinstance(op, cst.Plus):
+        return +val
+    if isinstance(op, cst.BitInvert):
+        assert isinstance(val, (int, bool)), val
+        return ~val
     raise TypeError()
 
 
