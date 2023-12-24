@@ -198,6 +198,15 @@ Assignments to tuples are not treated as config value assignments.
     ... """))
     <none>
 
+Type-annotations are supported when reading keys.
+
+    >>> print_config(PythonConfig("""
+    ... x: int = 123
+    ... y: int | float | None = 1.123
+    ... """))
+    x: 123
+    y: 1.123
+
 ## Values
 
 Python config supports these value types: int, float, string, boolean,
@@ -326,6 +335,17 @@ applied to values prior to their application.
 
     >>> apply_config("x = None", {"x": "Goodbye"})
     x = 'Goodbye'
+
+Type annotations are preserved.
+
+    >>> apply_config("x: int = 1", {"x": 2})
+    x: int = 2
+
+However, it's possible to assign a value of an invalid type. Type
+validation must be applied to values prior to application.
+
+    >>> apply_config("x: int = 1", {"x": "😓"})
+    x: int = '😓'
 
 ## Preserving comments and whitespace
 

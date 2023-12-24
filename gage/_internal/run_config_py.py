@@ -58,19 +58,28 @@ def _iter_top_level_assigns(module: cst.Module):
     for node in module.body:
         if isinstance(node, cst.SimpleStatementLine):
             for stmt_node in node.body:
-                if isinstance(stmt_node, cst.Assign):
+                if isinstance(stmt_node, (cst.Assign, cst.AnnAssign)):
                     yield stmt_node
 
 
-def _apply_assign(assign: cst.Assign, config: RunConfig, key_nodes: KeyNodes):
+_Assign = cst.Assign | cst.AnnAssign
+
+
+def _apply_assign(assign: _Assign, config: RunConfig, key_nodes: KeyNodes):
     for name in _iter_target_names(assign):
-        _apply_key_val(name, assign.value, config, key_nodes)
+        if assign.value is not None:
+            _apply_key_val(name, assign.value, config, key_nodes)
 
 
-def _iter_target_names(assign: cst.Assign):
-    for t in assign.targets:
-        if isinstance(t.target, cst.Name):
-            yield t.target.value
+def _iter_target_names(assign: _Assign):
+    if isinstance(assign, cst.Assign):
+        for t in assign.targets:
+            if isinstance(t.target, cst.Name):
+                yield t.target.value
+    else:
+        assert isinstance(assign, cst.AnnAssign), assign
+        if isinstance(assign.target, cst.Name):
+            yield assign.target.value
 
 
 def _apply_key_val(
