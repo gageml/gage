@@ -173,7 +173,7 @@ def _iter_config_replacements(
         else:
             orig_node = key_nodes[key]
             enc_config_val = _encode_config_val(config_val, orig_node)
-            yield orig_node, orig_node.with_changes(value=enc_config_val)
+            yield orig_node, cst.parse_expression(enc_config_val)
 
 
 def _encode_config_val(val: Any, node: cst.CSTNode):

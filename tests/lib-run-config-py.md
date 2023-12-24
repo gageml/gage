@@ -1,10 +1,8 @@
-# Run Config
+# Python Config
 
-*Run configuration* is a set of values available to a run script.
-Configuration is provided by way of source code files.
-
-Gage modifies source code files for a run to provide alternative
-configuration.
+Python run config is configuration defined in a Python module. Gage can
+read and write configuration for Python modules while preserving
+comments and whitespace.
 
 Consider a script `hello.py`.
 
@@ -55,7 +53,7 @@ Create some helper functions.
     ...         for key, val in sorted(config.items()):
     ...             print(f"{key}: {val}")
 
-## Python config
+## Overview
 
 Python config support is provided by `run_config_py`.
 
@@ -108,7 +106,7 @@ Use `apply()` to update the script and re-run it.
     Hello Mike
     <0>
 
-### Keys
+## Keys
 
 Keys correspond to top-level assignments of config values. Keys are
 comprised of the top-level variable and nested keys separated by dots.
@@ -200,7 +198,7 @@ Assignments to tuples are not treated as config value assignments.
     ... """))
     <none>
 
-### Values
+## Values
 
 Python config supports these value types: int, float, string, boolean,
 and None.
@@ -269,6 +267,65 @@ Various float notation:
     b: 120.0
     c: 0.01
     d: 0.012
+
+## Applying changes
+
+Create a function to apply config values to Python source.
+
+    >>> def apply_config(source, vals):
+    ...     cfg = PythonConfig(source)
+    ...     cfg.update(vals)
+    ...     print(cfg.apply())
+
+Integers:
+
+    >>> apply_config("x = 1", {"x": 2})
+    x = 2
+
+    >>> apply_config("x = -1", {"x": 2})
+    x = 2
+
+    >>> apply_config("x = -1", {"x": -2})
+    x = -2
+
+Floats:
+
+    >>> apply_config("x = 1.0", {"x": 1.1})
+    x = 1.1
+
+    >>> apply_config("x = -1.1", {"x": 1.2})
+    x = 1.2
+
+    >>> apply_config("x = -1.2", {"x": -1.3})
+    x = -1.3
+
+String:
+
+    >>> apply_config("x = 'Hello'", {"x": "Goodbye"})
+    x = 'Goodbye'
+
+    >>> apply_config("x = \"Hello\"", {"x": "Goodbye"})
+    x = "Goodbye"
+
+Booleans:
+
+    >>> apply_config("x = False", {"x": True})
+    x = True
+
+Gage supports replacements with any type. Type validation must be
+applied to values prior to their application.
+
+    >>> apply_config("x = 1", {"x": 1.1})
+    x = 1.1
+
+    >>> apply_config("x = 1", {"x": "Hello"})
+    x = 'Hello'
+
+    >>> apply_config("x = None", {"x": -123})
+    x = -123
+
+    >>> apply_config("x = None", {"x": "Goodbye"})
+    x = 'Goodbye'
 
 ## Preserving comments and whitespace
 
