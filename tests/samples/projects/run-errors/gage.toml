@@ -1,0 +1,40 @@
+[exec-error]
+
+description = "Error in run exec"
+exec = "python -c 'raise SystemExit(3)'"
+
+[sourcecode-error]
+
+description = "Error in source code resolution"
+
+[sourcecode-error.exec]
+
+stage-sourcecode = "python -c 'raise SystemExit(4)'"
+run = "true"
+
+[runtime-error]
+
+description = "Error in runtime init"
+
+[runtime-error.exec]
+
+stage-runtime = "python -c 'raise SystemExit(5)'"
+run = "true"
+
+[deps-error]
+
+description = "Error in stage deps"
+
+[deps-error.exec]
+
+stage-dependencies = "python -c 'raise SystemExit(6)'"
+run = "true"
+
+[finalize-error]
+
+description = "Error in finalize"
+
+[finalize-error.exec]
+
+run = "true"
+finalize-run = "python -c 'raise SystemExit(7)'"

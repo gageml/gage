@@ -42,6 +42,7 @@ from .sys_config import get_user
 
 __all__ = [
     "META_SCHEMA",
+    "RunExecError",
     "RunManifest",
     "RunManifestEntry",
     "RunFileType",
@@ -1092,7 +1093,10 @@ def _write_patched(run: Run, diffs: list[tuple[str, UnifiedDiff]]):
 
 
 class RunExecError(Exception):
-    pass
+    def __init__(self, phase_name: str, proc_args: list[str], exit_code: int):
+        self.phase_name = phase_name
+        self.proc_args = proc_args
+        self.exit_code = exit_code
 
 
 class _PhaseExecOutputCallback(run_output.OutputCallback):

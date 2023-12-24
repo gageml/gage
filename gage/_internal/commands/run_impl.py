@@ -173,7 +173,10 @@ def _stage(context: RunContext, args: Args):
     if user_attrs:
         init_run_user_attrs(run, user_attrs)
     with _RunPhaseStatus(args):
-        stage_run(run, context.project_dir)
+        try:
+            stage_run(run, context.project_dir)
+        except RunExecError as e:
+            error_handlers.run_exec_error(e)
     return run
 
 
@@ -295,7 +298,11 @@ def _run_staged(run: Run, args: Args):
         exit_code = proc.wait()
         output.wait_and_close()
     with _RunPhaseStatus(args):
-        finalize_run(run, exit_code)
+        try:
+            finalize_run(run, exit_code)
+        except RunExecError as e:
+            error_handlers.run_exec_error(e)
+    raise SystemExit(exit_code)
 
 
 def _running_status_desc(run: Run):

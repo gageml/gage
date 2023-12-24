@@ -2,9 +2,14 @@
 
 from typing import *
 
+import logging
+
 from ..types import *
 
 from .. import cli
+from .. import run_util
+
+log = logging.getLogger(__name__)
 
 
 def gagefile_error(e: GageFileError) -> NoReturn:
@@ -47,3 +52,13 @@ def missing_exec_error(ctx: RunContext) -> NoReturn:
         "is missing an exec command\n"
         "Run 'gage help exec' for more information."
     )
+
+
+def run_exec_error(e: run_util.RunExecError) -> NoReturn:
+    log.debug(
+        "Exec error for phase %r command %r exit %r",
+        e.phase_name,
+        e.proc_args,
+        e.exit_code,
+    )
+    raise SystemExit(e.exit_code)
