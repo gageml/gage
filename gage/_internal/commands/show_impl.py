@@ -245,7 +245,7 @@ def OutputTable(reader: RunOutputReader, name: str = "", pad: bool = False):
         # TODO truncate lines and show message if too long
         for line in lines:
             table.add_row(Text(line.text, style="orange3" if line.stream == 1 else ""))
-    return Padding(table, (1 if pad else 0, 0, 0, 0))
+    return Padding(table, pad=(1 if pad else 0, 0, 0, 0))
 
 
 def Comments(run: Run):

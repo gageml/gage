@@ -110,7 +110,7 @@ def CommentPanel(run: Run, comment: RunComment):
     attrs.add_row("run", run.name)
     attrs.add_row("comment id", comment.id)
     return cli.Panel(
-        Group(attrs, Padding(Markdown(comment.msg), (1, 0, 0, 0))),
+        Group(attrs, Padding(Markdown(comment.msg), pad=(1, 0, 0, 0))),
         title=f"{comment.id} {run.name}",
     )
 
