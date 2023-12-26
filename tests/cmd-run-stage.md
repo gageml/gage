@@ -4,7 +4,7 @@
 
     >>> from gage._internal import var
 
-    >>> ls(var.runs_home())
+    >>> ls(var.runs_dir())
     <empty>
 
     >>> run("gage run hello --stage -y")  # +parse
@@ -15,7 +15,7 @@
 
     >>> assert x == y
 
-    >>> for path in lsl(var.runs_home()):
+    >>> for path in lsl(var.runs_dir()):
     ...     print(path[36:])  # +diff
     .meta/__schema__
     .meta/config.json

@@ -161,7 +161,7 @@ def _maybe_verbose_info_data(verbose: bool) -> CheckData:
         ("command_directory", cwd),
         ("project_directory", project_dir or "<none>"),
         ("gagefile", gagefile.filename if gagefile else "<none>"),
-        ("runs_directory", var.runs_home()),
+        ("runs_directory", var.runs_dir()),
     ]
 
 

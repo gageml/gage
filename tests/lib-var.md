@@ -9,8 +9,8 @@ The `var` module provides system wide data related services.
 
 Create a new runs home.
 
-    >>> runs_home = make_temp_dir()
-    >>> set_runs_home(runs_home)
+    >>> runs_dir = make_temp_dir()
+    >>> set_runs_dir(runs_dir)
 
 The initial list of runs is empty.
 
@@ -20,12 +20,12 @@ The initial list of runs is empty.
 Create a new run.
 
     >>> opref = OpRef("test", "test")
-    >>> run = make_run(opref, runs_home)
+    >>> run = make_run(opref, runs_dir)
 
 A run is represented by a `.meta` directory. The minimum definition of a
 run is an `opref` file in the meta directory.
 
-    >>> ls(runs_home)  # +parse
+    >>> ls(runs_dir)  # +parse
     {id:run_id}.meta/opref
 
     >>> var.list_runs()  # +parse
@@ -54,7 +54,7 @@ Run directory:
 
     >>> assert x == id
 
-    >>> assert run.run_dir == os.path.join(runs_home, run.id)
+    >>> assert run.run_dir == os.path.join(runs_dir, run.id)
 
 Meta dir:
 
@@ -63,7 +63,7 @@ Meta dir:
 
     >>> assert x == id
 
-    >>> assert run.meta_dir == os.path.join(runs_home, run.id + ".meta")
+    >>> assert run.meta_dir == os.path.join(runs_dir, run.id + ".meta")
 
 Runs have other directories associated with them.
 
@@ -82,7 +82,7 @@ Runs have other directories associated with them.
 An explicit run ID is specified by an `id` attribute file in the meta
 directory.
 
-    >>> write(os.path.join(runs_home, id + ".meta", "id"), "abc")
+    >>> write(os.path.join(runs_dir, id + ".meta", "id"), "abc")
 
     >>> var.list_runs()
     [<Run id="abc" name="babab-bopus">]
@@ -91,8 +91,8 @@ This attribute only effects the run ID. It does not change run paths.
 
     >>> run = var.list_runs()[0]
 
-    >>> assert run.run_dir == os.path.join(runs_home, id)
-    >>> assert run.meta_dir == os.path.join(runs_home, id + ".meta")
+    >>> assert run.run_dir == os.path.join(runs_dir, id)
+    >>> assert run.meta_dir == os.path.join(runs_dir, id + ".meta")
 
 ## Delete runs
 
@@ -104,7 +104,7 @@ renamed with a `.deleted` extension.
     >>> var.delete_runs(var.list_runs())
     [<Run id="abc" name="babab-bopus">]
 
-    >>> ls(runs_home)  # +parse
+    >>> ls(runs_dir)  # +parse
     {x:run_id}.meta.deleted/id
     {y:run_id}.meta.deleted/opref
 
@@ -137,7 +137,7 @@ Run dir:
 
     >>> assert x == id
 
-    >>> assert run.run_dir == os.path.join(runs_home, id + ".deleted")
+    >>> assert run.run_dir == os.path.join(runs_dir, id + ".deleted")
 
 Run meta dir:
 
@@ -146,7 +146,7 @@ Run meta dir:
 
     >>> assert x == id
 
-    >>> assert run.meta_dir == os.path.join(runs_home, id + ".meta.deleted")
+    >>> assert run.meta_dir == os.path.join(runs_dir, id + ".meta.deleted")
 
 Project ref:
 
@@ -169,7 +169,7 @@ Runs can be restored with `var.restore_runs`.
     >>> var.restore_runs(var.list_runs(deleted=True))
     [<Run id="abc" name="babab-bopus">]
 
-    >>> ls(runs_home) # +parse
+    >>> ls(runs_dir) # +parse
     {x:run_id}.meta/id
     {y:run_id}.meta/opref
 
@@ -188,7 +188,7 @@ Purging runs permanently deletes all associated files.
     >>> var.purge_runs(var.list_runs())
     [<Run id="abc" name="babab-bopus">]
 
-    >>> ls(runs_home)
+    >>> ls(runs_dir)
     <empty>
 
 ## Canonical run dirs
@@ -208,10 +208,10 @@ Deleted runs mirror this structure where each directory ends with
 
 Create a new run.
 
-    >>> make_run(OpRef("test", "test"), runs_home, "abc")
+    >>> make_run(OpRef("test", "test"), runs_dir, "abc")
     <Run id="abc" name="babab-bopus">
 
-    >>> ls(runs_home, include_dirs=True)
+    >>> ls(runs_dir, include_dirs=True)
     abc.meta
     abc.meta/opref
 
@@ -242,12 +242,12 @@ Create the remaining canonical directories.
 
 Create a non-canonical file.
 
-    >>> touch(os.path.join(runs_home, run.id + ".misc"))
+    >>> touch(os.path.join(runs_dir, run.id + ".misc"))
 
 Runs home contains the canonical list plus `<rundir>.misc`, which is not
 considered part of the run.
 
-    >>> ls(runs_home, include_dirs=True)
+    >>> ls(runs_dir, include_dirs=True)
     abc
     abc.meta
     abc.meta/opref
@@ -260,7 +260,7 @@ Delete the run.
     >>> var.delete_runs([run])
     [<Run id="abc" name="babab-bopus">]
 
-    >>> ls(runs_home, include_dirs=True)
+    >>> ls(runs_dir, include_dirs=True)
     abc.deleted
     abc.meta.deleted
     abc.meta.deleted/opref
@@ -277,7 +277,7 @@ Restore the run.
     >>> var.restore_runs([run])
     [<Run id="abc" name="babab-bopus">]
 
-    >>> ls(runs_home, include_dirs=True)
+    >>> ls(runs_dir, include_dirs=True)
     abc
     abc.meta
     abc.meta/opref
@@ -287,23 +287,23 @@ Restore the run.
 
 ## Runs home
 
-`var` determines where runs are located. Use `runs_home` to read the
+`var` determines where runs are located. Use `runs_dir` to read the
 current value.
 
 We set runs home explicitly above using `set_homes_home`.
 
-    >>> assert runs_home == var.runs_home()
+    >>> assert runs_dir == var.runs_dir()
 
 This sets the environment variable `GAGE_RUNS`, which is the
 authoritative method of setting runs home.
 
     >>> gage_runs_env = os.getenv("GAGE_RUNS")
-    >>> assert runs_home == gage_runs_env
+    >>> assert runs_dir == gage_runs_env
 
-If `GAGE_RUNS` is not set, `var` checks `RUNS_HOME`.
+If `GAGE_RUNS` is not set, `var` checks `RUNS_DIR`.
 
-    >>> with Env({"GAGE_RUNS": "", "RUNS_HOME": "xyz"}):
-    ...     var.runs_home()
+    >>> with Env({"GAGE_RUNS": "", "RUNS_DIR": "xyz"}):
+    ...     var.runs_dir()
     'xyz'
 
 If neither environment variable is set, `var` looks for a project
@@ -315,12 +315,12 @@ Gage treats any directory with a Gage file as a project.
     >>> tmp = make_temp_dir()
     >>> touch(path_join(tmp, "gage.toml"))
 
-When `runs_home` is called in the context of a project directory, it
+When `runs_dir` is called in the context of a project directory, it
 returns the `runs` subdirectory by default.
 
     >>> with Env({"GAGE_RUNS": ""}):  # +parse
     ...     with SetCwd(tmp):
-    ...         var.runs_home()
+    ...         var.runs_dir()
     '{x:path}/runs'
 
     >>> assert x == tmp
@@ -334,7 +334,7 @@ path to the project directory.
 
     >>> with Env({"GAGE_RUNS": ""}):  # +parse
     ...     with SetCwd(tmp):
-    ...         var.runs_home()
+    ...         var.runs_dir()
     '{x:path}/abc/xyz'
 
     >>> assert x == tmp
@@ -350,7 +350,7 @@ location.
     >>> with Env({"GAGE_RUNS": ""}):  # +parse
     ...     with SetCwd(tmp):
     ...         with LogCapture(log_level=0) as logs:
-    ...             var.runs_home()
+    ...             var.runs_dir()
     '{x:path}/runs'
 
     >>> assert x == tmp

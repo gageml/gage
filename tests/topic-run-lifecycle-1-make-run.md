@@ -9,16 +9,16 @@ A run is created with `make_run()`. To create a run, specify:
 - Optional location
 
 If a location isn't specified, the run is assumed to be located in the
-system default as provided by `sys_config.get_runs_home()`.
+system default as provided by `sys_config.get_runs_dir()`.
 
 For the tests below, use a new location.
 
-    >>> runs_home = make_temp_dir()
+    >>> runs_dir = make_temp_dir()
 
 Create a new run.
 
     >>> opref = OpRef("test", "test")
-    >>> run = make_run(opref, runs_home)
+    >>> run = make_run(opref, runs_dir)
 
 The run has a unique ID.
 
@@ -32,7 +32,7 @@ It has a name based on the ID.
 
     >>> assert run_name == run_name_for_id(run.id)
 
-It has a corresponding run directory under `runs_home`.
+It has a corresponding run directory under `runs_dir`.
 
     >>> run.run_dir  # +parse
     '{run_dir:path}'
@@ -40,13 +40,13 @@ It has a corresponding run directory under `runs_home`.
 The run directory is a subdirectory of the runs location and is named
 with the run ID.
 
-    >>> assert run_dir == path_join(runs_home, run_id)
+    >>> assert run_dir == path_join(runs_dir, run_id)
 
 The run directory doesn't exit.
 
     >>> assert not os.path.exists(run_dir)
 
-The run has corresponding meta directory under `runs_home`.
+The run has corresponding meta directory under `runs_dir`.
 
     >>> run.meta_dir  # +parse
     '{meta_dir:path}'

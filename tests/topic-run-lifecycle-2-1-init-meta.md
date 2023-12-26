@@ -24,10 +24,10 @@ on run creation, see [_Making a run_](topic-run-lifecycle-1-make-run.md).
 
 Create runs in new runs home. A run requires an op ref.
 
-    >>> runs_home = make_temp_dir()
+    >>> runs_dir = make_temp_dir()
 
     >>> opref = OpRef("test", "test")
-    >>> run = make_run(opref, runs_home)
+    >>> run = make_run(opref, runs_dir)
 
 A run has an ID, a run directory, a meta directory, a reference to the
 op ref, and a name.

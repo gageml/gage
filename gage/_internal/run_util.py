@@ -433,7 +433,7 @@ def _run_dir_for_meta_dir(meta_dir: str):
 
 def make_run(opref: OpRef, location: str | None = None, id: str | None = None):
     run_id = id or make_run_id()
-    location = location or var.runs_home()
+    location = location or var.runs_dir()
     run_dir = os.path.join(location, run_id)
     meta_dir = run_dir + ".meta"
     name = run_name_for_id(run_id)

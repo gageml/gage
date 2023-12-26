@@ -148,9 +148,9 @@ directory.
     ...     }
     ... })
 
-    >>> runs_home = make_temp_dir()
+    >>> runs_dir = make_temp_dir()
 
-    >>> run = make_run(OpRef("test", "test"), runs_home)
+    >>> run = make_run(OpRef("test", "test"), runs_dir)
 
     >>> init_run_meta(run, opdef, {}, OpCmd([], {}))
 
@@ -504,9 +504,9 @@ created along with initial attributes using `init_run_user_attrs()`.
 
 Create a new run.
 
-    >>> runs_home = make_temp_dir()
+    >>> runs_dir = make_temp_dir()
 
-    >>> run = make_run(OpRef("test", "test"), runs_home)
+    >>> run = make_run(OpRef("test", "test"), runs_dir)
 
 Initialize user attributes.
 

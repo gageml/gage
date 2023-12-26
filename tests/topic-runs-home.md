@@ -6,7 +6,7 @@ These tests augment the run home related tests in
 Gage looks for runs in the following locations, in order of priority:
 
 1. Path specified by `GAGE_RUNS` env var
-2. Path specified by `RUNS_HOME` env var
+2. Path specified by `RUNS_DIR` env var
 3. Path specified in `$runs-dir` in the active Gage file
 4. `runs` subdir of the active project
 5. `~/.gage/runs`
@@ -67,9 +67,9 @@ We can configure a different location in a project Gage file.
 
     >>> assert x == y == z == tmp
 
-Use `RUNS_HOME` to specify a location.
+Use `RUNS_DIR` to specify a location.
 
-    >>> check({"RUNS_HOME": "xxx"})  # +parse -space
+    >>> check({"RUNS_DIR": "xxx"})  # +parse -space
     {}
     | project_directory     | {x:path}                         |
     | gagefile              | {y:path}/gage.yaml               |
@@ -78,10 +78,10 @@ Use `RUNS_HOME` to specify a location.
 
     >>> assert x == y == tmp
 
-`GAGE_RUNS` is used in priority of `RUNS_HOME` (e.g. in case there's
-another application using `RUNS_HOME`).
+`GAGE_RUNS` is used in priority of `RUNS_DIR` (e.g. in case there's
+another application using `RUNS_DIR`).
 
-    >>> check({"RUNS_HOME": "xxx", "GAGE_RUNS": "yyy"})  # +parse -space
+    >>> check({"RUNS_DIR": "xxx", "GAGE_RUNS": "yyy"})  # +parse -space
     {}
     | project_directory     | {x:path}                         |
     | gagefile              | {y:path}/gage.yaml               |

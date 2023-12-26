@@ -9,9 +9,9 @@ run is finalized.
 
 Create a run.
 
-    >>> runs_home = make_temp_dir()
+    >>> runs_dir = make_temp_dir()
 
-    >>> run = make_run(OpRef("test", "test"), runs_home)
+    >>> run = make_run(OpRef("test", "test"), runs_dir)
 
 Initialize run user attributes.
 
@@ -22,7 +22,7 @@ Initialize run user attributes.
 
 A `.user` directory is created for the run.
 
-    >>> ls(runs_home)  # +parse
+    >>> ls(runs_dir)  # +parse
     {x:run_id}.meta/opref
     {y:run_id}.user/{:uuid4}.json
 

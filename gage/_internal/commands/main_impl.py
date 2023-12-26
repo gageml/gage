@@ -21,7 +21,7 @@ class Args(NamedTuple):
 
 def main(args: Args):
     _init_logging(args)
-    _init_runs_home(args)
+    _init_runs_dir(args)
     if args.version:
         cli.out(f"Gage ML {__version__}")
         raise SystemExit(0)
@@ -29,9 +29,9 @@ def main(args: Args):
         _apply_cwd(args.cwd)
 
 
-def _init_runs_home(args: Args):
+def _init_runs_dir(args: Args):
     if args.runs_dir:
-        var.set_runs_home(args.runs_dir)
+        var.set_runs_dir(args.runs_dir)
 
 
 def _init_logging(args: Args):

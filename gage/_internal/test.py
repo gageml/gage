@@ -77,7 +77,7 @@ __all__ = [
     "run",
     "sample",
     "samples_dir",
-    "set_runs_home",
+    "set_runs_dir",
     "sha256",
     "sleep",
     "symlink",
@@ -494,14 +494,14 @@ def cd(s: str):
     os.chdir(os.path.expandvars(s))
 
 
-def set_runs_home(path: str):
-    var.set_runs_home(path)
+def set_runs_dir(path: str):
+    var.set_runs_dir(path)
 
 
 def use_example(name: str, var_home: Optional[str] = None):
     var_home = var_home or make_temp_dir()
     cd(_example(name))
-    set_runs_home(var_home)
+    set_runs_dir(var_home)
 
 
 def _example(name: str):
@@ -518,7 +518,7 @@ def _examples_dir():
 def use_project(project_name: str, var_home: Optional[str] = None):
     var_home = var_home or make_temp_dir()
     cd(sample("projects", project_name))
-    set_runs_home(var_home)
+    set_runs_dir(var_home)
 
 
 def path_join(*path: str):

@@ -14,7 +14,7 @@ from .. import cli
 
 from ..run_util import run_user_dir
 from ..util import flatten
-from ..var import runs_home
+from ..var import runs_dir
 
 from .impl_support import runs_table
 from .impl_support import selected_runs
@@ -320,7 +320,7 @@ def _copy_from(args: Args):
     with cli.Progress(transient=True) as p:
         task = p.add_task("Copying runs")
         for copied, total in _rclone_copy_from(
-            args.src, runs_home(), excludes=["*.project", ".deleted"]
+            args.src, runs_dir(), excludes=["*.project", ".deleted"]
         ):
             p.update(task, completed=copied, total=total)
     # TODO: Deferring even reasonable UI like "copied N runs" as we're

@@ -31,9 +31,9 @@ Create an opdef that runs the script.
 
 Create a new run.
 
-    >>> runs_home = make_temp_dir()
+    >>> runs_dir = make_temp_dir()
     >>> opref = OpRef("test", "test")
-    >>> run = make_run(opref, runs_home)
+    >>> run = make_run(opref, runs_dir)
 
 Initialize run meta.
 
@@ -155,7 +155,7 @@ Show the finalize run manifest.
 
 Start another run with different config.
 
-    >>> run = make_run(opref, runs_home)
+    >>> run = make_run(opref, runs_dir)
 
     >>> config = {"msg": "Ho there"}
     >>> init_run_meta(run, opdef, config, cmd)

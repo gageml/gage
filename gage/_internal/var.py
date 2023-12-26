@@ -26,9 +26,9 @@ __all__ = [
     "delete_runs",
     "list_runs",
     "purge_runs",
-    "set_runs_home",
+    "set_runs_dir",
     "restore_runs",
-    "runs_home",
+    "runs_dir",
 ]
 
 log = logging.getLogger(__name__)
@@ -37,20 +37,20 @@ USER_HOME = os.path.expanduser("~")
 
 
 # =================================================================
-# Runs home
+# Runs dir
 # =================================================================
 
 
-def runs_home():
+def runs_dir():
     return (
         os.getenv("GAGE_RUNS")
-        or os.getenv("RUNS_HOME")
-        or _project_runs_home()
-        or _system_default_runs_home()
+        or os.getenv("RUNS_DIR")
+        or _project_runs_dir()
+        or _system_default_runs_dir()
     )
 
 
-def _project_runs_home():
+def _project_runs_dir():
     cwd = sys_config.cwd()
     project_dir = find_project_dir(cwd)
     if not project_dir:
@@ -59,29 +59,29 @@ def _project_runs_home():
         gf = gagefile_for_dir(project_dir)
     except (FileNotFoundError, GageFileLoadError) as e:
         log.debug("error reading Gage file in %s: %s", project_dir, e)
-        return _project_default_runs_home(project_dir)
+        return _project_default_runs_dir(project_dir)
     else:
-        return _project_configured_runs_home(gf, project_dir)
+        return _project_configured_runs_dir(gf, project_dir)
 
 
-def _project_default_runs_home(project_dir: str):
+def _project_default_runs_dir(project_dir: str):
     return os.path.join(project_dir, "runs")
 
 
-def _project_configured_runs_home(gf: GageFile, project_dir: str):
+def _project_configured_runs_dir(gf: GageFile, project_dir: str):
     configured = gf.get_runs_dir()
     return (
         os.path.join(project_dir, configured)
         if configured
-        else _project_default_runs_home(project_dir)
+        else _project_default_runs_dir(project_dir)
     )
 
 
-def set_runs_home(dirname: str):
+def set_runs_dir(dirname: str):
     os.environ["GAGE_RUNS"] = dirname
 
 
-def _system_default_runs_home():
+def _system_default_runs_dir():
     return os.path.join(USER_HOME, ".gage", "runs")
 
 
@@ -99,7 +99,7 @@ def list_runs(
     sort: list[str] | None = None,
     deleted: bool = False,
 ):
-    root = root or runs_home()
+    root = root or runs_dir()
     filter = filter or _all_runs_filter
     runs = [run for run in _iter_runs(root, deleted) if filter(run)]
     if not sort:

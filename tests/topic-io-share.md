@@ -101,9 +101,9 @@ Use `gage copy` to copy runs to the remote location.
 
 Compare local and remote files.
 
-    >>> from gage._internal.sys_config import get_runs_home
+    >>> from gage._internal.sys_config import get_runs_dir
 
-    >>> local_runs = get_runs_home()
+    >>> local_runs = get_runs_dir()
 
     >>> diffl(lsl(local_runs), lsl(remote_runs))  # +parse
     @@ -17,7 +17,6 @@

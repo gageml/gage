@@ -29,9 +29,9 @@ meta*](topic-run-lifecycle-2-init-meta.md).
 
 Create a run and initialize its meta.
 
-    >>> runs_home = make_temp_dir()
+    >>> runs_dir = make_temp_dir()
     >>> opref = OpRef("test", "test")
-    >>> run = make_run(opref, runs_home)
+    >>> run = make_run(opref, runs_dir)
 
 Create the op def.
 
