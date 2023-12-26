@@ -63,7 +63,7 @@ def _project_runs_dir():
 
 
 def _project_default_runs_dir(project_dir: str):
-    return os.path.join(project_dir, "runs")
+    return os.path.join(project_dir, ".gage", "runs")
 
 
 def _project_configured_runs_dir(gf: GageFile, project_dir: str):

@@ -316,12 +316,12 @@ Gage treats any directory with a Gage file as a project.
     >>> touch(path_join(tmp, "gage.toml"))
 
 When `runs_dir` is called in the context of a project directory, it
-returns the `runs` subdirectory by default.
+returns the `.gage/runs` subdirectory by default.
 
     >>> with Env({"GAGE_RUNS": ""}):  # +parse
     ...     with SetCwd(tmp):
     ...         var.runs_dir()
-    '{x:path}/runs'
+    '{x:path}/.gage/runs'
 
     >>> assert x == tmp
 
@@ -340,8 +340,8 @@ path to the project directory.
     >>> assert x == tmp
 
 If the Gage file cannot be read, Gage logs a debug error message but
-otherwise ignores the error and returns the default `runs` subdirectory
-location.
+otherwise ignores the error and returns the default `.gage/runs`
+subdirectory location.
 
     >>> write(path_join(tmp, "gage.toml"), """
     ... not a valid TOML file
@@ -351,7 +351,7 @@ location.
     ...     with SetCwd(tmp):
     ...         with LogCapture(log_level=0) as logs:
     ...             var.runs_dir()
-    '{x:path}/runs'
+    '{x:path}/.gage/runs'
 
     >>> assert x == tmp
 

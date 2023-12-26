@@ -8,7 +8,7 @@ Gage looks for runs in the following locations, in order of priority:
 1. Path specified by `GAGE_RUNS` env var
 2. Path specified by `RUNS_DIR` env var
 3. Path specified in `$runs-dir` in the active Gage file
-4. `runs` subdir of the active project
+4. Project subdir `.gage/runs`
 5. `~/.gage/runs`
 
 We the `check` command with the `-v / --verbose` option to verify runs
@@ -47,7 +47,7 @@ defined in `project_util.py`.
     {}
     | project_directory     | {x:path}                         |
     | gagefile              | <none>                           |
-    | runs_directory        | {y:path}/runs                    |
+    | runs_directory        | {y:path}/.gage/runs              |
     <0>
 
     >>> assert x == y == tmp
