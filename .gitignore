@@ -3,6 +3,6 @@
 /scratch.md
 *.egg-info
 *.pyc
+.gage
 profile.*
 gage.spec
-runs
