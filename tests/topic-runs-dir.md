@@ -140,8 +140,14 @@ Generate a run.
 
     >>> ls(include_dirs=True)  # +parse
     .runs
-    .runs/{:run_id}
+    .runs/{run_id:run_id}
     .runs/{:run_id}.meta
     {}
     gage.yaml
     hello.py
+
+When runs are in a sub-directory of a project, the project reference is
+a relative path.
+
+    >>> cat(path_join(".runs", f"{run_id}.project"))
+    file:..

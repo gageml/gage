@@ -563,8 +563,17 @@ def associate_project(run: Run, project_dir: str):
     if not os.path.isabs(project_dir):
         raise ValueError(f"project_dir must be absolute: \"{project_dir}\"")
     ref_filename = run_project_ref(run)
+    project_ref_path = _project_ref_path(project_dir, run)
     with open(ref_filename, "w") as f:
-        f.write(f"file:{project_dir}")
+        f.write(f"file:{project_ref_path}")
+
+
+def _project_ref_path(project_dir: str, run: Run):
+    run_parent = os.path.dirname(run.run_dir)
+    assert os.path.isabs(project_dir) and os.path.isabs(run_parent)
+    if run_parent.startswith(project_dir):
+        return os.path.relpath(project_dir, run_parent)
+    return project_dir
 
 
 def remove_associate_project(run: Run):
