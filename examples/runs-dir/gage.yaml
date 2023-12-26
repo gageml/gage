@@ -1,0 +1,5 @@
+$runs-dir: .runs
+
+hello:
+  exec: python hello.py
+  description: Says hello

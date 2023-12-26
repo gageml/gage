@@ -1,6 +1,6 @@
-# Runs Home
+# Runs Dir
 
-These tests augment the run home related tests in
+These tests augment the runs dir related tests in
 [`lib-var.md`](lib-var.md).
 
 Gage looks for runs in the following locations, in order of priority:
@@ -12,7 +12,7 @@ Gage looks for runs in the following locations, in order of priority:
 5. `~/.gage/runs`
 
 We the `check` command with the `-v / --verbose` option to verify runs
-home.
+dir.
 
 Create an empty project directory.
 
@@ -24,7 +24,7 @@ Create a function to run the check command.
     ...     env = {"COLUMNS": "9999", **(env or {})}
     ...     run(f"gage -C '{tmp}' check -v", env=env)
 
-Moving up the list of locations, the default runs home is under the user
+Moving up the list of locations, the default runs dir is under the user
 directory.
 
     >>> check()  # +parse -space
@@ -89,3 +89,59 @@ another application using `RUNS_DIR`).
     <0>
 
     >>> assert x == y == tmp
+
+## Sample project
+
+The `runs-dir` example project specifies `.runs` as the runs dir.
+
+To test the project, copy it to a new location as we generate runs in
+the project directory.
+
+    >>> tmp = make_temp_dir()
+    >>> copytree(example("runs-dir"), tmp)
+
+    >>> cd(tmp)
+
+    >>> ls(include_dirs=True)
+    gage.yaml
+    hello.py
+
+    >>> run("gage ops")
+    | operation | description |
+    |-----------|-------------|
+    | hello     | Says hello  |
+    <0>
+
+    >>> run("gage runs -s")
+    | # | operation | status | label                           |
+    |---|-----------|--------|---------------------------------|
+    <0>
+
+The Gage file defines `$runs-dir`.
+
+    >>> cat("gage.yaml")
+    $runs-dir: .runs
+    ⤶
+    hello:
+      exec: python hello.py
+      description: Says hello
+
+Generate a run.
+
+    >>> run("gage run hello -y")
+    Hello!
+    <0>
+
+    >>> run("gage runs -s")  # +parse -space
+    | # | operation | status | label |
+    |-{}-|
+    | 1 | gage-test-{}:hello | completed | |
+    <0>
+
+    >>> ls(include_dirs=True)  # +parse
+    .runs
+    .runs/{:run_id}
+    .runs/{:run_id}.meta
+    {}
+    gage.yaml
+    hello.py

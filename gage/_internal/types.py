@@ -246,6 +246,7 @@ class GageFile:
         return {
             name: OpDef(name, self._data[name], self.filename)  # \
             for name in self._data
+            if name[:1] != "$"
         }
 
 

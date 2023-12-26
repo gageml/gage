@@ -7,7 +7,7 @@ The `var` module provides system wide data related services.
 
     >>> from gage._internal import var
 
-Create a new runs home.
+Create a new runs dir.
 
     >>> runs_dir = make_temp_dir()
     >>> set_runs_dir(runs_dir)
@@ -193,7 +193,7 @@ Purging runs permanently deletes all associated files.
 
 ## Canonical run dirs
 
-A run is associated with multiple directories under runs home. These are
+A run is associated with multiple directories under runs dir. These are
 the canonical run directories.
 
 | Dir                | Purpose                                            |
@@ -244,7 +244,7 @@ Create a non-canonical file.
 
     >>> touch(os.path.join(runs_dir, run.id + ".misc"))
 
-Runs home contains the canonical list plus `<rundir>.misc`, which is not
+Runs dir contains the canonical list plus `<rundir>.misc`, which is not
 considered part of the run.
 
     >>> ls(runs_dir, include_dirs=True)
@@ -285,17 +285,17 @@ Restore the run.
     abc.project
     abc.user
 
-## Runs home
+## Runs dir
 
 `var` determines where runs are located. Use `runs_dir` to read the
 current value.
 
-We set runs home explicitly above using `set_homes_home`.
+Previously we set runs dir using `set_runs_dir`.
 
     >>> assert runs_dir == var.runs_dir()
 
 This sets the environment variable `GAGE_RUNS`, which is the
-authoritative method of setting runs home.
+authoritative method of setting runs dir.
 
     >>> gage_runs_env = os.getenv("GAGE_RUNS")
     >>> assert runs_dir == gage_runs_env

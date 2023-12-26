@@ -44,6 +44,8 @@ __all__ = [
     "delete_temp_dir",
     "diff",
     "diffl",
+    "example",
+    "examples_dir",
     "lsl",
     "json",
     "json_pprint",
@@ -500,15 +502,15 @@ def set_runs_dir(path: str):
 
 def use_example(name: str, var_home: Optional[str] = None):
     var_home = var_home or make_temp_dir()
-    cd(_example(name))
+    cd(example(name))
     set_runs_dir(var_home)
 
 
-def _example(name: str):
-    return os.path.join(_examples_dir(), name)
+def example(name: str):
+    return os.path.join(examples_dir(), name)
 
 
-def _examples_dir():
+def examples_dir():
     try:
         return os.environ["EXAMPLES"]
     except KeyError:
