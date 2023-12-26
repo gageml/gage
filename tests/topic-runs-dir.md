@@ -135,7 +135,7 @@ Generate a run.
     >>> run("gage runs -s")  # +parse -space
     | # | operation | status | label |
     |-{}-|
-    | 1 | gage-test-{}:hello | completed | |
+    | 1 | hello | completed | |
     <0>
 
     >>> ls(include_dirs=True)  # +parse

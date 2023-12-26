@@ -12,10 +12,10 @@ import sys
 import gage
 
 from .. import cli
-from .. import sys_config
 from .. import gagefile
 from .. import project_util
 from .. import schema_util
+from .. import sys_config
 from .. import util
 from .. import var
 
@@ -156,7 +156,7 @@ def _maybe_verbose_info_data(verbose: bool) -> CheckData:
         return []
     cwd = sys_config.cwd()
     project_dir = project_util.find_project_dir(cwd)
-    gagefile = _try_gagefile(cwd)
+    gagefile = _try_gagefile(project_dir or cwd)
     return [
         ("command_directory", cwd),
         ("project_directory", project_dir or "<none>"),

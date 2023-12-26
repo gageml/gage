@@ -50,11 +50,11 @@ Generate some sample runs.
 List runs.
 
     >>> run("gage list -s")
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed | run-3                      |
-    | 2 | hello:hello | completed | run-2                      |
-    | 3 | hello:hello | completed | run-1                      |
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | run-3                        |
+    | 2 | hello     | completed | run-2                        |
+    | 3 | hello     | completed | run-1                        |
     <0>
 
 ## Incompatible params

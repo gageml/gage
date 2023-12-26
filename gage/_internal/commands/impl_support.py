@@ -7,8 +7,9 @@ from ..types import *
 import human_readable
 
 from .. import cli
-from .. import var
+from .. import project_util
 from .. import run_select
+from .. import var
 
 from ..run_util import meta_opref
 from ..run_util import run_status
@@ -96,6 +97,7 @@ def runs_table(
     **table_kw: Any,
 ):
     width = cli.console_width()
+    project_ns = project_util.project_ns()
     table = cli.Table(
         *_table_cols(width, deleted, simplified),
         expand=True,
@@ -103,7 +105,7 @@ def runs_table(
         **table_kw,
     )
     for index, run in runs:
-        table.add_row(*_table_row(index, run, width, simplified))
+        table.add_row(*_table_row(index, run, width, project_ns, simplified))
     return table
 
 
@@ -199,11 +201,12 @@ def _col_style(name: str, deleted: bool):
             return "dim"
 
 
-def _table_row(index: int, run: Run, width: int, simplified: bool) -> list[str]:
-    opref = meta_opref(run)
+def _table_row(
+    index: int, run: Run, width: int, project_ns: str | None, simplified: bool
+) -> list[str]:
     index_str = str(index)
     run_name = run.name[:5]
-    op_name = opref.get_full_name()
+    op_name = _op_name(run, project_ns)
     started = run_timestamp(run, "started")
     started_str = human_readable.date_time(started) if started else ""
     status = run_status(run)
@@ -222,6 +225,11 @@ def _table_row(index: int, run: Run, width: int, simplified: bool) -> list[str]:
     if simplified:
         return _simplify(row)
     return _fit(row, width)
+
+
+def _op_name(run: Run, project_ns: str | None):
+    opref = meta_opref(run)
+    return opref.get_full_name() if opref.op_ns != project_ns else opref.op_name
 
 
 def _fit(l: list[Any], width: int):

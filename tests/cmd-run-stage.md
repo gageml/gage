@@ -35,7 +35,7 @@
     /hello.py
 
     >>> run("gage list")  # +parse
-    | #   | name     | operation       | started    | status   |
-    |-----|----------|-----------------|------------|----------|
-    | 1   | {:rn}    | hello:hello     |            | staged   |
+    | #   | name     | operation      | started     | status   |
+    |-----|----------|----------------|-------------|----------|
+    | 1   | {:rn}    | hello          |             | staged   |
     <0>

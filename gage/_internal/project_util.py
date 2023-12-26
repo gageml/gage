@@ -10,6 +10,7 @@ from . import sys_config
 __all__ = [
     "find_project_dir",
     "load_data",
+    "project_ns",
 ]
 
 PROJECT_MARKERS = [
@@ -77,3 +78,8 @@ def _load_yaml(filename: str):
 
     with open(filename) as f:
         return yaml.safe_load(f)
+
+
+def project_ns(cwd: str | None = None):
+    project_dir = find_project_dir(cwd)
+    return os.path.basename(project_dir) if project_dir else None

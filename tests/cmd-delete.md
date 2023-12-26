@@ -33,9 +33,9 @@ Generate a run.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed |                            |
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed |                              |
     <0>
 
 Attempt to delete without specifying a run or `--all`.
@@ -77,9 +77,9 @@ Show runs.
 Show deleted runs.
 
     >>> run("gage ls -ds")
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed |                            |
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed |                              |
     <0>
 
 Generate another run.
@@ -89,9 +89,9 @@ Generate another run.
     <0>
 
     >>> run("gage ls", cols=64)  # +parse
-    | # | name  | operation   | started | status    | label        |
-    |---|-------|-------------|---------|-----------|--------------|
-    | 1 | {nme} | hello:hello | now     | completed | Run 2        |
+    | # | name  | operation | started | status    | label          |
+    |---|-------|-----------|---------|-----------|----------------|
+    | 1 | {nme} | hello     | now     | completed | Run 2          |
     <0>
 
 Permanently delete the run.
@@ -108,7 +108,7 @@ Show runs.
     <0>
 
     >>> run("gage list -ds")
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed |                            |
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed |                              |
     <0>

@@ -64,7 +64,7 @@ Run `hello` again.
     >>> run("gage runs -s")  # +parse -space
     | # | operation | status | label |
     |-{}-|
-    | 1 | {}:hello | completed | |
+    | 1 | hello | completed | |
     <0>
 
 Runs are created in the project `.gage/runs` subdirectory.

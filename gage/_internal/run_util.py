@@ -278,7 +278,13 @@ def run_project_dir(run: Run):
             if not uri.startswith("file:"):
                 log.warning("Unexpected project ref encoding in \"%s\"", ref_filename)
                 return None
-            return uri[5:]
+            return _abs_project_dir(uri[5:], run)
+
+
+def _abs_project_dir(project_ref_path: str, run: Run):
+    return os.path.realpath(
+        os.path.join(os.path.dirname(run.run_dir), project_ref_path)
+    )
 
 
 # =================================================================

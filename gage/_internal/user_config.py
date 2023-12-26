@@ -6,8 +6,6 @@ from .types import *
 
 import os
 
-from . import sys_config
-
 from .project_util import find_project_dir
 from .project_util import load_data
 from .schema_util import validate_data
@@ -80,7 +78,6 @@ def user_config_for_project(cwd: str | None = None):
 
 
 def _try_project_config(cwd: str | None):
-    cwd = cwd or sys_config.cwd()
     project_dir = find_project_dir(cwd)
     if not project_dir:
         return None

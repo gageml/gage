@@ -43,9 +43,9 @@ Delete the run.
     <0>
 
     >>> run("gage ls -s -d")
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed |                            |
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed |                              |
     <0>
 
 Attempt to purge runs without specifying a run or `--all`.

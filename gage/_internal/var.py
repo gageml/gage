@@ -7,8 +7,6 @@ import functools
 import logging
 import os
 
-from . import sys_config
-
 from .run_util import run_attr
 from .run_util import run_for_meta_dir
 from .run_util import run_user_dir
@@ -49,8 +47,7 @@ def runs_dir():
 
 
 def _project_runs_dir():
-    cwd = sys_config.cwd()
-    project_dir = find_project_dir(cwd)
+    project_dir = find_project_dir()
     if not project_dir:
         return None
     try:

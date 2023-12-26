@@ -226,8 +226,8 @@ Show the run.
     >>> run("gage ls -n2")  # +parse -space
     | #  | name    | operation       | started   | status      |
     |--{}--|
-    | 1  | {x:rn}  | hello:hello     |           | staged      |
-    | 2  | {:rn}   | hello:hello     | {}        | completed   |
+    | 1  | {x:rn}  | hello           |           | staged      |
+    | 2  | {:rn}   | hello           | {}        | completed   |
     ⤶
      Showing 2 of 4 runs (use -m to show more)
     <0>
@@ -263,8 +263,8 @@ Start the staged run.
     >>> run("gage ls -n2")  # +parse -space
     | #  | name    | operation       | started   | status      |
     |--{}--|
-    | 1  | {x:rn}  | hello:hello     | {}        | completed   |
-    | 2  | {:rn}   | hello:hello     | {}        | completed   |
+    | 1  | {x:rn}  | hello           | {}        | completed   |
+    | 2  | {:rn}   | hello           | {}        | completed   |
     ⤶
      Showing 2 of 4 runs (use -m to show more)
     <0>

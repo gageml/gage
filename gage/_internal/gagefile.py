@@ -6,8 +6,6 @@ from .types import *
 
 import os
 
-from . import sys_config
-
 from .project_util import find_project_dir
 from .project_util import load_data
 
@@ -67,7 +65,6 @@ def gagefile_candidates():
 
 
 def gagefile_for_project(cwd: str | None = None):
-    cwd = cwd or sys_config.cwd()
     project_dir = find_project_dir(cwd)
     if not project_dir:
         raise FileNotFoundError(cwd)
