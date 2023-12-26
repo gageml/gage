@@ -20,14 +20,16 @@ import time
 
 import gage
 
-from . import sys_config
 from . import file_util
 from . import shlex_util
+from . import sys_config
 from . import util
+from . import var
 
 __all__ = [
     "Env",
     "LogCapture",
+    "SetCwd",
     "StderrCapture",
     "SysPath",
     "basename",
@@ -91,7 +93,9 @@ __all__ = [
 
 Env = util.Env
 LogCapture = util.LogCapture
+SetCwd = sys_config.SetCwd
 StderrCapture = util.StderrCapture
+
 basename = os.path.basename
 delete_temp_dir = file_util.delete_temp_dir
 compare_paths = file_util.compare_paths
@@ -491,7 +495,7 @@ def cd(s: str):
 
 
 def set_runs_home(path: str):
-    sys_config.set_runs_home(path)
+    var.set_runs_home(path)
 
 
 def use_example(name: str, var_home: Optional[str] = None):

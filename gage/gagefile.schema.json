@@ -2,7 +2,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gage.org/gagefile",
   "title": "Gage ML Project File",
-
   "$defs": {
     "shell-cmd": {
       "type": "string",
@@ -166,8 +165,14 @@
   },
   "type": "object",
   "additionalProperties": false,
+  "properties": {
+    "$runs-dir": {
+      "type": "string",
+      "title": "Run directory"
+    }
+  },
   "patternProperties": {
-    ".+": {
+    "^[^$]": {
       "type": "object",
       "title": "Operation definition",
       "additionalProperties": false,

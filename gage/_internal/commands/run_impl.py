@@ -16,9 +16,9 @@ from .. import run_help
 from .. import run_output
 from .. import run_sourcecode
 
-from ..sys_config import get_runs_home
 from ..run_config import read_project_config
 from ..run_context import resolve_run_context
+from ..var import runs_home
 
 from ..run_util import *
 
@@ -162,7 +162,7 @@ def _init_sourcecode_preview(opdef: OpDef):
 
 
 def _stage(context: RunContext, args: Args):
-    run = make_run(context.opref, get_runs_home())
+    run = make_run(context.opref, runs_home())
     config = _run_config(context, args)
     _verify_action(args, run, config)
     cmd = _op_cmd(context, config)

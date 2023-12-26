@@ -284,3 +284,80 @@ Restore the run.
     abc.misc
     abc.project
     abc.user
+
+## Runs home
+
+`var` determines where runs are located. Use `runs_home` to read the
+current value.
+
+We set runs home explicitly above using `set_homes_home`.
+
+    >>> assert runs_home == var.runs_home()
+
+This sets the environment variable `GAGE_RUNS`, which is the
+authoritative method of setting runs home.
+
+    >>> gage_runs_env = os.getenv("GAGE_RUNS")
+    >>> assert runs_home == gage_runs_env
+
+If `GAGE_RUNS` is not set, `var` checks `RUNS_HOME`.
+
+    >>> with Env({"GAGE_RUNS": "", "RUNS_HOME": "xyz"}):
+    ...     var.runs_home()
+    'xyz'
+
+If neither environment variable is set, `var` looks for a project
+directory. See [`lib-project-util.md`](lib-project-util.md) for details
+on how project directories are inferred.
+
+Gage treats any directory with a Gage file as a project.
+
+    >>> tmp = make_temp_dir()
+    >>> touch(path_join(tmp, "gage.toml"))
+
+When `runs_home` is called in the context of a project directory, it
+returns the `runs` subdirectory by default.
+
+    >>> with Env({"GAGE_RUNS": ""}):  # +parse
+    ...     with SetCwd(tmp):
+    ...         var.runs_home()
+    '{x:path}/runs'
+
+    >>> assert x == tmp
+
+Finally, if the project specifies `$runs-dir`, it's used as a relative
+path to the project directory.
+
+    >>> write(path_join(tmp, "gage.toml"), """
+    ... "$runs-dir" = "abc/xyz"
+    ... """)
+
+    >>> with Env({"GAGE_RUNS": ""}):  # +parse
+    ...     with SetCwd(tmp):
+    ...         var.runs_home()
+    '{x:path}/abc/xyz'
+
+    >>> assert x == tmp
+
+If the Gage file cannot be read, Gage logs a debug error message but
+otherwise ignores the error and returns the default `runs` subdirectory
+location.
+
+    >>> write(path_join(tmp, "gage.toml"), """
+    ... not a valid TOML file
+    ... """)
+
+    >>> with Env({"GAGE_RUNS": ""}):  # +parse
+    ...     with SetCwd(tmp):
+    ...         with LogCapture(log_level=0) as logs:
+    ...             var.runs_home()
+    '{x:path}/runs'
+
+    >>> assert x == tmp
+
+    >>> logs.print_all()  # +parse -space
+    DEBUG: [gage._internal.var] error reading Gage file in {x:path}:
+    ('{y:path}/gage.toml', "Expected '=' after a key in a key/value
+    pair (at line 2, column 5)")
+
+    >>> assert x == y == tmp

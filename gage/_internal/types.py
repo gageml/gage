@@ -239,6 +239,9 @@ class GageFile:
     def as_json(self) -> Data:
         return self._data
 
+    def get_runs_dir(self) -> str | None:
+        return self._data.get("$runs-dir")
+
     def get_operations(self):
         return {
             name: OpDef(name, self._data[name], self.filename)  # \

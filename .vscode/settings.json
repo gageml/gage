@@ -75,6 +75,7 @@
     "GAGEPLAIN",
     "GAGETEST",
     "gaierror",
+    "getenv",
     "gethostname",
     "getpgid",
     "gmtoff",

@@ -17,14 +17,72 @@ from .run_util import run_project_ref
 from .file_util import ensure_safe_delete_tree
 from .file_util import safe_delete_tree
 
+from .project_util import find_project_dir
+
+from .gagefile import GageFileLoadError
+from .gagefile import gagefile_for_dir
+
 __all__ = [
-    "list_runs",
     "delete_runs",
+    "list_runs",
     "purge_runs",
+    "set_runs_home",
     "restore_runs",
+    "runs_home",
 ]
 
 log = logging.getLogger(__name__)
+
+USER_HOME = os.path.expanduser("~")
+
+
+# =================================================================
+# Runs home
+# =================================================================
+
+
+def runs_home():
+    return (
+        os.getenv("GAGE_RUNS")
+        or os.getenv("RUNS_HOME")
+        or _project_runs_home()
+        or _system_default_runs_home()
+    )
+
+
+def _project_runs_home():
+    cwd = sys_config.cwd()
+    project_dir = find_project_dir(cwd)
+    if not project_dir:
+        return None
+    try:
+        gf = gagefile_for_dir(project_dir)
+    except (FileNotFoundError, GageFileLoadError) as e:
+        log.debug("error reading Gage file in %s: %s", project_dir, e)
+        return _project_default_runs_home(project_dir)
+    else:
+        return _project_configured_runs_home(gf, project_dir)
+
+
+def _project_default_runs_home(project_dir: str):
+    return os.path.join(project_dir, "runs")
+
+
+def _project_configured_runs_home(gf: GageFile, project_dir: str):
+    configured = gf.get_runs_dir()
+    return (
+        os.path.join(project_dir, configured)
+        if configured
+        else _project_default_runs_home(project_dir)
+    )
+
+
+def set_runs_home(dirname: str):
+    os.environ["GAGE_RUNS"] = dirname
+
+
+def _system_default_runs_home():
+    return os.path.join(USER_HOME, ".gage", "runs")
 
 
 # =================================================================
@@ -41,7 +99,7 @@ def list_runs(
     sort: list[str] | None = None,
     deleted: bool = False,
 ):
-    root = root or sys_config.get_runs_home()
+    root = root or runs_home()
     filter = filter or _all_runs_filter
     runs = [run for run in _iter_runs(root, deleted) if filter(run)]
     if not sort:

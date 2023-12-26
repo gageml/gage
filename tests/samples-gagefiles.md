@@ -173,3 +173,11 @@ Comments are supported but must be on their own line.
     >>> run("gage check jsonc-invalid.json")
     Error loading jsonc-invalid.json: Expecting ',' delimiter: line 2 column 15 (char 16)
     <1>
+
+## Runs dir
+
+A project can configure a runs directory location with `$runs-dir`.
+
+    >>> run("gage check runs-dir.json")
+    runs-dir.json is a valid Gage file
+    <0>

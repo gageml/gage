@@ -49,6 +49,7 @@ directory for control.
     | command_directory     | {x:path} |
     | project_directory     | <none>   |
     | gagefile              | <none>   |
+    | runs_directory        | {}       |
     <0>
 
     >>> assert x == tmp

@@ -8,17 +8,12 @@ import threading
 __all__ = [
     "cwd",
     "get_user",
-    "get_runs_home",
     "set_cwd",
-    "set_runs_home",
 ]
 
 
 __cwd_lock = threading.Lock()
 __cwd = None
-
-
-USER_HOME = os.path.expanduser("~")
 
 
 def set_cwd(cwd: Optional[str]):
@@ -71,18 +66,6 @@ class SetCwd:
 
     def __exit__(self, *args: Any):
         set_cwd(self._save)
-
-
-def set_runs_home(dirname: str):
-    os.environ["GAGE_RUNS"] = dirname
-
-
-def get_runs_home():
-    return os.getenv("GAGE_RUNS") or os.getenv("RUNS_HOME") or default_runs_home()
-
-
-def default_runs_home():
-    return os.path.join(USER_HOME, ".gage", "runs")
 
 
 def get_user():

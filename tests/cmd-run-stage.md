@@ -2,9 +2,9 @@
 
     >>> use_example("hello")
 
-    >>> from gage._internal import sys_config
+    >>> from gage._internal import var
 
-    >>> ls(sys_config.get_runs_home())
+    >>> ls(var.runs_home())
     <empty>
 
     >>> run("gage run hello --stage -y")  # +parse
@@ -15,7 +15,7 @@
 
     >>> assert x == y
 
-    >>> for path in lsl(sys_config.get_runs_home()):
+    >>> for path in lsl(var.runs_home()):
     ...     print(path[36:])  # +diff
     .meta/__schema__
     .meta/config.json

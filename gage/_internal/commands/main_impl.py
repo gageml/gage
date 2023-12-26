@@ -9,6 +9,7 @@ from ...__init__ import __version__
 from .. import cli
 from .. import sys_config
 from .. import log
+from .. import var
 
 
 class Args(NamedTuple):
@@ -30,7 +31,7 @@ def main(args: Args):
 
 def _init_runs_home(args: Args):
     if args.runs_dir:
-        sys_config.set_runs_home(args.runs_dir)
+        var.set_runs_home(args.runs_dir)
 
 
 def _init_logging(args: Args):

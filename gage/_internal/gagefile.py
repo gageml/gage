@@ -10,6 +10,7 @@ from . import sys_config
 
 from .project_util import find_project_dir
 from .project_util import load_data
+
 from .schema_util import validate_data
 
 __all__ = [
