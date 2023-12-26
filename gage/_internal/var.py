@@ -33,8 +33,6 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-USER_HOME = os.path.expanduser("~")
-
 
 # =================================================================
 # Runs dir
@@ -42,7 +40,7 @@ USER_HOME = os.path.expanduser("~")
 
 
 def runs_dir():
-    return (
+    return os.path.expanduser(
         os.getenv("GAGE_RUNS")
         or os.getenv("RUNS_DIR")
         or _project_runs_dir()
@@ -82,7 +80,7 @@ def set_runs_dir(dirname: str):
 
 
 def _system_default_runs_dir():
-    return os.path.join(USER_HOME, ".gage", "runs")
+    return os.path.join("~", ".gage", "runs")
 
 
 # =================================================================
