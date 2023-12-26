@@ -170,6 +170,7 @@
     "textorbinary",
     "tomli",
     "topdown",
+    "tqdm",
     "Traceback",
     "truecolor",
     "typer",

@@ -1,8 +1,8 @@
-[a]
+[progress]
 
 description = "Shows progress for run phases"
 
-[a.exec]
+[progress.exec]
 
 stage-sourcecode = """
 echo Patching foobar.py
@@ -32,7 +32,7 @@ for i in range(10):
 "
 """
 
-finalize-run = """
+finalize = """
 echo Deleting temp files
 rm -f *.tmp
 echo Finishing up other important work
@@ -40,4 +40,19 @@ for i in `seq 3`; do
     echo "Item $i"
     sleep 1
 done
+"""
+
+[tqdm]
+
+description = "Show tqdm based progress"
+
+[tqdm.exec]
+
+# stage-runtime = """
+# virtualenv env
+# env/bin/pip install tqdm
+# """
+
+run = """
+python tqdm_progress.py
 """
