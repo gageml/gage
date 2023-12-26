@@ -161,7 +161,7 @@ When `exec` an object, it may have any of the following properties:
 - `resolve-dependencies`
 - `stage-runtime`
 - `run`
-- `finalize-run`
+- `finalize`
 
 A single string is a shell command.
 
@@ -205,7 +205,7 @@ for a run.
     ...     "stage-dependencies": "cp *.data $run_dir",
     ...     "stage-runtime": "virtualenv .venv",
     ...     "run": "python train.py",
-    ...     "finalize-run": "rm *.temp"
+    ...     "finalize": "rm *.temp"
     ... }})
     ok
 
@@ -374,7 +374,7 @@ operations.
     ...       "stage-dependencies": "echo deps",
     ...       "stage-runtime": "echo runtime",
     ...       "run": "echo run",
-    ...       "finalize-run": "echo finalize"
+    ...       "finalize": "echo finalize"
     ...     },
     ...     "depends": [
     ...       {
@@ -402,7 +402,7 @@ Gage file as JSON:
           }
         ],
         "exec": {
-          "finalize-run": "echo finalize",
+          "finalize": "echo finalize",
           "run": "echo run",
           "stage-dependencies": "echo deps",
           "stage-runtime": "echo runtime",
@@ -425,7 +425,7 @@ Op def:
         }
       ],
       "exec": {
-        "finalize-run": "echo finalize",
+        "finalize": "echo finalize",
         "run": "echo run",
         "stage-dependencies": "echo deps",
         "stage-runtime": "echo runtime",
@@ -446,7 +446,7 @@ Op def exec:
 
     >>> test_op.get_exec().as_json()  # +json +diff
     {
-      "finalize-run": "echo finalize",
+      "finalize": "echo finalize",
       "run": "echo run",
       "stage-dependencies": "echo deps",
       "stage-runtime": "echo runtime",

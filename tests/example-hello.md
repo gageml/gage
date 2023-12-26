@@ -134,11 +134,12 @@ Show runner log.
     Finalizing staged files (see manifest)
     Writing meta staged
     Writing meta started
-    Starting run process: python hello.py
+    Starting run (see output/40_run): python hello.py
     Writing meta proc/lock
+    Exit code for run: 0
+    Deleting meta proc/lock
     Writing meta stopped
     Writing meta proc/exit
-    Deleting meta proc/lock
     Finalizing run files (see manifest)
 
 ## Custom name
@@ -289,9 +290,10 @@ Show the runner log.
     Finalizing staged files (see manifest)
     Writing meta staged
     Writing meta started
-    Starting run process: python hello.py
+    Starting run (see output/40_run): python hello.py
     Writing meta proc/lock
+    Exit code for run: 0
+    Deleting meta proc/lock
     Writing meta stopped
     Writing meta proc/exit
-    Deleting meta proc/lock
     Finalizing run files (see manifest)

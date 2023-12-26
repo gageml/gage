@@ -34,7 +34,7 @@ Run help:
 Run preview:
 
     >>> run("gage run hello", timeout=1)
-    You are about to run config:hello
+    You are about to run hello
     ⤶
      name  Joe
     ⤶

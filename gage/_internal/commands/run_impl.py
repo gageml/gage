@@ -8,12 +8,9 @@ import logging
 import os
 import platform
 
-from rich.console import Console
-
 from .. import cli
 from .. import lang
 from .. import run_help
-from .. import run_output
 from .. import run_sourcecode
 
 from ..run_config import read_project_config
@@ -67,8 +64,9 @@ def _handle_start(args: Args):
             "Only staged runs can be started with '--start'."
         )
     config = meta_config(run)
-    _verify_action(args, run, config)
-    _run_staged(run, args)
+    _verify_action(args, config, run)
+    exit_code = _exec_run(run, args)
+    _finalize_run(run, exit_code, args)
 
 
 def _apply_default_op_flag_assign(args: Args):
@@ -162,9 +160,9 @@ def _init_sourcecode_preview(opdef: OpDef):
 
 
 def _stage(context: RunContext, args: Args):
-    run = make_run(context.opref, runs_dir())
     config = _run_config(context, args)
-    _verify_action(args, run, config)
+    _verify_action(args, config, context)
+    run = make_run(context.opref, runs_dir())
     cmd = _op_cmd(context, config)
     user_attrs = _user_attrs(args)
     sys_attrs = _sys_attrs()
@@ -172,7 +170,7 @@ def _stage(context: RunContext, args: Args):
     associate_project(run, context.project_dir)
     if user_attrs:
         init_run_user_attrs(run, user_attrs)
-    with _RunPhaseStatus(args):
+    with _RunPhaseStatus(run, args):
         try:
             stage_run(run, context.project_dir)
         except RunExecError as e:
@@ -181,15 +179,16 @@ def _stage(context: RunContext, args: Args):
 
 
 class _RunPhaseStatus:
-    phase_desc = {
-        "stage-sourcecode": "Staging source code",
-        "stage-config": "Applying configuration",
-        "stage-runtime": "Staging runtime",
-        "stage-dependencies": "Staging dependencies",
-        "finalize": "Finalizing run",
-    }
+    def __init__(self, run: Run, args: Args):
+        self._phase_desc = {
+            "stage-sourcecode": "Staging source code",
+            "stage-config": "Applying configuration",
+            "stage-runtime": "Staging runtime",
+            "stage-dependencies": "Staging dependencies",
+            "run": _run_phase_desc(run),
+            "finalize": "Finalizing run",
+        }
 
-    def __init__(self, args: Args):
         self._status = cli.status("", args.quiet)
 
     def __enter__(self):
@@ -206,24 +205,46 @@ class _RunPhaseStatus:
             phase_name, stream, output = arg
             self._status.console.out(cast(bytes, output).decode(), end="")
         else:
-            desc = self.phase_desc.get(name)
+            desc = self._phase_desc.get(name)
             if desc:
                 self._status.update(f"[dim]{desc}")
             else:
                 log.debug("Unexpected run phase callback: %r %r", name, arg)
 
 
-def _verify_action(args: Args, run: Run, config: RunConfig) -> None | NoReturn:
+def _run_phase_desc(run: Run):
+    opref = meta_opref(run)
+    return f"[dim]Running [{cli.STYLE_PANEL_TITLE}]{opref.op_name}"
+
+
+def _verify_action(
+    args: Args, config: RunConfig, run_or_context: RunContext | Run
+) -> None | NoReturn:
     if args.yes:
         return
-    action = "stage" if args.stage else "run"
-    cli.err(f"You are about to {action} [yellow]{run.opref.get_full_name()}[/]")
+    cli.out(_action_desc(args, run_or_context), err=True)
     if config:
-        cli.err(run_help.config_table(config))
+        cli.out(run_help.config_table(config), err=True)
     else:
-        cli.err("")
+        cli.out("", err=True)
     if not cli.confirm(f"Continue?"):
         raise SystemExit(0)
+
+
+def _action_desc(args: Args, run_or_context: Run | RunContext):
+    action = "stage" if args.stage else "run"
+    if args.stage:
+        assert isinstance(run_or_context, RunContext)
+        context = cast(RunContext, run_or_context)
+        return f"You are about to stage [yellow]{context.opref.op_name}"
+    elif args.start:
+        assert isinstance(run_or_context, Run)
+        run = cast(Run, run_or_context)
+        return f"You are about to start [yellow]{run.opref.op_name}[/] ({run.name})"
+    else:
+        assert isinstance(run_or_context, RunContext)
+        context = cast(RunContext, run_or_context)
+        return f"You are about to run [yellow]{context.opref.op_name}"
 
 
 def _run_config(context: RunContext, args: Args):
@@ -273,38 +294,27 @@ def _sys_attrs():
     return {"platform": platform.platform()}
 
 
-class _OutputCallback(run_output.OutputCallback):
-    def __init__(self, console: Console):
-        self.console = console
-
-    def output(self, stream: run_output.StreamType, out: bytes):
-        self.console.out(out.decode(), end="")
-
-    def close(self):
-        pass
-
-
 def _run(context: RunContext, args: Args):
     run = _stage(context, args)
-    _run_staged(run, args)
+    exit_code = _exec_run(run, args)
+    _finalize_run(run, exit_code, args)
 
 
-def _run_staged(run: Run, args: Args):
-    status = cli.status(_running_status_desc(run), args.quiet)
-    output_cb = _OutputCallback(status.console)
-    with status:
-        proc = start_run(run)
-        output = open_run_output(run, proc, output_cb=output_cb)
-        exit_code = proc.wait()
-        output.wait_and_close()
-    with _RunPhaseStatus(args):
+def _exec_run(run: Run, args: Args):
+    with _RunPhaseStatus(run, args):
+        try:
+            exec_run(run)
+        except RunExecError as e:
+            return e.exit_code
+        else:
+            return 0
+
+
+def _finalize_run(run: Run, exit_code: int, args: Args):
+    with _RunPhaseStatus(run, args):
         try:
             finalize_run(run, exit_code)
         except RunExecError as e:
             error_handlers.run_exec_error(e)
-    raise SystemExit(exit_code)
-
-
-def _running_status_desc(run: Run):
-    opref = meta_opref(run)
-    return f"[dim]Running [{cli.STYLE_PANEL_TITLE}]{opref.get_full_name()}"
+        else:
+            raise SystemExit(exit_code)

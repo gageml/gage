@@ -5,7 +5,7 @@
             "stage-dependencies": "",
             "stage-runtime": ["python", "-m", "venv"],
             "run": "dir .",
-            "finalize-run": ""
+            "finalize": ""
         }
     }
 }

@@ -1,0 +1,9 @@
+[phases]
+
+description = "Run command for each supported phase"
+
+exec.stage-runtime       = "touch runtime-file"
+exec.stage-sourcecode    = "touch sourcecode-file"
+exec.stage-dependencies  = "touch required-file"
+exec.run                 = "touch generated-file"
+exec.finalize            = "touch generated-file-2"

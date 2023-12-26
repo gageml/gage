@@ -38,7 +38,7 @@ def stream_fileno(stream: IO[bytes]):
 StreamType = Literal[0, 1]
 
 
-class OutputCallback:
+class OutputCallback(Protocol):
     def output(self, stream: StreamType, out: bytes) -> None:
         raise NotImplementedError()
 

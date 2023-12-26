@@ -85,7 +85,7 @@ various stages of a run lifecycle.
     >>> train.get_exec().get_run()
     'dir .'
 
-    >>> train.get_exec().get_finalize_run()
+    >>> train.get_exec().get_finalize()
     ''
 
 ## Invalid full exec

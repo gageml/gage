@@ -5,7 +5,7 @@
 
 ## Basic run
 
-`start_run()` starts a staged run. Once a run is staged, it's
+`exec_run()` executes a staged run. Once a run is staged, it's
 independent of the originating project.
 
 Create a sample project.
@@ -48,35 +48,11 @@ Stage the run.
     >>> ls(run.run_dir)
     say.py
 
-Start the run.
+Execute the run. `exec_run` blocks until the run process exits.
 
-    >>> proc = start_run(run)
+    >>> exec_run(run)
 
-At this point the run process is started. The run process ID is written
-to the run meta as `proc/lock`.
-
-    >>> ls(run_meta_path(run, "proc"))
-    cmd.json
-    env.json
-    lock
-
-    >>> cat(run_meta_path(run, "proc", "lock"))  # +parse
-    {pid:d}
-
-    >>> assert pid == proc.pid
-
-To write run output, call `open_run_output()` with the run process.
-
-    >>> output = open_run_output(run, proc)
-
-Wait for the run process to exit.
-
-    >>> proc.wait()
-    0
-
-Wait for output to be written.
-
-    >>> output.wait_and_close()
+Run output is written to `output/40_run`.
 
 List meta dir contents.
 
@@ -92,11 +68,10 @@ List meta dir contents.
     -r--r--r-- opref
     -r--r--r-- output/10_sourcecode
     -r--r--r-- output/10_sourcecode.index
-    -rw-rw-r-- output/40_run
-    -rw-rw-r-- output/40_run.index
+    -r--r--r-- output/40_run
+    -r--r--r-- output/40_run.index
     -r--r--r-- proc/cmd.json
     -r--r--r-- proc/env.json
-    -r--r--r-- proc/lock
     -r--r--r-- staged
     -r--r--r-- started
 
@@ -116,7 +91,7 @@ finalized. `finalize_run()` is responsible for finalizing a run.
 
 Finalize the run.
 
-    >>> finalize_run(run, proc.returncode)
+    >>> finalize_run(run)
 
 Show the meta files. All files are read only.
 
@@ -162,13 +137,9 @@ Start another run with different config.
 
     >>> stage_run(run, ".")
 
-Start the run with output.
+Execute the run.
 
-    >>> p = start_run(run)
-    >>> output = open_run_output(run, p)
-    >>> p.wait()
-    0
-    >>> output.wait_and_close()
+    >>> exec_run(run)
 
 Show run output.
 

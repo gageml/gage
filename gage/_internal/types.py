@@ -130,8 +130,8 @@ class OpDefExec:
     def get_run(self) -> CmdArgs | None:
         return self._data.get("run")
 
-    def get_finalize_run(self) -> CmdArgs | None:
-        return self._data.get("finalize-run")
+    def get_finalize(self) -> CmdArgs | None:
+        return self._data.get("finalize")
 
 
 class OpDefConfig:

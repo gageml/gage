@@ -206,7 +206,7 @@
                 "run": {
                   "$ref": "#/$defs/exec-cmd"
                 },
-                "finalize-run": {
+                "finalize": {
                   "$ref": "#/$defs/exec-cmd"
                 }
               }

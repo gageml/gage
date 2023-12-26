@@ -60,7 +60,6 @@ __all__ = [
     "meta_config",
     "meta_opdef",
     "meta_opref",
-    "open_run_output",
     "remove_associate_project",
     "run_attr",
     "run_meta_path",
@@ -76,7 +75,7 @@ __all__ = [
     "stage_run",
     "stage_runtime",
     "stage_sourcecode",
-    "start_run",
+    "exec_run",
 ]
 
 META_SCHEMA = "1"
@@ -652,15 +651,16 @@ def _copy_sourcecode(run: Run, project_dir: str, opdef: OpDef, log: Logger):
 
 def _stage_sourcecode_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger):
     exec = opdef.get_exec().get_stage_sourcecode()
-    if exec:
-        _run_phase_exec(
-            run,
-            "stage-sourcecode",
-            exec,
-            _hook_env(run, project_dir),
-            "10_sourcecode",
-            log,
-        )
+    if not exec:
+        return
+    _run_phase_exec(
+        run,
+        "stage-sourcecode",
+        exec,
+        _hook_env(run, project_dir),
+        "10_sourcecode",
+        log,
+    )
 
 
 def apply_config(run: Run):
@@ -685,15 +685,16 @@ def stage_runtime(run: Run, project_dir: str):
 
 def _stage_runtime_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger):
     exec = opdef.get_exec().get_stage_runtime()
-    if exec:
-        _run_phase_exec(
-            run,
-            "stage-runtime",
-            exec,
-            _hook_env(run, project_dir),
-            "20_runtime",
-            log,
-        )
+    if not exec:
+        return
+    _run_phase_exec(
+        run,
+        "stage-runtime",
+        exec,
+        _hook_env(run, project_dir),
+        "20_runtime",
+        log,
+    )
 
 
 def stage_dependencies(run: Run, project_dir: str):
@@ -717,15 +718,16 @@ def _resolve_dependencies(run: Run, project_dir: str, opdef: OpDef, log: Logger)
 
 def _stage_dependencies_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger):
     exec = opdef.get_exec().get_stage_dependencies()
-    if exec:
-        _run_phase_exec(
-            run,
-            "stage-dependencies",
-            exec,
-            _hook_env(run, project_dir),
-            "30_dependencies",
-            log,
-        )
+    if not exec:
+        return
+    _run_phase_exec(
+        run,
+        "stage-dependencies",
+        exec,
+        _hook_env(run, project_dir),
+        "30_dependencies",
+        log,
+    )
 
 
 def finalize_staged_run(run: Run):
@@ -758,56 +760,32 @@ def _reduce_files_log(run: Run):
 
 
 # =================================================================
-# Start / finalize
+# Exec run
 # =================================================================
 
 
-def start_run(run: Run):
+def exec_run(run: Run):
     log = _runner_log(run)
     cmd = meta_opcmd(run)
     env = {**cmd.env, **os.environ}
-    shell = isinstance(cmd.args, str)
+    run_phase_channel.notify("run")
     _write_timestamp("started", run, log)
-    log.info(f"Starting run process: {cmd.args}")
-    p = subprocess.Popen(
+    _run_phase_exec(
+        run,
+        "run",
         cmd.args,
-        env=env,
-        cwd=run.run_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=shell,
+        env,
+        "40_run",
+        log,
     )
-    _write_proc_lock(p, run, log)
-    return p
 
 
-def _write_proc_lock(proc: subprocess.Popen[bytes], run: Run, log: Logger):
-    log.info("Writing meta proc/lock")
-    filename = _meta_proc_lock_filename(run)
-    ensure_dir(os.path.dirname(filename))
-    write_file(filename, str(proc.pid), readonly=True)
+# =================================================================
+# Finalize run
+# =================================================================
 
 
-def open_run_output(
-    run: Run,
-    p: subprocess.Popen[bytes],
-    out_fileno: int | None = None,
-    err_fileno: int | None = None,
-    output_cb: run_output.OutputCallback | None = None,
-):
-    ensure_dir(run_meta_path(run, "output"))
-    output_filename = run_meta_path(run, "output", "40_run")
-    output = run_output.RunOutput(
-        output_filename,
-        out_fileno,
-        err_fileno,
-        output_cb,
-    )
-    output.open(p)
-    return output
-
-
-def finalize_run(run: Run, exit_code: int):
+def finalize_run(run: Run, exit_code: int = 0):
     log = _runner_log(run)
     opdef = meta_opdef(run)
     run_phase_channel.notify("finalize")
@@ -815,7 +793,6 @@ def finalize_run(run: Run, exit_code: int):
     _finalize_run_output(run)
     _write_timestamp("stopped", run, log)
     _write_exit_code(exit_code, run, log)
-    _delete_proc_lock(run, log)
     _finalize_run_hook(run, opdef, log)
     _apply_to_files_log(run, "g")
     _finalize_files_log(run)
@@ -839,26 +816,18 @@ def _write_exit_code(exit_code: int, run: Run, log: Logger):
     write_file(filename, str(exit_code), readonly=True)
 
 
-def _delete_proc_lock(run: Run, log: Logger):
-    log.info("Deleting meta proc/lock")
-    filename = _meta_proc_lock_filename(run)
-    try:
-        os.remove(filename)
-    except OSError as e:
-        log.info(f"Error deleting proc/lock: {e}")
-
-
 def _finalize_run_hook(run: Run, opdef: OpDef, log: Logger):
-    exec = opdef.get_exec().get_finalize_run()
-    if exec:
-        _run_phase_exec(
-            run,
-            "finalize-run",
-            exec,
-            _hook_env(run),
-            "50_finalize",
-            log,
-        )
+    exec = opdef.get_exec().get_finalize()
+    if not exec:
+        return
+    _run_phase_exec(
+        run,
+        "finalize",
+        exec,
+        _hook_env(run),
+        "50_finalize",
+        log,
+    )
 
 
 def _write_run_files_manifest(run: Run, log: Logger):
@@ -1144,7 +1113,7 @@ def _run_phase_exec(
     output_name: str,
     log: Logger,
 ):
-    log.info(f"Running {phase_name} (see output/{output_name}): {exec_cmd}")
+    log.info(f"Starting {phase_name} (see output/{output_name}): {exec_cmd}")
     proc_args, use_shell = _proc_args(exec_cmd)
     proc_env = {
         **os.environ,
@@ -1159,6 +1128,7 @@ def _run_phase_exec(
         cwd=run.run_dir,
         env=proc_env,
     )
+    _write_proc_lock(p, run, log)
     ensure_dir(run_meta_path(run, "output"))
     output_filename = run_meta_path(run, "output", output_name)
     output_cb = _PhaseExecOutputCallback(phase_name)
@@ -1169,6 +1139,7 @@ def _run_phase_exec(
     log.info(f"Exit code for {phase_name}: {exit_code}")
     set_readonly(output_filename)
     set_readonly(output_filename + ".index")
+    _delete_proc_lock(run, log)
     if exit_code != 0:
         raise RunExecError(phase_name, proc_args, exit_code)
 
@@ -1189,6 +1160,22 @@ def _hook_env(run: Run, project_dir: str | None = None):
         "run_dir": run.run_dir,
         **({"project_dir": project_dir} if project_dir else {}),
     }
+
+
+def _write_proc_lock(proc: subprocess.Popen[bytes], run: Run, log: Logger):
+    log.info("Writing meta proc/lock")
+    filename = _meta_proc_lock_filename(run)
+    ensure_dir(os.path.dirname(filename))
+    write_file(filename, str(proc.pid), readonly=True)
+
+
+def _delete_proc_lock(run: Run, log: Logger):
+    log.info("Deleting meta proc/lock")
+    filename = _meta_proc_lock_filename(run)
+    try:
+        os.remove(filename)
+    except OSError as e:
+        log.info(f"Error deleting proc/lock: {e}")
 
 
 def format_run_timestamp(ts: datetime.datetime | None):

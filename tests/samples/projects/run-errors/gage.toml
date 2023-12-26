@@ -37,4 +37,4 @@ description = "Error in finalize"
 [finalize-error.exec]
 
 run = "true"
-finalize-run = "python -c 'raise SystemExit(7)'"
+finalize = "python -c 'raise SystemExit(7)'"
