@@ -61,6 +61,7 @@
     "Errno",
     "ESRCH",
     "exitcodes",
+    "expanduser",
     "fakepkg",
     "fileno",
     "findl",
