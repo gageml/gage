@@ -39,20 +39,24 @@ StreamType = Literal[0, 1]
 
 
 class OutputCallback(Protocol):
-    def output(self, stream: StreamType, out: bytes) -> None:
+    def output(
+        self, stream: StreamType, out: bytes, progress: Any | None = None
+    ) -> None:
         raise NotImplementedError()
 
     def close(self) -> None:
         raise NotImplementedError()
 
 
+ProgressParser: TypeAlias = Callable[[bytes], tuple[bytes, Any]]
+
+
 class RunOutput:
     def __init__(
         self,
         filename: str,
-        out_fileno: int | None = None,
-        err_fileno: int | None = None,
         output_cb: OutputCallback | None = None,
+        progress_parser: ProgressParser | None = None,
     ):
         """Creates a run output object.
 
@@ -64,9 +68,8 @@ class RunOutput:
         output for a process.
         """
         self._filename = filename
-        self._out_fileno = out_fileno
-        self._err_fileno = err_fileno
         self._output_cb = output_cb
+        self._progress_parser = progress_parser
         self._output_lock = threading.Lock()
         self._open = False
         self._proc = None
@@ -119,17 +122,16 @@ class RunOutput:
     def _out_tee_run(self):
         assert self._proc
         assert self._proc.stdout
-        self._gen_tee_run(self._proc.stdout, self._out_fileno, 0)
+        self._gen_tee_run(self._proc.stdout, 0)
 
     def _err_tee_run(self):
         assert self._proc
         assert self._proc.stderr
-        self._gen_tee_run(self._proc.stderr, self._err_fileno, 1)
+        self._gen_tee_run(self._proc.stderr, 1)
 
     def _gen_tee_run(
         self,
         input_stream: IO[bytes],
-        tee_fileno: int | None,
         stream_type: StreamType,
     ):
         assert self._output
@@ -145,31 +147,46 @@ class RunOutput:
         while True:
             buf = os_read(input_fileno, RUN_OUTPUT_STREAM_BUFFER)
             if not buf:
-                if line:
-                    self._output_eol(index_fileno, line, stream_type)
                 break
-            with lock:
-                if tee_fileno is not None:
-                    os_write(tee_fileno, buf)
-                os_write(output_fileno, buf)
-                for b in buf:
-                    if b < 9:  # non-printable
-                        continue
-                    line.append(b)
-                    if b == 10:  # LF
-                        self._output_eol(index_fileno, line, stream_type)
-                        del line[:]
+            for b in buf:
+                if b < 9:  # non-printable
+                    continue
+                line.append(b)
+                if b not in (10, 13):
+                    continue
+                # LF
+                line_bytes, progress = self._process_line(line)
+                del line[:]
+                with lock:
+                    os_write(output_fileno, line_bytes)
+                    index_entry = struct.pack(
+                        "!QB", time.time_ns() // 1000000, stream_type
+                    )
+                    os_write(index_fileno, index_entry)
+                self._apply_output_cb(stream_type, line_bytes, progress)
 
-    def _output_eol(self, index_fileno: int, line: list[int], stream_type: StreamType):
-        line_bytes = bytes(line)
-        entry = struct.pack("!QB", time.time_ns() // 1000000, stream_type)
-        os.write(index_fileno, entry)
-        if self._output_cb:
-            try:
-                self._output_cb.output(stream_type, line_bytes)
-            except Exception:
-                log.exception("error in output callback (will be removed)")
-                self._output_cb = None
+    def _process_line(self, line: list[int]):
+        output = bytes(line)
+        if not self._progress_parser:
+            return output, None
+        try:
+            return self._progress_parser(output)
+        except Exception:
+            log.exception("error in output callback (will be removed)")
+            self._progress_parser = None
+            return output, None
+
+    def _apply_output_cb(
+        self, stream_type: StreamType, output: bytes, progress: Any | None
+    ):
+        if not self._output_cb:
+            return
+        try:
+            self._output_cb.output(stream_type, output, progress)
+        except Exception:
+            log.exception("error in output callback (will be removed)")
+            self._output_cb = None
+            return output, None
 
     def wait(self, timeout: float | None = None):
         """Wait for run output reader threads to exit.

@@ -188,7 +188,7 @@ Create a sample program that generates output.
 Create a callback to handle output.
 
     >>> class OutputHandler:
-    ...     def output(self, stream, line):
+    ...     def output(self, stream, line, progress):
     ...         print(f"Got output [{stream}]: {line}")
     ...
     ...     def close(self):

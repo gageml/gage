@@ -1098,8 +1098,15 @@ class _PhaseExecOutputCallback(run_output.OutputCallback):
     def __init__(self, phase_name: str):
         self.phase_name = phase_name
 
-    def output(self, stream: run_output.StreamType, out: bytes):
-        run_phase_channel.notify("exec-output", (self.phase_name, stream, out))
+    def output(
+        self,
+        stream: run_output.StreamType,
+        out: bytes,
+        progress: Any | None = None,
+    ):
+        run_phase_channel.notify(
+            "exec-output", (self.phase_name, stream, out, progress)
+        )
 
     def close(self):
         pass
@@ -1132,7 +1139,9 @@ def _run_phase_exec(
     ensure_dir(run_meta_path(run, "output"))
     output_filename = run_meta_path(run, "output", output_name)
     output_cb = _PhaseExecOutputCallback(phase_name)
-    output = run_output.RunOutput(output_filename, output_cb=output_cb)
+    output = run_output.RunOutput(
+        output_filename, output_cb=output_cb, progress_parser=_parse_progress
+    )
     output.open(p)
     exit_code = p.wait()
     output.wait_and_close()
@@ -1142,6 +1151,19 @@ def _run_phase_exec(
     _delete_proc_lock(run, log)
     if exit_code != 0:
         raise RunExecError(phase_name, proc_args, exit_code)
+
+
+def _parse_progress(output: bytes):
+    # TODO - This is a hacked together progress parser and only barely
+    # works with the default tqdm progress format. This doesn't even
+    # parse progress - it just strips progress out to avoid filling logs
+    # with garbage. Should a) parse robustly, if that's even possible
+    # and b) return a progress that can be usable by "exec-output"
+    # handlers.
+    import re
+
+    split = re.split(rb"\r *\d+%|.+\r", output)[-1]
+    return (split if not re.match(rb"\r *\d+%|.+]", split) else b""), None
 
 
 def _proc_args(exec_cmd: str | list[str]) -> tuple[str | list[str], bool]:

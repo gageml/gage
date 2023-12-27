@@ -65,8 +65,7 @@ def _handle_start(args: Args):
         )
     config = meta_config(run)
     _verify_action(args, config, run)
-    exit_code = _exec_run(run, args)
-    _finalize_run(run, exit_code, args)
+    _exec_and_finalize(run, args)
 
 
 def _apply_default_op_flag_assign(args: Args):
@@ -188,7 +187,6 @@ class _RunPhaseStatus:
             "run": _run_phase_desc(run),
             "finalize": "Finalizing run",
         }
-
         self._status = cli.status("", args.quiet)
 
     def __enter__(self):
@@ -202,7 +200,7 @@ class _RunPhaseStatus:
     def __call__(self, name: str, arg: Any | None = None):
         if name == "exec-output":
             assert isinstance(arg, tuple), arg
-            phase_name, stream, output = arg
+            phase_name, stream, output, progress = arg
             self._status.console.out(cast(bytes, output).decode(), end="")
         else:
             desc = self._phase_desc.get(name)
@@ -296,25 +294,28 @@ def _sys_attrs():
 
 def _run(context: RunContext, args: Args):
     run = _stage(context, args)
-    exit_code = _exec_run(run, args)
-    _finalize_run(run, exit_code, args)
+    _exec_and_finalize(run, args)
+
+
+def _exec_and_finalize(run: Run, args: Args):
+    with _RunPhaseStatus(run, args):
+        exit_code = _exec_run(run, args)
+        _finalize_run(run, exit_code, args)
 
 
 def _exec_run(run: Run, args: Args):
-    with _RunPhaseStatus(run, args):
-        try:
-            exec_run(run)
-        except RunExecError as e:
-            return e.exit_code
-        else:
-            return 0
+    try:
+        exec_run(run)
+    except RunExecError as e:
+        return e.exit_code
+    else:
+        return 0
 
 
 def _finalize_run(run: Run, exit_code: int, args: Args):
-    with _RunPhaseStatus(run, args):
-        try:
-            finalize_run(run, exit_code)
-        except RunExecError as e:
-            error_handlers.run_exec_error(e)
-        else:
-            raise SystemExit(exit_code)
+    try:
+        finalize_run(run, exit_code)
+    except RunExecError as e:
+        error_handlers.run_exec_error(e)
+    else:
+        raise SystemExit(exit_code)

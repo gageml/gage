@@ -48,11 +48,11 @@ description = "Show tqdm based progress"
 
 [tqdm.exec]
 
-# stage-runtime = """
-# virtualenv env
-# env/bin/pip install tqdm
-# """
+stage-runtime = """
+python -m venv env
+env/bin/pip install tqdm
+"""
 
 run = """
-python tqdm_progress.py
+env/bin/python -u tqdm_progress.py
 """
