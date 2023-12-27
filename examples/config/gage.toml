@@ -20,3 +20,9 @@ config = "hello.py#name"
 description = "Alternative config using a list of strings"
 exec = 'python -m hello'
 config = ["hello.py#name"]
+
+[hello-4]
+
+description = "Sample hello with full config"
+exec = 'python -m hello'
+config = "hello.py"

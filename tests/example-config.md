@@ -53,3 +53,12 @@ using different semantics.
     >>> run("gage run hello-3 -y")
     Hello, Joe
     <0>
+
+`hello-4` uses the entire `hello.py` file and so includes support for
+`times`.
+
+    >>> run("gage run hello-4 name=Mike times=3 -y")
+    Hello, Mike
+    Hello, Mike
+    Hello, Mike
+    <0>
