@@ -105,3 +105,17 @@ command. String values are parsed with `parse_config_value()`.
 
     >>> parse_flag_assign("'a b' = '1 2 3'")
     ('a b', '1 2 3')
+
+## Where expressions
+
+    >>> parse_where_expr("completed")
+    <RunFilter status=completed>
+
+    >>> parse_where_expr("terminated")
+    <RunFilter status=terminated>
+
+TODO - error message below is unhelpful.
+
+    >>> parse_where_expr("invalid")
+    Traceback (most recent call last):
+    ValueError: Unexpected character 'i' at line 1 col 1

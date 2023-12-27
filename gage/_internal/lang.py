@@ -6,9 +6,12 @@ from .types import *
 
 from lark import *
 
+from . import run_util
+
 __all__ = [
-    "parse_flag_assign",
     "parse_config_value",
+    "parse_flag_assign",
+    "parse_where_expr",
 ]
 
 GRAMMAR = r"""
@@ -24,6 +27,15 @@ config_value: SIGNED_INT      -> int
             | "false"         -> false
             | "null"          -> null
             | OTHER_STRING    -> other_string
+
+
+where_expr: RUN_STATUS    -> run_status
+
+RUN_STATUS: "completed"
+          | "staged"
+          | "error"
+          | "terminated"
+          | "running"
 
 _STRING_INNER: /.*?/
 _STRING_ESC_INNER: _STRING_INNER /(?<!\\)(\\\\)*?/
@@ -46,9 +58,6 @@ KEY: /[\w_\.][\w_\.\-]*/
 %ignore WS_INLINE
 """
 
-__config_val_parser: Lark | None = None
-__flag_assign_parser: Lark | None = None
-
 
 def parse_config_value(s: str) -> RunConfigValue:
     s = s.strip()
@@ -56,6 +65,21 @@ def parse_config_value(s: str) -> RunConfigValue:
         return s
     p = _ensure_config_val_parser()
     return cast(RunConfigValue, _parse(p, s))
+
+
+__config_val_parser: Lark | None = None
+
+
+def _ensure_config_val_parser() -> Lark:
+    if __config_val_parser is None:
+        globals()["__config_val_parser"] = Lark(
+            GRAMMAR,
+            start="config_value",
+            parser="lalr",
+            transformer=GrammarTransformer(),
+        )
+    assert __config_val_parser
+    return __config_val_parser
 
 
 def _parse(parser: Lark, s: str):
@@ -77,6 +101,42 @@ def parse_flag_assign(s: str) -> tuple[str, RunConfigValue]:
     s = s.strip()
     p = _ensure_flag_assign_parser()
     return cast(tuple[str, RunConfigValue], _parse(p, s))
+
+
+__flag_assign_parser: Lark | None = None
+
+
+def _ensure_flag_assign_parser() -> Lark:
+    if __flag_assign_parser is None:
+        globals()["__flag_assign_parser"] = Lark(
+            GRAMMAR,
+            start="flag_assign",
+            parser="lalr",
+            transformer=GrammarTransformer(),
+        )
+    assert __flag_assign_parser
+    return __flag_assign_parser
+
+
+def parse_where_expr(s: str) -> RunFilter:
+    s = s.strip()
+    p = _ensure_where_expr_parser()
+    return cast(RunFilter, _parse(p, s))
+
+
+__where_expr_parser: Lark | None = None
+
+
+def _ensure_where_expr_parser() -> Lark:
+    if __where_expr_parser is None:
+        globals()["__where_expr_parser"] = Lark(
+            GRAMMAR,
+            start="where_expr",
+            parser="lalr",
+            transformer=GrammarTransformer(),
+        )
+    assert __where_expr_parser
+    return __where_expr_parser
 
 
 class GrammarTransformer(Transformer):
@@ -113,26 +173,21 @@ class GrammarTransformer(Transformer):
         (s,) = tokens
         return s.value
 
-
-def _ensure_config_val_parser() -> Lark:
-    if __config_val_parser is None:
-        globals()["__config_val_parser"] = Lark(
-            GRAMMAR,
-            start="config_value",
-            parser="lalr",
-            transformer=GrammarTransformer(),
+    def run_status(self, tokens: list[Token]):
+        (s,) = tokens
+        return _RunFilter(
+            lambda run: run_util.run_status(run) == s,
+            f"status={s}",
         )
-    assert __config_val_parser
-    return __config_val_parser
 
 
-def _ensure_flag_assign_parser() -> Lark:
-    if __flag_assign_parser is None:
-        globals()["__flag_assign_parser"] = Lark(
-            GRAMMAR,
-            start="flag_assign",
-            parser="lalr",
-            transformer=GrammarTransformer(),
-        )
-    assert __flag_assign_parser
-    return __flag_assign_parser
+class _RunFilter(RunFilter):
+    def __init__(self, f: Callable[[Run], bool], desc: str):
+        self._f = f
+        self._desc = desc
+
+    def __repr__(self):
+        return f"<RunFilter {self._desc}>"
+
+    def __call__(self, run: Run):
+        return self._f(run)

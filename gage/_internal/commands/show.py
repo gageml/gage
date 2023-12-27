@@ -32,4 +32,4 @@ def show(run: RunSpec = "", files: FilesFlag = False):
     """Show information about a run."""
     from .show_impl import show, Args
 
-    show(Args(run, files))
+    show(Args(run, files, ""))

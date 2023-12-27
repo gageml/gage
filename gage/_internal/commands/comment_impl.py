@@ -43,12 +43,17 @@ def comment(args: Args):
         _handle_comment(args)
 
 
+class _OneRunArgs(NamedTuple):
+    run: str
+    where: str
+
+
 def _handle_delete(args: Args):
     if not args.runs and not args.all:
         args = Args(["1"], *args[1:])
     if len(args.runs) > 1 or args.all:
         cli.exit_with_error("Only one run can be specified with '-d / --delete'.\n\n")
-    run = one_run(args.runs[0])
+    run = one_run(_OneRunArgs(args.runs[0], args.where))
     comment = _run_comment(run, args.delete)
     _verify_delete(args, run, comment)
     delete_comment(run, args.delete)
@@ -80,7 +85,7 @@ def _handle_edit(args: Args):
         args = Args(["1"], *args[1:])
     if len(args.runs) > 1 or args.all:
         cli.exit_with_error("Only one run can be specified with '-e / --edit'.\n\n")
-    run = one_run(args.runs[0])
+    run = one_run(_OneRunArgs(args.runs[0], args.where))
     comment = _run_comment(run, args.edit)
     msg = _comment_message(args, comment.msg)
     if not msg:

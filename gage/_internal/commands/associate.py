@@ -48,4 +48,4 @@ def associate(run: RunSpec, project_dir: ProjectDir = None, remove: RemoveFlag =
     """
     from .associate_impl import associate, Args
 
-    associate(Args(run, project_dir, remove))
+    associate(Args(run, project_dir, remove, ""))

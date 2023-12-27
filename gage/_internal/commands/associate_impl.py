@@ -16,6 +16,7 @@ class Args(NamedTuple):
     run: str
     project_dir: str | None
     remove: bool
+    where: str
 
 
 def associate(args: Args):

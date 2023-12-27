@@ -7,6 +7,7 @@ from ..types import *
 import human_readable
 
 from .. import cli
+from .. import lang
 from .. import project_util
 from .. import run_select
 from .. import var
@@ -18,14 +19,11 @@ from ..run_util import run_user_attrs
 
 
 __all__ = [
+    "one_run",
+    "one_run_for_spec",
     "runs_table",
     "selected_runs",
-    "one_run",
 ]
-
-# =================================================================
-# One run
-# =================================================================
 
 
 class OneRunSupport(Protocol):
@@ -33,9 +31,42 @@ class OneRunSupport(Protocol):
     def run(self) -> str:
         ...
 
+    @property
+    def where(self) -> str:
+        ...
 
-def one_run(args: OneRunSupport | str):
-    run = args if isinstance(args, str) else args.run
+
+class SelectRunsSupport(Protocol):
+    @property
+    def runs(self) -> list[str]:
+        ...
+
+    @property
+    def where(self) -> str:
+        ...
+
+
+# =================================================================
+# One run
+# =================================================================
+
+
+def one_run(args: OneRunSupport):
+    sorted = var.list_runs(sort=["-timestamp"], filter=_runs_filter(args))
+    selected = run_select.select_runs(sorted, [args.run or "1"])
+    if not selected:
+        cli.err(
+            f"No runs match {args.run!r}\n\n"  # \
+            "Use '[cmd]gage list[/]' to show available runs."
+        )
+        raise SystemExit()
+    if len(selected) > 1:
+        assert False, "TODO: matches many runs, show list with error"
+
+    return selected[0]
+
+
+def one_run_for_spec(run: str):
     sorted = var.list_runs(sort=["-timestamp"])
     selected = run_select.select_runs(sorted, [run or "1"])
     if not selected:
@@ -50,31 +81,27 @@ def one_run(args: OneRunSupport | str):
     return selected[0]
 
 
+def _runs_filter(args: OneRunSupport | SelectRunsSupport):
+    if not args.where:
+        return None
+    try:
+        return lang.parse_where_expr(args.where)
+    except ValueError as e:
+        cli.err(f"Cannot use where expression {args.where!r}: {e}")
+        raise SystemExit()
+
+
 # =================================================================
 # Selected runs
 # =================================================================
 
 
-class SelectRunsSupport(Protocol):
-    @property
-    def runs(self) -> list[str]:
-        ...
-
-    @property
-    def where(self) -> str:
-        ...
-
-
 def selected_runs(args: SelectRunsSupport, deleted: bool = False):
-    sorted = var.list_runs(sort=["-timestamp"], deleted=deleted)
-    filtered = _filter_runs(sorted, args)
-    selected = _select_runs(filtered, args)
-    return selected, len(filtered)
-
-
-def _filter_runs(runs: list[Run], args: SelectRunsSupport):
-    # TODO apply where filter
-    return runs
+    runs = var.list_runs(
+        sort=["-timestamp"], filter=_runs_filter(args), deleted=deleted
+    )
+    selected = _select_runs(runs, args)
+    return selected, len(runs)
 
 
 def _select_runs(runs: list[Run], args: SelectRunsSupport):

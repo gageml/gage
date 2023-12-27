@@ -7,7 +7,7 @@ from .. import cli
 from ..run_util import run_project_dir
 from ..run_util import run_user_attrs
 
-from .impl_support import one_run
+from .impl_support import one_run_for_spec
 
 
 class Args(NamedTuple):
@@ -19,13 +19,9 @@ class Args(NamedTuple):
     label: bool
 
 
-class RunSupport(NamedTuple):
-    run: str
-
-
 def select(args: Args):
     for spec in args.runs or [""]:
-        run = one_run(RunSupport(spec))
+        run = one_run_for_spec(spec)
         if args.name:
             cli.out(run.name)
         elif args.run_dir:

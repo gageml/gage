@@ -85,9 +85,6 @@ def _system_default_runs_dir():
 # =================================================================
 
 
-RunFilter = Callable[[Run], bool]
-
-
 def list_runs(
     root: str | None = None,
     filter: RunFilter | None = None,

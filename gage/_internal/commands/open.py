@@ -51,4 +51,4 @@ def open(
 
     from .open_impl import open, Args
 
-    open(Args(run, path, cmd, meta, user))
+    open(Args(run, path, cmd, meta, user, ""))

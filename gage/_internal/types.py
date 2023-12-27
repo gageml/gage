@@ -21,6 +21,7 @@ __all__ = [
     "RunConfig",
     "RunConfigValue",
     "RunContext",
+    "RunFilter",
     "RunStatus",
     "RunTimestamp",
     "SchemaValidationError",
@@ -359,6 +360,16 @@ class RunComment(NamedTuple):
     author: str
     timestamp: int
     msg: str
+
+
+# =================================================================
+# Runs list
+# =================================================================
+
+
+class RunFilter(Protocol):
+    def __call__(self, run: Run) -> bool:
+        ...
 
 
 # =================================================================

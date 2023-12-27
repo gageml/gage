@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 class Args(NamedTuple):
     run: str
     files: bool
+    where: str
 
 
 def show(args: Args):

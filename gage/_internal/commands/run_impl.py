@@ -56,7 +56,7 @@ def run(args: Args):
 
 def _handle_start(args: Args):
     assert args.start
-    run = impl_support.one_run(args.start)
+    run = impl_support.one_run_for_spec(args.start)
     status = run_status(run)
     if status != "staged":
         cli.exit_with_error(
