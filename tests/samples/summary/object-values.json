@@ -1,0 +1,17 @@
+{
+  "attributes": {
+    "a": "ABC",
+    "b": {
+      "value": 123
+    },
+    "c": null,
+    "d": true
+  },
+  "metrics": {
+    "x": 123,
+    "y": {
+      "value": 0.456
+    },
+    "z": null
+  }
+}

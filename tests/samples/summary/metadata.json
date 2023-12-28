@@ -1,0 +1,20 @@
+{
+  "attributes": {
+    "model": {
+      "value": "mindy-labs/mindy-7b-v2",
+      "ref": "models/hf/mindy-labs/mindy-7b-v2",
+      "hf:model": "mindy-labs/mindy-7b-v2",
+      "label": "Model"
+    },
+    "params": "7b",
+    "lineage": "mindy"
+  },
+  "metrics": {
+    "arc": {
+      "value": 0.85,
+      "stderr": 0.1,
+      "label": "ARC",
+      "ref": "bench/arc"
+    }
+  }
+}

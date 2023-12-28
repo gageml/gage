@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gageml.org/summary",
+  "title": "Gage Run Summary",
+  "$defs": {
+    "attribute-value": {
+      "type": ["string", "number", "boolean", "null"],
+      "title": "Attribute value"
+    },
+    "attribute": {
+      "title": "Attribute",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/attribute-value"
+        },
+        {
+          "type": "object",
+          "title": "Attribute object",
+          "required": ["value"],
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/attribute-value"
+            },
+            "label": {
+              "type": "string",
+              "title": "Attribute label"
+            }
+          }
+        }
+      ]
+    },
+    "attributes": {
+      "type": "object",
+      "title": "Attributes",
+      "patternProperties": {
+        ".+": {
+          "$ref": "#/$defs/attribute"
+        }
+      }
+    },
+    "metric-value": {
+      "type": ["number", "null"],
+      "title": "Metric value"
+    },
+    "metric": {
+      "title": "Metric",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/metric-value"
+        },
+        {
+          "type": "object",
+          "title": "Metric object",
+          "required": ["value"],
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/metric-value"
+            },
+            "label": {
+              "type": "string",
+              "title": "Metric label"
+            }
+          }
+        }
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "title": "Metrics",
+      "patternProperties": {
+        ".+": {
+          "$ref": "#/$defs/metric"
+        }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "attributes": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/attributes"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attributes"
+          }
+        }
+      ]
+    },
+    "metrics": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/metrics"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/metrics"
+          }
+        }
+      ]
+    }
+  }
+}
