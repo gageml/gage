@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://gage.org/userconfig",
-  "title": "Gage ML User Config File",
+  "$id": "https://gageml.org/userconfig",
+  "title": "Gage User Config",
   "type": "object",
   "additionalProperties": false,
   "properties": {

@@ -24,22 +24,22 @@ object of error information.
 
     >>> from gage._internal.schema_util import validation_error_output
 
-    >>> try:
+    >>> try:  # +diff
     ...     validate_gagefile_data(123)
     ... except GageFileValidationError as e:
     ...     json_pprint(validation_error_output(e, verbose=True))
     {
-      "absoluteKeywordLocation": "https://gage.org/gagefile#",
+      "absoluteKeywordLocation": "https://gageml.org/gagefile#",
       "errors": [
         {
-          "absoluteKeywordLocation": "https://gage.org/gagefile#/title",
-          "annotation": "Gage ML Project File",
+          "absoluteKeywordLocation": "https://gageml.org/gagefile#/title",
+          "annotation": "Gage File",
           "instanceLocation": "",
           "keywordLocation": "/title",
           "valid": true
         },
         {
-          "absoluteKeywordLocation": "https://gage.org/gagefile#/type",
+          "absoluteKeywordLocation": "https://gageml.org/gagefile#/type",
           "error": "The instance must be of type \"object\"",
           "instanceLocation": "",
           "keywordLocation": "/type",

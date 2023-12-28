@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://gage.org/gagefile",
-  "title": "Gage ML Project File",
+  "$id": "https://gageml.org/gagefile",
+  "title": "Gage File",
   "$defs": {
     "shell-cmd": {
       "type": "string",
