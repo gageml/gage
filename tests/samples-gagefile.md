@@ -1,4 +1,4 @@
-# Gage file samples
+# Gage File Samples
 
 Use `check` to validate sample Gage files.
 
