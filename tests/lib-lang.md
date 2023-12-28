@@ -108,14 +108,8 @@ command. String values are parsed with `parse_config_value()`.
 
 ## Where expressions
 
-    >>> parse_where_expr("completed")
-    <RunFilter status=completed>
+    >>> parse_where_expr("completed")  # +wildcard
+    <function string_match_filter.<locals>.f at ...>
 
-    >>> parse_where_expr("terminated")
-    <RunFilter status=terminated>
-
-TODO - error message below is unhelpful.
-
-    >>> parse_where_expr("invalid")
-    Traceback (most recent call last):
-    ValueError: Unexpected character 'i' at line 1 col 1
+    >>> parse_where_expr("foobar")  # +wildcard
+    <function string_match_filter.<locals>.f at ...>

@@ -83,6 +83,7 @@
     gage._internal.run_config_py
     gage._internal.run_context
     gage._internal.run_dependencies
+    gage._internal.run_filter
     gage._internal.run_help
     gage._internal.run_output
     gage._internal.run_select

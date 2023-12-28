@@ -1,0 +1,7 @@
+[no-op]
+
+exec = "true"
+
+[hello]
+
+exec = "echo Hi"

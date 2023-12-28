@@ -6,7 +6,7 @@ from .types import *
 
 from lark import *
 
-from . import run_util
+from . import run_filter
 
 __all__ = [
     "parse_config_value",
@@ -29,13 +29,7 @@ config_value: SIGNED_INT      -> int
             | OTHER_STRING    -> other_string
 
 
-where_expr: RUN_STATUS    -> run_status
-
-RUN_STATUS: "completed"
-          | "staged"
-          | "error"
-          | "terminated"
-          | "running"
+where_expr: OTHER_STRING   -> run_string_match
 
 _STRING_INNER: /.*?/
 _STRING_ESC_INNER: _STRING_INNER /(?<!\\)(\\\\)*?/
@@ -173,21 +167,6 @@ class GrammarTransformer(Transformer):
         (s,) = tokens
         return s.value
 
-    def run_status(self, tokens: list[Token]):
+    def run_string_match(self, tokens: list[Token]):
         (s,) = tokens
-        return _RunFilter(
-            lambda run: run_util.run_status(run) == s,
-            f"status={s}",
-        )
-
-
-class _RunFilter(RunFilter):
-    def __init__(self, f: Callable[[Run], bool], desc: str):
-        self._f = f
-        self._desc = desc
-
-    def __repr__(self):
-        return f"<RunFilter {self._desc}>"
-
-    def __call__(self, run: Run):
-        return self._f(run)
+        return run_filter.string_match_filter(s)

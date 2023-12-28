@@ -19,14 +19,23 @@ Use the `hello` example to generate some runs.
     Hello Gage
     <0>
 
+    >>> run("gage run hello -l 'a test' -y")
+    Hello Gage
+    <0>
+
     >>> run("gage runs -s")
     | # | operation | status    | label                        |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
-    | 2 | hello     | staged    |                              |
+    | 1 | hello     | completed | a test                       |
+    | 2 | hello     | completed |                              |
+    | 3 | hello     | staged    |                              |
     <0>
 
-Use a where expression to filter results.
+The current implementation of the where filter applies a general string
+match algorithm to test runs. The test is applied to op name, status,
+and label. TODO - include tags when implemented.
+
+Show staged runs.
 
     >>> run("gage runs -s -w staged")
     | # | operation | status | label                           |
@@ -34,14 +43,36 @@ Use a where expression to filter results.
     | 1 | hello     | staged |                                 |
     <0>
 
+Show completed runs.
+
     >>> run("gage runs -s --where completed")
     | # | operation | status    | label                        |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
+    | 1 | hello     | completed | a test                       |
+    | 2 | hello     | completed |                              |
     <0>
 
-Filter using an unsupported run status.
+Show runs with 'test' (searches label).
 
-    >>> run("gage runs -s --where hah")
-    Cannot use where expression 'hah': Unexpected character 'h' at line 1 col 1
-    <1>
+    >>> run("gage runs -s --where test")
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | a test                       |
+    <0>
+
+Filter on something that does not match.
+
+    >>> run("gage runs -s -w does-not-match")
+    | # | operation | status | label                           |
+    |---|-----------|--------|---------------------------------|
+    <0>
+
+Empty string is equivalent to no filter.
+
+    >>> run("gage runs -s --where ''")
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | a test                       |
+    | 2 | hello     | completed |                              |
+    | 3 | hello     | staged    |                              |
+    <0>
