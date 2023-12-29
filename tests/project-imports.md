@@ -88,6 +88,7 @@
     gage._internal.run_output
     gage._internal.run_select
     gage._internal.run_sourcecode
+    gage._internal.run_summary
     gage._internal.run_util
     gage._internal.schema_util
     gage._internal.shlex_util

@@ -10,9 +10,18 @@
              index number, run ID, or run name.
     ⤶
     Options:
-      -f, --files  Show run files.
-      -h, --help   Show this message and exit.
+      --limit-files N  Limit files shown. Default is 50.
+                       Ignored if --files is specified. Use
+                       --all-files to bypass this limit.
+      --all-files      Show all files. --limit-files is
+                       ignored.
+      --summary        Show only summary.
+      -f, --files      Show only files. When used, all files
+                       are show.
+      -h, --help       Show this message and exit.
     <0>
+
+## Hello Example
 
 Generate a run.
 
@@ -44,11 +53,26 @@ Show the run.
     | gage.toml       |source code        |              143 B |
     | hello.py        |source code        |               38 B |
     | ----------------|-------------------|------------------- |
-    |                 |                   |       total: 181 B |
+    | 2 files         |                   |       total: 181 B |
     ⤶
                                Output
     | Hello Gage                                               |
     <0>
+
+Limit files using `--limit-files`. The limit is 50 by default to avoid
+huge lists. This can be increased or decreased as needed.
+
+    >>> run("gage show --limit-files 1")  # +wildcard=///
+    ///
+    | name                        |type         |         size |
+    | ----------------------------|-------------|------------- |
+    | gage.toml                   |source code  |        143 B |
+    | ...                         |...          |          ... |
+    | ----------------------------|-------------|------------- |
+    | truncated (1 of 2 files)    |             | total: 181 B |
+    ///
+    <0>
+
 
 Show files.
 
@@ -57,4 +81,29 @@ Show files.
     |-----------|-------------|-------|
     | gage.toml | source code | 143 B |
     | hello.py  | source code |  38 B |
+    <0>
+
+## Summary Example
+
+    >>> use_example("summary")
+
+    >>> run("gage run default -y")
+    Writing summary to summary.json
+    <0>
+
+    >>> run("gage show")  # +wildcard=///
+    ///
+                              Summary
+    | name         |value             |type                    |
+    | -------------|------------------|----------------------- |
+    | speed        |0.1               |metric                  |
+    | type         |example           |attribute               |
+    ///
+    <0>
+
+    >>> run("gage show --summary")
+    | name  | value   | type      |
+    |-------|---------|-----------|
+    | speed | 0.1     | metric    |
+    | type  | example | attribute |
     <0>

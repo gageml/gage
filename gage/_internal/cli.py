@@ -71,6 +71,7 @@ STYLE_PANEL_TITLE = "yellow"
 STYLE_LABEL = "cyan1"
 STYLE_SECOND_LABEL = "cyan"
 STYLE_VALUE = "dim"
+STYLE_SUBTEXT = "bright_black"
 
 
 def run_status_style(status: str):

@@ -1,0 +1,25 @@
+[default]
+
+default = true
+description = "Write summary using default file name"
+exec = "python summary.py"
+
+[alt-summary-name]
+
+description = "Write alternative summary file name"
+exec = "SUMMARY=results.json python summary.py"
+config = "summary.py"
+
+[alt-summary-name.summary]
+
+filename = "results.json"
+
+[alt-summary-toml]
+
+description = "Write alternative summary file as TOML"
+exec = "SUMMARY=zefile.toml python summary.py"
+config = "summary.py"
+
+[alt-summary-toml.summary]
+
+filename = "zefile.toml"

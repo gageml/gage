@@ -72,7 +72,7 @@ Run hello.
     | gage.toml       |source code        |              143 B |
     | hello.py        |source code        |               38 B |
     | ----------------|-------------------|------------------- |
-    |                 |                   |       total: 181 B |
+    | 2 files         |                   |       total: 181 B |
     ⤶
                                Output
     | Hello Gage                                               |
@@ -90,7 +90,7 @@ List meta files:
 
     >>> meta_dir = path_join(runs_dir, run_id + ".meta")
 
-    >>> ls(meta_dir, permissions=True)
+    >>> ls(meta_dir, permissions=True)  # +diff
     -r--r--r-- __schema__
     -r--r--r-- config.json
     -r--r--r-- id
@@ -108,6 +108,7 @@ List meta files:
     -r--r--r-- staged
     -r--r--r-- started
     -r--r--r-- stopped
+    -r--r--r-- summary.json
     -r--r--r-- sys/platform.json
 
 Show files log.
@@ -138,6 +139,7 @@ Show runner log.
     Writing meta proc/lock
     Exit code for run: 0
     Deleting meta proc/lock
+    Writing meta summary
     Writing meta stopped
     Writing meta proc/exit
     Finalizing run files (see manifest)
@@ -164,7 +166,7 @@ Run with a different `name`.
     | gage.toml       |source code        |              143 B |
     | hello.py        |source code        |               37 B |
     | ----------------|-------------------|------------------- |
-    |                 |                   |       total: 180 B |
+    | 2 files         |                   |       total: 180 B |
     ⤶
                                Output
     | Hello Joe                                                |
@@ -294,6 +296,7 @@ Show the runner log.
     Writing meta proc/lock
     Exit code for run: 0
     Deleting meta proc/lock
+    Writing meta summary
     Writing meta stopped
     Writing meta proc/exit
     Finalizing run files (see manifest)

@@ -23,20 +23,54 @@ optionally be used with a custom command.
 
 Generate a run top open.
 
-    >>> use_example("hello")
-    >>> run("gage run -q -y")
+    >>> use_example("summary")
+    >>> run("gage run default -y")
+    Writing summary to summary.json
     <0>
 
-    >>> run("gage select")  # +parse
-    {run_id:run_id}
+    >>> run("gage select --run-dir")  # +parse
+    {run_dir:path}
     <0>
 
-Use `echo` to print the command args.
+Default open location is the run directory. Use `echo` to print the
+command args.
 
-    >>> run(f"gage open --cmd echo")  # +parse
+    >>> run("gage open --cmd echo")  # +parse
     {echo_out}
     <0>
 
-    >>> assert os.path.exists(echo_out)
+    >>> assert echo_out == run_dir
 
-    >>> assert os.path.basename(echo_out) == run_id
+Use `--path` to open a specific path in the run directory. We use the
+`cat` command to print the file.
+
+    >>> run("gage open --cmd cat --path summary.json")
+    {
+      "attributes": {
+        "type": "example"
+      },
+      "metrics": {
+        "speed": 0.1
+      }
+    }
+    <0>
+
+Hidden options are used for developer convenience.
+
+`--summary` opens the meta summary file.
+
+    >>> run("gage open --cmd cat --summary")
+    {
+      "attributes": {
+        "type": "example"
+      },
+      "metrics": {
+        "speed": 0.1
+      }
+    }
+    <0>
+
+Return value from command is passed through.
+
+    >>> run("gage open --cmd false")
+    <1>

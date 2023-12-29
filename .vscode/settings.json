@@ -120,6 +120,7 @@
     "omegaconf",
     "opcmd",
     "opdef",
+    "opdefs",
     "oplib",
     "opref",
     "opspec",
@@ -185,6 +186,7 @@
     "virtualenv",
     "willmcgugan",
     "wordbreak",
-    "xonsh"
+    "xonsh",
+    "zefile"
   ]
 }

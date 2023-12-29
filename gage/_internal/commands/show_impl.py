@@ -24,11 +24,10 @@ from natsort import natsorted
 
 from .. import cli
 
-from ..run_output import RunOutputReader
-
-from ..run_util import *
-
 from ..run_comment import get_comments
+from ..run_output import RunOutputReader
+from ..run_summary import format_summary_value
+from ..run_util import *
 
 from ..util import format_user_dir
 
@@ -40,16 +39,21 @@ log = logging.getLogger(__name__)
 
 class Args(NamedTuple):
     run: str
+    limit_files: int
+    all_files: bool
+    summary: bool
     files: bool
-    where: str
+    where: str = ""
 
 
 def show(args: Args):
     run = one_run(args)
+    if args.summary:
+        _show_summary_and_exit(run)
     if args.files:
         _show_files_and_exit(run)
     with cli.pager():
-        _show(run)
+        _show(run, args)
 
 
 def Header(run: Run):
@@ -114,50 +118,117 @@ def Config(run: Run):
     return cli.Panel(config_table, title="Configuration")
 
 
-def Files(run: Run, table_only: bool = False):
+def Summary(run: Run, table_only: bool = False):
+    summary = run_summary(run)
+    attributes = summary.get_attributes()
+    metrics = summary.get_metrics()
+    if not attributes and not metrics:
+        return Group()
+
+    table = cli.Table(
+        expand=not table_only,
+        show_edge=table_only,
+        box=_inner_table_box(table_only),
+        padding=(0, 1) if table_only else 0,
+    )
+    table.add_column("name", style=cli.STYLE_LABEL)
+    table.add_column("value", style=cli.STYLE_VALUE)
+    table.add_column("type", style=cli.STYLE_SUBTEXT)
+    missing = object()
+    for name in sorted(set([*attributes.keys(), *metrics.keys()])):
+        attr = attributes.get(name, missing)
+        if attr is not missing:
+            table.add_row(name, format_summary_value(attr), "attribute")
+        metric = metrics.get(name, missing)
+        if metric is not missing:
+            table.add_row(name, format_summary_value(metric), "metric")
+
+    if table_only:
+        return table
+    return cli.Panel(table, title="Summary")
+
+
+def Files(run: Run, table_only: bool = False, limit: int | None = None):
     with RunManifest(run) as m:
         files = list(m)
     table = cli.Table(
         expand=not table_only,
         show_footer=not table_only,
         show_edge=table_only,
-        box=_files_box(table_only),
+        box=_inner_table_box(table_only),
         padding=(0, 1) if table_only else 0,
     )
     table.add_column(
         "name",
+        style=cli.STYLE_VALUE,
+        footer_style=f"not b {cli.STYLE_SUBTEXT} i",
     )
     table.add_column(
         "type",
-        style="dim",
+        style=cli.STYLE_SUBTEXT,
     )
     table.add_column(
         "size",
         justify="right",
         style="magenta",
-        footer_style="not b magenta",
+        footer_style="not b magenta i",
     )
+    total_count = len(files)
     total_size = 0
-    for type, digest, path in natsorted(files):
+    displayed = 0
+    for path, type in _sort_files(files):
         stat = os.stat(os.path.join(run.run_dir, path))
-        table.add_row(
-            path,
-            _type_desc(type),
-            _format_file_size(stat.st_size),
-        )
+        if limit is None or displayed < limit:
+            table.add_row(
+                path,
+                _type_desc(type),
+                _format_file_size(stat.st_size),
+            )
+            displayed += 1
         total_size += stat.st_size
-
-    table.columns[2].footer = f"total: {_format_file_size(total_size)}"
+    if displayed < total_count:
+        table.add_row("...", "...", "...", style="not b magenta i")
+    if not table_only:
+        files_desc = "file" if total_count == 1 else "files"
+        table.columns[0].footer = (
+            f"truncated ({displayed} of {total_count} {files_desc})"
+            if displayed < total_count
+            else f"{total_count} {files_desc}"
+        )
+        table.columns[2].footer = f"[i]total: {_format_file_size(total_size)}"
 
     if table_only:
         return table
     return cli.Panel(table, title="Files")
 
 
-def _files_box(table_only: bool):
+def _inner_table_box(table_only: bool):
     return (
         None if table_only else rich.box.MARKDOWN if cli.is_plain else rich.box.SIMPLE
     )
+
+
+def _sort_files(files: list[RunManifestEntry]) -> list[tuple[str, RunFileType]]:
+    return [
+        (path, type)
+        for type_order, path, type in natsorted(
+            [(_type_sort_order(type), path, type) for type, digest, path in files]
+        )
+    ]
+
+
+def _type_sort_order(type: RunFileType):
+    match type:
+        case "g":
+            return 1
+        case "d":
+            return 2
+        case "s":
+            return 3
+        case "r":
+            return 4
+        case _:
+            return 5
 
 
 def _type_desc(type: RunFileType):
@@ -290,13 +361,23 @@ def _format_comment_date(timestamp: int):
     return human_readable.date_time(comment_date)
 
 
-def _show(run: Run):
+def _show(run: Run, args: Args):
     cli.out(Header(run))
     cli.out(Attributes(run))
     cli.out(Config(run))
-    cli.out(Files(run))
+    cli.out(Summary(run))
+    cli.out(Files(run, limit=_files_limit(args)))
     cli.out(Output(run))
     cli.out(Comments(run))
+
+
+def _files_limit(args: Args):
+    return None if args.all_files else args.limit_files
+
+
+def _show_summary_and_exit(run: Run):
+    cli.out(Summary(run, table_only=True))
+    raise SystemExit(0)
 
 
 def _show_files_and_exit(run: Run):

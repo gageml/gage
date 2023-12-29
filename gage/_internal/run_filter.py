@@ -13,6 +13,7 @@ __all__ = ["string_match_filter"]
 def string_match_filter(s: str) -> RunFilter:
     if not s:
         raise ValueError("filter string cannot be empty")
+
     def f(run: Run):
         if not s:
             return False

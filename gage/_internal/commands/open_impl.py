@@ -23,17 +23,23 @@ class Args(NamedTuple):
     run: str
     path: str
     cmd: str
-    meta: bool
-    user: bool
-    where: str
+    meta: bool = False
+    user: bool = False
+    summary: bool = False
+    where: str = ""
 
 
 def open(args: Args):
     run = one_run(args)
-    dirname = _dirname(run, args)
-    path = os.path.join(dirname, args.path) if args.path else dirname
-    _open(path, args)
+    _open(_path(run, args), args)
     _flush_streams_and_exit()
+
+
+def _path(run: Run, args: Args):
+    if args.summary:
+        args = Args(run=args.run, path="summary.json", cmd=args.cmd, meta=True)
+    dirname = _dirname(run, args)
+    return os.path.join(dirname, args.path) if args.path else dirname
 
 
 def _dirname(run: Run, args: Args):
@@ -72,8 +78,10 @@ def _proc_f(prog: str):
     cmd = shlex.split(prog)
 
     def f(path: str):
-        p = subprocess.Popen(cmd + [path])
-        p.wait()
+        try:
+            subprocess.run(cmd + [path], check=True)
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(e.returncode)
 
     return f
 

@@ -115,6 +115,7 @@ Show the meta files. All files are read only.
     -r--r--r-- staged
     -r--r--r-- started
     -r--r--r-- stopped
+    -r--r--r-- summary.json
 
 Show the run files.
 

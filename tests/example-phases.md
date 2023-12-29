@@ -26,10 +26,10 @@ Show the run files.
     >>> run("gage show --files")
     | name             | type        |  size |
     |------------------|-------------|-------|
-    | required-file    | dependency  |   0 B |
     | generated-file   | generated   |   0 B |
     | generated-file-2 | generated   |   0 B |
-    | runtime-file     | runtime     |   0 B |
+    | required-file    | dependency  |   0 B |
     | gage.toml        | source code | 314 B |
     | sourcecode-file  | source code |   0 B |
+    | runtime-file     | runtime     |   0 B |
     <0>

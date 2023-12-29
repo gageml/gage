@@ -54,7 +54,10 @@ def _opdef_for_name(name: str, gagefile: GageFile):
 
 
 def _default_opdef(gagefile: GageFile):
-    for name, opdef in sorted(gagefile.get_operations().items()):
-        if opdef.get_default:
+    opdefs = [opdef for name, opdef in sorted(gagefile.get_operations().items())]
+    if len(opdefs) == 1:
+        return opdefs[0]
+    for opdef in opdefs:
+        if opdef.get_default():
             return opdef
     raise OpDefNotFound(None, gagefile.filename)

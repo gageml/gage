@@ -11,10 +11,12 @@ __all__ = [
     "JSONCompatible",
     "OpCmd",
     "OpDef",
-    "OpDefNotFound",
-    "OpRef",
-    "OpDefExec",
     "OpDefConfig",
+    "OpDefDependency",
+    "OpDefExec",
+    "OpDefNotFound",
+    "OpDefSummary",
+    "OpRef",
     "Repository",
     "Run",
     "RunComment",
@@ -23,6 +25,7 @@ __all__ = [
     "RunContext",
     "RunFilter",
     "RunStatus",
+    "RunSummary",
     "RunTimestamp",
     "SchemaValidationError",
     "UnifiedDiff",
@@ -34,7 +37,7 @@ __all__ = [
 
 Data = dict[str, Any]
 
-# NO IMPORTS ALLOWED
+# NO IMPORTS ALLOWED!
 
 
 # =================================================================
@@ -172,6 +175,17 @@ class OpDefDependency:
         return ""
 
 
+class OpDefSummary:
+    def __init__(self, data: Data):
+        self._data = data
+
+    def as_json(self) -> Data:
+        return self._data
+
+    def get_filename(self):
+        return self._data.get("filename")
+
+
 class OpDef:
     def __init__(self, name: str, data: Data, src: str | None = None):
         self.name = name
@@ -230,6 +244,12 @@ class OpDef:
         elif isinstance(val, dict):
             val = [val]
         return [OpDefDependency(item) for item in val]
+
+    def get_summary(self) -> OpDefSummary:
+        val = self._data.get("summary")
+        if val is None:
+            val = {}
+        return OpDefSummary(val)
 
 
 class GageFile:
@@ -338,7 +358,6 @@ RunTimestamp = Literal[
     "stopped",
 ]
 
-
 RunConfigValue = None | int | float | bool | str
 
 
@@ -360,6 +379,20 @@ class RunComment(NamedTuple):
     author: str
     timestamp: int
     msg: str
+
+
+class RunSummary:
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+
+    def get_attributes(self) -> dict[str, Any]:
+        return cast(dict[str, Any], self._data.get("attributes") or {})
+
+    def get_metrics(self) -> dict[str, Any]:
+        return cast(dict[str, Any], self._data.get("metrics") or {})
+
+    def as_json(self):
+        return self._data
 
 
 # =================================================================

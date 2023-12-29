@@ -64,6 +64,7 @@ __all__ = [
     "parse_short_run_id",
     "parse_short_run_name",
     "parse_sha256",
+    "parse_table_border",
     "parse_timestamp",
     "parse_timestamp_ms",
     "parse_timestamp_s",
@@ -204,6 +205,11 @@ def parse_isodate(s: str):
 
 @parse_type("sha256", "[a-f0-9]{64}")
 def parse_sha256(s: str):
+    return s
+
+
+@parse_type("--", r"\| -[\-\|]* \|")
+def parse_table_border(s: str):
     return s
 
 

@@ -38,6 +38,7 @@ Cmd = Annotated[
 
 MetaFlag = Annotated[bool, Option("--meta", hidden=True)]
 UserFlag = Annotated[bool, Option("--user", hidden=True)]
+SummaryFlag = Annotated[bool, Option("--summary", hidden=True)]
 
 
 def open(
@@ -46,9 +47,10 @@ def open(
     cmd: Cmd = "",
     meta: MetaFlag = False,
     user: UserFlag = False,
+    summary: SummaryFlag = False,
 ):
     """Open a run in the file explorer."""
 
     from .open_impl import open, Args
 
-    open(Args(run, path, cmd, meta, user, ""))
+    open(Args(run, path, cmd, meta, user, summary))

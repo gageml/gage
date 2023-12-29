@@ -37,9 +37,12 @@ from .file_util import write_file
 from .opref_util import decode_opref
 from .opref_util import encode_opref
 
+from .project_util import load_data
+
 from .sys_config import get_user
 
 __all__ = [
+    "CORE_ATTRS",
     "META_SCHEMA",
     "RunExecError",
     "RunManifest",
@@ -67,6 +70,7 @@ __all__ = [
     "run_project_dir",
     "run_project_ref",
     "run_status",
+    "run_summary",
     "run_timestamp",
     "run_user_attrs",
     "run_user_dir",
@@ -236,6 +240,22 @@ _ATTR_READERS = {
     "exit_code": _run_exit_code_reader,
 }
 
+CORE_ATTRS = list(_ATTR_READERS)
+
+# =================================================================
+# Run attrs
+# =================================================================
+
+
+def run_summary(run: Run) -> RunSummary:
+    filename = _meta_summary_filename(run)
+    try:
+        data = load_data(filename)
+    except FileNotFoundError:
+        return RunSummary({})
+    else:
+        return RunSummary(data)
+
 
 # =================================================================
 # Other run directories
@@ -380,6 +400,10 @@ def _meta_manifest_filename(run: Run):
 
 def _meta_timestamp_filename(run: Run, name: RunTimestamp):
     return run_meta_path(run, name)
+
+
+def _meta_summary_filename(run: Run):
+    return run_meta_path(run, "summary.json")
 
 
 # =================================================================
@@ -747,7 +771,7 @@ def _write_staged_files_manifest(run: Run, log: Logger):
 
 
 def _reduce_files_log(run: Run):
-    paths: Dict[str, RunFileType] = {}
+    paths: dict[str, RunFileType] = {}
     for event, type, modified, path in _iter_files_log(run):
         if event == "a":
             paths[path] = type
@@ -788,6 +812,7 @@ def finalize_run(run: Run, exit_code: int = 0):
     opdef = meta_opdef(run)
     run_phase_channel.notify("finalize")
     ensure_dir(run.run_dir)
+    _finalize_run_summary(run, opdef, log)
     _finalize_run_output(run)
     _write_timestamp("stopped", run, log)
     _write_exit_code(exit_code, run, log)
@@ -796,6 +821,40 @@ def finalize_run(run: Run, exit_code: int = 0):
     _finalize_files_log(run)
     _write_run_files_manifest(run, log)
     _finalize_runner_log(run)
+
+
+def _finalize_run_summary(run: Run, opdef: OpDef, log: Logger):
+    summary = _load_run_summary(run, opdef, log)
+    _apply_opdef_summary(opdef, summary)
+    _write_meta_summary(summary, run, log)
+
+
+def _load_run_summary(run: Run, opdef: OpDef, log: Logger) -> RunSummary:
+    filename = _run_summary_filename(run, opdef)
+    if not os.path.exists(filename):
+        return RunSummary({})
+    log.info(f"Using run summary {os.path.relpath(filename, run.run_dir)}")
+    return RunSummary(load_data(filename))
+
+
+def _run_summary_filename(run: Run, opdef: OpDef):
+    name = opdef.get_summary().get_filename() or "summary.json"
+    return os.path.join(run.run_dir, name)
+
+
+def _apply_opdef_summary(opdef: OpDef, summary: RunSummary):
+    # TODO - merge content from opdef summary to summary
+    pass
+
+
+def _write_meta_summary(summary: RunSummary, run: Run, log: Logger):
+    log.info("Writing meta summary")
+    filename = _meta_summary_filename(run)
+    write_file(filename, _encode_summary_json(summary), readonly=True)
+
+
+def _encode_summary_json(summary: RunSummary):
+    return json.dumps(summary.as_json(), indent=2, sort_keys=True)
 
 
 def _finalize_run_output(run: Run):
