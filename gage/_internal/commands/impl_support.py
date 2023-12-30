@@ -14,11 +14,13 @@ from .. import var
 
 from ..run_util import meta_opref
 from ..run_util import run_status
+from ..run_util import run_summary
 from ..run_util import run_timestamp
 from ..run_util import run_user_attrs
 
 
 __all__ = [
+    "format_summary_value",
     "one_run",
     "one_run_for_spec",
     "runs_table",
@@ -238,7 +240,7 @@ def _table_row(
     started_str = human_readable.date_time(started) if started else ""
     status = run_status(run)
     user_attrs = run_user_attrs(run)
-    label = user_attrs.get("label") or ""
+    label = user_attrs.get("label") or _run_summary_label(run) or ""
 
     row = [
         index_str,
@@ -254,6 +256,10 @@ def _table_row(
     return _fit(row, width)
 
 
+def _run_summary_label(run: Run):
+    return run_summary(run).get_run_attrs().get("label")
+
+
 def _op_name(run: Run, project_ns: str | None):
     opref = meta_opref(run)
     return opref.get_full_name() if opref.op_ns != project_ns else opref.op_name
@@ -264,3 +270,11 @@ def _fit(l: list[Any], width: int):
         if width <= limit:
             return [x for i, x in enumerate(l) if i not in drop]
     return l
+
+
+def format_summary_value(value: Any):
+    if isinstance(value, dict):
+        value = value.get("value", "")
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)

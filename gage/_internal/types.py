@@ -391,6 +391,9 @@ class RunSummary:
     def get_metrics(self) -> dict[str, Any]:
         return cast(dict[str, Any], self._data.get("metrics") or {})
 
+    def get_run_attrs(self) -> dict[str, Any]:
+        return cast(dict[str, Any], self._data.get("run") or {})
+
     def as_json(self):
         return self._data
 

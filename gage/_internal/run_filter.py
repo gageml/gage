@@ -5,6 +5,7 @@ from typing import *
 from .types import *
 
 from .run_util import run_status
+from .run_util import run_summary
 from .run_util import run_user_attrs
 
 __all__ = ["string_match_filter"]
@@ -21,6 +22,7 @@ def string_match_filter(s: str) -> RunFilter:
             _match_op_name(run, s)
             or _match_run_status(run, s)
             or _match_user_attrs(run, s)
+            or _match_summary_attrs(run, s)
         )
 
     return f
@@ -46,3 +48,8 @@ def _match_label(attrs: dict[str, Any], s: str):
 def _match_tags(attrs: dict[str, Any], s: str):
     # TODO - implement when tags are supported
     return False
+
+
+def _match_summary_attrs(run: Run, s: str):
+    attrs = run_summary(run).get_run_attrs()
+    return s in attrs.get("label", "")

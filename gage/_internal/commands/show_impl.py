@@ -26,11 +26,11 @@ from .. import cli
 
 from ..run_comment import get_comments
 from ..run_output import RunOutputReader
-from ..run_summary import format_summary_value
 from ..run_util import *
 
 from ..util import format_user_dir
 
+from .impl_support import format_summary_value
 from .impl_support import one_run
 
 
@@ -134,14 +134,13 @@ def Summary(run: Run, table_only: bool = False):
     table.add_column("name", style=cli.STYLE_LABEL)
     table.add_column("value", style=cli.STYLE_VALUE)
     table.add_column("type", style=cli.STYLE_SUBTEXT)
-    missing = object()
-    for name in sorted(set([*attributes.keys(), *metrics.keys()])):
-        attr = attributes.get(name, missing)
-        if attr is not missing:
-            table.add_row(name, format_summary_value(attr), "attribute")
-        metric = metrics.get(name, missing)
-        if metric is not missing:
-            table.add_row(name, format_summary_value(metric), "metric")
+
+    for name, attr in sorted(attributes.items()):
+        table.add_row(name, format_summary_value(attr), "attribute")
+    if metrics:
+        table.add_row(None)
+    for name, metric in sorted(metrics.items()):
+        table.add_row(name, format_summary_value(metric), "metric")
 
     if table_only:
         return table
