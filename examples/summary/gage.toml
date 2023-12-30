@@ -3,6 +3,7 @@
 default = true
 description = "Write summary using default file name"
 exec = "python summary.py"
+config = "summary.py"
 
 [alt-summary-name]
 
