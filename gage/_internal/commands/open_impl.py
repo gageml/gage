@@ -37,7 +37,7 @@ def open(args: Args):
 
 def _path(run: Run, args: Args):
     if args.summary:
-        args = Args(run=args.run, path="summary.json", cmd=args.cmd, meta=True)
+        args = args._replace(path="summary.json", meta=True)
     dirname = _dirname(run, args)
     return os.path.join(dirname, args.path) if args.path else dirname
 

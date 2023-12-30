@@ -77,7 +77,7 @@ def _apply_default_op_flag_assign(args: Args):
         return args
     else:
         # opspec is actually a flag assign
-        return Args("", [args.opspec] + args.flags, *args[2:])
+        return args._replace(opspec="", flags=[args.opspec] + args.flags)
 
 
 def _handle_run_context(context: RunContext, args: Args):
