@@ -213,15 +213,15 @@ def _col_style(name: str, deleted: bool):
         case "#", False:
             return cli.STYLE_TABLE_HEADER
         case "#", True:
-            return f"dim"
-        case "name", False:
             return "dim"
+        case "name", False:
+            return cli.STYLE_VALUE
         case "operation", False:
             return cli.STYLE_LABEL
         case "started", False:
-            return "dim"
+            return cli.STYLE_VALUE
         case "status", False:
-            return ""
+            return ""  # status style is value-dependent
         case "label", False:
             return cli.STYLE_SECOND_LABEL
         case _, False:

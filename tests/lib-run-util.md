@@ -407,7 +407,8 @@ Various core attributes:
     '/run_dir'
 
 Started and stopped timestamps are read from the meta dir. Neither are
-present and attempting to read either generates an attribute error.
+defined for `run` and attempting to read either generates an attribute
+error.
 
     >>> run_attr(run, "started")
     Traceback (most recent call last):
@@ -417,7 +418,8 @@ present and attempting to read either generates an attribute error.
     Traceback (most recent call last):
     AttributeError: stopped
 
-`read_attr()` returns specified defaults.
+Specify a default value for `run_attr` to return without raising an
+error.
 
     >>> run_attr(run, "started", 123)
     123
