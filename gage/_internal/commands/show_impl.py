@@ -137,8 +137,6 @@ def Summary(run: Run, table_only: bool = False):
 
     for name, attr in sorted(attributes.items()):
         table.add_row(name, format_summary_value(attr), "attribute")
-    if metrics:
-        table.add_row(None)
     for name, metric in sorted(metrics.items()):
         table.add_row(name, format_summary_value(metric), "metric")
 
