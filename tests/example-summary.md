@@ -55,8 +55,8 @@ The default location for a run summary is `summary.json`.
                               Summary
     | name         |value             |type                    |
     {:---}
-    | speed        |0.1               |metric                  |
     | type         |example           |attribute               |
+    | speed        |0.1               |metric                  |
     ⤶
                                Files
     | name              |type             |               size |
@@ -103,8 +103,8 @@ An op def may optionally specify the summary file name that it writes.
     >>> run("gage show --summary")
     | name  | value       | type      |
     |-------|-------------|-----------|
-    | speed | 0.2         | metric    |
     | type  | alt-example | attribute |
+    | speed | 0.2         | metric    |
     <0>
 
 ## Alt Summary TOML
@@ -134,6 +134,6 @@ An op def may optionally specify the summary file name that it writes.
     >>> run("gage show --summary")
     | name  | value    | type      |
     |-------|----------|-----------|
-    | speed | 0.3      | metric    |
     | type  | alt-toml | attribute |
+    | speed | 0.3      | metric    |
     <0>

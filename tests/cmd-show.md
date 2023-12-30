@@ -96,14 +96,14 @@ Show files.
                               Summary
     | name         |value             |type                    |
     | -------------|------------------|----------------------- |
-    | speed        |0.1               |metric                  |
     | type         |example           |attribute               |
+    | speed        |0.1               |metric                  |
     ///
     <0>
 
     >>> run("gage show --summary")
     | name  | value   | type      |
     |-------|---------|-----------|
-    | speed | 0.1     | metric    |
     | type  | example | attribute |
+    | speed | 0.1     | metric    |
     <0>
