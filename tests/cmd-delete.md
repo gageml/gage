@@ -112,3 +112,64 @@ Show runs.
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed |                              |
     <0>
+
+## Where Filter
+
+When `--where` is specified and runs aren't specified, Gage considers
+`--all` to be implicitly specified.
+
+Generate some runs.
+
+    >>> run("gage run hello -l red -qy")
+    <0>
+    >>> run("gage run hello -l red -qy")
+    <0>
+    >>> run("gage run hello -l green -qy")
+    <0>
+    >>> run("gage run hello -l green -qy")
+    <0>
+
+    >>> run("gage ls -s")
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | green                        |
+    | 2 | hello     | completed | green                        |
+    | 3 | hello     | completed | red                          |
+    | 4 | hello     | completed | red                          |
+    <0>
+
+Guild complains when a run spec or `--all` isn't specified.
+
+    >>> run("gage delete -y")
+    Specify a run to delete or use '--all'.
+    ⤶
+    Use 'gage list' to show available runs.
+    ⤶
+    Try 'gage delete -h' for additional help.
+    <1>
+
+When `--where` is specified, Gage consider `--all` to be implicitly
+specified, assuming the user wants to delete all matching runs.
+
+    >>> run("gage delete -w red -y")
+    Deleted 2 runs
+    <0>
+
+    >>> run("gage ls -s")
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | green                        |
+    | 2 | hello     | completed | green                        |
+    <0>
+
+Where can be used with run specs.
+
+    >>> run("gage delete -w green 2 -y")
+    Deleted 1 run
+    <0>
+
+    >>> run("gage ls -s")
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | green                        |
+    <0>

@@ -9,8 +9,8 @@ import click
 from .. import cli
 from .. import var
 
-from .impl_support import runs_table
 from .impl_support import selected_runs
+from .impl_support import runs_table
 
 
 class Args(NamedTuple):
@@ -23,6 +23,7 @@ class Args(NamedTuple):
 
 
 def runs_delete(args: Args):
+    args = _apply_implicit_all(args)
     if not args.runs and not args.all:
         cli.exit_with_error(
             "Specify a run to delete or use '--all'.\n\n"
@@ -36,6 +37,13 @@ def runs_delete(args: Args):
     _verify_delete(args, runs)
     deleted = var.delete_runs(_strip_index(runs), args.permanent)
     cli.err(_deleted_msg(deleted, args))
+
+
+def _apply_implicit_all(args: Args):
+    args._replace
+    if args.where and not args.runs:
+        return args._replace(all=True)
+    return args
 
 
 def _verify_delete(args: Args, runs: list[tuple[int, Run]]):
