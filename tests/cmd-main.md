@@ -22,7 +22,7 @@ Running `gage` without arguments shows help.
       check            Show and validate settings.
       comment          Comment on runs.
       copy             Copy runs.
-      delete, rm       Delete runs.
+      delete, del, rm  Delete runs.
       help             Show help for a topic.
       label            Set or clear run labels.
       list, ls, runs   List runs.

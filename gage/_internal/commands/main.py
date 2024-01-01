@@ -94,7 +94,7 @@ def main_app():
     app.command("check")(check)
     app.command("comment")(comment)
     app.command("copy")(copy)
-    app.command("delete, rm")(runs_delete)
+    app.command("delete, del, rm")(runs_delete)
     app.add_typer(help_app())
     app.command("label")(label)
     app.command("list, ls, runs")(runs_list)
