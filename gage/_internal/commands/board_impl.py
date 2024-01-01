@@ -75,7 +75,7 @@ def _board_raw_data(runs: list[Run]):
     metric_defs = {}
     row_data: _RowData = [
         {
-            "__id__": run.id,
+            "__rowid__": run.id,
             "run:id": run.id,
             "run:name": run.name,
             "run:operation": run.opref.op_name,

@@ -52,17 +52,20 @@ Show JSON data used by the board.
       ],
       "rowData": [
         {
-          ...
+          "__rowid__": "...",
+          "attribute:type": "example",
           "metric:speed": 3,
           ...
         },
         {
-          ...
+          "__rowid__": "...",
+          "attribute:type": "example",
           "metric:speed": 2,
           ...
         },
         {
-          ...
+          "__rowid__": "...",
+          "attribute:type": "example",
           "metric:speed": 1,
           ...
         }
