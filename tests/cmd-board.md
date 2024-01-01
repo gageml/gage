@@ -18,24 +18,30 @@ Show JSON data used by the board.
 
     >>> run("gage board --json")  # +wildcard +diff
     {
-      "columnDefs": [
+      "colDefs": [
         {
-          "field": "run:id"
+          "field": "run:id",
+          "label": "Run ID"
         },
         {
-          "field": "run:name"
+          "field": "run:name",
+          "label": "Run Name"
         },
         {
-          "field": "run:operation"
+          "field": "run:operation",
+          "label": "Operation"
         },
         {
-          "field": "run:status"
+          "field": "run:status",
+          "label": "Run Status"
         },
         {
-          "field": "run:started"
+          "field": "run:started",
+          "label": "Run Start"
         },
         {
-          "field": "run:stopped"
+          "field": "run:stopped",
+          "label": "Run Stop"
         },
         {
           "field": "attribute:type"
@@ -63,3 +69,8 @@ Show JSON data used by the board.
       ]
     }
     <0>
+
+To Do - test:
+
+- Col label when defined in metric summary
+- Col label when defined in board def

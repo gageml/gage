@@ -3,11 +3,14 @@
 from typing import *
 
 __all__ = [
+    "BoardDef",
+    "BoardDefColumn",
     "CmdArgs",
     "GageFile",
     "GageFileError",
     "GageFileLoadError",
     "GageFileValidationError",
+    "IndexedRun",
     "JSONCompatible",
     "OpCmd",
     "OpDef",
@@ -358,6 +361,8 @@ RunTimestamp = Literal[
     "stopped",
 ]
 
+IndexedRun = tuple[int, Run]
+
 RunConfigValue = None | int | float | bool | str
 
 
@@ -407,6 +412,14 @@ class RunFilter(Protocol):
     def __call__(self, run: Run) -> bool:
         ...
 
+
+# =================================================================
+# Board
+# =================================================================
+
+BoardDef = dict[str, Any]
+
+BoardDefColumn = str | dict[str, Any]
 
 # =================================================================
 # General

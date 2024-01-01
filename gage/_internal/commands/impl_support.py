@@ -106,7 +106,7 @@ def selected_runs(args: SelectRunsSupport, deleted: bool = False):
     return selected, len(runs)
 
 
-def _select_runs(runs: list[Run], args: SelectRunsSupport):
+def _select_runs(runs: list[Run], args: SelectRunsSupport) -> list[IndexedRun]:
     if not args.runs:
         return [(i + 1, run) for i, run in enumerate(runs)]
     index_lookup = {run: i + 1 for i, run in enumerate(runs)}
