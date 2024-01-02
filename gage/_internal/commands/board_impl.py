@@ -75,13 +75,14 @@ def _board_raw_data(runs: list[Run]):
     metric_defs = {}
     row_data: _RowData = [
         {
-            "__rowid__": run.id,
-            "run:id": run.id,
-            "run:name": run.name,
-            "run:operation": run.opref.op_name,
-            "run:status": run_status(run),
-            "run:started": _run_datetime(run, "started"),
-            "run:stopped": _run_datetime(run, "stopped"),
+            "__run__": {
+                "id": run.id,
+                "name": run.name,
+                "operation": run.opref.op_name,
+                "status": run_status(run),
+                "started": _run_datetime(run, "started"),
+                "stopped": _run_datetime(run, "stopped"),
+            },
             **_summary_fields(
                 summary.get_attributes(), "attribute", run, attribute_defs
             ),
@@ -90,12 +91,12 @@ def _board_raw_data(runs: list[Run]):
         for run, summary in [(run, run_summary(run)) for run in runs]
     ]
     col_defs: _ColDefs = [
-        {"field": "run:id", "label": "Run ID"},
-        {"field": "run:name", "label": "Run Name"},
-        {"field": "run:operation", "label": "Operation"},
-        {"field": "run:status", "label": "Run Status"},
-        {"field": "run:started", "label": "Run Start"},
-        {"field": "run:stopped", "label": "Run Stop"},
+        {"field": "run:id", "headerName": "Run ID"},
+        {"field": "run:name", "headerName": "Run Name"},
+        {"field": "run:operation", "headerName": "Operation"},
+        {"field": "run:status", "headerName": "Run Status"},
+        {"field": "run:started", "headerName": "Run Start"},
+        {"field": "run:stopped", "headerName": "Run Stop"},
         *[col_def for key, col_def in sorted(attribute_defs.items())],
         *[col_def for key, col_def in sorted(metric_defs.items())],
     ]
@@ -145,7 +146,7 @@ def _apply_col_def(field_name: str, attrs: dict[str, Any], col_defs: dict[str, A
     col_def = col_defs.setdefault(field_name, {})
     col_def["field"] = field_name
     try:
-        col_def["label"] = attrs["label"]
+        col_def["headerName"] = attrs["label"]
     except KeyError:
         pass
 

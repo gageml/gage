@@ -21,27 +21,27 @@ Show JSON data used by the board.
       "colDefs": [
         {
           "field": "run:id",
-          "label": "Run ID"
+          "headerName": "Run ID"
         },
         {
           "field": "run:name",
-          "label": "Run Name"
+          "headerName": "Run Name"
         },
         {
           "field": "run:operation",
-          "label": "Operation"
+          "headerName": "Operation"
         },
         {
           "field": "run:status",
-          "label": "Run Status"
+          "headerName": "Run Status"
         },
         {
           "field": "run:started",
-          "label": "Run Start"
+          "headerName": "Run Start"
         },
         {
           "field": "run:stopped",
-          "label": "Run Stop"
+          "headerName": "Run Stop"
         },
         {
           "field": "attribute:type"
@@ -52,22 +52,30 @@ Show JSON data used by the board.
       ],
       "rowData": [
         {
-          "__rowid__": "...",
+          "__run__": {
+            "id": "...",
+            "name": "...",
+            "operation": "default",
+            "started": "...",
+            "status": "completed",
+            "stopped": "..."
+          },
           "attribute:type": "example",
-          "metric:speed": 3,
-          ...
+          "metric:speed": 3
         },
         {
-          "__rowid__": "...",
+          "__run__": {
+            ...
+          },
           "attribute:type": "example",
-          "metric:speed": 2,
-          ...
+          "metric:speed": 2
         },
         {
-          "__rowid__": "...",
+          "__run__": {
+            ...
+          },
           "attribute:type": "example",
-          "metric:speed": 1,
-          ...
+          "metric:speed": 1
         }
       ]
     }
@@ -75,5 +83,5 @@ Show JSON data used by the board.
 
 To Do - test:
 
-- Col label when defined in metric summary
-- Col label when defined in board def
+- Col headerName when defined in metric summary
+- Col headerName when defined in board def
