@@ -91,12 +91,12 @@ def _board_raw_data(runs: list[Run]):
         for run, summary in [(run, run_summary(run)) for run in runs]
     ]
     col_defs: _ColDefs = [
-        {"field": "run:id", "headerName": "Run ID"},
-        {"field": "run:name", "headerName": "Run Name"},
-        {"field": "run:operation", "headerName": "Operation"},
-        {"field": "run:status", "headerName": "Run Status"},
-        {"field": "run:started", "headerName": "Run Start"},
-        {"field": "run:stopped", "headerName": "Run Stop"},
+        {"field": "run:status"},
+        {"field": "run:id"},
+        {"field": "run:name"},
+        {"field": "run:operation"},
+        {"field": "run:started"},
+        {"field": "run:stopped"},
         *[col_def for key, col_def in sorted(attribute_defs.items())],
         *[col_def for key, col_def in sorted(metric_defs.items())],
     ]
