@@ -44,7 +44,7 @@ def show_board(args: Args):
 
 def _board_config(config: str) -> BoardDef:
     if not config:
-        return {}
+        return BoardDef({})
     try:
         data = load_data(config)
     except FileNotFoundError:
@@ -54,7 +54,7 @@ def _board_config(config: str) -> BoardDef:
         if not isinstance(data, dict):
             cli.err(f"Unexpected board config in \"{config}\" - expected a map")
             raise SystemExit()
-        return data
+        return BoardDef(data)
 
 
 def _board_runs(args: Args):
@@ -65,14 +65,18 @@ def _board_runs(args: Args):
 def _print_board_json_and_exit(board: BoardDef, runs: list[Run]):
     raw_col_defs, row_data = _board_raw_data(runs)
     col_defs = _board_col_defs(board, raw_col_defs)
-    data = {"colDefs": col_defs, "rowData": row_data}
+    data = {
+        "title": board.get_title(),
+        "description": board.get_description(),
+        "colDefs": col_defs,
+        "rowData": row_data,
+    }
     cli.out(json.dumps(data, indent=2, sort_keys=True))
     raise SystemExit(0)
 
 
 def _board_raw_data(runs: list[Run]):
-    attribute_defs = {}
-    metric_defs = {}
+    field_cols = {}
     row_data: _RowData = [
         {
             "__run__": {
@@ -83,22 +87,14 @@ def _board_raw_data(runs: list[Run]):
                 "started": _run_datetime(run, "started"),
                 "stopped": _run_datetime(run, "stopped"),
             },
-            **_summary_fields(
-                summary.get_attributes(), "attribute", run, attribute_defs
-            ),
-            **_summary_fields(summary.get_metrics(), "metric", run, metric_defs),
+            **_config_fields(run, field_cols),
+            **_summary_fields(run, field_cols),
         }
         for run, summary in [(run, run_summary(run)) for run in runs]
     ]
     col_defs: _ColDefs = [
-        {"field": "run:status"},
-        {"field": "run:id"},
-        {"field": "run:name"},
-        {"field": "run:operation"},
-        {"field": "run:started"},
-        {"field": "run:stopped"},
-        *[col_def for key, col_def in sorted(attribute_defs.items())],
-        *[col_def for key, col_def in sorted(metric_defs.items())],
+        *_run_attr_cols(),
+        *_sorted_field_cols(field_cols),
     ]
     return col_defs, row_data
 
@@ -115,11 +111,51 @@ def _run_datetime(run: Run, attr_name: str):
     return val.isoformat()
 
 
-def _summary_fields(
+def _run_attr_cols():
+    return [
+        {"field": "run:status"},
+        {"field": "run:id"},
+        {"field": "run:name"},
+        {"field": "run:operation"},
+        {"field": "run:started"},
+        {"field": "run:stopped"},
+    ]
+
+
+def _sorted_field_cols(field_cols: dict[str, Any]) -> _ColDefs:
+    return [col for key, col in sorted(field_cols.items(), key=_field_col_sort_key)]
+
+
+def _field_col_sort_key(kv: tuple[str, Any]):
+    parts = kv[0].split(":", 1)
+    match parts[0]:
+        case "attribute":
+            return (1, parts)
+        case "metric":
+            return (2, parts)
+        case "config":
+            return (0, parts)
+        case _:
+            assert False, kv
+
+
+def _config_fields(run: Run, field_cols: dict[str, Any]):
+    return _gen_fields(meta_config(run), "config", run, field_cols)
+
+
+def _summary_fields(run: Run, field_cols: dict[str, Any]):
+    summary = run_summary(run)
+    return {
+        **_gen_fields(summary.get_attributes(), "attribute", run, field_cols),
+        **_gen_fields(summary.get_metrics(), "metric", run, field_cols),
+    }
+
+
+def _gen_fields(
     data: dict[str, Any],
     summary_type: str,
     run: Run,
-    col_defs: dict[str, Any],
+    field_cols: dict[str, Any],
 ):
     fields: dict[str, JSONCompatible] = {}
     for key, val in data.items():
@@ -137,12 +173,12 @@ def _summary_fields(
                 run.id,
             )
             continue
-        _apply_col_def(field_name, attrs, col_defs)
+        _apply_field_col(field_name, attrs, field_cols)
         fields[field_name] = val
     return fields
 
 
-def _apply_col_def(field_name: str, attrs: dict[str, Any], col_defs: dict[str, Any]):
+def _apply_field_col(field_name: str, attrs: dict[str, Any], col_defs: dict[str, Any]):
     col_def = col_defs.setdefault(field_name, {})
     col_def["field"] = field_name
     try:
@@ -162,8 +198,8 @@ def _is_json_serializable(val: Any):
         return True
 
 
-def _board_col_defs(config: BoardDef, col_defs: _ColDefs):
-    config_cols: list[BoardDefColumn] | None = config.get("columns")
+def _board_col_defs(board: BoardDef, col_defs: _ColDefs):
+    config_cols: list[BoardDefColumn] | None = board.get_columns()
     if not config_cols:
         return col_defs
     return [_board_col_def(config_col, col_defs) for config_col in config_cols]
@@ -200,6 +236,9 @@ def _field_matcher(
     metric = col_attrs.pop("metric", None)
     if metric:
         return _metric_col_matcher(metric), col_attrs
+    config = col_attrs.pop("config", None)
+    if config:
+        return _config_col_matcher(config), col_attrs
     run_attr = col_attrs.pop("run-attr", None)
     if run_attr:
         return _run_attr_col_matcher(run_attr), col_attrs
@@ -212,10 +251,15 @@ def _string_col_matcher(
     if (
         target_col.startswith("attribute:")
         or target_col.startswith("metric:")
+        or target_col.startswith("config:")
         or target_col.startswith("run:")
     ):
         return (lambda field_name: target_col == field_name), {}
-    candidates = ["metric:" + target_col, f"attribute:" + target_col]
+    candidates = [
+        "metric:" + target_col,
+        "attribute:" + target_col,
+        "config:" + target_col,
+    ]
     return (lambda field_name: field_name in candidates), {}
 
 
@@ -226,6 +270,11 @@ def _attribute_col_matcher(attribute_name: str) -> _FieldMatcher:
 
 def _metric_col_matcher(metric_name: str) -> _FieldMatcher:
     target = f"metric:{metric_name}"
+    return lambda field_name: field_name == target
+
+
+def _config_col_matcher(key: str) -> _FieldMatcher:
+    target = f"config:{key}"
     return lambda field_name: field_name == target
 
 

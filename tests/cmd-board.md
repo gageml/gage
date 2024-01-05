@@ -20,28 +20,28 @@ Show JSON data used by the board.
     {
       "colDefs": [
         {
-          "field": "run:id",
-          "headerName": "Run ID"
+          "field": "run:status"
         },
         {
-          "field": "run:name",
-          "headerName": "Run Name"
+          "field": "run:id"
         },
         {
-          "field": "run:operation",
-          "headerName": "Operation"
+          "field": "run:name"
         },
         {
-          "field": "run:status",
-          "headerName": "Run Status"
+          "field": "run:operation"
         },
         {
-          "field": "run:started",
-          "headerName": "Run Start"
+          "field": "run:started"
         },
         {
-          "field": "run:stopped",
-          "headerName": "Run Stop"
+          "field": "run:stopped"
+        },
+        {
+          "field": "config:fake_speed"
+        },
+        {
+          "field": "config:type"
         },
         {
           "field": "attribute:type"
@@ -50,6 +50,7 @@ Show JSON data used by the board.
           "field": "metric:speed"
         }
       ],
+      "description": null,
       "rowData": [
         {
           "__run__": {
@@ -61,6 +62,8 @@ Show JSON data used by the board.
             "stopped": "..."
           },
           "attribute:type": "example",
+          "config:fake_speed": 3,
+          "config:type": "example",
           "metric:speed": 3
         },
         {
@@ -68,6 +71,8 @@ Show JSON data used by the board.
             ...
           },
           "attribute:type": "example",
+          "config:fake_speed": 2,
+          "config:type": "example",
           "metric:speed": 2
         },
         {
@@ -75,9 +80,12 @@ Show JSON data used by the board.
             ...
           },
           "attribute:type": "example",
+          "config:fake_speed": 1,
+          "config:type": "example",
           "metric:speed": 1
         }
-      ]
+      ],
+      "title": null
     }
     <0>
 
@@ -85,3 +93,6 @@ To Do - test:
 
 - Col headerName when defined in metric summary
 - Col headerName when defined in board def
+- Other pass through attrs
+- Use over overlapping fields (e.g. using both metric and attribute --
+  should be invalid)

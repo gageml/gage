@@ -417,9 +417,22 @@ class RunFilter(Protocol):
 # Board
 # =================================================================
 
-BoardDef = dict[str, Any]
-
 BoardDefColumn = str | dict[str, Any]
+
+
+class BoardDef:
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+
+    def get_title(self) -> str | None:
+        return cast(str, self._data.get("title"))
+
+    def get_description(self) -> str | None:
+        return cast(str, self._data.get("description"))
+
+    def get_columns(self) -> list[BoardDefColumn]:
+        return cast(list[BoardDefColumn], self._data.get("columns") or [])
+
 
 # =================================================================
 # General
