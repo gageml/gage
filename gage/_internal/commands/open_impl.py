@@ -18,6 +18,8 @@ from .impl_support import one_run
 
 log = logging.getLogger(__name__)
 
+open_ = open
+
 
 class Args(NamedTuple):
     run: str
@@ -33,6 +35,28 @@ def open(args: Args):
     run = one_run(args)
     _open(_path(run, args), args)
     _flush_streams_and_exit()
+
+
+def cat(args: Args):
+    if not args.path:
+        _path_required_for_cat_error(args)
+    run = one_run(args)
+    path = _path(run, args)
+    if not os.path.isfile(path):
+        _path_not_file_error(path)
+    _cat(_path(run, args))
+
+
+def _path_required_for_cat_error(args: Args) -> NoReturn:
+    run_spec = f"{args.run} " if args.run else ""
+    cli.exit_with_error(
+        "Specify the file to print using '--path'. Use "
+        f"'[cmd]gage show {run_spec}--files[/]' to show available files."
+    )
+
+
+def _path_not_file_error(path: str) -> NoReturn:
+    cli.exit_with_error(f"Path \"{path}\" is not a run file")
 
 
 def _path(run: Run, args: Args):
@@ -89,3 +113,8 @@ def _proc_f(prog: str):
 def _flush_streams_and_exit():
     sys.stdout.flush()
     sys.exit(0)
+
+
+def _cat(path: str):
+    with open_(path, "rb") as f:
+        sys.stdout.buffer.write(f.read())

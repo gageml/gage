@@ -19,6 +19,7 @@ Running `gage` without arguments shows help.
     Commands:
       associate        Associate a run with a project directory.
       board            Show a board of run results.
+      cat              Show a run file.
       check            Show and validate settings.
       comment          Comment on runs.
       copy             Copy runs.

@@ -9,6 +9,7 @@ from .. import cli
 
 from .associate import associate
 from .board import show_board
+from .cat import cat
 from .check import check
 from .comment import comment
 from .copy import copy
@@ -91,6 +92,7 @@ def main_app():
     app.callback()(main)
     app.command("associate")(associate)
     app.command("board")(show_board)
+    app.command("cat")(cat)
     app.command("check")(check)
     app.command("comment")(comment)
     app.command("copy")(copy)

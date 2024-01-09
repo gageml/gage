@@ -1,0 +1,5 @@
+{
+    "gen-files": {
+        "exec": "python gen_files.py"
+    }
+}
