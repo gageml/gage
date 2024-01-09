@@ -39,11 +39,11 @@ log = logging.getLogger(__name__)
 
 class Args(NamedTuple):
     run: str
+    where: str
     limit_files: int
     all_files: bool
     summary: bool
     files: bool
-    where: str = ""
 
 
 def show(args: Args):

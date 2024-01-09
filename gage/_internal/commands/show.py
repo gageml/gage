@@ -19,6 +19,16 @@ RunSpec = Annotated[
     ),
 ]
 
+Where = Annotated[
+    str,
+    Option(
+        "-w",
+        "--where",
+        metavar="expr",
+        help="Limit available runs to show.",
+    ),
+]
+
 LimitFiles = Annotated[
     int,
     Option(
@@ -62,6 +72,7 @@ FilesFlag = Annotated[
 
 def show(
     run: RunSpec = "",
+    where: Where = "",
     limit_files: LimitFiles = 50,
     all_files: AllFilesFlag = False,
     summary: SummaryFlag = False,
@@ -73,6 +84,7 @@ def show(
     show(
         Args(
             run,
+            where,
             limit_files,
             all_files,
             summary,

@@ -10,15 +10,16 @@
              index number, run ID, or run name.
     ⤶
     Options:
-      --limit-files N  Limit files shown. Default is 50.
-                       Ignored if --files is specified. Use
-                       --all-files to bypass this limit.
-      --all-files      Show all files. --limit-files is
-                       ignored.
-      --summary        Show only summary.
-      -f, --files      Show only files. When used, all files
-                       are show.
-      -h, --help       Show this message and exit.
+      -w, --where expr  Limit available runs to show.
+      --limit-files N   Limit files shown. Default is 50.
+                        Ignored if --files is specified. Use
+                        --all-files to bypass this limit.
+      --all-files       Show all files. --limit-files is
+                        ignored.
+      --summary         Show only summary.
+      -f, --files       Show only files. When used, all files
+                        are show.
+      -h, --help        Show this message and exit.
     <0>
 
 ## Hello Example
