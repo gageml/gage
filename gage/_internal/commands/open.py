@@ -32,7 +32,7 @@ Cmd = Annotated[
         "-c",
         "--cmd",
         metavar="cmd",
-        help="System command to use. Default is the system file explorer.",
+        help="System command to use. Default is the program associated with the path.",
     ),
 ]
 
@@ -49,7 +49,12 @@ def open(
     user: UserFlag = False,
     summary: SummaryFlag = False,
 ):
-    """Open a run in the file explorer."""
+    """Open a run or run file.
+
+    The default system program is used to open the specified path, which
+    is the run directory by default. Use `--path` to specify a relative
+    file path. Use `--cmd` to open the file with an alternative program.
+    """
 
     from .open_impl import open, Args
 

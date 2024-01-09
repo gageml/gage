@@ -6,7 +6,12 @@ optionally be used with a custom command.
     >>> run("gage open -h")  # +diff
     Usage: gage open [options] [run]
     ⤶
-      Open a run in the file explorer.
+      Open a run or run file.
+    ⤶
+      The default system program is used to open the specified
+      path, which is the run directory by default. Use
+      `--path` to specify a relative file path. Use `--cmd` to
+      open the file with an alternative program.
     ⤶
     Arguments:
       [run]  Run to show information for. Value may be an
@@ -17,7 +22,7 @@ optionally be used with a custom command.
       -p, --path path  Run file to open. Use 'gage show
                        --files' to show run files.
       -c, --cmd cmd    System command to use. Default is the
-                       system file explorer.
+                       program associated with the path.
       -h, --help       Show this message and exit.
     <0>
 

@@ -27,7 +27,7 @@ Running `gage` without arguments shows help.
       help             Show help for a topic.
       label            Set or clear run labels.
       list, ls, runs   List runs.
-      open             Open a run in the file explorer.
+      open             Open a run or run file.
       operations, ops  Show available operations.
       purge            Remove deleted runs.
       restore          Restore runs.
