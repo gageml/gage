@@ -175,6 +175,8 @@ def _gen_fields(
             val = val.get("value", None)
         else:
             attrs = {}
+        if _is_nan(val):
+            val = None
         if not _is_json_serializable(val):
             log.warning(
                 "value for %s %s in run %s is not serializable, ignoring",
@@ -186,6 +188,10 @@ def _gen_fields(
         _apply_field_col(field_name, attrs, field_cols)
         fields[field_name] = val
     return fields
+
+
+def _is_nan(val: Any):
+    return isinstance(val, float) and val != val
 
 
 def _apply_field_col(field_name: str, attrs: dict[str, Any], col_defs: dict[str, Any]):
