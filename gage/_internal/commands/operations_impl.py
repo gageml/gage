@@ -14,6 +14,8 @@ from . import error_handlers
 def operations():
     try:
         table = operations_table()
+    except FileNotFoundError as e:
+        error_handlers.gagefile_not_found(e)
     except GageFileError as e:
         error_handlers.gagefile_error(e)
     else:

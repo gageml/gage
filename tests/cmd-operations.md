@@ -29,3 +29,11 @@ Show operations for sample projects.
     |-----------|-------------------------|
     | hello     | Say hello to my friend. |
     <0>
+
+Show operations for non-existing Gage file.
+
+    >>> cd(make_temp_dir())
+
+    >>> run("gage ops")
+    No operations defined for the current directory
+    <1>

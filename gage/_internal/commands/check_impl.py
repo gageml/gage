@@ -4,7 +4,6 @@ from typing import *
 
 from ..types import *
 
-import json
 import os
 import platform
 import sys
@@ -14,10 +13,11 @@ import gage
 from .. import cli
 from .. import gagefile
 from .. import project_util
-from .. import schema_util
 from .. import sys_config
 from .. import util
 from .. import var
+
+from . import error_handlers
 
 
 __all__ = ["check"]
@@ -52,60 +52,31 @@ def _gagefile_filename(path: str):
         return _gagefile_path_for_dir(path)
     if os.path.exists(path):
         return path
-    _gagefile_find_error(path)
+    error_handlers.gagefile_find_error(path)
 
 
 def _gagefile_path_for_dir(dirname: str):
     try:
         return gagefile.gagefile_path_for_dir(dirname)
     except FileNotFoundError:
-        _gagefile_find_error(dirname)
-
-
-def _gagefile_find_error(path: str) -> NoReturn:
-    if os.path.isdir(path):
-        list = "".join(["\n  " + name for name in gagefile.gagefile_candidates()])
-        cli.exit_with_error(
-            f"Cannot find a Gage file in {path}\n\n"
-            f"Looking for one of:{list}\n\n"
-            "For help with Gage files try 'gage help gagefile'"
-        )
-    else:
-        cli.exit_with_error(f"File \"{path}\" does not exist")
+        error_handlers.gagefile_find_error(dirname)
 
 
 def _gagefile_data(filename: str, args: Args):
     try:
         return gagefile.load_gagefile_data(filename)
     except gagefile.GageFileLoadError as e:
-        _gagefile_load_error(e, args)
+        error_handlers.gagefile_load_error(e)
 
 
-def _gagefile_load_error(e: gagefile.GageFileLoadError, args: Args):
-    cli.exit_with_error(f"Error loading {args.path}: {e.msg}")
-
-
-def _validate_gagefile_data_and_exit(data: Any, filename: str, args: Args) -> NoReturn:
+def _validate_gagefile_data_and_exit(data: Any, filename: str, args: Args):
     try:
         gagefile.validate_gagefile_data(data)
     except gagefile.GageFileValidationError as e:
-        _gagefile_validation_error(e, filename, args)
+        error_handlers.gagefile_validation_error(e, filename, args.verbose)
     else:
         cli.err(f"{filename} is a valid Gage file")
         raise SystemExit(0)
-
-
-def _gagefile_validation_error(
-    e: gagefile.GageFileValidationError, filename: str, args: Args
-) -> NoReturn:
-    cli.err(f"There are errors in {filename}")
-    if args.verbose:
-        output = schema_util.validation_error_output(e)
-        cli.err(json.dumps(output, indent=2, sort_keys=True))
-    else:
-        for err in schema_util.validation_errors(e):
-            cli.err(err)
-    raise SystemExit(1)
 
 
 def _check_version_and_exit(args: Args):

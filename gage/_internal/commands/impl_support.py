@@ -57,11 +57,10 @@ def one_run(args: OneRunSupport):
     sorted = var.list_runs(sort=["-timestamp"], filter=_runs_filter(args))
     selected = run_select.select_runs(sorted, [args.run or "1"])
     if not selected:
-        cli.err(
+        cli.exit_with_error(
             f"No runs match {args.run!r}\n\n"  # \
             "Use '[cmd]gage list[/]' to show available runs."
         )
-        raise SystemExit()
     if len(selected) > 1:
         assert False, "TODO: matches many runs, show list with error"
 
@@ -72,11 +71,10 @@ def one_run_for_spec(run: str):
     sorted = var.list_runs(sort=["-timestamp"])
     selected = run_select.select_runs(sorted, [run or "1"])
     if not selected:
-        cli.err(
+        cli.exit_with_error(
             f"No runs match {run!r}\n\n"  # \
             "Use '[cmd]gage list[/]' to show available runs."
         )
-        raise SystemExit()
     if len(selected) > 1:
         assert False, "TODO: matches many runs, show list with error"
 
@@ -89,8 +87,7 @@ def _runs_filter(args: OneRunSupport | SelectRunsSupport):
     try:
         return lang.parse_where_expr(args.where)
     except ValueError as e:
-        cli.err(f"Cannot use where expression {args.where!r}: {e}")
-        raise SystemExit()
+        cli.exit_with_error(f"Cannot use where expression {args.where!r}: {e}")
 
 
 # =================================================================

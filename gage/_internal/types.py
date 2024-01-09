@@ -59,18 +59,17 @@ class OpDefNotFound(Exception):
 
 
 class GageFileError(Exception):
-    pass
-
-
-class GageFileLoadError(GageFileError):
-    def __init__(self, filename: str, msg: Any):
+    def __init__(self, filename: str, msg: str):
         self.filename = filename
         self.msg = msg
 
 
-class GageFileValidationError(GageFileError):
+class GageFileLoadError(GageFileError):
+    pass
+
+
+class GageFileValidationError(Exception):
     def __init__(self, validation_result: Any):
-        super().__init__(validation_result)
         self.validation_result = validation_result
 
 

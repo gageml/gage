@@ -3,28 +3,71 @@
 from typing import *
 
 import logging
+import os
 
 from ..types import *
 
 from .. import cli
+from .. import gagefile
 from .. import run_util
+
+__ALL__ = [
+    "gagefile_error",
+    "gagefile_not_found",
+    "gagefile_find_error",
+    "gagefile_validation_error",
+    "gagefile_load_error",
+    "opdef_not_found",
+    "missing_exec_error",
+    "run_exec_error",
+]
 
 log = logging.getLogger(__name__)
 
 
-def gagefile_error(e: GageFileError) -> NoReturn:
-    if isinstance(e, FileNotFoundError):
-        cli.err("No operations defined for the current directory")
-        raise SystemExit()
-    elif isinstance(e, GageFileLoadError):
+def gagefile_error(e: GageFileError):
+    cli.exit_with_error(
+        f"There was an issue reading operations from {e.filename}: {e.msg}"
+    )
+
+
+def gagefile_not_found(e: FileNotFoundError) -> NoReturn:
+    cli.exit_with_error("No operations defined for the current directory")
+
+
+def gagefile_find_error(path: str) -> NoReturn:
+    if os.path.isdir(path):
+        list = "".join(["\n  " + name for name in gagefile.gagefile_candidates()])
         cli.exit_with_error(
-            f"There was an issue reading operations from {e.filename}: {e.msg}"
+            f"Cannot find a Gage file in {path}\n\n"
+            f"Looking for one of:{list}\n\n"
+            "For help with Gage files try 'gage help gagefile'"
         )
     else:
-        assert False, e
+        cli.exit_with_error(f"File \"{path}\" does not exist")
 
 
-def opdef_not_found(e: OpDefNotFound) -> NoReturn:
+def gagefile_validation_error(
+    e: gagefile.GageFileValidationError, filename: str, verbose: bool = False
+):
+    import json
+    from .. import schema_util
+
+    cli.err(f"There are errors in {filename}")
+    if verbose:
+        output = schema_util.validation_error_output(e)
+        cli.err(json.dumps(output, indent=2, sort_keys=True))
+    else:
+        for err in schema_util.validation_errors(e):
+            cli.err(err)
+    raise SystemExit(1)
+
+
+def gagefile_load_error(e: gagefile.GageFileLoadError) -> NoReturn:
+    cli.exit_with_error(f"Error loading {e.filename}: {e.msg}")
+
+
+def opdef_not_found(e: OpDefNotFound):
     from .operations_impl import operations_table
 
     msg = (
@@ -54,7 +97,7 @@ def missing_exec_error(ctx: RunContext) -> NoReturn:
     )
 
 
-def run_exec_error(e: run_util.RunExecError) -> NoReturn:
+def run_exec_error(e: run_util.RunExecError):
     log.debug(
         "Exec error for phase %r command %r exit %r",
         e.phase_name,

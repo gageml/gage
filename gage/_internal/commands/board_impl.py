@@ -32,11 +32,10 @@ class Args(NamedTuple):
 
 def show_board(args: Args):
     if not args.json:
-        cli.err(
+        cli.exit_with_error(
             "You must specify --json for this command. Graphical "
             "boards are not yet supported."
         )
-        raise SystemExit()
     board = _board_config(args.config)
     runs = _board_runs(args)
     _print_board_json_and_exit(board, runs)
@@ -48,12 +47,12 @@ def _board_config(config: str) -> BoardDef:
     try:
         data = load_data(config)
     except FileNotFoundError:
-        cli.err(f"Config file \"{config}\" does not exist")
-        raise SystemExit()
+        cli.exit_with_error(f"Config file \"{config}\" does not exist")
     else:
         if not isinstance(data, dict):
-            cli.err(f"Unexpected board config in \"{config}\" - expected a map")
-            raise SystemExit()
+            cli.exit_with_error(
+                f"Unexpected board config in \"{config}\" - expected a map"
+            )
         return BoardDef(data)
 
 
