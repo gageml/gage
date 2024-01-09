@@ -78,6 +78,12 @@ command. String values are parsed with `parse_config_value()`.
     >>> parse_config_value("")
     ''
 
+    >>> parse_config_value("1a")
+    '1a'
+
+    >>> parse_config_value("-1a")
+    '-1a'
+
 ## Flag assigns
 
     >>> parse_flag_assign("")

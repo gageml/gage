@@ -20,16 +20,13 @@ flag_assign: config_key WS_INLINE? "=" WS_INLINE? config_value? -> flag_assign
 config_key: KEY            -> key
           | QUOTED_STRING  -> quoted_string
 
-config_value: SIGNED_INT      -> int
-            | SIGNED_FLOAT    -> float
-            | QUOTED_STRING   -> quoted_string
+config_value: QUOTED_STRING   -> quoted_string
             | "true"          -> true
             | "false"         -> false
             | "null"          -> null
-            | OTHER_STRING    -> other_string
+            | ANY             -> dynamic
 
-
-where_expr: OTHER_STRING   -> run_string_match
+where_expr: ANY   -> run_string_match
 
 _STRING_INNER: /.*?/
 _STRING_ESC_INNER: _STRING_INNER /(?<!\\)(\\\\)*?/
@@ -39,7 +36,7 @@ _QUOTED_STRING_SINGLE: "'" _STRING_ESC_INNER "'"
 
 QUOTED_STRING: _QUOTED_STRING_DOUBLE | _QUOTED_STRING_SINGLE
 
-OTHER_STRING: /.+/
+ANY: /.+/
 
 KEY: /[\w_\.][\w_\.\-]*/
 
@@ -155,9 +152,15 @@ class GrammarTransformer(Transformer):
     def null(self, tokens: list[Token]):
         return None
 
-    def other_string(self, tokens: list[Token]):
+    def dynamic(self, tokens: list[Token]):
         (s,) = tokens
-        return s.value
+        try:
+            return int(s.value)
+        except ValueError:
+            try:
+                return float(s.value)
+            except ValueError:
+                return s.value
 
     def flag_assign(self, tokens: list[Token]):
         assert len(tokens) in (1, 2), tokens
