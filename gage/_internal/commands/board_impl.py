@@ -65,13 +65,24 @@ def _print_board_json_and_exit(board: BoardDef, runs: list[Run]):
     raw_col_defs, row_data = _board_raw_data(runs)
     col_defs = _board_col_defs(board, raw_col_defs)
     data = {
-        "title": board.get_title(),
-        "description": board.get_description(),
+        **_board_meta(board),
         "colDefs": col_defs,
         "rowData": row_data,
     }
     cli.out(json.dumps(data, indent=2, sort_keys=True))
     raise SystemExit(0)
+
+
+def _board_meta(board: BoardDef):
+    meta: dict[str, Any] = {}
+    _maybe_apply_board_meta(board.get_title(), "title", meta)
+    _maybe_apply_board_meta(board.get_description(), "description", meta)
+    return meta
+
+
+def _maybe_apply_board_meta(val: Any, attr: str, meta: dict[str, Any]):
+    if val is not None:
+        meta[attr] = val
 
 
 def _board_raw_data(runs: list[Run]):

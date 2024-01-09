@@ -50,7 +50,6 @@ Show JSON data used by the board.
           "field": "metric:speed"
         }
       ],
-      "description": null,
       "rowData": [
         {
           "__run__": {
@@ -84,13 +83,13 @@ Show JSON data used by the board.
           "config:type": "example",
           "metric:speed": 1
         }
-      ],
-      "title": null
+      ]
     }
     <0>
 
 To Do - test:
 
+- Apply board def
 - Col headerName when defined in metric summary
 - Col headerName when defined in board def
 - Other pass through attrs
