@@ -27,6 +27,7 @@ __all__ = [
     "RunConfigValue",
     "RunContext",
     "RunFilter",
+    "RunProxy",
     "RunStatus",
     "RunSummary",
     "RunTimestamp",
@@ -402,6 +403,14 @@ class RunSummary:
         return self._data
 
 
+class RunProxy(Protocol):
+    def __getitem__(self, name: str) -> Any:
+        ...
+
+    def get(self, name: str, default: Any = None) -> Any:
+        ...
+
+
 # =================================================================
 # Runs list
 # =================================================================
@@ -416,7 +425,21 @@ class RunFilter(Protocol):
 # Board
 # =================================================================
 
-BoardDefColumn = str | dict[str, Any]
+BoardDefColumn = dict[str, Any]
+
+
+class BoardDefRunSelect:
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+
+    def get_operation(self) -> str | None:
+        return self._data.get("operation")
+
+    def get_status(self) -> str | None:
+        return self._data.get("status")
+
+    def get_group(self) -> dict[str, Any] | None:
+        return self._data.get("group")
 
 
 class BoardDef:
@@ -431,6 +454,11 @@ class BoardDef:
 
     def get_columns(self) -> list[BoardDefColumn]:
         return cast(list[BoardDefColumn], self._data.get("columns") or [])
+
+    def get_run_select(self) -> BoardDefRunSelect:
+        return BoardDefRunSelect(
+            cast(dict[str, Any], self._data.get("run-select") or {})
+        )
 
 
 # =================================================================

@@ -64,6 +64,7 @@ __all__ = [
     "meta_opref",
     "remove_associate_project",
     "run_attr",
+    "run_label",
     "run_meta_path",
     "run_name_for_id",
     "run_phase_channel",
@@ -255,6 +256,14 @@ def run_summary(run: Run) -> RunSummary:
         return RunSummary({})
     else:
         return RunSummary(data)
+
+
+def run_label(run: Run) -> str | None:
+    return (
+        run_user_attrs(run).get("label")
+        or run_summary(run).get_run_attrs().get("label")
+        or None
+    )
 
 
 # =================================================================

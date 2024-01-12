@@ -13,10 +13,9 @@ from .. import run_select
 from .. import var
 
 from ..run_util import meta_opref
+from ..run_util import run_label
 from ..run_util import run_status
-from ..run_util import run_summary
 from ..run_util import run_timestamp
-from ..run_util import run_user_attrs
 
 
 __all__ = [
@@ -236,8 +235,7 @@ def _table_row(
     started = run_timestamp(run, "started")
     started_str = human_readable.date_time(started) if started else ""
     status = run_status(run)
-    user_attrs = run_user_attrs(run)
-    label = user_attrs.get("label") or _run_summary_label(run) or ""
+    label = run_label(run) or ""
 
     row = [
         index_str,
@@ -251,10 +249,6 @@ def _table_row(
     if simplified:
         return _simplify(row)
     return _fit(row, width)
-
-
-def _run_summary_label(run: Run):
-    return run_summary(run).get_run_attrs().get("label")
 
 
 def _op_name(run: Run, project_ns: str | None):
