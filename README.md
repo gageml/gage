@@ -5,8 +5,8 @@ It's under active development by the team that developed Guild AI.
 
 ## Installing
 
-Gage ML is not released to PyPI. To install it, see **Setting Up a Local
-Development Environment** below.
+Gage ML is not yet released to PyPI. To install it, see **[Setting Up a
+Local Development Environment]** below.
 
 <!--
 
@@ -36,7 +36,7 @@ correspondence via email will be held in strict confidence.
 
 ### Setting up a Local Development Environment
 
-1. For the source code repository at https://github.com/gage/gage
+1. Fork the source code repository at https://github.com/gageml/gage
 
 2. Create a project-specific virtual environment. **Use Python 3.10 or
    later.**
