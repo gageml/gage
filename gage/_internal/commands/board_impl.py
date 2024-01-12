@@ -7,11 +7,12 @@ from ..types import *
 import datetime
 import json
 import logging
+import operator
 
 from .. import cli
+from .. import util
 
 from ..run_util import *
-
 from ..project_util import load_data
 
 from .impl_support import selected_runs
@@ -37,7 +38,7 @@ def show_board(args: Args):
             "boards are not yet supported."
         )
     board = _board_config(args.config)
-    runs = _board_runs(args)
+    runs = _board_runs(board, args)
     _print_board_json_and_exit(board, runs)
 
 
@@ -56,9 +57,99 @@ def _board_config(config: str) -> BoardDef:
         return BoardDef(data)
 
 
-def _board_runs(args: Args):
+def _board_runs(board: BoardDef, args: Args):
     runs, total = selected_runs(args)
-    return [run for index, run in runs]
+    run_filter = _board_run_filter(board)
+    group_filter = _board_group_filter(board)
+    return group_filter([run for index, run in runs if run_filter(run)])
+
+
+def _board_run_filter(board: BoardDef) -> Callable[[Run], bool]:
+    filters: list[Callable[[Run], bool]] = []
+    run_select = board.get_run_select()
+    _maybe_apply_op_filter(run_select.get_operation(), filters)
+    _maybe_apply_status_filter(run_select.get_status(), filters)
+    if not filters:
+        return lambda run: True
+    return lambda run: all(f(run) for f in filters)
+
+
+def _maybe_apply_op_filter(op: str | None, filters: list[Callable[[Run], bool]]):
+    if op:
+        filters.append(lambda run: run.opref.op_name == op)
+
+
+def _maybe_apply_status_filter(
+    status: str | None, filters: list[Callable[[Run], bool]]
+):
+    if status:
+        filters.append(lambda run: run_status(run) == status)
+
+
+def _board_group_filter(board: BoardDef) -> Callable[[list[Run]], list[Run]]:
+    group = board.get_run_select().get_group()
+    if not group:
+        return lambda runs: runs
+    return lambda runs: _filter_grouped_runs(runs, group)
+
+
+def _filter_grouped_runs(runs: list[Run], group_select: dict[str, Any]):
+    groups = _group_runs(runs, group_select)
+    return _select_from_groups(groups, group_select)
+
+
+_RunGroupFunc = Callable[[Run], Any]
+
+
+def _group_runs(runs: list[Run], group_select: dict[str, Any]):
+    groups: dict[Any, list[Run]] = {}
+    run_group = _run_group_f(group_select)
+    for run in runs:
+        groups.setdefault(run_group(run), []).append(run)
+    return [runs for key, runs in sorted(groups.items())]
+
+
+def _run_group_f(group_select: dict[str, Any]):
+    f = util.find_apply([_run_attribute_group_f], group_select)
+    if not f:
+        cli.exit_with_error(
+            "run-select group for board does not specify a field attribute: "
+            "expected 'attribute', 'metric', 'run-attr', or 'config'"
+        )
+    return f
+
+
+def _run_attribute_group_f(group_select: dict[str, Any]) -> _RunGroupFunc | None:
+    name = group_select.get("attribute")
+    if name:
+        return lambda run: _field_val(run_summary(run).get_attributes().get(name))
+
+
+def _field_val(val: Any) -> Any:
+    return val.get("value") if isinstance(val, dict) else val
+
+
+def _select_from_groups(groups: list[list[Run]], group_select: dict[str, Any]):
+    # Only supporting select of latest runs - generalized facility to
+    # come later
+    started_func = group_select.get("started")
+    if started_func not in ["last", "first"]:
+        cli.exit_with_error(
+            "run-select group must specify 'last' or 'first' for the 'started' "
+            "attribute - this is a temporary limitation"
+        )
+    return [_cmp_started(group, cast(str, started_func)) for group in groups]
+
+
+def _cmp_started(runs: list[Run], started_func: str):
+    cmp = operator.ge if started_func == "last" else operator.lt
+    latest: tuple[Run, datetime.datetime] | None = None
+    for run in runs:
+        started = run_attr(run, "started")
+        if latest is None or cmp(started, latest[1]):
+            latest = run, started
+    assert latest
+    return latest[0]
 
 
 def _print_board_json_and_exit(board: BoardDef, runs: list[Run]):
@@ -227,73 +318,30 @@ def _board_col_def(config_col: BoardDefColumn, col_defs: _ColDefs) -> dict[str, 
 
 
 def _find_col_def(config_col: BoardDefColumn, col_defs: _ColDefs):
-    field_m, config_attrs = _field_matcher(config_col)
-    if not field_m:
+    field_target, config_attrs = _field_target(config_col)
+    if not field_target:
         return None, config_attrs
     for col_def in col_defs:
-        if field_m(col_def["field"]):
+        if col_def["field"] == field_target:
             return col_def, config_attrs
-    return None, config_attrs
+    return {"field": field_target}, config_attrs
 
 
-_FieldMatcher = Callable[[str], bool]
 _ExtraColAttrs = dict[str, Any]
 
 
-def _field_matcher(
-    config_col: BoardDefColumn,
-) -> tuple[_FieldMatcher | None, _ExtraColAttrs]:
-    if isinstance(config_col, str):
-        return _string_col_matcher(config_col)
+def _field_target(config_col: BoardDefColumn) -> tuple[str | None, _ExtraColAttrs]:
     col_attrs = dict(config_col)
     attribute = col_attrs.pop("attribute", None)
     if attribute:
-        return _attribute_col_matcher(attribute), col_attrs
+        return f"attribute:{attribute}", col_attrs
     metric = col_attrs.pop("metric", None)
     if metric:
-        return _metric_col_matcher(metric), col_attrs
+        return f"metric:{metric}", col_attrs
     config = col_attrs.pop("config", None)
     if config:
-        return _config_col_matcher(config), col_attrs
+        return f"config:{config}", col_attrs
     run_attr = col_attrs.pop("run-attr", None)
     if run_attr:
-        return _run_attr_col_matcher(run_attr), col_attrs
+        return f"run:{run_attr}", col_attrs
     return None, col_attrs
-
-
-def _string_col_matcher(
-    target_col: str,
-) -> tuple[_FieldMatcher | None, _ExtraColAttrs]:
-    if (
-        target_col.startswith("attribute:")
-        or target_col.startswith("metric:")
-        or target_col.startswith("config:")
-        or target_col.startswith("run:")
-    ):
-        return (lambda field_name: target_col == field_name), {}
-    candidates = [
-        "metric:" + target_col,
-        "attribute:" + target_col,
-        "config:" + target_col,
-    ]
-    return (lambda field_name: field_name in candidates), {}
-
-
-def _attribute_col_matcher(attribute_name: str) -> _FieldMatcher:
-    target = f"attribute:{attribute_name}"
-    return lambda field_name: field_name == target
-
-
-def _metric_col_matcher(metric_name: str) -> _FieldMatcher:
-    target = f"metric:{metric_name}"
-    return lambda field_name: field_name == target
-
-
-def _config_col_matcher(key: str) -> _FieldMatcher:
-    target = f"config:{key}"
-    return lambda field_name: field_name == target
-
-
-def _run_attr_col_matcher(attr_name: str) -> _FieldMatcher:
-    target = f"run:{attr_name}"
-    return lambda field_name: field_name == target

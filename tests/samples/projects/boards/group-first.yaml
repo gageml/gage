@@ -1,0 +1,8 @@
+run-select:
+  status: completed
+  group:
+    attribute: foo
+    started: first
+columns:
+  - attribute: foo
+  - attribute: bar

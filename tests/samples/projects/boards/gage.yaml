@@ -1,0 +1,3 @@
+default:
+  exec: python default.py
+  config: default.py
