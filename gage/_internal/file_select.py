@@ -506,8 +506,6 @@ def _prune_dirs(
     select: FileSelect | None,
     dirs: list[str],
 ) -> list[tuple[str, FileSelectResults]]:
-    if not select:
-        return []
     return select.prune_dirs(src_dir, relroot, dirs) if select else []
 
 
