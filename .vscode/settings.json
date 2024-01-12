@@ -171,6 +171,7 @@
     "staticmethod",
     "struct",
     "subdir",
+    "subdirs",
     "Subpanel",
     "subschema",
     "textorbinary",

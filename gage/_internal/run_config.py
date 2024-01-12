@@ -103,11 +103,44 @@ def _select_files(src_dir: str, parsed_paths: list[ParsedPath]):
             if p.file_pattern
         ]
     )
+    _apply_exclude_dirs(src_dir, parsed_paths, select)
     return file_select.select_files(src_dir, select)
 
 
 def _select_pattern(path: str, exclude: bool):
     return "-" + path if exclude else path
+
+
+def _apply_exclude_dirs(
+    src_dir: str,
+    parsed_paths: list[ParsedPath],
+    select: file_select.FileSelect,
+):
+    select.rules.extend(_unused_dirs(src_dir, parsed_paths))
+
+
+def _unused_dirs(src_dir: str, parsed_paths: list[ParsedPath]):
+    return [
+        file_select.FileSelectRule(False, name, "dir")
+        for name in os.listdir(src_dir)
+        if (
+            os.path.isdir(os.path.join(src_dir, name))
+            and _is_unused_dir(name, parsed_paths)
+        )
+    ]
+
+
+def _is_unused_dir(dir_name: str, parsed_paths: list[ParsedPath]):
+    dir_prefix = dir_name + os.path.sep
+
+    def used(path: ParsedPath):
+        return (
+            path.file_pattern
+            and not path.file_exclude
+            and path.file_pattern.startswith(dir_prefix)
+        )
+
+    return all(not used(path) for path in parsed_paths)
 
 
 def read_file_config(filename: str) -> RunConfig:

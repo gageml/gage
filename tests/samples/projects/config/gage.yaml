@@ -1,0 +1,21 @@
+hello:
+  exec: |
+    python hello.py
+    python foo/hello.py
+  sourcecode:
+    - hello.py
+    - foo/hello.py
+  config:
+    # NOTE: We've named the messages in these files `msg1` and `msg2` to
+    # avoid conflicting config names. This wants a rename feature so we
+    # can map the script var names, which want to be `msg` in both
+    # cases, to user-facing values. Or... import the value keys as `msg`
+    # and `foo.msg`.
+    - hello.py
+    - foo/hello.py
+
+hello-2:
+  exec: python hello2.py
+  config:
+    - hello2.py#msg1
+    - '#msg2'

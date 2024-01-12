@@ -624,6 +624,9 @@ Include just `c`.
 
 ## To Do / Notes
 
+TODO: See comment in `tests/samples/projects/hello/gage.yaml` to
+highlight the config naming problem.
+
 TODO: namespace maybe wants to be 'prefix'.
 
 TODO: want to strip prefix - so maybe 'strip-prefix' or similar -- e.g.
