@@ -60,5 +60,13 @@ def config_table(config: RunConfig):
     table.add_column(style=typer_rich_util.STYLE_OPTION)
     table.add_column(header_style="dim i")
     for key, val in sorted(config.items()):
-        table.add_row(key, str(val))
+        table.add_row(key, _format_config_val(val))
     return Padding(table, 1)
+
+
+def _format_config_val(val: Any):
+    if val is True:
+        return "true"
+    if val is False:
+        return "false"
+    return str(val)
