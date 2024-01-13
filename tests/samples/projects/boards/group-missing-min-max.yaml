@@ -1,0 +1,4 @@
+group-select:
+  group-by:
+    attribute: model
+  # group-select needs min or max

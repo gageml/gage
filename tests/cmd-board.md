@@ -171,21 +171,24 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
     }
     <0>
 
-Groups currently are only one level and must be specified as a field.
-`group-missing-field.yaml` defines a group without specifying a field.
+Group select requires a `group` field spec.
 
-    >>> run("gage board --json --config group-missing-field.yaml")  # -space
-    run-select group for board does not specify a field attribute: expected
-    'attribute', 'metric', 'run-attr', or 'config'
+    >>> run("gage board --json --config group-missing-group.yaml")  # -space
+    group-select for board is missing group-by field: expected run-attr,
+    attribute, metric, or config
     <1>
 
-Gage currently limits group to selecting the most recent run. This will
-be expanded to support generalized selection criteria. For now, groups
-must specify 'latest' for 'started'.
+Group must specify either `min` or `max` but not both.
 
-    >>> run("gage board --json --config group-missing-started.yaml")  # -space
-    run-select group must specify 'last' or 'first' for the 'started'
-    attribute - this is a temporary limitation
+    >>> run("gage board --json --config group-missing-min-max.yaml")  # -space
+    group-select for board must specify either min or max fields
+    <1>
+
+`min` or `max` specs require valid field references.
+
+    >>> run("gage board --json --config group-missing-min-field.yaml")  # -space
+    group-select min for board is missing field: expected run-attr,
+    attribute, metric, or config
     <1>
 
 To Do - test:
@@ -193,5 +196,3 @@ To Do - test:
 - Col headerName when defined in metric summary
 - Col headerName when defined in board def
 - Other pass through attrs
-- Use over overlapping fields (e.g. using both metric and attribute --
-  should be invalid)

@@ -1,8 +1,10 @@
 run-select:
   status: completed
-  group:
+group-select:
+  group-by:
     attribute: foo
-    started: first
+  min:
+    run-attr: started
 columns:
   - attribute: foo
   - attribute: bar

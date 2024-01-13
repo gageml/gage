@@ -1,5 +1,0 @@
-run-select:
-  status: completed
-  group:
-    # group needs a field spec: attribute, metric, config, or run-attr
-    foo: 123

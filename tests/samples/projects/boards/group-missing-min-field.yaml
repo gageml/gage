@@ -1,0 +1,6 @@
+group-select:
+  group-by:
+    attribute: model
+  # min needs a valid field spec
+  min:
+    foo: 123

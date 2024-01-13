@@ -1,0 +1,3 @@
+run-select:
+  status: completed
+group-select: {}  # group-select needs a group-by

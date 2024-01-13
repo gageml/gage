@@ -5,6 +5,8 @@ from typing import *
 __all__ = [
     "BoardDef",
     "BoardDefColumn",
+    "BoardDefRunSelect",
+    "BoardDefGroupSelect",
     "CmdArgs",
     "GageFile",
     "GageFileError",
@@ -441,7 +443,21 @@ class BoardDefRunSelect:
         return self._data.get("status")
 
     def get_group(self) -> dict[str, Any] | None:
-        return self._data.get("group")
+        return self._data.get("from-group")
+
+
+class BoardDefGroupSelect:
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+
+    def get_group_by(self) -> dict[str, Any]:
+        return self._data.get("group-by") or {}
+
+    def get_min(self) -> dict[str, Any] | None:
+        return self._data.get("min")
+
+    def get_max(self) -> dict[str, Any] | None:
+        return self._data.get("max")
 
 
 class BoardDef:
@@ -457,10 +473,17 @@ class BoardDef:
     def get_columns(self) -> list[BoardDefColumn]:
         return cast(list[BoardDefColumn], self._data.get("columns") or [])
 
-    def get_run_select(self) -> BoardDefRunSelect:
-        return BoardDefRunSelect(
-            cast(dict[str, Any], self._data.get("run-select") or {})
-        )
+    def get_run_select(self) -> BoardDefRunSelect | None:
+        run_select = self._data.get("run-select")
+        if run_select is None:
+            return None
+        return BoardDefRunSelect(run_select)
+
+    def get_group_select(self) -> BoardDefGroupSelect | None:
+        group_select = self._data.get("group-select")
+        if group_select is None:
+            return None
+        return BoardDefGroupSelect(group_select)
 
 
 # =================================================================

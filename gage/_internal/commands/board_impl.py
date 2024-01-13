@@ -10,7 +10,6 @@ import logging
 import operator
 
 from .. import cli
-from .. import util
 
 from ..run_util import *
 from ..project_util import load_data
@@ -59,14 +58,13 @@ def _board_config(config: str) -> BoardDef:
 
 def _board_runs(board: BoardDef, args: Args):
     runs, total = selected_runs(args)
-    run_filter = _board_run_filter(board)
-    group_filter = _board_group_filter(board)
-    return group_filter([run for index, run in runs if run_filter(run)])
-
-
-def _board_run_filter(board: BoardDef) -> Callable[[Run], bool]:
-    filters: list[Callable[[Run], bool]] = []
     run_select = board.get_run_select()
+    filter = _board_run_filter(run_select) if run_select else lambda run: True
+    return [run for index, run in runs if filter(run)]
+
+
+def _board_run_filter(run_select: BoardDefRunSelect) -> Callable[[Run], bool]:
+    filters: list[Callable[[Run], bool]] = []
     _maybe_apply_op_filter(run_select.get_operation(), filters)
     _maybe_apply_status_filter(run_select.get_status(), filters)
     if not filters:
@@ -86,75 +84,10 @@ def _maybe_apply_status_filter(
         filters.append(lambda run: run_status(run) == status)
 
 
-def _board_group_filter(board: BoardDef) -> Callable[[list[Run]], list[Run]]:
-    group = board.get_run_select().get_group()
-    if not group:
-        return lambda runs: runs
-    return lambda runs: _filter_grouped_runs(runs, group)
-
-
-def _filter_grouped_runs(runs: list[Run], group_select: dict[str, Any]):
-    groups = _group_runs(runs, group_select)
-    return _select_from_groups(groups, group_select)
-
-
-_RunGroupFunc = Callable[[Run], Any]
-
-
-def _group_runs(runs: list[Run], group_select: dict[str, Any]):
-    groups: dict[Any, list[Run]] = {}
-    run_group = _run_group_f(group_select)
-    for run in runs:
-        groups.setdefault(run_group(run), []).append(run)
-    return [runs for key, runs in sorted(groups.items())]
-
-
-def _run_group_f(group_select: dict[str, Any]):
-    f = util.find_apply([_run_attribute_group_f], group_select)
-    if not f:
-        cli.exit_with_error(
-            "run-select group for board does not specify a field attribute: "
-            "expected 'attribute', 'metric', 'run-attr', or 'config'"
-        )
-    return f
-
-
-def _run_attribute_group_f(group_select: dict[str, Any]) -> _RunGroupFunc | None:
-    name = group_select.get("attribute")
-    if name:
-        return lambda run: _field_val(run_summary(run).get_attributes().get(name))
-
-
-def _field_val(val: Any) -> Any:
-    return val.get("value") if isinstance(val, dict) else val
-
-
-def _select_from_groups(groups: list[list[Run]], group_select: dict[str, Any]):
-    # Only supporting select of latest runs - generalized facility to
-    # come later
-    started_func = group_select.get("started")
-    if started_func not in ["last", "first"]:
-        cli.exit_with_error(
-            "run-select group must specify 'last' or 'first' for the 'started' "
-            "attribute - this is a temporary limitation"
-        )
-    return [_cmp_started(group, cast(str, started_func)) for group in groups]
-
-
-def _cmp_started(runs: list[Run], started_func: str):
-    cmp = operator.ge if started_func == "last" else operator.lt
-    latest: tuple[Run, datetime.datetime] | None = None
-    for run in runs:
-        started = run_attr(run, "started")
-        if latest is None or cmp(started, latest[1]):
-            latest = run, started
-    assert latest
-    return latest[0]
-
-
 def _print_board_json_and_exit(board: BoardDef, runs: list[Run]):
     raw_col_defs, row_data = _board_raw_data(runs)
     col_defs = _board_col_defs(board, raw_col_defs)
+    row_data = _filter_by_group(row_data, board)
     data = {
         **_board_meta(board),
         "colDefs": col_defs,
@@ -345,3 +278,87 @@ def _field_target(config_col: BoardDefColumn) -> tuple[str | None, _ExtraColAttr
     if run_attr:
         return f"run:{run_attr}", col_attrs
     return None, col_attrs
+
+
+def _filter_by_group(row_data: list[dict[str, Any]], board: BoardDef) -> _RowData:
+    group_select = board.get_group_select()
+    if not group_select:
+        return row_data
+    group_key = _group_key_f(group_select)
+    select_from_group = _select_from_group_f(group_select)
+    groups = _group_row_data(row_data, group_key)
+    return [select_from_group(group) for group in groups]
+
+
+def _group_key_f(group_select: BoardDefGroupSelect) -> Callable[[dict[str, Any]], Any]:
+    reader = _field_reader(group_select.get_group_by())
+    if not reader:
+        cli.exit_with_error(
+            "group-select for board is missing group-by field: expected "
+            "run-attr, attribute, metric, or config"
+        )
+    return reader
+
+
+def _field_reader(field_spec: dict[str, Any]) -> Callable[[dict[str, Any]], Any] | None:
+    name = field_spec.get("run-attr")
+    if name:
+        return lambda data: data["__run__"].get(name)
+    name = field_spec.get("attribute")
+    if name:
+        return lambda data: data.get(f"attribute:{name}")
+    name = field_spec.get("metric")
+    if name:
+        return lambda data: data.get(f"metric:{name}")
+    name = field_spec.get("config")
+    if name:
+        return lambda data: data.get(f"config:{name}")
+    return None
+
+
+def _select_from_group_f(
+    group_select: BoardDefGroupSelect,
+) -> Callable[[_RowData], dict[str, Any]]:
+    min = group_select.get_min()
+    if min:
+        return _one_row_select_f(min, operator.lt, "min")
+    max = group_select.get_max()
+    if max:
+        return _one_row_select_f(max, operator.gt, "max")
+    cli.exit_with_error("group-select for board must specify either min or max fields")
+
+
+def _one_row_select_f(
+    field_spec: dict[str, Any],
+    cmp: Callable[[Any, Any], bool],
+    cmp_name: str,
+) -> Callable[[_RowData], dict[str, Any]]:
+    field_val = _field_reader(field_spec)
+    if not field_val:
+        cli.exit_with_error(
+            f"group-select {cmp_name} for board is missing field: expected "
+            "run-attr, attribute, metric, or config"
+        )
+
+    def f(row_data: _RowData) -> dict[str, Any]:
+        assert row_data
+        selected = None
+        selected_val = None
+        for cur in row_data:
+            cur_val = field_val(cur)
+            if selected is None or cmp(cur_val, selected_val):
+                selected = cur
+                selected_val = cur_val
+        assert selected
+        return selected
+
+    return f
+
+
+def _group_row_data(
+    row_data: _RowData, group_key: Callable[[dict[str, Any]], Any]
+) -> list[_RowData]:
+    groups: dict[Any, _RowData] = {}
+    for data in row_data:
+        groups.setdefault(group_key(data), []).append(data)
+    return [group for key, group in sorted(groups.items())]
