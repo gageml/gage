@@ -87,7 +87,7 @@ Show JSON data used by the board.
     }
     <0>
 
-## Board run select
+## Group Select
 
     >>> use_project(sample("projects", "boards"))
 
@@ -170,6 +170,73 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
       ]
     }
     <0>
+
+`group-max-bar.toml` groups by `foo` and selects runs with the max `bar`
+value from each group.
+
+    >>> run("gage board --json --config group-max-bar.toml")  # +wildcard
+    {
+      "colDefs": [
+        {
+          "field": "attribute:foo"
+        },
+        {
+          "field": "attribute:bar"
+        }
+      ],
+      "rowData": [
+        {
+          "__run__": ...
+          "attribute:bar": 2,
+          "attribute:foo": "a",
+          "config:bar": 2,
+          "config:foo": "a"
+        },
+        {
+          "__run__": ...
+          "attribute:bar": 4,
+          "attribute:foo": "b",
+          "config:bar": 4,
+          "config:foo": "b"
+        }
+      ]
+    }
+    <0>
+
+`group-min-bar.toml` groups by `foo` and selects runs with the min `bar`
+value from each group. Note that this example selects min `config`
+rather than attribute.
+
+    >>> run("gage board --json --config group-min-bar.toml")  # +wildcard
+    {
+      "colDefs": [
+        {
+          "field": "attribute:foo"
+        },
+        {
+          "field": "attribute:bar"
+        }
+      ],
+      "rowData": [
+        {
+          "__run__": ...
+          "attribute:bar": 1,
+          "attribute:foo": "a",
+          "config:bar": 1,
+          "config:foo": "a"
+        },
+        {
+          "__run__": ...
+          "attribute:bar": 3,
+          "attribute:foo": "b",
+          "config:bar": 3,
+          "config:foo": "b"
+        }
+      ]
+    }
+    <0>
+
+### Group Select Errors
 
 Group select requires a `group` field spec.
 

@@ -1,0 +1,12 @@
+[group-select]
+
+group-by = { attribute = "foo" }
+min = { config = "bar" }
+
+[[columns]]
+
+attribute = "foo"
+
+[[columns]]
+
+attribute = "bar"
