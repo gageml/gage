@@ -257,9 +257,14 @@ Group must specify either `min` or `max` but not both.
 
 ## Command validation
 
-    >>> run("gage board")
+    >>> run("gage board")  # -space
+    You must specify either --csv or --json for this command. Graphical
+    boards are not yet supported.
+    <1>
 
     >>> run("gage board --csv --json")
+    You can't use both --json and --csv options.
+    <1>
 
 To Do - test:
 
