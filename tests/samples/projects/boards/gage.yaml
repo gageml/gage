@@ -1,3 +1,8 @@
 default:
   exec: python default.py
   config: default.py
+  default: true
+
+op-2:
+  exec: python op2.py
+  config: op2.py

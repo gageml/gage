@@ -29,14 +29,18 @@ _ExtraColAttrs = dict[str, Any]
 _Row = dict[str, Any]
 _RowData = list[dict[str, Any]]
 
+
 class BoardConfigError(Exception):
     pass
+
 
 class MissingGroupBy(BoardConfigError):
     pass
 
+
 class MissingGroupSelector(BoardConfigError):
     pass
+
 
 class MissingGroupSelectorField(BoardConfigError):
     pass
