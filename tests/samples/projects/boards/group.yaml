@@ -7,4 +7,6 @@ group-select:
     run-attr: started
 columns:
   - attribute: foo
+    headerName: Foo
   - attribute: bar
+    headerName: Bar

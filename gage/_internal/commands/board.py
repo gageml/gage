@@ -50,6 +50,14 @@ Config = Annotated[
     ),
 ]
 
+CSVFlag = Annotated[
+    bool,
+    Option(
+        "--csv",
+        help="Show board as CSV output.",
+    ),
+]
+
 JSONFlag = Annotated[
     bool,
     Option(
@@ -63,14 +71,15 @@ def show_board(
     runs: RunArgs = None,
     where: Where = "",
     config: Config = "",
+    csv: CSVFlag = False,
     json: JSONFlag = False,
 ):
     """Show a board of run results.
 
     [b]IMPORTANT:[/b] This feature is under development. It currently
-    only supports showing a board as JSON. You must specify '--json' in
-    this case.
+    only supports showing a board as CSV or JSON. You must specify
+    either '--csv' or '--json'.
     """
     from .board_impl import show_board, Args
 
-    show_board(Args(runs or [], where, config, json))
+    show_board(Args(runs or [], where, config, csv, json))

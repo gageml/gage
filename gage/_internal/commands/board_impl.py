@@ -4,7 +4,9 @@ from typing import *
 
 from ..types import *
 
+import csv
 import datetime
+import io
 import json
 import logging
 import operator
@@ -20,6 +22,7 @@ log = logging.getLogger(__name__)
 
 _ColDef = dict[str, Any]
 _ColDefs = list[_ColDef]
+_Row = dict[str, Any]
 _RowData = list[dict[str, Any]]
 
 
@@ -27,18 +30,27 @@ class Args(NamedTuple):
     runs: list[str]
     where: str
     config: str
+    csv: bool
     json: bool
 
 
 def show_board(args: Args):
-    if not args.json:
+    if not args.json and not args.csv:
         cli.exit_with_error(
-            "You must specify --json for this command. Graphical "
-            "boards are not yet supported."
+            "You must specify either --csv or --json for this command. "
+            "Graphical boards are not yet supported."
         )
+    if args.json and args.csv:
+        cli.exit_with_error("You can't use both --json and --csv options.")
     board = _board_config(args.config)
     runs = _board_runs(board, args)
-    _print_board_json_and_exit(board, runs)
+    data = _board_json_data(board, runs)
+    if args.json:
+        _print_json_and_exit(data)
+    elif args.csv:
+        _print_csv_and_exit(data)
+    else:
+        assert False
 
 
 def _board_config(config: str) -> BoardDef:
@@ -84,17 +96,15 @@ def _maybe_apply_status_filter(
         filters.append(lambda run: run_status(run) == status)
 
 
-def _print_board_json_and_exit(board: BoardDef, runs: list[Run]):
-    raw_col_defs, row_data = _board_raw_data(runs)
+def _board_json_data(board: BoardDef, runs: list[Run]) -> dict[str, Any]:
+    raw_col_defs, raw_row_data = _board_raw_data(runs)
     col_defs = _board_col_defs(board, raw_col_defs)
-    row_data = _filter_by_group(row_data, board)
-    data = {
+    row_data = _prune_row_data_fields(_filter_by_group(raw_row_data, board), col_defs)
+    return {
         **_board_meta(board),
         "colDefs": col_defs,
         "rowData": row_data,
     }
-    cli.out(json.dumps(data, indent=2, sort_keys=True))
-    raise SystemExit(0)
 
 
 def _board_meta(board: BoardDef):
@@ -113,24 +123,26 @@ def _board_raw_data(runs: list[Run]):
     field_cols = {}
     row_data: _RowData = [
         {
-            "__run__": {
-                "id": run.id,
-                "name": run.name,
-                "operation": run.opref.op_name,
-                "status": run_status(run),
-                "started": _run_datetime(run, "started"),
-                "stopped": _run_datetime(run, "stopped"),
-            },
+            **_run_attr_fields(run, field_cols),
             **_config_fields(run, field_cols),
             **_summary_fields(run, field_cols),
         }
         for run, summary in [(run, run_summary(run)) for run in runs]
     ]
-    col_defs: _ColDefs = [
-        *_run_attr_cols(),
-        *_sorted_field_cols(field_cols),
-    ]
+    col_defs = _sorted_field_cols(field_cols)
     return col_defs, row_data
+
+
+def _run_attr_fields(run: Run, field_cols: dict[str, Any]):
+    fields = {
+        "id": run.id,
+        "name": run.name,
+        "operation": run.opref.op_name,
+        "status": run_status(run),
+        "started": _run_datetime(run, "started"),
+        "label": run_label(run),
+    }
+    return _gen_fields(fields, "run", run, field_cols)
 
 
 def _run_datetime(run: Run, attr_name: str):
@@ -145,17 +157,6 @@ def _run_datetime(run: Run, attr_name: str):
     return val.isoformat()
 
 
-def _run_attr_cols():
-    return [
-        {"field": "run:status"},
-        {"field": "run:id"},
-        {"field": "run:name"},
-        {"field": "run:operation"},
-        {"field": "run:started"},
-        {"field": "run:stopped"},
-    ]
-
-
 def _sorted_field_cols(field_cols: dict[str, Any]) -> _ColDefs:
     return [col for key, col in sorted(field_cols.items(), key=_field_col_sort_key)]
 
@@ -163,14 +164,28 @@ def _sorted_field_cols(field_cols: dict[str, Any]) -> _ColDefs:
 def _field_col_sort_key(kv: tuple[str, Any]):
     parts = kv[0].split(":", 1)
     match parts[0]:
-        case "attribute":
-            return (1, parts)
-        case "metric":
-            return (2, parts)
+        case "run":
+            return (0, _run_attr_sort_key(parts[1]), parts[0])
         case "config":
-            return (0, parts)
+            return (1, parts[1])
+        case "attribute":
+            return (2, parts[1])
+        case "metric":
+            return (3, parts[1])
         case _:
             assert False, kv
+
+
+def _run_attr_sort_key(name: str):
+    keys = {
+        "id": 0,
+        "name": 1,
+        "operation": 2,
+        "started": 3,
+        "status": 4,
+        "label": 5,
+    }
+    return keys.get(name, 99)
 
 
 def _config_fields(run: Run, field_cols: dict[str, Any]):
@@ -280,7 +295,7 @@ def _field_target(config_col: BoardDefColumn) -> tuple[str | None, _ExtraColAttr
     return None, col_attrs
 
 
-def _filter_by_group(row_data: list[dict[str, Any]], board: BoardDef) -> _RowData:
+def _filter_by_group(row_data: _RowData, board: BoardDef) -> _RowData:
     group_select = board.get_group_select()
     if not group_select:
         return row_data
@@ -290,7 +305,7 @@ def _filter_by_group(row_data: list[dict[str, Any]], board: BoardDef) -> _RowDat
     return [select_from_group(group) for group in groups]
 
 
-def _group_key_f(group_select: BoardDefGroupSelect) -> Callable[[dict[str, Any]], Any]:
+def _group_key_f(group_select: BoardDefGroupSelect) -> Callable[[_Row], Any]:
     reader = _field_reader(group_select.get_group_by())
     if not reader:
         cli.exit_with_error(
@@ -300,25 +315,31 @@ def _group_key_f(group_select: BoardDefGroupSelect) -> Callable[[dict[str, Any]]
     return reader
 
 
-def _field_reader(field_spec: dict[str, Any]) -> Callable[[dict[str, Any]], Any] | None:
-    name = field_spec.get("run-attr")
-    if name:
-        return lambda data: data["__run__"].get(name)
-    name = field_spec.get("attribute")
-    if name:
-        return lambda data: data.get(f"attribute:{name}")
-    name = field_spec.get("metric")
-    if name:
-        return lambda data: data.get(f"metric:{name}")
-    name = field_spec.get("config")
-    if name:
-        return lambda data: data.get(f"config:{name}")
+def _field_reader(field_spec: dict[str, Any]) -> Callable[[_Row], Any] | None:
+    field_name = _field_name(field_spec)
+    return (lambda data: data.get(field_name)) if field_name else None
+
+
+def _field_name(field_spec: dict[str, Any]):
+    field_candidates: list[tuple[str, str]] = [
+        ("attribute", "attribute:"),
+        ("metric", "metric:"),
+        ("run-attr", "run:"),
+        ("config", "config:"),
+    ]
+    for type, prefix in field_candidates:
+        try:
+            name = field_spec[type]
+        except KeyError:
+            pass
+        else:
+            return prefix + name
     return None
 
 
 def _select_from_group_f(
     group_select: BoardDefGroupSelect,
-) -> Callable[[_RowData], dict[str, Any]]:
+) -> Callable[[_RowData], _Row]:
     min = group_select.get_min()
     if min:
         return _one_row_select_f(min, operator.lt, "min")
@@ -332,7 +353,7 @@ def _one_row_select_f(
     field_spec: dict[str, Any],
     cmp: Callable[[Any, Any], bool],
     cmp_name: str,
-) -> Callable[[_RowData], dict[str, Any]]:
+) -> Callable[[_RowData], _Row]:
     field_val = _field_reader(field_spec)
     if not field_val:
         cli.exit_with_error(
@@ -340,7 +361,7 @@ def _one_row_select_f(
             "run-attr, attribute, metric, or config"
         )
 
-    def f(row_data: _RowData) -> dict[str, Any]:
+    def f(row_data: _RowData) -> _Row:
         assert row_data
         selected = None
         selected_val = None
@@ -356,9 +377,37 @@ def _one_row_select_f(
 
 
 def _group_row_data(
-    row_data: _RowData, group_key: Callable[[dict[str, Any]], Any]
+    row_data: _RowData, group_key: Callable[[_Row], Any]
 ) -> list[_RowData]:
     groups: dict[Any, _RowData] = {}
     for data in row_data:
         groups.setdefault(group_key(data), []).append(data)
     return [group for key, group in sorted(groups.items())]
+
+
+def _prune_row_data_fields(row_data: _RowData, col_defs: _ColDefs):
+    fields = set(col["field"] for col in col_defs)
+    return [
+        {name: val for name, val in row.items() if name in fields} for row in row_data
+    ]
+
+
+def _print_json_and_exit(data: dict[str, Any]):
+    cli.out(json.dumps(data, indent=2, sort_keys=True))
+    raise SystemExit(0)
+
+
+def _print_csv_and_exit(data: dict[str, Any]):
+    col_defs = data["colDefs"]
+    fields: list[str] = [col["field"] for col in col_defs]
+    headers = {
+        field: col.get("headerName") or field
+        for field, col in [(col["field"], col) for col in col_defs]
+    }
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fields)
+    writer.writerow(headers)
+    for row in data["rowData"]:
+        writer.writerow(row)
+    cli.out(buf.getvalue())
+    raise SystemExit(0)

@@ -11,7 +11,7 @@ Generate some runs with fake metrics.
     <0>
     >>> run("gage run fake_speed=2 -qy")
     <0>
-    >>> run("gage run fake_speed=3 -qy")
+    >>> run("gage run fake_speed=3 -l foo -qy")
     <0>
 
 Show JSON data used by the board.
@@ -19,9 +19,6 @@ Show JSON data used by the board.
     >>> run("gage board --json")  # +wildcard +diff
     {
       "colDefs": [
-        {
-          "field": "run:status"
-        },
         {
           "field": "run:id"
         },
@@ -35,7 +32,10 @@ Show JSON data used by the board.
           "field": "run:started"
         },
         {
-          "field": "run:stopped"
+          "field": "run:status"
+        },
+        {
+          "field": "run:label"
         },
         {
           "field": "config:fake_speed"
@@ -52,39 +52,52 @@ Show JSON data used by the board.
       ],
       "rowData": [
         {
-          "__run__": {
-            "id": "...",
-            "name": "...",
-            "operation": "default",
-            "started": "...",
-            "status": "completed",
-            "stopped": "..."
-          },
           "attribute:type": "example",
           "config:fake_speed": 3,
           "config:type": "example",
-          "metric:speed": 3
+          "metric:speed": 3,
+          "run:id": "...",
+          "run:label": "foo",
+          "run:name": "...",
+          "run:operation": "default",
+          "run:started": "...",
+          "run:status": "completed"
         },
         {
-          "__run__": {
-            ...
-          },
           "attribute:type": "example",
           "config:fake_speed": 2,
           "config:type": "example",
-          "metric:speed": 2
+          "metric:speed": 2,
+          "run:id": "...",
+          "run:label": null,
+          "run:name": "...",
+          "run:operation": "default",
+          "run:started": "...",
+          "run:status": "completed"
         },
         {
-          "__run__": {
-            ...
-          },
           "attribute:type": "example",
           "config:fake_speed": 1,
           "config:type": "example",
-          "metric:speed": 1
+          "metric:speed": 1,
+          "run:id": "...",
+          "run:label": null,
+          "run:name": "...",
+          "run:operation": "default",
+          "run:started": "...",
+          "run:status": "completed"
         }
       ]
     }
+    <0>
+
+Show CSV for the board.
+
+    >>> run("gage board --csv")  # +wildcard
+    run:id,run:name,run:operation,run:started,run:status,run:label,config:fake_speed,config:type,attribute:type,metric:speed
+    ...,...,default,...,completed,foo,3,example,example,3
+    ...,...,default,...,completed,,2,example,example,2
+    ...,...,default,...,completed,,1,example,example,1
     <0>
 
 ## Group Select
@@ -111,33 +124,35 @@ Show JSON data used by the board.
 
 The `group.yaml` board def selects the latest run grouped by `foo`.
 
-    >>> run("gage board --json --config group.yaml")  # +wildcard
+    >>> run("gage board --json --config group.yaml")
     {
       "colDefs": [
         {
-          "field": "attribute:foo"
+          "field": "attribute:foo",
+          "headerName": "Foo"
         },
         {
-          "field": "attribute:bar"
+          "field": "attribute:bar",
+          "headerName": "Bar"
         }
       ],
       "rowData": [
         {
-          "__run__": ...
           "attribute:bar": 2,
-          "attribute:foo": "a",
-          "config:bar": 2,
-          "config:foo": "a"
+          "attribute:foo": "a"
         },
         {
-          "__run__": ...
           "attribute:bar": 4,
-          "attribute:foo": "b",
-          "config:bar": 4,
-          "config:foo": "b"
+          "attribute:foo": "b"
         }
       ]
     }
+    <0>
+
+    >>> run("gage board --csv --config group.yaml")
+    Foo,Bar
+    a,2
+    b,4
     <0>
 
 `group-first.yaml` selects the oldest runs within each group.
@@ -154,18 +169,12 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
       ],
       "rowData": [
         {
-          "__run__": ...
           "attribute:bar": 1,
-          "attribute:foo": "a",
-          "config:bar": 1,
-          "config:foo": "a"
+          "attribute:foo": "a"
         },
         {
-          "__run__": ...
           "attribute:bar": 3,
-          "attribute:foo": "b",
-          "config:bar": 3,
-          "config:foo": "b"
+          "attribute:foo": "b"
         }
       ]
     }
@@ -186,18 +195,12 @@ value from each group.
       ],
       "rowData": [
         {
-          "__run__": ...
           "attribute:bar": 2,
-          "attribute:foo": "a",
-          "config:bar": 2,
-          "config:foo": "a"
+          "attribute:foo": "a"
         },
         {
-          "__run__": ...
           "attribute:bar": 4,
-          "attribute:foo": "b",
-          "config:bar": 4,
-          "config:foo": "b"
+          "attribute:foo": "b"
         }
       ]
     }
@@ -219,18 +222,12 @@ rather than attribute.
       ],
       "rowData": [
         {
-          "__run__": ...
           "attribute:bar": 1,
-          "attribute:foo": "a",
-          "config:bar": 1,
-          "config:foo": "a"
+          "attribute:foo": "a"
         },
         {
-          "__run__": ...
           "attribute:bar": 3,
-          "attribute:foo": "b",
-          "config:bar": 3,
-          "config:foo": "b"
+          "attribute:foo": "b"
         }
       ]
     }
@@ -257,6 +254,12 @@ Group must specify either `min` or `max` but not both.
     group-select min for board is missing field: expected run-attr,
     attribute, metric, or config
     <1>
+
+## Command validation
+
+    >>> run("gage board")
+
+    >>> run("gage board --csv --json")
 
 To Do - test:
 
