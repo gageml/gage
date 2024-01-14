@@ -216,14 +216,6 @@ def _gen_fields(
             attrs = {}
         if _is_nan(val):
             val = None
-        if not _is_json_serializable(val):
-            log.warning(
-                "value for %s %s in run %s is not serializable, ignoring",
-                key,
-                summary_type,
-                run.id,
-            )
-            continue
         _apply_field_col(field_name, attrs, field_cols)
         fields[field_name] = val
     return fields
@@ -240,17 +232,6 @@ def _apply_field_col(field_name: str, attrs: dict[str, Any], col_defs: dict[str,
         col_def["headerName"] = attrs["label"]
     except KeyError:
         pass
-
-
-def _is_json_serializable(val: Any):
-    # Pay the price of encoding to JSON otherwise risk failing for the
-    # entire board.
-    try:
-        json.dumps(val)
-    except TypeError:
-        return False
-    else:
-        return True
 
 
 def _board_col_defs(board: BoardDef, col_defs: _ColDefs):
