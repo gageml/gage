@@ -471,7 +471,7 @@ class BoardDef:
         return cast(str, self._data.get("description"))
 
     def get_columns(self) -> list[BoardDefColumn]:
-        return cast(list[BoardDefColumn], self._data.get("columns") or [])
+        return [_coerce_col(col) for col in self._data.get("columns") or []]
 
     def get_run_select(self) -> BoardDefRunSelect | None:
         run_select = self._data.get("run-select")
@@ -484,6 +484,10 @@ class BoardDef:
         if group_select is None:
             return None
         return BoardDefGroupSelect(group_select)
+
+
+def _coerce_col(col: Any) -> dict[str, Any]:
+    return col if isinstance(col, dict) else {"field": str(col)}
 
 
 # =================================================================

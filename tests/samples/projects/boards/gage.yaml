@@ -6,3 +6,6 @@ default:
 op-2:
   exec: python op2.py
   config: op2.py
+
+op-3:
+  exec: python op3.py

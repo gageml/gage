@@ -1,0 +1,18 @@
+{
+  "run-select": {
+    "operation": "op-3",
+    "status": "completed"
+  },
+  "columns": [
+    "run:id",
+    {
+      "attribute": "color"
+    },
+    "metric:height",
+    {
+      "metric": "width",
+      "headerName": "The Width",
+      "sort": "desc"
+    }
+  ]
+}

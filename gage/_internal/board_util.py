@@ -257,7 +257,7 @@ def _find_col_def(config_col: BoardDefColumn, col_defs: _ColDefs):
 
 
 def _field_target(config_col: BoardDefColumn) -> tuple[str | None, _ExtraColAttrs]:
-    col_attrs = dict(config_col)
+    col_attrs = dict(config_col)  # copy
     attribute = col_attrs.pop("attribute", None)
     if attribute:
         return f"attribute:{attribute}", col_attrs
