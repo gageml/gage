@@ -9,7 +9,7 @@ from . import sys_config
 
 __all__ = [
     "find_project_dir",
-    "load_data",
+    "load_project_data",
     "project_ns",
 ]
 
@@ -45,7 +45,7 @@ def _has_project_marker(dir: str):
     return any(os.path.exists(os.path.join(dir, *marker)) for marker in PROJECT_MARKERS)
 
 
-def load_data(filename: str):
+def load_project_data(filename: str):
     if not os.path.exists(filename):
         raise FileNotFoundError(f"file does not exist: {filename}")
     ext = os.path.splitext(filename)[1].lower()

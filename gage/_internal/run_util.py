@@ -37,7 +37,7 @@ from .file_util import write_file
 from .opref_util import decode_opref
 from .opref_util import encode_opref
 
-from .project_util import load_data
+from .project_util import load_project_data
 
 from .sys_config import get_user
 
@@ -251,7 +251,7 @@ CORE_ATTRS = list(_ATTR_READERS)
 def run_summary(run: Run) -> RunSummary:
     filename = _meta_summary_filename(run)
     try:
-        data = load_data(filename)
+        data = load_project_data(filename)
     except FileNotFoundError:
         return RunSummary({})
     else:
@@ -843,7 +843,7 @@ def _load_run_summary(run: Run, opdef: OpDef, log: Logger) -> RunSummary:
     if not os.path.exists(filename):
         return RunSummary({})
     log.info(f"Using run summary {os.path.relpath(filename, run.run_dir)}")
-    return RunSummary(load_data(filename))
+    return RunSummary(load_project_data(filename))
 
 
 def _run_summary_filename(run: Run, opdef: OpDef):

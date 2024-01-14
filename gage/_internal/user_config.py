@@ -7,7 +7,7 @@ from .types import *
 import os
 
 from .project_util import find_project_dir
-from .project_util import load_data
+from .project_util import load_project_data
 from .schema_util import validate_data
 
 __all__ = [
@@ -43,7 +43,7 @@ def load_user_config(filename: str):
 
 def load_user_config_data(filename: str):
     try:
-        return load_data(filename)
+        return load_project_data(filename)
     except Exception as e:
         raise UserConfigLoadError(filename, str(e))
 
