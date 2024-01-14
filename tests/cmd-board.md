@@ -251,7 +251,7 @@ Group must specify either `min` or `max` but not both.
 `min` or `max` specs require valid field references.
 
     >>> run("gage board --json --config group-missing-min-field.yaml")  # -space
-    group-select min for board is missing field: expected run-attr,
+    group-select selector (min/max) for board is missing field: expected run-attr,
     attribute, metric, or config
     <1>
 

@@ -29,6 +29,7 @@
     gage._internal.ansi_util
     gage._internal.api
     gage._internal.attr_log
+    gage._internal.board_util
     gage._internal.channel
     gage._internal.cli
     gage._internal.commands.associate
