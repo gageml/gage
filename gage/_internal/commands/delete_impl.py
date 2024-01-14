@@ -51,9 +51,14 @@ def _verify_delete(args: Args, runs: list[tuple[int, Run]]):
         return
     table = runs_table(runs)
     cli.out(table)
-    permanent_prefix = "permanently " if args.permanent else ""
+    style = "[red b]" if args.permanent else ""
+    permanent_prefix = "PERMANENTLY " if args.permanent else ""
+    permanent_suffix = " This cannot be undone." if args.permanent else ""
     run_count = "1 run" if len(runs) == 1 else f"{len(runs)} runs"
-    cli.err(f"You are about to {permanent_prefix}delete {run_count}.")
+    cli.err(
+        f"{style}You are about to {permanent_prefix}delete "
+        f"{run_count}.{permanent_suffix}"
+    )
     cli.err()
     if not cli.confirm(f"Continue?", default=not args.permanent):
         raise SystemExit(0)
