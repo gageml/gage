@@ -8,6 +8,8 @@ import datetime
 import logging
 import operator
 
+from functools import cmp_to_key
+
 from .project_util import load_project_data
 from .run_util import *
 
@@ -114,7 +116,7 @@ def _run_attr_fields(run: Run, field_cols: dict[str, Any]):
         "started": _run_datetime(run, "started"),
         "label": run_label(run),
     }
-    return _gen_fields(fields, "run", run, field_cols)
+    return _gen_fields(fields, "run", field_cols)
 
 
 def _run_datetime(run: Run, attr_name: str):
@@ -132,37 +134,23 @@ def _run_datetime(run: Run, attr_name: str):
 def _gen_fields(
     data: dict[str, Any],
     summary_type: str,
-    run: Run,
     field_cols: dict[str, Any],
 ):
     fields: dict[str, JSONCompatible] = {}
     for key, val in data.items():
         field_name = f"{summary_type}:{key}"
-        col_attrs, val = _split_field_val(val)
-        _apply_field_col_attrs(field_name, col_attrs, field_cols)
-        fields[field_name] = _flatten_field_val(val)
+        _apply_field_col(field_name, field_cols)
+        fields[field_name] = _normalize_field_val(val)
     return fields
 
 
-def _split_field_val(val: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-    if isinstance(val, dict):
-        return _split_field_val_dict(val)
-    else:
-        return {}, {"value": _safe_json_val(val)}
-
-
-def _split_field_val_dict(val: dict[str, Any]):
-    return _pop_field_attrs(["label"], val)
-
-
-def _pop_field_attrs(attr_names: list[str], val: dict[str, Any]):
-    attrs: dict[str, Any] = {}
-    for name in attr_names:
-        try:
-            attrs = val.pop(name)
-        except KeyError:
-            pass
-    return attrs, val
+def _normalize_field_val(data: Any) -> Any:
+    if isinstance(data, dict):
+        if "value" not in data:
+            return data
+        safe_val = _safe_json_val(data["value"])
+        return safe_val if len(data) == 1 else {**data, "value": safe_val}
+    return _safe_json_val(data)
 
 
 def _safe_json_val(val: Any):
@@ -173,33 +161,20 @@ def _is_nan(val: Any):
     return isinstance(val, float) and val != val
 
 
-def _apply_field_col_attrs(
-    field_name: str, col_attrs: dict[str, Any], col_defs: dict[str, Any]
-):
+def _apply_field_col(field_name: str, col_defs: dict[str, Any]):
     col_def = col_defs.setdefault(field_name, {})
     col_def["field"] = field_name
-    try:
-        col_def["headerName"] = col_attrs["label"]
-    except KeyError:
-        pass
-
-
-def _flatten_field_val(val: dict[str, Any]):
-    """Returns val 'value' item if it's the only item in val."""
-    if len(val) == 1 and list(val.keys())[0] == "value":
-        return val["value"]
-    return val
 
 
 def _config_fields(run: Run, field_cols: dict[str, Any]):
-    return _gen_fields(meta_config(run), "config", run, field_cols)
+    return _gen_fields(meta_config(run), "config", field_cols)
 
 
 def _summary_fields(run: Run, field_cols: dict[str, Any]):
     summary = run_summary(run)
     return {
-        **_gen_fields(summary.get_attributes(), "attribute", run, field_cols),
-        **_gen_fields(summary.get_metrics(), "metric", run, field_cols),
+        **_gen_fields(summary.get_attributes(), "attribute", field_cols),
+        **_gen_fields(summary.get_metrics(), "metric", field_cols),
     }
 
 
@@ -292,7 +267,9 @@ def _group_key_f(group_select: BoardDefGroupSelect) -> Callable[[_Row], Any]:
 
 def _field_reader(field_spec: dict[str, Any]) -> Callable[[_Row], Any] | None:
     field_name = _field_name(field_spec)
-    return (lambda data: data.get(field_name)) if field_name else None
+    if not field_name:
+        return None
+    return lambda data: _field_value(field_name, data)
 
 
 def _field_name(field_spec: dict[str, Any]):
@@ -310,6 +287,11 @@ def _field_name(field_spec: dict[str, Any]):
         else:
             return prefix + name
     return None
+
+
+def _field_value(field_name: str, data: Any) -> Any:
+    val = data.get(field_name)
+    return val.get("value") if isinstance(val, dict) else val
 
 
 def _select_from_group_f(
@@ -354,7 +336,22 @@ def _group_row_data(
     groups: dict[Any, _RowData] = {}
     for data in row_data:
         groups.setdefault(group_key(data), []).append(data)
-    return [group for key, group in sorted(groups.items())]
+    return [
+        group for key, group in sorted(groups.items(), key=cmp_to_key(_group_item_cmp))
+    ]
+
+
+def _group_item_cmp(lhs: tuple[Any, Any], rhs: tuple[Any, Any]):
+    lhsKey = lhs[0]
+    if lhsKey is None:
+        return -1
+    rhsKey = rhs[0]
+    if rhsKey is None:
+        return 1
+    try:
+        return -1 if lhsKey < rhsKey else 1 if lhsKey > rhsKey else 0
+    except TypeError:
+        return -1
 
 
 def _prune_row_data_fields(row_data: _RowData, col_defs: _ColDefs):

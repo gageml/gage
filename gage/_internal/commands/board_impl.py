@@ -90,7 +90,7 @@ def _print_csv_and_exit(data: dict[str, Any]):
     col_defs = data["colDefs"]
     fields: list[str] = [col["field"] for col in col_defs]
     headers = {
-        field: col.get("headerName") or field
+        field: col.get("label") or field
         for field, col in [(col["field"], col) for col in col_defs]
     }
     buf = io.StringIO()

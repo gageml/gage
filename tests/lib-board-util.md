@@ -234,7 +234,7 @@ default list.
         },
         {
           "field": "metric:width",
-          "headerName": "The Width",
+          "label": "The Width",
           "sort": "desc"
         }
       ],

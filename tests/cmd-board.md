@@ -129,11 +129,11 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
       "colDefs": [
         {
           "field": "attribute:foo",
-          "headerName": "Foo"
+          "label": "Foo"
         },
         {
           "field": "attribute:bar",
-          "headerName": "Bar"
+          "label": "Bar"
         }
       ],
       "rowData": [
@@ -265,9 +265,3 @@ Group must specify either `min` or `max` but not both.
     >>> run("gage board --csv --json")
     You can't use both --json and --csv options.
     <1>
-
-To Do - test:
-
-- Col headerName when defined in metric summary
-- Col headerName when defined in board def
-- Other pass through attrs

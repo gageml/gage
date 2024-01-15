@@ -11,7 +11,7 @@
     "metric:height",
     {
       "metric": "width",
-      "headerName": "The Width",
+      "label": "The Width",
       "sort": "desc"
     }
   ]
