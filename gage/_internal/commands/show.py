@@ -73,7 +73,7 @@ FilesFlag = Annotated[
 def show(
     run: RunSpec = "",
     where: Where = "",
-    limit_files: LimitFiles = 50,
+    limit_files: LimitFiles = 40,
     all_files: AllFilesFlag = False,
     summary: SummaryFlag = False,
     files: FilesFlag = False,
