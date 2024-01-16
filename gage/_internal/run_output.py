@@ -144,6 +144,15 @@ class RunOutput:
         lock = self._output_lock
         line: list[int] = []
 
+        def handle_eol():
+            line_bytes, progress = self._process_line(line)
+            del line[:]
+            with lock:
+                os_write(output_fileno, line_bytes)
+                index_entry = struct.pack("!QB", time.time_ns() // 1000000, stream_type)
+                os_write(index_fileno, index_entry)
+            self._apply_output_cb(stream_type, line_bytes, progress)
+
         while True:
             buf = os_read(input_fileno, RUN_OUTPUT_STREAM_BUFFER)
             if not buf:
@@ -154,16 +163,9 @@ class RunOutput:
                 line.append(b)
                 if b not in (10, 13):
                     continue
-                # LF
-                line_bytes, progress = self._process_line(line)
-                del line[:]
-                with lock:
-                    os_write(output_fileno, line_bytes)
-                    index_entry = struct.pack(
-                        "!QB", time.time_ns() // 1000000, stream_type
-                    )
-                    os_write(index_fileno, index_entry)
-                self._apply_output_cb(stream_type, line_bytes, progress)
+                handle_eol()
+        if line:
+            handle_eol()
 
     def _process_line(self, line: list[int]):
         output = bytes(line)

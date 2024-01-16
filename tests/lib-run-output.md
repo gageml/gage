@@ -218,3 +218,25 @@ Create a run output object with a callback.
     Line 1
     Line 2
     Line 3
+
+## End of file
+
+Output is captured up to the end of file, even when a line ending isn't
+used.
+
+    >>> output = RunOutput("output")
+
+Run a process that prints text without a line ending.
+
+    >>> proc = subprocess.Popen(
+    ...     [sys.executable, "-c", "print('abc', end='')"],
+    ...     stdout=subprocess.PIPE,
+    ...     stderr=subprocess.PIPE,
+    ... )
+    >>> output.open(proc)
+    >>> proc.wait()
+    0
+
+    >>> output.wait_and_close(timeout=1.0)
+    >>> cat("output")
+    abc
