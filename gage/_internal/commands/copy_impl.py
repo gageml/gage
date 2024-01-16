@@ -56,32 +56,6 @@ def copy(args: Args):
         )
 
 
-# def _copy_to_v2(args: Args):
-#     runs = _selected_runs(args)
-#     copy_to = _remote_copy_to(args)
-#     _verify_copy_to(args, runs)
-#     with cli.status(copy_to.get_init_desc()):
-#         copy_to.init()
-#     with cli.status(copy_to.get_waiting_for_event_desc()):
-#         copy_to.wait_for_event()
-#     with cli.Progress(transient=True) as p:
-#         task = p.add_task(copy_to.get_task_desc(), total=copy_to.get_progress_total())
-#         for event in copy_to.iter_events():
-#             if event.output is not None:
-#                 p.console.out(event.output)
-#             if event.progress_completed:
-#                 p.update(task, completed=event.progress_completed)
-
-
-# def _remote_copy_to(args: Args):
-#     try:
-#         return remote_copy_to(args.dest)
-#     except RemoteError as e:
-#         cli.exit_with_error(
-#             f"{e}\n\nTry '[cmd]gage help remotes[/]' for help with remotes."
-#         )
-
-
 def _copy_to(args: Args):
     runs = _selected_runs(args)
     _verify_copy_to(args, runs)
