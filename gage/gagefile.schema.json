@@ -161,6 +161,10 @@
           }
         }
       ]
+    },
+    "named-progress-spec": {
+      "type": "string",
+      "title": "Named progress spec"
     }
   },
   "type": "object",
@@ -208,6 +212,36 @@
                 },
                 "finalize": {
                   "$ref": "#/$defs/exec-cmd"
+                }
+              }
+            }
+          ]
+        },
+        "progress": {
+          "title": "Progress spec",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/named-progress-spec"
+            },
+            {
+              "type": "object",
+              "title": "Full progress spec",
+              "additionalProperties": false,
+              "properties": {
+                "stage-sourcecode": {
+                  "$ref": "#/$defs/named-progress-spec"
+                },
+                "stage-runtime": {
+                  "$ref": "#/$defs/named-progress-spec"
+                },
+                "stage-dependencies": {
+                  "$ref": "#/$defs/named-progress-spec"
+                },
+                "run": {
+                  "$ref": "#/$defs/named-progress-spec"
+                },
+                "finalize": {
+                  "$ref": "#/$defs/named-progress-spec"
                 }
               }
             }

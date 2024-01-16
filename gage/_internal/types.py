@@ -143,6 +143,32 @@ class OpDefExec:
         return self._data.get("finalize")
 
 
+ProgressSpec = str
+
+
+class OpDefProgress:
+    def __init__(self, data: Data):
+        self._data = data
+
+    def as_json(self) -> Data:
+        return self._data
+
+    def get_stage_sourcecode(self) -> ProgressSpec | None:
+        return self._data.get("stage-sourcecode")
+
+    def get_stage_dependencies(self) -> ProgressSpec | None:
+        return self._data.get("stage-dependencies")
+
+    def get_stage_runtime(self) -> ProgressSpec | None:
+        return self._data.get("stage-runtime")
+
+    def get_run(self) -> ProgressSpec | None:
+        return self._data.get("run")
+
+    def get_finalize(self) -> ProgressSpec | None:
+        return self._data.get("finalize")
+
+
 class OpDefConfig:
     def __init__(self, data: Data):
         self._data = data
@@ -215,10 +241,8 @@ class OpDef:
         return bool(self._data.get("default"))
 
     def get_exec(self) -> OpDefExec:
-        val = self._data.get("exec")
-        if val is None:
-            val = {}
-        elif isinstance(val, str) or isinstance(val, list):
+        val = self._data.get("exec", {})
+        if isinstance(val, str) or isinstance(val, list):
             val = {"run": val}
         return OpDefExec(val)
 
@@ -257,6 +281,15 @@ class OpDef:
         if val is None:
             val = {}
         return OpDefSummary(val)
+
+    def get_progress(self) -> OpDefProgress:
+        val = self._data.get("progress", {})
+        if isinstance(val, str) or isinstance(val, list):
+            val = {"run": val}
+        return OpDefProgress(val)
+
+        # TODO: this ought to mirror exec as progress is tied to
+        return self._data.get("progress")
 
 
 class GageFile:
@@ -491,7 +524,7 @@ def _coerce_col(col: Any) -> dict[str, Any]:
 
 
 # =================================================================
-# General
+# Misc
 # =================================================================
 
 

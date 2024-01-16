@@ -176,7 +176,7 @@ def status(description: str = "", quiet: bool = False):
 
 def Progress(*cols: str | rich.progress.ProgressColumn, **kw: Any):
     cols = cols or _default_progress_cols()
-    return rich.progress.Progress(*cols, **kw)
+    return rich.progress.Progress(*cols, transient=True, **kw)
 
 
 def _default_progress_cols() -> tuple[rich.progress.ProgressColumn, ...]:
@@ -186,6 +186,10 @@ def _default_progress_cols() -> tuple[rich.progress.ProgressColumn, ...]:
         rich.progress.TaskProgressColumn(),
         _TimeRemainingColumn(),
     )
+
+
+class Status(Protocol):
+    pass
 
 
 class _TimeRemainingColumn(rich.progress.TimeRemainingColumn):

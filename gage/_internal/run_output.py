@@ -16,6 +16,8 @@ import time
 
 __all__ = [
     "OutputCallback",
+    "Progress",
+    "ProgressParser",
     "RunOutput",
     "RunOutputReader",
     "stream_fileno",
@@ -38,17 +40,24 @@ def stream_fileno(stream: IO[bytes]):
 StreamType = Literal[0, 1]
 
 
+class Progress(NamedTuple):
+    completed: float
+
+
+ProgressParser: TypeAlias = Callable[[bytes], tuple[bytes, Progress | None]]
+
+
 class OutputCallback(Protocol):
     def output(
-        self, stream: StreamType, out: bytes, progress: Any | None = None
+        self,
+        stream: StreamType,
+        out: bytes,
+        progress: Progress | None = None,
     ) -> None:
         raise NotImplementedError()
 
     def close(self) -> None:
         raise NotImplementedError()
-
-
-ProgressParser: TypeAlias = Callable[[bytes], tuple[bytes, Any]]
 
 
 class RunOutput:

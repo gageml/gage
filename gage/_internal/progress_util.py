@@ -19,8 +19,8 @@ def progress_parser(name: str) -> ProgressParser:
             raise ValueError(name)
 
 
-_TQDM_SPLIT_P = re.compile(rb"\r *\d+%|.+\r")
-_TQDM_PART_P = re.compile(rb"\r *\d+%|.+]")
+_TQDM_EMPTY = re.compile(rb" *\r$")
+_TQDM_PROGRESS = re.compile(rb" *(\d+)%\|.+[\r\n]$")
 
 
 def _parse_tqdm(output: bytes) -> tuple[bytes, Progress | None]:
@@ -32,5 +32,9 @@ def _parse_tqdm(output: bytes) -> tuple[bytes, Progress | None]:
     based on output, which could be presented to the user via the output
     callback interface. See `run_output` module for details.
     """
-    split = _TQDM_SPLIT_P.split(output)[-1]
-    return (b"" if _TQDM_PART_P.match(split) else split), None
+    if _TQDM_EMPTY.match(output):
+        return b"", None
+    m = _TQDM_PROGRESS.match(output)
+    if m:
+        return b"", Progress(int(m.group(1)))
+    return output, None

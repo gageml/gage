@@ -76,6 +76,7 @@
     gage._internal.lang
     gage._internal.log
     gage._internal.opref_util
+    gage._internal.progress_util
     gage._internal.project_util
     gage._internal.python_util
     gage._internal.repo

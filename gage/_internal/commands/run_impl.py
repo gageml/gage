@@ -13,11 +13,13 @@ from .. import lang
 from .. import run_help
 from .. import run_sourcecode
 
+from ..run_util import *
+
 from ..run_config import read_project_config
 from ..run_context import resolve_run_context
-from ..var import runs_dir
+from ..run_output import Progress
 
-from ..run_util import *
+from ..var import runs_dir
 
 from . import error_handlers
 from . import impl_support
@@ -177,6 +179,79 @@ def _stage(context: RunContext, args: Args):
     return run
 
 
+class _Status:
+    supports_progress = False
+
+    def start(self):
+        ...
+
+    def stop(self):
+        ...
+
+    def update(self, desc: str):
+        ...
+
+    def output(self, output: bytes, progress: Progress | None):
+        ...
+
+
+class _DefaultStatus(_Status):
+    _status = None
+
+    def __init__(self, args: Args):
+        if args.quiet or log.getEffectiveLevel() < logging.WARN:
+            return
+        self._status = cli.status("")
+
+    def start(self):
+        if self._status:
+            self._status.start()
+
+    def stop(self):
+        if self._status:
+            self._status.stop()
+
+    def update(self, desc: str):
+        if self._status:
+            self._status.update(desc)
+
+    def output(self, output: bytes, progress: Progress | None):
+        if self._status:
+            self._status.console.out(output.decode(), end="")
+
+
+class _Progress(_Status):
+    supports_progress = True
+    _progress = None
+    _task_id = None
+
+    def __init__(self, args: Args):
+        if args.quiet or log.getEffectiveLevel() < logging.WARN:
+            return
+        self._progress = cli.Progress()
+        self._task_id = self._progress.add_task("")
+
+    def start(self):
+        if self._progress:
+            self._progress.start()
+
+    def stop(self):
+        if self._progress:
+            self._progress.stop()
+
+    def update(self, desc: str):
+        if self._progress:
+            assert self._task_id is not None
+            self._progress.update(self._task_id, description=desc)
+
+    def output(self, output: bytes, progress: Progress | None):
+        if self._progress:
+            assert self._task_id is not None
+            self._progress.console.out(output.decode(), end="")
+            if progress:
+                self._progress.update(self._task_id, completed=progress.completed)
+
+
 class _RunPhaseStatus:
     def __init__(self, run: Run, args: Args):
         self._phase_desc = {
@@ -187,7 +262,8 @@ class _RunPhaseStatus:
             "run": _run_phase_desc(run),
             "finalize": "Finalizing run",
         }
-        self._status = cli.status("", args.quiet)
+        self._args = args
+        self._status = _DefaultStatus(args)
 
     def __enter__(self):
         self._status.start()
@@ -201,7 +277,13 @@ class _RunPhaseStatus:
         if name == "exec-output":
             assert isinstance(arg, tuple), arg
             phase_name, stream, output, progress = arg
-            self._status.console.out(cast(bytes, output).decode(), end="")
+            if progress and not self._status.supports_progress:
+                # Lazily upgrade status to support progress
+                self._status.stop()
+                self._status = _Progress(self._args)
+                assert self._status.supports_progress
+                self._status.start()
+            self._status.output(output, progress)
         else:
             desc = self._phase_desc.get(name)
             if desc:

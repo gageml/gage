@@ -1,0 +1,18 @@
+[op-1]
+
+exec = "true"
+progress = "tqdm"
+
+[op-2]
+
+exec = "true"
+progress.run = "tqdm"
+
+[op-3]
+
+exec = "true"
+progress.stage-sourcecode = "foo"
+progress.stage-runtime = "bar"
+progress.stage-dependencies = "baz"
+progress.run = "tqdm"
+progress.finalize = "bam"

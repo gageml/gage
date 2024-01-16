@@ -181,3 +181,30 @@ A project can configure a runs directory location with `$runs-dir`.
     >>> run("gage check runs-dir.json")
     runs-dir.json is a valid Gage file
     <0>
+
+## Progress specs
+
+Project specs can be a single string or a mapping that corresponds to
+the run phase execs.
+
+    >>> run("gage check progress-specs.toml")
+    progress-specs.toml is a valid Gage file
+    <0>
+
+    >>> run("gage check invalid-progress.json")  # +wildcard
+    There are errors in invalid-progress.json
+    Properties ['op', 'op-2', 'op-3'] are invalid
+    Properties ['progress'] are invalid
+    ...
+    The instance must be of type "string"
+    The instance must be of type "object"
+    Properties ['progress'] are invalid
+    ...
+    The instance must be of type "string"
+    ['not-supported']
+    Properties ['progress'] are invalid
+    ...
+    The instance must be of type "string"
+    Properties ['run'] are invalid
+    The instance must be of type "string"
+    <1>

@@ -37,29 +37,14 @@ the progress updates to prevent them from appearing in the run output.
     {meta_dir:path}
     <0>
 
-TODO - the output below has spurious line returns. This is a problem
-with the wonky "progress parsing" scheme defined in run_util, or
-possibly the even wonkier handling of 10 and 13 in run_output.
-
     >>> cat(path_join(meta_dir, "output", "40_run"))
-    ⤶
     Doing stuff 1
-    ⤶
     Doing stuff 2
-    ⤶
     Doing stuff 3
-    ⤶
     Doing stuff 4
-    ⤶
     Doing stuff 5
-    ⤶
     Doing stuff 6
-    ⤶
     Doing stuff 7
-    ⤶
     Doing stuff 8
-    ⤶
     Doing stuff 9
-    ⤶
     Doing stuff 10
-    ⤶

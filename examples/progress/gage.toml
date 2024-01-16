@@ -46,6 +46,8 @@ done
 
 description = "Show tqdm based progress"
 
+progress = "tqdm"
+
 [tqdm.exec]
 
 stage-runtime = """

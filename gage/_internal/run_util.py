@@ -37,8 +37,8 @@ from .file_util import write_file
 from .opref_util import decode_opref
 from .opref_util import encode_opref
 
+from .progress_util import progress_parser
 from .project_util import load_project_data
-
 from .sys_config import get_user
 
 __all__ = [
@@ -689,6 +689,7 @@ def _stage_sourcecode_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger
         "stage-sourcecode",
         exec,
         _hook_env(run, project_dir),
+        opdef.get_progress().get_stage_sourcecode(),
         "10_sourcecode",
         log,
     )
@@ -723,6 +724,7 @@ def _stage_runtime_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger):
         "stage-runtime",
         exec,
         _hook_env(run, project_dir),
+        opdef.get_progress().get_stage_runtime(),
         "20_runtime",
         log,
     )
@@ -756,6 +758,7 @@ def _stage_dependencies_hook(run: Run, project_dir: str, opdef: OpDef, log: Logg
         "stage-dependencies",
         exec,
         _hook_env(run, project_dir),
+        opdef.get_progress().get_stage_dependencies(),
         "30_dependencies",
         log,
     )
@@ -797,6 +800,7 @@ def _reduce_files_log(run: Run):
 
 def exec_run(run: Run):
     log = _runner_log(run)
+    opdef = meta_opdef(run)
     cmd = meta_opcmd(run)
     env = {**cmd.env, **os.environ}
     run_phase_channel.notify("run")
@@ -806,6 +810,7 @@ def exec_run(run: Run):
         "run",
         cmd.args,
         env,
+        opdef.get_progress().get_run(),
         "40_run",
         log,
     )
@@ -891,6 +896,7 @@ def _finalize_run_hook(run: Run, opdef: OpDef, log: Logger):
         "finalize",
         exec,
         _hook_env(run),
+        opdef.get_progress().get_finalize(),
         "50_finalize",
         log,
     )
@@ -1178,11 +1184,16 @@ class _PhaseExecOutputCallback(run_output.OutputCallback):
         pass
 
 
+def _progress_parser(progress: str | None):
+    return progress_parser(progress) if progress else None
+
+
 def _run_phase_exec(
     run: Run,
     phase_name: str,
     exec_cmd: str | list[str],
     env: dict[str, str],
+    progress: str | None,
     output_name: str,
     log: Logger,
 ):
@@ -1205,8 +1216,11 @@ def _run_phase_exec(
     ensure_dir(run_meta_path(run, "output"))
     output_filename = run_meta_path(run, "output", output_name)
     output_cb = _PhaseExecOutputCallback(phase_name)
+    progress_parser = _progress_parser(progress)
     output = run_output.RunOutput(
-        output_filename, output_cb=output_cb, progress_parser=_parse_progress
+        output_filename,
+        output_cb=output_cb,
+        progress_parser=progress_parser,
     )
     output.open(p)
     exit_code = p.wait()
@@ -1217,19 +1231,6 @@ def _run_phase_exec(
     _delete_proc_lock(run, log)
     if exit_code != 0:
         raise RunExecError(phase_name, proc_args, exit_code)
-
-
-def _parse_progress(output: bytes):
-    # TODO - This is a hacked together progress parser and only barely
-    # works with the default tqdm progress format. This doesn't even
-    # parse progress - it just strips progress out to avoid filling logs
-    # with garbage. Should a) parse robustly, if that's even possible
-    # and b) return a progress that can be usable by "exec-output"
-    # handlers.
-    import re
-
-    split = re.split(rb"\r *\d+%|.+\r", output)[-1]
-    return (split if not re.match(rb"\r *\d+%|.+]", split) else b""), None
 
 
 def _proc_args(exec_cmd: str | list[str]) -> tuple[str | list[str], bool]:
