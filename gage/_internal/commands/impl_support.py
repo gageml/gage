@@ -267,5 +267,13 @@ def format_summary_value(value: Any):
     if isinstance(value, dict):
         value = value.get("value", "")
     if isinstance(value, float):
-        return f"{value:g}"
+        return f"{value:.4g}"
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
     return str(value)
