@@ -44,4 +44,7 @@
     ''
 
     >>> format_summary_value([1, 2, 3])
-    '[1, 2, 3]'
+    '1, 2, 3'
+
+    >>> format_summary_value([True, {"value": 0.12345}, None])
+    'true, 0.1235, '

@@ -276,4 +276,6 @@ def format_summary_value(value: Any):
         return "true"
     if value is False:
         return "false"
+    if isinstance(value, list):
+        return ", ".join([format_summary_value(item) for item in value])
     return str(value)
