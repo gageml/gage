@@ -862,3 +862,34 @@ without modifying the list. If not specified the default is None.
     ...     lambda: 3,
     ...     lambda: None])
     [1, 2, 3]
+
+## Case Conversion
+
+    >>> from gage._internal.util import kebab_to_camel
+
+    >>> kebab_to_camel("")
+    ''
+
+    >>> kebab_to_camel("a")
+    'a'
+
+    >>> kebab_to_camel("A")
+    'A'
+
+    >>> kebab_to_camel("a-b")
+    'aB'
+
+    >>> kebab_to_camel("a-b-c")
+    'aBC'
+
+    >>> kebab_to_camel("foo-bar")
+    'fooBar'
+
+    >>> kebab_to_camel("-")
+    ''
+
+    >>> kebab_to_camel("--")
+    ''
+
+    >>> kebab_to_camel("a--b")
+    'aB'

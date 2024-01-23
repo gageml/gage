@@ -259,3 +259,56 @@ default list.
 
 Note that column def attributes are also passed through to the board
 data.
+
+## Safe JSON Vals
+
+Browser JSON does not accept `NaN` values. The function `_safe_json_val`
+converts `NaN` to `null`. It applies the conversion to values in objects
+and arrays.
+
+    >>> from gage._internal.board_util import _safe_json_val
+
+    >>> NaN = float("NaN")
+
+    >>> _safe_json_val(NaN)  # +json
+    null
+
+    >>> _safe_json_val({"foo": NaN, "bar": 1})  # +json
+    {
+      "bar": 1,
+      "foo": null
+    }
+
+    >>> _safe_json_val({"foo": [1, NaN]})  # +json
+    {
+      "foo": [
+        1,
+        null
+      ]
+    }
+
+## Key Case Conversion
+
+Gage board is configured using kebab case for keys. This is in keeping
+conventions used in VS Code, which inspires Gage config in general.
+
+The function `_apply_col_def_key_case` converts kebab case keys to camel
+case.
+
+    >>> from gage._internal.board_util import _apply_col_def_key_case
+
+    >>> _apply_col_def_key_case({})
+    {}
+
+    >>> _apply_col_def_key_case({
+    ...     "foo": 123,
+    ...     "foo-bar": 456,
+    ...     "baz": {"baz-bam": "super duper"}
+    ... })  # +json
+    {
+      "baz": {
+        "bazBam": "super duper"
+      },
+      "foo": 123,
+      "fooBar": 456
+    }

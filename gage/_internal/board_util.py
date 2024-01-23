@@ -13,6 +13,8 @@ from functools import cmp_to_key
 from .project_util import load_project_data
 from .run_util import *
 
+from .util import kebab_to_camel
+
 log = logging.getLogger(__name__)
 
 __ALL__ = [
@@ -83,8 +85,8 @@ def _maybe_apply_status_filter(
 
 
 def board_data(board: BoardDef, runs: list[Run]) -> dict[str, Any]:
-    raw_col_defs, raw_row_data = _board_raw_data(runs)
-    col_defs = _board_col_defs(board, raw_col_defs)
+    inferred_col_defs, raw_row_data = _board_raw_data(runs)
+    col_defs = _board_col_defs(board, inferred_col_defs)
     row_data = _prune_row_data_fields(_filter_by_group(raw_row_data, board), col_defs)
     return {
         **_board_meta(board),
@@ -145,16 +147,23 @@ def _gen_fields(
 
 
 def _normalize_field_val(data: Any) -> Any:
+    data = _safe_json_val(data)
     if isinstance(data, dict):
-        if "value" not in data:
+        try:
+            val = data["value"]
+        except KeyError:
             return data
-        safe_val = _safe_json_val(data["value"])
-        return safe_val if len(data) == 1 else {**data, "value": safe_val}
-    return _safe_json_val(data)
+        else:
+            return val if len(data) == 1 else {**data, "value": val}
+    return data
 
 
-def _safe_json_val(val: Any):
-    return None if _is_nan(val) else val
+def _safe_json_val(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {key: _safe_json_val(val) for key, val in data.items()}
+    if isinstance(data, list):
+        return [_safe_json_val(val) for val in data]
+    return None if _is_nan(data) else data
 
 
 def _is_nan(val: Any):
@@ -209,26 +218,40 @@ def _run_attr_sort_key(name: str):
     return keys.get(name, 99)
 
 
-def _board_col_defs(board: BoardDef, col_defs: _ColDefs):
-    config_cols: list[BoardDefColumn] | None = board.get_columns()
-    if not config_cols:
-        return col_defs
-    return [_board_col_def(config_col, col_defs) for config_col in config_cols]
+def _board_col_defs(board: BoardDef, inferred_col_defs: _ColDefs):
+    board_cols = board.get_columns()
+    if not board_cols:
+        return inferred_col_defs
+    return [
+        _apply_col_def_key_case(_merged_col_def(board_col, inferred_col_defs))
+        for board_col in board_cols
+    ]
 
 
-def _board_col_def(config_col: BoardDefColumn, col_defs: _ColDefs) -> dict[str, Any]:
-    col_def, config_attrs = _find_col_def(config_col, col_defs)
-    return {**col_def, **config_attrs} if col_def else config_attrs
+def _apply_col_def_key_case(col_def: dict[str, Any]) -> dict[str, Any]:
+    return {
+        kebab_to_camel(key): (
+            _apply_col_def_key_case(val) if isinstance(val, dict) else val
+        )
+        for key, val in col_def.items()
+    }
 
 
-def _find_col_def(config_col: BoardDefColumn, col_defs: _ColDefs):
-    field_target, config_attrs = _field_target(config_col)
+def _merged_col_def(
+    board_col: BoardDefColumn, inferred_col_defs: _ColDefs
+) -> dict[str, Any]:
+    col_def, inferred_attrs = _find_col_def(board_col, inferred_col_defs)
+    return {**col_def, **inferred_attrs} if col_def else inferred_attrs
+
+
+def _find_col_def(board_col: BoardDefColumn, inferred_col_defs: _ColDefs):
+    field_target, rest_config = _field_target(board_col)
     if not field_target:
-        return None, config_attrs
-    for col_def in col_defs:
-        if col_def["field"] == field_target:
-            return col_def, config_attrs
-    return {"field": field_target}, config_attrs
+        return None, rest_config
+    for inferred_col in inferred_col_defs:
+        if inferred_col["field"] == field_target:
+            return inferred_col, rest_config
+    return {"field": field_target}, rest_config
 
 
 def _field_target(config_col: BoardDefColumn) -> tuple[str | None, _ExtraColAttrs]:

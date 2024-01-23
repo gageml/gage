@@ -1266,3 +1266,13 @@ T = TypeVar("T")
 
 def coerce_list(x: T | list[T]) -> list[T]:
     return x if isinstance(x, list) else [x]
+
+
+def kebab_to_camel(s: str):
+    return "".join(
+        [
+            part if i == 0 else part[0].upper() + part[1:]
+            for i, part in enumerate(s.split("-"))
+            if part
+        ]
+    )
