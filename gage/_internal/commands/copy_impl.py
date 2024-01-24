@@ -58,18 +58,15 @@ def copy(args: Args):
 
 def _copy_to(args: Args):
     runs = _selected_runs(args)
-    _verify_copy_to(args, runs)
-    with cli.status("Preparing to copy"):
-        src_dir, includes = _src_run_includes([run for index, run in runs])
-        total_bytes = _rclone_size(src_dir, includes)
-
+    _user_confirm_copy_to(args, runs)
+    pre_copy_status = cli.status("Preparing copy")
+    pre_copy_status.start()
+    src_dir, includes, total_bytes = _prepare_copy(runs)
     p = None  # Lazy init to avoid progress display on early error
     task = None
-    pre_copy_status = cli.status("Looking for changes")
-    pre_copy_status.start()
     nothing_copied = False
     try:
-        for total_copied, line in _rclone_copy_to(
+        for total_copied, output in _rclone_copy_to(
             src_dir, args.dest, includes, args.verbose
         ):
             if total_copied == -1:
@@ -77,12 +74,12 @@ def _copy_to(args: Args):
                 break
             pre_copy_status.stop()
             if p is None:
-                p = cli.Progress(transient=True)
+                p = cli.Progress()
                 p.start()
                 task = p.add_task("Copying runs", total=total_bytes)
             assert task is not None
-            if line:
-                p.console.out(line)
+            if output:
+                p.console.out(output)
             if total_copied:
                 p.update(task, completed=total_copied)
     except _CopyError as e:
@@ -97,6 +94,12 @@ def _copy_to(args: Args):
         cli.err("Nothing copied, runs are up-to-date")
     else:
         cli.err(f"Copied {runs_count}")
+
+
+def _prepare_copy(runs: list[IndexedRun]):
+    src_dir, includes = _src_run_includes(runs)
+    total_bytes = _rclone_size(src_dir, includes)
+    return src_dir, includes, total_bytes
 
 
 def _handle_copy_error(e: _CopyError):
@@ -122,7 +125,7 @@ def _selected_runs(args: Args):
     return runs
 
 
-def _verify_copy_to(args: Args, runs: list[tuple[int, Run]]):
+def _user_confirm_copy_to(args: Args, runs: list[tuple[int, Run]]):
     if args.yes:
         return
     table = runs_table(runs)
@@ -134,17 +137,17 @@ def _verify_copy_to(args: Args, runs: list[tuple[int, Run]]):
         raise SystemExit(0)
 
 
-def _src_run_includes(runs: list[Run]):
+def _src_run_includes(runs: list[IndexedRun]):
     assert runs
     src_root = None
     includes: list[str] = []
-    for run in runs:
+    for index, run in runs:
         for src_dir in _run_src_dirs(run):
             src_parent, name = os.path.split(src_dir)
             if not src_root:
                 src_root = src_parent
             assert src_parent == src_root, (src_dir, src_parent)
-            includes.append(name + "/**")
+            includes.append(f"/{name}/**")
     assert src_root
     return src_root, includes
 
