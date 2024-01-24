@@ -5,18 +5,6 @@ from typing import *
 from typer import Argument
 from typer import Option
 
-"""
-TODO:
-
-`--sort COLS` where COLS is a comma separated list of column keys or
-label with optional leading '+/-' for ascending/descending order
-respectively. Key should be whatever is used to join the values.
-
-`--csv` to print results in a CSV table.
-
-`--columns` can be used to limit and order the columns shown. This is a
-convenience to limit/order columns with or without a board def.
-"""
 
 RunArgs = Annotated[
     Optional[list[str]],

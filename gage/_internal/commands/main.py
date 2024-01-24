@@ -20,6 +20,7 @@ from .operations import operations
 from .run import run
 from .delete import runs_delete
 from .list import runs_list
+from .publish import publish
 from .purge import runs_purge
 from .restore import runs_restore
 from .select import select
@@ -102,6 +103,7 @@ def main_app():
     app.command("list, ls, runs")(runs_list)
     app.command("open")(open)
     app.command("operations, ops")(operations)
+    app.command("publish")(publish)
     app.command("purge")(runs_purge)
     app.command("restore")(runs_restore)
     app.command("run")(run)

@@ -35,7 +35,7 @@ def show_board(args: Args):
         )
     if args.json and args.csv:
         cli.exit_with_error("You can't use both --json and --csv options.")
-    board = _init_board(args.config)
+    board = _init_board(args)
     runs = _board_runs(board, args)
     data = _board_data(board, runs)
     if args.json:
@@ -46,15 +46,17 @@ def show_board(args: Args):
         assert False
 
 
-def _init_board(config: str) -> BoardDef:
-    if not config:
+def _init_board(args: Args) -> BoardDef:
+    if not args.config:
         return BoardDef({})
     try:
-        return load_board_def(config)
+        return load_board_def(args.config)
     except FileNotFoundError:
-        cli.exit_with_error(f"Config file \"{config}\" does not exist")
+        cli.exit_with_error(f"Config file \"{args.config}\" does not exist")
     except ValueError as e:
-        cli.exit_with_error(f"Unexpected board config in \"{config}\" - {e.args[0]}")
+        cli.exit_with_error(
+            f"Unexpected board config in \"{args.config}\" - {e.args[0]}"
+        )
 
 
 def _board_runs(board: BoardDef, args: Args):

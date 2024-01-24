@@ -58,6 +58,8 @@
     gage._internal.commands.open_impl
     gage._internal.commands.operations
     gage._internal.commands.operations_impl
+    gage._internal.commands.publish
+    gage._internal.commands.publish_impl
     gage._internal.commands.purge
     gage._internal.commands.purge_impl
     gage._internal.commands.restore

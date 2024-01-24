@@ -29,6 +29,7 @@ Running `gage` without arguments shows help.
       list, ls, runs   List runs.
       open             Open a run or run file.
       operations, ops  Show available operations.
+      publish          Publish a board.
       purge            Remove deleted runs.
       restore          Restore runs.
       run              Start or stage a run.
