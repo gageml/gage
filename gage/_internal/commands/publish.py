@@ -5,6 +5,15 @@ from typing import *
 from typer import Argument
 from typer import Option
 
+Board = Annotated[
+    str,
+    Option(
+        "--board",
+        metavar="NAME",
+        help="Board name to publish. Required if name is not specified in board config.",
+    ),
+]
+
 
 RunArgs = Annotated[
     Optional[list[str]],
@@ -38,13 +47,24 @@ Config = Annotated[
     ),
 ]
 
+YesFlag = Annotated[
+    bool,
+    Option(
+        "-y",
+        "--yes",
+        help="Delete runs without prompting.",
+    ),
+]
+
 
 def publish(
+    board: Board = "",
     runs: RunArgs = None,
     where: Where = "",
     config: Config = "",
+    yes: YesFlag = False,
 ):
     """Publish a board."""
     from .publish_impl import publish, Args
 
-    publish(Args(runs or [], where, config))
+    publish(Args(board, runs or [], where, config, yes))
