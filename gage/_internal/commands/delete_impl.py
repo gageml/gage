@@ -34,7 +34,7 @@ def runs_delete(args: Args):
     runs, from_count = selected_runs(args)
     if not runs:
         cli.exit_with_error("Nothing selected")
-    _verify_delete(args, runs)
+    _user_confirm_delete(args, runs)
     deleted = var.delete_runs(_strip_index(runs), args.permanent)
     cli.err(_deleted_msg(deleted, args))
 
@@ -46,7 +46,7 @@ def _apply_implicit_all(args: Args):
     return args
 
 
-def _verify_delete(args: Args, runs: list[tuple[int, Run]]):
+def _user_confirm_delete(args: Args, runs: list[tuple[int, Run]]):
     if args.yes:
         return
     table = runs_table(runs)
