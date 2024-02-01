@@ -24,3 +24,8 @@ config = "summary.py"
 [alt-summary-toml.summary]
 
 filename = "zefile.toml"
+
+[alt-summary-metadata]
+
+description = "Write summary vals with metadata"
+exec = "python summary_metadata.py"

@@ -100,6 +100,34 @@ Show CSV for the board.
     ...,...,default,...,completed,,1,example,example,1
     <0>
 
+## Summary Metadata
+
+Summary values can be written either directly or as a `value` attribute
+of a mapping. Mappings may include additional metadata alongside the
+value. The `alt-summary-metadata` operation illustrates this.
+
+    >>> run("gage run alt-summary-metadata -y")
+    <0>
+
+    >>> run("gage cat -p summary.json")
+    {
+      "metrics": {
+        "foo": {
+          "color": "green",
+          "value": 1.123
+        }
+      }
+    }
+    <0>
+
+When rendering a board as CSV content, values are selected from
+mappings.
+
+    >>> run("gage board --csv 1")  # +parse
+    run:id,run:name,run:operation,run:started,run:status,run:label,metric:foo
+    {:run_id},{:run_name},alt-summary-metadata,{:isodate},completed,,1.123
+    <0>
+
 ## Group Select
 
     >>> use_project(sample("projects", "boards"))
@@ -255,7 +283,7 @@ Group must specify either `min` or `max` but not both.
     attribute, metric, or config
     <1>
 
-## Command validation
+## Command Validation
 
     >>> run("gage board")  # -space
     You must specify either --csv or --json for this command. Graphical

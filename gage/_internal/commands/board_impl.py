@@ -107,7 +107,15 @@ def _print_csv_and_exit(data: dict[str, Any]):
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fields)
     writer.writerow(headers)
-    for row in data["rowData"]:
-        writer.writerow(row)
+    for row in cast(list[dict[str, Any]], data["rowData"]):
+        writer.writerow(_csv_row_values(row))
     cli.out(buf.getvalue())
     raise SystemExit(0)
+
+
+def _csv_row_values(row: dict[str, Any]):
+    return {key: _csv_cell_value(val) for key, val in row.items()}
+
+
+def _csv_cell_value(val: Any) -> Any:
+    return val.get("value") if isinstance(val, dict) else val
