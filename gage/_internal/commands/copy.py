@@ -58,12 +58,14 @@ AllFlag = Annotated[
     ),
 ]
 
-YesFlag = Annotated[
+SyncFlag = Annotated[
     bool,
     Option(
-        "-y",
-        "--yes",
-        help="Delete runs without prompting.",
+        "--sync",
+        help=(
+            "Synchronize contents in destination with source. Deletes runs "
+            "in destination that are not in source."
+        ),
     ),
 ]
 
@@ -76,6 +78,15 @@ Verbose = Annotated[
     ),
 ]
 
+YesFlag = Annotated[
+    bool,
+    Option(
+        "-y",
+        "--yes",
+        help="Delete runs without prompting.",
+    ),
+]
+
 
 def copy(
     runs: RunSpecs = None,
@@ -83,8 +94,9 @@ def copy(
     src: Src = "",
     where: Where = "",
     all: AllFlag = False,
-    yes: YesFlag = False,
+    sync: SyncFlag = False,
     verbose: Verbose = None,
+    yes: YesFlag = False,
 ):
     """Copy runs.
 
@@ -108,6 +120,7 @@ def copy(
             where,
             all,
             yes,
+            sync,
             sum(verbose or []),
         )
     )

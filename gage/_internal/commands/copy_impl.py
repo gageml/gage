@@ -35,6 +35,7 @@ class Args(NamedTuple):
     where: str
     all: bool
     yes: bool
+    sync: bool
     verbose: int
 
 
@@ -59,6 +60,10 @@ def copy(args: Args):
 def _copy_to(args: Args):
     runs = _selected_runs(args)
     _user_confirm_copy_to(args, runs)
+    _copy_to_([run for index, run in runs], args.dest, args.sync, args.verbose)
+
+
+def _copy_to_(runs: list[Run], dest: str, sync: bool = False, verbose: int = 0):
     pre_copy_status = cli.status("Preparing copy")
     pre_copy_status.start()
     src_dir, includes, total_bytes = _prepare_copy(runs)
@@ -67,7 +72,7 @@ def _copy_to(args: Args):
     nothing_copied = False
     try:
         for total_copied, output in _rclone_copy_to(
-            src_dir, args.dest, includes, args.verbose
+            src_dir, dest, includes, sync, verbose
         ):
             if total_copied == -1:
                 nothing_copied = True
@@ -96,7 +101,7 @@ def _copy_to(args: Args):
         cli.err(f"Copied {runs_count}")
 
 
-def _prepare_copy(runs: list[IndexedRun]):
+def _prepare_copy(runs: list[Run]):
     src_dir, includes = _src_run_includes(runs)
     total_bytes = _rclone_size(src_dir, includes)
     return src_dir, includes, total_bytes
@@ -125,7 +130,7 @@ def _selected_runs(args: Args):
     return runs
 
 
-def _user_confirm_copy_to(args: Args, runs: list[tuple[int, Run]]):
+def _user_confirm_copy_to(args: Args, runs: list[IndexedRun]):
     if args.yes:
         return
     table = runs_table(runs)
@@ -137,11 +142,11 @@ def _user_confirm_copy_to(args: Args, runs: list[tuple[int, Run]]):
         raise SystemExit(0)
 
 
-def _src_run_includes(runs: list[IndexedRun]):
+def _src_run_includes(runs: list[Run]):
     assert runs
     src_root = None
     includes: list[str] = []
-    for index, run in runs:
+    for run in runs:
         for src_dir in _run_src_dirs(run):
             src_parent, name = os.path.split(src_dir)
             if not src_root:
@@ -189,7 +194,9 @@ def _rclone_size(src: str, includes: list[str]):
 _TRANSFERRED_P = re.compile(r"([\d\.]+) ([\S]+) /")
 
 
-def _rclone_copy_to(src: str, dest: str, includes: list[str], verbose: int):
+def _rclone_copy_to(
+    src: str, dest: str, includes: list[str], sync: bool = False, verbose: int = 0
+):
     """Use rclone to copy to a location.
 
     `includes` is a list of patterns under `src` to include. Anything is
@@ -219,11 +226,12 @@ def _rclone_copy_to(src: str, dest: str, includes: list[str], verbose: int):
       impact performance even with verbose logging.
 
     """
+    sync_opts = ["--delete-excluded"] if sync else []
     verbose_opts = ["-" + "v" * verbose] if verbose else ["-v"]
-    p = subprocess.Popen(
+    cmd = (
         [
             "rclone",
-            "copy",
+            "sync" if sync else "copy",
             src,
             dest,
             "--include-from",
@@ -234,8 +242,15 @@ def _rclone_copy_to(src: str, dest: str, includes: list[str], verbose: int):
             "--stats-one-line",
             "--stats-log-level",
             "DEBUG",
+            # Options to improve performance (ruled out --no-traverse)
+            "--size-only",
         ]
-        + verbose_opts,
+        + sync_opts
+        + verbose_opts
+    )
+    log.debug("Copy cmd: %s", cmd)
+    p = subprocess.Popen(
+        cmd,
         text=True,
         stdin=subprocess.PIPE,
         stderr=subprocess.STDOUT,
