@@ -50,6 +50,7 @@ def _init_board(args: Args) -> BoardDef:
     if not args.config:
         return BoardDef({})
     try:
+        log.info("Loading board from %s", args.config)
         return load_board_def(args.config)
     except FileNotFoundError:
         cli.exit_with_error(f"Config file \"{args.config}\" does not exist")
@@ -61,10 +62,18 @@ def _init_board(args: Args) -> BoardDef:
 
 def _board_runs(board: BoardDef, args: Args):
     runs, total = selected_runs(args)
-    return filter_board_runs([run for index, run in runs], board)
+    filtered = filter_board_runs([run for index, run in runs], board)
+    log.debug(
+        "Selected %i run(s) for using command options; "
+        "selected %i using board config criteria",
+        len(runs),
+        len(filtered),
+    )
+    return filtered
 
 
 def _board_data(board: BoardDef, runs: list[Run]):
+    log.info("Generating board data for %i run(s)", len(runs))
     try:
         return board_data(board, runs)
     except MissingGroupBy:
