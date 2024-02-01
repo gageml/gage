@@ -188,8 +188,7 @@ def _default_progress_cols() -> tuple[rich.progress.ProgressColumn, ...]:
     )
 
 
-class Status(Protocol):
-    pass
+Status = rich.status.Status
 
 
 class _TimeRemainingColumn(rich.progress.TimeRemainingColumn):
