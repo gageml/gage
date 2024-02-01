@@ -198,7 +198,7 @@ def parse_datetime(s: str):
     return datetime.datetime.strptime(s, "%x %X").isoformat()
 
 
-@parse_type("isodate", r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{4}(?:\d{2})?)?")
+@parse_type("isodate", r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.]\d+)?(?:[+-]\d{4}(?:\d{2})?)?")
 def parse_isodate(s: str):
     return datetime.datetime.fromisoformat(_format_tz(s)).isoformat()
 
@@ -216,7 +216,7 @@ def parse_table_border(s: str):
 def _format_tz(s: str):
     # Add ':' to tz component for parsing by `fromisoformat`
     tz = s[19:]
-    if not tz:
+    if not tz or tz[0] == ".":  # dot -> tz is actually a decimal part
         return s
     if len(tz) == 5:
         return s[:19] + tz[:3] + ":" + tz[3:]

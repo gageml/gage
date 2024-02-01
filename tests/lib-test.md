@@ -72,6 +72,11 @@ Valid formats but not supported:
     >>> print("2023-09-03T11:21:33-05:00:30")  # +fails
     {:isodate}
 
+ISO dates with decimals:
+
+    >>> print("2023-09-03T11:21:33.123456")
+    {:isodate}
+
 ### Timestamps
 
 The `timestamp` pattern matches epoch microsecond timestamps.
