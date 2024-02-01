@@ -92,8 +92,10 @@ def list_runs(
     deleted: bool = False,
 ):
     root = root or runs_dir()
+    log.debug("Getting runs from %s", root)
     filter = filter or _all_runs_filter
-    runs = [run for run in _iter_runs(root, deleted) if filter(run)]
+    runs_iter = _iter_runs(root, deleted)
+    runs = [run for run in runs_iter if filter(run)] if filter else list(runs_iter)
     if not sort:
         return runs
     return sorted(runs, key=_run_sort_key(sort))

@@ -4,6 +4,8 @@ from typing import *
 
 from ..types import *
 
+import logging
+
 import human_readable
 
 from .. import cli
@@ -16,6 +18,8 @@ from ..run_util import meta_opref
 from ..run_util import run_label
 from ..run_util import run_status
 from ..run_util import run_timestamp
+
+log = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -84,6 +88,7 @@ def _runs_filter(args: OneRunSupport | SelectRunsSupport):
     if not args.where:
         return None
     try:
+        log.debug("Filtering runs matching '%s'", args.where)
         return lang.parse_where_expr(args.where)
     except ValueError as e:
         cli.exit_with_error(f"Cannot use where expression {args.where!r}: {e}")
@@ -96,7 +101,9 @@ def _runs_filter(args: OneRunSupport | SelectRunsSupport):
 
 def selected_runs(args: SelectRunsSupport, deleted: bool = False):
     runs = var.list_runs(
-        sort=["-timestamp"], filter=_runs_filter(args), deleted=deleted
+        sort=["-timestamp"],
+        filter=_runs_filter(args),
+        deleted=deleted,
     )
     selected = _select_runs(runs, args)
     return selected, len(runs)
@@ -105,9 +112,9 @@ def selected_runs(args: SelectRunsSupport, deleted: bool = False):
 def _select_runs(runs: list[Run], args: SelectRunsSupport) -> list[IndexedRun]:
     if not args.runs:
         return [(i + 1, run) for i, run in enumerate(runs)]
-    index_lookup = {run: i + 1 for i, run in enumerate(runs)}
+    index_lookup = {run.id: i + 1 for i, run in enumerate(runs)}
     selected = run_select.select_runs(runs, args.runs)
-    return [(index_lookup[run], run) for run in selected]
+    return [(index_lookup[run.id], run) for run in selected]
 
 
 # =================================================================
