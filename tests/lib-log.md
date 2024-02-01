@@ -30,7 +30,51 @@ and our logging function:
     ...     test_logger.warning("warning entry")
     ...     test_logger.error("error entry")
 
-## Initializing logging
+## Logging Scheme Rationale
+
+By default, INFO and lower logging levels are not shown to the user. To
+show these levels, the user must specify `-v/--verbose` or `-vv` to show
+INFO and DEBUG levels respectively.
+
+WARN levels and above are shown to users.
+
+To ensure that a user sees a message, use `cli.out` or `cli.err`. These
+are the designated user-facing interface functions. Calls to these
+functions MUST only be made from command implementations. They MUST
+NOT be called from anywhere else.
+
+To show information from non-command code, use logging.
+
+Use the following guidelines when choosing a log level:
+
+Use `DEBUG` for low-level information that is used only when debugging
+issues.
+
+Use `INFO` to provide user-facing descriptions of what is occurring.
+Think of `INFO` as progress status from the logging subsystem.
+
+Use `WARN` to show error or unexpected state details when the system
+continues to run.
+
+Use `ERROR` to show information prior to exiting the system with an
+error code.
+
+Use `EXCEPTION` only when debug level logging is enabled to show
+exception tracebacks. Use this pattern:
+
+```python
+if log.getEffectiveLevel() <= logging.DEBUG:
+    log.exception("<Additional contexts for the error>")
+    # Optionally perform additional tasks before exiting or re-raising
+    raise  # or raise SystemExit(<error_code>)
+```
+
+When logging, always capitalize the first word, unless the word is a
+term that cannot be capitalized. Do not end log messages with
+punctuation. The intent is to present a user-facing message that is not
+a full sentence.
+
+## Initializing Logging
 
 We use the `init_logging` function to initialize the logging
 facility. First, let's save the current settings so we can restore
@@ -56,7 +100,7 @@ Debug is not logged by default:
     WARNING: warning entry
     ERROR: error entry
 
-## Enable debug
+## Enable Debug
 
 Re-init with debug enabled.
 
@@ -89,7 +133,7 @@ and errors in red (color code 31).
     [33mWARNING: warning entry[0m
     [31mERROR: error entry[0m
 
-## Custom formats
+## Custom Formats
 
 Specify custom level formats.
 
@@ -124,7 +168,7 @@ Define the WARN and ERROR formats.
     !! warning entry
     !!! error entry
 
-## Restoring logging
+## Restoring Logging
 
 Restore logging to its defaults.
 

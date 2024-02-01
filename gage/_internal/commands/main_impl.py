@@ -16,7 +16,7 @@ class Args(NamedTuple):
     version: bool
     cwd: str
     runs_dir: str
-    debug: bool
+    verbose: int
 
 
 def main(args: Args):
@@ -35,7 +35,10 @@ def _init_runs_dir(args: Args):
 
 
 def _init_logging(args: Args):
-    log.init_logging(log.DEBUG if args.debug else log.WARN)
+    log_level = (
+        log.DEBUG if args.verbose >= 2 else log.INFO if args.verbose == 1 else log.WARN
+    )
+    log.init_logging(log_level)
 
 
 def _apply_cwd(cwd: str):

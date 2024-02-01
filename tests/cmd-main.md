@@ -10,11 +10,11 @@ Running `gage` without arguments shows help.
       Gage ML command line interface.
     ⤶
     Options:
-      --version    Print program version and exit.
-      -C path      Run command from a different directory.
-      --runs path  Use a different location for runs.
-      --debug      Show debug messages.
-      -h, --help   Show this message and exit.
+      --version      Print program version and exit.
+      -C path        Run command from a different directory.
+      --runs path    Use a different location for runs.
+      -v, --verbose  Show more information. Use twice for debug logging.
+      -h, --help     Show this message and exit.
     ⤶
     Commands:
       associate        Associate a run with a project directory.

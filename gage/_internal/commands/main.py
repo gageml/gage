@@ -53,11 +53,12 @@ RunsDir = Annotated[
     ),
 ]
 
-DebugFlag = Annotated[
-    bool,
+Verbose = Annotated[
+    Optional[list[bool]],
     Option(
-        "--debug",
-        help="Show debug messages.",
+        "-v",
+        "--verbose",
+        help="Show more information. Use twice for debug logging.",
     ),
 ]
 
@@ -66,13 +67,13 @@ def main(
     version: VersionFlag = False,
     cwd: Cwd = "",
     runs_dir: RunsDir = "",
-    debug: DebugFlag = False,
+    verbose: Verbose = None,
 ):
     """Gage ML command line interface."""
 
     from .main_impl import main, Args
 
-    main(Args(version, cwd, runs_dir, debug))
+    main(Args(version, cwd, runs_dir, sum(verbose or [])))
 
 
 def main_app():
