@@ -5,16 +5,6 @@ from typing import *
 from typer import Argument
 from typer import Option
 
-Board = Annotated[
-    str,
-    Option(
-        "--board",
-        metavar="NAME",
-        help="Board name to publish. Required if name is not specified in board config.",
-    ),
-]
-
-
 RunArgs = Annotated[
     Optional[list[str]],
     Argument(
@@ -26,6 +16,16 @@ RunArgs = Annotated[
         show_default=False,
     ),
 ]
+
+Board = Annotated[
+    str,
+    Option(
+        "--board",
+        metavar="NAME",
+        help="Board name to publish. Required if name is not specified in board config.",
+    ),
+]
+
 
 Where = Annotated[
     str,
@@ -47,6 +47,14 @@ Config = Annotated[
     ),
 ]
 
+SkipRunsFlag = Annotated[
+    bool,
+    Option(
+        "--skip-runs",
+        help="Don't copy runs.",
+    ),
+]
+
 YesFlag = Annotated[
     bool,
     Option(
@@ -62,9 +70,10 @@ def publish(
     runs: RunArgs = None,
     where: Where = "",
     config: Config = "",
+    skip_runs: SkipRunsFlag = False,
     yes: YesFlag = False,
 ):
     """Publish a board."""
     from .publish_impl import publish, Args
 
-    publish(Args(board, runs or [], where, config, yes))
+    publish(Args(board, runs or [], where, config, skip_runs, yes))

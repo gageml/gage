@@ -2,6 +2,8 @@
 
 from typing import *
 
+from gage._internal.file_util import safe_delete_tree
+
 from ..types import *
 
 import json
@@ -9,6 +11,8 @@ import logging
 import os
 import subprocess
 import tempfile
+
+import requests
 
 from .. import cli
 
@@ -22,12 +26,15 @@ from .copy_impl import _copy_to_
 
 log = logging.getLogger()
 
+DEFAULT_GAGE_API = "https://beta.gage.live/api"
+
 
 class Args(NamedTuple):
     board: str
     runs: list[str]
     where: str
     config: str
+    skip_runs: bool
     yes: bool
 
 
@@ -41,57 +48,73 @@ class BoardDest(NamedTuple):
 def publish(args: Args):
     board_args = BoardArgs(args.runs, args.where, args.config, True, False)
     board = _init_board(board_args)
-    board_name = _board_name(args, board)
+    board_id = _board_id(args, board)
     runs = _board_runs(board, board_args)
-    _user_confirm_publish(args, board_name, runs)
     with cli.status() as status:
         status.update("Resolving board details")
-        board_dest = _board_dest(board_name)
+        board_dest = _board_dest(board_id)
+    _user_confirm_publish(args, board, board_id, runs)
+    with cli.status() as status:
         status.update("Publishing board data")
-        rclone_conf = _publish_board_data(board, runs, board_dest, status)
-    _copy_runs(runs, rclone_conf, board_dest)
+        rclone_conf, rclone_env = _publish_board_data(board, runs, board_dest, status)
+    if not args.skip_runs:
+        _copy_runs(runs, rclone_conf, rclone_env, board_dest)
+    _delete_conf_tmp(rclone_conf)
 
 
-def _board_name(args: Args, board: BoardDef):
-    name = args.board or board.get_name()
-    if not name:
+def _board_id(args: Args, board: BoardDef):
+    id = args.board or board.get_id()
+    if not id:
         if args.config:
             cli.exit_with_error(
-                "Unknown board name: use '--board' to specify the board "
-                f"to publish or specify a name in {args.config}"
+                "Missing board ID: use '--board <id>' or specify an 'id' "
+                f"attribute in {args.config}"
             )
         else:
             cli.exit_with_error(
-                "Unknown board name: use '--board' to specify the board " "to publish"
+                "Missing board ID: use '--board <id>' to specify the board to publish"
             )
-    return name
+    return id
 
 
-def _user_confirm_publish(args: Args, name: str, runs: list[Run]):
+def _user_confirm_publish(args: Args, board: BoardDef, board_id: str, runs: list[Run]):
     if args.yes:
         return
+    board_desc = board.get_name() or f"board {board_id}"
+    skip_suffix = " (runs are not copied)" if args.skip_runs else ""
     cli.err(
         f"You are about to publish {len(runs):,} {'run' if len(runs) == 1 else 'runs'} "
-        f"to {name}"
+        f"to {board_desc} on Gage Live{skip_suffix}"
     )
     cli.err()
     if not cli.confirm(f"Continue?"):
         raise SystemExit(0)
 
 
-def _board_dest(board_name: str):
-    import time
-
-    time.sleep(1.25)
-
-    # TODO - lookup this from API using something secure!
-
-    return BoardDest(
-        "https://d5f5a59ff84ba96f4eba7a056261fd17.r2.cloudflarestorage.com",
-        "gage-boards",
-        "b3d4bd0de70d2a583e257be5045f1043",
-        "9ba1ee5bbe23b7c7ef346e864d38e786f5d8756b1586e8393995708e9d33b5d8",
-    )
+def _board_dest(board_id: str):
+    token = os.getenv("GAGE_TOKEN")
+    if not token:
+        cli.exit_with_error(
+            "Missing API token: specify GAGE_TOKEN environment variable"
+        )
+    endpoint = os.getenv("GAGE_API") or DEFAULT_GAGE_API
+    url = f"{endpoint}/v1/boards/{board_id}/creds"
+    headers = {"Authorization": f"Bearer {token}"}
+    log.debug("Getting board credentials at %s", url)
+    try:
+        resp = requests.get(url, headers=headers)
+    except requests.HTTPError as e:
+        cli.exit_with_error(f"Error publishing to {endpoint}: {e}")
+    else:
+        data = json.loads(resp.content)
+        board_dest = BoardDest(
+            data["endpoint"],
+            data["bucket"],
+            data["accessKeyId"],
+            data["secretAccessKey"],
+        )
+        log.info("Publishing to %s/%s", board_dest.endpoint, board_dest.bucket)
+        return board_dest
 
 
 RCLONE_CONF = """
@@ -109,6 +132,7 @@ def _publish_board_data(
 ):
     data = _board_data(board, runs)
     tmp = tempfile.mkdtemp(prefix="gage-publish-")
+    log.debug("Using %s for rclone config", tmp)
     data_path = os.path.join(tmp, "data.json")
     with open(data_path, "w") as f:
         json.dump(data, f)
@@ -123,14 +147,14 @@ def _publish_board_data(
         "data.json",
         f"gage:{board_dest.bucket}/board.json",
     ]
-    env = {
+    conf_env = {
         "RCLONE_CONFIG_GAGE_ACCESS_KEY_ID": board_dest.access_key_id,
         "RCLONE_CONFIG_GAGE_SECRET_ACCESS_KEY": board_dest.secret_access_key,
     }
     try:
         subprocess.run(
             cmd,
-            env=env,
+            env=conf_env,
             cwd=tmp,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -142,9 +166,18 @@ def _publish_board_data(
         log.error(e.output)
         raise SystemExit(e.returncode)
     else:
-        return conf_path
+        return conf_path, conf_env
 
 
-def _copy_runs(runs: list[Run], rclone_conf_path: str, board_dest: BoardDest):
+def _copy_runs(
+    runs: list[Run], conf_path: str, conf_env: dict[str, str], board_dest: BoardDest
+):
     dest = f"gage:{board_dest.bucket}/runs"
-    _copy_to_(runs, dest, sync=True)
+    _copy_to_(runs, dest, sync=True, config_path=conf_path, env=conf_env)
+
+
+def _delete_conf_tmp(conf_path: str):
+    tmp_root = tempfile.gettempdir()
+    conf_tmp = os.path.dirname(conf_path)
+    assert conf_tmp.startswith(tmp_root), (conf_path, tmp_root)
+    safe_delete_tree(conf_tmp)

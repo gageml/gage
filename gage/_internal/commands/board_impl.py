@@ -8,6 +8,7 @@ import csv
 import io
 import json
 import logging
+import sys
 
 from .. import cli
 
@@ -29,10 +30,7 @@ class Args(NamedTuple):
 
 def show_board(args: Args):
     if not args.json and not args.csv:
-        cli.exit_with_error(
-            "You must specify either --csv or --json for this command. "
-            "Graphical boards are not yet supported."
-        )
+        cli.exit_with_error("You must specify either --csv or --json for this command.")
     if args.json and args.csv:
         cli.exit_with_error("You can't use both --json and --csv options.")
     board = _init_board(args)
@@ -93,7 +91,7 @@ def _board_data(board: BoardDef, runs: list[Run]):
 
 
 def _print_json_and_exit(data: dict[str, Any]):
-    cli.out(json.dumps(data, indent=2, sort_keys=True))
+    sys.stdout.write(json.dumps(data, indent=2, sort_keys=True))
     raise SystemExit(0)
 
 
@@ -109,7 +107,7 @@ def _print_csv_and_exit(data: dict[str, Any]):
     writer.writerow(headers)
     for row in cast(list[dict[str, Any]], data["rowData"]):
         writer.writerow(_csv_row_values(row))
-    cli.out(buf.getvalue())
+    sys.stdout.write(buf.getvalue())
     raise SystemExit(0)
 
 
@@ -118,4 +116,13 @@ def _csv_row_values(row: dict[str, Any]):
 
 
 def _csv_cell_value(val: Any) -> Any:
-    return val.get("value") if isinstance(val, dict) else val
+    if isinstance(val, dict):
+        return _csv_cell_value(val.get("value"))
+    elif isinstance(val, list):
+        return ",".join([_csv_cell_value(x) for x in val])
+    elif val is True:
+        return 1
+    elif val is False:
+        return 0
+    else:
+        return val

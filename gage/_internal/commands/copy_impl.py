@@ -63,7 +63,14 @@ def _copy_to(args: Args):
     _copy_to_([run for index, run in runs], args.dest, args.sync, args.verbose)
 
 
-def _copy_to_(runs: list[Run], dest: str, sync: bool = False, verbose: int = 0):
+def _copy_to_(
+    runs: list[Run],
+    dest: str,
+    sync: bool = False,
+    verbose: int = 0,
+    config_path: str | None = None,
+    env: dict[str, str] | None = None,
+):
     pre_copy_status = cli.status("Preparing copy")
     pre_copy_status.start()
     src_dir, includes, total_bytes = _prepare_copy(runs)
@@ -72,7 +79,13 @@ def _copy_to_(runs: list[Run], dest: str, sync: bool = False, verbose: int = 0):
     nothing_copied = False
     try:
         for total_copied, output in _rclone_copy_to(
-            src_dir, dest, includes, sync, verbose
+            src_dir,
+            dest,
+            includes,
+            sync,
+            verbose,
+            config_path,
+            env,
         ):
             if total_copied == -1:
                 nothing_copied = True
@@ -195,7 +208,13 @@ _TRANSFERRED_P = re.compile(r"([\d\.]+) ([\S]+) /")
 
 
 def _rclone_copy_to(
-    src: str, dest: str, includes: list[str], sync: bool = False, verbose: int = 0
+    src: str,
+    dest: str,
+    includes: list[str],
+    sync: bool = False,
+    verbose: int = 0,
+    config_path: str | None = None,
+    env: dict[str, str] | None = None,
 ):
     """Use rclone to copy to a location.
 
@@ -226,12 +245,15 @@ def _rclone_copy_to(
       impact performance even with verbose logging.
 
     """
+    rclone_cmd = "sync" if sync else "copy"
+    config_opts = ["--config", config_path] if config_path else []
     sync_opts = ["--delete-excluded"] if sync else []
     verbose_opts = ["-" + "v" * verbose] if verbose else ["-v"]
+    env = {**os.environ, **(env if env else {})}
     cmd = (
         [
             "rclone",
-            "sync" if sync else "copy",
+            rclone_cmd,
             src,
             dest,
             "--include-from",
@@ -245,12 +267,14 @@ def _rclone_copy_to(
             # Options to improve performance (ruled out --no-traverse)
             "--size-only",
         ]
+        + config_opts
         + sync_opts
         + verbose_opts
     )
     log.debug("Copy cmd: %s", cmd)
     p = subprocess.Popen(
         cmd,
+        env=env,
         text=True,
         stdin=subprocess.PIPE,
         stderr=subprocess.STDOUT,

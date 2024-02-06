@@ -26,6 +26,7 @@ dependencies = [
     "psutil==5.9.5",
     "python-ulid==2.2.0",
     "pyyaml==6.0.1",
+    "requests==2.31.0",
     "rich==13.5.2",
     "setuptools==68.2.2",
     "tomli==2.0.1",

@@ -497,6 +497,9 @@ class BoardDef:
     def __init__(self, data: dict[str, Any]):
         self._data = data
 
+    def get_id(self) -> str | None:
+        return cast(str, self._data.get("id"))
+
     def get_name(self) -> str | None:
         return cast(str, self._data.get("name"))
 
