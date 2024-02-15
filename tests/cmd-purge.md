@@ -51,7 +51,7 @@ Delete the run.
 Attempt to purge runs without specifying a run or `--all`.
 
     >>> run("gage purge -y")
-    Specify a deleted run to remove or use '--all'.
+    gage: Specify a deleted run to remove or use '--all'.
     ⤶
     Use 'gage list --deleted' to show deleted runs.
     ⤶

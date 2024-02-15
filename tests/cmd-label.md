@@ -76,19 +76,19 @@ Clear all labels.
 ## Errors
 
     >>> run("gage label -y")
-    Specify either '--set' or '--clear'
+    gage: Specify either '--set' or '--clear'
     ⤶
     Try 'gage label --help' for help.
     <1>
 
     >>> run("gage label 1 -y")
-    Specify either '--set' or '--clear'
+    gage: Specify either '--set' or '--clear'
     ⤶
     Try 'gage label --help' for help.
     <1>
 
     >>> run("gage label --set Hi -y")
-    Specify a run to modify or use '--all'.
+    gage: Specify a run to modify or use '--all'.
     ⤶
     Use 'gage list' to show available runs.
     ⤶
@@ -96,7 +96,7 @@ Clear all labels.
     <1>
 
     >>> run("gage label --clear -y")
-    Specify a run to modify or use '--all'.
+    gage: Specify a run to modify or use '--all'.
     ⤶
     Use 'gage list' to show available runs.
     ⤶

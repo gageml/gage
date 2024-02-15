@@ -41,7 +41,7 @@ Generate a run.
 Attempt to delete without specifying a run or `--all`.
 
     >>> run("gage rm -y")
-    Specify a run to delete or use '--all'.
+    gage: Specify a run to delete or use '--all'.
     ⤶
     Use 'gage list' to show available runs.
     ⤶
@@ -51,7 +51,7 @@ Attempt to delete without specifying a run or `--all`.
 Attempt to delete a non-existing run.
 
     >>> run("gage rm 9z -y")
-    Nothing selected
+    gage: Nothing selected
     <1>
 
 List deleted runs.
@@ -141,7 +141,7 @@ Generate some runs.
 Guild complains when a run spec or `--all` isn't specified.
 
     >>> run("gage delete -y")
-    Specify a run to delete or use '--all'.
+    gage: Specify a run to delete or use '--all'.
     ⤶
     Use 'gage list' to show available runs.
     ⤶

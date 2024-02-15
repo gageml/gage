@@ -122,7 +122,7 @@ Delete the comment.
 When adding a comment, a run specifier is required.
 
     >>> run("gage comment -m 'A thought'")
-    Specify a run to modify or use '--all'.
+    gage: Specify a run to modify or use '--all'.
     ⤶
     Use 'gage list' to show available runs.
     ⤶

@@ -73,7 +73,7 @@ If a directory is specified, `check` looks for a Gage file.
 If a specified path doesn't exist, `check` exits with an error.
 
     >>> run("gage check not-there.toml")
-    File "not-there.toml" does not exist
+    gage: File "not-there.toml" does not exist
     <1>
 
 Generate an invalid Gage file.
@@ -113,24 +113,24 @@ Matching spec:
 Non matching spec:
 
     >>> run(f"gage check --version '<{__version__}'")  # +parse
-    Version mismatch: current version '{:ver}' does not match '<{:ver}'
+    gage: Version mismatch: current version '{:ver}' does not match '<{:ver}'
     <1>
 
     >>> run(f"gage check --version '>{__version__}'")  # +parse
-    Version mismatch: current version '{:ver}' does not match '>{:ver}'
+    gage: Version mismatch: current version '{:ver}' does not match '>{:ver}'
     <1>
 
     >>> run("gage check --version 999")  # +parse
-    Version mismatch: current version '{:ver}' does not match '999'
+    gage: Version mismatch: current version '{:ver}' does not match '999'
     <1>
 
     >>> run("gage check --version foobar")
-    Invalid version spec 'foobar': missing comparison operator (==, <, >, etc.)
+    gage: Invalid version spec 'foobar': missing comparison operator (==, <, >, etc.)
     See https://bit.ly/45AerAj for help with version specs.
     <1>
 
     >>> run("gage check --version ==foobar")  # -space
-    Invalid version spec '==foobar': expected end or semicolon (after name and
+    gage: Invalid version spec '==foobar': expected end or semicolon (after name and
     no valid version specifier)
     See https://bit.ly/45AerAj for help with version specs.
     <1>

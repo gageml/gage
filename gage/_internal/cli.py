@@ -107,13 +107,11 @@ def err(val: rich.console.RenderableType = "", style: str | None = None):
 
 
 def exit_with_error(msg: rich.console.RenderableType, code: int = 1) -> NoReturn:
-    err(msg)
-    raise SystemExit(code)
+    raise SystemExit(msg, code)
 
 
 def exit_with_message(msg: rich.console.RenderableType) -> NoReturn:
-    err(msg)
-    raise SystemExit(0)
+    raise SystemExit(msg, 0)
 
 
 def text(s: str, style: str | rich.style.Style = ""):

@@ -13,7 +13,7 @@ Use `load_gagefile()` to load a Gage file.
 An empty file is invalid JSON and can't be loaded.
 
     >>> run("gage check empty.json")
-    Error loading empty.json: Expecting value: line 1 column 1 (char 0)
+    gage: Error loading empty.json: Expecting value: line 1 column 1 (char 0)
     <1>
 
 ## Empty object
@@ -170,8 +170,9 @@ Comments are supported but must be on their own line.
     jsonc-valid.json is a valid Gage file
     <0>
 
-    >>> run("gage check jsonc-invalid.json")
-    Error loading jsonc-invalid.json: Expecting ',' delimiter: line 2 column 15 (char 16)
+    >>> run("gage check jsonc-invalid.json")  # -space
+    gage: Error loading jsonc-invalid.json: Expecting ',' delimiter: line 2
+    column 15 (char 16)
     <1>
 
 ## Runs dir

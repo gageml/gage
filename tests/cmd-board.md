@@ -266,29 +266,29 @@ rather than attribute.
 Group select requires a `group` field spec.
 
     >>> run("gage board --json --config group-missing-group.yaml")  # -space
-    group-select for board is missing group-by field: expected run-attr,
+    gage: group-select for board is missing group-by field: expected run-attr,
     attribute, metric, or config
     <1>
 
 Group must specify either `min` or `max` but not both.
 
     >>> run("gage board --json --config group-missing-min-max.yaml")  # -space
-    group-select for board must specify either min or max fields
+    gage: group-select for board must specify either min or max fields
     <1>
 
 `min` or `max` specs require valid field references.
 
     >>> run("gage board --json --config group-missing-min-field.yaml")  # -space
-    group-select selector (min/max) for board is missing field: expected run-attr,
-    attribute, metric, or config
+    gage: group-select selector (min/max) for board is missing field: expected
+    run-attr, attribute, metric, or config
     <1>
 
 ## Command Validation
 
     >>> run("gage board")  # -space
-    You must specify either --csv or --json for this command.
+    gage: You must specify either --csv or --json for this command.
     <1>
 
     >>> run("gage board --csv --json")
-    You can't use both --json and --csv options.
+    gage: You can't use both --json and --csv options.
     <1>

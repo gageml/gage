@@ -51,7 +51,7 @@ Delete the run.
 Attempt to restore runs without specifying a run or `--all`.
 
     >>> run("gage restore -y")
-    Specify a deleted run to restore or use '--all'.
+    gage: Specify a deleted run to restore or use '--all'.
     ⤶
     Use 'gage list --deleted' to show deleted runs.
     ⤶

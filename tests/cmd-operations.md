@@ -35,5 +35,5 @@ Show operations for non-existing Gage file.
     >>> cd(make_temp_dir())
 
     >>> run("gage ops")
-    No operations defined for the current directory
+    gage: No operations defined for the current directory
     <1>
