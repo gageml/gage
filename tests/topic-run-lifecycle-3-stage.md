@@ -213,7 +213,8 @@ The runner log contains the applied include and exclude patterns.
       ['**/* text size<10000 max-matches=500',
        '-**/.* dir',
        '-**/* dir sentinel=bin/activate',
-       '-**/* dir sentinel=.nocopy']
+       '-**/* dir sentinel=.nocopy',
+       '-summary.json']
     Starting stage-sourcecode (see output/10_sourcecode):
       ['...',
        '-c',

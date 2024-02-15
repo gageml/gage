@@ -14,6 +14,7 @@ operation.
     | | -**/.* dir                           |       |
     | | -**/* dir sentinel=bin/activate      |       |
     | | -**/* dir sentinel=.nocopy           |       |
+    | | -summary.json                        |       |
     |                                                |
     |                                                |
     | | matched files  |                             |
@@ -25,7 +26,7 @@ operation.
     |                                                |
     <0>
 
-    >>> run("gage run default --preview-sourcecode --json")  # +parse
+    >>> run("gage run default --preview-sourcecode --json")  # +parse +diff
     {
       "sourcecode": {
         "src_dir": "{:path}",
@@ -33,7 +34,8 @@ operation.
           "**/* text size<10000 max-matches=500",
           "-**/.* dir",
           "-**/* dir sentinel=bin/activate",
-          "-**/* dir sentinel=.nocopy"
+          "-**/* dir sentinel=.nocopy",
+          "-summary.json"
         ],
         "paths": [
           ".gitignore",
@@ -59,7 +61,7 @@ operation.
     }
     <0>
 
-    >>> run("gage run exclude-data --preview-sourcecode --json")  # +parse
+    >>> run("gage run exclude-data --preview-sourcecode --json")  # +parse +diff
     {
       "sourcecode": {
         "src_dir": "{:path}",
@@ -68,6 +70,7 @@ operation.
           "-**/.* dir",
           "-**/* dir sentinel=bin/activate",
           "-**/* dir sentinel=.nocopy",
+          "-summary.json",
           "-data.txt"
         ],
         "paths": [

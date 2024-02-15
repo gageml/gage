@@ -130,7 +130,8 @@ Show runner log.
     Copying source code (see log/files):
       ['**/* text size<10000 max-matches=500',
        '-**/.* dir', '-**/* dir sentinel=bin/activate',
-       '-**/* dir sentinel=.nocopy']
+       '-**/* dir sentinel=.nocopy',
+       '-summary.json']
     Applying configuration (see log/patched)
     Finalizing staged files (see manifest)
     Writing meta staged
@@ -252,7 +253,8 @@ Show the runner log.
     Copying source code (see log/files):
       ['**/* text size<10000 max-matches=500',
        '-**/.* dir', '-**/* dir sentinel=bin/activate',
-       '-**/* dir sentinel=.nocopy']
+       '-**/* dir sentinel=.nocopy',
+       '-summary.json']
     Applying configuration (see log/patched)
     Finalizing staged files (see manifest)
     Writing meta staged
@@ -287,7 +289,8 @@ Show the runner log.
     Copying source code (see log/files):
       ['**/* text size<10000 max-matches=500',
        '-**/.* dir', '-**/* dir sentinel=bin/activate',
-       '-**/* dir sentinel=.nocopy']
+       '-**/* dir sentinel=.nocopy',
+       '-summary.json']
     Applying configuration (see log/patched)
     Finalizing staged files (see manifest)
     Writing meta staged

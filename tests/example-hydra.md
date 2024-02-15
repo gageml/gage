@@ -29,7 +29,8 @@
           "**/* text size<10000 max-matches=500",
           "-**/.* dir",
           "-**/* dir sentinel=bin/activate",
-          "-**/* dir sentinel=.nocopy"
+          "-**/* dir sentinel=.nocopy",
+          "-summary.json"
         ],
         "paths": [
           ".gitignore",
