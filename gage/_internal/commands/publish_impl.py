@@ -106,6 +106,8 @@ def _board_dest(board_id: str):
     except requests.HTTPError as e:
         cli.exit_with_error(f"Error publishing to {endpoint}: {e}")
     else:
+        if resp.status_code != 200:
+            cli.exit_with_error(f"Error publishing to {endpoint}: {resp.content.decode()}")
         data = json.loads(resp.content)
         board_dest = BoardDest(
             data["endpoint"],
