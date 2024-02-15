@@ -13,3 +13,16 @@
     |                         Default                          |
     |  name                   Gage                             |
     <0>
+
+If an operation doesn't define config, Gage omits the Flags section in
+help.
+
+    >>> use_project(make_temp_dir())
+
+    >>> write("gage.json", """
+    ... {"test": {}}
+    ... """)
+
+    >>> run("gage run test --help-op")
+    Usage: gage run test
+    <0>
