@@ -103,11 +103,13 @@ def _board_dest(board_id: str):
     log.debug("Getting board credentials at %s", url)
     try:
         resp = requests.get(url, headers=headers)
-    except requests.HTTPError as e:
-        cli.exit_with_error(f"Error publishing to {endpoint}: {e}")
+    except requests.RequestException as e:
+        cli.exit_with_error(f"Error getting board information: {e}")
     else:
         if resp.status_code != 200:
-            cli.exit_with_error(f"Error publishing to {endpoint}: {resp.content.decode()}")
+            cli.exit_with_error(
+                f"Error get board information: {resp.content.decode()}"
+            )
         data = json.loads(resp.content)
         board_dest = BoardDest(
             data["endpoint"],
