@@ -210,7 +210,7 @@ The runner log contains the applied include and exclude patterns.
     Writing meta id
     ...
     Copying source code (see log/files):
-      ['**/* text size<10000 max-matches=500',
+      ['**/* text size<100000 max-matches=500',
        '-**/.* dir',
        '-**/* dir sentinel=bin/activate',
        '-**/* dir sentinel=.nocopy',

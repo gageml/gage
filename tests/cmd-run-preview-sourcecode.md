@@ -8,13 +8,13 @@ operation.
     >>> run("gage run default --preview-sourcecode", env={"COLUMNS": "50"})  #+diff
     Source Code
     |                                                |
-    | | patterns                             |       |
-    | |--------------------------------------|       |
-    | | **/* text size<10000 max-matches=500 |       |
-    | | -**/.* dir                           |       |
-    | | -**/* dir sentinel=bin/activate      |       |
-    | | -**/* dir sentinel=.nocopy           |       |
-    | | -summary.json                        |       |
+    | | patterns                              |      |
+    | |---------------------------------------|      |
+    | | **/* text size<100000 max-matches=500 |      |
+    | | -**/.* dir                            |      |
+    | | -**/* dir sentinel=bin/activate       |      |
+    | | -**/* dir sentinel=.nocopy            |      |
+    | | -summary.json                         |      |
     |                                                |
     |                                                |
     | | matched files  |                             |
@@ -31,7 +31,7 @@ operation.
       "sourcecode": {
         "src_dir": "{:path}",
         "patterns": [
-          "**/* text size<10000 max-matches=500",
+          "**/* text size<100000 max-matches=500",
           "-**/.* dir",
           "-**/* dir sentinel=bin/activate",
           "-**/* dir sentinel=.nocopy",
@@ -66,7 +66,7 @@ operation.
       "sourcecode": {
         "src_dir": "{:path}",
         "patterns": [
-          "**/* text size<10000 max-matches=500",
+          "**/* text size<100000 max-matches=500",
           "-**/.* dir",
           "-**/* dir sentinel=bin/activate",
           "-**/* dir sentinel=.nocopy",

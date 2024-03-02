@@ -26,7 +26,7 @@
       "sourcecode": {
         "src_dir": "{}/examples/hydra",
         "patterns": [
-          "**/* text size<10000 max-matches=500",
+          "**/* text size<100000 max-matches=500",
           "-**/.* dir",
           "-**/* dir sentinel=bin/activate",
           "-**/* dir sentinel=.nocopy",

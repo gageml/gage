@@ -128,7 +128,7 @@ Show runner log.
     Writing meta sys/platform
     Writing meta initialized
     Copying source code (see log/files):
-      ['**/* text size<10000 max-matches=500',
+      ['**/* text size<100000 max-matches=500',
        '-**/.* dir', '-**/* dir sentinel=bin/activate',
        '-**/* dir sentinel=.nocopy',
        '-summary.json']
@@ -251,7 +251,7 @@ Show the runner log.
     Writing meta sys/platform
     Writing meta initialized
     Copying source code (see log/files):
-      ['**/* text size<10000 max-matches=500',
+      ['**/* text size<100000 max-matches=500',
        '-**/.* dir', '-**/* dir sentinel=bin/activate',
        '-**/* dir sentinel=.nocopy',
        '-summary.json']
@@ -287,7 +287,7 @@ Show the runner log.
     Writing meta sys/platform
     Writing meta initialized
     Copying source code (see log/files):
-      ['**/* text size<10000 max-matches=500',
+      ['**/* text size<100000 max-matches=500',
        '-**/.* dir', '-**/* dir sentinel=bin/activate',
        '-**/* dir sentinel=.nocopy',
        '-summary.json']
