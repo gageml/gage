@@ -14,6 +14,8 @@ import tempfile
 
 import requests
 
+from rich import prompt
+
 from .. import cli
 
 from .board_impl import Args as BoardArgs
@@ -49,10 +51,11 @@ def publish(args: Args):
     board_args = BoardArgs(args.runs, args.where, args.config, True, False)
     board = _init_board(board_args)
     board_id = _board_id(args, board)
-    runs = _board_runs(board, board_args)
+    token = _api_token()
     with cli.status() as status:
         status.update("Resolving board details")
-        board_dest = _board_dest(board_id)
+        board_dest = _board_dest(board_id, token)
+    runs = _board_runs(board, board_args)
     _user_confirm_publish(args, board, board_id, runs)
     with cli.status() as status:
         status.update("Publishing board data")
@@ -67,14 +70,35 @@ def _board_id(args: Args, board: BoardDef):
     if not id:
         if args.config:
             cli.exit_with_error(
-                "Missing board ID: use '--board <id>' or specify an 'id' "
-                f"attribute in {args.config}"
+                f"Missing board ID: specify an 'id' attribute in {args.config} "
+                "or use --board-id"
             )
         else:
             cli.exit_with_error(
-                "Missing board ID: use '--board <id>' to specify the board to publish"
+                "Missing board ID: use '--config <path>' to specify a "
+                "board config or use '--board-id <id>'"
             )
     return id
+
+
+def _api_token():
+    token = os.getenv("GAGE_TOKEN")
+    if not token:
+        token = _prompt_for_token()
+        if not token:
+            cli.exit_with_error(
+                "Missing API token: specify GAGE_TOKEN environment variable"
+            )
+    if not token.startswith("gage_"):
+        cli.exit_with_error("Invalid API token")
+    return token
+
+
+def _prompt_for_token():
+    console = prompt.get_console()
+    if not console.is_interactive:
+        return None
+    return prompt.Prompt.ask("Enter your Gage API token", password=True)
 
 
 def _user_confirm_publish(args: Args, board: BoardDef, board_id: str, runs: list[Run]):
@@ -91,12 +115,7 @@ def _user_confirm_publish(args: Args, board: BoardDef, board_id: str, runs: list
         raise SystemExit(0)
 
 
-def _board_dest(board_id: str):
-    token = os.getenv("GAGE_TOKEN")
-    if not token:
-        cli.exit_with_error(
-            "Missing API token: specify GAGE_TOKEN environment variable"
-        )
+def _board_dest(board_id: str, token: str):
     endpoint = os.getenv("GAGE_API") or DEFAULT_GAGE_API
     url = f"{endpoint}/v1/boards/{board_id}/creds"
     headers = {"Authorization": f"Bearer {token}"}
@@ -107,9 +126,7 @@ def _board_dest(board_id: str):
         cli.exit_with_error(f"Error getting board information: {e}")
     else:
         if resp.status_code != 200:
-            cli.exit_with_error(
-                f"Error get board information: {resp.content.decode()}"
-            )
+            cli.exit_with_error(f"Error get board information: {resp.content.decode()}")
         data = json.loads(resp.content)
         board_dest = BoardDest(
             data["endpoint"],

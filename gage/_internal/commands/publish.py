@@ -20,9 +20,12 @@ RunArgs = Annotated[
 Board = Annotated[
     str,
     Option(
-        "--board",
-        metavar="NAME",
-        help="Board name to publish. Required if name is not specified in board config.",
+        "--board-id",
+        metavar="ID",
+        help=(
+            "Board ID to publish. Required if 'id' attribute is not "
+            "specified in board config."
+        ),
     ),
 ]
 
@@ -60,7 +63,7 @@ YesFlag = Annotated[
     Option(
         "-y",
         "--yes",
-        help="Delete runs without prompting.",
+        help="Publish without prompting.",
     ),
 ]
 
