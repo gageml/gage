@@ -802,7 +802,7 @@ def exec_run(run: Run):
     log = _runner_log(run)
     opdef = meta_opdef(run)
     cmd = meta_opcmd(run)
-    env = {**cmd.env, **os.environ}
+    env = {**_run_env(run), **cmd.env}
     run_phase_channel.notify("run")
     _write_timestamp("started", run, log)
     _run_phase_exec(
@@ -814,6 +814,13 @@ def exec_run(run: Run):
         "40_run",
         log,
     )
+
+
+def _run_env(run: Run):
+    return {
+        "RUN_DIR": run.run_dir,
+        "PARENT_PWD": os.getcwd(),
+    }
 
 
 # =================================================================
@@ -1200,8 +1207,8 @@ def _run_phase_exec(
     log.info(f"Starting {phase_name} (see output/{output_name}): {exec_cmd}")
     proc_args, use_shell = _proc_args(exec_cmd)
     proc_env = {
-        **os.environ,
         **env,
+        **os.environ,
     }
     ensure_dir(run.run_dir)
     p = subprocess.Popen(

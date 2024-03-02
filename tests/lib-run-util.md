@@ -3,6 +3,10 @@
     >>> from gage._internal.types import *
     >>> from gage._internal.run_util import *
 
+Save the run command as we use `run` for vars below.
+
+    >>> run_ = run
+
 ## General utils
 
 ### Run IDs
@@ -586,3 +590,41 @@ Project directories must be absolute.
     >>> associate_project(run, "relative")
     Traceback (most recent call last):
     ValueError: project_dir must be absolute: "relative"
+
+## Run environment
+
+Gage provides the following environment variables to runs:
+
+`RUN_DIR`
+: The run directory (same as current directory but made explicit)
+
+`PARENT_PWD`
+: The directory from where the run command originated.
+
+Create a sample project to illustrate.
+
+    >>> tmp = make_temp_dir()
+    >>> use_project(tmp)
+
+    >>> write("test.py", """
+    ... import os
+    ... print("CWD:", os.getcwd())
+    ... print("RUN_DIR:", os.getenv("RUN_DIR"))
+    ... print("PARENT_PWD:", os.getenv("PARENT_PWD"))
+    ... """)
+
+    >>> write("gage.yaml", """
+    ... test:
+    ...   exec: python test.py
+    ... """)
+
+Run the test op.
+
+    >>> run_("gage run test -y")  # +parse
+    CWD: {cwd:path}
+    RUN_DIR: {run_dir:path}
+    PARENT_PWD: {parent_pwd:path}
+    <0>
+
+    >>> assert cwd == run_dir
+    >>> assert parent_pwd == tmp
