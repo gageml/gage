@@ -126,7 +126,7 @@ def _board_dest(board_id: str, token: str):
         cli.exit_with_error(f"Error getting board information: {e}")
     else:
         if resp.status_code != 200:
-            cli.exit_with_error(f"Error get board information: {resp.content.decode()}")
+            cli.exit_with_error(f"Error getting board information: {resp.content.decode()}")
         data = json.loads(resp.content)
         board_dest = BoardDest(
             data["endpoint"],
