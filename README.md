@@ -1,22 +1,15 @@
-# Gage ML
+# Gage
 
-Gage ML is a tool for running model evaluations and publishing results.
+Gage is a tool for running model evaluations and publishing results.
 It's under active development by the team that developed Guild AI.
 
 ## Installing
 
-Gage ML is not yet released to PyPI. To install it, see **[Setting Up a
-Local Development Environment]** below.
-
-<!--
-
-To install Gage ML, use `pip`.
+Install the latest version of Gage using `pip`:
 
 ``` shell
 pip install gage
 ```
-
--->
 
 ## Contributing
 

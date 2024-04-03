@@ -69,7 +69,7 @@ def main(
     runs_dir: RunsDir = "",
     verbose: Verbose = None,
 ):
-    """Gage ML command line interface."""
+    """Gage command line interface."""
 
     from .main_impl import main, Args
 

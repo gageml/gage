@@ -55,8 +55,7 @@ def check(
 ):
     """Show and validate settings.
 
-    Shows Gage ML version, install location, and other configured
-    settings.
+    Shows Gage version, install location, and other configured settings.
 
     To check a Gage file for issues, specify [arg]path[/].
     """

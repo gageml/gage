@@ -1,7 +1,7 @@
 [project]
 
 name = "gage"
-version = "0.1.0-dev.0"
+version = "0.1.0"
 authors = [
   { name="Garrett Smith", email="garrett@placeon.earth" },
 ]

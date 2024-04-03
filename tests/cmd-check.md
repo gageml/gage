@@ -7,8 +7,7 @@ Help for `check`:
     ⤶
       Show and validate settings.
     ⤶
-      Shows Gage ML version, install location, and other configured
-      settings.
+      Shows Gage version, install location, and other configured settings.
     ⤶
       To check a Gage file for issues, specify path.
     ⤶
@@ -27,7 +26,7 @@ Help for `check`:
 Default output:
 
     >>> run("gage check", cols=999)  # +parse -space
-    | gage_version          | 0.1.0{}   |
+    | gage_version          | 0.1.0     |
     | gage_install_location | {:path}   |
     | python_version        | {:ver} {} |
     | python_exe            | {:path}   |

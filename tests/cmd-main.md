@@ -7,7 +7,7 @@ Running `gage` without arguments shows help.
     >>> run("gage", cols=70)  # +diff
     Usage: gage [options] command
     ⤶
-      Gage ML command line interface.
+      Gage command line interface.
     ⤶
     Options:
       --version      Print program version and exit.
@@ -45,7 +45,7 @@ Using `--help` shows help explicitly.
     >>> run("gage --help")  # +wildcard
     Usage: gage [options] command
     ⤶
-      Gage ML command line interface.
+      Gage command line interface.
     ⤶
     ...
 

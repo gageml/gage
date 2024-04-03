@@ -23,7 +23,7 @@ def main(args: Args):
     _init_logging(args)
     _init_runs_dir(args)
     if args.version:
-        cli.out(f"Gage ML {__version__}")
+        cli.out(f"Gage {__version__}")
         raise SystemExit(0)
     if args.cwd:
         _apply_cwd(args.cwd)
