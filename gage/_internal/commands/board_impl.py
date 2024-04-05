@@ -30,7 +30,7 @@ class Args(NamedTuple):
 
 def show_board(args: Args):
     if not args.json and not args.csv:
-        cli.exit_with_error("You must specify either --csv or --json for this command.")
+        cli.exit_with_error("Specify either --csv or --json for this command.")
     if args.json and args.csv:
         cli.exit_with_error("You can't use both --json and --csv options.")
     board = _init_board(args)
