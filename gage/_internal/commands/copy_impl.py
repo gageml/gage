@@ -12,6 +12,7 @@ import subprocess
 
 from .. import cli
 
+from ..file_util import make_temp_dir
 from ..run_util import run_user_dir
 from ..util import flatten
 from ..var import runs_dir
@@ -156,7 +157,8 @@ def _user_confirm_copy_to(args: Args, runs: list[IndexedRun]):
 
 
 def _src_run_includes(runs: list[Run]):
-    assert runs
+    if not runs:
+        return _empty_src_run_includes()
     src_root = None
     includes: list[str] = []
     for run in runs:
@@ -168,6 +170,11 @@ def _src_run_includes(runs: list[Run]):
             includes.append(f"/{name}/**")
     assert src_root
     return src_root, includes
+
+
+def _empty_src_run_includes() -> tuple[str, list[str]]:
+    tmp = make_temp_dir("gage-empty-")
+    return tmp, []
 
 
 def _run_src_dirs(run: Run):
