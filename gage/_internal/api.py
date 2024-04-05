@@ -8,7 +8,7 @@ from .run_util import *
 
 from . import var
 
-__ALL__ = ["runs"]
+__ALL__ = ["runs", "write_summary"]
 
 
 def _run_attributes(run: Run) -> dict[str, Any]:
@@ -67,3 +67,28 @@ def runs(filter: Callable[[RunProxy], bool] | None = None) -> list[RunProxy]:
 
 def _api_runs():
     return [_Run(run) for run in var.list_runs(sort=["-timestamp"])]
+
+
+def write_summary(
+    metrics: dict[str, Any],
+    attributes: dict[str, Any],
+    filename: str = "summary.json",
+    echo: bool = True,
+):
+    import json
+
+    if echo:
+        _echo_summary(metrics, attributes)
+
+    with open(filename, "w") as f:
+        json.dump(
+            {"metrics": metrics, "attributes": attributes},
+            f,
+            indent=True,
+        )
+
+
+def _echo_summary(metrics: dict[str, Any], attributes: dict[str, Any]):
+    for summary in (metrics, attributes):
+        for name, val in sorted(summary.items()):
+            print(f"{name}: {val}")
