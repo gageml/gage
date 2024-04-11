@@ -15,6 +15,7 @@ from .. import cli
 from ..file_util import make_temp_dir
 from ..run_util import run_user_dir
 from ..util import flatten
+from ..util import which
 from ..var import runs_dir
 
 from .impl_support import runs_table
@@ -190,7 +191,7 @@ def _run_src_dirs(run: Run):
 
 def _rclone_size(src: str, includes: list[str]):
     p = subprocess.Popen(
-        ["rclone", "size", src, "--include-from", "-", "--json"],
+        _rclone_cmd(["size", src, "--include-from", "-", "--json"]),
         text=True,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -208,6 +209,16 @@ def _rclone_size(src: str, includes: list[str]):
         err = p.stderr.read()
         raise RuntimeError(result, err)
     return _parse_rclone_size(out)
+
+
+def _rclone_cmd(args: list[str]):
+    exe = which("rclone")
+    if not exe:
+        raise SystemExit(
+            "rclone is required for this command\n"
+            "Refer to https://rclone.org/install/ for help installing rclone."
+        )
+    return [exe, *args]
 
 
 def _parse_rclone_size(out: str):
@@ -267,9 +278,8 @@ def _rclone_copy_to(
     sync_opts = ["--delete-excluded"] if sync else []
     verbose_opts = ["-" + "v" * verbose] if verbose else ["-v"]
     env = {**os.environ, **(env if env else {})}
-    cmd = (
+    cmd = _rclone_cmd(
         [
-            "rclone",
             rclone_cmd,
             src,
             dest,
@@ -376,9 +386,8 @@ _TRANSFERRED2_P = re.compile(r"-Transferred:\s+([\d\.]+) ([\S]+) / ([\d\.]+) ([\
 
 def _rclone_copy_from(src: str, dest: str, excludes: list[str]):
     exclude_opts = flatten([["--exclude", pattern] for pattern in excludes])
-    p = subprocess.Popen(
+    cmd = _rclone_cmd(
         [
-            "rclone",
             "copy",
             src,
             dest,
@@ -386,7 +395,10 @@ def _rclone_copy_from(src: str, dest: str, excludes: list[str]):
             "--stats",
             "100ms",
         ]
-        + exclude_opts,
+        + exclude_opts
+    )
+    p = subprocess.Popen(
+        cmd,
         text=True,
         stderr=subprocess.STDOUT,
         stdout=subprocess.PIPE,

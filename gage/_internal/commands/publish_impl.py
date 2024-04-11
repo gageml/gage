@@ -24,6 +24,7 @@ from .board_impl import _board_runs
 from .board_impl import _board_data
 
 from .copy_impl import _copy_to_
+from .copy_impl import _rclone_cmd
 
 
 log = logging.getLogger()
@@ -162,14 +163,15 @@ def _publish_board_data(
     conf_path = os.path.join(tmp, "rclone.conf")
     with open(conf_path, "w") as f:
         f.write(RCLONE_CONF.format(endpoint=board_dest.endpoint))
-    cmd = [
-        "rclone",
-        "--config",
-        "rclone.conf",
-        "copyto",
-        "data.json",
-        f"gage:{board_dest.bucket}/board.json",
-    ]
+    cmd = _rclone_cmd(
+        [
+            "--config",
+            "rclone.conf",
+            "copyto",
+            "data.json",
+            f"gage:{board_dest.bucket}/board.json",
+        ]
+    )
     conf_env = {
         "RCLONE_CONFIG_GAGE_ACCESS_KEY_ID": board_dest.access_key_id,
         "RCLONE_CONFIG_GAGE_SECRET_ACCESS_KEY": board_dest.secret_access_key,
