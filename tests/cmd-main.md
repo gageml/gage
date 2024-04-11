@@ -64,8 +64,8 @@ The `-C` runs the command in the specified directory.
     >>> run(f"gage -C {tmp} check -v")  # +parse -space
     {}
     | command_directory   | {x:path} |
-    | project_directory   | <none>   |
-    | gagefile            | <none>   |
+    | project_directory   | {}       |
+    | gagefile            | {}       |
     | runs_directory      | {}       |
     <0>
 

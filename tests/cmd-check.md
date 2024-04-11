@@ -46,8 +46,8 @@ directory for control.
     | python_exe            | {}       |
     | platform              | {}       |
     | command_directory     | {x:path} |
-    | project_directory     | <none>   |
-    | gagefile              | <none>   |
+    | project_directory     | {}       |
+    | gagefile              | {}       |
     | runs_directory        | {}       |
     <0>
 

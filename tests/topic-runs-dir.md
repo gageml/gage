@@ -18,6 +18,13 @@ Create an empty project directory.
 
     >>> tmp = make_temp_dir()
 
+Ensure that tmp parent is not a Gage project. A project is inferred by
+the presence of various files. Use `has_project_marker` to confirm that
+tmp parent is not a Gage project.
+
+    >>> from gage._internal.project_util import has_project_marker
+    >>> assert not has_project_marker(os.path.dirname(tmp)), tmp
+
 Create a function to run the check command.
 
     >>> def check(env=None):
