@@ -212,8 +212,9 @@ class _TimeRemainingColumn(rich.progress.TimeRemainingColumn):
 
 
 def track(
-    sequence: Sequence[rich.progress.ProgressType]
-    | Iterable[rich.progress.ProgressType],
+    sequence: (
+        Sequence[rich.progress.ProgressType] | Iterable[rich.progress.ProgressType]
+    ),
     description: str = "",
     **kw: Any,
 ):

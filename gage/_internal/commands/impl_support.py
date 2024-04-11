@@ -33,22 +33,18 @@ __all__ = [
 
 class OneRunSupport(Protocol):
     @property
-    def run(self) -> str:
-        ...
+    def run(self) -> str: ...
 
     @property
-    def where(self) -> str:
-        ...
+    def where(self) -> str: ...
 
 
 class SelectRunsSupport(Protocol):
     @property
-    def runs(self) -> list[str]:
-        ...
+    def runs(self) -> list[str]: ...
 
     @property
-    def where(self) -> str:
-        ...
+    def where(self) -> str: ...
 
 
 # =================================================================

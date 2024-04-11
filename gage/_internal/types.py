@@ -441,11 +441,9 @@ class RunSummary:
 
 
 class RunProxy(Protocol):
-    def __getitem__(self, name: str) -> Any:
-        ...
+    def __getitem__(self, name: str) -> Any: ...
 
-    def get(self, name: str, default: Any = None) -> Any:
-        ...
+    def get(self, name: str, default: Any = None) -> Any: ...
 
 
 # =================================================================
@@ -454,8 +452,7 @@ class RunProxy(Protocol):
 
 
 class RunFilter(Protocol):
-    def __call__(self, run: Run) -> bool:
-        ...
+    def __call__(self, run: Run) -> bool: ...
 
 
 # =================================================================

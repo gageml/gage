@@ -71,9 +71,9 @@ STYLE_CMD = "b green"
 
 _TERMINAL_WIDTH = getenv("TERMINAL_WIDTH")
 MAX_WIDTH = int(_TERMINAL_WIDTH) if _TERMINAL_WIDTH else None
-COLOR_SYSTEM: Optional[
-    Literal["auto", "standard", "256", "truecolor", "windows"]
-] = "auto"  # Set to None to disable colors
+COLOR_SYSTEM: Optional[Literal["auto", "standard", "256", "truecolor", "windows"]] = (
+    "auto"  # Set to None to disable colors
+)
 _TYPER_FORCE_DISABLE_TERMINAL = getenv("_TYPER_FORCE_DISABLE_TERMINAL")
 FORCE_TERMINAL = (
     True
@@ -209,9 +209,11 @@ def _get_help_text(
         if markup_mode is not None:
             # Remove single linebreaks
             remaining_paragraphs = [
-                x.replace("\n", " ").strip()
-                if not x.startswith("\b")
-                else "{}\n".format(x.strip("\b\n"))
+                (
+                    x.replace("\n", " ").strip()
+                    if not x.startswith("\b")
+                    else "{}\n".format(x.strip("\b\n"))
+                )
                 for x in remaining_paragraphs
             ]
             # Join back together
@@ -269,9 +271,11 @@ def _get_parameter_help(
         # Remove single linebreaks
         if markup_mode != MARKUP_MODE_MARKDOWN:
             paragraphs = [
-                x.replace("\n", " ").strip()
-                if not x.startswith("\b")
-                else "{}\n".format(x.strip("\b\n"))
+                (
+                    x.replace("\n", " ").strip()
+                    if not x.startswith("\b")
+                    else "{}\n".format(x.strip("\b\n"))
+                )
                 for x in paragraphs
             ]
         items.append(
