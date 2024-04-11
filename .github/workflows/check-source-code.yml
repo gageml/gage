@@ -26,4 +26,4 @@ jobs:
     - name: Check source code format
       if: ${{ success() || failure() }}
       run: |
-        python -m black --check
+        python -m black --check .
