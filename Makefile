@@ -17,3 +17,6 @@ venv: .venv/bin/activate
 
 .venv/bin/activate:
 	virtualenv --python python3.10 .venv
+
+upload-to-pypi:
+	python -m twine upload dist/*
