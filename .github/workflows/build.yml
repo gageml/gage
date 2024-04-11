@@ -24,7 +24,7 @@ on:
 jobs:
   build-posix:
     name: Build - POSIX
-    if: ${{ !inputs || inputs.posix }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -76,7 +76,7 @@ jobs:
 
   build-windows:
     name: Build - Windows
-    if: ${{ !inputs || inputs.windows }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -129,7 +129,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    if: ${{ !inputs || inputs.release }}
+
     needs:
       - build-posix
       # - build-windows
