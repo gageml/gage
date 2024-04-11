@@ -205,10 +205,18 @@ def _rclone_size(src: str, includes: list[str]):
     out = p.stdout.read()
     if result != 0:
         raise RuntimeError(result, out)
-    data = json.loads(out)
-    bytes = data.get("bytes")
-    assert isinstance(bytes, int), data
-    return bytes
+    return _parse_rclone_size(out)
+
+
+def _parse_rclone_size(out: str):
+    try:
+        data = json.loads(out)
+    except json.decoder.JSONDecodeError as e:
+        raise AssertionError(e, out)
+    else:
+        bytes = data.get("bytes")
+        assert isinstance(bytes, int), data
+        return bytes
 
 
 _TRANSFERRED_P = re.compile(r"([\d\.]+) ([\S]+) /")
