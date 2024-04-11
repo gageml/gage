@@ -35,7 +35,6 @@ Running `gage` without arguments shows help.
       run              Start or stage a run.
       select           Selects runs and their attributes.
       show             Show information about a run.
-      sign             Sign one or more runs.
     <0>
 
 ## Help
