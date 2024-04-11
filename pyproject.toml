@@ -30,7 +30,7 @@ dependencies = [
     "rich==13.5.2",
     "setuptools==68.2.2",
     "tomli==2.0.1",
-    "typer@git+https://github.com/gar1t/typer",
+    "gage-typer==0.9.0",
 ]
 
 [project.optional-dependencies]
