@@ -1,9 +1,6 @@
 name: Build
 
 on:
-  push:
-    branches: 'main'
-
   schedule:
    - cron:  '0 5 * * *'
 
@@ -77,7 +74,7 @@ jobs:
 
   build-windows:
     name: Build - Windows
-    if: ${{ !inputs || inputs.windows }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.windows }}
     strategy:
       fail-fast: false
       matrix:
@@ -130,7 +127,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    if: ${{ !inputs || inputs.release }}
+    if: ${{ inputs.release }}
     needs:
       - build-posix
       # - build-windows
