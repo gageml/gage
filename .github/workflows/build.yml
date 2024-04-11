@@ -65,7 +65,7 @@ jobs:
           git config --global user.name unused
           git config --global user.email unused@localhost
           git config --global init.defaultBranch main
-          sudo -v ; curl https://rclone.org/install.sh | sudo bash
+          sudo apt install rclone -y || brew install rclone
 
       - name: Run tests
         env:

@@ -66,7 +66,7 @@ jobs:
           git config --global user.name unused
           git config --global user.email unused@localhost
           git config --global init.defaultBranch main
-
+          sudo apt install rclone -y || brew install rclone
 
       - name: Keep server alive for SSH (cancel workflow to terminate)
         run: sleep 7200
