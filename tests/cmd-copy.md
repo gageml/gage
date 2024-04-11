@@ -17,6 +17,13 @@ Generate test runs
     Hello Joe
     <0>
 
+    >>> run("gage list -s")
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | Run 2                        |
+    | 2 | hello     | completed | Run 1                        |
+    <0>
+
 Create a directory to copy runs to.
 
     >>> tmp = make_temp_dir()

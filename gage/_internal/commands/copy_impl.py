@@ -193,18 +193,20 @@ def _rclone_size(src: str, includes: list[str]):
         ["rclone", "size", src, "--include-from", "-", "--json"],
         text=True,
         stdin=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     assert p.stdin
     assert p.stdout
+    assert p.stderr
     for include in includes:
         p.stdin.write(include + "\n")
     p.stdin.close()
     result = p.wait()
     out = p.stdout.read()
     if result != 0:
-        raise RuntimeError(result, out)
+        err = p.stderr.read()
+        raise RuntimeError(result, err)
     return _parse_rclone_size(out)
 
 
