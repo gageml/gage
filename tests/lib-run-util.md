@@ -626,5 +626,5 @@ Run the test op.
     PARENT_PWD: {parent_pwd:path}
     <0>
 
-    >>> assert cwd == run_dir
-    >>> assert parent_pwd == tmp
+    >>> assert compare_paths(cwd, run_dir)
+    >>> assert compare_paths(parent_pwd, tmp)

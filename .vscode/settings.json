@@ -147,6 +147,7 @@
     "rcetps",
     "rclone",
     "readlines",
+    "realpath",
     "relpath",
     "relroot",
     "renderable",

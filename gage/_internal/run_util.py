@@ -309,9 +309,7 @@ def run_project_dir(run: Run):
 
 
 def _abs_project_dir(project_ref_path: str, run: Run):
-    return os.path.realpath(
-        os.path.join(os.path.dirname(run.run_dir), project_ref_path)
-    )
+    os.path.join(os.path.dirname(run.run_dir), project_ref_path)
 
 
 # =================================================================
