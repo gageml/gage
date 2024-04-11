@@ -1,6 +1,8 @@
 name: Build
 
 on:
+  push:
+    branches: 'main'
   schedule:
    - cron:  '0 5 * * *'
 
@@ -22,7 +24,7 @@ on:
 jobs:
   build-posix:
     name: Build - POSIX
-    if: ${{ inputs.posix }}
+    if: ${{ !inputs || inputs.posix }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +76,7 @@ jobs:
 
   build-windows:
     name: Build - Windows
-    if: ${{ inputs.windows }}
+    if: ${{ !inputs || inputs.windows }}
     strategy:
       fail-fast: false
       matrix:
@@ -127,7 +129,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    if: ${{ inputs.release }}
+    if: ${{ !inputs || inputs.release }}
     needs:
       - build-posix
       # - build-windows
