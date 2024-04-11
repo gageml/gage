@@ -818,6 +818,7 @@ def exec_run(run: Run):
 
 def _run_env(run: Run):
     return {
+        "RUN_ID": run.id,
         "RUN_DIR": run.run_dir,
         "PARENT_PWD": os.getcwd(),
     }
