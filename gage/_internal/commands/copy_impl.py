@@ -216,7 +216,7 @@ def _rclone_cmd(args: list[str]):
     if not exe:
         raise SystemExit(
             "rclone is required for this command\n"
-            "Refer to https://rclone.org/install/ for help installing rclone."
+            "Refer to https://www.gage.chat/rclone/ for help."
         )
     return [exe, *args]
 
