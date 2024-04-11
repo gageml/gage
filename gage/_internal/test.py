@@ -198,7 +198,9 @@ def parse_datetime(s: str):
     return datetime.datetime.strptime(s, "%x %X").isoformat()
 
 
-@parse_type("isodate", r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.]\d+)?(?:[+-]\d{4}(?:\d{2})?)?")
+@parse_type(
+    "isodate", r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.]\d+)?(?:[+-]\d{4}(?:\d{2})?)?"
+)
 def parse_isodate(s: str):
     return datetime.datetime.fromisoformat(_format_tz(s)).isoformat()
 

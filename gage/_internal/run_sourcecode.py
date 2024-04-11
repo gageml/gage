@@ -19,7 +19,7 @@ DEFAULT_PATTERNS = [
     "-**/.* dir",
     "-**/* dir sentinel=bin/activate",
     "-**/* dir sentinel=.nocopy",
-    "-summary.json"
+    "-summary.json",
 ]
 
 

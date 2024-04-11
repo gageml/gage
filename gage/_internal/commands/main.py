@@ -110,5 +110,5 @@ def main_app():
     app.command("run")(run)
     app.command("select")(select)
     app.command("show")(show)
-    #app.command("sign")(sign)
+    # app.command("sign")(sign)
     return app
