@@ -71,7 +71,7 @@ def _api_runs():
 
 def write_summary(
     metrics: dict[str, Any],
-    attributes: dict[str, Any],
+    attributes: dict[str, Any] | None = None,
     filename: str = "summary.json",
     echo: bool = True,
 ):
@@ -88,7 +88,8 @@ def write_summary(
         )
 
 
-def _echo_summary(metrics: dict[str, Any], attributes: dict[str, Any]):
+def _echo_summary(metrics: dict[str, Any], attributes: dict[str, Any] | None = None):
+    attributes = attributes or {}
     for summary in (metrics, attributes):
         for name, val in sorted(summary.items()):
             print(f"{name}: {val}")
