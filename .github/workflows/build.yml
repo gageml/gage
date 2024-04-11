@@ -13,7 +13,7 @@ on:
       windows:
         description: Build for Windows
         type: boolean
-        default: false
+        default: true
       release:
         description: Publish to PyPI (select for release)
         type: boolean
@@ -36,10 +36,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
@@ -70,6 +70,7 @@ jobs:
       - name: Run tests
         env:
           CI: 1
+          GAGE_TEMPDIR: /tmp
         run: |
           test-env/bin/groktest .
 
@@ -83,15 +84,15 @@ jobs:
           - windows-latest
         python:
           - '3.10'
-          # - '3.11'
-          # - '3.12'
+          - '3.11'
+          - '3.12'
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
@@ -131,7 +132,7 @@ jobs:
     if: ${{ inputs.release }}
     needs:
       - build-posix
-      # - build-windows
+      - build-windows
     strategy:
       matrix:
         os:
@@ -143,10 +144,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python for build
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 

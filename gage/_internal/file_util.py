@@ -672,3 +672,9 @@ def safe_filename(s: str):
     if os.name == "nt":
         s = re.sub(r"[:<>?]", "_", s).rstrip()
     return re.sub(r"[/\\]+", "_", s)
+
+
+try:
+    tempfile.tempdir = os.environ["GAGE_TEMPDIR"]
+except KeyError:
+    pass
