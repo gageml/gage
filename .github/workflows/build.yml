@@ -22,7 +22,7 @@ on:
 jobs:
   build-posix:
     name: Build - POSIX
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.posix }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.posix }}
     strategy:
       fail-fast: false
       matrix:
