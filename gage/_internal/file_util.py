@@ -433,11 +433,16 @@ def safe_delete_tree(path: str, force: bool = False):
     assert not _top_level_dir(path), path
     assert path != os.path.expanduser("~"), path
     if os.path.isdir(path):
-        shutil.rmtree(path)
+        shutil.rmtree(path, onerror=_handle_rmtree_error)
     elif os.path.isfile(path):
         os.remove(path)
     elif not force:
         raise ValueError(f"{path} does not exist")
+
+
+def _handle_rmtree_error(func: Callable[[str], NoReturn], path: str, excinfo: Any):
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 
 def ensure_safe_delete_tree(path: str):
