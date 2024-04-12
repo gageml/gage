@@ -306,10 +306,9 @@ def _table_width_windows_markdown(table_width_arg: int | None, box: rich.box.Box
     ):
         # On Windows when using markdown formatted tables, width is one
         # less than expected when COLUMNS is used to infer width (i.e.
-        # when width is None). Adjust here to standardize tables widths
-        # across platforms.
-        cols = int(os.environ["COLUMNS"])
-        return cols + 1
+        # when width is None). When `width` is provide to a table
+        # explicitly, the generated output is as expected.
+        return int(os.environ["COLUMNS"])
     return table_width_arg
 
 
