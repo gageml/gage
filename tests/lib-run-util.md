@@ -572,7 +572,8 @@ The project reference is a URI to the project directory.
 Use `run_project_dir()` to read the project directory associated with a
 run.
 
-    >>> assert run_project_dir(run) == project_dir
+    >>> compare_paths(run_project_dir(run), project_dir)
+    True
 
 Use `remove_associate_project()` to disassociate the run from the project
 directory.
