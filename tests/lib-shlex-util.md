@@ -103,3 +103,22 @@ be used as a replacement in all cases.
 
     >>> shlex_join(["a", "b c"])
     "a 'b c'"
+
+## Unquoting
+
+    >>> from gage._internal.shlex_util import _unquote
+
+    >>> _unquote("'Hello'")
+    'Hello'
+
+    >>> _unquote("")
+    ''
+
+    >>> _unquote("''")
+    ''
+
+    >>> _unquote("Hello")
+    'Hello'
+
+    >>> _unquote("'Hello")
+    "'Hello"
