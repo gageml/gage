@@ -35,6 +35,11 @@ jobs:
         with:
           python-version: ${{ inputs.python }}
 
+      - name: Configure SSH
+        # ssh action (below) waits for a 'continue' sentinel - we want
+        # the job to continue while ssh is available for connections
+        run: touch continue
+
       - name: Start SSH
         uses: mxschmitt/action-tmate@v3
         with:
@@ -80,6 +85,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python }}
+
+      - name: Configure SSH
+        # ssh action (below) waits for a 'continue' sentinel - we want
+        # the job to continue while ssh is available for connections
+        run: touch continue
 
       - name: Start SSH
         uses: mxschmitt/action-tmate@v3
