@@ -2,22 +2,23 @@
 
 Help for `check`:
 
-    >>> run("gage check --help", env={"COLUMNS": "72"})  # +diff
+    >>> run("gage check --help")
     Usage: gage check [options] [path]
     ⤶
       Show and validate settings.
     ⤶
-      Shows Gage version, install location, and other configured settings.
+      Shows Gage version, install location, and other
+      configured settings.
     ⤶
       To check a Gage file for issues, specify path.
     ⤶
     Arguments:
-      [path]  Gage file or a project directory to check. Cannot use with
-              --version.
+      [path]  Gage file or a project directory to check.
+              Cannot use with --version.
     ⤶
     Options:
-      --version spec  Test Gage version against spec. Cannot be used with
-                      path.
+      --version spec  Test Gage version against spec. Cannot
+                      be used with path.
       --json          Format check output as JSON.
       -v, --verbose   Show more information.
       -h, --help      Show this message and exit.

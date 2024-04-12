@@ -2,6 +2,7 @@
 
 from typing import *
 
+import os
 import shlex
 
 __all__ = [
@@ -15,7 +16,7 @@ def shlex_split(s: str):
     # If s is None, this call will block (see
     # https://bugs.python.org/issue27775)
     s = s or ""
-    return shlex.split(s, posix=True)
+    return shlex.split(s, posix=os.name != "nt")
 
 
 def shlex_quote(s: str):

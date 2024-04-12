@@ -422,7 +422,7 @@ def _popen(cmd: str, env: _Env, cwd: Optional[str]):
 
 
 def _popen_win(cmd: str, env: _Env, cwd: Optional[str]):
-    split_cmd = shlex_util.shlex_split(file_util.standardize_path(cmd))
+    split_cmd = shlex_util.shlex_split(cmd)
     return subprocess.Popen(
         split_cmd,
         stdout=subprocess.PIPE,
