@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shlex
+import sys
 import time
 
 import click
@@ -279,7 +280,7 @@ def _pager_supports_styles(pager: str | None):
 ColSpec = str | tuple[str, dict[str, Any]]
 
 
-def Table(*cols: ColSpec, **kw: Any):
+def Table(*cols: ColSpec, width: int | None = None, **kw: Any):
     box = kw.pop("box", None) or (rich.box.MARKDOWN if is_plain else rich.box.ROUNDED)
     border_style = kw.pop("border_style", None) or STYLE_TABLE_BORDER
     header_style = kw.pop("header_style", None) or STYLE_TABLE_HEADER
@@ -287,12 +288,29 @@ def Table(*cols: ColSpec, **kw: Any):
         box=box,
         border_style=border_style,
         header_style=header_style,
+        width=_table_width_windows_markdown(width, box),
         **kw,
     )
     for col in cols:
         col_header, col_kw = _split_col(col)
         t.add_column(col_header, **col_kw)
     return t
+
+
+def _table_width_windows_markdown(table_width_arg: int | None, box: rich.box.Box):
+    if (
+        table_width_arg is None
+        and sys.platform == "win32"
+        and box is rich.box.MARKDOWN
+        and "COLUMNS" in os.environ
+    ):
+        # On Windows when using markdown formatted tables, width is one
+        # less than expected when COLUMNS is used to infer width (i.e.
+        # when width is None). Adjust here to standardize tables widths
+        # across platforms.
+        cols = int(os.environ["COLUMNS"])
+        return cols + 1
+    return table_width_arg
 
 
 def _split_col(col: ColSpec) -> tuple[str, dict[str, Any]]:

@@ -370,16 +370,14 @@ def run(
     cwd: Optional[str] = None,
     env: Optional[_Env] = None,
     rstrip: bool = True,
-    cols: int | None = None,
+    cols: int = 60,
     _capture: bool = False,
     **other_env: str,
 ):
     proc_env = dict(os.environ)
     _apply_venv_bin_path(proc_env)
     proc_env["TERM"] = "unknown"
-    if cols is None:
-        proc_env["COLUMNS"] = "60"
-    elif cols >= 0:
+    if cols >= 0:
         proc_env["COLUMNS"] = str(cols)
     proc_env.update(env or {})
     proc_env.update(other_env)

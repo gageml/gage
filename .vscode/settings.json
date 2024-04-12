@@ -62,6 +62,7 @@
     "ENOENT",
     "Errno",
     "ESRCH",
+    "excinfo",
     "exitcodes",
     "expanduser",
     "fakepkg",
