@@ -30,6 +30,11 @@ Paths must be absolute to match.
     >>> "bin/git"  # +fails
     '{:path}'
 
+`path` also matches Windows style paths.
+
+    >>> "C:\\foo\\bar.txt"
+    '{:path}'
+
 ### Any value
 
 `any` is used to match anything within the same line. This is an
