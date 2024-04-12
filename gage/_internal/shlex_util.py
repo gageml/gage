@@ -16,7 +16,23 @@ def shlex_split(s: str):
     # If s is None, this call will block (see
     # https://bugs.python.org/issue27775)
     s = s or ""
-    return shlex.split(s, posix=os.name != "nt")
+    return _shlex_split_windows(s) if os.name == "nt" else _shlex_split_posix(s)
+
+
+def _shlex_split_windows(s: str):
+    assert s is not None  # proc hangs if None
+    return [_unquote(s) for s in shlex.split(s, posix=False)]
+
+
+def _unquote(s: str):
+    if s[:1] == "'" and s[-1:] == "'":
+        return s[1:-1]
+    return s
+
+
+def _shlex_split_posix(s: str):
+    assert s is not None  # proc hangs if None
+    return shlex.split(s, posix=True)
 
 
 def shlex_quote(s: str):
