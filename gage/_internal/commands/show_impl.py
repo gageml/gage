@@ -328,7 +328,7 @@ def Comments(run: Run):
 
 
 def CommentTable(comment: RunComment):
-    table = Table(
+    table = cli.Table(
         show_header=False,
         expand=True,
         show_edge=False,
