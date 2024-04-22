@@ -142,8 +142,7 @@ def parse_ver(s: str):
         return None
     return m.groups()
 
-
-@parse_type("path", r"(?:[/~][/\w_\-\.:]*)|(?:[A-Z]:[\\\w_\-\.]*)")
+@parse_type("path", r"(?:[/~][/\w\-\.:]*)|(?:[A-Z]:[/\\\w\-\.]*)")
 def parse_path(s: str):
     return s
 
