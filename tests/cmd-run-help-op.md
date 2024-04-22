@@ -2,7 +2,7 @@
 
     >>> use_example("hello")
 
-    >>> run("gage run --help-op")  # +diff
+    >>> run("gage run --help-op")  # +diff -space
     Usage: gage run
     ⤶
      Say hello to my friend.
