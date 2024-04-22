@@ -16,7 +16,7 @@
     >>> assert x == y
 
     >>> for path in lsl(var.runs_dir()):
-    ...     print(path[36:])  # +diff
+    ...     print(path[36:])  # +diff +paths
     .meta/__schema__
     .meta/config.json
     .meta/id
