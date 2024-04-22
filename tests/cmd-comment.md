@@ -71,15 +71,15 @@ Show comments.
 
 Comments appear in `show`.
 
-    >>> run("gage show")  # +parse -space
+    >>> run("gage show", cols=60)  # +parse -space
     {:run_id}
-    | hello:hello                                    completed |
+    | hello:hello                                   completed |
     ⤶
     {}
                               Comments
-    | {}                                                    {} |
-    | -------------------------------------------------------- |
-    | Hello with defaults                                      |
+    | {}                                                   {} |
+    | ------------------------------------------------------- |
+    | Hello with defaults                                     |
     <0>
 
 Modify the comment.
