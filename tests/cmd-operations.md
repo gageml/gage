@@ -24,10 +24,10 @@ Show operations for sample projects.
 
     >>> use_example("hello")
 
-    >>> run("gage ops", cols=60)
-    | operation        | description                           |
-    |------------------|---------------------------------------|
-    | hello            | Say hello to my friend.               |
+    >>> run("gage ops", cols=39)
+    | operation | description             |
+    |-----------|-------------------------|
+    | hello     | Say hello to my friend. |
     <0>
 
 Show operations for non-existing Gage file.
