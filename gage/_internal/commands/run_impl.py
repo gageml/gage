@@ -36,8 +36,7 @@ class Args(NamedTuple):
     quiet: bool
     yes: bool
     help_op: bool
-    preview_sourcecode: bool
-    preview_all: bool
+    preview: bool
     json: bool
 
 
@@ -85,7 +84,7 @@ def _apply_default_op_flag_assign(args: Args):
 def _handle_run_context(context: RunContext, args: Args):
     if args.help_op:
         _show_op_help(context, args)
-    elif _preview_opts(args):
+    elif args.preview:
         _preview(context, args)
     elif args.stage:
         _handle_stage(context, args)
@@ -115,10 +114,6 @@ def _show_op_help(context: RunContext, args: Args):
 # =================================================================
 
 
-def _preview_opts(args: Args):
-    return args.preview_sourcecode or args.preview_all
-
-
 def _preview(context: RunContext, args: Args):
     previews = _init_previews(context.opdef, args)
     if args.json:
@@ -139,8 +134,7 @@ class Preview(NamedTuple):
 
 def _init_previews(opdef: OpDef, args: Args):
     previews: list[Preview] = []
-    if args.preview_sourcecode or args.preview_all:
-        previews.append(_init_sourcecode_preview(opdef))
+    previews.append(_init_sourcecode_preview(opdef))
     # TODO: other previews
     return previews
 

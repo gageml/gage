@@ -1,11 +1,11 @@
-# `run` command - preview source code
+# `run` command - preview
 
-Use `--preview-sourcecode` to show source code that is copied for an
-operation.
+Use `--preview` to show decisions made by the run command based on
+configuration and the project state.
 
     >>> use_example("sourcecode")
 
-    >>> run("gage run default --preview-sourcecode", env={"COLUMNS": "50"})  #+diff
+    >>> run("gage run default --preview", env={"COLUMNS": "50"})  #+diff
     Source Code
     |                                                |
     | | patterns                              |      |
@@ -26,7 +26,7 @@ operation.
     |                                                |
     <0>
 
-    >>> run("gage run default --preview-sourcecode --json")  # +parse +diff
+    >>> run("gage run default --preview --json")  # +parse +diff
     {
       "sourcecode": {
         "src_dir": "{:path}",
@@ -47,7 +47,7 @@ operation.
     }
     <0>
 
-    >>> run("gage run pyfiles --preview-sourcecode --json")  # +parse
+    >>> run("gage run pyfiles --preview --json")  # +parse
     {
       "sourcecode": {
         "src_dir": "{:path}",
@@ -61,7 +61,7 @@ operation.
     }
     <0>
 
-    >>> run("gage run exclude-data --preview-sourcecode --json")  # +parse +diff
+    >>> run("gage run exclude-data --preview --json")  # +parse +diff
     {
       "sourcecode": {
         "src_dir": "{:path}",
@@ -82,7 +82,7 @@ operation.
     }
     <0>
 
-    >>> run("gage run all-files --preview-sourcecode --json")  # +parse
+    >>> run("gage run all-files --preview --json")  # +parse
     {
       "sourcecode": {
         "src_dir": "{:path}",

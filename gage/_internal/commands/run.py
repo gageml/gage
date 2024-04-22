@@ -76,19 +76,11 @@ HelpOpFlag = Annotated[
     ),
 ]
 
-PreviewSourceCodeFlag = Annotated[
+PreviewFlag = Annotated[
     bool,
     Option(
-        "--preview-sourcecode",
-        help="Preview source code selection.",
-    ),
-]
-
-PreviewAllFlag = Annotated[
-    bool,
-    Option(
-        "--preview-all",
-        help="Preview all run steps without making changes.",
+        "--preview",
+        help="Preview run steps without making changes.",
     ),
 ]
 
@@ -110,8 +102,7 @@ def run(
     quiet: QuietFlag = False,
     yes: YesFlag = False,
     help_op: HelpOpFlag = False,
-    preview_sourcecode: PreviewSourceCodeFlag = False,
-    preview_all: PreviewAllFlag = False,
+    preview: PreviewFlag = False,
     json: JSONFlag = False,
 ):
     """Start or stage a run.
@@ -135,8 +126,7 @@ def run(
             quiet,
             yes,
             help_op,
-            preview_sourcecode,
-            preview_all,
+            preview,
             json=json,
         )
     )
