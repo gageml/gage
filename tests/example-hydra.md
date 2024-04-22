@@ -21,7 +21,7 @@
     | my_app    | Replicates the Hydra Get Started example. |
     <0>
 
-    >>> run("gage run my_app --preview-sourcecode --json")  # +diff +parse
+    >>> run("gage run my_app --preview --json")  # +diff +parse
     {
       "sourcecode": {
         "src_dir": "{}/examples/hydra",
