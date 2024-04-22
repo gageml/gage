@@ -6,3 +6,4 @@
 .gage
 profile.*
 gage.spec
+.vscode/tasks.json
