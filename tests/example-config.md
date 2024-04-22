@@ -21,7 +21,7 @@ Show the operation source code.
 
 Run help:
 
-    >>> run("gage run hello --help-op")
+    >>> run("gage run hello --help-op")  # -space
     Usage: gage run hello
     ⤶
      Sample hello op
