@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # Hydra example
 
     >>> use_example("hydra")
@@ -15,7 +19,7 @@
     ./gage.toml is a valid Gage file
     <0>
 
-    >>> run("gage ops")
+    >>> run("gage ops", cols=57)
     | operation | description                               |
     |-----------|-------------------------------------------|
     | my_app    | Replicates the Hydra Get Started example. |
