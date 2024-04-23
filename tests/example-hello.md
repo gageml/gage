@@ -22,7 +22,7 @@ possible Gage project.
 
 List operations.
 
-    >>> run("gage ops")
+    >>> run("gage ops", cols=39)
     | operation | description             |
     |-----------|-------------------------|
     | hello     | Say hello to my friend. |
@@ -30,7 +30,7 @@ List operations.
 
 Show help for `hello` op.
 
-    >>> run("gage run hello --help-op")
+    >>> run("gage run hello --help-op")  # -space
     Usage: gage run hello
     ⤶
      Say hello to my friend.
