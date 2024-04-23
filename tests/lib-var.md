@@ -318,12 +318,13 @@ Gage treats any directory with a Gage file as a project.
 When `runs_dir` is called in the context of a project directory, it
 returns the `.gage/runs` subdirectory by default.
 
-    >>> with Env({"GAGE_RUNS": ""}):  # +parse
+    >>> with Env({"GAGE_RUNS": ""}):  # +parse +paths
     ...     with SetCwd(tmp):
     ...         var.runs_dir()
     '{x:path}/.gage/runs'
 
-    >>> assert x == tmp
+    >>> compare_paths(x, tmp)
+    True
 
 Finally, if the project specifies `$runs-dir`, it's used as a relative
 path to the project directory.
@@ -332,12 +333,13 @@ path to the project directory.
     ... "$runs-dir" = "abc/xyz"
     ... """)
 
-    >>> with Env({"GAGE_RUNS": ""}):  # +parse
+    >>> with Env({"GAGE_RUNS": ""}):  # +parse +paths
     ...     with SetCwd(tmp):
     ...         var.runs_dir()
     '{x:path}/abc/xyz'
 
-    >>> assert x == tmp
+    >>> compare_paths(x, tmp)
+    True
 
 If the Gage file cannot be read, Gage logs a debug error message but
 otherwise ignores the error and returns the default `.gage/runs`
@@ -347,17 +349,19 @@ subdirectory location.
     ... not a valid TOML file
     ... """)
 
-    >>> with Env({"GAGE_RUNS": ""}):  # +parse
+    >>> with Env({"GAGE_RUNS": ""}):  # +parse +paths
     ...     with SetCwd(tmp):
     ...         with LogCapture(log_level=0) as logs:
     ...             var.runs_dir()
     '{x:path}/.gage/runs'
 
-    >>> assert x == tmp
+    >>> compare_paths(x, tmp)
+    True
 
-    >>> logs.print_all()  # +parse -space
+    >>> logs.print_all()  # +parse -space +paths
     DEBUG: [gage._internal.var] error reading Gage file in {x:path}:
     ('{y:path}/gage.toml', "Expected '=' after a key in a key/value
     pair (at line 2, column 5)")
 
-    >>> assert x == y == tmp
+    >>> compare_paths(x, y) and compare_paths(y, tmp)
+    True
