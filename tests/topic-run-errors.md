@@ -5,7 +5,7 @@ These tests illustrate how Gage handles run errors. The use the
 
     >>> use_project(sample("projects", "run-errors"))
 
-    >>> run("gage ops")
+    >>> run("gage ops", cols=54)
     | operation        | description                     |
     |------------------|---------------------------------|
     | deps-error       | Error in stage deps             |
