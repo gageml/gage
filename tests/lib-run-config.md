@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # Run config support
 
 `run_config` provides support for run configuration implementation.
