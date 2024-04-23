@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # Project reference
 
 A project reference is a sidebar run file with a `.project` extension.
