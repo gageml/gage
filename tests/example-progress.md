@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # Progress example
 
     >>> use_example("progress")
