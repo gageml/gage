@@ -40,7 +40,7 @@ directory for control.
 
     >>> tmp = make_temp_dir()
 
-    >>> run(f"gage -C {tmp} check -v")  # -space +parse
+    >>> run(f"gage -C {tmp} check -v", cols=999)  # -space +parse
     | gage_version          | {}       |
     | gage_install_location | {}       |
     | python_version        | {}       |
@@ -66,7 +66,7 @@ Validate `hello` example.
 
 If a directory is specified, `check` looks for a Gage file.
 
-    >>> run("gage check .")
+    >>> run("gage check .") # +paths
     ./gage.toml is a valid Gage file
     <0>
 

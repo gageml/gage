@@ -32,7 +32,8 @@ If we create a project marker in root, it becomes a project.
     >>> find_project_dir(root, root)  # +parse
     '{x:path}'
 
-    >>> assert x == root
+    >>> compare_paths(x, root)
+    True
 
 Create a subdirectory of root.
 
@@ -49,7 +50,8 @@ When we include root in the search, it's selected as the project dir.
     >>> find_project_dir(subdir, root)  # +parse
     '{x:path}'
 
-    >>> assert x == root
+    >>> compare_paths(x, root)
+    True
 
 Create a subdirectory within subdir.
 
@@ -67,7 +69,8 @@ Look for the project in the new sub dir.
     >>> find_project_dir(subdir2, root)  # +parse
     '{x:path}'
 
-    >>> assert x == root
+    >>> compare_paths(x, root)
+    True
 
 Create a project marker in subdir.
 
@@ -81,9 +84,11 @@ Find the project starting from subdir 2.
     >>> find_project_dir(subdir2, subdir)  # +parse
     '{x:path}'
 
-    >>> assert x == subdir
+    >>> compare_paths(x, subdir)
+    True
 
     >>> find_project_dir(subdir2, root)  # +parse
     '{x:path}'
 
-    >>> assert x == subdir
+    >>> compare_paths(x, subdir)
+    True

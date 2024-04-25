@@ -40,7 +40,8 @@ It has a corresponding run directory under `runs_dir`.
 The run directory is a subdirectory of the runs location and is named
 with the run ID.
 
-    >>> assert run_dir == path_join(runs_dir, run_id)
+    >>> compare_paths(run_dir, path_join(runs_dir, run_id))
+    True
 
 The run directory doesn't exit.
 

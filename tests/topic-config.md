@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # Run Config
 
 TODO: Lots to cover here topic wise. Initial motivation is to test
@@ -21,7 +25,7 @@ contain potential config matches.
     Hola
     <0>
 
-    >>> run("gage show --files")
+    >>> run("gage show --files", cols=37)
     | name         | type        | size |
     |--------------|-------------|------|
     | foo/hello.py | source code | 26 B |
@@ -34,7 +38,7 @@ The `hello-2` operation includes two config keys, `msg1` and `msg2`. It
 uses a shorthand version when defining `msg2` of `#msg2`, which applies
 the previously specified path to the `hello2.py` file.
 
-    >>> run("gage run hello-2 --help-op")  # +wildcard
+    >>> run("gage run hello-2 --help-op")  # +wildcard -space
     Usage: gage run hello-2
     ...
     |  msg1                   Hi                               |

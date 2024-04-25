@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # Gage file support
 
 ## Validation

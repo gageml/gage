@@ -25,12 +25,12 @@ Use `genfiles` sample project to generate a run with files we can show.
     >>> run("gage run gen-files -y")
     <0>
 
-    >>> run("gage show --files")  # +wildcard -space
+    >>> run("gage show --files", cols=37)  # +wildcard -space
     | name         | type        | size |
     |--------------|-------------|------|
-    | msg.txt      | generated   | ...  |
-    | gage.json    | source code | ...  |
-    | gen_files.py | source code | ...  |
+    | msg.txt      | generated   |  ... |
+    | gage.json    | source code |  ... |
+    | gen_files.py | source code |  ... |
     <0>
 
 Show run files using the `cat` command.

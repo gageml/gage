@@ -44,7 +44,7 @@ Scripts can be inspected for various declarations. Let's example the
 
 The script source can be read using the `src` attribute:
 
-    >>> mnist_mlp.src  # +parse
+    >>> mnist_mlp.src  # +parse +paths
     '{:path}/samples/scripts/mnist_mlp.py'
 
 A script name is the base name (without extension) of the script

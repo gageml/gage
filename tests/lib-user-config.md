@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # User config
 
     >>> from gage._internal.user_config import *

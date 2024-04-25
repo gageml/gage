@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # File select / copy tree support
 
 The `file_select` module provides rules-based copy file support. Its two

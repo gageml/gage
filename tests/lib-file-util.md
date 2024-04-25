@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # File Utils
 
 The module `gage._internal.file_util` implements advanced file utilities.

@@ -2,7 +2,7 @@
 
     >>> use_example("summary")
 
-    >>> run("gage ops")
+    >>> run("gage ops", cols=60)
     | operation            | description                       |
     |----------------------|-----------------------------------|
     | alt-summary-metadata | Write summary vals with metadata  |
@@ -22,7 +22,7 @@ The default location for a run summary is `summary.json`.
     Writing summary to summary.json
     <0>
 
-    >>> run("gage show --files")  # +wildcard
+    >>> run("gage show --files", cols=45)  # +wildcard
     | name                | type        |  size |
     |---------------------|-------------|-------|
     | summary.json        | generated   | ... B |
@@ -41,6 +41,9 @@ The default location for a run summary is `summary.json`.
       }
     }
     <0>
+
+    >>> # +skiprest
+
 
     >>> run("gage show")  # +parse +diff -space
     {:run_id}

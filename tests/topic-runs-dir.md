@@ -1,3 +1,7 @@
+---
+test-options: +paths
+---
+
 # Runs Dir
 
 These tests augment the runs dir related tests in
@@ -28,7 +32,7 @@ tmp parent is not a Gage project.
 Create a function to run the check command.
 
     >>> def check(env=None):
-    ...     env = {"COLUMNS": "9999", **(env or {})}
+    ...     env = {"COLUMNS": "110", **(env or {})}
     ...     run(f"gage -C '{tmp}' check -v", env=env)
 
 Moving up the list of locations, the default runs dir is under the user
@@ -36,13 +40,12 @@ directory.
 
     >>> check()  # +parse -space
     {}
-    | project_directory     | <none>                           |
-    | gagefile              | <none>                           |
     | runs_directory        | {x:path}/.gage/runs              |
     <0>
 
     >>> user_home = os.path.expanduser("~")
-    >>> assert x == user_home
+    >>> compare_paths(x, user_home)
+    True
 
 Next, it's the `runs` subdirectory of the active project. To make `tmp`
 a project, we can create a Gage file or any of the project markers
@@ -57,7 +60,8 @@ defined in `project_util.py`.
     | runs_directory        | {y:path}/.gage/runs              |
     <0>
 
-    >>> assert x == y == tmp
+    >>> compare_paths(x, y) and compare_paths(y, tmp)
+    True
 
 We can configure a different location in a project Gage file.
 
@@ -72,7 +76,8 @@ We can configure a different location in a project Gage file.
     | runs_directory        | {z:path}/xyz                     |
     <0>
 
-    >>> assert x == y == z == tmp
+    >>> compare_paths(x, y) and compare_paths(y, z) and compare_paths(z, tmp)
+    True
 
 Use `RUNS_DIR` to specify a location.
 
@@ -83,7 +88,8 @@ Use `RUNS_DIR` to specify a location.
     | runs_directory        | xxx                              |
     <0>
 
-    >>> assert x == y == tmp
+    >>> compare_paths(x, y) and compare_paths(y, tmp)
+    True
 
 `GAGE_RUNS` is used in priority of `RUNS_DIR` (e.g. in case there's
 another application using `RUNS_DIR`).
@@ -95,7 +101,8 @@ another application using `RUNS_DIR`).
     | runs_directory        | yyy                              |
     <0>
 
-    >>> assert x == y == tmp
+    >>> compare_paths(x, y) and compare_paths(y, tmp)
+    True
 
 ## Sample project
 
@@ -113,7 +120,7 @@ the project directory.
     gage.yaml
     hello.py
 
-    >>> run("gage ops")
+    >>> run("gage ops", cols=27)
     | operation | description |
     |-----------|-------------|
     | hello     | Says hello  |

@@ -60,7 +60,7 @@ The `-C` runs the command in the specified directory.
 
     >>> tmp = make_temp_dir()
 
-    >>> run(f"gage -C {tmp} check -v")  # +parse -space
+    >>> run(f"gage -C {tmp} check -v", cols=999)  # +parse -space
     {}
     | command_directory   | {x:path} |
     | project_directory   | {}       |
