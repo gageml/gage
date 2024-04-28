@@ -210,7 +210,7 @@ def parse_sha256(s: str):
     return s
 
 
-@parse_type("--", r"\| -[\-\|]* \|")
+@parse_type("|-|", r"\|-[\-\|]*\|")
 def parse_table_border(s: str):
     return s
 

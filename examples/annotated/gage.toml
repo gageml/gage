@@ -1,0 +1,180 @@
+# Annotated Gage file
+# ===================
+#
+# This file provides a list of sample operations for this project.
+# Annotations (comments) provide information about attributes and
+# behavior.
+#
+# The file is intended to be read from top to bottom. Information from
+# prior sections is not repeated. We recommend that you run commands
+# where suggested to help reinforce the concepts.
+
+[hello]
+
+# This is your traditional "hello world" style example. The only
+# required attribute is `exec`, however, we recommend providing a
+# description.
+
+# The description appears when you run `gage ops`. While it's optional,
+# we recommend using it for all your operations.
+#
+description = "Simplest possible Gage operation"
+
+# Use `exec` to run the operation command.
+#
+exec = "python hello.py"
+
+# Notes
+# -----
+#
+# Q: How do I run this operation?
+#
+# A: Use `gage run hello`. Use `gage run hello -y` to bypass the prompt.
+#
+# Q: What happens when I run the operation?
+#
+# A: Like Guild AI, Gage creates a new directory in prepration for
+# running the operation. This directory is called the *run directory*.
+#
+# Gage copies source code from the project to the run directory. This
+# process is called *staging*. The intent is that the run directory
+# mirrors the project directory when the operation is staged.
+#
+# Once the run is staged, Gage executes the command specified by `exec`
+# *inside the run directory*. This is arguably the most important
+# feature Gage offers and it can be the source of some confusion. By
+# isolating the operation from your project, Gage ensures that the
+# source code for the run is accurate --- it does not reflect incidental
+# changes to your project during the run. Additionally, generated files
+# are automatically part of the run, provided they're written relative
+# to the current directory.
+#
+# You can view the contents of the run directory using `gage show
+# --files` (shows run files in a table) or `gage open` (opens a file
+# explorer for the run directory).
+#
+# Q: What gets copied as source code?
+#
+# A: Like Guild, Gage supports a `sourcecode` spec for configuring
+# source code. In this case Gage uses the default set of rules for
+# selecting source code for the operation. To see what source code Gage
+# selects for an operation, run `gage run <operation> --preview`.
+#
+# You can also stage the run using `gage run hello --stage`. This stages
+# run, as described above, but does not run it.
+#
+# Q: Where's the `main` attribute (Guild AI)?
+#
+# A: Guild users may be looking for `main`. Gage intentionally does not
+# support wrappers around "exec". We found this layer to be an ongoing
+# source of confusion and surprise behavior for users. Gage takes a
+# "what you see is what you get" approach to what's executed in this
+# case.
+#
+# Q: Who's Joe?
+#
+# A: See https://en.wikipedia.org/wiki/Joe_Armstrong_(programmer).
+
+[hello-2]
+
+description = "Same as hello but with a configurable name"
+
+exec = "python hello.py"
+
+# Gage supports explicit run configuration through text files. Config
+# can be defined in either language files (e.g. Python, Julia, etc.) or
+# in traditional configuration files (e.g. JSON, YAML, TOML, etc.)
+#
+# This case specifies a single configuration file `hello.py`. The
+# `config` attribute, however, is quite flexible and can specify
+# patterns for including and excluding multiple files.
+#
+# For each configuration file selected, Gage reads the keys and makes
+# them available to modify for a run. In this case, `hello.py` defines a
+# single global variable `name`, which Gage reads and makes available to
+# modify.
+#
+# If a config value is modified for a run, Gage re-writes the
+# configuration file using the new value for the run.
+#
+config = "hello.py"
+
+# Notes
+# -----
+#
+# Q: How do I run this operation?
+#
+# A: To specify a different name, use `gage run hello-2 name=Jane`.
+#
+# Q: Why use this approach for configuration?
+#
+# A: This approach applies lessons from our experience with Guild AI.
+# Guild supports a variety of methods to customize inputs to a run. Some
+# work well, others dont't. Gage improves on the successful methods and
+# drops the others.
+#
+# One method that works well is that standard configuration files are
+# re-written with their customizes values to the run directory. This
+# provides an explicit record of what was used for a run.
+#
+# One method that does not work well is to dynamically apply custom
+# values to Python scripts by modifying the Python global namespace at
+# runtime. This in fact is a very bad idea! First, it requires that
+# Python operations be wrapped with a special Guild-specific handler
+# that modifies the global namespace. Second, it leaves no record of
+# what exactly occurred to the wrapped module at runtime. Third, *it
+# modifies user code at runtime*.
+#
+# Gage refuses to do any such thing.
+#
+# Instead, custom values are used to *modify the Python source code
+# file* as needed for each run. This leaves a clear record of the change
+# and does not require tampering with the runtime.
+#
+# Q: If Gage re-writes my Python files, what happens to comments and
+# white space?
+#
+# A: Gage uses a lossless AST to parse language files and should not
+# modify anything that's not applicable to the customized value. If it
+# does that's a bug and should be fixed. I.e. diffs between your
+# original source code file and the run-specific file should be minimal.
+
+[hello-3]
+
+description = "Same as hello but limits what source code is copied"
+exec = "python hello.py"
+
+# Source code files are selected using a list of rules. Runs can include
+# or exclude files. To exclude files, prefix the rule with '-'. Use a
+# wildcard '*' to match parts of filenames. Use '**' to match multiple
+# levels of directories. Rules are evaluated in order.
+#
+# This example includes all Python and txt files but excludes all files
+# under the data subdirectory. This is a common pattern to avoid copying
+# files that aren't needed for a run.
+#
+sourcecode = ["*.py", "*.txt", "-data"]
+
+[add]
+
+description = "Adds x and y"
+exec = "python add.py"
+
+# Specific configuration keys can be selected using '#<key' suffixes for
+# a configuration path. If an entry omits the filename, Gage assumes the
+# previously specified filename.
+#
+# In this case, Gage selects the `x` and `y` keys from `add.py`. The
+# second entry omits the filename, which Gage assumes to be `add.py`.
+#
+config = ["add.py#x", "#y"]
+
+[incr]
+
+description = "Increments x by 1"
+exec = "python add.py"
+
+# In this case we repurpose add.py but limit the configuration to `x`,
+# leaving `y` out.
+#
+config = "add.py#x"
