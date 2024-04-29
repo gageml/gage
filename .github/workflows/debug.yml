@@ -116,11 +116,11 @@ jobs:
           git config --global user.email unused@localhost
           git config --global init.defaultBranch main
 
-      - name: Install rclone
-        run: |
-          wget https://downloads.rclone.org/rclone-current-windows-amd64.zip
-          unzip rclone-current-windows-amd64.zip
-          copy rclone-current-windows-amd64\rclone.exe C:\msys64\mingw64\bin
+      # - name: Install rclone
+      #   run: |
+      #     wget https://downloads.rclone.org/rclone-current-windows-amd64.zip
+      #     unzip rclone-current-windows-amd64.zip
+      #     copy rclone-current-windows-amd64\rclone.exe C:\msys64\mingw64\bin
 
       - name: Keep server alive for SSH (cancel workflow to terminate)
         run: sleep 7200
