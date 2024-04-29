@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_SKIP  # locking on Windows
+test-options: +skip=WINDOWS_FIX  # locking on Windows
 ---
 
 # Starting a staged run
