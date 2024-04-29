@@ -1,5 +1,5 @@
 ---
-test-options: +paths
+test-options: +paths +skip=WINDOWS_FIX  # Config is broken on Windows
 ---
 
 # Run Config

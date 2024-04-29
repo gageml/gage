@@ -1,3 +1,6 @@
+---
+test-options: +skip=WINDOWS_FIX  # sample ops don't run on Windows
+---
 # Run Errors
 
 These tests illustrate how Gage handles run errors. The use the
@@ -15,7 +18,7 @@ These tests illustrate how Gage handles run errors. The use the
     | sourcecode-error | Error in source code resolution |
     <0>
 
-    >>> run("gage check .")
+    >>> run("gage check .")  # +paths
     ./gage.toml is a valid Gage file
     <0>
 

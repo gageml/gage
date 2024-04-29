@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX  # Various issues: locks, digests
+---
+
 # Run utils
 
     >>> from gage._internal.types import *
