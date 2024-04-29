@@ -97,12 +97,6 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install rclone
-        run: |
-          C:\msys64\usr\bin\wget.exe https://github.com/rclone/rclone/releases/download/v1.66.0/rclone-v1.66.0-windows-amd64.zip
-          & "C:\Program Files\Git\usr\bin\unzip.exe" rclone-v1.66.0-windows-amd64.zip
-          copy rclone-v1.66.0-windows-amd64\rclone.exe C:\msys64\mingw64\bin
-
       - name: Build package
         run: |
           python -m pip install --upgrade pip wheel setuptools
@@ -118,6 +112,12 @@ jobs:
       - name: Install test requirements
         run: |
           test-env\Scripts\pip install groktest
+
+      - name: Install rclone
+        run: |
+          C:\msys64\usr\bin\wget.exe https://github.com/rclone/rclone/releases/download/v1.66.0/rclone-v1.66.0-windows-amd64.zip
+          & "C:\Program Files\Git\usr\bin\unzip.exe" rclone-v1.66.0-windows-amd64.zip
+          copy rclone-v1.66.0-windows-amd64\rclone.exe test-env\Scripts
 
       - name: Configure environment for tests
         run: |
