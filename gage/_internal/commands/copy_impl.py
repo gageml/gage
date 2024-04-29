@@ -214,6 +214,7 @@ def _rclone_size(src: str, includes: list[str]):
 def _rclone_cmd(args: list[str]):
     exe = which("rclone")
     if not exe:
+        assert False, os.getenv("PATH")
         raise SystemExit(
             "rclone is required for this command\n"
             "Refer to https://www.gage.chat/rclone/ for help."
