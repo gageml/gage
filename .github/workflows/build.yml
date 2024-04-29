@@ -159,6 +159,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Build package
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip wheel --no-deps --wheel-dir dist .
+
       - name: Publish package
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
