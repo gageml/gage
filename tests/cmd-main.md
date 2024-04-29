@@ -51,7 +51,7 @@ Using `--help` shows help explicitly.
 ## Version
 
     >>> run("gage --version")
-    Gage 0.1.1
+    Gage 0.1.2
     <0>
 
 ## Changing cwd

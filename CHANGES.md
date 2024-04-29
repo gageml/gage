@@ -1,5 +1,11 @@
 # Changes
 
+### v0.1.2
+
+Fixes:
+
+- Missing help topics
+
 ### v0.1.1
 
 This is the first early release of Gage. The tool is still under

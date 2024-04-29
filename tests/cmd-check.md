@@ -27,7 +27,7 @@ Help for `check`:
 Default output:
 
     >>> run("gage check", cols=999)  # +parse -space
-    | gage_version          | 0.1.1     |
+    | gage_version          | 0.1.2     |
     | gage_install_location | {:path}   |
     | python_version        | {:ver} {} |
     | python_exe            | {:path}   |
