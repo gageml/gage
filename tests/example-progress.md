@@ -1,12 +1,12 @@
 ---
-test-options: +paths
+test-options: +skip=WINDOWS_FIX  # file locking
 ---
 
 # Progress example
 
     >>> use_example("progress")
 
-    >>> run("gage check .")
+    >>> run("gage check .")  # +paths
     ./gage.toml is a valid Gage file
     <0>
 
