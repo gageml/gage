@@ -43,7 +43,13 @@ def remotes():
 def _show_help(topic: str):
     help = _read_help_topic(topic)
     with cli.pager():
-        cli.out(cli.markdown(help), wrap=True)
+        if cli.is_plain:
+            cli.out(help)
+        else:
+            import rich.markdown
+
+            md = rich.markdown.Markdown(help)
+            cli.out(md, wrap=True)
 
 
 def _read_help_topic(topic: str):
