@@ -215,6 +215,7 @@ def parse_sha256(s: str):
 def parse_table_border(s: str):
     return s
 
+
 @parse_type("sigint", r"1|-9")
 def parse_sigint(s: str):
     return int(s)
