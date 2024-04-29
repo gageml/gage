@@ -43,7 +43,8 @@ dev = [
 [tool.setuptools.package-data]
 
 gage = [
-    "*.schema.json"
+    "*.schema.json",
+    "help/*.md"
 ]
 
 [project.scripts]
