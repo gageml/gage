@@ -23,7 +23,7 @@ on:
 jobs:
   build-posix:
     name: Build - POSIX
-    if: (github.event_name != 'workflow_dispatch' || inputs.posix) && !contains(github.event.commit.message, '-build')
+    if: (github.event_name != 'workflow_dispatch' || inputs.posix) && !contains(github.event.head_commit.message, '-build')
     strategy:
       fail-fast: false
       matrix:
@@ -78,7 +78,7 @@ jobs:
 
   build-windows:
     name: Build - Windows
-    if: (github.event_name != 'workflow_dispatch' || inputs.windows) && !contains(github.event.commit.message, '-build')
+    if: (github.event_name != 'workflow_dispatch' || inputs.windows) && !contains(github.event.head_commit.message, '-build')
     strategy:
       fail-fast: false
       matrix:
