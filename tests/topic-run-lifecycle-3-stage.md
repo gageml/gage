@@ -78,7 +78,8 @@ Initialize run meta.
 
 List meta files after init.
 
-    >>> ls(run.meta_dir, include_dirs=True, permissions=True)  # +diff
+    >>> ls(run.meta_dir, include_dirs=True, permissions=True)
+    ... # +diff +skip=WINDOWS_FIX (global writeable on Windows)
     -r--r--r-- __schema__
     -r--r--r-- config.json
     -r--r--r-- id
