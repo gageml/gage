@@ -97,6 +97,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Install winget
+        uses: Cyberboss/install-winget@v1
+
       - name: Build package
         run: |
           python -m pip install --upgrade pip wheel setuptools
@@ -113,11 +116,7 @@ jobs:
         run: |
           test-env\Scripts\pip install groktest
 
-      - name: Install winget
-        uses: Cyberboss/install-winget@v1
-
       - name: Configure environment for tests
-        # Git config required by tests that run git commands
         run: |
           git config --global user.name unused
           git config --global user.email unused@localhost

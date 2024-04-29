@@ -85,6 +85,9 @@ jobs:
         with:
           python-version: ${{ inputs.python }}
 
+      - name: Install winget
+        uses: Cyberboss/install-winget@v1
+
       - name: Configure SSH
         # ssh action (below) waits for a 'continue' sentinel - we want
         # the job to continue while ssh is available for connections
@@ -110,12 +113,13 @@ jobs:
         run: |
           test-env\Scripts\pip install groktest
 
-      # - name: Configure environment for tests
-      #   run: |
-      #     git config --global user.name unused
-      #     git config --global user.email unused@localhost
-      #     git config --global init.defaultBranch main
-      #     sudo apt install rclone -y || brew install rclone
+      - name: Configure environment for tests
+        run: |
+          git config --global user.name unused
+          git config --global user.email unused@localhost
+          git config --global init.defaultBranch main
+          # winget install Rclone.Rclone
+          # mkdir \Tmp -Force
 
       - name: Keep server alive for SSH (cancel workflow to terminate)
         run: sleep 7200
