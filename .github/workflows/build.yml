@@ -23,7 +23,7 @@ on:
 jobs:
   build-posix:
     name: Build - POSIX
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.posix }}
+    if: github.event_name != 'workflow_dispatch' || inputs.posix
     strategy:
       fail-fast: false
       matrix:
@@ -78,7 +78,7 @@ jobs:
 
   build-windows:
     name: Build - Windows
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.windows }}
+    if: github.event_name != 'workflow_dispatch' || inputs.windows
     strategy:
       fail-fast: false
       matrix:
@@ -138,7 +138,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    if: ${{ inputs.release }} || contains(github.event.head_commit.message, "## release ##")
+    if: 'inputs.release || contains(github.event.commit.message, "## release ##")'
     needs:
       - build-posix
       - build-windows
