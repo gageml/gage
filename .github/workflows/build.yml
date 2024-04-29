@@ -121,9 +121,9 @@ jobs:
 
       - name: Install rclone
         run: |
-          C:\msys64\usr\bin\wget.exe https://downloads.rclone.org/rclone-current-windows-amd64.zip
-          C:\msys64\usr\bin\unzip.exe rclone-current-windows-amd64.zip
-          copy rclone-current-windows-amd64\rclone.exe C:\msys64\mingw64\bin
+          C:\msys64\usr\bin\wget.exe https://github.com/rclone/rclone/releases/download/v1.66.0/rclone-v1.66.0-windows-amd64.zip
+          "C:\Program Files\Git\usr\bin\unzip.exe" rclone-v1.66.0-windows-amd64.zip
+          copy rclone-v1.66.0-windows-amd64\rclone.exe C:\msys64\mingw64\bin
 
       - name: Run tests
         env:
