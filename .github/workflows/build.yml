@@ -118,8 +118,12 @@ jobs:
           git config --global user.name unused
           git config --global user.email unused@localhost
           git config --global init.defaultBranch main
-          winget install Rclone.Rclone
-          mkdir \tmp -Force
+
+      - name: Install rclone
+        run: |
+          wget https://downloads.rclone.org/rclone-current-windows-amd64.zip
+          unzip rclone-current-windows-amd64.zip
+          copy rclone-current-windows-amd64\rclone.exe C:\msys64\mingw64\bin
 
       - name: Run tests
         env:
@@ -127,7 +131,6 @@ jobs:
           CI: 1
           WINDOWS: 1
           WINDOWS_FIX: 1
-          GAGE_TEMPDIR: \\tmp
         run: |
           test-env\\Scripts\\activate
           groktest .
