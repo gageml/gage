@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX  # Locking and global write permissions
+---
+
 # Staging a run dir
 
     >>> from gage._internal.run_util import *
@@ -78,8 +82,7 @@ Initialize run meta.
 
 List meta files after init.
 
-    >>> ls(run.meta_dir, include_dirs=True, permissions=True)
-    ... # +diff +skip=WINDOWS_FIX (global writeable on Windows)
+    >>> ls(run.meta_dir, include_dirs=True, permissions=True)  # +diff
     -r--r--r-- __schema__
     -r--r--r-- config.json
     -r--r--r-- id
@@ -193,7 +196,7 @@ Source code files are copied and left in a writeable state.
 The list of files is written to the files log. Log entries are per line
 and consist of an event, a file type, a modified timestamp, and a path.
 
-    >>> cat(run_meta_path(run, "log", "files"))  # +parse
+    >>> cat(run_meta_path(run, "log", "files"))  # +parse +paths
     a s {:timestamp} conf/eval.yaml
     a s {:timestamp} conf/train.yaml
     a s {:timestamp} eval.py
@@ -207,7 +210,7 @@ type.
 
 The runner log contains the applied include and exclude patterns.
 
-    >>> cat_log(run_meta_path(run, "log", "runner"))  # +wildcard -space
+    >>> cat_log(run_meta_path(run, "log", "runner"))  # +wildcard -space +paths
     Writing meta id
     ...
     Copying source code (see log/files):

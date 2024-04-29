@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_SKIP  # locking on Windows
+---
+
 # Starting a staged run
 
     >>> from gage._internal.run_util import *
