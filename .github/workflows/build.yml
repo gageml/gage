@@ -99,9 +99,9 @@ jobs:
 
       - name: Install rclone
         run: |
-          C:/msys64/usr/bin/wget.exe https://github.com/rclone/rclone/releases/download/v1.66.0/rclone-v1.66.0-windows-amd64.zip
-          "C:/Program Files/Git/usr/bin/unzip.exe" rclone-v1.66.0-windows-amd64.zip
-          copy rclone-v1.66.0-windows-amd64/rclone.exe C:/msys64/mingw64/bin
+          C:\msys64\usr\bin\wget.exe https://github.com/rclone/rclone/releases/download/v1.66.0/rclone-v1.66.0-windows-amd64.zip
+          \"C:\Program Files\Git\usr\bin\unzip.exe\" rclone-v1.66.0-windows-amd64.zip
+          copy rclone-v1.66.0-windows-amd64\rclone.exe C:\msys64\mingw64\bin
 
       - name: Build package
         run: |
@@ -111,13 +111,13 @@ jobs:
       - name: Install package
         run: |
           python -m venv test-env
-          test-env/Scripts/pip install --upgrade pip
-          pwsh -Command 'test-env/Scripts/pip install $(ls dist)'
-          test-env/Scripts/gage check
+          test-env\Scripts\pip install --upgrade pip
+          pwsh -Command 'test-env\Scripts\pip install $(ls dist)'
+          test-env\Scripts\gage check
 
       - name: Install test requirements
         run: |
-          test-env/Scripts/pip install groktest
+          test-env\Scripts\pip install groktest
 
       - name: Configure environment for tests
         run: |
@@ -132,7 +132,7 @@ jobs:
           WINDOWS: 1
           WINDOWS_FIX: 1
         run: |
-          test-env/Scripts/activate
+          test-env\Scripts\activate
           groktest .
 
   publish-to-pypi:
