@@ -3,8 +3,8 @@ name: Build
 on:
   push:
     branches: main
-  # schedule:
-  #  - cron:  '0 5 * * *'
+  schedule:
+   - cron:  '0 5 * * *'
   workflow_dispatch:
     inputs:
       posix:
@@ -138,7 +138,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    if: inputs.release
+    if: inputs.release || contains(github.event.head_commit.message, '+release')
     needs:
       - build-posix
       - build-windows
