@@ -377,7 +377,6 @@ def run(
     rstrip: bool = True,
     cols: int = 60,
     _capture: bool = False,
-    **other_env: str,
 ):
     proc_env = dict(os.environ)
     _apply_venv_bin_path(proc_env)
@@ -385,7 +384,6 @@ def run(
     if cols >= 0:
         proc_env["COLUMNS"] = str(cols)
     proc_env.update(env or {})
-    proc_env.update(other_env)
     p = _popen(cmd, proc_env, cwd)
     with _kill_after(p, timeout) as timeout_context:
         try:
