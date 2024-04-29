@@ -4,6 +4,6 @@ import os
 
 __pkgdir__ = os.path.dirname(os.path.dirname(__file__))
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from ._internal.api import *
