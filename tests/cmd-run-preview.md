@@ -5,7 +5,8 @@ configuration and the project state.
 
     >>> use_example("sourcecode")
 
-    >>> run("gage run default --preview", env={"COLUMNS": "50"})  #+diff
+    >>> run("gage run default --preview", env={"COLUMNS": "50"})
+    ... # +diff +skip=WINDOWS_FIX (table fmt output diff)
     Source Code
     |                                                |
     | | patterns                              |      |

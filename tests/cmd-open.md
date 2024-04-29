@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX  # OS-specific cmd dependencies
+---
+
 # `open` command
 
 `open` opens a run directory in the system file explorer. It can

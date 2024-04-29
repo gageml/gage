@@ -77,7 +77,7 @@ Comments appear in `show`.
     ⤶
     {}
                               Comments
-    | {}                                                   {} |
+    | {}                                                      |
     | ---------------------------{}-------------------------- |
     | Hello with defaults                                     |
     <0>

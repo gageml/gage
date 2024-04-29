@@ -64,6 +64,7 @@ __all__ = [
     "parse_short_run_id",
     "parse_short_run_name",
     "parse_sha256",
+    "parse_sigint",
     "parse_table_border",
     "parse_timestamp",
     "parse_timestamp_ms",
@@ -213,6 +214,10 @@ def parse_sha256(s: str):
 @parse_type("|-|", r"\|-[\-\|]*\|")
 def parse_table_border(s: str):
     return s
+
+@parse_type("sigint", r"1|-9")
+def parse_sigint(s: str):
+    return int(s)
 
 
 def _format_tz(s: str):

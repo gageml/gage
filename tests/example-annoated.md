@@ -17,7 +17,7 @@
     Hello Joe
     <0>
 
-    >>> run("gage show --files")  # +parse -space
+    >>> run("gage show --files")  # +parse -space +paths
     | name                | type        |   size |
     {:|-|}
     | a-file.txt          | source code |     {} |

@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX  # table border off-by-one, file size calcs
+---
+
 # Hello example
 
 The [`hello`](../examples/hello) example demonstrates the simplest

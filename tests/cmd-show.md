@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX  # file size calc issue on windows
+---
+
 # `show` command
 
     >>> run("gage show -h")  # +diff

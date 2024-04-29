@@ -97,9 +97,6 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install winget
-        uses: Cyberboss/install-winget@v1
-
       - name: Build package
         run: |
           python -m pip install --upgrade pip wheel setuptools
@@ -122,15 +119,15 @@ jobs:
           git config --global user.email unused@localhost
           git config --global init.defaultBranch main
           winget install Rclone.Rclone
-          mkdir \Tmp -Force
+          mkdir \tmp -Force
 
       - name: Run tests
         env:
           PYTHONUTF8: 1
           CI: 1
           WINDOWS: 1
-          WINFIX: 1
-          GAGE_TEMPDIR: \\Tmp
+          WINDOWS_FIX: 1
+          GAGE_TEMPDIR: \\tmp
         run: |
           test-env\\Scripts\\activate
           groktest .
