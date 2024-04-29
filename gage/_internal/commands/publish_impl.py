@@ -64,6 +64,7 @@ def publish(args: Args):
     if not args.skip_runs:
         _copy_runs(runs, rclone_conf, rclone_env, board_dest)
     _delete_conf_tmp(rclone_conf)
+    cli.out(f"Board updated https://beta.gage.live/boards/{board_id}")
 
 
 def _board_id(args: Args, board: BoardDef):
@@ -83,7 +84,7 @@ def _board_id(args: Args, board: BoardDef):
 
 
 def _api_token():
-    token = os.getenv("GAGE_TOKEN")
+    token = _token_for_env()
     if not token:
         token = _prompt_for_token()
         if not token:
@@ -93,6 +94,23 @@ def _api_token():
     if not token.startswith("gage_"):
         cli.exit_with_error("Invalid API token")
     return token
+
+
+def _token_for_env():
+    return os.getenv("GAGE_TOKEN") or _dot_env().get("GAGE_TOKEN")
+
+
+def _dot_env():
+    try:
+        s = open(".env").read()
+    except OSError:
+        return {}
+    else:
+        return _parse_env(s)
+
+
+def _parse_env(s):
+    return dict([line.split("=", 1) for line in s.split("\n") if "=" in line])
 
 
 def _prompt_for_token():
