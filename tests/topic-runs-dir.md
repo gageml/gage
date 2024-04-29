@@ -32,8 +32,7 @@ tmp parent is not a Gage project.
 Create a function to run the check command.
 
     >>> def check(env=None):
-    ...     env = {"COLUMNS": "110", **(env or {})}
-    ...     run(f"gage -C '{tmp}' check -v", env=env)
+    ...     run(f"gage -C '{tmp}' check -v", cols=120, env=(env or {}))
 
 Moving up the list of locations, the default runs dir is under the user
 directory.
