@@ -113,12 +113,16 @@ jobs:
         run: |
           test-env\Scripts\pip install groktest
 
+      - name: Install winget
+        uses: Cyberboss/install-winget@v1
+
       - name: Configure environment for tests
         # Git config required by tests that run git commands
         run: |
           git config --global user.name unused
           git config --global user.email unused@localhost
           git config --global init.defaultBranch main
+          winget install Rclone.Rclone
           mkdir \Tmp -Force
 
       - name: Run tests
@@ -127,6 +131,7 @@ jobs:
           CI: 1
           WINDOWS: 1
           WINFIX: 1
+          GAGE_TEMPDIR: \\Tmp
         run: |
           test-env\\Scripts\\activate
           groktest .
