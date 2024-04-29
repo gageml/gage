@@ -127,8 +127,8 @@ jobs:
           CI: 1
           WINDOWS: 1
           WINFIX: 1
-          PATH: "%GITHUB_WORKSPACE%\\test-env\\Scripts;%PATH%"
         run: |
+          test-env\\Scripts\\activate
           groktest .
 
   publish-to-pypi:
