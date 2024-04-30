@@ -64,7 +64,7 @@ def publish(args: Args):
     if not args.skip_runs:
         _copy_runs(runs, rclone_conf, rclone_env, board_dest)
     _delete_conf_tmp(rclone_conf)
-    cli.out(f"Board updated https://beta.gage.live/boards/{board_id}")
+    cli.out(f"View board at https://beta.gage.live/boards/{board_id}")
 
 
 def _board_id(args: Args, board: BoardDef):
