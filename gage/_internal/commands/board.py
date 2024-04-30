@@ -62,12 +62,7 @@ def show_board(
     csv: CSVFlag = False,
     json: JSONFlag = False,
 ):
-    """Show a board of run results.
-
-    [b]IMPORTANT:[/b] This feature is under development. It currently
-    only supports showing a board as CSV or JSON. You must specify
-    either '--csv' or '--json'.
-    """
+    """Show a board of run results."""
     from .board_impl import show_board, Args
 
     show_board(Args(runs or [], where, config, csv, json))

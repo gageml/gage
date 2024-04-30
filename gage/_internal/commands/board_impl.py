@@ -11,11 +11,10 @@ import logging
 import sys
 
 from .. import cli
-
 from ..board_util import *
 from ..run_util import *
 
-from .impl_support import selected_runs
+from .impl_support import format_summary_value, selected_runs
 
 log = logging.getLogger(__name__)
 
@@ -29,19 +28,17 @@ class Args(NamedTuple):
 
 
 def show_board(args: Args):
-    if not args.json and not args.csv:
-        cli.exit_with_error("Specify either --csv or --json for this command.")
     if args.json and args.csv:
         cli.exit_with_error("You can't use both --json and --csv options.")
     board = _init_board(args)
     runs = _board_runs(board, args)
     data = _board_data(board, runs)
     if args.json:
-        _print_json_and_exit(data)
+        _print_json(data)
     elif args.csv:
-        _print_csv_and_exit(data)
+        _print_csv(data)
     else:
-        assert False
+        _print_table(data)
 
 
 def _init_board(args: Args) -> BoardDef:
@@ -90,12 +87,11 @@ def _board_data(board: BoardDef, runs: list[Run]):
         )
 
 
-def _print_json_and_exit(data: dict[str, Any]):
+def _print_json(data: dict[str, Any]):
     sys.stdout.write(json.dumps(data, indent=2, sort_keys=True))
-    raise SystemExit(0)
 
 
-def _print_csv_and_exit(data: dict[str, Any]):
+def _print_csv(data: dict[str, Any]):
     col_defs = data["colDefs"]
     fields: list[str] = [col["field"] for col in col_defs]
     headers = {
@@ -108,7 +104,6 @@ def _print_csv_and_exit(data: dict[str, Any]):
     for row in cast(list[dict[str, Any]], data["rowData"]):
         writer.writerow(_csv_row_values(row))
     sys.stdout.write(buf.getvalue())
-    raise SystemExit(0)
 
 
 def _csv_row_values(row: dict[str, Any]):
@@ -126,3 +121,37 @@ def _csv_cell_value(val: Any) -> Any:
         return 0
     else:
         return val
+
+
+def _print_table(data: dict[str, Any]):
+    table = cli.Table()
+    fields = [(col["field"], col) for col in data["colDefs"]]
+    for field, col in fields:
+        table.add_column(col.get("label") or _table_default_field_label(field))
+    for row in data["rowData"]:
+        table.add_row(*[_format_summary_value(row[field]) for field, _ in fields])
+    cli.out(table)
+
+
+def _table_default_field_label(field: str):
+    if field.startswith("run:"):
+        return field[4:]
+    elif field.startswith("metric:"):
+        return field[7:]
+    elif field.startswith("attribute:"):
+        return field[10:]
+    elif field.startswith("config:"):
+        return field[7:]
+    else:
+        return field
+
+
+def _format_summary_value(value: Any):
+    if isinstance(value, str):
+        try:
+            d = datetime.datetime.fromisoformat(value)
+        except ValueError:
+            return value
+        else:
+            return datetime.datetime.strftime(d, "%Y-%m-%d %H:%M")
+    return format_summary_value(value)

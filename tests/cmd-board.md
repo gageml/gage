@@ -1,3 +1,8 @@
+---
+parse-types:
+  date: "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}"
+---
+
 # `board` Command
 
 The `board` command runs a basic board view (not implemented) or prints
@@ -12,6 +17,16 @@ Generate some runs with fake metrics.
     >>> run("gage run fake_speed=2 -qy")
     <0>
     >>> run("gage run fake_speed=3 -l foo -qy")
+    <0>
+
+Show the board as a table.
+
+    >>> run("gage board", cols=999)  # +parse -space
+    | id | name  | operation | started | status | label | fake_speed | type | type | speed |
+    {:|-|}
+    | {:run_id} | {:run_name} | default | {:date} | completed | foo | 3 | example | example | 3 |
+    | {:run_id} | {:run_name} | default | {:date} | completed |     | 2 | example | example | 2 |
+    | {:run_id} | {:run_name} | default | {:date} | completed |     | 1 | example | example | 1 |
     <0>
 
 Show JSON data used by the board.
@@ -284,10 +299,6 @@ Group must specify either `min` or `max` but not both.
     <1>
 
 ## Command Validation
-
-    >>> run("gage board")  # -space
-    gage: Specify either --csv or --json for this command.
-    <1>
 
     >>> run("gage board --csv --json")
     gage: You can't use both --json and --csv options.
