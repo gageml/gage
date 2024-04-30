@@ -100,7 +100,7 @@ def _token_for_env():
     return os.getenv("GAGE_TOKEN") or _dot_env().get("GAGE_TOKEN")
 
 
-def _dot_env():
+def _dot_env() -> dict[str, str]:
     try:
         s = open(".env").read()
     except OSError:
@@ -109,7 +109,7 @@ def _dot_env():
         return _parse_env(s)
 
 
-def _parse_env(s):
+def _parse_env(s: str):
     return dict([line.split("=", 1) for line in s.split("\n") if "=" in line])
 
 
