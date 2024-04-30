@@ -112,4 +112,17 @@ def main_app():
     app.command("select")(select)
     app.command("show")(show)
     # app.command("sign")(sign)
+    _PATCH_fix_options_metavar(app)
     return app
+
+
+def _PATCH_fix_options_metavar(app: Typer):
+    # See https://github.com/tiangolo/typer/pull/816
+    import os
+
+    patched = False
+    for cmd in app.registered_commands:
+        if cmd.options_metavar != "[options]":
+            cmd.options_metavar = "[options]"
+            patched = True
+    assert patched or os.getenv("CI") != "1", "nothing patched - time to remove?"
