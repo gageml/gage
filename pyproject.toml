@@ -30,7 +30,7 @@ dependencies = [
     "rich>=13.7.1",
     "setuptools>=69.2.0",
     "tomli>=2.0.1",
-    "gage-typer>=0.9.0",
+    "typer>=0.12.3",
 ]
 
 [project.optional-dependencies]

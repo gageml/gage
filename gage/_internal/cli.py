@@ -227,7 +227,7 @@ def incompatible_with(*incompatible: str):
 
     def callback(value: Any, param: typer.core.TyperArgument, ctx: click.Context):
         if not _param_changed(param, value):
-            return value
+            return param.type_cast_value(ctx, value)
         for used_param in ctx.params:
             if param.name == used_param or used_param not in incompatible:
                 continue
@@ -240,7 +240,7 @@ def incompatible_with(*incompatible: str):
                 )
             )
             raise SystemExit()
-        return value
+        return param.type_cast_value(ctx, value)
 
     return callback
 
