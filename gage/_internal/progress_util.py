@@ -8,7 +8,7 @@ from .run_output import Progress, ProgressParser
 
 import re
 
-__ALL__ = ["progress_parser"]
+__all__ = ["progress_parser"]
 
 
 def progress_parser(name: str) -> ProgressParser:

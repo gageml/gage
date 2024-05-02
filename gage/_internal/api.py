@@ -8,7 +8,7 @@ from .run_util import *
 
 from . import var
 
-__ALL__ = ["runs", "write_summary"]
+__all__ = ["runs", "write_summary"]
 
 
 def _run_attributes(run: Run) -> dict[str, Any]:

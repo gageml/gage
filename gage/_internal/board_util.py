@@ -17,14 +17,14 @@ from .util import kebab_to_camel
 
 log = logging.getLogger(__name__)
 
-__ALL__ = [
+__all__ = [
     "BoardConfigError",
     "MissingGroupBy",
     "MissingGroupSelector",
     "MissingGroupSelectorField",
     "board_data",
     "filter_board_runs",
-    "load_board",
+    "load_board_def",
 ]
 
 _ColDef = dict[str, Any]

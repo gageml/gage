@@ -11,7 +11,7 @@ from .. import cli
 from .. import gagefile
 from .. import run_util
 
-__ALL__ = [
+__all__ = [
     "gagefile_error",
     "gagefile_not_found",
     "gagefile_find_error",

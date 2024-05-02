@@ -1065,6 +1065,7 @@ _KNOWN_SHELLS = (
     "code",
     "dash",
     "fish",
+    "nu",
     "powershell",
     "pwsh",
     "sh",

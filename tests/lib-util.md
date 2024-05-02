@@ -443,7 +443,8 @@ The active shell is provided as a shell string using
 
     >>> if shell is None:
     ...     import psutil
-    ...     from gage._internal.util import shlex_quote as _quote, _KNOWN_SHELLS
+    ...     from gage._internal.shlex_util import shlex_quote as _quote
+    ...     from gage._internal.util import _KNOWN_SHELLS
     ...     proc_path = []
     ...     p = psutil.Process().parent()
     ...     while p:
