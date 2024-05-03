@@ -130,7 +130,6 @@ jobs:
         env:
           PYTHONUTF8: 1
           CI: 1
-          WINDOWS: 1
           WINDOWS_FIX: 1
         run: |
           test-env\Scripts\activate

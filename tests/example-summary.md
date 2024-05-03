@@ -31,7 +31,7 @@ The default location for a run summary is `summary.json`.
     | summary_metadata.py | source code | ... B |
     <0>
 
-    >>> run("gage open --cmd cat --path summary.json")  # +skip=WINDOWS
+    >>> run("gage open --cmd cat --path summary.json")  # -windows
     {
       "attributes": {
         "type": "example"

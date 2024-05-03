@@ -54,6 +54,7 @@ __all__ = [
     "make_temp_dir",
     "normlf",
     "option_table",
+    "option_windows",
     "os",
     "parse_any",
     "parse_comment_id",
@@ -238,6 +239,18 @@ def option_type(name: str):
 
 def skip_test():
     raise RuntimeError("skip")
+
+
+@option_type("windows")
+def option_windows(enabled: bool):
+    if enabled is True and sys.platform != "win32":
+        # +windows -> only run on Windows
+        if sys.platform != "win32":
+            skip_test()
+    elif enabled is False and sys.platform == "win32":
+        # -windows -> don't run on Windows
+        if sys.platform == "win32":
+            skip_test()
 
 
 @option_type("table")

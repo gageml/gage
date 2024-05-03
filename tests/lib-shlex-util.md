@@ -40,7 +40,7 @@ be used as a replacement in all cases.
     >>> shlex_split("a b c")
     ['a', 'b', 'c']
 
-    >>> shlex_split("a \"b c\"")  # +skip=WINDOWS
+    >>> shlex_split("a \"b c\"")  # -windows
     ['a', 'b c']
 
     >>> shlex_split("'a b' c")
