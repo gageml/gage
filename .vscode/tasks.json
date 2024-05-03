@@ -22,7 +22,7 @@
       "label": "Run All Tests",
       "type": "process",
       "command": "${command:python.interpreterPath}",
-      "args": ["-m", "groktest", ".", "-F"],
+      "args": ["-m", "groktest", ".", "--fail-fast"],
       "presentation": {
         "panel": "dedicated",
       }
@@ -34,10 +34,22 @@
       "args": ["-m", "groktest", "${relativeFile}"]
     },
     {
+      "label": "Run Current (fail fast)",
+      "type": "process",
+      "command": "${command:python.interpreterPath}",
+      "args": ["-m", "groktest", "${relativeFile}", "--fail-fast"]
+    },
+    {
       "label": "Run Last",
       "type": "process",
       "command": "${command:python.interpreterPath}",
       "args": ["-m", "groktest", "--last"]
+    },
+    {
+      "label": "Run Last (fail fast)",
+      "type": "process",
+      "command": "${command:python.interpreterPath}",
+      "args": ["-m", "groktest", "--last", "--fail-fast"]
     }
   ]
 }
