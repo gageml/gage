@@ -33,7 +33,7 @@ Run help:
 
 Run preview:
 
-    >>> run("gage run hello", timeout=1)  # +parse
+    >>> run("gage run hello", timeout=2)  # +parse
     You are about to run hello
     ⤶
      name  Joe
