@@ -58,7 +58,7 @@ jobs:
 
       - name: Install test requirements
         run: |
-          test-env/bin/pip install groktest
+          test-env/bin/pip install git+https://github.com/gar1t/groktest
 
       - name: Configure environment for tests
         run: |
@@ -108,7 +108,7 @@ jobs:
 
       - name: Install test requirements
         run: |
-          test-env\Scripts\pip install groktest
+          test-env\Scripts\pip install git+https://github.com/gar1t/groktest
 
       - name: Configure environment for tests
         run: |
