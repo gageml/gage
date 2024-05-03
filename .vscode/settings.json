@@ -80,6 +80,7 @@
     "GAGETEST",
     "gaierror",
     "genfiles",
+    "getcwd",
     "getenv",
     "gethostname",
     "getpgid",
