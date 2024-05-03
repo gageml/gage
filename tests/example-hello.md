@@ -54,7 +54,7 @@ Run hello.
     Hello Gage
     <0>
 
-    >>> run("gage show")  # +parse -space +diff
+    >>> run("gage show")  # +parse +table +diff +paths
     {:run_id}
     | hello:hello                                    completed |
     ⤶
@@ -73,10 +73,10 @@ Run hello.
                                Files
     | name            |type               |               size |
     | ----------------|-------------------|------------------- |
-    | gage.toml       |source code        |              143 B |
-    | hello.py        |source code        |               38 B |
+    | gage.toml       |source code        |             {:d} B |
+    | hello.py        |source code        |             {:d} B |
     | ----------------|-------------------|------------------- |
-    | 2 files         |                   |       total: 181 B |
+    | 2 files         |                   |      total: {:d} B |
     ⤶
                                Output
     | Hello Gage                                               |
@@ -94,7 +94,7 @@ List meta files:
 
     >>> meta_dir = path_join(runs_dir, run_id + ".meta")
 
-    >>> ls(meta_dir, permissions=True)  # +diff
+    >>> ls(meta_dir, permissions=True)  # +diff +paths
     -r--r--r-- __schema__
     -r--r--r-- config.json
     -r--r--r-- id
@@ -123,7 +123,7 @@ Show files log.
 
 Show runner log.
 
-    >>> cat_log(path_join(meta_dir, "log", "runner"))  # +parse +diff -space
+    >>> cat_log(path_join(meta_dir, "log", "runner"))  # +parse +diff -space +paths
     Writing meta id
     Writing meta opdef
     Writing meta config
@@ -157,7 +157,7 @@ Run with a different `name`.
     Hello Joe
     <0>
 
-    >>> run("gage show")  # +parse
+    >>> run("gage show")  # +parse +table
     {run_id:run_id}
     {}
     | exit_code  0                                             |
@@ -168,10 +168,10 @@ Run with a different `name`.
                                Files
     | name            |type               |               size |
     | ----------------|-------------------|------------------- |
-    | gage.toml       |source code        |              143 B |
-    | hello.py        |source code        |               37 B |
+    | gage.toml       |source code        |             {:d} B |
+    | hello.py        |source code        |             {:d} B |
     | ----------------|-------------------|------------------- |
-    | 2 files         |                   |       total: 180 B |
+    | 2 files         |                   |      total: {:d} B |
     ⤶
                                Output
     | Hello Joe                                                |
@@ -219,7 +219,7 @@ Stage `hello` with a custom name.
 
 Show the run.
 
-    >>> run("gage show")  # +parse -space
+    >>> run("gage show")  # +parse +table
     {run_id:run_id}
     | hello:hello                                       staged |
     ⤶
@@ -231,9 +231,9 @@ Show the run.
 
     >>> assert x == run_id
 
-    >>> run("gage ls -n2")  # +parse -space
+    >>> run("gage ls -n2")  # +parse +table
     | #  | name    | operation       | started   | status      |
-    |--{}--|
+    |----|---------|-----------------|-----------|-------------|
     | 1  | {x:rn}  | hello           |           | staged      |
     | 2  | {:rn}   | hello           | {}        | completed   |
     ⤶
@@ -269,9 +269,9 @@ Start the staged run.
     Hello Robert
     <0>
 
-    >>> run("gage ls -n2")  # +parse -space
+    >>> run("gage ls -n2")  # +parse +table
     | #  | name    | operation       | started   | status      |
-    |--{}--|
+    |----|---------|-----------------|-----------|-------------|
     | 1  | {x:rn}  | hello           | {}        | completed   |
     | 2  | {:rn}   | hello           | {}        | completed   |
     ⤶

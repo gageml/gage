@@ -42,10 +42,7 @@ The default location for a run summary is `summary.json`.
     }
     <0>
 
-    >>> # +skiprest
-
-
-    >>> run("gage show")  # +parse +diff -space
+    >>> run("gage show")  # +parse +diff +table
     {:run_id}
     | summary:default                                completed |
     ⤶
@@ -64,19 +61,19 @@ The default location for a run summary is `summary.json`.
     ⤶
                               Summary
     | name         |value             |type                    |
-    {:---}
+    | -------------|------------------|----------------------- |
     | type         |example           |attribute               |
     | speed        |0.1               |metric                  |
     ⤶
                                Files
-    | name              |type             |               size |
-    {:---}
-    | summary.json        |generated        |                 {} |
-    | gage.toml           |source code      |                 {} |
-    | summary.py          |source code      |                 {} |
-    | summary_metadata.py |source code      |                 {} |
-    {:---}
-    | 4 files             |                 |          total: {} |
+    | name                    |type          |            size |
+    | ------------------------|--------------|---------------- |
+    | summary.json            |generated     |            84 B |
+    | gage.toml               |source code   |           636 B |
+    | summary.py              |source code   |           719 B |
+    | summary_metadata.py     |source code   |           301 B |
+    | ------------------------|--------------|---------------- |
+    | 4 files                 |              |       total: {} |
     ⤶
                                Output
     | Writing summary to summary.json                          |
@@ -92,7 +89,7 @@ An op def may optionally specify the summary file name that it writes.
     Writing summary to results.json
     <0>
 
-    >>> run("gage show --files")  # +wildcard -space
+    >>> run("gage show --files")  # +wildcard +table
     | name                | type        |  size |
     |---------------------|-------------|-------|
     | results.json        | generated   |   ... |
@@ -127,9 +124,9 @@ An op def may optionally specify the summary file name that it writes.
     Writing summary to zefile.toml
     <0>
 
-    >>> run("gage show --files")  # +wildcard -space
+    >>> run("gage show --files")  # +wildcard +table
     | name         | type        |  size |
-    |...|
+    |--------------|-------------|-------|
     | zefile.toml  | generated   |   ... |
     | gage.toml    | source code |   ... |
     | summary.py   | source code |   ... |

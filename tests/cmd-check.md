@@ -26,7 +26,7 @@ Help for `check`:
 
 Default output:
 
-    >>> run("gage check", cols=999)  # +parse -space
+    >>> run("gage check", cols=999)  # +parse +table
     | gage_version          | 0.1.2     |
     | gage_install_location | {:path}   |
     | python_version        | {:ver} {} |
@@ -40,7 +40,7 @@ directory for control.
 
     >>> tmp = make_temp_dir()
 
-    >>> run(f"gage -C {tmp} check -v", cols=999)  # -space +parse
+    >>> run(f"gage -C {tmp} check -v", cols=999)  # +parse +table
     | gage_version          | {}       |
     | gage_install_location | {}       |
     | python_version        | {}       |

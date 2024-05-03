@@ -145,10 +145,10 @@ Generate a run.
     Hello!
     <0>
 
-    >>> run("gage runs -s")  # +parse -space
-    | # | operation | status | label |
-    |-{}-|
-    | 1 | hello | completed | |
+    >>> run("gage runs -s")  # +parse +table
+    | # | operation | status    | label |
+    |---|-----------|-----------|-------|
+    | 1 | hello     | completed |       |
     <0>
 
     >>> ls(include_dirs=True)  # +parse

@@ -53,6 +53,7 @@ __all__ = [
     "make_dir",
     "make_temp_dir",
     "normlf",
+    "option_table",
     "os",
     "parse_any",
     "parse_comment_id",
@@ -65,7 +66,6 @@ __all__ = [
     "parse_short_run_name",
     "parse_sha256",
     "parse_sigint",
-    "parse_table_border",
     "parse_timestamp",
     "parse_timestamp_ms",
     "parse_timestamp_s",
@@ -206,21 +206,6 @@ def parse_isodate(s: str):
     return datetime.datetime.fromisoformat(_format_tz(s)).isoformat()
 
 
-@parse_type("sha256", "[a-f0-9]{64}")
-def parse_sha256(s: str):
-    return s
-
-
-@parse_type("|-|", r"\|-[\-\|]*\|")
-def parse_table_border(s: str):
-    return s
-
-
-@parse_type("sigint", r"1|-9")
-def parse_sigint(s: str):
-    return int(s)
-
-
 def _format_tz(s: str):
     # Add ':' to tz component for parsing by `fromisoformat`
     tz = s[19:]
@@ -231,6 +216,47 @@ def _format_tz(s: str):
     else:
         assert len(tz) == 7, s
         return s[:19] + tz[:3] + ":" + tz[3:5] + ":" + tz[5:]
+
+
+@parse_type("sha256", "[a-f0-9]{64}")
+def parse_sha256(s: str):
+    return s
+
+
+@parse_type("sigint", r"1|-9")
+def parse_sigint(s: str):
+    return int(s)
+
+
+def option_type(name: str):
+    def decorator(f: Callable[[Any], Optional[Callable[[str], str]]]):
+        f.option_name = name
+        return f
+
+    return decorator
+
+
+def skip_test():
+    raise RuntimeError("skip")
+
+
+@option_type("table")
+def option_table(enabled: bool):
+    if enabled:
+        return _normalize_table
+
+
+def _normalize_table(s: str):
+    p1 = re.compile(r" +\|")
+    p2 = re.compile(r"\| +")
+    p3 = re.compile(r"-+\|")
+
+    def norm_line(line: str):
+        line = p1.sub(" |", line)
+        line = p2.sub("| ", line)
+        return p3.sub("-|", line)
+
+    return "\n".join([norm_line(line) for line in s.split("\n")])
 
 
 def tests_dir():

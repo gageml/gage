@@ -21,9 +21,9 @@ Generate some runs with fake metrics.
 
 Show the board as a table.
 
-    >>> run("gage board", cols=999)  # +parse -space
-    | id | name  | operation | started | status | label | fake_speed | type | type | speed |
-    {:|-|}
+    >>> run("gage board", cols=999)  # +table +parse
+    | id  | name | operation | started | status | label | fake_speed | type | type | speed |
+    |-----------|-------------|---------|---------|-----------|-----|---|---------|---------|---|
     | {:run_id} | {:run_name} | default | {:date} | completed | foo | 3 | example | example | 3 |
     | {:run_id} | {:run_name} | default | {:date} | completed |     | 2 | example | example | 2 |
     | {:run_id} | {:run_name} | default | {:date} | completed |     | 1 | example | example | 1 |

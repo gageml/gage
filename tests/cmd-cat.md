@@ -25,7 +25,7 @@ Use `genfiles` sample project to generate a run with files we can show.
     >>> run("gage run gen-files -y")
     <0>
 
-    >>> run("gage show --files", cols=37)  # +wildcard -space
+    >>> run("gage show --files", cols=37)  # +wildcard +table
     | name         | type        | size |
     |--------------|-------------|------|
     | msg.txt      | generated   |  ... |

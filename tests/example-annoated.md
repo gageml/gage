@@ -17,9 +17,9 @@
     Hello Joe
     <0>
 
-    >>> run("gage show --files")  # +parse -space +paths
+    >>> run("gage show --files")  # +parse +table +paths
     | name                | type        |   size |
-    {:|-|}
+    |---------------------|-------------|--------|
     | a-file.txt          | source code |     {} |
     | add.py              | source code |     {} |
     | data/big-file-1.txt | source code |     {} |
@@ -36,9 +36,9 @@
     Hello Joe
     <0>
 
-    >>> run("gage show --files")  # +parse -space
+    >>> run("gage show --files")  # +parse +table
     | name                | type        |   size |
-    {:|-|}
+    |---------------------|-------------|--------|
     | a-file.txt          | source code |     {} |
     | add.py              | source code |     {} |
     | hello.py            | source code |     {} |
