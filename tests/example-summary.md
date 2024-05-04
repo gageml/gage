@@ -42,7 +42,7 @@ The default location for a run summary is `summary.json`.
     }
     <0>
 
-    >>> run("gage show")  # +parse +diff +table
+    >>> run("gage show")  # +parse +paths +diff +panels
     {:run_id}
     | summary:default                                completed |
     ⤶
@@ -98,7 +98,7 @@ An op def may optionally specify the summary file name that it writes.
     | summary_metadata.py | source code |   ... |
     <0>
 
-    >>> run("gage open --cmd cat --path results.json")
+    >>> run("gage open --cmd cat --path results.json")  # -windows
     {
       "attributes": {
         "type": "alt-example"

@@ -53,6 +53,7 @@ __all__ = [
     "make_dir",
     "make_temp_dir",
     "normlf",
+    "option_panels",
     "option_table",
     "option_windows",
     "os",
@@ -268,6 +269,23 @@ def _normalize_table(s: str):
         line = p1.sub(" |", line)
         line = p2.sub("| ", line)
         return p3.sub("-|", line)
+
+    return "\n".join([norm_line(line) for line in s.split("\n")])
+
+
+@option_type("panels")
+def option_panels(enabled: bool):
+    if enabled:
+        return _normalize_panel_output
+
+
+def _normalize_panel_output(s: str):
+    p1 = re.compile(r"-+")
+    p2 = re.compile(r" +")
+
+    def norm_line(line: str):
+        line = p1.sub("-", line)
+        return p2.sub(" ", line)
 
     return "\n".join([norm_line(line) for line in s.split("\n")])
 
