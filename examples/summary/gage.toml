@@ -19,6 +19,7 @@ filename = "results.json"
 
 description = "Write alternative summary file as TOML"
 exec = "SUMMARY=zefile.toml python summary.py"
+env = { SUMMARY = "zefile.toml" } # What we'd like to do for Windows
 config = "summary.py"
 
 [alt-summary-toml.summary]

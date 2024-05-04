@@ -1,3 +1,6 @@
+---
+test-options: +skip=WINDOWS_FIX  # Lots of platform specific issues
+---
 # Summary example
 
     >>> use_example("summary")
@@ -31,7 +34,7 @@ The default location for a run summary is `summary.json`.
     | summary_metadata.py | source code | ... B |
     <0>
 
-    >>> run("gage open --cmd cat --path summary.json")  # -windows
+    >>> run("gage open --cmd cat --path summary.json")
     {
       "attributes": {
         "type": "example"
@@ -68,10 +71,10 @@ The default location for a run summary is `summary.json`.
                                Files
     | name                    |type          |            size |
     | ------------------------|--------------|---------------- |
-    | summary.json            |generated     |            84 B |
-    | gage.toml               |source code   |           636 B |
-    | summary.py              |source code   |           719 B |
-    | summary_metadata.py     |source code   |           301 B |
+    | summary.json            |generated     |          {:d} B |
+    | gage.toml               |source code   |          {:d} B |
+    | summary.py              |source code   |          {:d} B |
+    | summary_metadata.py     |source code   |          {:d} B |
     | ------------------------|--------------|---------------- |
     | 4 files                 |              |       total: {} |
     ⤶
@@ -98,7 +101,7 @@ An op def may optionally specify the summary file name that it writes.
     | summary_metadata.py | source code |   ... |
     <0>
 
-    >>> run("gage open --cmd cat --path results.json")  # -windows
+    >>> run("gage open --cmd cat --path results.json")
     {
       "attributes": {
         "type": "alt-example"

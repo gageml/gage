@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX  # OS-specific cmd dependencies
----
-
 # `open` command
 
 `open` opens a run directory in the system file explorer. It can
@@ -44,7 +40,7 @@ Generate a run top open.
 Default open location is the run directory. Use `echo` to print the
 command args.
 
-    >>> run("gage open --cmd echo")  # +parse
+    >>> run("gage open --cmd echo")  # +parse -windows
     {echo_out}
     <0>
 
@@ -53,7 +49,7 @@ command args.
 Use `--path` to open a specific path in the run directory. We use the
 `cat` command to print the file.
 
-    >>> run("gage open --cmd cat --path summary.json")
+    >>> run("gage open --cmd cat --path summary.json")  # -windows
     {
       "attributes": {
         "type": "example"
@@ -68,7 +64,7 @@ Hidden options are used for developer convenience.
 
 `--summary` opens the meta summary file.
 
-    >>> run("gage open --cmd cat --summary")
+    >>> run("gage open --cmd cat --summary")  # -windows
     {
       "attributes": {
         "type": "example"
@@ -81,5 +77,5 @@ Hidden options are used for developer convenience.
 
 Return value from command is passed through.
 
-    >>> run("gage open --cmd false")
+    >>> run("gage open --cmd false")  # -windows
     <1>
