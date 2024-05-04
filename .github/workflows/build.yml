@@ -71,7 +71,6 @@ jobs:
       - name: Run tests
         env:
           CI: 1
-          POSIX: 1
           GAGE_TEMPDIR: /tmp
         run: |
           test-env/bin/groktest .
