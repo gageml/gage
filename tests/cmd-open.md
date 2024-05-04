@@ -44,7 +44,7 @@ command args.
     {echo_out}
     <0>
 
-    >>> assert echo_out == run_dir
+    >>> assert echo_out == run_dir  # -windows
 
 Use `--path` to open a specific path in the run directory. We use the
 `cat` command to print the file.
