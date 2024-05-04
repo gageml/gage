@@ -16,7 +16,10 @@
                          config.
       -w, --where expr   Publish runs matching filter
                          expression.
-      -c, --config PATH  Use board configuration.
+      -c, --config PATH  Use board configuration. Defaults to
+                         board.json, board.yaml, or board.yaml
+                         if present.
+      --no-config        Don't use config.
       --skip-runs        Don't copy runs.
       -y, --yes          Publish without prompting.
       -h, --help         Show this message and exit.

@@ -8,6 +8,28 @@ parse-types:
 The `board` command runs a basic board view (not implemented) or prints
 board info as JSON (tested here).
 
+    >>> run("gage board --help")  # +diff
+    Usage: gage board [options] [run]...
+    ⤶
+      Show a board of run results.
+    ⤶
+    Arguments:
+      [run]...  Runs to show. run may be a run ID, name, list
+                index or slice. Default is to show all runs.
+    ⤶
+    Options:
+      -w, --where expr   Show runs matching filter expression.
+      -c, --config PATH  Use board configuration. Defaults to
+                         board.json, board.yaml, or board.yaml
+                         if present.
+      --no-config        Don't use config.
+      --csv              Show board as CSV output.
+      --json             Show board as JSON output.
+      -h, --help         Show this message and exit.
+    <0>
+
+Use `summary` example to demonstrate board command features.
+
     >>> use_example("summary")
 
 Generate some runs with fake metrics.
@@ -298,8 +320,69 @@ Group must specify either `min` or `max` but not both.
     run-attr, attribute, metric, or config
     <1>
 
+## Default Board Config
+
+If the current directory has a file named `board.json`, `board.toml`, or
+`board.yaml`, that file is used for config by default.
+
+    >>> cd(make_temp_dir())
+
+We start without any files.
+
+    >>> ls()
+    <empty>
+
+Run `board` with `--verbose` to show the selected config.
+
+    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
+    Using default board config
+    Generating board data for 0 run(s)
+    <0>
+
+Create the three board config candidates.
+
+    >>> write("board.json", "{}")
+    >>> write("board.toml", "")
+    >>> write("board.yaml", "")
+
+Gage selects `board.json` first.
+
+    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
+    Using config from board.json
+    Generating board data for 0 run(s)
+    <0>
+
+Delete `board.json` - Gage uses `board.toml`.
+
+    >>> rm("board.json")
+
+    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
+    Using config from board.toml
+    Generating board data for 0 run(s)
+    <0>
+
+Delete `board.toml` - Gage uses `board.yaml`.
+
+    >>> rm("board.toml")
+
+    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
+    Using config from board.yaml
+    gage: Unexpected board config in "board.yaml" - expected a map
+    <1>
+
+Use `--no-config` to explicit use default config.
+
+    >>> run("gage --verbose board --no-config", env={"GAGE_RUNS": "."})
+    Using default board config
+    Generating board data for 0 run(s)
+    <0>
+
 ## Command Validation
 
     >>> run("gage board --csv --json")
     gage: You can't use both --json and --csv options.
+    <1>
+
+    >>> run("gage board --no-config --config xxx")
+    gage: You can't use both --config and --no-config options.
     <1>

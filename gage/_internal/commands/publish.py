@@ -46,9 +46,14 @@ Config = Annotated[
         "-c",
         "--config",
         metavar="PATH",
-        help="Use board configuration.",
+        help=(
+            "Use board configuration. Defaults to board.json, "
+            "board.yaml, or board.yaml if present."
+        ),
     ),
 ]
+
+NoConfig = Annotated[bool, Option("--no-config", help="Don't use config.")]
 
 SkipRunsFlag = Annotated[
     bool,
@@ -73,10 +78,11 @@ def publish(
     runs: RunArgs = None,
     where: Where = "",
     config: Config = "",
+    no_config: NoConfig = False,
     skip_runs: SkipRunsFlag = False,
     yes: YesFlag = False,
 ):
     """Publish a board."""
     from .publish_impl import publish, Args
 
-    publish(Args(board, runs or [], where, config, skip_runs, yes))
+    publish(Args(board, runs or [], where, config, no_config, skip_runs, yes))

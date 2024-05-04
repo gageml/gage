@@ -338,7 +338,10 @@ def _decode_json(filename: str):
 
 
 def meta_config(run: Run) -> RunConfig:
-    return _decode_json(run_meta_path(run, "config.json"))
+    try:
+        return _decode_json(run_meta_path(run, "config.json"))
+    except FileNotFoundError:
+        return {}
 
 
 def meta_opcmd(run: Run) -> OpCmd:

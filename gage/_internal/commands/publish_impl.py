@@ -37,6 +37,7 @@ class Args(NamedTuple):
     runs: list[str]
     where: str
     config: str
+    no_config: bool
     skip_runs: bool
     yes: bool
 
@@ -49,7 +50,9 @@ class BoardDest(NamedTuple):
 
 
 def publish(args: Args):
-    board_args = BoardArgs(args.runs, args.where, args.config, True, False)
+    board_args = BoardArgs(
+        args.runs, args.where, args.config, args.no_config, True, False
+    )
     board = _init_board(board_args)
     board_id = _board_id(args, board)
     token = _api_token()

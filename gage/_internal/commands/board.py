@@ -34,9 +34,14 @@ Config = Annotated[
         "-c",
         "--config",
         metavar="PATH",
-        help="Use board configuration.",
+        help=(
+            "Use board configuration. Defaults to board.json, "
+            "board.yaml, or board.yaml if present."
+        ),
     ),
 ]
+
+NoConfig = Annotated[bool, Option("--no-config", help="Don't use config.")]
 
 CSVFlag = Annotated[
     bool,
@@ -59,10 +64,11 @@ def show_board(
     runs: RunArgs = None,
     where: Where = "",
     config: Config = "",
+    no_config: NoConfig = False,
     csv: CSVFlag = False,
     json: JSONFlag = False,
 ):
     """Show a board of run results."""
     from .board_impl import show_board, Args
 
-    show_board(Args(runs or [], where, config, csv, json))
+    show_board(Args(runs or [], where, config, no_config, csv, json))
