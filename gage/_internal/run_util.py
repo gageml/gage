@@ -341,7 +341,7 @@ def meta_config(run: Run) -> RunConfig:
     try:
         return _decode_json(run_meta_path(run, "config.json"))
     except FileNotFoundError:
-        return {}
+        return cast(RunConfig, {})
 
 
 def meta_opcmd(run: Run) -> OpCmd:
