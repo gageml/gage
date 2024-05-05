@@ -58,7 +58,7 @@ The default location for a run summary is `summary.json`.
     | project    {:path}/examples/summary                      |
     | exit_code  0                                             |
     ⤶
-                           Configuration
+                               Config
     | fake_speed  0.1                                          |
     | type        example                                      |
     ⤶

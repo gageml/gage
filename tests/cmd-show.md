@@ -49,7 +49,7 @@ Show the run.
     | project    {:path}/examples/hello                        |
     | exit_code  0                                             |
     ⤶
-                           Configuration
+                               Config
     | name  Gage                                               |
     ⤶
                                Files

@@ -67,7 +67,7 @@ Run hello.
     | project    {:path}/examples/hello                        |
     | exit_code  0                                             |
     ⤶
-                           Configuration
+                               Config
     | name  Gage                                               |
     ⤶
                                Files
@@ -162,7 +162,7 @@ Run with a different `name`.
     {}
     | exit_code  0                                             |
     ⤶
-                           Configuration
+                               Config
     | name  Joe                                                |
     ⤶
                                Files

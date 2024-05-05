@@ -115,7 +115,7 @@ def Config(run: Run):
     for name in sorted(config):
         config_table.add_row(name, str(config[name]))
 
-    return cli.Panel(config_table, title="Configuration")
+    return cli.Panel(config_table, title="Config")
 
 
 def Summary(run: Run, table_only: bool = False):
