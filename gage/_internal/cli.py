@@ -3,6 +3,7 @@
 from typing import *
 
 import logging
+import math
 import os
 import re
 import shlex
@@ -40,6 +41,7 @@ __all__ = [
     "err",
     "exit_with_error",
     "exit_with_message",
+    "format_assigns",
     "incompatible_with",
     "label",
     "markdown",
@@ -428,3 +430,69 @@ class PlainHelpFormatter(click.HelpFormatter):
 
 def _strip_markup(s: str):
     return rich.markup.render(s).plain
+
+
+Assign = tuple[str, str]
+
+AssignStyles = tuple[str, str, str]
+
+MIN_ASSIGN_WIDTH = 11
+
+
+def format_assigns(
+    assigns: list[Assign], available_width: int, styles: AssignStyles | None = None
+) -> str:
+    assigns = _fit_assigns(assigns, available_width)
+    parts = []
+    while assigns:
+        budget = available_width // len(assigns) - (1 if parts else 0)
+        name, val = assigns.pop(0)
+        assign_wants = len(name) + len(val) + 1
+        if parts and budget < min(assign_wants, MIN_ASSIGN_WIDTH):
+            break
+        fit_name, fit_val = _fit_assign(name, val, budget)
+        available_width -= len(fit_name) + len(fit_val) + 1
+        parts.append(_format_assign(fit_name, fit_val, styles))
+    return " ".join(parts)
+
+
+def _fit_assigns(assigns: list[Assign], total_width: int) -> list[Assign]:
+    fit: list[int] = []  # use assign indices to preserve order
+    # Evaluate in order of wanted size to fit as many as we can
+    ordered = sorted(
+        [(len(name) + len(val) + 1, i) for i, (name, val) in enumerate(assigns)]
+    )
+    running_width = 0
+    for assign_wants, i in ordered:
+        running_width += min(assign_wants, MIN_ASSIGN_WIDTH) + (1 if fit else 0)
+        if fit and running_width > total_width:  # Always include one assign
+            break
+        fit.append(i)
+    return [assigns[i] for i in fit]
+
+
+def _fit_assign(name: str, val: str, budget: int, min_name: int = 4):
+    budget = max(budget, 3)  # Assign uses at least 3 chars
+    len_name = len(name)
+    len_val = len(val)
+    wanted = len_name + len_val + 1
+    trunc = wanted - budget
+    if trunc <= 0:
+        return name, val
+    name_trunc = min(
+        math.floor(len_name / (len_name + len_val) * trunc),
+        max(len_name - min_name - 1, 0),
+    )
+    val_trunc = trunc - name_trunc
+    return _trunc(name, name_trunc), _trunc(val, val_trunc)
+
+
+def _trunc(s: str, len: int):
+    return f"{s[:-(len+1)]}…" if len > 0 else s
+
+
+def _format_assign(name: str, val: str, styles: AssignStyles | None):
+    name = f"[{styles[0]}]{name}[/]" if styles else name
+    eq = f"[{styles[1]}]=[/]" if styles else "="
+    val = f"[{styles[2]}]{val}" if styles else val
+    return name + eq + val
