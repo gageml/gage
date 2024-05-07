@@ -381,8 +381,7 @@ def _verify_copy_from(args: Args):
         raise SystemExit(0)
 
 
-_TRANSFERRED2_P = re.compile(r"-Transferred:\s+([\d\.]+) ([\S]+) / ([\d\.]+) ([\S]+)")
-
+_TRANSFERRED2_P = re.compile(r"-Transferred:\s+([\d\.]+) ([\w]+) / ([\d\.]+) ([\w]+)")
 
 def _rclone_copy_from(src: str, dest: str, excludes: list[str]):
     exclude_opts = flatten([["--exclude", pattern] for pattern in excludes])
