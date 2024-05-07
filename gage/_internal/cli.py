@@ -441,38 +441,56 @@ Assign = tuple[str, str]
 AssignStyles = tuple[str, str, str]
 
 MIN_ASSIGN_WIDTH = 11
+MIN_ASSIGN_NAME = 4
 
 
 def format_assigns(
-    assigns: list[Assign], available_width: int, styles: AssignStyles | None = None
+    assigns: list[Assign],
+    available_width: int,
+    styles: AssignStyles | None = None,
+    min_assign_width: int = MIN_ASSIGN_WIDTH,
 ) -> str:
-    assigns = _fit_assigns(assigns, available_width)
+    assigns = _fit_assigns(assigns, available_width, min_assign_width)
     parts = []
     while assigns:
-        budget = available_width // len(assigns) - (1 if parts else 0)
+        avg_budget = available_width // len(assigns)
+        assign_budget = avg_budget + _lookahead_unused(assigns[1:], avg_budget)
         name, val = assigns.pop(0)
         assign_wants = len(name) + len(val) + 1
-        if parts and budget < min(assign_wants, MIN_ASSIGN_WIDTH):
+        if parts and available_width < min(assign_wants, min_assign_width):
             break
-        fit_name, fit_val = _fit_assign(name, val, budget)
-        available_width -= len(fit_name) + len(fit_val) + 1
+        fit_name, fit_val = _fit_assign(name, val, assign_budget)
+        available_width -= len(fit_name) + len(fit_val) + 2 if assigns else 1
         parts.append(_format_assign(fit_name, fit_val, styles))
     return " ".join(parts)
 
 
-def _fit_assigns(assigns: list[Assign], total_width: int) -> list[Assign]:
-    fit: list[int] = []  # use assign indices to preserve order
-    # Evaluate in order of wanted size to fit as many as we can
-    ordered = sorted(
-        [(len(name) + len(val) + 1, i) for i, (name, val) in enumerate(assigns)]
-    )
+def _lookahead_unused(assigns: list[Assign], avg_budget: int):
+    unused_total = 0
+    allocation_targets = 1
+    for name, val in assigns:
+        needed = len(name) + len(val) + 1
+        if needed < avg_budget:
+            unused_total += avg_budget - needed
+        else:
+            allocation_targets += 1
+    return unused_total // allocation_targets
+
+
+def _fit_assigns(
+    assigns: list[Assign],
+    total_width: int,
+    min_assign_width: int = MIN_ASSIGN_WIDTH,
+) -> list[Assign]:
+    fit: list[Assign] = []
     running_width = 0
-    for assign_wants, i in ordered:
-        running_width += min(assign_wants, MIN_ASSIGN_WIDTH) + (1 if fit else 0)
-        if fit and running_width > total_width:  # Always include one assign
+    for assign in assigns:
+        assign_wants = len(assign[0]) + len(assign[1]) + 1
+        running_width += min(assign_wants, min_assign_width) + (1 if fit else 0)
+        if fit and running_width > total_width:  # Include at least one assign
             break
-        fit.append(i)
-    return [assigns[i] for i in fit]
+        fit.append(assign)
+    return fit
 
 
 def _fit_assign(name: str, val: str, budget: int, min_name: int = 4):
