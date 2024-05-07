@@ -238,20 +238,20 @@ def option_type(name: str):
     return decorator
 
 
-def skip_test():
-    raise RuntimeError("skip")
-
-
 @option_type("windows")
 def option_windows(enabled: bool):
     if enabled is True and sys.platform != "win32":
         # +windows -> only run on Windows
         if sys.platform != "win32":
-            skip_test()
+            _skip_test()
     elif enabled is False and sys.platform == "win32":
         # -windows -> don't run on Windows
         if sys.platform == "win32":
-            skip_test()
+            _skip_test()
+
+
+def _skip_test():
+    raise RuntimeError("skip")
 
 
 @option_type("table")
