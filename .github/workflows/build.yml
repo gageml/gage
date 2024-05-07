@@ -73,7 +73,7 @@ jobs:
           CI: 1
           GAGE_TEMPDIR: /tmp
         run: |
-          test-env/bin/groktest .
+          test-env/bin/groktest . --show-skipped
 
   build-windows:
     name: Build - Windows
@@ -132,7 +132,7 @@ jobs:
           WINDOWS_FIX: 1
         run: |
           test-env\Scripts\activate
-          groktest .
+          groktest . --show-skipped
 
   publish-to-pypi:
     name: Publish to PyPI
