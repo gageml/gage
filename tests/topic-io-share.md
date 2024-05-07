@@ -197,7 +197,8 @@ is not affected.
     {x:path}
     <0>
 
-    >>> assert x == retrieve_project
+    >>> compare_paths(x, retrieve_project)
+    True
 
 Change the run label for the retrieved run.
 
