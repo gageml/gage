@@ -1,5 +1,5 @@
 ---
-test-options: +skip (for CI until we get better control over tests)
+#test-options: +skip (for CI until we get better control over tests)
 ---
 
 # Sharing runs with others
@@ -73,9 +73,9 @@ Generate a run to share.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed | Something to share         |
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | Something to share           |
     <0>
 
     >>> run("gage select --project-dir")  # +parse
@@ -88,7 +88,7 @@ Create a "remote location".
 
     >>> remote_runs = make_temp_dir()
 
-    >>> run("gage ls -s", GAGE_RUNS=remote_runs)
+    >>> run("gage ls -s", env={"GAGE_RUNS": remote_runs})
     | # | operation | status | label                           |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -101,14 +101,14 @@ Use `gage copy` to copy runs to the remote location.
 
 Compare local and remote files.
 
-    >>> from gage._internal.sys_config import get_runs_dir
+    >>> from gage._internal.var import runs_dir
 
-    >>> local_runs = get_runs_dir()
+    >>> local_runs = runs_dir()
 
     >>> diffl(lsl(local_runs), lsl(remote_runs))  # +parse
-    @@ -17,7 +17,6 @@
-     {:run_id}.meta/started
+    @@ -18,7 +18,6 @@
      {:run_id}.meta/stopped
+     {:run_id}.meta/summary.json
      {:run_id}.meta/sys/platform.json
     -{:run_id}.project
      {:run_id}.user/{:uuid4}.json
@@ -120,15 +120,15 @@ is not copied.
 
 List remote runs.
 
-    >>> run("gage ls -s", GAGE_RUNS=remote_runs)
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed | Something to share         |
+    >>> run("gage ls -s", env={"GAGE_RUNS": remote_runs})
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | Something to share           |
     <0>
 
 The remote run is not associated with a project.
 
-    >>> run("gage select --project-dir", GAGE_RUNS=remote_runs)
+    >>> run("gage select --project-dir", env={"GAGE_RUNS": remote_runs})
     <0>
 
 Once copied, the run is shared using the Gage Web UI.
@@ -154,16 +154,16 @@ Create a directory for a "retrieve" location.
 Copy runs from the remote location to the retrieve location.
 
     >>> run(f"gage copy --all --from '{remote_runs}' -y",
-    ...     GAGE_RUNS=retrieve_runs)
+    ...     env={"GAGE_RUNS": retrieve_runs})
     Copied runs
     <0>
 
 Show retrieved runs.
 
-    >>> run("gage ls -s", GAGE_RUNS=retrieve_runs)
-    | # | operation   | status    | label                      |
-    |---|-------------|-----------|----------------------------|
-    | 1 | hello:hello | completed | Something to share         |
+    >>> run("gage ls -s", env={"GAGE_RUNS": retrieve_runs})
+    | # | operation | status    | label                        |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | Something to share           |
     <0>
 
 Compare remote files and retrieved files.
@@ -175,7 +175,7 @@ attributes.
 
 The retrieved run is not associated with a project.
 
-    >>> run("gage select --project-dir", GAGE_RUNS=retrieve_runs)
+    >>> run("gage select --project-dir", env={"GAGE_RUNS": retrieve_runs})
     <0>
 
 Associate the run with a project directory. This isn't necessary for the
@@ -186,13 +186,13 @@ is not affected.
     >>> retrieve_project = make_temp_dir()
 
     >>> run(f"gage associate 1 '{retrieve_project}'",
-    ...     GAGE_RUNS=retrieve_runs)  # +parse
+    ...     env={"GAGE_RUNS": retrieve_runs})  # +parse
     Associated "{:run_id}" with {x:path}
     <0>
 
     >>> assert x == retrieve_project
 
-    >>> run("gage select --project-dir", GAGE_RUNS=retrieve_runs)
+    >>> run("gage select --project-dir", env={"GAGE_RUNS": retrieve_runs})
     ... # +parse
     {x:path}
     <0>
@@ -202,11 +202,11 @@ is not affected.
 Change the run label for the retrieved run.
 
     >>> run("gage label 1 --set 'Just an example' -y",
-    ...     GAGE_RUNS=retrieve_runs)
+    ...     env={"GAGE_RUNS": retrieve_runs})
     Set label for 1 run
     <0>
 
-    >>> run("gage select --label", GAGE_RUNS=retrieve_runs)
+    >>> run("gage select --label", env={"GAGE_RUNS": retrieve_runs})
     Just an example
     <0>
 
@@ -216,7 +216,7 @@ The local and remote runs aren't modified.
     Something to share
     <0>
 
-    >>> run("gage select --label", GAGE_RUNS=remote_runs)
+    >>> run("gage select --label", env={"GAGE_RUNS": remote_runs})
     Something to share
     <0>
 
@@ -224,7 +224,7 @@ To share the new label, the retrieve copies the run to the remote
 location.
 
     >>> run(f"gage copy 1 --to '{remote_runs}' -y",
-    ...     GAGE_RUNS=retrieve_runs)
+    ...     env={"GAGE_RUNS": retrieve_runs})
     Copied 1 run
     <0>
 
@@ -232,9 +232,9 @@ The project reference file is not copied to the remote location but the
 new label logged attribute is.
 
     >>> diffl(lsl(retrieve_runs), lsl(remote_runs))  # +parse
-    @@ -17,7 +17,6 @@
-     {:run_id}.meta/started
+    @@ -18,7 +18,6 @@
      {:run_id}.meta/stopped
+     {:run_id}.meta/summary.json
      {:run_id}.meta/sys/platform.json
     -{:run_id}.project
      {:run_id}.user/{:uuid4}.json
@@ -243,22 +243,22 @@ new label logged attribute is.
 
 Show the label for the remote run.
 
-    >>> run("gage select --label", GAGE_RUNS=remote_runs)
+    >>> run("gage select --label", env={"GAGE_RUNS": remote_runs})
     Just an example
     <0>
 
 Show the associated project for the remote run.
 
-    >>> run("gage select --project-dir", GAGE_RUNS=remote_runs)
+    >>> run("gage select --project-dir", env={"GAGE_RUNS": remote_runs})
     <0>
 
 When comparing the remote run to the local (original) run, we see a
 missing project ref and a new logged attribute.
 
     >>> diffl(lsl(local_runs), lsl(remote_runs))  # +parse
-    @@ -17,7 +17,7 @@
-     {:run_id}.meta/started
+    @@ -18,7 +18,7 @@
      {:run_id}.meta/stopped
+     {:run_id}.meta/summary.json
      {:run_id}.meta/sys/platform.json
     -{:run_id}.project
      {:run_id}.user/{:uuid4}.json
@@ -293,9 +293,9 @@ The local project association is unmodified.
     >>> assert x == project_dir
 
     >>> diffl(lsl(remote_runs), lsl(local_runs))  # +parse
-    @@ -17,6 +17,7 @@
-     {:run_id}.meta/started
+    @@ -18,6 +18,7 @@
      {:run_id}.meta/stopped
+     {:run_id}.meta/summary.json
      {:run_id}.meta/sys/platform.json
     +{:run_id}.project
      {:run_id}.user/{:uuid4}.json

@@ -115,9 +115,15 @@ assumption that dependencies are not modified by a run. In cases where a
 resolved dependency must be written, the dependency may specify
 `writeable` as a boolean or as an array of paths.
 
-    >>> run("gage check writeable-dependencies.json")  # +skip - dependencies pending
+    >>> run("gage check writeable-dependencies.json")  # +fails TODO implement deps
     writeable-dependencies.json is a valid Gage file
     <0>
+
+    >>> run("gage check writeable-dependencies.json")  # TODO implement deps
+    There are errors in writeable-dependencies.json
+    Properties ['train'] are invalid
+    ['requires']
+    <1>
 
 ## Missing required keys
 

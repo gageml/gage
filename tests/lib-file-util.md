@@ -304,11 +304,11 @@ file name is valid for a platform.
 
 On Windows, the function replaces colons with underscores.
 
-    >>> safe_filename("hello:there")  # +skip TODO how to limit to Windows?
+    >>> safe_filename("hello:there")  # +windows
     'hello_there'
 
 On all platforms, the function replaces any possible path separator
 with underscore.
 
-    >>> safe_filename("hello/there\\friend")
+    >>> safe_filename("hello/there\\friend")  # -windows
     'hello_there_friend'

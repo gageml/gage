@@ -360,7 +360,7 @@ def _copy_from(args: Args):
     if args.where:
         cli.exit_with_error("'--where' cannot be used with '-s / --source'")
     _verify_copy_from(args)
-    with cli.Progress(transient=True) as p:
+    with cli.Progress() as p:
         task = p.add_task("Copying runs")
         for copied, total in _rclone_copy_from(
             args.src, runs_dir(), excludes=["*.project", ".deleted"]

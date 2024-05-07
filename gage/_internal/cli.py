@@ -175,9 +175,13 @@ def status(description: str = "", quiet: bool = False):
     return _out.status(description)
 
 
-def Progress(*cols: str | rich.progress.ProgressColumn, **kw: Any):
+def Progress(
+    *cols: str | rich.progress.ProgressColumn,
+    transient: bool = True,
+    **kw: Any,
+):
     cols = cols or _default_progress_cols()
-    return rich.progress.Progress(*cols, transient=True, **kw)
+    return rich.progress.Progress(*cols, transient=transient, **kw)
 
 
 def _default_progress_cols() -> tuple[rich.progress.ProgressColumn, ...]:
