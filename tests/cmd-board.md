@@ -179,12 +179,12 @@ mappings.
     <0>
 
     >>> run("gage runs -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | default   | completed | foo=b bar=4                  |
-    | 2 | default   | completed | foo=b bar=3                  |
-    | 3 | default   | completed | foo=a bar=2                  |
-    | 4 | default   | completed | foo=a bar=1                  |
+    | 1 | default   | completed | bar=4 foo=b                  |
+    | 2 | default   | completed | bar=3 foo=b                  |
+    | 3 | default   | completed | bar=2 foo=a                  |
+    | 4 | default   | completed | bar=1 foo=a                  |
     <0>
 
 The `group.yaml` board def selects the latest run grouped by `foo`.

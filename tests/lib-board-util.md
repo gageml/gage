@@ -17,11 +17,11 @@ To show the default behavior, generate some runs.
     >>> run("gage run op-2 x=2 -y")
     <0>
 
-    >>> run("gage ls -s")
-    | # | operation | status    | label                        |
-    |---|-----------|-----------|------------------------------|
-    | 1 | op-2      | completed | x=2                          |
-    | 2 | op-2      | completed | x=1                          |
+    >>> run("gage ls -s", cols=64)
+    | # | operation | status    | description                      |
+    |---|-----------|-----------|----------------------------------|
+    | 1 | op-2      | completed | x=2 speed=1.123 type=red x=2     |
+    | 2 | op-2      | completed | x=1 speed=0.987 type=blue x=1    |
     <0>
 
 Use `board_data` to generate the board data for a list of runs.

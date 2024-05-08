@@ -18,10 +18,10 @@ Generate test runs
     <0>
 
     >>> run("gage list -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | Run 2                        |
-    | 2 | hello     | completed | Run 1                        |
+    | 1 | hello     | completed | Run 2 name=Joe               |
+    | 2 | hello     | completed | Run 1 name=Gage              |
     <0>
 
 Create a directory to copy runs to.
@@ -35,10 +35,10 @@ Copy all runs.
     <0>
 
     >>> run(f"gage --runs {tmp} runs -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | Run 2                        |
-    | 2 | hello     | completed | Run 1                        |
+    | 1 | hello     | completed | Run 2 name=Joe               |
+    | 2 | hello     | completed | Run 1 name=Gage              |
     <0>
 
 The `--sync` option syncs selected runs to the destination.
@@ -51,7 +51,7 @@ TODO: The output should reflect that there were deletions at the
 destination.
 
     >>> run(f"gage --runs {tmp} runs -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | Run 1                        |
+    | 1 | hello     | completed | Run 1 name=Gage              |
     <0>

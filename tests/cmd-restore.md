@@ -38,14 +38,14 @@ Delete the run.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status | label                           |
+    | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
 
     >>> run("gage ls -s -d")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
+    | 1 | hello     | completed | name=Gage                    |
     <0>
 
 Attempt to restore runs without specifying a run or `--all`.
@@ -65,12 +65,12 @@ Restore the run.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
+    | 1 | hello     | completed | name=Gage                    |
     <0>
 
     >>> run("gage ls -s -d")
-    | # | operation | status | label                           |
+    | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>

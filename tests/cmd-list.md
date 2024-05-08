@@ -36,25 +36,25 @@ Generate some sample runs.
 
     >>> use_example("hello")
 
-    >>> run("gage run hello -l run-1 -q -y")
+    >>> run("gage run hello name=Red -l run-1 -q -y")
     <0>
 
-    >>> run("gage run hello -l run-2 -q -y")
+    >>> run("gage run hello name=Green -l run-2 -q -y")
     <0>
 
     >>> sleep(1)
 
-    >>> run("gage run hello -l run-3 -q -y")
+    >>> run("gage run hello name=Blue -l run-3 -q -y")
     <0>
 
 List runs.
 
     >>> run("gage list -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | run-3                        |
-    | 2 | hello     | completed | run-2                        |
-    | 3 | hello     | completed | run-1                        |
+    | 1 | hello     | completed | run-3 name=Blue              |
+    | 2 | hello     | completed | run-2 name=Green             |
+    | 3 | hello     | completed | run-1 name=Red               |
     <0>
 
 ## Incompatible params

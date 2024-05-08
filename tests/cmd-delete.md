@@ -33,9 +33,9 @@ Generate a run.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
+    | 1 | hello     | completed | name=Gage                    |
     <0>
 
 Attempt to delete without specifying a run or `--all`.
@@ -77,9 +77,9 @@ Show runs.
 Show deleted runs.
 
     >>> run("gage ls -ds")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
+    | 1 | hello     | completed | name=Gage                    |
     <0>
 
 Generate another run.
@@ -88,10 +88,10 @@ Generate another run.
     Hello Gage
     <0>
 
-    >>> run("gage ls", cols=64)  # +parse +table
-    | # | name  | operation | started | status    | label          |
-    |---|-------|-----------|---------|-----------|----------------|
-    | 1 | {nme} | hello     | {}      | completed | Run 2          |
+    >>> run("gage ls", cols=65)  # +parse +table
+    | # | name  | operation | started | status    | description     |
+    |---|-------|-----------|---------|-----------|-----------------|
+    | 1 | {nme} | hello     | now     | completed | Run 2 name=Gage |
     <0>
 
 Permanently delete the run.
@@ -108,9 +108,9 @@ Show runs.
     <0>
 
     >>> run("gage list -ds")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
+    | 1 | hello     | completed | name=Gage                    |
     <0>
 
 ## Where Filter
@@ -120,22 +120,22 @@ When `--where` is specified and runs aren't specified, Gage considers
 
 Generate some runs.
 
-    >>> run("gage run hello -l red -qy")
+    >>> run("gage run hello -l red name=A -qy")
     <0>
-    >>> run("gage run hello -l red -qy")
+    >>> run("gage run hello -l red name=B -qy")
     <0>
-    >>> run("gage run hello -l green -qy")
+    >>> run("gage run hello -l green name=C -qy")
     <0>
-    >>> run("gage run hello -l green -qy")
+    >>> run("gage run hello -l green name=D -qy")
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | green                        |
-    | 2 | hello     | completed | green                        |
-    | 3 | hello     | completed | red                          |
-    | 4 | hello     | completed | red                          |
+    | 1 | hello     | completed | green name=D                 |
+    | 2 | hello     | completed | green name=C                 |
+    | 3 | hello     | completed | red name=B                   |
+    | 4 | hello     | completed | red name=A                   |
     <0>
 
 Guild complains when a run spec or `--all` isn't specified.
@@ -156,10 +156,10 @@ specified, assuming the user wants to delete all matching runs.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | green                        |
-    | 2 | hello     | completed | green                        |
+    | 1 | hello     | completed | green name=D                 |
+    | 2 | hello     | completed | green name=C                 |
     <0>
 
 Where can be used with run specs.
@@ -169,7 +169,7 @@ Where can be used with run specs.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | green                        |
+    | 1 | hello     | completed | green name=D                 |
     <0>

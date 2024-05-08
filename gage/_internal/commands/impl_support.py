@@ -14,9 +14,11 @@ from .. import project_util
 from .. import run_select
 from .. import var
 
+from ..run_util import meta_config
 from ..run_util import meta_opref
 from ..run_util import run_label
 from ..run_util import run_status
+from ..run_util import run_summary
 from ..run_util import run_timestamp
 
 log = logging.getLogger(__name__)
@@ -187,11 +189,11 @@ def _table_cols(width: int, deleted: bool, simplified: bool) -> list[cli.ColSpec
             },
         ),
         (
-            "label",
+            "description",
             {
                 "ratio": 1,
                 "no_wrap": True,
-                "style": _col_style("label", deleted),
+                "style": _col_style("description", deleted),
             },
         ),
     ]
@@ -221,8 +223,8 @@ def _col_style(name: str, deleted: bool):
             return cli.STYLE_VALUE
         case "status", False:
             return ""  # status style is value-dependent
-        case "label", False:
-            return cli.STYLE_SECOND_LABEL
+        case "description", False:
+            return None
         case _, False:
             assert False, (name, deleted)
         case _, True:
@@ -230,7 +232,11 @@ def _col_style(name: str, deleted: bool):
 
 
 def _table_row(
-    index: int, run: Run, width: int, project_ns: str | None, simplified: bool
+    index: int,
+    run: Run,
+    width: int,
+    project_ns: str | None,
+    simplified: bool,
 ) -> list[str]:
     index_str = str(index)
     run_name = run.name[:5]
@@ -238,15 +244,14 @@ def _table_row(
     started = run_timestamp(run, "started")
     started_str = human_readable.date_time(started) if started else ""
     status = run_status(run)
-    label = run_label(run) or ""
-
+    description = _run_description(run, width)
     row = [
         index_str,
         run_name,
         op_name,
         started_str,
         cli.text(status, style=cli.run_status_style(status)),
-        label,
+        description,
     ]
 
     if simplified:
@@ -257,6 +262,35 @@ def _table_row(
 def _op_name(run: Run, project_ns: str | None):
     opref = meta_opref(run)
     return opref.get_full_name() if opref.op_ns != project_ns else opref.op_name
+
+
+def _run_description(run: Run, width: int):
+    summary = run_summary(run)
+    config = meta_config(run)
+    label = run_label(run)
+    fields = {
+        **summary.get_metrics(),
+        **summary.get_attributes(),
+        **config,
+    }
+    assigns = [
+        (name, format_summary_value(val)) for name, val in sorted(fields.items())
+    ]
+    if label:
+        label_width = min(len(label), int(0.25 * width))
+        rest_width = width - label_width
+        formatted = cli.format_assigns(
+            assigns,
+            rest_width,
+            ("cyan1", "bright_black", "dim"),
+        )
+        return f"[dim]{label}[/dim] {formatted}"
+    else:
+        return cli.format_assigns(
+            assigns,
+            width,
+            ("cyan1", "bright_black", "dim"),
+        )
 
 
 def _fit(l: list[Any], width: int):

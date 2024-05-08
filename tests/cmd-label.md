@@ -6,19 +6,19 @@ Create two test runs.
 
     >>> use_example("hello")
 
-    >>> run("gage run hello -q -y")
+    >>> run("gage run hello name=Joe -q -y")
     <0>
 
-    >>> run("gage run hello -q -y -l 'Say hi'")
+    >>> run("gage run hello name=Mike -q -y -l 'Saying hi'")
     <0>
 
 Show the runs.
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | Say hi                       |
-    | 2 | hello     | completed |                              |
+    | 1 | hello     | completed | Saying hi name=Mike          |
+    | 2 | hello     | completed | name=Joe                     |
     <0>
 
 Set the label for run 2.
@@ -28,10 +28,10 @@ Set the label for run 2.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | Say hi                       |
-    | 2 | hello     | completed | Say hi 2                     |
+    | 1 | hello     | completed | Saying hi name=Mike          |
+    | 2 | hello     | completed | Say hi 2 name=Joe            |
     <0>
 
 Clear the label for run 1.
@@ -41,10 +41,10 @@ Clear the label for run 1.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
-    | 2 | hello     | completed | Say hi 2                     |
+    | 1 | hello     | completed | name=Mike                    |
+    | 2 | hello     | completed | Say hi 2 name=Joe            |
     <0>
 
 Set label for runs 1 and 2.
@@ -54,10 +54,10 @@ Set label for runs 1 and 2.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed | Say hi to all                |
-    | 2 | hello     | completed | Say hi to all                |
+    | 1 | hello     | completed | Say hi to all name=Mike      |
+    | 2 | hello     | completed | Say hi to all name=Joe       |
     <0>
 
 Clear all labels.
@@ -67,10 +67,10 @@ Clear all labels.
     <0>
 
     >>> run("gage ls -s")
-    | # | operation | status    | label                        |
+    | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
-    | 1 | hello     | completed |                              |
-    | 2 | hello     | completed |                              |
+    | 1 | hello     | completed | name=Mike                    |
+    | 2 | hello     | completed | name=Joe                     |
     <0>
 
 ## Errors

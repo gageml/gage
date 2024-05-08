@@ -106,6 +106,13 @@ Format other examples.
     ... ], 36)
     'foobar=1234567 barfoo=76543… baz=321'
 
+    >>> format([
+    ...     ("changes_per_author_baseline", "40"),
+    ...     ("period", "monthly"),
+    ...     ("project", "guildai/guildai"),
+    ... ], 40)
+    'changes_p…=40 period=month… proje…=guil…'
+
 ### Implementation
 
 `format_assign` is implementing using two phases:
@@ -179,38 +186,43 @@ An assign uses at least three chars.
 By default, names are preserved up to the first four chars.
 
     >>> fit_assign("abcd", "", 0)
-    ('abcd', '…')
-
-Note that a five char name is not truncated as the ellipsis requires one
-char and so does not shorten the name,
+    ('abcd', '')
 
     >>> fit_assign("abcde", "", 0)
-    ('abcde', '…')
+    ('abc…', '')
 
 Names are truncated at six chars.
 
     >>> fit_assign("abcdef", "", 0)
-    ('abcd…', '…')
+    ('abc…', '')
 
 The min name width is configurable with the `min_name` param.
 
     >>> fit_assign("abcde", "", 0, min_name=3)
-    ('abc…', '…')
+    ('ab…', '')
 
-Values are truncated with consideration for an additional assignment
-char (i.e. "="). For example, a budget of 8 will produce a total name
-and value length of 7.
+Values are truncated with a goal of showing equal parts name and value.
 
     >>> fit_assign("abcdef", "123456", 8)
-    ('abcd…', '1…')
-
-And so on.
+    ('abc…', '123…')
 
     >>> fit_assign("abcdef", "123456", 9)
-    ('abcd…', '12…')
+    ('abc…', '123…')
 
     >>> fit_assign("abcdef", "123456", 10)
     ('abcd…', '123…')
+
+This is true regardless of the relative sizes of the sides.
+
+Here's a case with a long name and a short value.
+
+    >>> fit_assign("abcdefghij", "12345", 8)
+    ('abc…', '123…')
+
+And a case with a short name and a long value.
+
+    >>> fit_assign("abcde", "1234567890", 8)
+    ('abc…', '123…')
 
 When name and value are the same size, they're truncated equally.
 
@@ -222,4 +234,9 @@ example, if value is 2x the width of name, it's truncated by 2x the
 chars as needed fit within the budget.
 
     >>> fit_assign("abcdef", "123456789012", 13)
-    ('abcd…', '123456…')
+    ('abcdef', '12345…')
+
+Other examples:
+
+    >>> fit_assign("changes_per_author_baseline", "40", 13)
+    ('changes_p…', '40')

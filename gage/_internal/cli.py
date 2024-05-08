@@ -3,7 +3,6 @@
 from typing import *
 
 import logging
-import math
 import os
 import re
 import shlex
@@ -48,6 +47,7 @@ __all__ = [
     "out",
     "status",
     "track",
+    "truncate",
 ]
 
 log = logging.getLogger(__name__)
@@ -493,28 +493,63 @@ def _fit_assigns(
     return fit
 
 
-def _fit_assign(name: str, val: str, budget: int, min_name: int = 4):
-    budget = max(budget, 3)  # Assign uses at least 3 chars
+DEBUG = 0
+
+
+def _fit_assign(name: str, val: str, budget: int, min_name: int = 4, min_val: int = 4):
     len_name = len(name)
     len_val = len(val)
-    wanted = len_name + len_val + 1
-    trunc = wanted - budget
-    if trunc <= 0:
-        return name, val
-    name_trunc = min(
-        math.floor(len_name / (len_name + len_val) * trunc),
-        max(len_name - min_name - 1, 0),
+    fit_name = min(len_name, min_name)
+    fit_val = min(len_val, min_val)
+    available = max(0, budget - fit_name - fit_val - 1)
+    if DEBUG:
+        print("#########", available, budget, fit_name, fit_val)
+    while available:
+        applied = False
+        if DEBUG:
+            print(
+                f"### check for name: {fit_name} < {len_name} and ({fit_name} <= {fit_val} or {fit_val} >= {len_val}"
+            )
+        if fit_name < len_name and (fit_name <= fit_val or fit_val >= len_val):
+            fit_name += 1
+            available -= 1
+            applied = True
+            if DEBUG:
+                print("#### applied to name")
+        if DEBUG:
+            print(
+                f"### check for val: {available} and {fit_val} < {len_val} and ({fit_val} <= {fit_name} or {fit_name} >= {len_name}"
+            )
+        if (
+            available
+            and fit_val < len_val
+            and (fit_val <= fit_name or fit_name >= len_name)
+        ):
+            fit_val += 1
+            available -= 1
+            applied = True
+            if DEBUG:
+                print("#### applied to val")
+        if not applied:
+            if DEBUG:
+                print("#### did not apply")
+            break
+
+    return (
+        truncate(name, fit_name),
+        truncate(val, fit_val),
     )
-    val_trunc = trunc - name_trunc
-    return _trunc(name, name_trunc), _trunc(val, val_trunc)
 
 
-def _trunc(s: str, len: int):
-    return f"{s[:-(len+1)]}…" if len > 0 else s
+def truncate(s: str, to_len: int):
+    return f"{s[:to_len-1]}…" if to_len < len(s) else s
 
 
 def _format_assign(name: str, val: str, styles: AssignStyles | None):
-    name = f"[{styles[0]}]{name}[/]" if styles else name
-    eq = f"[{styles[1]}]=[/]" if styles else "="
-    val = f"[{styles[2]}]{val}" if styles else val
+    name_style = styles[0] if styles else ""
+    eq_style = styles[1] if styles else ""
+    val_style = styles[2] if styles else ""
+    name = f"[{name_style}]{name}[/{name_style}]" if name_style else name
+    eq = f"[{eq_style}]=[/{eq_style}]" if eq_style else "="
+    val = f"[{val_style}]{val}[/{val_style}]" if val_style else val
     return name + eq + val

@@ -126,7 +126,7 @@ the project directory.
     <0>
 
     >>> run("gage runs -s")
-    | # | operation | status | label                           |
+    | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
 
@@ -146,9 +146,9 @@ Generate a run.
     <0>
 
     >>> run("gage runs -s")  # +parse +table
-    | # | operation | status    | label |
-    |---|-----------|-----------|-------|
-    | 1 | hello     | completed |       |
+    | # | operation | status    | description                  |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed |                              |
     <0>
 
     >>> ls(include_dirs=True)  # +parse

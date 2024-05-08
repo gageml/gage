@@ -55,7 +55,7 @@ Change to the new project location.
     >>> cd(tmp)
 
     >>> run("gage runs -s")
-    | # | operation | status | label                           |
+    | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
 
@@ -66,9 +66,9 @@ Run `hello` again.
     <0>
 
     >>> run("gage runs -s")  # +parse +table
-    | # | operation | status    | label |
-    |---|-----------|-----------|-------|
-    | 1 | hello     | completed |       |
+    | # | operation | status    | description                  |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | name=Gage                    |
     <0>
 
 Runs are created in the project `.gage/runs` subdirectory.
