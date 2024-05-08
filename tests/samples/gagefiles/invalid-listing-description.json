@@ -1,0 +1,15 @@
+{
+  "op": {
+    "listing": {
+      "description": [123]
+    }
+  },
+  "op-2": {
+    "listing": {
+      "foo": true
+    }
+  },
+  "op-3": {
+    "listing": 123
+  }
+}

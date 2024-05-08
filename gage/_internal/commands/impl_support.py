@@ -14,9 +14,12 @@ from .. import project_util
 from .. import run_select
 from .. import var
 
+from ..gagefile import gagefile_for_dir
+
 from ..run_util import meta_config
 from ..run_util import meta_opref
 from ..run_util import run_label
+from ..run_util import run_project_dir
 from ..run_util import run_status
 from ..run_util import run_summary
 from ..run_util import run_timestamp
@@ -127,7 +130,7 @@ def runs_table(
     **table_kw: Any,
 ):
     width = cli.console_width()
-    project_ns = project_util.project_ns()
+    project_namespace = project_util.project_namespace()
     table = cli.Table(
         *_table_cols(width, deleted, simplified),
         expand=True,
@@ -135,7 +138,7 @@ def runs_table(
         **table_kw,
     )
     for index, run in runs:
-        table.add_row(*_table_row(index, run, width, project_ns, simplified))
+        table.add_row(*_table_row(index, run, width, project_namespace, simplified))
     return table
 
 
@@ -235,12 +238,12 @@ def _table_row(
     index: int,
     run: Run,
     width: int,
-    project_ns: str | None,
+    project_namespace: str | None,
     simplified: bool,
 ) -> list[str]:
     index_str = str(index)
     run_name = run.name[:5]
-    op_name = _op_name(run, project_ns)
+    op_name = _op_name(run, project_namespace)
     started = run_timestamp(run, "started")
     started_str = human_readable.date_time(started) if started else ""
     status = run_status(run)
@@ -259,9 +262,9 @@ def _table_row(
     return _fit(row, width)
 
 
-def _op_name(run: Run, project_ns: str | None):
+def _op_name(run: Run, project_namespace: str | None):
     opref = meta_opref(run)
-    return opref.get_full_name() if opref.op_ns != project_ns else opref.op_name
+    return opref.get_full_name() if opref.op_ns != project_namespace else opref.op_name
 
 
 def _run_description(run: Run, width: int):
@@ -274,7 +277,8 @@ def _run_description(run: Run, width: int):
         **config,
     }
     assigns = [
-        (name, format_summary_value(val)) for name, val in sorted(fields.items())
+        (name, format_summary_value(fields.get(name)))
+        for name in _run_desc_field_names(run, fields)
     ]
     if label:
         label_width = min(len(label), int(0.25 * width))
@@ -291,6 +295,36 @@ def _run_description(run: Run, width: int):
             width,
             ("cyan1", "bright_black", "dim"),
         )
+
+
+__run_desc_field_name_cache: dict[str, list[str]] = {}
+
+
+def _run_desc_field_names(run: Run, fields: dict[str, Any]):
+    try:
+        names = __run_desc_field_name_cache[run.id]
+    except KeyError:
+        __run_desc_field_name_cache[run.id] = names = (
+            _try_run_desc_field_names(run) or []
+        )
+    return names or sorted(fields)
+
+
+def _try_run_desc_field_names(run: Run):
+    project_dir = run_project_dir(run)
+    if not project_dir:
+        return None
+    try:
+        gf = gagefile_for_dir(project_dir)
+    except FileNotFoundError:
+        return None
+    opdef = gf.as_json().get(run.opref.op_name)
+    if not opdef:
+        return None
+    fields = opdef.get("listing", {}).get("description")
+    if not fields and not isinstance(fields, list):
+        return None
+    return cast(list[str], fields)
 
 
 def _fit(l: list[Any], width: int):

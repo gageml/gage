@@ -1,0 +1,15 @@
+{
+  "op": {
+    "description": "Specifies fields used in listing description",
+    "exec": "python run.py",
+    "config": "run.py",
+    "listing": {
+      "description": ["z", "s"]
+    }
+  },
+  "op-2": {
+    "description": "Same as run but uses default listing description",
+    "exec": "python run.py",
+    "config": "run.py"
+  }
+}

@@ -215,3 +215,25 @@ the run phase execs.
     Properties ['run'] are invalid
     The instance must be of type "string"
     <1>
+
+## Listing descriptions
+
+The description used in run lists can be configured using an operation
+listing description.
+
+    >>> run("gage check listing-description.json")
+    listing-description.json is a valid Gage file
+    <0>
+
+    >>> run("gage check invalid-listing-description.json")
+    There are errors in invalid-listing-description.json
+    Properties ['op', 'op-2', 'op-3'] are invalid
+    Properties ['listing'] are invalid
+    Properties ['description'] are invalid
+    [0]
+    The instance must be of type "string"
+    Properties ['listing'] are invalid
+    ['foo']
+    Properties ['listing'] are invalid
+    The instance must be of type "object"
+    <1>

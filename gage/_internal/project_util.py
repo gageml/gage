@@ -11,7 +11,7 @@ __all__ = [
     "find_project_dir",
     "has_project_marker",
     "load_project_data",
-    "project_ns",
+    "project_namespace",
 ]
 
 PROJECT_MARKERS = [
@@ -81,6 +81,6 @@ def _load_yaml(filename: str):
         return yaml.safe_load(f)
 
 
-def project_ns(cwd: str | None = None):
+def project_namespace(cwd: str | None = None):
     project_dir = find_project_dir(cwd)
     return os.path.basename(project_dir) if project_dir else None

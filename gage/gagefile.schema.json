@@ -289,6 +289,20 @@
               }
             }
           ]
+        },
+        "listing": {
+          "type": "object",
+          "title": "Listing configuration",
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         }
       }
     }
