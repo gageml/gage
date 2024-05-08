@@ -88,10 +88,10 @@ Generate another run.
     Hello Gage
     <0>
 
-    >>> run("gage ls", cols=68)  # +parse +table
-    | # | name  | operation | started | status    | description        |
-    |---|-------|-----------|---------|-----------|--------------------|
-    | 1 | {nme} | hello     | {}      | completed | Run 2 name=Gage    |
+    >>> run("gage ls", cols=72)  # +parse +table
+    | # | name  | operation | started | status    | description      |
+    |---|-------|-----------|---------|-----------|------------------|
+    | 1 | {nme} | hello     | {}      | completed | Run 2 name=Gage  |
     <0>
 
 Permanently delete the run.
