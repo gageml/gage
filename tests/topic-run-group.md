@@ -1,5 +1,8 @@
 # Run groups
 
+UPDATE May 2024 - TODO: Review this test and delete if needed. I think
+this is outdated but this might contain something worth keeping.
+
 A run group is a run directory type used to group related runs.
 
 Run groups use the same ID types as runs.
