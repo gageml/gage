@@ -47,6 +47,8 @@ def run(args: Args):
     else:
         try:
             context = resolve_run_context(args.opspec)
+        except FileNotFoundError as e:
+            error_handlers.gagefile_not_found(e)
         except GageFileError as e:
             error_handlers.gagefile_error(e)
         except OpDefNotFound as e:
