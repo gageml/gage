@@ -2,13 +2,19 @@
 
 from typing import *
 
+import os
+
 from .types import *
 
 from .run_util import *
+from .file_util import compare_paths
 
 from . import var
 
-__all__ = ["runs", "write_summary"]
+__all__ = [
+    "runs",
+    "write_summary",
+]
 
 
 def _run_attributes(run: Run) -> dict[str, Any]:
@@ -69,27 +75,76 @@ def _api_runs():
     return [_Run(run) for run in var.list_runs(sort=["-timestamp"])]
 
 
+EchoFormat = Literal["flat", "json", "yaml"]
+
+
 def write_summary(
+    *,
     metrics: dict[str, Any],
     attributes: dict[str, Any] | None = None,
     filename: str = "summary.json",
     echo: bool = True,
+    echo_format: EchoFormat = "flat",
+    always_write: bool = False,
 ):
-    import json
+
+    summary = {
+        **({"metrics": metrics} if metrics else {}),
+        **({"attributes": attributes} if attributes else {}),
+    }
 
     if echo:
-        _echo_summary(metrics, attributes)
+        _echo_summary(summary, echo_format)
 
-    with open(filename, "w") as f:
-        json.dump(
-            {"metrics": metrics, "attributes": attributes},
-            f,
-            indent=True,
-        )
+    if always_write or _is_cwd_run_dir():
+        import json
+
+        with open(filename, "w") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
 
 
-def _echo_summary(metrics: dict[str, Any], attributes: dict[str, Any] | None = None):
-    attributes = attributes or {}
-    for summary in (metrics, attributes):
-        for name, val in sorted(summary.items()):
-            print(f"{name}: {val}")
+def _is_cwd_run_dir():
+    run_dir = os.getenv("RUN_DIR")
+    return run_dir and compare_paths(run_dir, os.getcwd())
+
+
+def _echo_summary(summary: dict[str, Any], format: EchoFormat):
+    if format == "flat":
+        _echo_flat(summary)
+    elif format == "json":
+        _echo_json(summary)
+    elif format == "yaml":
+        _echo_yaml(summary)
+    else:
+        raise ValueError(format)
+
+
+def _echo_flat(summary: dict[str, Any]):
+    metrics = summary.get("metrics") or {}
+    attributes = summary.get("attributes") or {}
+    names = set(list(metrics) + list(attributes))
+    missing = object()
+    for name in sorted(names):
+        metric = metrics.get(name, missing)
+        attr = attributes.get(name, missing)
+        if metric is not missing and attr is not missing:
+            print(f"{name} (metric): {metric:g}")
+            print(f"{name} (attribute): {attr}")
+        elif metric is not missing:
+            print(f"{name}: {metric:g}")
+        elif attr is not missing:
+            print(f"{name}: {attr}")
+        else:
+            assert False, (name, summary)
+
+
+def _echo_json(summary: dict[str, Any]):
+    import json
+
+    print(json.dumps(summary, indent=2, sort_keys=True))
+
+
+def _echo_yaml(summary: dict[str, Any]):
+    import yaml
+
+    print(yaml.dump(summary).rstrip())
