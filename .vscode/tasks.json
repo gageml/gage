@@ -22,7 +22,7 @@
       "label": "Run All Tests",
       "type": "process",
       "command": "${command:python.interpreterPath}",
-      "args": ["-m", "groktest", ".", "--fail-fast", "--show-skipped"],
+      "args": ["-m", "groktest", ".", "--fail-fast"],
       "presentation": {
         "panel": "dedicated",
       }
