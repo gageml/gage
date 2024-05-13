@@ -29,6 +29,9 @@ PROJECT_MARKERS = [
 
 
 def find_project_dir(dirname: str | None = None, stop_dir: str | None = None):
+    explicit_dirname = os.getenv("PROJECT_DIR")
+    if explicit_dirname:
+        return explicit_dirname
     dirname = dirname or sys_config.cwd()
     last = None
     while True:
