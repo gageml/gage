@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 
 from .. import cli
 
@@ -410,12 +411,21 @@ def _rclone_copy_from(src: str, dest: str, excludes: list[str]):
             break
         m = _TRANSFERRED2_P.search(line)
         if m:
-            assert m.group(2) == "KiB", line
-            assert m.group(4) == "KiB", line
-            yield int(float(m.group(1)) * 1024), int(float(m.group(3)) * 1024)
-            import time
-
+            yield (
+                _parse_bytes(m.group(1), m.group(2), line),
+                _parse_bytes(m.group(3), m.group(4), line),
+            )
             time.sleep(0.1)
     result = p.wait()
     if result != 0:
         raise RuntimeError(result)
+
+
+def _parse_bytes(s: str, unit: str, line: str):
+    num = float(s)
+    if unit == "KiB":
+        return int(num * 1024)
+    elif unit == "B":
+        return int(num)
+    else:
+        assert False, (line, unit)
