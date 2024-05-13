@@ -122,3 +122,24 @@ be used as a replacement in all cases.
 
     >>> _unquote("'Hello")
     "'Hello"
+
+## Splitting Env
+
+`split_env` removes env assignments from a string, returning them in an
+env dict.
+
+    >>> from gage._internal.shlex_util import split_env
+
+    >>> split_env("")
+    ('', {})
+
+    >>> split_env("python eval.py")
+    ('python eval.py', {})
+
+    >>> split_env("FOO=123 BAR=abc BAZ=\"Hello there\" BAM='Hi ho' python eval.py")
+    ... # -space
+    ('python eval.py',
+     {'FOO': '123',
+      'BAR': 'abc',
+      'BAZ': 'Hello there',
+      'BAM': 'Hi ho'})

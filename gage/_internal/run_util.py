@@ -19,11 +19,12 @@ import uuid
 
 from proquint import uint2quint
 
+from . import attr_log
 from . import channel
 from . import run_config
 from . import run_sourcecode
 from . import run_output
-from . import attr_log
+from . import shlex_util
 from . import util
 
 from .file_select import copy_files
@@ -1303,10 +1304,11 @@ def _run_phase_exec(
     log: Logger,
 ):
     log.info(f"Starting {phase_name} (see output/{output_name}): {exec_cmd}")
-    proc_args, use_shell = _proc_args(exec_cmd)
+    proc_args, cmd_env, use_shell = _proc_args(exec_cmd)
     proc_env = {
         **env,
         **os.environ,
+        **cmd_env,
     }
     ensure_dir(run.run_dir)
     p = subprocess.Popen(
@@ -1339,14 +1341,19 @@ def _run_phase_exec(
         raise RunExecError(phase_name, proc_args, exit_code)
 
 
-def _proc_args(exec_cmd: str | list[str]) -> tuple[str | list[str], bool]:
+def _proc_args(
+    exec_cmd: str | list[str],
+) -> tuple[str | list[str], dict[str, str], bool]:
     if isinstance(exec_cmd, list):
-        return exec_cmd, False
+        return exec_cmd, {}, False
     line1, *rest = exec_cmd.splitlines()
     if line1.startswith("#!"):
-        return [line1[2:].rstrip(), "-c", "".join(rest)], False
+        return [line1[2:].rstrip(), "-c", "".join(rest)], {}, False
+    elif os.name == "nt":
+        cmd, env = shlex_util.split_env(exec_cmd)
+        return cmd, env, True
     else:
-        return exec_cmd, True
+        return exec_cmd, {}, True
 
 
 def _hook_env(run: Run, project_dir: str | None = None):

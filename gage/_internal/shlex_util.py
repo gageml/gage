@@ -3,12 +3,14 @@
 from typing import *
 
 import os
+import re
 import shlex
 
 __all__ = [
     "shlex_split",
     "shlex_quote",
     "shlex_join",
+    "split_env",
 ]
 
 
@@ -57,3 +59,19 @@ def _simplify_shlex_quote(s: str):
         stripped = s[len(pattern_start) : -len(pattern_end)]
         return repl_start + stripped + repl_end
     return s
+
+
+_ENV_ASSIGN_P = re.compile(r"([\w]+)=(.*)")
+
+
+def split_env(cmd: str) -> tuple[str, dict[str, str]]:
+    if not cmd:
+        return cmd, {}
+    parts = shlex.split(cmd)
+    env = {}
+    for i, part in enumerate(parts):
+        m = _ENV_ASSIGN_P.match(part)
+        if not m:
+            break
+        env[m.group(1)] = _unquote(m.group(2))
+    return shlex.join(parts[i:]), env
