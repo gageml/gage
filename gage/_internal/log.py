@@ -104,7 +104,10 @@ def init_logging(level: int | None = None, formats: Optional[dict[str, str]] = N
         {
             "version": 1,
             "handlers": {"console": console_handler},
-            "root": {"level": level, "handlers": ["console"]},
+            "root": {
+                "level": level,
+                "handlers": ["console"],
+            },
             "disable_existing_loggers": False,
         }
     )
