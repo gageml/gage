@@ -89,7 +89,7 @@ An op def may optionally specify the summary file name that it writes.
     }
     <0>
 
-    >>> run("gage show --summary")
+    >>> run("gage show --summary")  # +table
     | name  | value       | type      |
     |-------|-------------|-----------|
     | type  | alt-example | attribute |
@@ -120,7 +120,7 @@ An op def may optionally specify the summary file name that it writes.
     speed = 0.3
     <0>
 
-    >>> run("gage show --summary")
+    >>> run("gage show --summary")  # +table
     | name  | value    | type      |
     |-------|----------|-----------|
     | type  | alt-toml | attribute |

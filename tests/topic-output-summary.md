@@ -47,7 +47,7 @@ the run summary.
     }
     <0>
 
-    >>> run("gage show")  # +parse
+    >>> run("gage show")  # +parse +panel
     {:run_id}
     | summary:output-summary                         completed |
     ⤶
@@ -90,7 +90,7 @@ the run summary.
     ---
     <0>
 
-    >>> run("gage show")  # +parse
+    >>> run("gage show")  # +parse +panel
     {:run_id}
     | summary:output-summary-2                       completed |
     ⤶
