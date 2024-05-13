@@ -1,11 +1,8 @@
----
-test-options: +skip=WINDOWS_FIX  # Lots of platform specific issues
----
 # Summary example
 
     >>> use_example("summary")
 
-    >>> run("gage ops", cols=60)
+    >>> run("gage ops", cols=60)  # +diff
     | operation            | description                       |
     |----------------------|-----------------------------------|
     | alt-summary-metadata | Write summary vals with metadata  |
@@ -15,6 +12,13 @@ test-options: +skip=WINDOWS_FIX  # Lots of platform specific issues
     |                      | TOML                              |
     | default              | Write summary using default file  |
     |                      | name (default)                    |
+    | output-summary       | Use output to print summary       |
+    | output-summary-2     | Alt of output-summary using       |
+    |                      | default pattern                   |
+    | output-summary-3     | Alt of output summary using       |
+    |                      | custom pattern                    |
+    | output-summary-4     | Alt of output summary using       |
+    |                      | invalid pattern                   |
     <0>
 
 ## Default Summary File
@@ -25,16 +29,19 @@ The default location for a run summary is `summary.json`.
     Writing summary to summary.json
     <0>
 
-    >>> run("gage show --files", cols=45)  # +wildcard
-    | name                | type        |  size |
-    |---------------------|-------------|-------|
-    | summary.json        | generated   | ... B |
-    | gage.toml           | source code | ... B |
-    | summary.py          | source code | ... B |
-    | summary_metadata.py | source code | ... B |
+    >>> run("gage show --files", cols=60)  # +wildcard +table
+    | name                | type        |   size |
+    |---------------------|-------------|--------|
+    | summary.json        | generated   |    ... |
+    | gage.toml           | source code |    ... |
+    | output_summary.py   | source code |    ... |
+    | output_summary_2.py | source code |    ... |
+    | output_summary_3.py | source code |    ... |
+    | summary.py          | source code |    ... |
+    | summary_metadata.py | source code |    ... |
     <0>
 
-    >>> run("gage open --cmd cat --path summary.json")
+    >>> run("gage cat --path summary.json")
     {
       "attributes": {
         "type": "example"
@@ -45,41 +52,11 @@ The default location for a run summary is `summary.json`.
     }
     <0>
 
-    >>> run("gage show")  # +parse +paths +diff +panels
-    {:run_id}
-    | summary:default                                completed |
-    ⤶
-                             Attributes
-    | id         {:run_id}                                     |
-    | name       {:run_name}                                   |
-    | started    {:datetime}                                   |
-    | stopped    {:datetime}                                   |
-    | location   {:path}                                       |
-    | project    {:path}/examples/summary                      |
-    | exit_code  0                                             |
-    ⤶
-                               Config
-    | fake_speed  0.1                                          |
-    | type        example                                      |
-    ⤶
-                              Summary
-    | name         |value             |type                    |
-    | -------------|------------------|----------------------- |
-    | type         |example           |attribute               |
-    | speed        |0.1               |metric                  |
-    ⤶
-                               Files
-    | name                    |type          |            size |
-    | ------------------------|--------------|---------------- |
-    | summary.json            |generated     |          {:d} B |
-    | gage.toml               |source code   |          {:d} B |
-    | summary.py              |source code   |          {:d} B |
-    | summary_metadata.py     |source code   |          {:d} B |
-    | ------------------------|--------------|---------------- |
-    | 4 files                 |              |       total: {} |
-    ⤶
-                               Output
-    | Writing summary to summary.json                          |
+    >>> run("gage show --summary")
+    | name  | value   | type      |
+    |-------|---------|-----------|
+    | type  | example | attribute |
+    | speed | 0.1     | metric    |
     <0>
 
 ## Alt Summary File
@@ -101,7 +78,7 @@ An op def may optionally specify the summary file name that it writes.
     | summary_metadata.py | source code |   ... |
     <0>
 
-    >>> run("gage open --cmd cat --path results.json")
+    >>> run("gage cat --path results.json")
     {
       "attributes": {
         "type": "alt-example"
@@ -135,7 +112,7 @@ An op def may optionally specify the summary file name that it writes.
     | summary.py   | source code |   ... |
     <0>
 
-    >>> run("gage open --cmd cat --path zefile.toml")
+    >>> run("gage cat --path zefile.toml")
     [attributes]
     type = "alt-toml"
     ⤶

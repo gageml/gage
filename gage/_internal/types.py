@@ -291,6 +291,9 @@ class OpDef:
         # TODO: this ought to mirror exec as progress is tied to
         return self._data.get("progress")
 
+    def get_output_summary_pattern(self) -> str | bool | None:
+        return self._data.get("output-summary")
+
 
 class GageFile:
     def __init__(self, filename: str, data: Data):

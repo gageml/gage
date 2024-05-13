@@ -30,3 +30,25 @@ filename = "zefile.toml"
 
 description = "Write summary vals with metadata"
 exec = "python summary_metadata.py"
+
+[output-summary]
+
+description = "Use output to print summary"
+exec = "python output_summary.py"
+
+[output-summary-2]
+
+description = "Alt of output-summary using default pattern"
+exec = "python output_summary_2.py"
+
+[output-summary-3]
+
+description = "Alt of output summary using custom pattern"
+exec = "python output_summary_3.py"
+output-summary = "Summary:\n(.*?)\n\n"  # Use empty line as summary stop
+
+[output-summary-4]
+
+description = "Alt of output summary using invalid pattern"
+exec = "python output_summary_2.py"
+output-summary = "--- summary ---"

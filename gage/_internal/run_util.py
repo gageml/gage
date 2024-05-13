@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -418,6 +419,10 @@ def _meta_summary_filename(run: Run):
     return run_meta_path(run, "summary.json")
 
 
+def _meta_output_dir(run: Run):
+    return run_meta_path(run, "output")
+
+
 # =================================================================
 # Load run
 # =================================================================
@@ -659,6 +664,13 @@ def log_user_attrs(run: Run, set: dict[str, Any], delete: list[str] | None = Non
 # =================================================================
 
 
+class OutputName:
+    sourcecode = "10_sourcecode"
+    runtime = "20_runtime"
+    dependencies = "30_dependencies"
+    run = "40_run"
+
+
 def stage_run(run: Run, project_dir: str):
     stage_sourcecode(run, project_dir, _log_files=False)
     apply_config(run)
@@ -693,7 +705,7 @@ def _stage_sourcecode_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger
         exec,
         _hook_env(run, project_dir),
         opdef.get_progress().get_stage_sourcecode(),
-        "10_sourcecode",
+        OutputName.sourcecode,
         log,
     )
 
@@ -728,7 +740,7 @@ def _stage_runtime_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger):
         exec,
         _hook_env(run, project_dir),
         opdef.get_progress().get_stage_runtime(),
-        "20_runtime",
+        OutputName.runtime,
         log,
     )
 
@@ -762,7 +774,7 @@ def _stage_dependencies_hook(run: Run, project_dir: str, opdef: OpDef, log: Logg
         exec,
         _hook_env(run, project_dir),
         opdef.get_progress().get_stage_dependencies(),
-        "30_dependencies",
+        OutputName.dependencies,
         log,
     )
 
@@ -814,7 +826,7 @@ def exec_run(run: Run):
         cmd.args,
         env,
         opdef.get_progress().get_run(),
-        "40_run",
+        OutputName.run,
         log,
     )
 
@@ -837,8 +849,8 @@ def finalize_run(run: Run, exit_code: int = 0):
     opdef = meta_opdef(run)
     run_phase_channel.notify("finalize")
     ensure_dir(run.run_dir)
-    _finalize_run_summary(run, opdef, log)
     _finalize_run_output(run)
+    _finalize_run_summary(run, opdef, log)
     _write_timestamp("stopped", run, log)
     _write_exit_code(exit_code, run, log)
     _finalize_run_hook(run, opdef, log)
@@ -848,6 +860,16 @@ def finalize_run(run: Run, exit_code: int = 0):
     _finalize_runner_log(run)
 
 
+def _finalize_run_output(run: Run):
+    output_dir = _meta_output_dir(run)
+    output_filename = os.path.join(output_dir, OutputName.run)
+    if os.path.exists(output_filename):
+        set_readonly(output_filename)
+    index_filename = output_filename + ".index"
+    if os.path.exists(index_filename):
+        set_readonly(index_filename)
+
+
 def _finalize_run_summary(run: Run, opdef: OpDef, log: Logger):
     summary = _load_run_summary(run, opdef, log)
     _apply_opdef_summary(opdef, summary)
@@ -855,16 +877,95 @@ def _finalize_run_summary(run: Run, opdef: OpDef, log: Logger):
 
 
 def _load_run_summary(run: Run, opdef: OpDef, log: Logger) -> RunSummary:
+    return (
+        _run_summary_from_file(run, opdef, log)
+        or _run_summary_from_output(run, opdef, log)
+        or RunSummary({})
+    )
+
+
+def _run_summary_from_file(run: Run, opdef: OpDef, log: Logger):
     filename = _run_summary_filename(run, opdef)
     if not os.path.exists(filename):
-        return RunSummary({})
-    log.info(f"Using run summary {os.path.relpath(filename, run.run_dir)}")
+        return None
+    log.info(f"Using run summary '{os.path.relpath(filename, run.run_dir)}'")
     return RunSummary(load_project_data(filename))
 
 
 def _run_summary_filename(run: Run, opdef: OpDef):
     name = opdef.get_summary().get_filename() or "summary.json"
     return os.path.join(run.run_dir, name)
+
+
+_DEFAULT_OUTPUT_SUMMARY_PATTERN = "--- summary ---(.*)---"
+
+
+def _run_summary_from_output(run: Run, opdef: OpDef, log: Logger):
+    summary_pattern = opdef.get_output_summary_pattern()
+    if summary_pattern is False or summary_pattern == "":
+        return None
+    if summary_pattern is True:
+        summary_pattern = None
+    output_dir = _meta_output_dir(run)
+    filename = os.path.join(output_dir, OutputName.run)
+    try:
+        with open(filename) as f:
+            out = f.read()
+    except OSError as e:
+        log.info("Error reading run ${filename} summary: {e}")
+        return None
+    else:
+        if summary_pattern:
+            return _try_summary_pattern(out, summary_pattern, log)
+        return (
+            _try_decode_summary(out)
+            or _try_summary_pattern(out, _DEFAULT_OUTPUT_SUMMARY_PATTERN, log)
+            # \
+        )
+
+
+def _try_summary_pattern(out: str, pattern: str, log: Logger):
+    log.info(f"Checking output for summary pattern {pattern!r}")
+    try:
+        m = re.search(pattern, out, re.DOTALL)
+    except re.error as e:
+        log.info(f"Error in output summary pattern {pattern!r}: {e}")
+        return None
+    else:
+        if not m:
+            return None
+        log.info("Found summary output")
+        try:
+            encoded = m.group(1)
+        except IndexError:
+            log.info(
+                f"Error in output summary pattern {pattern!r}: must capture a group"
+            )
+            return None
+        else:
+            return _try_decode_summary(encoded, log)
+
+
+def _try_decode_summary(out: str, log: Logger | None = None) -> RunSummary | None:
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        if log:
+            log.info(f"Error decoding output summary: {e}")
+        return None
+    else:
+        if not _is_summary_data(data):
+            if log:
+                log.info(
+                    "Decoded output is not valid summary data: missing "
+                    "metrics or attributes"
+                )
+            return None
+        return RunSummary(data)
+
+
+def _is_summary_data(data: Any):
+    return isinstance(data, dict) and ("metrics" in data or "attributes" in data)
 
 
 def _apply_opdef_summary(opdef: OpDef, summary: RunSummary):
@@ -880,15 +981,6 @@ def _write_meta_summary(summary: RunSummary, run: Run, log: Logger):
 
 def _encode_summary_json(summary: RunSummary):
     return json.dumps(summary.as_json(), indent=2, sort_keys=True)
-
-
-def _finalize_run_output(run: Run):
-    output_filename = run_meta_path(run, "output", "40_run")
-    if os.path.exists(output_filename):
-        set_readonly(output_filename)
-    index_filename = run_meta_path(run, "output", "40_run.index")
-    if os.path.exists(index_filename):
-        set_readonly(index_filename)
 
 
 def _write_exit_code(exit_code: int, run: Run, log: Logger):
@@ -974,12 +1066,14 @@ RunFileType = Literal[
 def _runner_log(run: Run):
     filename = _meta_runner_log_filename(run)
     ensure_dir(os.path.dirname(filename))
-    log = logging.Logger("runner")
+    runner_log = logging.Logger("runner")
     handler = logging.FileHandler(filename)
-    log.addHandler(handler)
+    runner_log.addHandler(handler)
+    if log.getEffectiveLevel() <= logging.INFO:
+        runner_log.addHandler(logging.StreamHandler())
     formatter = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%dT%H:%M:%S%z")
     handler.setFormatter(formatter)
-    return log
+    return runner_log
 
 
 def _run_meta_schema(run: Run):
@@ -1224,8 +1318,9 @@ def _run_phase_exec(
         env=proc_env,
     )
     _write_proc_lock(p, run, log)
-    ensure_dir(run_meta_path(run, "output"))
-    output_filename = run_meta_path(run, "output", output_name)
+    output_dir = _meta_output_dir(run)
+    ensure_dir(output_dir)
+    output_filename = os.path.join(output_dir, output_name)
     output_cb = _PhaseExecOutputCallback(phase_name)
     progress_parser = _progress_parser(progress)
     output = run_output.RunOutput(

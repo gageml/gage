@@ -310,5 +310,5 @@ On Windows, the function replaces colons with underscores.
 On all platforms, the function replaces any possible path separator
 with underscore.
 
-    >>> safe_filename("hello/there\\friend")  # -windows
+    >>> safe_filename("hello/there\\friend")
     'hello_there_friend'

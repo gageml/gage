@@ -290,6 +290,17 @@
             }
           ]
         },
+        "output-summary": {
+          "title": "Output summary configuration",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
         "listing": {
           "type": "object",
           "title": "Listing configuration",

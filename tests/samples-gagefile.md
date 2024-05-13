@@ -237,3 +237,18 @@ listing description.
     Properties ['listing'] are invalid
     The instance must be of type "object"
     <1>
+
+## Output Summary
+
+    >>> run("gage check output-summary.json")
+    output-summary.json is a valid Gage file
+    <0>
+
+    >>> run("gage check invalid-output-summary.json")
+    There are errors in invalid-output-summary.json
+    Properties ['op'] are invalid
+    Properties ['output-summary'] are invalid
+    The instance must be valid against exactly one subschema; it is valid against [] and invalid against [0, 1]
+    The instance must be of type "boolean"
+    The instance must be of type "string"
+    <1>

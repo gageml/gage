@@ -144,6 +144,7 @@ Show runner log.
     Writing meta proc/lock
     Exit code for run: 0
     Deleting meta proc/lock
+    Checking output for summary pattern '--- summary ---(.*)---'
     Writing meta summary
     Writing meta stopped
     Writing meta proc/exit
@@ -303,6 +304,7 @@ Show the runner log.
     Writing meta proc/lock
     Exit code for run: 0
     Deleting meta proc/lock
+    Checking output for summary pattern '--- summary ---(.*)---'
     Writing meta summary
     Writing meta stopped
     Writing meta proc/exit

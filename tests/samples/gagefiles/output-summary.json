@@ -1,0 +1,14 @@
+{
+  "disable-output-summary-1": {
+    "exec": "xxx",
+    "output-summary": false
+  },
+  "disable-output-summary-2": {
+    "exec": "xxx",
+    "output-summary": ""
+  },
+  "output-summary": {
+    "exec": "xxx",
+    "output-summary": "xxx(.*)yyy"
+  }
+}
