@@ -52,7 +52,7 @@ The default location for a run summary is `summary.json`.
     }
     <0>
 
-    >>> run("gage show --summary")
+    >>> run("gage show --summary")  # +table
     | name  | value   | type      |
     |-------|---------|-----------|
     | type  | example | attribute |
