@@ -117,3 +117,20 @@ The `timestamp` pattern matches epoch microsecond timestamps.
       ],
       "z": 123
     }
+
+## Normalize panels
+
+`_normalize_panel_output` normalizes panel output.
+
+    >>> from gage._internal.test import _normalize_panel_output as norm_panel
+
+    >>> print(norm_panel("""
+    ... |            Title             |
+    ... | ---------------------------- |
+    ... | Some value | Another Value   |
+    ... """))
+    ⤶
+    | Title |
+    | - |
+    | Some value | Another Value |
+    ⤶
