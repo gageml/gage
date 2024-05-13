@@ -7,6 +7,7 @@ from ..types import *
 import logging
 import os
 import platform
+import sys
 
 from .. import cli
 from .. import lang
@@ -188,12 +189,13 @@ class _Status:
 
 
 class _DefaultStatus(_Status):
-    _status = None
-
     def __init__(self, args: Args):
-        if args.quiet or log.getEffectiveLevel() < logging.WARN:
-            return
-        self._status = cli.status("")
+        self._quiet = args.quiet
+        self._status = (
+            cli.status("")
+            if not args.quiet and not log.getEffectiveLevel() < logging.WARN
+            else None
+        )
 
     def start(self):
         if self._status:
@@ -208,8 +210,11 @@ class _DefaultStatus(_Status):
             self._status.update(desc)
 
     def output(self, output: bytes, progress: Progress | None):
+        output_str = output.decode()
         if self._status:
-            self._status.console.out(output.decode(), end="")
+            self._status.console.out(output_str, end="")
+        elif not self._quiet:
+            sys.stdout.write(output_str)
 
 
 class _Progress(_Status):
