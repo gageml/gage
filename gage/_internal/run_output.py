@@ -309,9 +309,10 @@ class RunOutputReader:
                 raise
         else:
             while True:
-                line = output.readline().rstrip().decode()
-                if not line:
+                line_encoded = output.readline()
+                if not line_encoded:
                     break
+                line = line_encoded.rstrip().decode()
                 header = index.read(9)
                 if len(header) < 9:
                     break
