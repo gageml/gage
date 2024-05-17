@@ -31,6 +31,31 @@ else:
 
 
 def main():
+    if os.getenv("PROFILE") == "1":
+        _main_profile()
+    else:
+        _main()
+
+
+def _main_profile():
+    import cProfile
+    import sys
+    import tempfile
+
+    fd, filename = tempfile.mkstemp(suffix=".conf", prefix="gage-profile-")
+    os.close(fd)
+    p = cProfile.Profile()
+    sys.stderr.write("Profiling command\n")
+    p.enable()
+    try:
+        _main()
+    finally:
+        p.disable()
+        sys.stderr.write(f"Writing profile to {filename}\n")
+        p.dump_stats(filename)
+
+
+def _main():
     app = main_app()
     try:
         app()
