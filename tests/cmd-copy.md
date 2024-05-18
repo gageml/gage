@@ -55,3 +55,13 @@ destination.
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | Run 1 name=Gage              |
     <0>
+
+## Errors
+
+Can't use `--all` with runs.
+
+    >>> run("gage copy -a 123")
+    all and runs cannot be used together.
+    ⤶
+    Try 'gage copy -h' for help.
+    <1>

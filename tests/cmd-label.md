@@ -104,7 +104,7 @@ Clear all labels.
     <1>
 
     >>> run("gage label --set Hi --clear 1 -y")
-    clear and set cannot be used together.
+    set and clear cannot be used together.
     ⤶
     Try 'gage label -h' for help.
     <1>

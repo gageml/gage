@@ -2,10 +2,8 @@
 
 from typing import *
 
-from typer import Argument
-from typer import Option
-
-from ..cli import incompatible_with
+from ..cli import Argument
+from ..cli import Option
 
 RunSpecs = Annotated[
     Optional[list[str]],
@@ -13,7 +11,7 @@ RunSpecs = Annotated[
         help="Runs to modify. Required unless '--all' is specified.",
         metavar="[run]...",
         show_default=False,
-        callback=incompatible_with("all"),
+        incompatible_with=["all"],
     ),
 ]
 
@@ -44,7 +42,7 @@ SetLabel = Annotated[
         metavar="label",
         help="Set label for the specified runs.",
         show_default=False,
-        callback=incompatible_with("clear"),
+        incompatible_with=["clear"],
     ),
 ]
 
@@ -54,7 +52,6 @@ ClearFlag = Annotated[
         "-c",
         "--clear",
         help="Clear the label for the specified runs.",
-        callback=incompatible_with("set"),
     ),
 ]
 

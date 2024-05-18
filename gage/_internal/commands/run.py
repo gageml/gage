@@ -2,8 +2,8 @@
 
 from typing import *
 
-from typer import Argument
-from typer import Option
+from ..cli import Argument
+from ..cli import Option
 
 OpSpec = Annotated[
     str,
@@ -37,6 +37,7 @@ StageFlag = Annotated[
     Option(
         "--stage",
         help="Stage a run but don't run it.",
+        incompatible_with=["start"],
     ),
 ]
 

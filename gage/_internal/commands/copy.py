@@ -2,10 +2,8 @@
 
 from typing import *
 
-from typer import *
-
-from .. import cli
-
+from ..cli import Argument
+from ..cli import Option
 
 RunSpecs = Annotated[
     Optional[list[str]],
@@ -13,7 +11,7 @@ RunSpecs = Annotated[
         metavar="[run]...",
         help="Runs to copy. Required unless '--all' is specified.",
         show_default=False,
-        callback=cli.incompatible_with("all"),
+        incompatible_with=["all"],
     ),
 ]
 

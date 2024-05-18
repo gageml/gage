@@ -2,7 +2,7 @@
 
 from typing import *
 
-from typer import Argument
+from ..cli import Argument
 
 RunSpecs = Annotated[
     Optional[list[str]],

@@ -128,3 +128,11 @@ When adding a comment, a run specifier is required.
     ⤶
     Try 'gage comment -h' for additional help.
     <1>
+
+Can't specify `--all` with runs.
+
+    >>> run("gage comment -a 123")
+    all and runs cannot be used together.
+    ⤶
+    Try 'gage comment -h' for help.
+    <1>

@@ -173,3 +173,13 @@ Where can be used with run specs.
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | green name=D                 |
     <0>
+
+## Errors
+
+Can't use `--all` with run specs.
+
+    >>> run("gage delete -a 123 -y")
+    all and runs cannot be used together.
+    ⤶
+    Try 'gage delete -h' for help.
+    <1>

@@ -2,10 +2,8 @@
 
 from typing import *
 
-from typer import Argument
-from typer import Option
-
-from .. import cli
+from ..cli import Argument
+from ..cli import Option
 
 RunArgs = Annotated[
     Optional[list[str]],
@@ -41,7 +39,7 @@ AllFlag = Annotated[
         "-a",
         "--all",
         help="Show all runs. Cannot use with --limit.",
-        callback=cli.incompatible_with("limit"),
+        incompatible_with=["limit"],
     ),
 ]
 

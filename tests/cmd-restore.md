@@ -74,3 +74,13 @@ Restore the run.
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
+
+## Errors
+
+Can't use `--all` with runs.
+
+    >>> run("gage restore -a 123 -y")
+    all and runs cannot be used together.
+    ⤶
+    Try 'gage restore -h' for help.
+    <1>

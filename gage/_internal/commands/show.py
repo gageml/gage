@@ -2,11 +2,8 @@
 
 from typing import *
 
-from typer import Argument
-from typer import Option
-
-from .. import cli
-
+from ..cli import Argument
+from ..cli import Option
 
 RunSpec = Annotated[
     str,
@@ -54,7 +51,7 @@ SummaryFlag = Annotated[
     Option(
         "--summary",
         help=("Show only summary."),
-        callback=cli.incompatible_with("files"),
+        incompatible_with=["files"],
     ),
 ]
 
@@ -65,7 +62,6 @@ FilesFlag = Annotated[
         "-f",
         "--files",
         help="Show only files. When used, all files are show.",
-        callback=cli.incompatible_with("summary"),
     ),
 ]
 

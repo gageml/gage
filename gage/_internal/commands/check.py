@@ -2,18 +2,15 @@
 
 from typing import *
 
-from typer import Argument
-from typer import Option
-
-from .. import cli
-
+from ..cli import Argument
+from ..cli import Option
 
 Path = Annotated[
     str,
     Argument(
         metavar="[path]",
         help=("Gage file or a project directory to check. Cannot use with --version."),
-        callback=cli.incompatible_with("version"),
+        incompatible_with=["version"],
     ),
 ]
 

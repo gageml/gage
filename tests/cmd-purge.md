@@ -73,3 +73,13 @@ Purge the run.
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
+
+## Errors
+
+Can't use `--all` with run spec.
+
+    >>> run("gage purge -a 123 -y")
+    all and runs cannot be used together.
+    ⤶
+    Try 'gage purge -h' for help.
+    <1>

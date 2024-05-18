@@ -138,7 +138,7 @@ Non matching spec:
 ## Incompatible params
 
     >>> run("gage check --version xxx some-path")
-    path and version cannot be used together.
+    version and path cannot be used together.
     ⤶
     Try 'gage check -h' for help.
     <1>

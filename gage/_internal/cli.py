@@ -10,6 +10,7 @@ import sys
 import time
 
 import click
+from click.core import ParameterSource
 
 import rich.box
 import rich.columns
@@ -27,7 +28,11 @@ import rich.text
 import rich.theme
 import rich.table
 
-import typer.core
+from typer import Context
+from typer import Option as OptionBase
+from typer import Argument as ArgumentBase
+from typer.core import TyperGroup
+from typer.core import TyperArgument
 
 __all__ = [
     "AliasGroup",
@@ -41,7 +46,6 @@ __all__ = [
     "exit_with_error",
     "exit_with_message",
     "format_assigns",
-    "incompatible_with",
     "label",
     "markdown",
     "out",
@@ -228,37 +232,6 @@ def track(
     return rich.progress.track(sequence, description, **kw)
 
 
-def incompatible_with(*incompatible: str):
-    """Decorator to specify incompatible params."""
-
-    def callback(value: Any, param: typer.core.TyperArgument, ctx: click.Context):
-        if not _param_changed(param, value):
-            return param.type_cast_value(ctx, value)
-        for used_param in ctx.params:
-            if param.name == used_param or used_param not in incompatible:
-                continue
-            err(
-                markup(
-                    f"[b cyan]{param.name}[/] and [b cyan]{used_param}[/] "
-                    "cannot be used together.\n\n"
-                    f"Try '[cmd]{ctx.command_path} {ctx.help_option_names[0]}[/]' "
-                    "for help."
-                )
-            )
-            raise SystemExit()
-        return param.type_cast_value(ctx, value)
-
-    return callback
-
-
-def _param_changed(param: typer.core.TyperArgument, value: Any):
-    if param.default is None and value == []:
-        # Special case where default is None and value is coerced to an
-        # empty list - this is considered unchanged
-        return False
-    return param.default != value
-
-
 class pager:
     _pager_env = os.getenv("PAGER") or os.getenv("MANPAGER")
 
@@ -346,7 +319,7 @@ def Columns(renderables: Iterable[rich.console.RenderableType], **kw: Any):
     return rich.columns.Columns(renderables, **kw)
 
 
-class AliasGroup(typer.core.TyperGroup):
+class AliasGroup(TyperGroup):
     """click Group subclass that supports commands with aliases.
 
     To alias a command, include the aliases in the command name,
@@ -355,7 +328,7 @@ class AliasGroup(typer.core.TyperGroup):
 
     _CMD_SPLIT_P = re.compile(r", ?")
 
-    def get_command(self, ctx: click.Context, cmd_name: str):
+    def get_command(self, ctx: Context, cmd_name: str):
         return super().get_command(ctx, self._map_name(cmd_name))
 
     def _map_name(self, default_name: str):
@@ -553,3 +526,89 @@ def _format_assign(name: str, val: str, styles: AssignStyles | None):
     eq = f"[{eq_style}]=[/{eq_style}]" if eq_style else "="
     val = f"[{val_style}]{val}[/{val_style}]" if val_style else val
     return name + eq + val
+
+
+def Argument(
+    default: Any | None = ...,
+    *,
+    metavar: str | None = None,
+    show_default: bool | str = True,
+    help: str | None = None,
+    incompatible_with: list[str] | None = None,
+):
+    return ArgumentBase(
+        default,
+        metavar=metavar,
+        show_default=show_default,
+        help=help,
+        callback=_option_callback(incompatible_with),
+    )
+
+
+def Option(
+    default: Any | None = ...,
+    *param_decls: str,
+    metavar: str | None = None,
+    show_default: bool = True,
+    is_flag: bool | None = None,
+    help: str | None = None,
+    hidden: bool = False,
+    incompatible_with: list[str] | None = None,
+):
+    return OptionBase(
+        default,
+        *param_decls,
+        metavar=metavar,
+        show_default=show_default,
+        is_flag=is_flag,
+        help=help,
+        hidden=hidden,
+        callback=_option_callback(incompatible_with),
+    )
+
+
+def _option_callback(incompatible: list[str] | None):
+    def check_compatible(value: Any, param: TyperArgument, ctx: Context):
+        if not param.name or _is_default_param_value(param, value, ctx):
+            return param.type_cast_value(ctx, value)
+        if incompatible:
+            _add_implied_incompatible(param.name, incompatible, ctx)
+        real_incompatible = incompatible or _implied_incompatible(param.name, ctx)
+        if not real_incompatible:
+            return param.type_cast_value(ctx, value)
+        for used_param in ctx.params:
+            if param.name == used_param or used_param not in real_incompatible:
+                continue
+            err(
+                markup(
+                    f"[b cyan]{used_param}[/] and [b cyan]{param.name}[/] "
+                    "cannot be used together.\n\n"
+                    f"Try '[cmd]{ctx.command_path} {ctx.help_option_names[0]}[/]' "
+                    "for help."
+                )
+            )
+            raise SystemExit()
+        return param.type_cast_value(ctx, value)
+
+    return check_compatible
+
+
+def _is_default_param_value(param: TyperArgument, value: Any, ctx: Context):
+    if param.default == value or param.default is None and value == []:
+        # The check for value == [] here accommodates the case where a
+        # param value is coerced to an empty list - we consider this a
+        # default value as nothing has been provided on the command
+        # line.
+        return True
+    source = ctx.get_parameter_source(param.name or "")
+    return source is ParameterSource.DEFAULT
+
+
+def _add_implied_incompatible(param_name: str, incompatible: list[str], ctx: Context):
+    implied = ctx.meta.setdefault("incompatible", {})
+    for name in incompatible:
+        implied.setdefault(name, []).append(param_name)
+
+
+def _implied_incompatible(param_name: str, ctx: Context):
+    return ctx.meta.get("incompatible", {}).get(param_name)

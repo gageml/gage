@@ -2,8 +2,8 @@
 
 from typing import *
 
-from typer import Argument
-from typer import Option
+from ..cli import Argument
+from ..cli import Option
 
 RunSpec = Annotated[
     str,

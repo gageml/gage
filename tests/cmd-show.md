@@ -78,7 +78,6 @@ huge lists. This can be increased or decreased as needed.
     ///
     <0>
 
-
 Show files.
 
     >>> run("gage show --files")
@@ -112,3 +111,11 @@ Show files.
     | type  | example | attribute |
     | speed | 0.1     | metric    |
     <0>
+
+## Errors
+
+    >>> run("gage show --files --summary")
+    files and summary cannot be used together.
+    ⤶
+    Try 'gage show -h' for help.
+    <1>

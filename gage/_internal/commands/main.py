@@ -2,7 +2,7 @@
 
 from typing import *
 
-from typer import Option
+from ..cli import Option
 from typer import Typer
 
 from .. import cli
