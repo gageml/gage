@@ -51,6 +51,29 @@ StartRun = Annotated[
     ),
 ]
 
+Batch = Annotated[
+    str,
+    Option(
+        "-b",
+        "--batch",
+        metavar="filename",
+        help="Run a batch.",
+        show_default=False,
+        incompatible_with=["start"],
+    ),
+]
+
+MaxRuns = Annotated[
+    int,
+    Option(
+        "-m",
+        "--max-runs",
+        metavar="N",
+        help="Limit batch to N runs.",
+        show_default=False,
+    ),
+]
+
 QuietFlag = Annotated[
     bool,
     Option(
@@ -100,6 +123,8 @@ def run(
     label: Label = "",
     stage: StageFlag = False,
     start: StartRun = "",
+    batch: Batch = "",
+    max_runs: MaxRuns = -1,
     quiet: QuietFlag = False,
     yes: YesFlag = False,
     help_op: HelpOpFlag = False,
@@ -114,6 +139,10 @@ def run(
 
     If [arg]operation[/] isn't specified, runs the default in the
     project Gage file.
+
+    To run a batch, specify [arg]--batch[/] with a CSV or JSON formatted
+    file specifying configuration for one or more runs. Try '[cmd]gage
+    help batches[/]' for more information.
     """
     from .run_impl import run, Args
 
@@ -124,10 +153,12 @@ def run(
             label,
             stage,
             start,
+            batch,
+            max_runs,
             quiet,
             yes,
             help_op,
             preview,
-            json=json,
+            json,
         )
     )

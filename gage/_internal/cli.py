@@ -113,7 +113,9 @@ def err(val: rich.console.RenderableType = "", style: str | None = None):
     out(val, err=True)
 
 
-def exit_with_error(msg: rich.console.RenderableType, code: int = 1) -> NoReturn:
+def exit_with_error(
+    msg: rich.console.RenderableType, code: str | int | None = 1
+) -> NoReturn:
     raise SystemExit(msg, code)
 
 

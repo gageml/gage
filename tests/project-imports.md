@@ -34,6 +34,7 @@
     gage._internal.cli
     gage._internal.commands.associate
     gage._internal.commands.associate_impl
+    gage._internal.commands.batch_impl
     gage._internal.commands.board
     gage._internal.commands.board_impl
     gage._internal.commands.cat

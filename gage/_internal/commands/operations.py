@@ -2,6 +2,7 @@
 
 from typing import *
 
+
 def operations():
     """Show available operations.
 

@@ -16,28 +16,33 @@ def help():
 
 
 def filters():
-    """Filtering results."""
+    """Filter results."""
     _show_help("filters")
 
 
 def operations():
-    """Defining and running operations."""
+    """Define and run operations."""
     _show_help("operations")
 
 
 def gagefile():
-    """Defining and using gage files."""
+    """Define and use gage files."""
     _show_help("gagefile")
 
 
 def exec():
-    """Defining run commands."""
+    """Define run commands."""
     _show_help("exec")
 
 
 def remotes():
-    """Defining and using remote locations."""
+    """Define and use remote locations."""
     _show_help("remotes")
+
+
+def batches():
+    """Define and run batches."""
+    _show_help("batches")
 
 
 def _show_help(topic: str):
@@ -71,6 +76,7 @@ def help_app():
     def topic(fn: Callable[..., Any]):
         app.command(rich_help_panel="Topics")(fn)
 
+    topic(batches)
     topic(exec)
     topic(filters)
     topic(gagefile)

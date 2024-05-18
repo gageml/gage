@@ -34,6 +34,8 @@ class Args(NamedTuple):
     label: str
     stage: bool
     start: str | None
+    batch: str
+    max_runs: int
     quiet: bool
     yes: bool
     help_op: bool
@@ -46,30 +48,7 @@ def run(args: Args):
     if args.start:
         _handle_start(args)
     else:
-        try:
-            context = resolve_run_context(args.opspec)
-        except FileNotFoundError as e:
-            error_handlers.gagefile_not_found(e)
-        except GageFileError as e:
-            error_handlers.gagefile_error(e)
-        except OpDefNotFound as e:
-            error_handlers.opdef_not_found(e)
-        else:
-            _handle_run_context(context, args)
-
-
-def _handle_start(args: Args):
-    assert args.start
-    run = impl_support.one_run_for_spec(args.start)
-    status = run_status(run)
-    if status != "staged":
-        cli.exit_with_error(
-            f"Run \"{run.id}\" is '{status}'\n\n"
-            "Only staged runs can be started with '--start'."
-        )
-    config = meta_config(run)
-    _verify_action(args, config, run)
-    _exec_and_finalize(run, args)
+        _handle_run(args)
 
 
 def _apply_default_op_flag_assign(args: Args):
@@ -84,15 +63,50 @@ def _apply_default_op_flag_assign(args: Args):
         return args._replace(opspec="", flags=[args.opspec] + args.flags)
 
 
+def _handle_start(args: Args):
+    assert args.start
+    run = impl_support.one_run_for_spec(args.start)
+    status = run_status(run)
+    if status != "staged":
+        cli.exit_with_error(
+            f"Run \"{run.id}\" is '{status}'\n\n"
+            "Only staged runs can be started with '--start'."
+        )
+    config = meta_config(run)
+    _verify_run_or_stage(args, config, run)
+    _exec_and_finalize(run, args)
+
+
+def _handle_run(args: Args):
+    try:
+        context = resolve_run_context(args.opspec)
+    except FileNotFoundError as e:
+        error_handlers.gagefile_not_found(e)
+    except GageFileError as e:
+        error_handlers.gagefile_error(e)
+    except OpDefNotFound as e:
+        error_handlers.opdef_not_found(e)
+    else:
+        _handle_run_context(context, args)
+
+
 def _handle_run_context(context: RunContext, args: Args):
     if args.help_op:
         _show_op_help(context, args)
+    elif args.batch:
+        _handle_batch(context, args)
     elif args.preview:
         _preview(context, args)
     elif args.stage:
         _handle_stage(context, args)
     else:
         _run(context, args)
+
+
+def _handle_batch(context: RunContext, args: Args):
+    from . import batch_impl
+
+    batch_impl.handle_run_context(context, args)
 
 
 def _handle_stage(context: RunContext, args: Args):
@@ -157,9 +171,9 @@ def _init_sourcecode_preview(opdef: OpDef):
 # =================================================================
 
 
-def _stage(context: RunContext, args: Args):
-    config = _run_config(context, args)
-    _verify_action(args, config, context)
+def _stage(context: RunContext, args: Args, config: RunConfig | None = None):
+    config = config or _run_config(context, args)
+    _verify_run_or_stage(args, config, context)
     run = make_run(context.opref, runs_dir())
     cmd = _op_cmd(context, config)
     user_attrs = _user_attrs(args)
@@ -294,8 +308,10 @@ def _run_phase_desc(run: Run):
     return f"[dim]Running [{cli.STYLE_PANEL_TITLE}]{opref.op_name}"
 
 
-def _verify_action(
-    args: Args, config: RunConfig, run_or_context: RunContext | Run
+def _verify_run_or_stage(
+    args: Args,
+    config: RunConfig,
+    run_or_context: RunContext | Run,
 ) -> None | NoReturn:
     if args.yes:
         return
@@ -309,11 +325,10 @@ def _verify_action(
 
 
 def _action_desc(args: Args, run_or_context: Run | RunContext):
-    action = "stage" if args.stage else "run"
     if args.stage:
         assert isinstance(run_or_context, RunContext)
         context = cast(RunContext, run_or_context)
-        return f"You are about to stage [yellow]{context.opref.op_name}"
+        return f"You are about to stage [yellow]{context.opref.op_name}[/]"
     elif args.start:
         assert isinstance(run_or_context, Run)
         run = cast(Run, run_or_context)
@@ -321,7 +336,7 @@ def _action_desc(args: Args, run_or_context: Run | RunContext):
     else:
         assert isinstance(run_or_context, RunContext)
         context = cast(RunContext, run_or_context)
-        return f"You are about to run [yellow]{context.opref.op_name}"
+        return f"You are about to run [yellow]{context.opref.op_name}[/]"
 
 
 def _run_config(context: RunContext, args: Args):
