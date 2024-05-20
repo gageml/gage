@@ -52,7 +52,7 @@ StartRun = Annotated[
 ]
 
 Batch = Annotated[
-    str,
+    Optional[list[str]],
     Option(
         "-b",
         "--batch",
@@ -123,7 +123,7 @@ def run(
     label: Label = "",
     stage: StageFlag = False,
     start: StartRun = "",
-    batch: Batch = "",
+    batch: Batch = None,
     max_runs: MaxRuns = -1,
     quiet: QuietFlag = False,
     yes: YesFlag = False,
@@ -153,7 +153,7 @@ def run(
             label,
             stage,
             start,
-            batch,
+            batch or [],
             max_runs,
             quiet,
             yes,

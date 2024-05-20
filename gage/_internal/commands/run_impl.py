@@ -34,7 +34,7 @@ class Args(NamedTuple):
     label: str
     stage: bool
     start: str | None
-    batch: str
+    batch: list[str]
     max_runs: int
     quiet: bool
     yes: bool
