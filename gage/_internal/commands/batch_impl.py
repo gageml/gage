@@ -229,6 +229,23 @@ class _BatchProgress(_RunPhaseContext):
 
     All run output is send to standard output. Progress and status are
     transient.
+
+    It should be noted that this class uses an unorthodox pattern for
+    context managers that works at two levels: the batch context and run
+    contexts.
+
+        batch_progress = _BatchProgress()
+        with batch_progress:
+          # Batch started, no runs started - this is level 1
+          for run in runs:
+            with batch_progress:
+              # Run started - this is level 2
+              do_something(run)
+            # Run stopped
+        # Batch stopped
+
+    This interface reflects the unified nature of the batch progress,
+    which supports an overall status and a per-run status.
     """
 
     def __init__(self, run_count: int, staging: bool):
