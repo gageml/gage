@@ -3,7 +3,13 @@
 from typing import *
 
 import itertools
+import logging
 import os
+
+import rich.progress
+import rich.status
+import rich.table
+import rich.live
 
 from ..types import *
 
@@ -11,10 +17,18 @@ from .. import cli
 
 from ..lang import parse_config_value
 
+from ..run_util import run_phase_channel
+from ..run_util import meta_opref
+
+from .run_impl import _RUN_PHASE_DESC
 from .run_impl import Args
 from .run_impl import RunContext
+from .run_impl import _RunPhaseContext
 from .run_impl import _stage as _stage_run
 from .run_impl import _exec_and_finalize
+
+
+log = logging.getLogger(__name__)
 
 
 class BatchFileReadError(Exception):
@@ -190,12 +204,155 @@ def _handle_stage(batch: Batch, context: RunContext, args: Args):
     )
 
 
+def _BatchStatus(batch: Batch | list[Run], args: Args, staging: bool = False):
+    if args.quiet:
+        return _NullStatus()
+    return _BatchProgress(len(batch), staging)
+
+
+class _BatchProgress(_RunPhaseContext):
+    """Batch progress facility.
+
+    Batch progress is handled independently by this class.
+
+    There are two components to batch progress: an overall batch
+    progress bar and a run status line. This facility does not support
+    per-run progress bars in the way that run_impl does. This is an area
+    for future enhancement. Refer to run_impl for the pattern used to
+    upgrade status (which is used as the indeterminate state prior to
+    progress reporting) to a progress bar. The implementation is
+    complicated here as we're using rich Live with a table
+
+    Batch progress supports two modes: staging and running. When
+    staging, overall progress shows a generic "Staging runs" label. When
+    running, overall progress shows the current run one-based counter.
+
+    All run output is send to standard output. Progress and status are
+    transient.
+    """
+
+    def __init__(self, run_count: int, staging: bool):
+        self._run_count = run_count
+        self._staging = staging
+        self._cur_run = 0
+        self._live_started = False
+        self._run_started = False
+        self._batch_progress = rich.progress.Progress()
+        self._run_status = rich.status.Status("")
+        progress_table = rich.table.Table.grid()
+        progress_table.add_row(self._batch_progress)
+        progress_table.add_row(self._run_status)
+        self._batch_task = self._batch_progress.add_task(
+            "[dim]Staging runs" if staging else "",
+            total=run_count,
+        )
+        self._live = rich.live.Live(progress_table, transient=True)
+
+    def __enter__(self):
+        if not self._live_started:
+            self._start_live()
+            self._live_started = True
+        else:
+            assert not self._run_started
+            self._handle_run_start()
+            self._run_started = True
+        return self
+
+    def _start_live(self):
+        self._live.start()
+
+    def _handle_run_start(self):
+        self._run_status.update("")
+        self._cur_run += 1
+        self._batch_progress.update(self._batch_task, advance=1)
+        if not self._staging:
+            self._batch_progress.update(
+                self._batch_task,
+                description=f"[dim]Batch run {self._cur_run} of {self._run_count}",
+            )
+        run_phase_channel.add(self)
+
+    def __exit__(self, *exc: Any):
+        assert self._live_started
+        if self._run_started:
+            self._handle_run_stop()
+            self._run_started = False
+        else:
+            self._stop_live()
+            self._live_started = False
+
+    def _handle_run_stop(self):
+        run_phase_channel.remove(self)
+        self._run_status.update("")
+
+    def _stop_live(self):
+        self._live.stop()
+
+    def __call__(self, name: str, arg: Any):
+        if name == "exec-output":
+            self._handle_run_output(arg)
+        else:
+            self._handle_run_status(name, arg)
+
+    def _handle_run_output(self, arg: Any):
+        run, phase_name, stream, output, progress = arg
+        self._live.console.out(output.decode(), end="")
+
+    def _handle_run_status(self, name: str, arg: Any):
+        desc = _run_status_desc(name, arg)
+        if desc is not None:
+            self._run_status.update(desc)
+
+
+def _run_status_desc(name: str, arg: Any):
+    desc = _RUN_PHASE_DESC.get(name)
+    if desc is None:
+        return None
+    try:
+        return desc.format(**_run_attrs_for_phase_arg(arg))
+    except KeyError as e:
+        log.debug(
+            "Run phase desc format error for %r: missing %r",
+            desc,
+            e.args[0],
+        )
+        return desc
+
+
+def _run_attrs_for_phase_arg(arg: Any) -> dict[str, Any]:
+    run = _run_for_phase_arg(arg)
+    return {"op_name": meta_opref(run).op_name} if run else {}
+
+
+def _run_for_phase_arg(arg: Any):
+    if isinstance(arg, Run):
+        return arg
+    elif arg and isinstance(arg, tuple) and isinstance(arg[0], Run):
+        return arg[0]
+    else:
+        return None
+
+
+class _NullStatus(_RunPhaseContext):
+    """Batch status that doesn't show anything.
+
+    Used for batch status when the quiet option is specified.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: Any):
+        pass
+
+
 def _stage(batch: Batch, context: RunContext, args: Args):
     _verify_run_or_stage(args, batch, context)
     run_args = _run_args_for_batch(args)
     runs: list[Run] = []
-    for config in batch:
-        runs.append(_stage_run(context, run_args, config))
+    with _BatchStatus(batch, args, staging=True) as status:
+        for config in batch:
+            runs.append(_stage_run(context, run_args, config, status))
     return runs
 
 
@@ -229,13 +386,14 @@ def _run_args_for_batch(args: Args):
 def _run(batch: Batch, context: RunContext, args: Args):
     run_args = _run_args_for_batch(args)
     runs = _stage(batch, context, args)
-    for run in runs:
-        try:
-            _exec_and_finalize(run, run_args)
-        except SystemExit as e:
-            if e.code != 0:
-                _print_run_error(run, e.code)
-                raise
+    with _BatchStatus(runs, args) as status:
+        for run in runs:
+            try:
+                _exec_and_finalize(run, run_args, status)
+            except SystemExit as e:
+                if e.code != 0:
+                    _print_run_error(run, e.code)
+                    raise
 
 
 def _print_run_error(run: Run, code: int | str | None):

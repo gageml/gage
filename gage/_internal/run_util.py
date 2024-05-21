@@ -47,9 +47,9 @@ __all__ = [
     "CORE_ATTRS",
     "META_SCHEMA",
     "RunExecError",
+    "RunFileType",
     "RunManifest",
     "RunManifestEntry",
-    "RunFileType",
     "apply_config",
     "associate_project",
     "finalize_run",
@@ -244,10 +244,6 @@ _ATTR_READERS = {
 }
 
 CORE_ATTRS = list(_ATTR_READERS)
-
-# =================================================================
-# Run attrs
-# =================================================================
 
 
 def run_summary(run: Run) -> RunSummary:
@@ -683,7 +679,7 @@ def stage_run(run: Run, project_dir: str):
 def stage_sourcecode(run: Run, project_dir: str, _log_files: bool = True):
     log = _runner_log(run)
     opdef = meta_opdef(run)
-    run_phase_channel.notify("stage-sourcecode")
+    run_phase_channel.notify("stage-sourcecode", run)
     _copy_sourcecode(run, project_dir, opdef, log)
     _stage_sourcecode_hook(run, project_dir, opdef, log)
     if _log_files:
@@ -715,7 +711,7 @@ def apply_config(run: Run):
     log = _runner_log(run)
     config = meta_config(run)
     opdef = meta_opdef(run)
-    run_phase_channel.notify("stage-config")
+    run_phase_channel.notify("stage-config", run)
     log.info("Applying configuration (see log/patched)")
     diffs = run_config.apply_config(config, opdef, run.run_dir)
     if diffs:
@@ -726,7 +722,7 @@ def apply_config(run: Run):
 def stage_runtime(run: Run, project_dir: str):
     log = _runner_log(run)
     opdef = meta_opdef(run)
-    run_phase_channel.notify("stage-runtime")
+    run_phase_channel.notify("stage-runtime", run)
     _stage_runtime_hook(run, project_dir, opdef, log)
     _apply_to_files_log(run, "r")
 
@@ -749,7 +745,7 @@ def _stage_runtime_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger):
 def stage_dependencies(run: Run, project_dir: str):
     log = _runner_log(run)
     opdef = meta_opdef(run)
-    run_phase_channel.notify("stage-dependencies")
+    run_phase_channel.notify("stage-dependencies", run)
     _resolve_dependencies(run, project_dir, opdef, log)
     _stage_dependencies_hook(run, project_dir, opdef, log)
     _apply_to_files_log(run, "d")
@@ -819,7 +815,7 @@ def exec_run(run: Run):
     opdef = meta_opdef(run)
     cmd = meta_opcmd(run)
     env = {**_run_env(run), **cmd.env}
-    run_phase_channel.notify("run")
+    run_phase_channel.notify("run", run)
     _write_timestamp("started", run, log)
     _run_phase_exec(
         run,
@@ -848,7 +844,7 @@ def _run_env(run: Run):
 def finalize_run(run: Run, exit_code: int = 0):
     log = _runner_log(run)
     opdef = meta_opdef(run)
-    run_phase_channel.notify("finalize")
+    run_phase_channel.notify("finalize", run)
     ensure_dir(run.run_dir)
     _finalize_run_output(run)
     _finalize_run_summary(run, opdef, log)
@@ -1273,7 +1269,8 @@ class RunExecError(Exception):
 
 
 class _PhaseExecOutputCallback(run_output.OutputCallback):
-    def __init__(self, phase_name: str):
+    def __init__(self, run: Run, phase_name: str):
+        self.run = run
         self.phase_name = phase_name
 
     def output(
@@ -1283,7 +1280,7 @@ class _PhaseExecOutputCallback(run_output.OutputCallback):
         progress: Any | None = None,
     ):
         run_phase_channel.notify(
-            "exec-output", (self.phase_name, stream, out, progress)
+            "exec-output", (self.run, self.phase_name, stream, out, progress)
         )
 
     def close(self):
@@ -1323,7 +1320,7 @@ def _run_phase_exec(
     output_dir = _meta_output_dir(run)
     ensure_dir(output_dir)
     output_filename = os.path.join(output_dir, output_name)
-    output_cb = _PhaseExecOutputCallback(phase_name)
+    output_cb = _PhaseExecOutputCallback(run, phase_name)
     progress_parser = _progress_parser(progress)
     output = run_output.RunOutput(
         output_filename,

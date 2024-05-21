@@ -171,25 +171,6 @@ def _init_sourcecode_preview(opdef: OpDef):
 # =================================================================
 
 
-def _stage(context: RunContext, args: Args, config: RunConfig | None = None):
-    config = config or _run_config(context, args)
-    _verify_run_or_stage(args, config, context)
-    run = make_run(context.opref, runs_dir())
-    cmd = _op_cmd(context, config)
-    user_attrs = _user_attrs(args)
-    sys_attrs = _sys_attrs()
-    init_run_meta(run, context.opdef, config, cmd, sys_attrs)
-    associate_project(run, context.project_dir)
-    if user_attrs:
-        init_run_user_attrs(run, user_attrs)
-    with _RunPhaseStatus(run, args):
-        try:
-            stage_run(run, context.project_dir)
-        except RunExecError as e:
-            error_handlers.run_exec_error(e)
-    return run
-
-
 class _Status:
     supports_progress = False
 
@@ -263,22 +244,33 @@ class _Progress(_Status):
                 self._progress.update(self._task_id, completed=progress.completed)
 
 
-class _RunPhaseStatus:
+class _RunPhaseContext:
+
+    def __enter__(self): ...
+
+    def __exit__(self, *exc: Any) -> '_RunPhaseContext': ...
+
+
+_RUN_PHASE_DESC = {
+    "stage-sourcecode": "[dim]Staging source code[/]",
+    "stage-config": "[dim]Applying configuration[/]",
+    "stage-runtime": "[dim]Staging runtime[/]",
+    "stage-dependencies": "[dim]Staging dependencies[/]",
+    "run": f"[dim]Running [{cli.STYLE_PANEL_TITLE}]{{op_name}}[/]",
+    "finalize": "[dim]Finalizing run[/]",
+}
+
+
+class _RunPhaseStatus(_RunPhaseContext):
     def __init__(self, run: Run, args: Args):
-        self._phase_desc = {
-            "stage-sourcecode": "Staging source code",
-            "stage-config": "Applying configuration",
-            "stage-runtime": "Staging runtime",
-            "stage-dependencies": "Staging dependencies",
-            "run": _run_phase_desc(run),
-            "finalize": "Finalizing run",
-        }
         self._args = args
         self._status = _DefaultStatus(args)
+        self._run_attrs = {"op_name": meta_opref(run).op_name}
 
     def __enter__(self):
         self._status.start()
         run_phase_channel.add(self)
+        return self
 
     def __exit__(self, *exc: Any):
         self._status.stop()
@@ -287,7 +279,7 @@ class _RunPhaseStatus:
     def __call__(self, name: str, arg: Any | None = None):
         if name == "exec-output":
             assert isinstance(arg, tuple), arg
-            phase_name, stream, output, progress = arg
+            run, phase_name, stream, output, progress = arg
             if progress and not self._status.supports_progress:
                 # Lazily upgrade status to support progress
                 self._status.stop()
@@ -296,16 +288,45 @@ class _RunPhaseStatus:
                 self._status.start()
             self._status.output(output, progress)
         else:
-            desc = self._phase_desc.get(name)
+            desc = _RUN_PHASE_DESC.get(name)
             if desc:
-                self._status.update(f"[dim]{desc}")
+                try:
+                    formatted = desc.format(**self._run_attrs)
+                except KeyError as e:
+                    log.debug(
+                        "Run phase desc format error for %r: missing %r",
+                        desc,
+                        e.args[0],
+                    )
+                    formatted = desc
+                self._status.update(formatted)
             else:
                 log.debug("Unexpected run phase callback: %r %r", name, arg)
 
 
-def _run_phase_desc(run: Run):
-    opref = meta_opref(run)
-    return f"[dim]Running [{cli.STYLE_PANEL_TITLE}]{opref.op_name}"
+def _stage(
+    context: RunContext,
+    args: Args,
+    config: RunConfig | None = None,
+    run_phase_status: _RunPhaseContext | None = None,
+):
+    config = config or _run_config(context, args)
+    _verify_run_or_stage(args, config, context)
+    run = make_run(context.opref, runs_dir())
+    run_phase_status = run_phase_status or _RunPhaseStatus(run, args)
+    cmd = _op_cmd(context, config)
+    user_attrs = _user_attrs(args)
+    sys_attrs = _sys_attrs()
+    init_run_meta(run, context.opdef, config, cmd, sys_attrs)
+    associate_project(run, context.project_dir)
+    if user_attrs:
+        init_run_user_attrs(run, user_attrs)
+    with run_phase_status:
+        try:
+            stage_run(run, context.project_dir)
+        except RunExecError as e:
+            error_handlers.run_exec_error(e)
+    return run
 
 
 def _verify_run_or_stage(
@@ -391,8 +412,13 @@ def _run(context: RunContext, args: Args):
     _exec_and_finalize(run, args)
 
 
-def _exec_and_finalize(run: Run, args: Args):
-    with _RunPhaseStatus(run, args):
+def _exec_and_finalize(
+    run: Run,
+    args: Args,
+    run_phase_status: _RunPhaseContext | None = None,
+):
+    run_phase_status = run_phase_status or _RunPhaseStatus(run, args)
+    with run_phase_status:
         exit_code = _exec_run(run, args)
         _finalize_run(run, exit_code, args)
 
