@@ -43,6 +43,7 @@ class Args(NamedTuple):
     limit_files: int
     all_files: bool
     summary: bool
+    output: bool
     files: bool
 
 
@@ -50,6 +51,8 @@ def show(args: Args):
     run = one_run(args)
     if args.summary:
         _show_summary_and_exit(run)
+    if args.output:
+        _show_output_and_exit(run)
     if args.files:
         _show_files_and_exit(run)
     with cli.pager():
@@ -374,6 +377,15 @@ def _files_limit(args: Args):
 
 def _show_summary_and_exit(run: Run):
     cli.out(Summary(run, table_only=True))
+    raise SystemExit(0)
+
+
+def _show_output_and_exit(run: Run):
+    for output_name, reader in _iter_run_output(run):
+        if output_name != "run":
+            continue
+        for line in reader:
+            print(line.text)
     raise SystemExit(0)
 
 

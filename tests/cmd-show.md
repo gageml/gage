@@ -20,7 +20,8 @@ test-options: +skip=WINDOWS_FIX  # file size calc issue on windows
                         --all-files to bypass this limit.
       --all-files       Show all files. --limit-files is
                         ignored.
-      --summary         Show only summary.
+      -s, --summary     Show only summary.
+      -o, --output      Show only output.
       -f, --files       Show only files. When used, all files
                         are show.
       -h, --help        Show this message and exit.
@@ -87,6 +88,12 @@ Show files.
     | hello.py  | source code |  38 B |
     <0>
 
+Show output.
+
+    >>> run("gage show --output")
+    Hello Gage
+    <0>
+
 ## Summary Example
 
     >>> use_example("summary")
@@ -114,8 +121,22 @@ Show files.
 
 ## Errors
 
+Mutually exclusive options:
+
     >>> run("gage show --files --summary")
     files and summary cannot be used together.
+    ⤶
+    Try 'gage show -h' for help.
+    <1>
+
+    >>> run("gage show --summary --output")
+    summary and output cannot be used together.
+    ⤶
+    Try 'gage show -h' for help.
+    <1>
+
+    >>> run("gage show --output --files")
+    output and files cannot be used together.
     ⤶
     Try 'gage show -h' for help.
     <1>

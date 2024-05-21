@@ -49,9 +49,20 @@ AllFilesFlag = Annotated[
 SummaryFlag = Annotated[
     bool,
     Option(
+        "-s",
         "--summary",
         help=("Show only summary."),
-        incompatible_with=["files"],
+        incompatible_with=["files", "output"],
+    ),
+]
+
+OutputFlag = Annotated[
+    bool,
+    Option(
+        "-o",
+        "--output",
+        help=("Show only output."),
+        incompatible_with=["summary", "files"],
     ),
 ]
 
@@ -62,6 +73,7 @@ FilesFlag = Annotated[
         "-f",
         "--files",
         help="Show only files. When used, all files are show.",
+        incompatible_with=["summary", "output"],
     ),
 ]
 
@@ -72,6 +84,7 @@ def show(
     limit_files: LimitFiles = 40,
     all_files: AllFilesFlag = False,
     summary: SummaryFlag = False,
+    output: OutputFlag = False,
     files: FilesFlag = False,
 ):
     """Show information about a run."""
@@ -84,6 +97,7 @@ def show(
             limit_files,
             all_files,
             summary,
+            output,
             files,
         )
     )
