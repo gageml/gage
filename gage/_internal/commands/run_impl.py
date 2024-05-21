@@ -2,6 +2,8 @@
 
 from typing import *
 
+from gage._internal import exitcodes
+
 from ..types import *
 
 import logging
@@ -19,6 +21,7 @@ from ..run_util import *
 from ..run_config import read_project_config
 from ..run_context import resolve_run_context
 from ..run_output import Progress
+from ..run_select import find_comparable_run
 
 from ..var import runs_dir
 
@@ -28,12 +31,18 @@ from . import impl_support
 log = logging.getLogger(__name__)
 
 
+class Skipped(Exception):
+    def __init__(self, comparable_run: Run):
+        self.comparable_run = comparable_run
+
+
 class Args(NamedTuple):
     opspec: str
     flags: list[str]
     label: str
     stage: bool
     start: str | None
+    needed: bool
     batch: list[str]
     max_runs: int
     quiet: bool
@@ -110,11 +119,25 @@ def _handle_batch(context: RunContext, args: Args):
 
 
 def _handle_stage(context: RunContext, args: Args):
-    run = _stage(context, args)
+    try:
+        run = _stage(context, args)
+    except Skipped as e:
+        _handle_skipped(e)
+    else:
+        cli.out(
+            f"Run \"{run.name}\" is staged\n\n"
+            f"To start it, run '[cmd]gage run --start {run.name}[/]'"
+        )
+
+
+def _handle_skipped(skipped: Skipped):
+    run_name = skipped.comparable_run.name
     cli.out(
-        f"Run \"{run.name}\" is staged\n\n"
-        f"To start it, run '[cmd]gage run --start {run.name}[/]'"
+        f"Run skipped because a comparable run exists ([cyan]{run_name})[/]\n\n"
+        f"For details, run '[cmd]gage show {run_name}[/]'",
+        err=True,
     )
+    raise SystemExit(exitcodes.SKIPPED)
 
 
 # =================================================================
@@ -244,11 +267,11 @@ class _Progress(_Status):
                 self._progress.update(self._task_id, completed=progress.completed)
 
 
-class _RunPhaseContext:
+class _RunPhaseContextManager:
 
     def __enter__(self): ...
 
-    def __exit__(self, *exc: Any) -> '_RunPhaseContext': ...
+    def __exit__(self, *exc: Any) -> '_RunPhaseContextManager': ...
 
 
 _RUN_PHASE_DESC = {
@@ -261,7 +284,7 @@ _RUN_PHASE_DESC = {
 }
 
 
-class _RunPhaseStatus(_RunPhaseContext):
+class _RunPhaseStatus(_RunPhaseContextManager):
     def __init__(self, run: Run, args: Args):
         self._args = args
         self._status = _DefaultStatus(args)
@@ -308,10 +331,11 @@ def _stage(
     context: RunContext,
     args: Args,
     config: RunConfig | None = None,
-    run_phase_status: _RunPhaseContext | None = None,
+    run_phase_status: _RunPhaseContextManager | None = None,
 ):
     config = config or _run_config(context, args)
     _verify_run_or_stage(args, config, context)
+    _check_needed(args, config, context)
     run = make_run(context.opref, runs_dir())
     run_phase_status = run_phase_status or _RunPhaseStatus(run, args)
     cmd = _op_cmd(context, config)
@@ -327,6 +351,14 @@ def _stage(
         except RunExecError as e:
             error_handlers.run_exec_error(e)
     return run
+
+
+def _check_needed(args: Args, config: RunConfig, context: RunContext):
+    if not args.needed:
+        return
+    run = find_comparable_run(context.opref, config)
+    if run:
+        raise Skipped(run)
 
 
 def _verify_run_or_stage(
@@ -408,14 +440,18 @@ def _sys_attrs():
 
 
 def _run(context: RunContext, args: Args):
-    run = _stage(context, args)
-    _exec_and_finalize(run, args)
+    try:
+        run = _stage(context, args)
+    except Skipped as e:
+        _handle_skipped(e)
+    else:
+        _exec_and_finalize(run, args)
 
 
 def _exec_and_finalize(
     run: Run,
     args: Args,
-    run_phase_status: _RunPhaseContext | None = None,
+    run_phase_status: _RunPhaseContextManager | None = None,
 ):
     run_phase_status = run_phase_status or _RunPhaseStatus(run, args)
     with run_phase_status:

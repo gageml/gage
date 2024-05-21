@@ -6,9 +6,14 @@ from .types import *
 
 import re
 
+from .run_util import meta_config
+from .run_util import run_status
+
 from .util import find_apply
+from .var import list_runs
 
 __all__ = [
+    "find_comparable_run",
     "select_runs",
 ]
 
@@ -76,3 +81,22 @@ def _slice_end(s: str | None):
 
 def _select_id_or_name(runs: list[Run], spec: str):
     return [run for run in runs if run.id.startswith(spec) or run.name.startswith(spec)]
+
+
+def find_comparable_run(opref: OpRef, config: RunConfig):
+    target_op_name = opref.op_name
+    target_op_ns = opref.op_ns
+
+    def check_run(run: Run):
+        run_opref = run.opref
+        # Check attrs in order of least-to-most expensive
+        if run_opref.op_name != target_op_name or run_opref.op_ns != target_op_ns:
+            return False
+        if run_status(run) == "error":
+            return False
+        return meta_config(run) == config
+
+    try:
+        return next(iter(list_runs(sort=["-timestamp"], filter=check_run)))
+    except StopIteration:
+        return None

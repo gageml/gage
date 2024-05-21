@@ -19,3 +19,7 @@ hello-2:
   config:
     - hello2.py#msg1
     - '#msg2'
+
+config-types:
+  exec: python config_types.py
+  config: config_types.py

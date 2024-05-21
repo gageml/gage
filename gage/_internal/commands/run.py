@@ -51,6 +51,16 @@ StartRun = Annotated[
     ),
 ]
 
+NeededFlag = Annotated[
+    bool,
+    Option(
+        "-n",
+        "--needed",
+        help="Run only if a comparable run doesn't exist.",
+        incompatible_with=["start"],
+    ),
+]
+
 Batch = Annotated[
     Optional[list[str]],
     Option(
@@ -123,6 +133,7 @@ def run(
     label: Label = "",
     stage: StageFlag = False,
     start: StartRun = "",
+    needed: NeededFlag = False,
     batch: Batch = None,
     max_runs: MaxRuns = -1,
     quiet: QuietFlag = False,
@@ -143,6 +154,10 @@ def run(
     To run a batch, specify [arg]--batch[/] with a CSV or JSON formatted
     file specifying configuration for one or more runs. Try '[cmd]gage
     help batches[/]' for more information.
+
+    Use [arg]--needed[/] to check for comparable runs and proceed only
+    if one doesn't exit. A comparable run is a completed run of the same
+    operation and configuration.
     """
     from .run_impl import run, Args
 
@@ -153,6 +168,7 @@ def run(
             label,
             stage,
             start,
+            needed,
             batch or [],
             max_runs,
             quiet,

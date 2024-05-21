@@ -23,7 +23,7 @@ from ..run_util import meta_opref
 from .run_impl import _RUN_PHASE_DESC
 from .run_impl import Args
 from .run_impl import RunContext
-from .run_impl import _RunPhaseContext
+from .run_impl import _RunPhaseContextManager
 from .run_impl import _stage as _stage_run
 from .run_impl import _exec_and_finalize
 
@@ -210,7 +210,7 @@ def _BatchStatus(batch: Batch | list[Run], args: Args, staging: bool = False):
     return _BatchProgress(len(batch), staging)
 
 
-class _BatchProgress(_RunPhaseContext):
+class _BatchProgress(_RunPhaseContextManager):
     """Batch progress facility.
 
     Batch progress is handled independently by this class.
@@ -350,7 +350,7 @@ def _run_for_phase_arg(arg: Any):
         return None
 
 
-class _NullStatus(_RunPhaseContext):
+class _NullStatus(_RunPhaseContextManager):
     """Batch status that doesn't show anything.
 
     Used for batch status when the quiet option is specified.

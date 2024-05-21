@@ -52,3 +52,11 @@ Start and stage:
     ⤶
     Try 'gage run -h' for help.
     <1>
+
+Start and needed:
+
+    >>> run("gage run -y --start foobar --needed")
+    start and needed cannot be used together.
+    ⤶
+    Try 'gage run -h' for help.
+    <1>
