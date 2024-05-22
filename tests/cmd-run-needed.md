@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX
+---
+
 # Run when Needed
 
 The `--needed` option tells Gage to look for a comparable run before
