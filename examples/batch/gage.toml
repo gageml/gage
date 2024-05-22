@@ -4,3 +4,9 @@ description = "Print lines to test batch progress"
 exec.stage-runtime = "python test_progress_stage.py"
 exec.run = "python test_progress.py"
 config = "test_progress.py"
+
+[hello]
+
+description = "Say hello"
+exec = "python hello.py"
+config = "hello.py"

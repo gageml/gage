@@ -23,6 +23,7 @@ from ..run_util import meta_opref
 from .run_impl import _RUN_PHASE_DESC
 from .run_impl import Args
 from .run_impl import RunContext
+from .run_impl import Skipped
 from .run_impl import _RunPhaseContextManager
 from .run_impl import _stage as _stage_run
 from .run_impl import _exec_and_finalize
@@ -281,7 +282,6 @@ class _BatchProgress(_RunPhaseContextManager):
     def _handle_run_start(self):
         self._run_status.update("")
         self._cur_run += 1
-        self._batch_progress.update(self._batch_task, advance=1)
         if not self._staging:
             self._batch_progress.update(
                 self._batch_task,
@@ -299,6 +299,7 @@ class _BatchProgress(_RunPhaseContextManager):
             self._live_started = False
 
     def _handle_run_stop(self):
+        self._batch_progress.update(self._batch_task, advance=1)
         run_phase_channel.remove(self)
         self._run_status.update("")
 
@@ -367,9 +368,17 @@ def _stage(batch: Batch, context: RunContext, args: Args):
     _verify_run_or_stage(args, batch, context)
     run_args = _run_args_for_batch(args)
     runs: list[Run] = []
+    skipped = 0
     with _BatchStatus(batch, args, staging=True) as status:
         for config in batch:
-            runs.append(_stage_run(context, run_args, config, status))
+            try:
+                run = _stage_run(context, run_args, config, status)
+            except Skipped:
+                skipped += 1
+            else:
+                runs.append(run)
+    if skipped:
+        _log_skipped_runs(skipped)
     return runs
 
 
@@ -398,6 +407,14 @@ def _run_args_for_batch(args: Args):
             "yes": True,
         }
     )
+
+
+def _log_skipped_runs(skipped: int):
+    runs_desc = "run" if skipped == 1 else "runs"
+    comparable_desc = (
+        "a comparable run exists" if skipped == 1 else "comparable runs exist"
+    )
+    cli.out(f"Skipped {skipped} {runs_desc} because {comparable_desc}", err=True)
 
 
 def _run(batch: Batch, context: RunContext, args: Args):

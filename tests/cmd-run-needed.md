@@ -234,3 +234,55 @@ Project b:
 Similarly, confirm that Gage identified the previous run for project b.
 
     >>> assert x == y == test_b_name
+
+## Need with Batch
+
+When a batch is specified, the batch applies the `--needed` option to
+runs. If a run is not needed (i.e. there is a comparable run - see
+above) it's skipped.
+
+    >>> use_example("batch")
+
+Run `hello` in a batch. Specify `--needed` to confirm that all batch
+runs are generated.
+
+We expect two runs, given the batch config.
+
+    >>> cat("hello-batch.json")
+    [
+      { "name": "Cat", "n": 2 },
+      { "name": "Dog", "n": 3 }
+    ]
+
+    >>> run("gage run hello --batch hello-batch.json --needed -y")
+    Hello Cat 1
+    Hello Cat 2
+    Hello Dog 1
+    Hello Dog 2
+    Hello Dog 3
+    <0>
+
+    >>> run("gage ls -s")
+    | # | operation | status    | description                  |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | n=3 name=Dog                 |
+    | 2 | hello     | completed | n=2 name=Cat                 |
+    <0>
+
+Run the command again.
+
+    >>> run("gage run hello --batch hello-batch.json --needed -y")
+    Skipped 2 runs because comparable runs exist
+    <0>
+
+Note that the exit code the batch is 0, unlike the exit code for skipped
+run, which is 5 (see above). This is intentional, signifying that a
+batch with `--needed` often expects comparable runs to exist and that
+skipped runs are not an unexpected result.
+
+    >>> run("gage ls -s")
+    | # | operation | status    | description                  |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | n=3 name=Dog                 |
+    | 2 | hello     | completed | n=2 name=Cat                 |
+    <0>
