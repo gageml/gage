@@ -44,11 +44,11 @@ Generate some runs with fake metrics.
 Show the board as a table.
 
     >>> run("gage board", cols=999)  # +table +parse
-    | id  | name | operation | started | status | label | fake_speed | type | type | speed |
-    |-----------|-------------|---------|---------|-----------|-----|---|---------|---------|---|
-    | {:run_id} | {:run_name} | default | {:date} | completed | foo | 3 | example | example | 3 |
-    | {:run_id} | {:run_name} | default | {:date} | completed |     | 2 | example | example | 2 |
-    | {:run_id} | {:run_name} | default | {:date} | completed |     | 1 | example | example | 1 |
+    | name | operation | started | status | label | fake_speed | type | type | speed |
+    |-------------|---------|---------|-----------|-----|---|---------|---------|---|
+    | {:run_name} | default | {:date} | completed | foo | 3 | example | example | 3 |
+    | {:run_name} | default | {:date} | completed |     | 2 | example | example | 2 |
+    | {:run_name} | default | {:date} | completed |     | 1 | example | example | 1 |
     <0>
 
 Show JSON data used by the board.
@@ -56,9 +56,6 @@ Show JSON data used by the board.
     >>> run("gage board --json")  # +wildcard +diff
     {
       "colDefs": [
-        {
-          "field": "run:id"
-        },
         {
           "field": "run:name"
         },
@@ -130,11 +127,11 @@ Show JSON data used by the board.
 
 Show CSV for the board.
 
-    >>> run("gage board --csv")  # +wildcard
-    run:id,run:name,run:operation,run:started,run:status,run:label,config:fake_speed,config:type,attribute:type,metric:speed
-    ...,...,default,...,completed,foo,3,example,example,3
-    ...,...,default,...,completed,,2,example,example,2
-    ...,...,default,...,completed,,1,example,example,1
+    >>> run("gage board --csv")  # +parse
+    run:name,run:operation,run:started,run:status,run:label,config:fake_speed,config:type,attribute:type,metric:speed
+    {:run_name},default,{:isodate},completed,foo,3,example,example,3
+    {:run_name},default,{:isodate},completed,,2,example,example,2
+    {:run_name},default,{:isodate},completed,,1,example,example,1
     <0>
 
 ## Summary Metadata
@@ -161,8 +158,8 @@ When rendering a board as CSV content, values are selected from
 mappings.
 
     >>> run("gage board --csv 1")  # +parse
-    run:id,run:name,run:operation,run:started,run:status,run:label,metric:foo
-    {:run_id},{:run_name},alt-summary-metadata,{:isodate},completed,,1.123
+    run:name,run:operation,run:started,run:status,run:label,metric:foo
+    {:run_name},alt-summary-metadata,{:isodate},completed,,1.123
     <0>
 
 ## Group Select
@@ -189,7 +186,7 @@ mappings.
 
 The `group.yaml` board def selects the latest run grouped by `foo`.
 
-    >>> run("gage board --json --config group.yaml")
+    >>> run("gage board --json --config group.yaml")  # +parse
     {
       "colDefs": [
         {
@@ -204,11 +201,13 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
       "rowData": [
         {
           "attribute:bar": 2,
-          "attribute:foo": "a"
+          "attribute:foo": "a",
+          "run:id": "{:run_id}"
         },
         {
           "attribute:bar": 4,
-          "attribute:foo": "b"
+          "attribute:foo": "b",
+          "run:id": "{:run_id}"
         }
       ]
     }
@@ -222,7 +221,7 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
 
 `group-first.yaml` selects the oldest runs within each group.
 
-    >>> run("gage board --json --config group-first.yaml")  # +wildcard
+    >>> run("gage board --json --config group-first.yaml")  # +parse
     {
       "colDefs": [
         {
@@ -235,11 +234,13 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
       "rowData": [
         {
           "attribute:bar": 1,
-          "attribute:foo": "a"
+          "attribute:foo": "a",
+          "run:id": "{:run_id}"
         },
         {
           "attribute:bar": 3,
-          "attribute:foo": "b"
+          "attribute:foo": "b",
+          "run:id": "{:run_id}"
         }
       ]
     }
@@ -248,7 +249,7 @@ The `group.yaml` board def selects the latest run grouped by `foo`.
 `group-max-bar.toml` groups by `foo` and selects runs with the max `bar`
 value from each group.
 
-    >>> run("gage board --json --config group-max-bar.toml")  # +wildcard
+    >>> run("gage board --json --config group-max-bar.toml")  # +parse
     {
       "colDefs": [
         {
@@ -261,11 +262,13 @@ value from each group.
       "rowData": [
         {
           "attribute:bar": 2,
-          "attribute:foo": "a"
+          "attribute:foo": "a",
+          "run:id": "{:run_id}"
         },
         {
           "attribute:bar": 4,
-          "attribute:foo": "b"
+          "attribute:foo": "b",
+          "run:id": "{:run_id}"
         }
       ]
     }
@@ -275,7 +278,7 @@ value from each group.
 value from each group. Note that this example selects min `config`
 rather than attribute.
 
-    >>> run("gage board --json --config group-min-bar.toml")  # +wildcard
+    >>> run("gage board --json --config group-min-bar.toml")  # +parse
     {
       "colDefs": [
         {
@@ -288,11 +291,13 @@ rather than attribute.
       "rowData": [
         {
           "attribute:bar": 1,
-          "attribute:foo": "a"
+          "attribute:foo": "a",
+          "run:id": "{:run_id}"
         },
         {
           "attribute:bar": 3,
-          "attribute:foo": "b"
+          "attribute:foo": "b",
+          "run:id": "{:run_id}"
         }
       ]
     }

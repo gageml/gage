@@ -3,7 +3,7 @@
     >>> from gage._internal.types import *
 
 `board_util` provides support for loading boards and generating the
-JSON-encodable data used to render boards.
+JSON-encodable data used to render them.
 
     >>> from gage._internal.board_util import *
 
@@ -29,16 +29,14 @@ Use `board_data` to generate the board data for a list of runs.
     >>> from gage._internal.var import list_runs
 
     >>> runs = list_runs(sort=["-timestamp"])
+    >>> default_board = board_data(BoardDef({}), runs)
 
-By default, `board_data` includes columns for all core run attributes,
-all config field, all attributes, and all metrics.
+By default, `board_data` includes columns for default run attributes,
+all config, all attributes, and all metrics.
 
-    >>> board_data(BoardDef({}), runs)  # +json +parse
+    >>> default_board  # +json +parse
     {
       "colDefs": [
-        {
-          "field": "run:id"
-        },
         {
           "field": "run:name"
         },
@@ -89,6 +87,32 @@ all config field, all attributes, and all metrics.
         }
       ]
     }
+
+Note that the default col defs include run name but do not include run ID.
+
+    >>> any(col["field"] == "run:name" for col in default_board["colDefs"])
+    True
+
+    >>> any(col["field"] == "run:id" for col in default_board["colDefs"])
+    False
+
+This mirrors the data presented in `gage runs` lists, which uses name to
+identify runs rather than ID.
+
+    >>> run("gage runs")  # +parse +table
+    | #  | name     | operation     | started    | status      |
+    |----|----------|---------------|------------|-------------|
+    | 1  | {}       | op-2          | {}         | completed   |
+    | 2  | {}       | op-2          | {}         | completed   |
+    <0>
+
+The `run:id` field, however, always appears in row data.
+
+    >>> all("run:id" in row for row in default_board["rowData"])
+    True
+
+This ensures that board data is always associated with the underlying
+run.
 
 ## Filter Runs
 
@@ -158,9 +182,6 @@ Field attributes are included in the board data.
     {
       "colDefs": [
         {
-          "field": "run:id"
-        },
-        {
           "field": "run:name"
         },
         {
@@ -215,16 +236,26 @@ equivalent expressions. Gage uses the value directly when it can.
 
 ## Column Definitions
 
-Board defs may contain explicit columns, which are used instead of the
+Board defs may define columns explicitly. These are used instead of the
 default list.
 
     >>> board = load_board_def(sample("projects", "boards", "board-op-3.json"))
 
-    >>> board_data(board, list_runs())  # +json +parse
+    >>> board_data(board, list_runs())  # +json +parse +diff
     {
       "colDefs": [
         {
           "field": "run:id"
+        },
+        {
+          "field": "run:operation"
+        },
+        {
+          "field": "run:op_ns"
+        },
+        {
+          "field": "run:op_version",
+          "label": "Operation Ver"
         },
         {
           "field": "attribute:color"
@@ -252,7 +283,10 @@ default list.
             "comment": "2x height",
             "value": 2.4
           },
-          "run:id": "{}"
+          "run:id": "{:run_id}",
+          "run:op_ns": "boards",
+          "run:op_version": null,
+          "run:operation": "op-3"
         }
       ]
     }

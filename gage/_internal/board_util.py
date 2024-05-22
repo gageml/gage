@@ -114,11 +114,40 @@ def _run_attr_fields(run: Run, field_cols: dict[str, Any]):
         "id": run.id,
         "name": run.name,
         "operation": run.opref.op_name,
+        "op_ns": run.opref.op_ns,
+        "op_version": run.opref.op_version,
         "status": run_status(run),
         "started": _run_datetime(run, "started"),
+        "stopped": _run_datetime(run, "stopped"),
         "label": run_label(run),
     }
     return _gen_fields(fields, "run", field_cols)
+
+
+_RUN_ATTR_ORDER = {
+    key: i
+    for i, key in enumerate(
+        [
+            "id",
+            "name",
+            "operation",
+            "op_ns",
+            "op_version",
+            "started",
+            "stopped",
+            "status",
+            "label",
+        ]
+    )
+}
+
+_RUN_ATTR_DEFAULT_COL_DEFS = {
+    "name",
+    "operation",
+    "started",
+    "status",
+    "label",
+}
 
 
 def _run_datetime(run: Run, attr_name: str):
@@ -207,25 +236,26 @@ def _field_col_sort_key(kv: tuple[str, Any]):
 
 
 def _run_attr_sort_key(name: str):
-    keys = {
-        "id": 0,
-        "name": 1,
-        "operation": 2,
-        "started": 3,
-        "status": 4,
-        "label": 5,
-    }
-    return keys.get(name, 99)
+    return _RUN_ATTR_ORDER.get(name, 99)
 
 
 def _board_col_defs(board: BoardDef, inferred_col_defs: _ColDefs):
     board_cols = board.get_columns()
     if not board_cols:
-        return inferred_col_defs
+        return _filter_run_attr_cols_for_inferred(inferred_col_defs)
     return [
         _apply_col_def_key_case(_merged_col_def(board_col, inferred_col_defs))
         for board_col in board_cols
     ]
+
+
+def _filter_run_attr_cols_for_inferred(col_defs: _ColDefs):
+    return [col_def for col_def in col_defs if not _excluded_run_attr(col_def)]
+
+
+def _excluded_run_attr(col_def: dict[str, Any]):
+    field = col_def["field"]
+    return field.startswith("run:") and field[4:] not in _RUN_ATTR_DEFAULT_COL_DEFS
 
 
 def _apply_col_def_key_case(col_def: dict[str, Any]) -> dict[str, Any]:
@@ -255,7 +285,7 @@ def _find_col_def(board_col: BoardDefColumn, inferred_col_defs: _ColDefs):
 
 
 def _field_target(config_col: BoardDefColumn) -> tuple[str | None, _ExtraColAttrs]:
-    col_attrs = dict(config_col)  # copy
+    col_attrs = dict(config_col)
     attribute = col_attrs.pop("attribute", None)
     if attribute:
         return f"attribute:{attribute}", col_attrs
@@ -380,7 +410,10 @@ def _group_item_cmp(lhs: tuple[Any, Any], rhs: tuple[Any, Any]):
 def _prune_row_data_fields(row_data: _RowData, col_defs: _ColDefs):
     fields = set(col["field"] for col in col_defs)
     return [
-        {name: val for name, val in row.items() if name in fields} for row in row_data
+        # Keep row data for all col def fields and for run ID (run ID
+        # should always appear in row data)
+        {name: val for name, val in row.items() if name in fields or name == "run:id"}
+        for row in row_data
     ]
 
 

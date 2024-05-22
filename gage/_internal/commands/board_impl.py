@@ -120,20 +120,17 @@ def _print_json(data: dict[str, Any]):
 def _print_csv(data: dict[str, Any]):
     col_defs = data["colDefs"]
     fields: list[str] = [col["field"] for col in col_defs]
-    headers = {
-        field: col.get("label") or field
-        for field, col in [(col["field"], col) for col in col_defs]
-    }
+    headers = {field: col.get("label") or field for field, col in zip(fields, col_defs)}
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fields)
     writer.writerow(headers)
     for row in cast(list[dict[str, Any]], data["rowData"]):
-        writer.writerow(_csv_row_values(row))
+        writer.writerow(_csv_row_values(row, fields))
     sys.stdout.write(buf.getvalue())
 
 
-def _csv_row_values(row: dict[str, Any]):
-    return {key: _csv_cell_value(val) for key, val in row.items()}
+def _csv_row_values(row: dict[str, Any], fields: list[str]):
+    return {key: _csv_cell_value(val) for key, val in row.items() if key in fields}
 
 
 def _csv_cell_value(val: Any) -> Any:

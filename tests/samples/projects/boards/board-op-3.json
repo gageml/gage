@@ -5,6 +5,12 @@
   },
   "columns": [
     "run:id",
+    "run:operation",
+    "run:op_ns",
+    {
+      "run-attr": "op_version",
+      "label": "Operation Ver"
+    },
     {
       "attribute": "color"
     },

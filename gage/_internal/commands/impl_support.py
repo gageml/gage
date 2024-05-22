@@ -17,7 +17,6 @@ from .. import var
 from ..gagefile import gagefile_for_dir
 
 from ..run_util import meta_config
-from ..run_util import meta_opref
 from ..run_util import run_label
 from ..run_util import run_project_dir
 from ..run_util import run_status
@@ -243,17 +242,17 @@ def _table_row(
 ) -> list[str]:
     index_str = str(index)
     run_name = run.name[:5]
-    op_name = _op_name(run, project_namespace)
+    operation = _run_operation(run, project_namespace)
     started = run_timestamp(run, "started")
     started_str = human_readable.date_time(started) if started else ""
-    status = run_status(run)
+    status = _run_status(run)
     description = _run_description(run, width)
     row = [
         index_str,
         run_name,
-        op_name,
+        operation,
         started_str,
-        cli.text(status, style=cli.run_status_style(status)),
+        status,
         description,
     ]
 
@@ -262,9 +261,20 @@ def _table_row(
     return _fit(row, width)
 
 
-def _op_name(run: Run, project_namespace: str | None):
-    opref = meta_opref(run)
-    return opref.get_full_name() if opref.op_ns != project_namespace else opref.op_name
+def _run_operation(run: Run, project_namespace: str | None):
+    opref = run.opref
+    op_name = (
+        opref.get_full_name() if opref.op_ns != project_namespace else opref.op_name
+    )
+    op_version = (
+        f" [{cli.STYLE_SECOND_LABEL}]v{opref.op_version}[/]" if opref.op_version else ""
+    )
+    return f"{op_name}{op_version}"
+
+
+def _run_status(run: Run):
+    status = run_status(run)
+    return cli.text(status, style=cli.run_status_style(status))
 
 
 def _run_description(run: Run, width: int):
