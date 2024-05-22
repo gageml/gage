@@ -114,6 +114,14 @@ class OpRef:
         )
         return f"<OpRef ns=\"{self.op_ns}\" name=\"{self.op_name}\"{version}>"
 
+    def __eq__(self, other: Any):
+        return (
+            isinstance(other, OpRef)
+            and other.op_ns == self.op_ns
+            and other.op_name == self.op_name
+            and other.op_version == self.op_version
+        )
+
 
 CmdArgs = str | list[str]
 
