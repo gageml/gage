@@ -98,9 +98,10 @@ class UserConfigValidationError(UserConfigError):
 
 
 class OpRef:
-    def __init__(self, op_ns: str, op_name: str):
+    def __init__(self, op_ns: str, op_name: str, op_version: str | None = None):
         self.op_ns = op_ns
         self.op_name = op_name
+        self.op_version = op_version
 
     def get_full_name(self):
         if not self.op_ns:
@@ -108,7 +109,10 @@ class OpRef:
         return f"{self.op_ns}:{self.op_name}"
 
     def __repr__(self):
-        return f"<OpRef ns=\"{self.op_ns}\" name=\"{self.op_name}\">"
+        version = (
+            f" version=\"{self.op_version}\"" if self.op_version is not None else ""
+        )
+        return f"<OpRef ns=\"{self.op_ns}\" name=\"{self.op_name}\"{version}>"
 
 
 CmdArgs = str | list[str]
@@ -233,6 +237,9 @@ class OpDef:
                 "directly to bypass this check"
             )
         return self._src
+
+    def get_version(self) -> str | None:
+        return self._data.get("version")
 
     def get_description(self) -> str | None:
         return self._data.get("description")

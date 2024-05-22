@@ -1,0 +1,11 @@
+{
+  "op-1": {
+    "version": 123
+  },
+  "op-2": {
+    "version": "foo bar"
+  },
+  "op-3": {
+    "version": ""
+  }
+}

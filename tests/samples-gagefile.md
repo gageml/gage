@@ -252,3 +252,26 @@ listing description.
     The instance must be of type "boolean"
     The instance must be of type "string"
     <1>
+
+## Op Version
+
+    >>> run("gage check op-version.json")
+    op-version.json is a valid Gage file
+    <0>
+
+    >>> run("gage check invalid-op-version.json")
+    There are errors in invalid-op-version.json
+    Properties ['op-1', 'op-2', 'op-3'] are invalid
+    Properties ['version'] are invalid
+    The instance must be valid against exactly one subschema; it is valid against [] and invalid against [0, 1]
+    The instance must be of type "string"
+    The instance must be of type "null"
+    Properties ['version'] are invalid
+    The instance must be valid against exactly one subschema; it is valid against [] and invalid against [0, 1]
+    The text must match the regular expression "^[^\\s]*$"
+    The instance must be of type "null"
+    Properties ['version'] are invalid
+    The instance must be valid against exactly one subschema; it is valid against [] and invalid against [0, 1]
+    The text is too short (minimum 1 characters)
+    The instance must be of type "null"
+    <1>

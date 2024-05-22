@@ -199,7 +199,7 @@ prototype.
 the run name efficiently.
 
     >>> cat(run_meta_path(run, "opref"))  # +parse
-    1 test test
+    2 test test
 
 ### `proc/cmd.json` and `proc/env.json`
 

@@ -71,8 +71,13 @@ def Header(run: Run):
         padding=(0, 1),
         collapse_padding=False,
     )
+    version = (
+        f" [dim {cli.STYLE_LABEL}]v{run.opref.op_version}[/]"
+        if run.opref.op_version
+        else ""
+    )
     header.add_row(
-        Text(run.opref.get_full_name(), style="bold " + cli.STYLE_LABEL),
+        f"[bold {cli.STYLE_LABEL}]{run.opref.get_full_name()}[/]{version}",
         Text(status, style=cli.run_status_style(status)),
     )
     if label:

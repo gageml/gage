@@ -67,7 +67,7 @@ op ref for the run.
     -r--r--r-- opref
 
     >>> cat(path_join(meta_dir, "opref"))
-    1 test test
+    2 test test
 
 The run status is `unknown`.
 

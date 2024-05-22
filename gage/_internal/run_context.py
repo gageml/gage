@@ -27,7 +27,7 @@ def resolve_run_context(opspec: str, command_dir: str | None = None):
         command_dir=command_dir,
         project_dir=project_dir,
         gagefile=gf,
-        opref=OpRef(namespace, opdef.name),
+        opref=OpRef(namespace, opdef.name, opdef.get_version()),
         opdef=opdef,
     )
 

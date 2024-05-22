@@ -1,0 +1,5 @@
+[op]
+
+description = "Sample op"
+version = "2"
+exec = "python op.py"

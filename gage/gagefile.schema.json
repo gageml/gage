@@ -181,6 +181,18 @@
       "title": "Operation definition",
       "additionalProperties": false,
       "properties": {
+        "version": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[^\\s]*$",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "description": {
           "type": "string"
         },
