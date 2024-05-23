@@ -117,6 +117,7 @@
     "libcst",
     "libcublas",
     "lineterm",
+    "listdir",
     "logfile",
     "loglib",
     "lstrip",
