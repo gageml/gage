@@ -9,8 +9,8 @@ import click
 from .. import cli
 from .. import var
 
-from .impl_support import selected_runs
 from .impl_support import runs_table
+from .impl_support import selected_runs
 
 
 class Args(NamedTuple):

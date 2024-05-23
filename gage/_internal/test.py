@@ -568,9 +568,7 @@ def set_runs_dir(path: str):
 
 
 def use_example(name: str, var_home: Optional[str] = None):
-    var_home = var_home or make_temp_dir()
-    cd(example(name))
-    set_runs_dir(var_home)
+    use_project(example(name), var_home)
 
 
 def example(name: str):
@@ -584,10 +582,15 @@ def examples_dir():
         return os.path.join(gage.__pkgdir__, "examples")
 
 
-def use_project(project_name: str, var_home: Optional[str] = None):
+def use_project(dirname: str, var_home: Optional[str] = None):
     var_home = var_home or make_temp_dir()
-    cd(sample("projects", project_name))
-    set_runs_dir(var_home)
+    runs_dir = path_join(var_home, "runs")
+    make_dir(runs_dir)
+    var.set_runs_dir(runs_dir)
+    archives_dir = path_join(var_home, "archives")
+    make_dir(archives_dir)
+    var.set_archives_dir(archives_dir)
+    cd(dirname)
 
 
 def path_join(*path: str):

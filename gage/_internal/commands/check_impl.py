@@ -109,7 +109,7 @@ def _print_check_info(args: Args):
 
 
 def _check_info_data(args: Args):
-    return _core_info_data() + _maybe_verbose_info_data(args.verbose)
+    return _core_info_data() + _verbose_info_data(args)
 
 
 def _core_info_data() -> CheckData:
@@ -122,8 +122,8 @@ def _core_info_data() -> CheckData:
     ]
 
 
-def _maybe_verbose_info_data(verbose: bool) -> CheckData:
-    if not verbose:
+def _verbose_info_data(args: Args) -> CheckData:
+    if not args.verbose:
         return []
     cwd = sys_config.cwd()
     project_dir = project_util.find_project_dir(cwd)

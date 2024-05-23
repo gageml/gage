@@ -484,13 +484,6 @@ def _iter_resolved_ref_parts(
             yield part
 
 
-def getmtime(filename: str):
-    try:
-        return os.path.getmtime(filename)
-    except OSError:
-        return None
-
-
 def kill_process_tree(pid: int, force: bool = False, timeout: Optional[float] = None):
     import psutil
     import signal
@@ -512,13 +505,6 @@ def kill_process_tree(pid: int, force: bool = False, timeout: Optional[float] = 
     for proc in children:
         send_sig(proc)
     return psutil.wait_procs([root] + children, timeout=timeout)
-
-
-def safe_mtime(path: str):
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return None
 
 
 def safe_list_remove(x: Any, l: list[Any]):

@@ -26,13 +26,19 @@ def operations_table():
     gf = gagefile_for_project()
     table = cli.Table("operation", "description")
     for name, opdef in sorted(gf.get_operations().items()):
-        table.add_row(cli.label(name), _opdef_desc(opdef))
+        table.add_row(
+            cli.label(name),
+            _opdef_desc(opdef),
+        )
     return table
 
 
 def _opdef_desc(opdef: OpDef):
     desc = _first_line(opdef.get_description() or "")
-    return f"{desc} [dim](default)[/dim]" if opdef.get_default() else desc
+    default_tag = (
+        f" [{cli.STYLE_SECOND_LABEL}](default)[/]" if opdef.get_default() else ""
+    )
+    return f"[{cli.STYLE_VALUE}]{desc}{default_tag}"
 
 
 def _first_line(s: str):
