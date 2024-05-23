@@ -51,21 +51,12 @@ ListFlag = Annotated[
         "-l",
         "--list",
         help="Show local archives.",
+        incompatible_with=["name", "delete", "rename"],
     ),
 ]
 
-Delete = Annotated[
-    str,
-    Option(
-        "-d",
-        "--delete",
-        metavar="archive",
-        help="Delete the specified archive. Use '--list' to show archives.",
-    ),
-]
-
-Edit = Annotated[
-    str,
+Rename = Annotated[
+    tuple[str, str],
     Option(
         "-r",
         "--rename",
@@ -74,6 +65,16 @@ Edit = Annotated[
             "Rename the archive named [arg]current[/] to [arg]new[/]. "
             "Use '--list' show show comments."
         ),
+    ),
+]
+
+Delete = Annotated[
+    str,
+    Option(
+        "-d",
+        "--delete",
+        metavar="name",
+        help="Delete the specified archive. Use '--list' to show archives.",
     ),
 ]
 
@@ -91,7 +92,7 @@ def archive(
     runs: RunSpecs = None,
     name: Name = "",
     delete: Delete = "",
-    edit: Edit = "",
+    rename: Rename = ("", ""),
     list: ListFlag = False,
     where: Where = "",
     all: AllFlag = False,
@@ -121,9 +122,9 @@ def archive(
         Args(
             runs or [],
             name,
-            delete,
-            edit,
             list,
+            rename,
+            delete,
             where,
             all,
             yes,

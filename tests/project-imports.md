@@ -28,6 +28,7 @@
     gage._internal.__init__
     gage._internal.ansi_util
     gage._internal.api
+    gage._internal.archive_util
     gage._internal.attr_log
     gage._internal.board_util
     gage._internal.channel

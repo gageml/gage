@@ -37,14 +37,15 @@ __all__ = [
     "make_temp_dir",
     "realpath",
     "delete_temp_dir",
+    "safe_delete_tree",
     "safe_filename",
     "safe_list_dir",
-    "safe_delete_tree",
     "set_readonly",
     "shorten_path",
     "standardize_path",
     "subpath",
     "test_windows_symlinks",
+    "touch",
     "write_file",
 ]
 

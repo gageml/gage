@@ -21,9 +21,12 @@ from .gagefile import GageFileLoadError
 from .gagefile import gagefile_for_dir
 
 __all__ = [
+    "archives_dir",
+    "delete_run",
     "delete_runs",
     "list_runs",
     "purge_runs",
+    "set_archives_dir",
     "set_runs_dir",
     "restore_runs",
     "runs_dir",
@@ -72,12 +75,59 @@ def _project_configured_runs_dir(gf: GageFile, project_dir: str):
     )
 
 
+def _system_default_runs_dir():
+    return os.path.join("~", ".gage", "runs")
+
+
 def set_runs_dir(dirname: str):
     os.environ["GAGE_RUNS"] = dirname
 
 
-def _system_default_runs_dir():
-    return os.path.join("~", ".gage", "runs")
+# =================================================================
+# Archives dir
+# =================================================================
+
+
+def archives_dir():
+    return os.path.expanduser(
+        os.getenv("GAGE_ARCHIVES")
+        or _project_archives_dir()
+        or _system_default_archives_dir()
+    )
+
+
+def _project_archives_dir():
+    project_dir = find_project_dir()
+    if not project_dir:
+        return None
+    try:
+        gf = gagefile_for_dir(project_dir)
+    except (FileNotFoundError, GageFileLoadError) as e:
+        log.debug("error reading Gage file in %s: %s", project_dir, e)
+        return _project_default_archives_dir(project_dir)
+    else:
+        return _project_configured_archives_dir(gf, project_dir)
+
+
+def _project_default_archives_dir(project_dir: str):
+    return os.path.join(project_dir, ".gage", "archives")
+
+
+def _project_configured_archives_dir(gf: GageFile, project_dir: str):
+    configured = gf.get_archives_dir()
+    return (
+        os.path.join(project_dir, configured)
+        if configured
+        else _project_default_archives_dir(project_dir)
+    )
+
+
+def _system_default_archives_dir():
+    return os.path.join("~", ".gage", "archives")
+
+
+def set_archives_dir(dirname: str):
+    os.environ["GAGE_ARCHIVES"] = dirname
 
 
 # =================================================================
@@ -161,11 +211,11 @@ def _run_attr_cmp(a: Run, b: Run, attr: str):
 
 def delete_runs(runs: list[Run], permanent: bool = False):
     for run in runs:
-        _delete_run(run, permanent)
+        delete_run(run, permanent)
     return runs
 
 
-def _delete_run(run: Run, permanent: bool):
+def delete_run(run: Run, permanent: bool):
     for src in _existing_run_sources(run):
         _handle_delete_run_source(src, permanent)
 

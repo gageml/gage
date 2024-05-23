@@ -31,7 +31,7 @@ archive-specific directory.
     Options:
       -n, --name name           Use the specified archive
                                 name.
-      -d, --delete archive      Delete the specified archive.
+      -d, --delete name         Delete the specified archive.
                                 Use '--list' to show archives.
       -r, --rename current new  Rename the archive named
                                 current to new. Use '--list'
@@ -45,15 +45,135 @@ archive-specific directory.
       -h, --help                Show this message and exit.
     <0>
 
-## To Do
+## Archive Runs
 
-Nothing working now:
+Use `hello` to generate some runs.
 
-    >>> run("gage archive")  # -space
-    TODO archive:
-    Args(runs=[], name='', delete='', edit='',
-         list=False, where='', all=False, yes=False)
+    >>> use_example("hello")
+
+    >>> run("gage run hello name=Moon -y")
+    Hello Moon
     <0>
+
+    >>> run("gage run hello name=Room -y")
+    Hello Room
+    <0>
+
+    >>> run("gage runs -s")
+    | # | operation | status    | description                  |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | name=Room                    |
+    | 2 | hello     | completed | name=Moon                    |
+    <0>
+
+Archive the runs.
+
+    >>> run("gage archive --all -y")  # +parse
+    Copied 2 runs
+    Runs archived to '{name}'
+    ⤶
+    Use 'gage restore {x} --all' to restore these runs later.
+    Use 'gage archive --list' to show available archives.
+    <0>
+
+    >>> assert x == name
+
+Show available archives.
+
+    >>> run("gage archive --list")  # +parse +table
+    | name                | runs | last archived |
+    |---------------------|------|---------------|
+    | {x}                 | 2    | {}            |
+    <0>
+
+    >>> assert x == name
+
+The archived runs deleted after being copied.
+
+    >>> run("gage runs -s")  # +fails TODO delete is pending
+    | # | operation | status | description                     |
+    |---|-----------|--------|---------------------------------|
+    <0>
+
+The archive is located in a unique directory under the archives
+directory. We can get the current archives directory using the `check`
+command with the verbose option.
+
+    >>> run("gage check -v")  # +parse +table
+    {}
+    | archives_directory    | {archives_dir:path} |
+    <0>
+
+    >>> os.listdir(archives_dir)  # +parse
+    ['{subdir:uuid4}']
+
+The archive name is located in the archive subdirectory in a file named
+`.archive`. This is an implementation detail but we can verify it.
+
+    >>> cat(path_join(archives_dir, subdir, ".archive"))  # +parse
+    1{x}
+
+    >>> assert x == name
+
+Use `--delete` to delete the archive.
+
+    >>> run(f"gage archive --delete {name} -y")  # +parse
+    Deleted archive '{x}'
+    <0>
+
+    >>> assert x == name
+
+    >>> run("gage archive --list")
+    | name | runs | last archived |
+    |------|------|---------------|
+    <0>
+
+Confirm that the archive directory is deleted.
+
+    >>> os.listdir(archives_dir)
+    []
+
+## Errors
+
+Archive without a run spec or `--all`.
+
+    >>> run("gage archive")
+    gage: Specify one or more runs to archive or use '--all'.
+    ⤶
+    Use 'gage list' to show available runs.
+    ⤶
+    Try 'gage archive -h' for additional help.
+    <1>
+
+Rename args:
+
+    >>> run("gage archive --rename")
+    Error: Option '--rename' requires 2 arguments.
+    <2>
+
+    >>> run("gage archive --rename foo")
+    Error: Option '--rename' requires 2 arguments.
+    <2>
+
+Incompatible options:
+
+    >>> run("gage archive --list --delete xxx")
+    list and delete cannot be used together.
+    ⤶
+    Try 'gage archive -h' for help.
+    <1>
+
+    >>> run("gage archive --list --name xxx")
+    list and name cannot be used together.
+    ⤶
+    Try 'gage archive -h' for help.
+    <1>
+
+    >>> run("gage archive --list --rename xxx yyy")
+    list and rename cannot be used together.
+    ⤶
+    Try 'gage archive -h' for help.
+    <1>
 
 ### Archive Location
 

@@ -52,6 +52,7 @@ __all__ = [
     "status",
     "track",
     "truncate",
+    "value",
 ]
 
 log = logging.getLogger(__name__)
@@ -133,6 +134,10 @@ def json(val: Any):
 
 def label(s: str):
     return text(s, style=STYLE_LABEL)
+
+
+def value(s: str):
+    return text(s, style=STYLE_VALUE)
 
 
 def markdown(md: str):
@@ -229,9 +234,10 @@ def track(
         Sequence[rich.progress.ProgressType] | Iterable[rich.progress.ProgressType]
     ),
     description: str = "",
+    transient: bool = False,
     **kw: Any,
 ):
-    return rich.progress.track(sequence, description, **kw)
+    return rich.progress.track(sequence, description, transient=transient, **kw)
 
 
 class pager:

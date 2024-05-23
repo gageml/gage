@@ -40,6 +40,7 @@ directory.
     >>> check()  # +parse -space
     {}
     | runs_directory        | {x:path}/.gage/runs              |
+    {}
     <0>
 
     >>> user_home = os.path.expanduser("~")
@@ -57,6 +58,7 @@ defined in `project_util.py`.
     | project_directory     | {x:path}                         |
     | gagefile              | <none>                           |
     | runs_directory        | {y:path}/.gage/runs              |
+    {}
     <0>
 
     >>> compare_paths(x, y) and compare_paths(y, tmp)
@@ -73,6 +75,7 @@ We can configure a different location in a project Gage file.
     | project_directory     | {x:path}                         |
     | gagefile              | {y:path}/gage.yaml               |
     | runs_directory        | {z:path}/xyz                     |
+    {}
     <0>
 
     >>> compare_paths(x, y) and compare_paths(y, z) and compare_paths(z, tmp)
@@ -85,6 +88,7 @@ Use `RUNS_DIR` to specify a location.
     | project_directory     | {x:path}                         |
     | gagefile              | {y:path}/gage.yaml               |
     | runs_directory        | xxx                              |
+    {}
     <0>
 
     >>> compare_paths(x, y) and compare_paths(y, tmp)
@@ -98,6 +102,7 @@ another application using `RUNS_DIR`).
     | project_directory     | {x:path}                         |
     | gagefile              | {y:path}/gage.yaml               |
     | runs_directory        | yyy                              |
+    {}
     <0>
 
     >>> compare_paths(x, y) and compare_paths(y, tmp)

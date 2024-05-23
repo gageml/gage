@@ -321,6 +321,9 @@ class GageFile:
     def get_runs_dir(self) -> str | None:
         return self._data.get("$runs-dir")
 
+    def get_archives_dir(self) -> str | None:
+        return self._data.get("$archives-dir")
+
     def get_operations(self):
         return {
             name: OpDef(name, self._data[name], self.filename)  # \
