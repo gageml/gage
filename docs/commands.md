@@ -9,6 +9,10 @@ Each command is defined in two separate modules:
 - Interface module
 - Implementation module
 
+By convention, the interface module uses the same name as the command
+and the implementation module uses the same name as the interface module
+plus `_impl`.
+
 Refer to an existing command for the patterns used in each.
 
 Generally:
@@ -81,3 +85,57 @@ Each new command should come with the following:
 
 Refer to [bf232af](https://github.com/gageml/gage/commit/bf232af2abd) for an
 example of a minimal set of changes for a new command.
+
+## Implementation Guidance
+
+The interface module should not contain any implementation code. As
+stated previously, it must not directly import anything that is
+expensive. This means limiting imports to types and CLI related support.
+
+Expensive imports *may* be included in the implementation class.
+However, if an expensive import is only used in limited cases, it should
+be imported in the function that requires it. It's okay to import the
+same module from multiple functions in the implementation module, but up
+to a point. More than three times, e.g. as a rule of thumb, might
+suggest the import belongs at the top level. Use your best judgement.
+
+Calls to `cli` for user facing behavior *must* be limited to
+implementation modules or helper modules in `gage._internal.commands`.
+Unless you're enhancing `cli` this behavior must not be defined outside
+the `commands` package.
+
+Try to implement the entire command feature set in the implementation
+module before considering new modules.
+
+Only modify other modules if it's absolutely clear that the modification
+(new functions, changed/enhanced behavior) belongs there.
+
+If there is a clear set of unified behavior implemented for the command,
+consider a new library module. The triggers for this decision:
+
+- The set of functionality is narrowly scoped, coherent, and well
+  understood.
+
+- Other areas of the Gage code base would benefit from such
+  functionality defined in a standalone module (the obvious case is that
+  another implementation uses the function).
+
+- If the functions in question implement user interface behavior,
+  chances are good they belong in `impl_support` or remain in the
+  implementation module to be exported for use by other modules.
+
+Non-triggers:
+
+- Code reuse. It's okay for a command implementation module to import
+  and reuse functions from another command implementation. The shared
+  functions, however, must be limited to command implementation.
+
+As a rule of thumb, start by implementing all of the command
+functionality in a single implementation module. If you feel a set of
+functions should be moved to a library module (i.e. moved outside the
+`commands` package to `gage._internal`), propose the move to the team to
+get feedback.
+
+Any new library modules *must* be accompanied by a complementary
+`lib-xxx.md` test file. This test file should document and exercise the
+module API. These tests are in addition to any tests in `cmd-xxx.md`.
