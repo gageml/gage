@@ -99,7 +99,7 @@ The archive is located in a unique directory under the archives
 directory. We can get the current archives directory using the `check`
 command with the verbose option.
 
-    >>> run("gage check -v")  # +parse +table
+    >>> run("gage check -v", cols=120)  # +parse +table
     {}
     | archives_directory    | {archives_dir:path} |
     <0>
@@ -124,6 +124,10 @@ Use `--delete` to delete the archive.
     >>> assert x == name
 
     >>> run("gage archive --list")
+    ... # +skip=WINDOWS_FIX table expanded to fill default cols it seems
+    ... # We can brute force this with +table but it'd be nicer to have
+    ... # the formatting consistent across platforms so we don't have to
+    ... # keep hacking the test.
     | name | runs | last archived |
     |------|------|---------------|
     <0>
