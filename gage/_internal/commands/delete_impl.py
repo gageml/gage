@@ -50,7 +50,7 @@ def _user_confirm_delete(args: Args, runs: list[tuple[int, Run]]):
     if args.yes:
         return
     table = runs_table(runs)
-    cli.out(table)
+    cli.err(table)
     style = "[red b]" if args.permanent else ""
     permanent_prefix = "PERMANENTLY " if args.permanent else ""
     permanent_suffix = " This cannot be undone." if args.permanent else ""

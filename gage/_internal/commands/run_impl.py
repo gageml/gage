@@ -132,10 +132,9 @@ def _handle_stage(context: RunContext, args: Args):
 
 def _handle_skipped(skipped: Skipped):
     run_name = skipped.comparable_run.name
-    cli.out(
+    cli.err(
         f"Run skipped because a comparable run exists ([cyan]{run_name})[/]\n\n"
-        f"For details, run '[cmd]gage show {run_name}[/]'",
-        err=True,
+        f"For details, run '[cmd]gage show {run_name}[/]'"
     )
     raise SystemExit(exitcodes.SKIPPED)
 
@@ -368,11 +367,11 @@ def _verify_run_or_stage(
 ) -> None | NoReturn:
     if args.yes:
         return
-    cli.out(_action_desc(args, run_or_context), err=True)
+    cli.err(_action_desc(args, run_or_context))
     if config:
-        cli.out(run_help.config_table(config), err=True)
+        cli.err(run_help.config_table(config))
     else:
-        cli.out("", err=True)
+        cli.err("")
     if not cli.confirm(f"Continue?"):
         raise SystemExit(0)
 

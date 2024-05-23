@@ -385,7 +385,7 @@ def _stage(batch: Batch, context: RunContext, args: Args):
 def _verify_run_or_stage(args: Args, batch: Batch, context: RunContext):
     if args.yes:
         return
-    cli.out(_action_desc(args, batch, context), err=True)
+    cli.err(_action_desc(args, batch, context))
     if not cli.confirm(f"Continue?"):
         raise SystemExit(0)
 
@@ -414,7 +414,7 @@ def _log_skipped_runs(skipped: int):
     comparable_desc = (
         "a comparable run exists" if skipped == 1 else "comparable runs exist"
     )
-    cli.out(f"Skipped {skipped} {runs_desc} because {comparable_desc}", err=True)
+    cli.err(f"Skipped {skipped} {runs_desc} because {comparable_desc}")
 
 
 def _run(batch: Batch, context: RunContext, args: Args):
@@ -431,10 +431,7 @@ def _run(batch: Batch, context: RunContext, args: Args):
 
 
 def _print_run_error(run: Run, code: int | str | None):
-    cli.out(
-        (
-            f"\n[red b]Run {run.name} exited with an error ({code})[/]\n"
-            f"Try '[cmd]gage show {run.name}[/]' for run details."
-        ),
-        err=True,
+    cli.err(
+        f"\n[red b]Run {run.name} exited with an error ({code})[/]\n"
+        f"Try '[cmd]gage show {run.name}[/]' for run details."
     )
