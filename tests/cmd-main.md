@@ -17,6 +17,7 @@ Running `gage` without arguments shows help.
       -h, --help     Show this message and exit.
     ⤶
     Commands:
+      archive          Archive runs.
       associate        Associate a run with a project directory.
       board            Show a board of run results.
       cat              Show a run file.

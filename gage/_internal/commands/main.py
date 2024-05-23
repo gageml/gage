@@ -7,6 +7,7 @@ from typer import Typer
 
 from .. import cli
 
+from .archive import archive
 from .associate import associate
 from .board import show_board
 from .cat import cat
@@ -93,6 +94,7 @@ def main_app():
         options_metavar="[options]",
     )
     app.callback()(main)
+    app.command("archive")(archive)
     app.command("associate")(associate)
     app.command("board")(show_board)
     app.command("cat")(cat)
