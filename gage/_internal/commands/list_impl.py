@@ -6,6 +6,7 @@ from ..types import *
 
 from .. import cli
 
+from .impl_support import archive_dir
 from .impl_support import runs_table
 from .impl_support import selected_runs
 
@@ -17,11 +18,16 @@ class Args(NamedTuple):
     all: bool
     where: str
     deleted: bool
+    archive: str
     simplified: bool
 
 
 def runs_list(args: Args):
-    selected, from_count = selected_runs(args, args.deleted)
+    selected, from_count = selected_runs(
+        args,
+        deleted=args.deleted,
+        archive_dir=_maybe_archive(args),
+    )
     limited = _limit_runs(selected, args)
     caption = _table_caption(len(limited), from_count, args)
     table = runs_table(
@@ -31,6 +37,10 @@ def runs_list(args: Args):
         caption=caption,
     )
     cli.out(table)
+
+
+def _maybe_archive(args: Args):
+    return archive_dir(args.archive) if args.archive else None
 
 
 def _limit_runs(runs: list[tuple[int, Run]], args: Args):

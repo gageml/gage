@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX # nagging table formatting inconsistencies
+---
+
 # `archive` Command
 
 The `archive` command moves runs out of the runs dir into an
@@ -31,8 +35,11 @@ archive-specific directory.
     Options:
       -n, --name name           Use the specified archive
                                 name.
+      -A, --archive name        Use an existing archive. Fails
+                                if archive doesn't exit.
       -d, --delete name         Delete the specified archive.
                                 Use '--list' to show archives.
+      --delete-empty            Delete empty archives.
       -r, --rename current new  Rename the archive named
                                 current to new. Use '--list'
                                 show show comments.
@@ -69,11 +76,10 @@ Use `hello` to generate some runs.
 Archive the runs.
 
     >>> run("gage archive --all -y")  # +parse
-    Copied 2 runs
+    Moved 2 runs
     Runs archived to '{name}'
     ⤶
-    Use 'gage restore {x} --all' to restore these runs later.
-    Use 'gage archive --list' to show available archives.
+    Use 'gage restore --archive {x}' to restore from this archive.
     <0>
 
     >>> assert x == name
@@ -88,9 +94,9 @@ Show available archives.
 
     >>> assert x == name
 
-The archived runs deleted after being copied.
+The archived runs are deleted after being copied.
 
-    >>> run("gage runs -s")  # +fails TODO delete is pending
+    >>> run("gage runs -s")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -115,19 +121,107 @@ The archive name is located in the archive subdirectory in a file named
 
     >>> assert x == name
 
-Use `--delete` to delete the archive.
+## Restore Runs
 
-    >>> run(f"gage archive --delete {name} -y")  # +parse
-    Deleted archive '{x}'
+Runs are restored from an archive using `restore` with the `--archive` option.
+
+`restore` requires a valid archive name with `--archive`.
+
+    >>> run("gage restore --archive invalid")
+    gage: archive 'invalid' does not exist
+    ⤶
+    Use 'gage archive --list' to show available archives.
+    <1>
+
+Restore the runs from the archive. Gage assumes that all runs are
+restored. Gage assumes the `--all` option, which is otherwise required
+when restoring deleted runs when run specs aren't provided.
+
+    >>> run(f"gage restore --archive {name} -y")
+    Restored 2 runs
+    <0>
+
+    >>> run("gage ls -s")
+    | # | operation | status    | description                  |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | name=Room                    |
+    | 2 | hello     | completed | name=Moon                    |
+    <0>
+
+    >>> run(f"gage ls -A {name} -s")
+    | # | operation | status | description                     |
+    |---|-----------|--------|---------------------------------|
+    <0>
+
+## Delete Empty Archives
+
+Delete empty archives using `--delete-empty`.
+
+    >>> run("gage archive -l")  # +parse +table
+    | name              | runs | last archived |
+    |-------------------|------|---------------|
+    | {x}               | 0    | {}            |
     <0>
 
     >>> assert x == name
 
+    >>> run("gage archive --delete-empty -y")
+    Deleted 1 empty archive
+    <0>
+
+## Delete Archive
+
+Use `--delete` to delete the archive. This permanently deletes the
+archive runs.
+
+Archive the current runs.
+
+    >>> run("gage archive --all --name my-archive -y")
+    Moved 2 runs
+    Runs archived to 'my-archive'
+    ⤶
+    Use 'gage restore --archive my-archive' to restore from this archive.
+    <0>
+
+    >>> run("gage ls -s")
+    | # | operation | status | description                     |
+    |---|-----------|--------|---------------------------------|
+    <0>
+
+    >>> run("gage ls -A my-archive -s")
+    | # | operation | status    | description                  |
+    |---|-----------|-----------|------------------------------|
+    | 1 | hello     | completed | name=Room                    |
+    | 2 | hello     | completed | name=Moon                    |
+    <0>
+
+Delete requires a valid archive name.
+
+    >>> run("gage archive --delete invalid")
+    gage: archive 'invalid' does not exist.
+    Use 'gage archive --list' to show available names.
+    <1>
+
+The user is notified that the deletion is permanent.
+
+    >>> run(f"gage archive --delete my-archive", timeout=2)  # +parse +table
+    | #  | name   | operation   | started         | status     |
+    |----|--------|-------------|-----------------|------------|
+    | 1  | {}     | hello       | {}              | completed  |
+    | 2  | {}     | hello       | {}              | completed  |
+    ⤶
+    You are about to PERMANENTLY delete 2 runs. This cannot be undone.
+    ⤶
+    Continue? (y/N)
+    <{:sigint}>
+
+Delete the archive.
+
+    >>> run(f"gage archive --delete my-archive -y")
+    Deleted archive 'my-archive'
+    <0>
+
     >>> run("gage archive --list")
-    ... # +skip=WINDOWS_FIX table expanded to fill default cols it seems
-    ... # We can brute force this with +table but it'd be nicer to have
-    ... # the formatting consistent across platforms so we don't have to
-    ... # keep hacking the test.
     | name | runs | last archived |
     |------|------|---------------|
     <0>

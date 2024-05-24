@@ -62,6 +62,16 @@ DeletedFlag = Annotated[
     ),
 ]
 
+Archive = Annotated[
+    str,
+    Option(
+        "-A",
+        "--archive",
+        metavar="name",
+        help="Show archived runs.",
+    ),
+]
+
 SimplifiedFlag = Annotated[
     bool,
     Option(
@@ -79,6 +89,7 @@ def runs_list(
     all: AllFlag = False,
     where: Where = "",
     deleted: DeletedFlag = False,
+    archive: Archive = "",
     simplified: SimplifiedFlag = False,
 ):
     """List runs.
@@ -92,6 +103,11 @@ def runs_list(
     Runs may be selected from the list using run IDs, names, indexes or
     slice notation. Try '[cmd]gage help select-runs[/]' for help with
     select options.
+
+    To show deleted runs, use '--deleted',
+
+    To show archives runs, use '--archive [arg]name[/]'. Use '[cmd]gage
+    archive --list[/]' for a list of archive names.
     """
     from .list_impl import runs_list, Args
 
@@ -103,6 +119,7 @@ def runs_list(
             all,
             where,
             deleted,
+            archive,
             simplified,
         )
     )

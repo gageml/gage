@@ -73,6 +73,7 @@ def _copy_to_(
     verbose: int = 0,
     config_path: str | None = None,
     env: dict[str, str] | None = None,
+    no_summary: bool = False,
 ):
     pre_copy_status = cli.status("Preparing copy")
     pre_copy_status.start()
@@ -111,10 +112,11 @@ def _copy_to_(
             p.stop()
 
     runs_count = "1 run" if len(runs) == 1 else f"{len(runs)} runs"
-    if nothing_copied:
-        cli.err("Nothing copied, runs are up-to-date")
-    else:
-        cli.err(f"Copied {runs_count}")
+    if not no_summary:
+        if nothing_copied:
+            cli.err("Nothing copied, runs are up-to-date")
+        else:
+            cli.err(f"Copied {runs_count}")
 
 
 def _prepare_copy(runs: list[Run]):

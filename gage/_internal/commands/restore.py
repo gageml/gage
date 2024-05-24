@@ -32,7 +32,17 @@ AllFlag = Annotated[
     Option(
         "-a",
         "--all",
-        help="Restore all deleted runs.",
+        help="Restore all runs.",
+    ),
+]
+
+Archive = Annotated[
+    str,
+    Option(
+        "-A",
+        "--archive",
+        metavar="name",
+        help="Restore runs from an archive.",
     ),
 ]
 
@@ -50,17 +60,21 @@ def runs_restore(
     ctx: Context,
     runs: RunSpecs = None,
     where: Where = "",
+    archive: Archive = "",
     all: AllFlag = False,
     yes: YesFlag = False,
 ):
-    """Restore runs.
+    """Restore deleted or archived runs.
 
     Use to restore deleted runs. Note that is a run is permanently
     deleted, it cannot be restored.
 
     Use [cmd]gage list --deleted[/] to list deleted runs that can be
     restored.
+
+    If '--archive' is specified, restores runs from the archive. Use
+    [cmd]gage archive --list[/] for a list of archive names.
     """
     from .restore_impl import runs_restore, Args
 
-    runs_restore(Args(ctx, runs or [], where, all, yes))
+    runs_restore(Args(ctx, runs or [], where, archive, all, yes))

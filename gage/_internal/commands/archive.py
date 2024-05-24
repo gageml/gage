@@ -45,13 +45,25 @@ Name = Annotated[
     ),
 ]
 
+Archive = Annotated[
+    str,
+    Option(
+        "-A",
+        "--archive",
+        metavar="name",
+        help="Use an existing archive. Fails if archive doesn't exit.",
+        show_default=False,
+        incompatible_with=["name"],
+    ),
+]
+
 ListFlag = Annotated[
     bool,
     Option(
         "-l",
         "--list",
         help="Show local archives.",
-        incompatible_with=["name", "delete", "rename"],
+        incompatible_with=["name", "delete", "delete_empty", "rename"],
     ),
 ]
 
@@ -65,6 +77,7 @@ Rename = Annotated[
             "Rename the archive named [arg]current[/] to [arg]new[/]. "
             "Use '--list' show show comments."
         ),
+        incompatible_with=["delete", "delete_empty", "list"],
     ),
 ]
 
@@ -75,6 +88,15 @@ Delete = Annotated[
         "--delete",
         metavar="name",
         help="Delete the specified archive. Use '--list' to show archives.",
+    ),
+]
+
+DeleteEmptyFlag = Annotated[
+    bool,
+    Option(
+        "--delete-empty",
+        help="Delete empty archives.",
+        incompatible_with=["delete"],
     ),
 ]
 
@@ -91,7 +113,9 @@ YesFlag = Annotated[
 def archive(
     runs: RunSpecs = None,
     name: Name = "",
+    archive: Archive = "",
     delete: Delete = "",
+    delete_empty: DeleteEmptyFlag = False,
     rename: Rename = ("", ""),
     list: ListFlag = False,
     where: Where = "",
@@ -116,15 +140,17 @@ def archive(
     <name>'.
     """
 
-    from .archive_impl import archive, Args
+    from .archive_impl import archive as archive_, Args
 
-    archive(
+    archive_(
         Args(
             runs or [],
             name,
+            archive,
             list,
             rename,
             delete,
+            delete_empty,
             where,
             all,
             yes,

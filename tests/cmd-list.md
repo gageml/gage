@@ -18,18 +18,25 @@
       indexes or slice notation. Try 'gage help select-runs'
       for help with select options.
     ⤶
+      To show deleted runs, use '--deleted',
+    ⤶
+      To show archives runs, use '--archive name'. Use 'gage
+      archive --list' for a list of archive names.
+    ⤶
     Arguments:
       [run]...  Runs to list. run may be a run ID, name, list
                 index or slice.
     ⤶
     Options:
-      -m, --more        Show more runs.
-      -n, --limit max   Limit list to max runs.
-      -a, --all         Show all runs. Cannot use with
-                        --limit.
-      -w, --where expr  Show runs matching filter expression.
-      -d, --deleted     Show deleted runs.
-      -h, --help        Show this message and exit.
+      -m, --more          Show more runs.
+      -n, --limit max     Limit list to max runs.
+      -a, --all           Show all runs. Cannot use with
+                          --limit.
+      -w, --where expr    Show runs matching filter
+                          expression.
+      -d, --deleted       Show deleted runs.
+      -A, --archive name  Show archived runs.
+      -h, --help          Show this message and exit.
     <0>
 
 Generate some sample runs.

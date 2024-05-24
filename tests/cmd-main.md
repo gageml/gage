@@ -32,7 +32,7 @@ Running `gage` without arguments shows help.
       operations, ops  Show available operations.
       publish          Publish a board.
       purge            Remove deleted runs.
-      restore          Restore runs.
+      restore          Restore deleted or archived runs.
       run              Start or stage a run.
       select           Selects runs and their attributes.
       show             Show information about a run.

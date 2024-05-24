@@ -16,6 +16,8 @@ from .. import var
 
 from ..gagefile import gagefile_for_dir
 
+from ..archive_util import find_archive_dir
+
 from ..run_util import meta_config
 from ..run_util import run_label
 from ..run_util import run_project_dir
@@ -99,14 +101,31 @@ def _runs_filter(args: OneRunSupport | SelectRunsSupport):
 # =================================================================
 
 
-def selected_runs(args: SelectRunsSupport, deleted: bool = False):
-    runs = var.list_runs(
+def selected_runs(
+    args: SelectRunsSupport,
+    deleted: bool = False,
+    archive_dir: str | None = None,
+):
+    runs = (
+        _archive_runs(archive_dir, args) if archive_dir else _local_runs(args, deleted)
+    )
+    return _select_runs(runs, args), len(runs)
+
+
+def _archive_runs(archive: str, args: SelectRunsSupport):
+    return var.list_runs(
+        archive,
+        sort=["-timestamp"],
+        filter=_runs_filter(args),
+    )
+
+
+def _local_runs(args: SelectRunsSupport, deleted: bool):
+    return var.list_runs(
         sort=["-timestamp"],
         filter=_runs_filter(args),
         deleted=deleted,
     )
-    selected = _select_runs(runs, args)
-    return selected, len(runs)
 
 
 def _select_runs(runs: list[Run], args: SelectRunsSupport) -> list[IndexedRun]:
@@ -360,3 +379,18 @@ def format_summary_value(value: Any):
     if isinstance(value, list):
         return ", ".join([format_summary_value(item) for item in value])
     return str(value)
+
+
+# =================================================================
+# Archive support
+# =================================================================
+
+
+def archive_dir(archive_name: str):
+    dirname = find_archive_dir(archive_name)
+    if not dirname:
+        cli.exit_with_error(
+            f"archive '{archive_name}' does not exist\n\n"  # \
+            "Use '[cmd]gage archive --list[/]' to show available archives."
+        )
+    return dirname
