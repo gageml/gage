@@ -353,7 +353,7 @@ Create the three board config candidates.
 
 Gage selects `board.json` first.
 
-    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
+    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})  # +paths
     Using config from ./board.json
     Generating board data for 0 run(s)
     <0>
@@ -362,7 +362,7 @@ Delete `board.json` - Gage uses `board.toml`.
 
     >>> rm("board.json")
 
-    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
+    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})  # +paths
     Using config from ./board.toml
     Generating board data for 0 run(s)
     <0>
@@ -371,7 +371,7 @@ Delete `board.toml` - Gage uses `board.yaml`.
 
     >>> rm("board.toml")
 
-    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
+    >>> run("gage --verbose board", env={"GAGE_RUNS": "."})  # +paths
     gage: Unexpected board config in "./board.yaml" - expected a map
     <1>
 
