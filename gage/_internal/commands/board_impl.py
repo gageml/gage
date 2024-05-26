@@ -9,18 +9,19 @@ import datetime
 import io
 import json
 import logging
-import os
 import sys
 
 from .. import cli
+
+from ..board import load_board_def
+from ..board import default_board_config_path_for_dir
+
 from ..board_util import *
 from ..run_util import *
 
 from .impl_support import format_summary_value, selected_runs
 
 log = logging.getLogger(__name__)
-
-DEFAULT_CONFIG_NAMES = ["board.json", "board.toml", "board.yaml"]
 
 
 class Args(NamedTuple):
@@ -34,7 +35,7 @@ class Args(NamedTuple):
 
 def show_board(args: Args):
     _check_args(args)
-    board = _init_board(args)
+    board = _load_board_def(args)
     runs = _board_runs(board, args)
     data = _board_data(board, runs)
     if args.json:
@@ -52,33 +53,32 @@ def _check_args(args: Args):
         cli.exit_with_error("You can't use both --config and --no-config options.")
 
 
-def _init_board(args: Args) -> BoardDef:
-    config = _board_config(args)
-    if not config:
+def _load_board_def(args: Args) -> BoardDef:
+    filename = _config_filename(args)
+    if not filename:
         log.info("Using default board config")
-        return BoardDef({})
-    log.info("Using config from %s", config)
+        return BoardDef("<default>", {})
     try:
-        return load_board_def(config)
+        board_def = load_board_def(filename)
     except FileNotFoundError:
-        cli.exit_with_error(f"Config file \"{config}\" does not exist")
+        cli.exit_with_error(f"Config file \"{filename}\" does not exist")
     except ValueError as e:
-        cli.exit_with_error(f"Unexpected board config in \"{config}\" - {e.args[0]}")
+        cli.exit_with_error(f"Unexpected board config in \"{filename}\" - {e.args[0]}")
+    else:
+        log.info("Using config from %s", board_def.filename)
+        return board_def
 
 
-def _board_config(args: Args):
+def _config_filename(args: Args):
     if args.config:
         return args.config
-    if args.no_config:
+    elif args.no_config:
         return None
-    return _default_config()
-
-
-def _default_config():
-    for name in DEFAULT_CONFIG_NAMES:
-        if os.path.exists(name):
-            return name
-    return None
+    else:
+        try:
+            return default_board_config_path_for_dir(".")
+        except FileNotFoundError:
+            return None
 
 
 def _board_runs(board: BoardDef, args: Args):
@@ -97,20 +97,8 @@ def _board_data(board: BoardDef, runs: list[Run]):
     log.info("Generating board data for %i run(s)", len(runs))
     try:
         return board_data(board, runs)
-    except MissingGroupBy:
-        cli.exit_with_error(
-            "group-select for board is missing group-by field: expected "
-            "run-attr, attribute, metric, or config"
-        )
-    except MissingGroupSelector:
-        cli.exit_with_error(
-            "group-select for board must specify either min or max fields"
-        )
-    except MissingGroupSelectorField:
-        cli.exit_with_error(
-            f"group-select selector (min/max) for board is missing field: "
-            "expected run-attr, attribute, metric, or config"
-        )
+    except BoardConfigError as e:
+        cli.exit_with_error(f"invalid board config: {e}")
 
 
 def _print_json(data: dict[str, Any]):

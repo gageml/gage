@@ -308,21 +308,22 @@ rather than attribute.
 Group select requires a `group` field spec.
 
     >>> run("gage board --json --config group-missing-group.yaml")  # -space
-    gage: group-select for board is missing group-by field: expected run-attr,
-    attribute, metric, or config
+    gage: invalid board config: group-select for board is missing
+    group-by field: expected run-attr, attribute, metric, or config
     <1>
 
 Group must specify either `min` or `max` but not both.
 
     >>> run("gage board --json --config group-missing-min-max.yaml")  # -space
-    gage: group-select for board must specify either min or max fields
+    gage: invalid board config: group-select for board must specify
+    either min or max fields
     <1>
 
 `min` or `max` specs require valid field references.
 
     >>> run("gage board --json --config group-missing-min-field.yaml")  # -space
-    gage: group-select selector (min/max) for board is missing field: expected
-    run-attr, attribute, metric, or config
+    gage: invalid board config: group-select selector (min/max) for
+    board is missing field: expected run-attr, attribute, metric, or config
     <1>
 
 ## Default Board Config
@@ -353,7 +354,7 @@ Create the three board config candidates.
 Gage selects `board.json` first.
 
     >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
-    Using config from board.json
+    Using config from ./board.json
     Generating board data for 0 run(s)
     <0>
 
@@ -362,7 +363,7 @@ Delete `board.json` - Gage uses `board.toml`.
     >>> rm("board.json")
 
     >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
-    Using config from board.toml
+    Using config from ./board.toml
     Generating board data for 0 run(s)
     <0>
 
@@ -371,8 +372,7 @@ Delete `board.toml` - Gage uses `board.yaml`.
     >>> rm("board.toml")
 
     >>> run("gage --verbose board", env={"GAGE_RUNS": "."})
-    Using config from board.yaml
-    gage: Unexpected board config in "board.yaml" - expected a map
+    gage: Unexpected board config in "./board.yaml" - expected a map
     <1>
 
 Use `--no-config` to explicit use default config.

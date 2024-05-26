@@ -59,7 +59,7 @@ def gagefile_validation_error(
         cli.err(json.dumps(output, indent=2, sort_keys=True))
     else:
         for err in schema_util.validation_errors(e):
-            cli.err(err)
+            cli.err(str(err))
     raise SystemExit(1)
 
 

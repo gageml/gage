@@ -3,6 +3,9 @@
 from typing import *
 
 __all__ = [
+    "BoardConfigError",
+    "BoardConfigLoadError",
+    "BoardConfigValidationError",
     "BoardDef",
     "BoardDefColumn",
     "BoardDefRunSelect",
@@ -87,6 +90,22 @@ class UserConfigLoadError(UserConfigError):
 
 
 class UserConfigValidationError(UserConfigError):
+    def __init__(self, validation_result: Any):
+        super().__init__(validation_result)
+        self.validation_result = validation_result
+
+
+class BoardConfigError(Exception):
+    pass
+
+
+class BoardConfigLoadError(BoardConfigError):
+    def __init__(self, filename: str, msg: Any):
+        self.filename = filename
+        self.msg = msg
+
+
+class BoardConfigValidationError(BoardConfigError):
     def __init__(self, validation_result: Any):
         super().__init__(validation_result)
         self.validation_result = validation_result
@@ -490,7 +509,7 @@ class BoardDefRunSelect:
     def get_operation(self) -> str | None:
         return self._data.get("operation")
 
-    def get_status(self) -> str | None:
+    def get_status(self) -> str | list[str] | None:
         return self._data.get("status")
 
     def get_group(self) -> dict[str, Any] | None:
@@ -512,7 +531,8 @@ class BoardDefGroupSelect:
 
 
 class BoardDef:
-    def __init__(self, data: dict[str, Any]):
+    def __init__(self, filename: str, data: dict[str, Any]):
+        self.filename = filename
         self._data = data
 
     def get_id(self) -> str | None:

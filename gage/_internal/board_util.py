@@ -10,21 +10,15 @@ import operator
 
 from functools import cmp_to_key
 
-from .project_util import load_project_data
 from .run_util import *
-
 from .util import kebab_to_camel
 
 log = logging.getLogger(__name__)
 
 __all__ = [
     "BoardConfigError",
-    "MissingGroupBy",
-    "MissingGroupSelector",
-    "MissingGroupSelectorField",
     "board_data",
     "filter_board_runs",
-    "load_board_def",
 ]
 
 _ColDef = dict[str, Any]
@@ -32,29 +26,6 @@ _ColDefs = list[_ColDef]
 _ExtraColAttrs = dict[str, Any]
 _Row = dict[str, Any]
 _RowData = list[dict[str, Any]]
-
-
-class BoardConfigError(Exception):
-    pass
-
-
-class MissingGroupBy(BoardConfigError):
-    pass
-
-
-class MissingGroupSelector(BoardConfigError):
-    pass
-
-
-class MissingGroupSelectorField(BoardConfigError):
-    pass
-
-
-def load_board_def(config_filename: str):
-    data = load_project_data(config_filename)
-    if not isinstance(data, dict):
-        raise ValueError("expected a map")
-    return BoardDef(data)
 
 
 def filter_board_runs(runs: list[Run], board: BoardDef):
@@ -78,10 +49,13 @@ def _maybe_apply_op_filter(op: str | None, filters: list[Callable[[Run], bool]])
 
 
 def _maybe_apply_status_filter(
-    status: str | None, filters: list[Callable[[Run], bool]]
+    status: str | list[str] | None,
+    filters: list[Callable[[Run], bool]],
 ):
     if status:
-        filters.append(lambda run: run_status(run) == status)
+        if isinstance(status, str):
+            status = [status]
+        filters.append(lambda run: run_status(run) in status)
 
 
 def board_data(board: BoardDef, runs: list[Run]) -> dict[str, Any]:
@@ -314,7 +288,10 @@ def _filter_by_group(row_data: _RowData, board: BoardDef) -> _RowData:
 def _group_key_f(group_select: BoardDefGroupSelect) -> Callable[[_Row], Any]:
     reader = _field_reader(group_select.get_group_by())
     if not reader:
-        raise MissingGroupBy()
+        raise BoardConfigError(
+            "group-select for board is missing group-by field: expected "
+            "run-attr, attribute, metric, or config"
+        )
     return reader
 
 
@@ -356,7 +333,9 @@ def _select_from_group_f(
     max = group_select.get_max()
     if max:
         return _one_row_select_f(max, operator.gt, "max")
-    raise MissingGroupSelector()
+    raise BoardConfigError(
+        "group-select for board must specify either min or max fields"
+    )
 
 
 def _one_row_select_f(
@@ -366,7 +345,10 @@ def _one_row_select_f(
 ) -> Callable[[_RowData], _Row]:
     field_val = _field_reader(field_spec)
     if not field_val:
-        raise MissingGroupSelectorField()
+        raise BoardConfigError(
+            "group-select selector (min/max) for board is missing field: "
+            "expected run-attr, attribute, metric, or config"
+        )
 
     def f(row_data: _RowData) -> _Row:
         assert row_data

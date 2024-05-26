@@ -29,7 +29,7 @@ Use `board_data` to generate the board data for a list of runs.
     >>> from gage._internal.var import list_runs
 
     >>> runs = list_runs(sort=["-timestamp"])
-    >>> default_board = board_data(BoardDef({}), runs)
+    >>> default_board = board_data(BoardDef("<test>", {}), runs)
 
 By default, `board_data` includes columns for default run attributes,
 all config, all attributes, and all metrics.
@@ -122,6 +122,8 @@ included in the board. `board-op-2.toml` selects only `op-2` runs. Use
 
 Use `load_board_def` to load the board in `board-op-2.toml`.
 
+    >>> from gage._internal.board import load_board_def
+
     >>> board = load_board_def(sample("projects", "boards", "board-op-2.toml"))
 
 Generate another run. Use `default`.
@@ -178,7 +180,7 @@ The run summary includes values that have addition attributes.
 
 Field attributes are included in the board data.
 
-    >>> board_data(BoardDef({}), list_runs())  # +json +parse
+    >>> board_data(BoardDef("<test>", {}), list_runs())  # +json +parse
     {
       "colDefs": [
         {

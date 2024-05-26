@@ -98,7 +98,7 @@ The default type is 'local'.
     ...     try:
     ...         validate_user_config_data(data)
     ...     except UserConfigValidationError as e:
-    ...         json_pprint(validation_errors(e))
+    ...         json_pprint([str(err) for err in validation_errors(e)])
 
 Empty config.
 
@@ -110,9 +110,7 @@ Unknown top-level attributes.
 
     >>> validate({"unknown": {}})
     [
-      [
-        "unknown"
-      ]
+      "Additional properties: ['unknown']"
     ]
 
 Invalid repository type.

@@ -19,7 +19,7 @@ from rich import prompt
 from .. import cli
 
 from .board_impl import Args as BoardArgs
-from .board_impl import _init_board
+from .board_impl import _load_board_def
 from .board_impl import _board_runs
 from .board_impl import _board_data
 
@@ -53,7 +53,7 @@ def publish(args: Args):
     board_args = BoardArgs(
         args.runs, args.where, args.config, args.no_config, True, False
     )
-    board = _init_board(board_args)
+    board = _load_board_def(board_args)
     board_id = _board_id(args, board)
     token = _api_token()
     with cli.status() as status:

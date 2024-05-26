@@ -62,7 +62,7 @@ object of error information.
     >>> try:
     ...     validate_gagefile_data(123)
     ... except GageFileValidationError as e:
-    ...     json_pprint(validation_errors(e))
+    ...     json_pprint([str(err) for err in validation_errors(e)])
     [
       "The instance must be of type \"object\""
     ]
@@ -229,7 +229,7 @@ Invalid examples:
     ...
     The instance must be of type "string"
     The instance must be of type "array"
-    ['foo']
+    Additional properties: ['foo']
 
 ### `sourcecode`
 
@@ -286,7 +286,7 @@ Invalid values:
     Properties ['test'] are invalid
     Properties ['sourcecode'] are invalid
     ...
-    [0]
+    Items: [0]
     The instance must be of type "string"
     The instance must be of type "boolean"
 
@@ -308,7 +308,7 @@ Strings must be non-empty.
     Properties ['test'] are invalid
     Properties ['config'] are invalid
     ...
-    [0]
+    Items: [0]
     The text is too short (minimum 1 characters)
     ...
 

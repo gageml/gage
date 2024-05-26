@@ -102,7 +102,7 @@ Exec commands must be either strings or arrays of strings.
     Properties ['stage-dependencies', 'stage-runtime', 'run'] are invalid
     ...
     The instance must be of type "string"
-    [0]
+    Items: [0]
     ...
     The instance must be of type "string"
     The instance must be of type "array"
@@ -122,7 +122,7 @@ resolved dependency must be written, the dependency may specify
     >>> run("gage check writeable-dependencies.json")  # TODO implement deps
     There are errors in writeable-dependencies.json
     Properties ['train'] are invalid
-    ['requires']
+    Additional properties: ['requires']
     <1>
 
 ## Missing required keys
@@ -208,7 +208,7 @@ the run phase execs.
     Properties ['progress'] are invalid
     ...
     The instance must be of type "string"
-    ['not-supported']
+    Additional properties: ['not-supported']
     Properties ['progress'] are invalid
     ...
     The instance must be of type "string"
@@ -230,10 +230,10 @@ listing description.
     Properties ['op', 'op-2', 'op-3'] are invalid
     Properties ['listing'] are invalid
     Properties ['description'] are invalid
-    [0]
+    Items: [0]
     The instance must be of type "string"
     Properties ['listing'] are invalid
-    ['foo']
+    Additional properties: ['foo']
     Properties ['listing'] are invalid
     The instance must be of type "object"
     <1>

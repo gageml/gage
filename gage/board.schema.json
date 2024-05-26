@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gageml.org/gagefile",
+  "title": "Gage File",
+  "$defs": {
+    "column": {
+      "oneOf": [
+        {
+          "type": "object",
+          "title": "Column definition",
+          "additionalProperties": false,
+          "oneOf": [
+            {
+              "properties": {
+                "field": {
+                  "$ref": "#/$defs/fieldRef"
+                }
+              },
+              "required": ["field"]
+            },
+            {
+              "properties": {
+                "run-attr": {
+                  "type": "string",
+                  "title": "Run attribute field"
+                }
+              },
+              "required": ["run-attr"]
+            },
+            {
+              "properties": {
+                "metric": {
+                  "type": "string",
+                  "title": "Summary metric field"
+                }
+              },
+              "required": ["metric"]
+            },
+            {
+              "properties": {
+                "attribute": {
+                  "type": "string",
+                  "title": "Summary attribute field"
+                }
+              },
+              "required": ["attribute"]
+            },
+            {
+              "properties": {
+                "config": {
+                  "type": "string",
+                  "title": "Config field"
+                }
+              },
+              "required": ["config"]
+            }
+          ],
+          "properties": {
+            "field": true,
+            "metric": true,
+            "attribute": true,
+            "config": true,
+            "label": {
+              "type": "string",
+              "title": "Column label"
+            },
+            "description": {
+              "type": "string",
+              "title": "Column description"
+            },
+            "type": {
+              "title": "Column data style",
+              "type": "string"
+            },
+            "links": {
+              "type": "array",
+              "title": "Column links",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "href": { "type": "string" },
+                  "label": { "type": "string" },
+                  "type": {
+                    "enum": [
+                      "paper",
+                      "model",
+                      "dataset",
+                      "leaderboard",
+                      "code",
+                      "help",
+                      "website"
+                    ]
+                  }
+                },
+                "required": ["href"]
+              }
+            },
+            "hide": {
+              "type": "boolean",
+              "title": "Flag to hide column"
+            },
+            "sort": {
+              "enum": ["asc", "desc"],
+              "title": "Default column sort direction"
+            },
+            "filter": {
+              "oneOf": [
+                { "title": "Column filter type", "type": "string" },
+                { "title": "Whether or not to filter", "type": "boolean" }
+              ]
+            },
+            "flag-filter-label": {
+              "type": "string",
+              "title": "Filter label for flag column filters"
+            },
+            "filter-select-all": {
+              "type": "boolean",
+              "title": "Whether select all is available in filter"
+            },
+            "filter-search": {
+              "type": "boolean",
+              "title": "Whether search is available in filter"
+            },
+            "agg": {
+              "title": "Default aggregation function for column values",
+              "enum": [
+                false,
+                "sum",
+                "min",
+                "max",
+                "count",
+                "avg",
+                "first",
+                "last"
+              ]
+            }
+          }
+        },
+        {
+          "title": "Column field reference",
+          "$ref": "#/$defs/fieldRef"
+        }
+      ]
+    },
+    "fieldRef": {
+      "type": "string",
+      "title": "Property field spec",
+      "oneOf": [
+        {
+          "pattern": "^run-attr:.+$"
+        },
+        {
+          "pattern": "^metric:.+$"
+        },
+        {
+          "pattern": "^attribute:.+$"
+        },
+        {
+          "pattern": "^config:.+$"
+        }
+      ]
+    },
+    "runSelect": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "oneOf": [
+            { "$ref": "#/$defs/runStatus" },
+            { "type": "array", "items": { "$ref": "#/$defs/runStatus" } }
+          ]
+        },
+        "operation": {
+          "type": "string"
+        }
+      }
+    },
+    "runStatus": {
+      "enum": ["completed", "terminated", "error", "running"]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "title": "Board ID"
+    },
+    "name": {
+      "type": "string",
+      "title": "Board name"
+    },
+    "title": {
+      "type": "string",
+      "title": "Board title"
+    },
+    "description": {
+      "type": "string",
+      "title": "Board description"
+    },
+    "columns": {
+      "type": "array",
+      "title": "Board columns",
+      "items": {
+        "$ref": "#/$defs/column"
+      }
+    },
+    "run-select": {
+      "title": "Run select criteria",
+      "$ref": "#/$defs/runSelect"
+    }
+  }
+}
