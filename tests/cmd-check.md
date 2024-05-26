@@ -2,7 +2,7 @@
 
 Help for `check`:
 
-    >>> run("gage check --help")
+    >>> run("gage check --help")  # +diff
     Usage: gage check [options] [path]
     ⤶
       Show and validate settings.
@@ -20,6 +20,7 @@ Help for `check`:
       --version spec  Test Gage version against spec. Cannot
                       be used with path.
       --json          Format check output as JSON.
+      --board         Check board configuration in path.
       -v, --verbose   Show more information.
       -h, --help      Show this message and exit.
     <0>
@@ -54,7 +55,7 @@ directory for control.
 
     >>> assert x == tmp
 
-## Check Gage file
+## Check Gage File
 
 Validate `hello` example.
 
@@ -89,7 +90,15 @@ Generate an invalid Gage file.
     The instance must be of type "object"
     <1>
 
-## Check version
+## Check Board Config
+
+    >>> use_example("boards")
+
+    >>> run("gage check --board board.json")
+    board.json is a valid board configuration file
+    <0>
+
+## Check Version
 
 The `--version` option is used to check the Gage version against a
 version spec.
@@ -135,7 +144,7 @@ Non matching spec:
     See https://bit.ly/45AerAj for help with version specs.
     <1>
 
-## Incompatible params
+## Incompatible Params
 
     >>> run("gage check --version xxx some-path")
     version and path cannot be used together.

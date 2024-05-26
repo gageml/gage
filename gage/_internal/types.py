@@ -535,6 +535,9 @@ class BoardDef:
         self.filename = filename
         self._data = data
 
+    def as_json(self):
+        return self._data
+
     def get_id(self) -> str | None:
         return cast(str, self._data.get("id"))
 

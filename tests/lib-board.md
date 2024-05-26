@@ -120,6 +120,20 @@ A field may alternatively be specified as a string.
     The text must match the regular expression "^attribute:.+$"
     The text must match the regular expression "^config:.+$"
 
+Fields may be specified using properties that match the field type.
+
+    >>> validate_col({"run-attr": "id"})
+    ok
+
+    >>> validate_col({"metric": "loss"})
+    ok
+
+    >>> validate_col({"attribute": "type"})
+    ok
+
+    >>> validate_col({"config": "lr"})
+    ok
+
 ### Column Label
 
     >>> validate_col({"metric": "train_loss", "label": "Training Loss"})

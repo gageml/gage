@@ -34,6 +34,14 @@ JSONFlag = Annotated[
     ),
 ]
 
+BoardFlag = Annotated[
+    bool,
+    Option(
+        "--board",
+        help="Check board configuration in [arg]path[/].",
+    ),
+]
+
 VerboseFlag = Annotated[
     bool,
     Option(
@@ -48,6 +56,7 @@ def check(
     path: Path = "",
     version: Version = "",
     json: JSONFlag = False,
+    board: BoardFlag = False,
     verbose: VerboseFlag = False,
 ):
     """Show and validate settings.
@@ -58,4 +67,4 @@ def check(
     """
     from .check_impl import check, Args
 
-    check(Args(path, version, json, verbose))
+    check(Args(path, version, json, board, verbose))

@@ -10,6 +10,7 @@ import sys
 
 import gage
 
+from .. import board
 from .. import cli
 from .. import gagefile
 from .. import project_util
@@ -29,15 +30,34 @@ class Args(NamedTuple):
     path: str
     version: str
     json: bool
+    board: bool
     verbose: bool
 
 
 def check(args: Args):
     if args.path:
-        _check_gagefile_and_exit(args)
+        if args.board:
+            _check_board_and_exit(args)
+        else:
+            _check_gagefile_and_exit(args)
     if args.version:
         _check_version_and_exit(args)
     _print_check_info(args)
+
+
+def _check_board_and_exit(args: Args):
+    try:
+        data = board.load_board_def(args.path)
+    except FileNotFoundError:
+        error_handlers.file_not_found_error(args.path)
+    else:
+        try:
+            board.validate_board_data(data.as_json())
+        except BoardConfigValidationError as e:
+            error_handlers.schema_validation_error(e, args.path, args.verbose)
+        else:
+            cli.err(f"{args.path} is a valid board configuration file")
+            raise SystemExit(0)
 
 
 def _check_gagefile_and_exit(args: Args):
@@ -73,7 +93,7 @@ def _validate_gagefile_data_and_exit(data: Any, filename: str, args: Args):
     try:
         gagefile.validate_gagefile_data(data)
     except gagefile.GageFileValidationError as e:
-        error_handlers.gagefile_validation_error(e, filename, args.verbose)
+        error_handlers.schema_validation_error(e, filename, args.verbose)
     else:
         cli.err(f"{filename} is a valid Gage file")
         raise SystemExit(0)

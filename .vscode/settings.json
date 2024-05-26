@@ -17,6 +17,10 @@
     {
       "fileMatch": ["gage.json", "gage.toml", "**/samples/gagefiles/*.json"],
       "url": "/gage/gagefile.schema.json"
+    },
+    {
+      "fileMatch": ["board.json", "**/samples/board/*.json"],
+      "url": "/gage/board.schema.json"
     }
   ],
   "files.associations": {

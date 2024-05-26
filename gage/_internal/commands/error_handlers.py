@@ -12,14 +12,15 @@ from .. import gagefile
 from .. import run_util
 
 __all__ = [
+    "file_not_found_error",
     "gagefile_error",
     "gagefile_not_found",
     "gagefile_find_error",
-    "gagefile_validation_error",
     "gagefile_load_error",
     "opdef_not_found",
     "missing_exec_error",
     "run_exec_error",
+    "schema_validation_error",
 ]
 
 log = logging.getLogger(__name__)
@@ -44,11 +45,17 @@ def gagefile_find_error(path: str) -> NoReturn:
             "For help with Gage files try 'gage help gagefile'"
         )
     else:
-        cli.exit_with_error(f"File \"{path}\" does not exist")
+        file_not_found_error(path)
 
 
-def gagefile_validation_error(
-    e: gagefile.GageFileValidationError, filename: str, verbose: bool = False
+def file_not_found_error(path: str) -> NoReturn:
+    cli.exit_with_error(f"File \"{path}\" does not exist")
+
+
+def schema_validation_error(
+    e: SchemaValidationError,
+    filename: str,
+    verbose: bool = False,
 ):
     import json
     from .. import schema_util

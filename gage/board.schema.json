@@ -57,6 +57,7 @@
           ],
           "properties": {
             "field": true,
+            "run-attr": true,
             "metric": true,
             "attribute": true,
             "config": true,
