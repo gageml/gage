@@ -63,7 +63,7 @@
             "config": true,
             "label": {
               "type": "string",
-              "title": "Column label"
+              "title": "Column heading name"
             },
             "description": {
               "type": "string",
@@ -134,6 +134,14 @@
                 "first",
                 "last"
               ]
+            },
+            "pinned": {
+              "title": "Whether to pin the column",
+              "enum": ["left", "right"]
+            },
+            "row-group": {
+              "type": "boolean",
+              "title": "Group rows by this column"
             }
           }
         },
@@ -197,6 +205,16 @@
     "description": {
       "type": "string",
       "title": "Board description"
+    },
+    "group-column": {
+      "type": "object",
+      "title": "Group column config",
+      "properties": {
+        "label": {
+          "type": "string",
+          "title": "Group column heading name"
+        }
+      }
     },
     "columns": {
       "type": "array",

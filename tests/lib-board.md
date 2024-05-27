@@ -280,6 +280,32 @@ Aggregation is true by default.
                            'avg', 'first', 'last']
     ...
 
+### Column Pinning
+
+    >>> validate_col({"run-attr": "id", "pinned": "left"})
+    ok
+
+    >>> validate_col({"run-attr": "id", "pinned": "right"})
+    ok
+
+    >>> validate_col({"run-attr": "id", "pinned": "other"})  # +wildcard
+    Properties ['columns'] are invalid
+    ...
+    Properties ['pinned'] are invalid
+    Value must be one of: ['left', 'right']
+    ...
+
+### Row Groups
+
+    >>> validate_col({"config": "model", "row-group": True})
+    ok
+
+    >>> validate_col({"config": "model", "row-group": 123})  # +wildcard
+    Properties ['columns'] are invalid
+    ...
+    Properties ['row-group'] are invalid
+    The instance must be of type "boolean"
+    ...
 
 ### Unknown Column Properties
 
@@ -294,6 +320,17 @@ Columns can't have properties that aren't explicitly supported.
     The instance must be of type "string"
     The instance must be valid against exactly one subschema;
       it is valid against [0, 1, 2, 3] and invalid against []
+
+## Group Column
+
+The `group-column` attribute defines the group column attributes.
+
+    >>> validate({
+    ...     "group-column": {
+    ...         "label": "Custom Group"
+    ...     }
+    ... })
+    ok
 
 ## Run Select
 

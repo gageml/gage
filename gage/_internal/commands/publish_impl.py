@@ -51,7 +51,12 @@ class BoardDest(NamedTuple):
 
 def publish(args: Args):
     board_args = BoardArgs(
-        args.runs, args.where, args.config, args.no_config, True, False
+        args.runs,
+        args.where,
+        args.config,
+        args.no_config,
+        True,
+        False,
     )
     board = _load_board_def(board_args)
     board_id = _board_id(args, board)
@@ -67,7 +72,15 @@ def publish(args: Args):
     if not args.skip_runs:
         _copy_runs(runs, rclone_conf, rclone_env, board_dest)
     _delete_conf_tmp(rclone_conf)
-    cli.out(f"View board at https://beta.gage.live/boards/{board_id}")
+    endpoint = _board_endpoint()
+    cli.out(f"View board at {endpoint}/boards/{board_id}")
+
+
+def _board_endpoint():
+    from urllib.parse import urlparse
+
+    parsed = urlparse(_api_endpoint())
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _board_id(args: Args, board: BoardDef):
@@ -138,7 +151,7 @@ def _user_confirm_publish(args: Args, board: BoardDef, board_id: str, runs: list
 
 
 def _board_dest(board_id: str, token: str):
-    endpoint = os.getenv("GAGE_API") or DEFAULT_GAGE_API
+    endpoint = _api_endpoint()
     url = f"{endpoint}/v1/boards/{board_id}/creds"
     headers = {"Authorization": f"Bearer {token}"}
     log.debug("Getting board credentials at %s", url)
@@ -160,6 +173,10 @@ def _board_dest(board_id: str, token: str):
         )
         log.info("Publishing to %s/%s", board_dest.endpoint, board_dest.bucket)
         return board_dest
+
+
+def _api_endpoint():
+    return os.getenv("GAGE_API") or _dot_env().get("GAGE_API") or DEFAULT_GAGE_API
 
 
 RCLONE_CONF = """

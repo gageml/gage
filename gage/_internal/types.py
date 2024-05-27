@@ -550,6 +550,12 @@ class BoardDef:
     def get_description(self) -> str | None:
         return cast(str, self._data.get("description"))
 
+    def get_group_column(self) -> BoardDefColumn | None:
+        group_column = self._data.get("group-column")
+        if group_column is None:
+            return None
+        return cast(BoardDefColumn, group_column)
+
     def get_columns(self) -> list[BoardDefColumn]:
         return [_coerce_col(col) for col in self._data.get("columns") or []]
 

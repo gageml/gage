@@ -401,11 +401,14 @@ def _prune_row_data_fields(row_data: _RowData, col_defs: _ColDefs):
 
 def _board_meta(board: BoardDef):
     meta: dict[str, Any] = {}
-    _maybe_apply_board_meta(board.get_title(), "title", meta)
-    _maybe_apply_board_meta(board.get_description(), "description", meta)
+    _maybe_apply_meta(board.get_title(), "title", meta)
+    _maybe_apply_meta(board.get_description(), "description", meta)
+    group_col = board.get_group_column()
+    if group_col:
+        meta["groupColumn"] = _apply_col_def_key_case(group_col)
     return meta
 
 
-def _maybe_apply_board_meta(val: Any, attr: str, meta: dict[str, Any]):
+def _maybe_apply_meta(val: Any, attr: str, meta: dict[str, Any]):
     if val is not None:
         meta[attr] = val
