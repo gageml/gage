@@ -833,6 +833,7 @@ def _run_env(run: Run):
         "RUN_ID": run.id,
         "RUN_DIR": run.run_dir,
         "PARENT_PWD": os.getcwd(),
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
 
 

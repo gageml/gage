@@ -165,6 +165,7 @@
     "pwsh",
     "pycache",
     "pyfiles",
+    "PYTHONDONTWRITEBYTECODE",
     "rcetps",
     "rclone",
     "readlines",
