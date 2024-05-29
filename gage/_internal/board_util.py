@@ -11,6 +11,8 @@ import operator
 from functools import cmp_to_key
 
 from .run_util import *
+
+from .summary_util import format_summary_value
 from .util import kebab_to_camel
 
 log = logging.getLogger(__name__)
@@ -18,7 +20,9 @@ log = logging.getLogger(__name__)
 __all__ = [
     "BoardConfigError",
     "board_data",
+    "column_label",
     "filter_board_runs",
+    "formatted_cell_value",
 ]
 
 _ColDef = dict[str, Any]
@@ -390,7 +394,7 @@ def _group_item_cmp(lhs: tuple[Any, Any], rhs: tuple[Any, Any]):
 
 
 def _prune_row_data_fields(row_data: _RowData, col_defs: _ColDefs):
-    fields = set(col["field"] for col in col_defs)
+    fields = set(col["field"] for col in col_defs if "field" in col)
     return [
         # Keep row data for all col def fields and for run ID (run ID
         # should always appear in row data)
@@ -412,3 +416,108 @@ def _board_meta(board: BoardDef):
 def _maybe_apply_meta(val: Any, attr: str, meta: dict[str, Any]):
     if val is not None:
         meta[attr] = val
+
+
+def column_label(column: BoardDefColumn):
+    label = column.get("label")
+    if label:
+        return cast(str, label)
+    try:
+        field = column["field"]
+    except KeyError:
+        if "score" in column:
+            return "score"
+        else:
+            return ""
+    else:
+        return _default_field_label(field)
+
+
+def _default_field_label(field: str):
+    if field.startswith("run:"):
+        return field[4:]
+    elif field.startswith("metric:"):
+        return field[7:]
+    elif field.startswith("attribute:"):
+        return field[10:]
+    elif field.startswith("config:"):
+        return field[7:]
+    else:
+        return field
+
+
+def formatted_cell_value(column: BoardDefColumn, row: dict[str, Any]):
+    try:
+        field = column["field"]
+    except KeyError:
+        try:
+            score = column["score"]
+        except KeyError:
+            return ""
+        else:
+            return _table_row_score(column["score"], row)
+    else:
+        return _table_row_field_value(column["field"], row.get(field))
+
+
+def _table_row_field_value(field: str, value: Any):
+    if field.startswith("run:"):
+        if field == "run:started" or field == "run:stopped":
+            return _format_datetime(value)
+        return format_summary_value(value)
+    elif field.startswith("attribute:") and isinstance(value, str):
+        return _try_format_datetime(value) or format_summary_value(value)
+    else:
+        return format_summary_value(value)
+
+
+def _try_format_datetime(s: str):
+    try:
+        return _format_datetime(s)
+    except ValueError:
+        return None
+
+
+def _format_datetime(s: str | None):
+    if not s:
+        return ""
+    d = datetime.datetime.fromisoformat(s)
+    return datetime.datetime.strftime(d, "%Y-%m-%d %H:%M")
+
+
+def _table_row_score(score_config: Any, row: Any):
+    try:
+        average = score_config["average"]
+    except KeyError:
+        log.debug("Unsupported score config (expected 'average'): %s", score_config)
+        return ""
+    else:
+        score = _average_score(average, row)
+        return format_summary_value(score) if score is not None else ""
+
+
+def _average_score(fields: list[str | tuple[str, float | int]], row: Any):
+    vals: list[tuple[float, float]] = []
+    for field in fields:
+        try:
+            vals.append(_num_field_val_and_weight(field, row))
+        except (KeyError, TypeError, ValueError):
+            pass
+    if not vals:
+        return None
+    total_weight = sum(weight for val, weight in vals)
+    return sum(val * weight / total_weight for val, weight in vals)
+
+
+def _num_field_val_and_weight(
+    field: str | tuple[str, float | int], row: dict[str, Any]
+):
+    if isinstance(field, str):
+        field_name = field
+        weight = 1
+    else:
+        field_name, weight = field
+    val = row[field_name]
+    if isinstance(val, dict):
+        val = val["value"]
+    return (float(val), float(weight))

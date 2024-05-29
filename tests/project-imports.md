@@ -104,6 +104,7 @@
     gage._internal.run_util
     gage._internal.schema_util
     gage._internal.shlex_util
+    gage._internal.summary_util
     gage._internal.sys_config
     gage._internal.test
     gage._internal.typer_rich_util

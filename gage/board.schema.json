@@ -53,6 +53,14 @@
                 }
               },
               "required": ["config"]
+            },
+            {
+              "properties": {
+                "score": {
+                  "$ref": "#/$defs/score"
+                }
+              },
+              "required": ["score"]
             }
           ],
           "properties": {
@@ -61,6 +69,7 @@
             "metric": true,
             "attribute": true,
             "config": true,
+            "score": true,
             "label": {
               "type": "string",
               "title": "Column heading name"
@@ -166,6 +175,33 @@
         },
         {
           "pattern": "^config:.+$"
+        }
+      ]
+    },
+    "score": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "average": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  { "$ref": "#/$defs/fieldRef" },
+                  {
+                    "type": "array",
+                    "prefixItems": [
+                      { "$ref": "#/$defs/fieldRef" },
+                      { "type": "number" }
+                    ],
+                    "items": false
+                  }
+                ]
+              }
+            }
+          },
+          "required": ["average"]
         }
       ]
     },

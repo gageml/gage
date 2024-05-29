@@ -1,0 +1,12 @@
+columns:
+  - "config:x"
+  - metric: y
+  - attribute: z
+  - score:
+      average: ['config:x', 'metric:y']
+    label: score-1
+  - score:
+      average:
+       - config:x
+       - [metric:y, 2]
+    label: score-2

@@ -5,7 +5,6 @@ from typing import *
 from ..types import *
 
 import csv
-import datetime
 import io
 import json
 import logging
@@ -19,7 +18,7 @@ from ..board import default_board_config_path_for_dir
 from ..board_util import *
 from ..run_util import *
 
-from .impl_support import format_summary_value, selected_runs
+from .impl_support import selected_runs
 
 log = logging.getLogger(__name__)
 
@@ -136,49 +135,9 @@ def _csv_cell_value(val: Any) -> Any:
 
 def _print_table(data: dict[str, Any]):
     table = cli.Table()
-    fields = [(col["field"], col) for col in data["colDefs"]]
-    for field, col in fields:
-        table.add_column(col.get("label") or _table_default_field_label(field))
+    cols = data["colDefs"]
+    for col in cols:
+        table.add_column(column_label(col))
     for row in data["rowData"]:
-        table.add_row(
-            *[_format_summary_value(field, row.get(field)) for field, _ in fields]
-        )
+        table.add_row(*[formatted_cell_value(col, row) for col in cols])
     cli.out(table)
-
-
-def _table_default_field_label(field: str):
-    if field.startswith("run:"):
-        return field[4:]
-    elif field.startswith("metric:"):
-        return field[7:]
-    elif field.startswith("attribute:"):
-        return field[10:]
-    elif field.startswith("config:"):
-        return field[7:]
-    else:
-        return field
-
-
-def _format_summary_value(field: str, value: Any):
-    if field.startswith("run:"):
-        if field == "run:started" or field == "run:stopped":
-            return _format_datetime(value)
-        return format_summary_value(value)
-    elif field.startswith("attribute:") and isinstance(value, str):
-        return _try_format_datetime(value) or format_summary_value(value)
-    else:
-        return format_summary_value(value)
-
-
-def _format_datetime(s: str | None):
-    if not s:
-        return ""
-    d = datetime.datetime.fromisoformat(s)
-    return datetime.datetime.strftime(d, "%Y-%m-%d %H:%M")
-
-
-def _try_format_datetime(s: str):
-    try:
-        return _format_datetime(s)
-    except ValueError:
-        return None

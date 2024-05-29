@@ -348,3 +348,81 @@ case.
       "foo": 123,
       "fooBar": 456
     }
+
+## Column Labels
+
+`column_label` returns a label for a column definition.
+
+If a column definition provides a label, it's always used.
+
+    >>> column_label({"label": "My Col"})
+    'My Col'
+
+    >>> column_label({"label": "My Col", "field": "metric:foo"})
+    'My Col'
+
+If `field` is specified, it returns a label appropriate for that field.
+
+    >>> column_label({"field": "run:id"})
+    'id'
+
+    >>> column_label({"field": "metric:foo"})
+    'foo'
+
+    >>> column_label({"field": "config:bar"})
+    'bar'
+
+If `field` uses an unknown prefix, the field value is used.
+
+    >>> column_label({"field": "unknown:foo"})
+    'unknown:foo'
+
+If the column uses a score, the label is 'score'.
+
+    >>> column_label({"score": 123})
+    'score'
+
+## Cell Values
+
+`formatted_cell_value` returns a formatted cell value for a column
+definition and row.
+
+    >>> formatted_cell_value({"field": "foo"}, {"foo": 1})
+    '1'
+
+    >>> formatted_cell_value({"field": "foo"}, {"foo": 1.1234567})
+    '1.123'
+
+If the column is a score, `formatted_cell_value` applies the scoring
+function to the row values.
+
+### Average Score
+
+    >>> formatted_cell_value(
+    ...     {"score": {"average": ["a"]}},
+    ...     {"a": 1}
+    ... )
+    '1'
+
+    >>> formatted_cell_value(
+    ...     {"score": {"average": ["a", "b"]}},
+    ...     {"a": 1, "b": 2}
+    ... )
+    '1.5'
+
+Missing values are omitted from the average.
+
+    >>> formatted_cell_value(
+    ...     {"score": {"average": ["a", "b"]}},
+    ...     {"a": 1}
+    ... )
+    '1'
+
+Values can be weighted relative to other values. The default weight is
+1.
+
+    >>> formatted_cell_value(
+    ...     {"score": {"average": [["a", 2], "b"]}},
+    ...     {"a": 1, "b": 2}
+    ... )
+    '1.333'

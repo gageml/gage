@@ -64,12 +64,13 @@ A field spec is required.
     The instance must be valid against exactly one subschema;
       it is valid against [] and invalid against [0, 1]
     The instance must be valid against exactly one subschema;
-      it is valid against [] and invalid against [0, 1, 2, 3, 4]
+      it is valid against [] and invalid against [0, 1, 2, 3, 4, 5]
     The object is missing required properties ['field']
     The object is missing required properties ['run-attr']
     The object is missing required properties ['metric']
     The object is missing required properties ['attribute']
     The object is missing required properties ['config']
+    The object is missing required properties ['score']
     The instance must be of type "string"
     The instance must be valid against exactly one subschema;
       it is valid against [0, 1, 2, 3] and invalid against []
@@ -133,6 +134,38 @@ Fields may be specified using properties that match the field type.
 
     >>> validate_col({"config": "lr"})
     ok
+
+### Column Score
+
+`score` may be used as a field alternative. `score` must be a supported
+operation. Currently Gage only supports 'average'. `average` is a list
+of field refs.
+
+    >>> validate_col({"score": {"average": ["metric:a", "metric:b"]}})
+    ok
+
+Other values aren't supported.
+
+    >>> validate_col({"score": 123})  # +wildcard -space
+    Properties ['columns'] are invalid
+    ...
+    Properties ['score'] are invalid
+    The instance must be valid against exactly one subschema;
+      it is valid against [] and invalid against [0]
+    The instance must be of type "object"
+    ...
+
+Other operations aren't supported.
+
+    >>> validate_col({"score": {"foo": 123}})  # +wildcard -space
+    Properties ['columns'] are invalid
+    ...
+    Properties ['score'] are invalid
+    The instance must be valid against exactly one subschema;
+      it is valid against [] and invalid against [0]
+    Additional properties: ['foo']
+    The object is missing required properties ['average']
+    ...
 
 ### Column Label
 

@@ -74,7 +74,7 @@ YesFlag = Annotated[
 
 
 def publish(
-    board: Board = "",
+    board_id: Board = "",
     runs: RunArgs = None,
     where: Where = "",
     config: Config = "",
@@ -85,4 +85,14 @@ def publish(
     """Publish a board."""
     from .publish_impl import publish, Args
 
-    publish(Args(board, runs or [], where, config, no_config, skip_runs, yes))
+    publish(
+        Args(
+            board_id,
+            runs or [],
+            where,
+            config,
+            no_config,
+            skip_runs,
+            yes,
+        )
+    )

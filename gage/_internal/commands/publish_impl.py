@@ -33,7 +33,7 @@ DEFAULT_GAGE_API = "https://beta.gage.live/api"
 
 
 class Args(NamedTuple):
-    board: str
+    board_id: str
     runs: list[str]
     where: str
     config: str
@@ -84,7 +84,7 @@ def _board_endpoint():
 
 
 def _board_id(args: Args, board: BoardDef):
-    id = args.board or board.get_id()
+    id = args.board_id or board.get_id()
     if not id:
         if args.config:
             cli.exit_with_error(

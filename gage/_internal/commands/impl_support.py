@@ -25,11 +25,12 @@ from ..run_util import run_status
 from ..run_util import run_summary
 from ..run_util import run_timestamp
 
+from ..summary_util import format_summary_value
+
 log = logging.getLogger(__name__)
 
 
 __all__ = [
-    "format_summary_value",
     "one_run",
     "one_run_for_spec",
     "runs_table",
@@ -361,24 +362,6 @@ def _fit(l: list[Any], width: int):
         if width <= limit:
             return [x for i, x in enumerate(l) if i not in drop]
     return l
-
-
-def format_summary_value(value: Any):
-    if isinstance(value, dict):
-        value = value.get("value", "")
-    if isinstance(value, float):
-        return f"{value:.4g}"
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return ""
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, list):
-        return ", ".join([format_summary_value(item) for item in value])
-    return str(value)
 
 
 # =================================================================

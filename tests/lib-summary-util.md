@@ -2,7 +2,7 @@
 
 ## Format Summary Values
 
-    >>> from gage._internal.commands.impl_support import format_summary_value
+    >>> from gage._internal.summary_util import format_summary_value
 
     >>> format_summary_value(1)
     '1'
