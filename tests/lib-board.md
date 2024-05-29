@@ -300,17 +300,17 @@ Other filter settings:
     >>> validate_col({"metric": "loss", "agg": "other"})  # +wildcard -space
     Properties ['columns'] are invalid
     ...
-    Value must be one of: [False, 'sum', 'min', 'max', 'count',
-                           'avg', 'first', 'last']
+    Value must be one of: [False, 'sum', 'min', 'max', 'count', 'avg',
+                           'first', 'first-val', 'last', 'last-val']
     ...
 
-Aggregation is true by default.
+Aggregation is true by default and so true is not supported.
 
     >>> validate_col({"metric": "loss", "agg": True})  # +wildcard -space
     Properties ['columns'] are invalid
     ...
-    Value must be one of: [False, 'sum', 'min', 'max', 'count',
-                           'avg', 'first', 'last']
+    Value must be one of: [False, 'sum', 'min', 'max', 'count', 'avg',
+                           'first', 'first-val', 'last', 'last-val']
     ...
 
 ### Column Pinning

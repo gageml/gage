@@ -141,7 +141,9 @@
                 "count",
                 "avg",
                 "first",
-                "last"
+                "first-val",
+                "last",
+                "last-val"
               ]
             },
             "pinned": {
