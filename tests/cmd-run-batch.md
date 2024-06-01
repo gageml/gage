@@ -123,6 +123,62 @@ Run a batch using the two batch files.
     3 + 5 = 8
     <0>
 
+## Batch Configuration
+
+Batch files provide additional configuration to runs. Configuration
+values that are not specified in batch files are read from the operation
+defaults.
+
+The `add` operation defined in the previous section has two
+configuration keys: `x` and `y`, each with a default value.
+
+    >>> run("gage run add -y")
+    1 + 2 = 3
+    <0>
+
+The default values are used for config.
+
+    >>> run("gage show --config")
+    | x | 1 |
+    | y | 2 |
+    <0>
+
+Run a batch using `y.csv`, which only specifies `y` values.
+
+    >>> run("gage run add -b y.csv -y")
+    1 + 4 = 5
+    1 + 5 = 6
+    <0>
+
+    >>> run("gage show --config")
+    | x | 1 |
+    | y | 5 |
+    <0>
+
+Flags override default values.
+
+    >>> run("gage run add -b y.csv x=11 -y")
+    11 + 4 = 15
+    11 + 5 = 16
+    <0>
+
+    >>> run("gage show --config")
+    | x | 11 |
+    | y | 5  |
+    <0>
+
+Flags override batch values as well.
+
+    >>> run("gage run add -b y.csv y=22 -y")
+    1 + 22 = 23
+    1 + 22 = 23
+    <0>
+
+    >>> run("gage show --config")
+    | x | 1  |
+    | y | 22 |
+    <0>
+
 ## Errors
 
 Only CSV and JSON files are supported.

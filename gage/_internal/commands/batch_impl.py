@@ -17,6 +17,8 @@ from .. import cli
 
 from ..lang import parse_config_value
 
+from ..run_config import read_project_config
+
 from ..run_util import run_phase_channel
 from ..run_util import meta_opref
 
@@ -25,8 +27,9 @@ from .run_impl import Args
 from .run_impl import RunContext
 from .run_impl import Skipped
 from .run_impl import _RunPhaseContextManager
-from .run_impl import _stage as _stage_run
 from .run_impl import _exec_and_finalize
+from .run_impl import _parse_flags_config
+from .run_impl import _stage as _stage_run
 
 
 log = logging.getLogger(__name__)
@@ -370,7 +373,7 @@ def _stage(batch: Batch, context: RunContext, args: Args):
     runs: list[Run] = []
     skipped = 0
     with _BatchStatus(batch, args, staging=True) as status:
-        for config in batch:
+        for config in _iter_batch_config(batch, context, run_args):
             try:
                 run = _stage_run(context, run_args, config, status)
             except Skipped:
@@ -407,6 +410,13 @@ def _run_args_for_batch(args: Args):
             "yes": True,
         }
     )
+
+
+def _iter_batch_config(batch: Batch, context: RunContext, args: Args):
+    project_config = read_project_config(context.project_dir, context.opdef)
+    flags_config = _parse_flags_config(args)
+    for run_config in batch:
+        yield cast(RunConfig, {**project_config, **run_config, **flags_config})
 
 
 def _log_skipped_runs(skipped: int):
