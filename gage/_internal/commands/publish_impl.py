@@ -12,6 +12,8 @@ import os
 import subprocess
 import tempfile
 
+from urllib.parse import urlparse
+
 import requests
 
 from rich import prompt
@@ -65,20 +67,18 @@ def publish(args: Args):
         status.update("Resolving board details")
         board_dest = _board_dest(board_id, token)
     runs = _board_runs(board, board_args)
-    _user_confirm_publish(args, board, board_id, runs)
+    endpoint = _board_endpoint()
+    _user_confirm_publish(args, board, board_id, runs, endpoint)
     with cli.status() as status:
         status.update("Publishing board data")
         rclone_conf, rclone_env = _publish_board_data(board, runs, board_dest, status)
     if not args.skip_runs:
         _copy_runs(runs, rclone_conf, rclone_env, board_dest)
     _delete_conf_tmp(rclone_conf)
-    endpoint = _board_endpoint()
     cli.out(f"View board at {endpoint}/boards/{board_id}")
 
 
 def _board_endpoint():
-    from urllib.parse import urlparse
-
     parsed = urlparse(_api_endpoint())
     return f"{parsed.scheme}://{parsed.netloc}"
 
@@ -136,18 +136,26 @@ def _prompt_for_token():
     return prompt.Prompt.ask("Enter your Gage API token", password=True)
 
 
-def _user_confirm_publish(args: Args, board: BoardDef, board_id: str, runs: list[Run]):
+def _user_confirm_publish(
+    args: Args, board: BoardDef, board_id: str, runs: list[Run], endpoint: str
+):
     if args.yes:
         return
     board_desc = board.get_name() or f"board {board_id}"
+    endpoint_desc = _endpoint_desc(endpoint)
     skip_suffix = " (runs are not copied)" if args.skip_runs else ""
     cli.err(
         f"You are about to publish {len(runs):,} {'run' if len(runs) == 1 else 'runs'} "
-        f"to {board_desc} on Gage Live{skip_suffix}"
+        f"to {board_desc} on {endpoint_desc}{skip_suffix}"
     )
     cli.err()
     if not cli.confirm(f"Continue?"):
         raise SystemExit(0)
+
+
+def _endpoint_desc(endpoint: str):
+    parsed = urlparse(endpoint)
+    return parsed.netloc
 
 
 def _board_dest(board_id: str, token: str):
