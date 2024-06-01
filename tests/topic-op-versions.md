@@ -8,7 +8,13 @@ The `op-version` sample project specifies an operation version.
     [op]
     ⤶
     description = "Sample op"
-    version = "2"
+    version = 1  # numeric val
+    exec = "python op.py"
+    ⤶
+    [op-2]
+    ⤶
+    description = "Sample op 2"
+    version = "2.0"  # string val
     exec = "python op.py"
 
 Generate a run for `op`.
@@ -21,7 +27,7 @@ Gage prepends a lowercase 'v' to the version string.
 
     >>> run("gage show")  # +parse +panel
     {:run_id}
-    | op-version:op v2                               completed |
+    | op-version:op v1                               completed |
     ⤶
     {}
     <0>
@@ -41,10 +47,36 @@ Get the run meta dir and load it.
 Verify the operation version.
 
     >>> run1.opref
-    <OpRef ns="op-version" name="op" version="2">
+    <OpRef ns="op-version" name="op" version="1">
 
     >>> run1.opref.op_version
-    '2'
+    '1'
+
+Note that the version is a string value, even when specified as a number
+in the Gage file (see above).
+
+`op-2` defines a string version.
+
+    >>> run("gage run op-2 -qy")
+    <0>
+
+    >>> run("gage show")  # +parse +panel
+    {}
+    | op-version:op-2 v2.0                           completed |
+    {}
+    <0>
+
+    >>> run("gage select --meta-dir")  # +parse
+    {meta_dir:path}
+    <0>
+
+    >>> run2 = run_for_meta_dir(meta_dir)
+
+    >>> run2.opref
+    <OpRef ns="op-version" name="op-2" version="2.0">
+
+    >>> run2.opref.op_version
+    '2.0'
 
 ## Use Version to Invalid Comparable Runs
 

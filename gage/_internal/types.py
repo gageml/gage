@@ -266,7 +266,8 @@ class OpDef:
         return self._src
 
     def get_version(self) -> str | None:
-        return self._data.get("version")
+        val = self._data.get("version")
+        return str(val) if val is not None else None
 
     def get_description(self) -> str | None:
         return self._data.get("description")

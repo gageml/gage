@@ -189,6 +189,9 @@
               "minLength": 1
             },
             {
+              "type": "number"
+            },
+            {
               "type": "null"
             }
           ]

@@ -1,5 +1,11 @@
 [op]
 
 description = "Sample op"
-version = "2"
+version = 1  # numeric val
+exec = "python op.py"
+
+[op-2]
+
+description = "Sample op 2"
+version = "2.0"  # string val
 exec = "python op.py"
