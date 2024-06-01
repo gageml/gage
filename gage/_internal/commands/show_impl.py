@@ -42,6 +42,7 @@ class Args(NamedTuple):
     where: str
     limit_files: int
     all_files: bool
+    config: bool
     summary: bool
     output: bool
     files: bool
@@ -49,7 +50,9 @@ class Args(NamedTuple):
 
 def show(args: Args):
     run = one_run(args)
-    if args.summary:
+    if args.config:
+        _show_config_and_exit(run)
+    elif args.summary:
         _show_summary_and_exit(run)
     if args.output:
         _show_output_and_exit(run)
@@ -93,37 +96,54 @@ def Attributes(run: Run):
     project_dir = format_user_dir(run_project_dir(run) or "")
     exit_code = str(run_attr(run, "exit_code", ""))
 
-    attributes = Table.grid(
+    table = Table.grid(
         Column(style=cli.STYLE_LABEL),
         Column(style=cli.STYLE_VALUE),
         padding=(0, 1),
         collapse_padding=False,
     )
-    attributes.add_row("id", run.id)
-    attributes.add_row("name", run.name)
-    attributes.add_row("started", format_run_timestamp(started))
-    attributes.add_row("stopped", format_run_timestamp(stopped))
-    attributes.add_row("location", location)
-    attributes.add_row("project", project_dir)
-    attributes.add_row("exit_code", str(exit_code) if exit_code is not None else "")
+    table.add_row("id", run.id)
+    table.add_row("name", run.name)
+    table.add_row("started", format_run_timestamp(started))
+    table.add_row("stopped", format_run_timestamp(stopped))
+    table.add_row("location", location)
+    table.add_row("project", project_dir)
+    table.add_row("exit_code", str(exit_code) if exit_code is not None else "")
 
-    return cli.Panel(attributes, title="Attributes")
+    return cli.Panel(table, title="Attributes")
 
 
-def Config(run: Run):
+def Config(run: Run, table_only: bool = False):
     config = meta_config(run)
     if not config:
         return Group()
-    config_table = Table.grid(
-        Column(style=cli.STYLE_LABEL),
-        Column(style=cli.STYLE_VALUE),
-        padding=(0, 1),
-        collapse_padding=False,
-    )
-    for name in sorted(config):
-        config_table.add_row(name, str(config[name]))
 
-    return cli.Panel(config_table, title="Config")
+    table = _config_table(table_only)
+    for name in sorted(config):
+        table.add_row(name, str(config[name]))
+
+    return table if table_only else cli.Panel(table, title="Config")
+
+
+def _config_table(table_only: bool):
+    if table_only:
+        table = cli.Table(
+            show_header=False,
+            show_edge=True,
+            box=None,
+            padding=(0, 1),
+            pad_edge=True,
+        )
+        table.add_column(style=cli.STYLE_LABEL)
+        table.add_column(style=cli.STYLE_VALUE)
+        return table
+    else:
+        return Table.grid(
+            Column(style=cli.STYLE_LABEL),
+            Column(style=cli.STYLE_VALUE),
+            padding=(0, 1),
+            collapse_padding=False,
+        )
 
 
 def Summary(run: Run, table_only: bool = False):
@@ -378,6 +398,11 @@ def _show(run: Run, args: Args):
 
 def _files_limit(args: Args):
     return None if args.all_files else args.limit_files
+
+
+def _show_config_and_exit(run: Run):
+    cli.out(Config(run, table_only=True))
+    raise SystemExit(0)
 
 
 def _show_summary_and_exit(run: Run):

@@ -20,6 +20,7 @@ test-options: +skip=WINDOWS_FIX  # file size calc issue on windows
                         --all-files to bypass this limit.
       --all-files       Show all files. --limit-files is
                         ignored.
+      -c, --config      Show only config.
       -s, --summary     Show only summary.
       -o, --output      Show only output.
       -f, --files       Show only files. When used, all files
@@ -37,7 +38,7 @@ Generate a run.
 
 Show the run.
 
-    >>> run("gage show")  # +parse -space +diff
+    >>> run("gage show")  # +parse +panel +diff
     {:run_id}
     | hello:hello                                    completed |
     ⤶
@@ -102,14 +103,23 @@ Show output.
     Writing summary to summary.json
     <0>
 
-    >>> run("gage show")  # +wildcard=///
-    ///
+    >>> run("gage show")  # +parse
+    {}
+                               Config
+    | fake_speed  0.1                                          |
+    | type        example                                      |
+    ⤶
                               Summary
     | name         |value             |type                    |
     | -------------|------------------|----------------------- |
     | type         |example           |attribute               |
     | speed        |0.1               |metric                  |
-    ///
+    {}
+    <0>
+
+    >>> run("gage show --config")
+    | fake_speed | 0.1     |
+    | type       | example |
     <0>
 
     >>> run("gage show --summary")

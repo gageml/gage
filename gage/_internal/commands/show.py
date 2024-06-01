@@ -46,6 +46,16 @@ AllFilesFlag = Annotated[
     ),
 ]
 
+ConfigFlag = Annotated[
+    bool,
+    Option(
+        "-c",
+        "--config",
+        help=("Show only config."),
+        incompatible_with=["files", "output", "summary"],
+    ),
+]
+
 SummaryFlag = Annotated[
     bool,
     Option(
@@ -83,6 +93,7 @@ def show(
     where: Where = "",
     limit_files: LimitFiles = 40,
     all_files: AllFilesFlag = False,
+    config: ConfigFlag = False,
     summary: SummaryFlag = False,
     output: OutputFlag = False,
     files: FilesFlag = False,
@@ -96,6 +107,7 @@ def show(
             where,
             limit_files,
             all_files,
+            config,
             summary,
             output,
             files,
