@@ -360,7 +360,8 @@ The `group-column` attribute defines the group column attributes.
 
     >>> validate({
     ...     "group-column": {
-    ...         "label": "Custom Group"
+    ...         "label": "Custom Group",
+    ...         "pinned": "left"
     ...     }
     ... })
     ok
