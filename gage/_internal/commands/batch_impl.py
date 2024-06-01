@@ -52,7 +52,7 @@ class BatchFile:
 class Batch:
     def __init__(self, batchfiles: list[BatchFile], max_runs: int = -1):
         self.batchfiles = batchfiles
-        self._run_config = _trunc(_batch_run_config(batchfiles), max_runs)
+        self._run_config = _truncate_list(_batch_run_config(batchfiles), max_runs)
 
     def __iter__(self):
         return iter(self._run_config)
@@ -67,7 +67,7 @@ class Batch:
 T = TypeVar("T")
 
 
-def _trunc(l: list[T], n: int):
+def _truncate_list(l: list[T], n: int):
     return l if n < 0 else l[:n]
 
 
