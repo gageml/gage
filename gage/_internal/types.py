@@ -323,9 +323,6 @@ class OpDef:
             val = {"run": val}
         return OpDefProgress(val)
 
-        # TODO: this ought to mirror exec as progress is tied to
-        return self._data.get("progress")
-
     def get_output_summary_pattern(self) -> str | bool | None:
         return self._data.get("output-summary")
 
