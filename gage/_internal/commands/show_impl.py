@@ -133,6 +133,7 @@ def _config_table(table_only: bool):
             box=None,
             padding=(0, 1),
             pad_edge=True,
+            expand=False,
         )
         table.add_column(style=cli.STYLE_LABEL)
         table.add_column(style=cli.STYLE_VALUE)
