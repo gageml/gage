@@ -138,7 +138,7 @@ configuration keys: `x` and `y`, each with a default value.
 
 The default values are used for config.
 
-    >>> run("gage show --config")
+    >>> run("gage show --config")  # +skip=WINDOWS_FIX panel expand
     | x | 1 |
     | y | 2 |
     <0>
@@ -150,7 +150,7 @@ Run a batch using `y.csv`, which only specifies `y` values.
     1 + 5 = 6
     <0>
 
-    >>> run("gage show --config")
+    >>> run("gage show --config")  # +skip=WINDOWS_FIX panel expand
     | x | 1 |
     | y | 5 |
     <0>
@@ -162,7 +162,7 @@ Flags override default values.
     11 + 5 = 16
     <0>
 
-    >>> run("gage show --config")
+    >>> run("gage show --config")  # +skip=WINDOWS_FIX panel expand
     | x | 11 |
     | y | 5  |
     <0>
@@ -174,7 +174,7 @@ Flags override batch values as well.
     1 + 22 = 23
     <0>
 
-    >>> run("gage show --config")
+    >>> run("gage show --config")  # +skip=WINDOWS_FIX panel expand
     | x | 1  |
     | y | 22 |
     <0>
