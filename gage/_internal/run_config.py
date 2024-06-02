@@ -193,9 +193,10 @@ def _selected_files_config(dest_dir: str, parsed_paths: list[ParsedPath]):
         filename = os.path.join(dest_dir, path)
         try:
             config = read_file_config(filename)
+        except UnsupportedFileFormat as e:
+            log.warning("Unsupported file type for config file \"%s\"", filename)
         except Exception as e:
-            log.warning("Cannot load configuration for \"%s\": %s", filename)
-            print(f"WARNING: {e}")
+            log.warning("Cannot load configuration for \"%s\": %s", filename, e)
         else:
             files_config.append((path, config))
     return files_config
