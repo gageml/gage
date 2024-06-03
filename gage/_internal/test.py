@@ -44,6 +44,7 @@ __all__ = [
     "delete_temp_dir",
     "diff",
     "diffl",
+    "diffs",
     "example",
     "examples_dir",
     "lsl",
@@ -648,6 +649,10 @@ def diffl(l1: list[str], l2: list[str]):
     diff_lines = list(difflib.unified_diff(l1, l2, "list 1", "list 2", lineterm=""))
     for line in diff_lines[2:]:
         print(line)
+
+
+def diffs(s1: str, s2: str):
+    return diffl(s1.split("\n"), s2.split("\n"))
 
 
 def rm(filename: str, force: bool = False):

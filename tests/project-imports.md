@@ -93,6 +93,7 @@
     gage._internal.repo_util
     gage._internal.run_comment
     gage._internal.run_config
+    gage._internal.run_config_ipynb
     gage._internal.run_config_py
     gage._internal.run_context
     gage._internal.run_dependencies

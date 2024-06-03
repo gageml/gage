@@ -44,7 +44,7 @@ Note that Gage is language independent in terms of what is run. The
 application of configuration to source code files, however, is dependent
 on support for specific file formats.
 
-Create some helper functions.
+Create a helper function to print config.
 
     >>> def print_config(config):
     ...     if not config:

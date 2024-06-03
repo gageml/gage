@@ -146,10 +146,23 @@ def _is_unused_dir(dir_name: str, parsed_paths: list[ParsedPath]):
 def read_file_config(filename: str) -> RunConfig:
     _, ext = os.path.splitext(filename)
     if ext == ".py":
-        from .run_config_py import PythonConfig
+        return _python_config(filename)
+    elif ext == ".ipynb":
+        return _ipynb_config(filename)
+    else:
+        raise UnsupportedFileFormat(filename)
 
-        return PythonConfig(open(filename).read())
-    raise UnsupportedFileFormat(filename)
+
+def _python_config(filename: str):
+    from .run_config_py import PythonConfig
+
+    return PythonConfig(open(filename).read())
+
+
+def _ipynb_config(filename: str):
+    from .run_config_ipynb import JupyterNotebookConfig
+
+    return JupyterNotebookConfig(open(filename).read())
 
 
 def match_keys(include: list[str], exclude: list[str], keys: list[str] | RunConfig):
