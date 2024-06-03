@@ -47,9 +47,13 @@ def _board_run_filter(run_select: BoardDefRunSelect) -> Callable[[Run], bool]:
     return lambda run: all(f(run) for f in filters)
 
 
-def _maybe_apply_op_filter(op: str | None, filters: list[Callable[[Run], bool]]):
+def _maybe_apply_op_filter(
+    op: str | list[str] | None, filters: list[Callable[[Run], bool]]
+):
     if op:
-        filters.append(lambda run: run.opref.op_name == op)
+        if isinstance(op, str):
+            op = [op]
+        filters.append(lambda run: run.opref.op_name in op)
 
 
 def _maybe_apply_status_filter(
