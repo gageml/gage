@@ -84,18 +84,21 @@ def _open(path: str, args: Args):
 
 
 def _open_f(args: Args):
-    if args.cmd:
-        return _proc_f(args.cmd)
+    return _proc_f(args.cmd) if args.cmd else _default_open_cmd()
+
+
+def _default_open_cmd():
     if os.name == "nt":
         return os.startfile
-    if sys.platform.startswith("darwin"):
+    elif sys.platform.startswith("darwin"):
         return _proc_f("open")
-    if os.name == "posix":
+    elif os.name == "posix":
         return _proc_f("xdg-open")
-    cli.exit_with_error(
-        f"unsupported platform: {sys.platform} {os.name}\n"  # \
-        "Try --cmd with a program."
-    )
+    else:
+        cli.exit_with_error(
+            f"unsupported platform: {sys.platform} {os.name}\n"  # \
+            "Try --cmd with a program."
+        )
 
 
 def _proc_f(prog: str):
