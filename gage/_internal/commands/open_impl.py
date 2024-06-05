@@ -84,10 +84,10 @@ def _open(path: str, args: Args):
 
 
 def _open_f(args: Args):
-    return _proc_f(args.cmd) if args.cmd else _default_open_cmd()
+    return _proc_f(args.cmd) if args.cmd else _default_open_f()
 
 
-def _default_open_cmd():
+def _default_open_f():
     if os.name == "nt":
         return os.startfile
     elif sys.platform.startswith("darwin"):
