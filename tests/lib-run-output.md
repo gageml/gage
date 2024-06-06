@@ -1,7 +1,5 @@
 ---
-test-options: |
-  +retry-on-fail=2
-  +skip=WINDOWS_FIX  # OS line ending prob, and timestamp?
+test-options: +retry-on-fail=2 +skip=WINDOWS_FIX  # OS line ending prob, and timestamp?
 parse-types:
   timestamp: 1[6-7]\d{11}
 ---
