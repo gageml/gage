@@ -241,14 +241,12 @@ def option_type(name: str):
 
 @option_type("windows")
 def option_windows(enabled: bool):
-    if enabled is True and sys.platform != "win32":
+    if enabled and sys.platform != "win32":
         # +windows -> only run on Windows
-        if sys.platform != "win32":
-            _skip_test()
-    elif enabled is False and sys.platform == "win32":
+        _skip_test()
+    elif not enabled and sys.platform == "win32":
         # -windows -> don't run on Windows
-        if sys.platform == "win32":
-            _skip_test()
+        _skip_test()
 
 
 def _skip_test():
