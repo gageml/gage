@@ -1372,10 +1372,16 @@ def _write_proc_lock(proc: subprocess.Popen[bytes], run: Run, log: Logger):
 def _delete_proc_lock(run: Run, log: Logger):
     log.info("Deleting meta proc/lock")
     filename = _meta_proc_lock_filename(run)
+    _ensure_deletable(filename)
     try:
         os.remove(filename)
     except OSError as e:
         log.info(f"Error deleting proc/lock: {e}")
+
+
+def _ensure_deletable(filename: str):
+    if os.name == "nt":
+        set_readonly(filename, False)
 
 
 def format_run_timestamp(ts: datetime.datetime | None):
