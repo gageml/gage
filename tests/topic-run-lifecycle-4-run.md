@@ -65,9 +65,9 @@ List meta dir contents.
     -r--r--r-- config.json
     -r--r--r-- id
     -r--r--r-- initialized
-    -rw-rw-r-- log/files
-    -rw-rw-r-- log/runner
-    -rw-rw-r-- manifest
+    -rw-rw-rw- log/files
+    -rw-rw-rw- log/runner
+    -rw-rw-rw- manifest
     -r--r--r-- opdef.json
     -r--r--r-- opref
     -r--r--r-- output/10_sourcecode

@@ -96,14 +96,14 @@ Gage creates the following files:
     -r--r--r-- config.json
     -r--r--r-- id
     -r--r--r-- initialized
-    drwxrwxr-x log
-    -rw-rw-r-- log/runner
+    drwxrwxrwx log
+    -rw-rw-rw- log/runner
     -r--r--r-- opdef.json
     -r--r--r-- opref
-    drwxrwxr-x proc
+    drwxrwxrwx proc
     -r--r--r-- proc/cmd.json
     -r--r--r-- proc/env.json
-    drwxrwxr-x sys
+    drwxrwxrwx sys
     -r--r--r-- sys/platform.json
 
 Files are read only with the exception of the runner log, which is

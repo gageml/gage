@@ -340,17 +340,19 @@ def ls(
 def _ls_path_permissions(path: str):
     """Returns path permissions using `stat.filemode`.
 
-    Group write permissions are coerced to be what the user write
-    permission is. This is special case for tests, which may run in
-    environments where the user group doesn't have write access by
-    default. To handle these cases, the user write flag is used, if set,
-    for the group write permission, even if the group does not have
-    write permission.
+    Group and other write permissions are coerced to be what the user
+    write permission is. This is a special case for tests, which may run
+    in environments where the user group or other doesn't have write
+    access by default. To handle these cases, the user write flag is
+    used, if set, for the group and other write permission, even if the
+    group or other does not have write permission.
     """
     perm = stat.filemode(os.stat(path).st_mode)
     assert len(perm) == 10, (perm, path)
     if perm[2] == "w" and perm[5] == "-":
-        return perm[:5] + "w" + perm[6:]
+        perm = perm[:5] + "w" + perm[6:]
+    if perm[2] == "w" and perm[8] == "-":
+        perm = perm[:8] + "w" + perm[9:]
     return perm
 
 

@@ -87,11 +87,11 @@ List meta files after init.
     -r--r--r-- config.json
     -r--r--r-- id
     -r--r--r-- initialized
-    drwxrwxr-x log
-    -rw-rw-r-- log/runner
+    drwxrwxrwx log
+    -rw-rw-rw- log/runner
     -r--r--r-- opdef.json
     -r--r--r-- opref
-    drwxrwxr-x proc
+    drwxrwxrwx proc
     -r--r--r-- proc/cmd.json
     -r--r--r-- proc/env.json
 
@@ -185,13 +185,13 @@ Copy the source code to the run directory.
 Source code files are copied and left in a writeable state.
 
     >>> ls(run.run_dir, permissions=True)  # +diff
-    -rw-rw-r-- conf/eval.yaml
-    -rw-rw-r-- conf/train.yaml
-    -rw-rw-r-- eval.py
-    -rw-rw-r-- gage.toml
-    -rw-rw-r-- msg.txt
-    -rw-rw-r-- setup.py
-    -rw-rw-r-- train.py
+    -rw-rw-rw- conf/eval.yaml
+    -rw-rw-rw- conf/train.yaml
+    -rw-rw-rw- eval.py
+    -rw-rw-rw- gage.toml
+    -rw-rw-rw- msg.txt
+    -rw-rw-rw- setup.py
+    -rw-rw-rw- train.py
 
 The list of files is written to the files log. Log entries are per line
 and consist of an event, a file type, a modified timestamp, and a path.
@@ -334,14 +334,14 @@ files (source code, dependencies, and runtime).
 Note that files are writable prior to finalizing.
 
     >>> ls(run.run_dir, permissions=True)  # +diff
-    -rw-rw-r-- .venv/bin/activate
-    -rw-rw-r-- conf/eval.yaml
-    -rw-rw-r-- conf/train.yaml
-    -rw-rw-r-- eval.py
-    -rw-rw-r-- gage.toml
-    -rw-rw-r-- msg.txt
-    -rw-rw-r-- setup.py
-    -rw-rw-r-- train.py
+    -rw-rw-rw- .venv/bin/activate
+    -rw-rw-rw- conf/eval.yaml
+    -rw-rw-rw- conf/train.yaml
+    -rw-rw-rw- eval.py
+    -rw-rw-rw- gage.toml
+    -rw-rw-rw- msg.txt
+    -rw-rw-rw- setup.py
+    -rw-rw-rw- train.py
 
 Finalize the staged run.
 
@@ -385,10 +385,10 @@ List meta runs.
     -r--r--r-- config.json
     -r--r--r-- id
     -r--r--r-- initialized
-    -rw-rw-r-- log/files
+    -rw-rw-rw- log/files
     -r--r--r-- log/patched
-    -rw-rw-r-- log/runner
-    -rw-rw-r-- manifest
+    -rw-rw-rw- log/runner
+    -rw-rw-rw- manifest
     -r--r--r-- opdef.json
     -r--r--r-- opref
     -r--r--r-- output/10_sourcecode
