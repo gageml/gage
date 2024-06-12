@@ -70,9 +70,10 @@ class Script:
             self._handle_apply_node_error(e, node)
 
     def _handle_apply_node_error(self, e: Exception, node: ast.AST):
+        lineno = getattr(node, "lineno", "<unknown>")
         msg = (
             f"error applying AST node {node.__class__.__name__} "
-            f"from {self.src}:{node.lineno}:"
+            f"from {self.src}:{lineno}:"
         )
         if log.getEffectiveLevel() <= logging.DEBUG:
             log.exception(msg)
