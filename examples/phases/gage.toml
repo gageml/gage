@@ -2,8 +2,8 @@
 
 description = "Run command for each supported phase"
 
-exec.stage-runtime       = "touch runtime-file"
-exec.stage-sourcecode    = "touch sourcecode-file"
-exec.stage-dependencies  = "touch required-file"
-exec.run                 = "touch generated-file"
-exec.finalize            = "touch generated-file-2"
+exec.stage-runtime       = "python touch.py runtime-file"
+exec.stage-sourcecode    = "python touch.py sourcecode-file"
+exec.stage-dependencies  = "python touch.py required-file"
+exec.run                 = "python touch.py generated-file"
+exec.finalize            = "python touch.py generated-file-2"

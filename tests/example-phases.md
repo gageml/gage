@@ -14,7 +14,7 @@ The `phases` example creates files for each of the supported run phases:
 
     >>> use_example("phases")
 
-    >>> run("gage ops")
+    >>> run("gage ops")  # +table
     | operation | description                          |
     |-----------|--------------------------------------|
     | phases    | Run command for each supported phase |
@@ -27,13 +27,14 @@ Run the operation.
 
 Show the run files.
 
-    >>> run("gage show --files")
-    | name             | type        |  size |
-    |------------------|-------------|-------|
-    | generated-file   | generated   |   0 B |
-    | generated-file-2 | generated   |   0 B |
-    | required-file    | dependency  |   0 B |
-    | gage.toml        | source code | 314 B |
-    | sourcecode-file  | source code |   0 B |
-    | runtime-file     | runtime     |   0 B |
+    >>> run("gage show --files") # +table
+    | name                      | type              |     size |
+    |---------------------------|-------------------|----------|
+    | generated-file            | generated         |      0 B |
+    | generated-file-2          | generated         |      0 B |
+    | required-file             | dependency        |      0 B |
+    | gage.toml                 | source code       |    364 B |
+    | sourcecode-file           | source code       |      0 B |
+    | touch.py                  | source code       |    141 B |
+    | runtime-file              | runtime           |      0 B |
     <0>
