@@ -361,7 +361,7 @@ The run files are read only.
 
 Show the run manifest.
 
-    >>> cat(run_meta_path(run, "manifest"))  # +parse
+    >>> cat(run_meta_path(run, "manifest"))  # +parse +paths
     s {:sha256} conf/eval.yaml
     s {:sha256} conf/train.yaml
     s {:sha256} eval.py
