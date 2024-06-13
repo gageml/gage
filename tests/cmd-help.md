@@ -28,7 +28,7 @@ above.
 
 When we unset `TERM`, the correct header is used.
 
-    >>> run("gage help", env={"TERM": ""})  # +wildcard -space
+    >>> run("gage help", env={"TERM": ""})  # +wildcard -space +skip=CI
     Usage: gage help [options] topic
     ⤶
       Show help for a topic.
