@@ -4,6 +4,7 @@
 *.egg-info
 *.pyc
 .gage
+.venv
 profile.*
 gage.spec
 .vscode/tasks.json
