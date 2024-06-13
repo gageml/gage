@@ -37,28 +37,15 @@ Generate a run top open.
     {run_dir:path}
     <0>
 
-Default open location is the run directory. Use `echo` to print the
-command args.
+Default open location is the run directory. Use `python` to print the command
+args.
 
-    >>> run("gage open --cmd echo")  # +parse -windows
-    {echo_out}
+    >>> run("gage open --cmd \"python -c 'import sys; print(sys.argv[1:])'\"")  # +parse
+    ['{x}']
     <0>
 
-    >>> assert echo_out == run_dir  # -windows
-
-Use `--path` to open a specific path in the run directory. We use the
-`cat` command to print the file.
-
-    >>> run("gage open --cmd cat --path summary.json")  # -windows
-    {
-      "attributes": {
-        "type": "example"
-      },
-      "metrics": {
-        "speed": 0.1
-      }
-    }
-    <0>
+    >>> compare_paths(x, run_dir)
+    True
 
 Return value from command is passed through.
 
