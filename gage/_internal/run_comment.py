@@ -11,7 +11,7 @@ from .attr_log import now_ms
 from .attr_log import get_attrs_by_author
 from .attr_log import log_attrs
 
-from .run_util import run_user_dir
+from .run_attr import run_user_dir
 
 from .file_util import ensure_dir
 

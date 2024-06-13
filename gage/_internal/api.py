@@ -4,11 +4,7 @@ from typing import *
 
 from .types import *
 
-from .run_util import meta_config
-from .run_util import run_attr
-from .run_util import run_label
-from .run_util import run_summary
-from .run_util import run_status
+from .run_attr import *
 
 from . import var
 
@@ -38,7 +34,7 @@ def _run_metrics(run: Run) -> dict[str, Any]:
 
 _readers = {
     "attributes": _run_attributes,
-    "config": meta_config,
+    "config": run_config,
     "label": run_label,
     "metrics": _run_metrics,
     "operation": lambda run: run.opref.op_name,

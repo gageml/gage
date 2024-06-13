@@ -18,12 +18,7 @@ from ..gagefile import gagefile_for_dir
 
 from ..archive_util import find_archive_dir
 
-from ..run_util import meta_config
-from ..run_util import run_label
-from ..run_util import run_project_dir
-from ..run_util import run_status
-from ..run_util import run_summary
-from ..run_util import run_timestamp
+from ..run_attr import *
 
 from ..summary_util import format_summary_value
 
@@ -299,7 +294,7 @@ def _run_status(run: Run):
 
 def _run_description(run: Run, width: int):
     summary = run_summary(run)
-    config = meta_config(run)
+    config = run_config(run)
     label = run_label(run)
     fields = {
         **summary.get_metrics(),

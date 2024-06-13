@@ -14,7 +14,7 @@ from rich.table import Table
 
 from . import cli
 from . import typer_rich_util
-from . import run_config
+from . import run_config_util
 
 __all__ = [
     "get_help",
@@ -25,7 +25,7 @@ __all__ = [
 def get_help(opspec: str, context: RunContext):
     usage = render(f"[b]Usage: gage run {opspec}")
     help = render((context.opdef.get_description() or "").strip())
-    config = run_config.read_project_config(context.project_dir, context.opdef)
+    config = run_config_util.read_project_config(context.project_dir, context.opdef)
     return Group(
         Padding(
             Group(

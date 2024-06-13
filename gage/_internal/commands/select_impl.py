@@ -4,8 +4,8 @@ from typing import *
 
 from .. import cli
 
-from ..run_util import run_project_dir
-from ..run_util import run_user_attrs
+from ..run_attr import run_project_dir
+from ..run_attr import run_user_attrs
 
 from .impl_support import one_run_for_spec
 

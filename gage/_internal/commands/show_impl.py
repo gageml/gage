@@ -24,10 +24,11 @@ from natsort import natsorted
 
 from .. import cli
 
-from ..run_comment import get_comments
-from ..run_output import RunOutputReader
+from ..run_attr import *
 from ..run_util import *
 
+from ..run_comment import get_comments
+from ..run_output import RunOutputReader
 from ..util import format_user_dir
 
 from .impl_support import format_summary_value
@@ -114,7 +115,7 @@ def Attributes(run: Run):
 
 
 def Config(run: Run, table_only: bool = False):
-    config = meta_config(run)
+    config = run_config(run)
     if not config:
         return Group()
 

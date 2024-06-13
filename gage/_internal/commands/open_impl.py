@@ -12,7 +12,7 @@ import sys
 
 from .. import cli
 
-from ..run_util import run_user_dir
+from ..run_attr import run_user_dir
 
 from .impl_support import one_run
 

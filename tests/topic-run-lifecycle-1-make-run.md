@@ -1,5 +1,6 @@
 # Making a run
 
+    >>> from gage._internal.run_attr import *
     >>> from gage._internal.run_util import *
     >>> from gage._internal.types import *
 

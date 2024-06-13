@@ -7,7 +7,8 @@ import functools
 import logging
 import os
 
-from .run_util import run_attr
+from .run_attr import run_attr
+
 from .run_util import run_for_meta_dir
 from .run_util import run_user_dir
 from .run_util import run_project_ref

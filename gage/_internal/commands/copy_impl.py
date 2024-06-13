@@ -13,8 +13,8 @@ import time
 
 from .. import cli
 
+from ..run_attr import run_user_dir
 from ..file_util import make_temp_dir
-from ..run_util import run_user_dir
 from ..util import flatten
 from ..util import which
 from ..var import runs_dir

@@ -6,8 +6,8 @@ from .types import *
 
 import re
 
-from .run_util import meta_config
-from .run_util import run_status
+from .run_attr import run_config
+from .run_attr import run_status
 
 from .util import find_apply
 from .var import list_runs
@@ -90,7 +90,7 @@ def find_comparable_run(opref: OpRef, config: RunConfig):
             return False
         if run_status(run) == "error":
             return False
-        return meta_config(run) == config
+        return run_config(run) == config
 
     try:
         return next(iter(list_runs(sort=["-timestamp"], filter=check_run)))
