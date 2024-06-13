@@ -20,6 +20,7 @@ from ..run_util import *
 
 from ..run_config import read_project_config
 from ..run_context import resolve_run_context
+from ..run_meta import read_opref
 from ..run_output import Progress
 from ..run_select import find_comparable_run
 
@@ -287,7 +288,7 @@ class _RunPhaseStatus(_RunPhaseContextManager):
     def __init__(self, run: Run, args: Args):
         self._args = args
         self._status = _DefaultStatus(args)
-        self._run_attrs = {"op_name": meta_opref(run).op_name}
+        self._run_attrs = {"op_name": read_opref(run).op_name}
 
     def __enter__(self):
         self._status.start()

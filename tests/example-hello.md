@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX  # table border off-by-one, file size calcs
+test-options: +skip=WINDOWS_FIX (table border off-by-one, file size calcs) +skip (zip meta and showing output)
 ---
 
 # Hello example

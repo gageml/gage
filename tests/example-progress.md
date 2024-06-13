@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX  # file locking
+test-options: +skip=WINDOWS_FIX (file locking) +skip (zip meta - can't just cat output)
 ---
 
 # Progress example

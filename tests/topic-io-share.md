@@ -102,10 +102,8 @@ Compare local and remote files.
     >>> local_runs = runs_dir()
 
     >>> diffl(lsl(local_runs), lsl(remote_runs))  # +parse +paths +skip=WINDOWS_FIX
-    @@ -18,7 +18,6 @@
-     {:run_id}.meta/stopped
-     {:run_id}.meta/summary.json
-     {:run_id}.meta/sys/platform.json
+    @@ -1,5 +1,4 @@
+     {:run_id}.meta.zip
     -{:run_id}.project
      {:run_id}.user/{:uuid4}.json
      {:run_id}/gage.toml
@@ -229,10 +227,8 @@ The project reference file is not copied to the remote location but the
 new label logged attribute is.
 
     >>> diffl(lsl(retrieve_runs), lsl(remote_runs))  # +parse +paths +skip=WINDOWS_FIX
-    @@ -18,7 +18,6 @@
-     {:run_id}.meta/stopped
-     {:run_id}.meta/summary.json
-     {:run_id}.meta/sys/platform.json
+    @@ -1,5 +1,4 @@
+     {:run_id}.meta.zip
     -{:run_id}.project
      {:run_id}.user/{:uuid4}.json
      {:run_id}.user/{:uuid4}.json
@@ -253,10 +249,8 @@ When comparing the remote run to the local (original) run, we see a
 missing project ref and a new logged attribute.
 
     >>> diffl(lsl(local_runs), lsl(remote_runs))  # +parse +paths +skip=WINDOWS_FIX
-    @@ -18,7 +18,7 @@
-     {:run_id}.meta/stopped
-     {:run_id}.meta/summary.json
-     {:run_id}.meta/sys/platform.json
+    @@ -1,5 +1,5 @@
+     {:run_id}.meta.zip
     -{:run_id}.project
      {:run_id}.user/{:uuid4}.json
     +{:run_id}.user/{:uuid4}.json
@@ -290,10 +284,8 @@ The local project association is unmodified.
     >>> assert x == project_dir
 
     >>> diffl(lsl(remote_runs), lsl(local_runs))  # +parse +paths +skip=WINDOWS_FIX
-    @@ -18,6 +18,7 @@
-     {:run_id}.meta/stopped
-     {:run_id}.meta/summary.json
-     {:run_id}.meta/sys/platform.json
+    @@ -1,4 +1,5 @@
+     {:run_id}.meta.zip
     +{:run_id}.project
      {:run_id}.user/{:uuid4}.json
      {:run_id}.user/{:uuid4}.json

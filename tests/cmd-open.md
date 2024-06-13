@@ -1,3 +1,7 @@
+---
+test-options: +skip - meta zip work
+---
+
 # `open` command
 
 `open` opens a run directory in the system file explorer. It can

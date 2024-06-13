@@ -10,7 +10,11 @@ import operator
 
 from functools import cmp_to_key
 
-from .run_util import *
+from .run_util import run_attr
+from .run_util import run_label
+from .run_util import run_status
+from .run_util import run_summary
+from .run_util import meta_config
 
 from .summary_util import format_summary_value
 from .util import kebab_to_camel

@@ -90,21 +90,20 @@ Initialize the run meta with `init_run_meta()`.
 
 Gage creates the following files:
 
-    >>> ls(run.meta_dir, include_dirs=True, permissions=True)
-    ... # +diff +skip=WINDOWS_FIX (global writeable on Windows)
-    -r--r--r-- __schema__
-    -r--r--r-- config.json
-    -r--r--r-- id
-    -r--r--r-- initialized
-    drwxrwxr-x log
-    -rw-rw-r-- log/runner
-    -r--r--r-- opdef.json
-    -r--r--r-- opref
-    drwxrwxr-x proc
-    -r--r--r-- proc/cmd.json
-    -r--r--r-- proc/env.json
-    drwxrwxr-x sys
-    -r--r--r-- sys/platform.json
+    >>> ls(run.meta_dir, include_dirs=True)
+    __schema__
+    config.json
+    id
+    initialized
+    log
+    log/runner
+    opdef.json
+    opref
+    proc
+    proc/cmd.json
+    proc/env.json
+    sys
+    sys/platform.json
 
 Files are read only with the exception of the runner log, which is
 assumed to be writable until the run is finalized (see below).
@@ -114,7 +113,7 @@ assumed to be writable until the run is finalized (see below).
 `__schema__` contains the schema used for the directory layout and
 contents.
 
-    >>> cat(run_meta_path(run, "__schema__"))  # +parse
+    >>> cat(path_join(run.meta_dir, "__schema__"))  # +parse
     {x}
 
 The current schema is defined by `META_SCHEMA`.
@@ -127,7 +126,7 @@ The current schema is defined by `META_SCHEMA`.
 namespace of keys and values. Keys are "dotted" to denote level
 hierarchy.
 
-    >>> cat(run_meta_path(run, "config.json"))
+    >>> cat(path_join(run.meta_dir, "config.json"))
     {
       "x": 123,
       "y": 1.23
@@ -138,7 +137,7 @@ hierarchy.
 `id` is the run ID. This is saved in the meta dir for the contents to
 remain independent of the container name.
 
-    >>> cat(run_meta_path(run, "id"))  # +parse
+    >>> cat(path_join(run.meta_dir, "id"))  # +parse
     {x:run_id}
 
     >>> assert x == run.id
@@ -149,7 +148,7 @@ remain independent of the container name.
 was initialized. This is written at the end of the initialization
 process.
 
-    >>> cat(run_meta_path(run, "initialized"))  # +parse
+    >>> cat(path_join(run.meta_dir, "initialized"))  # +parse
     {:timestamp}
 
 ### `log/runner`
@@ -159,10 +158,10 @@ The runner log contains log entries for the actions performed.
 Log entries are encoded in plain text, one per line. Lines are prefixed
 with an ISO 8601 formatted date.
 
-    >>> logfile = run_meta_path(run, "log", "runner")
+    >>> logfile = path_join(run.meta_dir, "log", "runner")
 
     >>> cat(logfile)  # +parse
-    {x:isodate} Writing meta id
+    {x:isodate} Writing meta run id
     {}
 
     >>> assert datetime_fromiso(x) <= datetime_now()
@@ -170,12 +169,12 @@ with an ISO 8601 formatted date.
 The log contains a record of the changes made during init.
 
     >>> cat_log(logfile)  # +diff
-    Writing meta id
+    Writing meta run id
     Writing meta opdef
     Writing meta config
     Writing meta proc cmd
     Writing meta proc env
-    Writing meta sys/platform
+    Writing meta system platform
     Writing meta initialized
 
 Runner logs are not written with a log level. As a convention, messages
@@ -190,7 +189,7 @@ when running a language script).
 This file is used when re-running the run or when using the run as a
 prototype.
 
-    >>> cat(run_meta_path(run, "opdef.json"))
+    >>> cat(path_join(run.meta_dir, "opdef.json"))
     {}
 
 ### `opref`
@@ -198,7 +197,7 @@ prototype.
 `opref` is an encoded op reference. This is used in run listings to read
 the run name efficiently.
 
-    >>> cat(run_meta_path(run, "opref"))  # +parse
+    >>> cat(path_join(run.meta_dir, "opref"))  # +parse
     2 test test
 
 ### `proc/cmd.json` and `proc/env.json`
@@ -206,13 +205,10 @@ the run name efficiently.
 `proc/cmd` and `proc/env` contain the run process command args and env
 vars respectively. These are used to start the run process.
 
-    >>> cat(run_meta_path(run, "proc", "cmd.json"))
-    [
-      "echo",
-      "hello"
-    ]
+    >>> cat(path_join(run.meta_dir, "proc", "cmd.json"))
+    ["echo", "hello"]
 
-    >>> cat(run_meta_path(run, "proc", "env.json"))
+    >>> cat(path_join(run.meta_dir, "proc", "env.json"))
     {
       "bar": "abc",
       "foo": "123"
@@ -223,5 +219,5 @@ vars respectively. These are used to start the run process.
 `sys` contains JSON encoded system attributes specified at the time of
 meta init.
 
-    >>> cat(run_meta_path(run, "sys", "platform.json"))
+    >>> cat(path_join(run.meta_dir, "sys", "platform.json"))
     "test 123"

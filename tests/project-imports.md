@@ -99,6 +99,7 @@
     gage._internal.run_dependencies
     gage._internal.run_filter
     gage._internal.run_help
+    gage._internal.run_meta
     gage._internal.run_output
     gage._internal.run_select
     gage._internal.run_sourcecode

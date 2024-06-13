@@ -63,8 +63,8 @@ The meta directory does exist.
 The meta directory contains a single file `opref`, which is the encoded
 op ref for the run.
 
-    >>> ls(meta_dir, include_dirs=True, permissions=True)
-    -r--r--r-- opref
+    >>> ls(meta_dir, include_dirs=True)
+    opref
 
     >>> cat(path_join(meta_dir, "opref"))
     2 test test

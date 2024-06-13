@@ -20,7 +20,8 @@ from ..lang import parse_config_value
 from ..run_config import read_project_config
 
 from ..run_util import run_phase_channel
-from ..run_util import meta_opref
+
+from ..run_meta import read_opref
 
 from .run_impl import _RUN_PHASE_DESC
 from .run_impl import Args
@@ -342,7 +343,7 @@ def _run_status_desc(name: str, arg: Any):
 
 def _run_attrs_for_phase_arg(arg: Any) -> dict[str, Any]:
     run = _run_for_phase_arg(arg)
-    return {"op_name": meta_opref(run).op_name} if run else {}
+    return {"op_name": read_opref(run).op_name} if run else {}
 
 
 def _run_for_phase_arg(arg: Any):

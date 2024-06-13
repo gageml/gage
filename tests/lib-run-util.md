@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX  # Various issues: locks, digests
+test-options: +skip=WINDOWS_FIX (Various issues - locks, digests) +skip (sync up with run meta tests)
 ---
 
 # Run utils

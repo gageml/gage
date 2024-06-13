@@ -171,7 +171,10 @@ def _iter_runs(root: str, deleted: bool = False):
 
 
 def _is_meta_name(name: str, deleted: bool):
-    return name.endswith(".meta.deleted") if deleted else name.endswith(".meta")
+    if deleted:
+        return name.endswith(".meta.deleted") or name.endswith(".meta.zip.deleted")
+    else:
+        return name.endswith(".meta") or name.endswith(".meta.zip")
 
 
 def _run_sort_key(sort: list[str]):
