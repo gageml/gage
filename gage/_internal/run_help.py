@@ -56,6 +56,7 @@ def FlagsPanel(config: dict[str, RunConfigValue]):
         border_style=typer_rich_util.STYLE_OPTIONS_PANEL_BORDER,
         title="Flags",
         title_align=typer_rich_util.ALIGN_OPTIONS_PANEL,
+        width=int(os.environ["COLUMNS"])
     )
 
 
