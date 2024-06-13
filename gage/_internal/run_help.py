@@ -39,7 +39,6 @@ def get_help(opspec: str, context: RunContext):
 
 
 def FlagsPanel(config: dict[str, RunConfigValue]):
-    import os
     flags_table = Table(
         highlight=True,
         show_header=True,
@@ -56,8 +55,20 @@ def FlagsPanel(config: dict[str, RunConfigValue]):
         border_style=typer_rich_util.STYLE_OPTIONS_PANEL_BORDER,
         title="Flags",
         title_align=typer_rich_util.ALIGN_OPTIONS_PANEL,
-        width=int(os.environ["COLUMNS"])
+        width=_panel_width(),
     )
+
+
+def _panel_width():
+    # Workaround for inconsistency in panel width across platform.
+    # It seems that reducing the width by 1 creates a consistent
+    # width, whereas without this Windows suffers the 1-space less
+    # wide problem.
+    import os
+
+    if "COLUMNS" in os.environ:
+        return int(os.environ["COLUMNS"]) - 1
+    return None
 
 
 def config_table(config: RunConfig):
