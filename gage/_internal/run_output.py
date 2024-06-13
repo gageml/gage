@@ -6,7 +6,6 @@ from .types import *
 
 from subprocess import Popen
 
-import errno
 import io
 import logging
 import os
@@ -18,7 +17,7 @@ __all__ = [
     "OutputCallback",
     "Progress",
     "ProgressParser",
-    "RunOutput",
+    "RunOutputWriter",
     "RunOutputReader",
     "stream_fileno",
 ]
@@ -60,7 +59,7 @@ class OutputCallback(Protocol):
         raise NotImplementedError()
 
 
-class RunOutput:
+class RunOutputWriter:
     def __init__(
         self,
         filename: str,
@@ -264,11 +263,11 @@ class RunOutputLine(NamedTuple):
 
 
 class RunOutputReader:
-    def __init__(self, filename: str):
-        self.filename = filename
+    def __init__(self, name: str, output: IO[bytes], index: IO[bytes]):
+        self.name = name
+        self._output = output
+        self._index = index
         self._lines: list[RunOutputLine] = []
-        self._output: Optional[BinaryIO] = None
-        self._index: Optional[BinaryIO] = None
 
     def __enter__(self):
         return self
@@ -302,43 +301,26 @@ class RunOutputReader:
     def _read_next(self, end: int | None):
         if end is not None and end < len(self._lines):
             return
-        try:
-            output, index = self._ensure_open()
-        except IOError as e:
-            if e.errno != errno.EEXIST:
-                raise
-        else:
-            while True:
-                line_encoded = output.readline()
-                if not line_encoded:
-                    break
-                line = line_encoded.rstrip().decode()
-                header = index.read(9)
-                if len(header) < 9:
-                    break
-                time, stream = struct.unpack("!QB", header)
-                self._lines.append(RunOutputLine(time, stream, line))
-                if end is not None and end < len(self._lines):
-                    break
-
-    def _ensure_open(self):
-        if self._output is None:
-            output = open(self.filename, "rb")
-            index = open(self.filename + ".index", "rb")
-            self._output, self._index = output, index
-        assert self._output is not None
-        assert self._index is not None
-        return self._output, self._index
+        while True:
+            line_encoded = self._output.readline()
+            if not line_encoded:
+                break
+            line = line_encoded.rstrip().decode()
+            header = self._index.read(9)
+            if len(header) < 9:
+                break
+            time, stream = struct.unpack("!QB", header)
+            self._lines.append(RunOutputLine(time, stream, line))
+            if end is not None and end < len(self._lines):
+                break
 
     def close(self):
-        self._try_close(self._output)
-        self._try_close(self._index)
+        _try_close(self._output)
+        _try_close(self._index)
 
-    @staticmethod
-    def _try_close(f: Optional[BinaryIO]):
-        if f is None:
-            return
-        try:
-            f.close()
-        except IOError:
-            pass
+
+def _try_close(f: IO[bytes]):
+    try:
+        f.close()
+    except IOError:
+        pass

@@ -1,7 +1,3 @@
----
-test-options: +skip - meta zip work
----
-
 # `open` command
 
 `open` opens a run directory in the system file explorer. It can
@@ -64,22 +60,7 @@ Use `--path` to open a specific path in the run directory. We use the
     }
     <0>
 
-Hidden options are used for developer convenience.
-
-`--summary` opens the meta summary file.
-
-    >>> run("gage open --cmd cat --summary")  # -windows
-    {
-      "attributes": {
-        "type": "example"
-      },
-      "metrics": {
-        "speed": 0.1
-      }
-    }
-    <0>
-
 Return value from command is passed through.
 
-    >>> run("gage open --cmd false")  # -windows
+    >>> run("gage open --cmd \"python -c 'raise SystemExit(1)'\"")
     <1>

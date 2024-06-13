@@ -202,6 +202,9 @@ def ls(
     include_dirs: bool = False,
     unsorted: bool = False,
 ):
+    if not os.path.exists(root):
+        raise FileNotFoundError(root)
+
     paths: list[str] = []
 
     def relpath(path: str, name: str):

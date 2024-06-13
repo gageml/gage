@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX (table border off-by-one, file size calcs) +skip (zip meta and showing output)
+test-options: +skip=WINDOWS_FIX (table border off-by-one, file size calcs)
 ---
 
 # Hello example
@@ -86,69 +86,9 @@ List run files:
 
     >>> run_dir = path_join(runs_dir, run_id)
 
-    >>> ls(run_dir, permissions=True)
-    -r--r--r-- gage.toml
-    -r--r--r-- hello.py
-
-List meta files:
-
-    >>> meta_dir = path_join(runs_dir, run_id + ".meta")
-
-    >>> ls(meta_dir, permissions=True)  # +diff +paths
-    -r--r--r-- __schema__
-    -r--r--r-- config.json
-    -r--r--r-- id
-    -r--r--r-- initialized
-    -r--r--r-- log/files
-    -r--r--r-- log/runner
-    -r--r--r-- manifest
-    -r--r--r-- opdef.json
-    -r--r--r-- opref
-    -r--r--r-- output/40_run
-    -r--r--r-- output/40_run.index
-    -r--r--r-- proc/cmd.json
-    -r--r--r-- proc/env.json
-    -r--r--r-- proc/exit
-    -r--r--r-- staged
-    -r--r--r-- started
-    -r--r--r-- stopped
-    -r--r--r-- summary.json
-    -r--r--r-- sys/platform.json
-
-Show files log.
-
-    >>> cat(path_join(meta_dir, "log", "files"))  # +parse
-    a s {:timestamp} gage.toml
-    a s {:timestamp} hello.py
-
-Show runner log.
-
-    >>> cat_log(path_join(meta_dir, "log", "runner"))  # +parse +diff -space +paths
-    Writing meta id
-    Writing meta opdef
-    Writing meta config
-    Writing meta proc cmd
-    Writing meta proc env
-    Writing meta sys/platform
-    Writing meta initialized
-    Copying source code (see log/files):
-      ['**/* text size<100000 max-matches=500',
-       '-**/.* dir', '-**/* dir sentinel=bin/activate',
-       '-**/* dir sentinel=.nocopy',
-       '-summary.json']
-    Applying configuration (see log/patched)
-    Finalizing staged files (see manifest)
-    Writing meta staged
-    Writing meta started
-    Starting run (see output/40_run): python hello.py
-    Writing meta proc/lock
-    Exit code for run: 0
-    Deleting meta proc/lock
-    Checking output for summary pattern '--- summary ---(.*)---'
-    Writing meta summary
-    Writing meta stopped
-    Writing meta proc/exit
-    Finalizing run files (see manifest)
+    >>> ls(run_dir)
+    gage.toml
+    hello.py
 
 ## Custom name
 
@@ -178,24 +118,7 @@ Run with a different `name`.
     | Hello Joe                                                |
     <0>
 
-Show files log.
-
-    >>> meta_dir = path_join(runs_dir, run_id + ".meta")
-
-    >>> cat(path_join(meta_dir, "log", "files"))  # +parse
-    a s {:timestamp} gage.toml
-    a s {:timestamp} hello.py
-
-Show patched files.
-
-    >>> cat(path_join(meta_dir, "log", "patched"))
-    --- hello.py
-    +++ hello.py
-    @@ -1,3 +1,3 @@
-    -name = "Gage"
-    +name = "Joe"
-    ⤶
-     print(f"Hello {name}")
+TODO: show patch info - mod show command??
 
 ## Flag with default operation
 
@@ -243,27 +166,6 @@ Show the run.
 
     >>> assert x == short_name
 
-Show the runner log.
-
-    >>> meta_dir = path_join(runs_dir, run_id + ".meta")
-
-    >>> cat_log(path_join(meta_dir, "log", "runner"))  # +parse +diff -space
-    Writing meta id
-    Writing meta opdef
-    Writing meta config
-    Writing meta proc cmd
-    Writing meta proc env
-    Writing meta sys/platform
-    Writing meta initialized
-    Copying source code (see log/files):
-      ['**/* text size<100000 max-matches=500',
-       '-**/.* dir', '-**/* dir sentinel=bin/activate',
-       '-**/* dir sentinel=.nocopy',
-       '-summary.json']
-    Applying configuration (see log/patched)
-    Finalizing staged files (see manifest)
-    Writing meta staged
-
 Start the staged run.
 
     >>> run(f"gage run --start {run_name} -y")
@@ -280,32 +182,3 @@ Start the staged run.
     <0>
 
     >>> assert x == short_name
-
-Show the runner log.
-
-    >>> cat_log(path_join(meta_dir, "log", "runner"))  # +parse +diff -space
-    Writing meta id
-    Writing meta opdef
-    Writing meta config
-    Writing meta proc cmd
-    Writing meta proc env
-    Writing meta sys/platform
-    Writing meta initialized
-    Copying source code (see log/files):
-      ['**/* text size<100000 max-matches=500',
-       '-**/.* dir', '-**/* dir sentinel=bin/activate',
-       '-**/* dir sentinel=.nocopy',
-       '-summary.json']
-    Applying configuration (see log/patched)
-    Finalizing staged files (see manifest)
-    Writing meta staged
-    Writing meta started
-    Starting run (see output/40_run): python hello.py
-    Writing meta proc/lock
-    Exit code for run: 0
-    Deleting meta proc/lock
-    Checking output for summary pattern '--- summary ---(.*)---'
-    Writing meta summary
-    Writing meta stopped
-    Writing meta proc/exit
-    Finalizing run files (see manifest)

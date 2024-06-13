@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX (locking on Windows) +skip (meta zip)
+test-options: +skip=WINDOWS_FIX (locking on Windows)
 ---
 
 TODO - finalize_run changes the run's meta dir from the directory form
@@ -95,15 +95,6 @@ Show run output.
     >>> cat(path_join(run.meta_dir, "output", "40_run"))
     Hi there
 
-At this point the run process has completed but the run is not yet
-finalized. `finalize_run()` is responsible for finalizing a run.
-
-Finalize the run.
-
-    >>> finalize_run(run)
-
-Show the meta files. All files are read only.
-
     >>> ls(run.meta_dir)  # +diff
     __schema__
     config.json
@@ -120,20 +111,68 @@ Show the meta files. All files are read only.
     output/40_run.index
     proc/cmd.json
     proc/env.json
+    staged
+    started
+
+At this point the run process has completed but the run is not yet
+finalized. `finalize_run()` is responsible for finalizing a run.
+
+Finalize the run.
+
+    >>> finalized_run = finalize_run(run)
+
+Finalize generates a zip meta directory. The run meta directory no
+longer exists.
+
+    >>> os.path.exists(run.meta_dir)
+    False
+
+The finalized run is updated to use the zipped meta directory.
+
+    >>> os.path.basename(finalized_run.meta_dir)  # +parse
+    '{x:run_id}.meta.zip'
+
+    >>> assert x == run.id == finalized_run.id
+
+Use `run_meta` to list the zip contents.
+
+    >>> from gage._internal import run_meta
+
+    >>> for name in run_meta.ls(finalized_run.meta_dir):
+    ...     print(name)  # +diff
+    __schema__
+    config.json
+    id
+    initialized
+    log/
+    log/files
+    log/runner
+    manifest
+    opdef.json
+    opref
+    output/
+    output/10_sourcecode
+    output/10_sourcecode.index
+    output/40_run
+    output/40_run.index
+    proc/
+    proc/cmd.json
+    proc/env.json
     proc/exit
     staged
     started
     stopped
     summary.json
 
-Show the run files.
+Show the run finalized files.
 
-    >>> ls(run.run_dir)  # +diff
-    say.py
+    >>> ls(finalized_run.run_dir, permissions=True)  # +diff
+    -r--r--r-- say.py
 
 Show the finalize run manifest.
 
-    >>> cat(path_join(run.meta_dir, "manifest"))  # +diff
+    >>> with run_meta.open_manifest(finalized_run) as f:
+    ...     print(f.read(), end="")
     s 3f9c639e1d6b056c071b44752ea97c694127291443065afa2689bf78ef3b8fb0 say.py
 
 ## Run with config
@@ -153,5 +192,5 @@ Execute the run.
 
 Show run output.
 
-    >>> cat(path_join(run.meta_dir, "output", "40_run"))
-    Ho there
+    >>> run_meta.read_output(run, "40_run")
+    'Ho there\n'

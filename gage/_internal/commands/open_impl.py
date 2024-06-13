@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 from .. import cli
+from .. import run_meta
 
 from ..run_attr import run_user_dir
 
@@ -32,16 +33,57 @@ class Args(NamedTuple):
 
 
 def open(args: Args):
+    args = _apply_summary_option(args)
     run = one_run(args)
-    _open(_path(run, args), args)
+    if args.meta and run_meta.is_zip(run.meta_dir):
+        _open(run.meta_dir, args)
+    else:
+        _open(_path(run, args), args)
     _flush_streams_and_exit()
 
 
+def _apply_summary_option(args: Args):
+    if args.summary:
+        if args.path:
+            cli.exit_with_error("summary and path cannot be used together")
+        return args._replace(path="summary.json", meta=True)
+    return args
+
+
 def cat(args: Args):
+    args = _apply_summary_option(args)
     if not args.path:
         _path_required_for_cat_error(args)
     run = one_run(args)
+    if args.meta:
+        _cat_meta_file(run, args)
+    else:
+        _cat_dir_file(run, args)
+
+
+def _cat_meta_file(run: Run, args: Args):
+    assert args.path
+    try:
+        f = run_meta.open_meta_file(run, args.path, text=False)
+    except FileNotFoundError as e:
+        _path_not_found_error(e.filename)
+    except KeyError:
+        _zip_entry_not_found(run.meta_dir, args.path)
+    else:
+        with f:
+            sys.stdout.buffer.write(f.read())
+
+
+def _zip_entry_not_found(filename: str, name: str):
+    cli.exit_with_error(
+        f"cannot open \"{name}\" in \"{filename}\": entry does not exist"
+    )
+
+
+def _cat_dir_file(run: Run, args: Args):
     path = _path(run, args)
+    if not os.path.exists(path):
+        _path_not_found_error(path)
     if not os.path.isfile(path):
         _path_not_file_error(path)
     _cat(_path(run, args))
@@ -55,13 +97,15 @@ def _path_required_for_cat_error(args: Args) -> NoReturn:
     )
 
 
+def _path_not_found_error(path: str) -> NoReturn:
+    cli.exit_with_error(f"cannot open \"{path}\": no such file")
+
+
 def _path_not_file_error(path: str) -> NoReturn:
-    cli.exit_with_error(f"Path \"{path}\" is not a run file")
+    cli.exit_with_error(f"cannot open \"{path}\": not a file")
 
 
 def _path(run: Run, args: Args):
-    if args.summary:
-        args = args._replace(path="summary.json", meta=True)
     dirname = _dirname(run, args)
     return os.path.join(dirname, args.path) if args.path else dirname
 

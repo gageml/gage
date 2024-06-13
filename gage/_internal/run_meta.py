@@ -10,11 +10,50 @@ import zipfile
 
 from .types import *
 
+from .run_output import *
+
 from .file_util import ensure_dir
+from .file_util import ls as ls_dir
 from .file_util import make_dir
 
 from .opref_util import encode_opref
 from .opref_util import decode_opref
+
+__all__ = [
+    "delete_proc_lock",
+    "is_zip",
+    "iter_output",
+    "ls",
+    "make_meta_dir",
+    "meta_file_exists",
+    "open_files_log",
+    "open_manifest",
+    "open_meta_file",
+    "read_config",
+    "read_opdef",
+    "read_opref",
+    "read_output",
+    "read_proc_cmd",
+    "read_proc_env",
+    "read_proc_exit",
+    "read_proc_lock",
+    "read_schema",
+    "read_summary",
+    "run_output_writer",
+    "runner_log",
+    "write_config",
+    "write_opdef",
+    "write_opref",
+    "write_patched",
+    "write_proc_cmd",
+    "write_proc_env",
+    "write_proc_exit",
+    "write_proc_lock",
+    "write_run_id",
+    "write_schema",
+    "write_summary",
+    "write_system_attribute",
+]
 
 log = logging.getLogger(__name__)
 
@@ -30,16 +69,22 @@ def make_meta_dir(run_dir: str):
 
 
 def meta_file_exists(run: Run, *path: str):
-    if _is_zip(run.meta_dir):
+    if is_zip(run.meta_dir):
         return _meta_zip_file_exists(run.meta_dir, _zip_member(path))
     else:
         return os.path.exists(os.path.join(run.meta_dir, *path))
 
 
-def open_meta_file(run: Run, *path: str, write: bool = False, append: bool = False):
+def open_meta_file(
+    run: Run,
+    *path: str,
+    write: bool = False,
+    append: bool = False,
+    text: bool = True,
+):
     if write and append:
         raise ValueError("cannot specify both write and append")
-    return _open_meta_file(run.meta_dir, path, write, append)
+    return _open_meta_file(run.meta_dir, path, write, append, text)
 
 
 def _open_meta_file(
@@ -47,20 +92,21 @@ def _open_meta_file(
     path: list[str] | tuple[str, ...],
     write: bool = False,
     append: bool = False,
-):
-    if _is_zip(meta_dir):
+    text: bool = True,
+) -> IO[Any]:
+    if is_zip(meta_dir):
         if write or append:
             raise ValueError(f"cannot write to {meta_dir}")
-        return _open_meta_zip_file(meta_dir, _zip_member(path))
+        return _open_meta_zip_file(meta_dir, _zip_member(path), text)
     else:
-        return _open_meta_dir_file(meta_dir, path, write, append)
+        return _open_meta_dir_file(meta_dir, path, write, append, text)
 
 
 def _zip_member(path: list[str] | tuple[str, ...]):
     return "/".join(path)
 
 
-def _is_zip(meta_dir: str):
+def is_zip(meta_dir: str):
     return meta_dir.endswith(".zip") or meta_dir.endswith(".zip.deleted")
 
 
@@ -69,25 +115,14 @@ def _open_meta_dir_file(
     path: list[str] | tuple[str, ...],
     write: bool = False,
     append: bool = False,
+    text: bool = True,
 ):
     assert not (write and append)
     filename = os.path.join(meta_dir, *path)
     if write or append:
         ensure_dir(os.path.dirname(filename))
-    mode = "w" if write else "a" if append else "r"
+    mode = ("w" if write else "a" if append else "r") + ("" if text else "b")
     return open(filename, mode)
-
-
-@overload
-def _open_meta_zip_file(
-    filename: str, member: str, text: Literal[True] = True
-) -> IO[str]: ...
-
-
-@overload
-def _open_meta_zip_file(
-    filename: str, member: str, text: Literal[False]
-) -> IO[bytes]: ...
 
 
 def _open_meta_zip_file(filename: str, member: str, text: bool = True):
@@ -115,6 +150,18 @@ def _meta_zip_file_exists(filename: str, member: str):
             return False
         else:
             return True
+
+
+def ls(meta_dir: str):
+    if is_zip(meta_dir):
+        return _ls_zip(meta_dir)
+    else:
+        return ls_dir(meta_dir)
+
+
+def _ls_zip(filename: str):
+    with zipfile.ZipFile(filename) as zf:
+        return sorted(zf.namelist())
 
 
 # =================================================================
@@ -311,7 +358,7 @@ def write_proc_lock(run: Run, pid: int):
 
 
 def delete_proc_lock(run: Run):
-    if _is_zip(run.meta_dir):
+    if is_zip(run.meta_dir):
         raise ValueError("cannot delete from zip")
     filename = os.path.join(run.meta_dir, "proc", "lock")
     try:
@@ -344,16 +391,71 @@ def read_output(run: Run, output_name: str):
         return f.read()
 
 
-def _open_run_output(run: Run, output_name: str, write: bool = False):
-    return _open_meta_file(run.meta_dir, ["output", output_name], write)
+def _open_run_output(run: Run, output_name: str):
+    return _open_meta_file(run.meta_dir, ["output", output_name])
 
 
-def writeable_output_filename(run: Run, output_name: str):
-    if _is_zip(run.meta_dir):
+def run_output_writer(
+    run: Run,
+    output_name: str,
+    output_cb: OutputCallback | None = None,
+    progress_parser: ProgressParser | None = None,
+):
+    output_filename = _writeable_output_filename(run, output_name)
+    return RunOutputWriter(
+        output_filename,
+        output_cb=output_cb,
+        progress_parser=progress_parser,
+    )
+
+
+def _writeable_output_filename(run: Run, output_name: str):
+    if is_zip(run.meta_dir):
         raise ValueError(f"cannot write to {run.meta_dir}")
     output_dir = os.path.join(run.meta_dir, "output")
     ensure_dir(output_dir)
     return os.path.join(output_dir, output_name)
+
+
+def iter_output(run: Run) -> Generator[RunOutputReader, Any, None]:
+    if is_zip(run.meta_dir):
+        return _iter_zip_output(run.meta_dir)
+    else:
+        return _iter_dir_output(run.meta_dir)
+
+
+def _iter_zip_output(filename: str):
+    with zipfile.ZipFile(filename) as zf:
+        for name in zf.namelist():
+            if not name.startswith("/output") and not name.endswith(".index"):
+                continue
+            basename = name[7:-6]
+            try:
+                output = zf.open(name[:-6])
+            except KeyError:
+                pass
+            else:
+                index = zf.open(name)
+                yield RunOutputReader(basename, output, index)
+
+
+def _iter_dir_output(meta_dir: str):
+    output_dirname = os.path.join(meta_dir, "output")
+    if not os.path.exists(output_dirname):
+        return
+    for name in sorted(os.listdir(output_dirname)):
+        if os.path.splitext(name)[1] != ".index":
+            continue
+        basename = name[:6]
+        output_filename = os.path.join(output_dirname, basename)
+        index_filename = os.path.join(output_dirname, name)
+        if not os.path.exists(output_filename):
+            continue
+        yield RunOutputReader(
+            basename,
+            open(output_filename, "rb"),
+            open(index_filename, "rb"),
+        )
 
 
 # =================================================================
@@ -375,7 +477,7 @@ def runner_log(run: Run):
 
 
 def _log_filename(meta_dir: str, log_name: str):
-    if _is_zip(meta_dir):
+    if is_zip(meta_dir):
         raise ValueError(f"cannot write to {meta_dir}")
     return os.path.join(meta_dir, "log", log_name)
 

@@ -43,7 +43,7 @@ Use `var` to list the runs.
 
 Use `_zip_meta` to zip the meta directory for the run.
 
-    >>> _zip_meta(run)
+    >>> _ = _zip_meta(run)
 
     >>> ls(runs_dir)  # +parse
     {x}.meta.zip

@@ -1,7 +1,3 @@
----
-test-options: +skip (meta zip breaking `cat --meta`)
----
-
 # Op Version
 
 The `op-version` sample project specifies an operation version.

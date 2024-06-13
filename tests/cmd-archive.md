@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX (nagging table formatting inconsistencies) +skip (meta zip work)
+test-options: +skip=WINDOWS_FIX (nagging table formatting inconsistencies)
 ---
 
 # `archive` Command

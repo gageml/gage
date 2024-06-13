@@ -47,6 +47,7 @@ from .sys_config import get_user
 
 __all__ = [
     "META_SCHEMA",
+    "OutputName",
     "RunExecError",
     "RunFileType",
     "RunManifest",
@@ -127,7 +128,7 @@ def _run_dir_for_meta_dir(meta_dir: str):
     elif meta_dir.endswith(".meta.zip"):
         return meta_dir[:-9]
     elif meta_dir.endswith(".meta.zip.deleted"):
-        return meta_dir[:-17]
+        return meta_dir[:-17] + ".deleted"
     else:
         assert False, meta_dir
 
@@ -488,7 +489,11 @@ def finalize_run(run: Run, exit_code: int = 0):
     _finalize_run_hook(run, opdef, log)
     _apply_to_files_log(run, "g")
     _write_run_files_manifest(run, log)
-    _zip_meta(run)
+    if os.getenv("NO_ZIP_META") != "1":
+        zip_filename = _zip_meta(run)
+        return run_for_meta_dir(zip_filename)
+    else:
+        return run
 
 
 def _finalize_run_summary(run: Run, opdef: OpDef, log: Logger):
@@ -646,15 +651,18 @@ def _maybe_log_file_changed(
 
 
 def _zip_meta(run: Run):
-    _make_meta_zip(run)
+    filename = _make_meta_zip(run)
     safe_delete_tree(run.meta_dir)
+    return filename
 
 
 def _make_meta_zip(run: Run):
     files = ls(run.meta_dir, followlinks=True, include_dirs=True)
-    with zipfile.ZipFile(_meta_zip_filename(run), "x") as zf:
+    filename = _meta_zip_filename(run)
+    with zipfile.ZipFile(filename, "x") as zf:
         for path in files:
             zf.write(os.path.join(run.meta_dir, path), path)
+    return filename
 
 
 def _meta_zip_filename(run: Run):
@@ -900,12 +908,11 @@ def _run_phase_exec(
         env=proc_env,
     )
     _write_proc_lock(p, run, log)
-
-    output_filename = run_meta.writeable_output_filename(run, output_name)
     output_cb = _PhaseExecOutputCallback(run, phase_name)
     progress_parser = _progress_parser(progress)
-    output = run_output.RunOutput(
-        output_filename,
+    output = run_meta.run_output_writer(
+        run,
+        output_name,
         output_cb=output_cb,
         progress_parser=progress_parser,
     )
@@ -913,8 +920,6 @@ def _run_phase_exec(
     exit_code = p.wait()
     output.wait_and_close()
     log.info(f"Exit code for {phase_name}: {exit_code}")
-    set_readonly(output_filename)
-    set_readonly(output_filename + ".index")
     _delete_proc_lock(run, log)
     if exit_code != 0:
         raise RunExecError(phase_name, proc_args, exit_code)

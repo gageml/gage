@@ -1,7 +1,3 @@
----
-test-options: +skip (restore broken with zip meta)
----
-
 # `restore` command
 
     >>> run("gage restore -h")  # +diff

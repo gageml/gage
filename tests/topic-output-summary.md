@@ -1,7 +1,3 @@
----
-test-options: +skip (meta zip breaking show output)
----
-
 # Output Summary
 
 By default, Gage scans run output for summary data if a summary file

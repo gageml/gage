@@ -173,10 +173,10 @@ otherwise specify rules.
     >>> opdef.get_sourcecode()  # +pprint
     None
 
-Confirm the run directory is empty.
+The run directory does not yet exist.
 
-    >>> ls(run.run_dir)
-    <empty>
+    >>> os.path.exists(run.run_dir)
+    False
 
 Copy the source code to the run directory.
 
