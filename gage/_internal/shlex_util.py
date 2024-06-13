@@ -29,6 +29,8 @@ def _shlex_split_windows(s: str):
 def _unquote(s: str):
     if s[:1] == "'" and s[-1:] == "'":
         return s[1:-1]
+    if s[:1] == "\"" and s[-1:] == "\"":
+        return s[1:-1]
     return s
 
 
