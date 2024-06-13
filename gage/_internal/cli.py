@@ -273,7 +273,7 @@ def _pager_supports_styles(pager: str | None):
 ColSpec = str | tuple[str, dict[str, Any]]
 
 
-def Table(*cols: ColSpec, width: int | None = None, **kw: Any):
+def Table(*cols: ColSpec, width: int | None = None, expand: bool = False, **kw: Any):
     box = kw.pop("box", None) or (rich.box.MARKDOWN if is_plain else rich.box.ROUNDED)
     border_style = kw.pop("border_style", None) or STYLE_TABLE_BORDER
     header_style = kw.pop("header_style", None) or STYLE_TABLE_HEADER
@@ -281,7 +281,8 @@ def Table(*cols: ColSpec, width: int | None = None, **kw: Any):
         box=box,
         border_style=border_style,
         header_style=header_style,
-        width=_table_width_windows_markdown(width, box),
+        expand=expand,
+        width=_table_width_windows_markdown(width, expand, box),
         **kw,
     )
     for col in cols:
@@ -290,17 +291,22 @@ def Table(*cols: ColSpec, width: int | None = None, **kw: Any):
     return t
 
 
-def _table_width_windows_markdown(table_width_arg: int | None, box: rich.box.Box):
+def _table_width_windows_markdown(
+    table_width_arg: int | None,
+    expand_arg: bool,
+    box: rich.box.Box,
+):
     if (
-        table_width_arg is None
+        expand_arg
+        and table_width_arg is None
         and sys.platform == "win32"
         and box is rich.box.MARKDOWN
         and "COLUMNS" in os.environ
     ):
-        # On Windows when using markdown formatted tables, width is one
-        # less than expected when COLUMNS is used to infer width (i.e.
-        # when width is None). When `width` is provide to a table
-        # explicitly, the generated output is as expected.
+        # On Windows when using expanded, markdown formatted tables, width is
+        # one less than expected when COLUMNS is used to infer width (i.e. when
+        # width is None). When `width` is provide to a table explicitly, the
+        # generated output is as expected.
         return int(os.environ["COLUMNS"])
     return table_width_arg
 

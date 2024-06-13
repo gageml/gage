@@ -221,7 +221,7 @@ Delete the archive.
     Deleted archive 'my-archive'
     <0>
 
-    >>> run("gage archive --list")  # +table
+    >>> run("gage archive --list")
     | name | runs | last archived |
     |------|------|---------------|
     <0>

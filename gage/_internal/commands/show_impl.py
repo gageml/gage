@@ -132,7 +132,6 @@ def _config_table(table_only: bool):
         table = cli.Table(
             show_header=False,
             show_edge=True,
-            box=None,
             padding=(0, 1),
             pad_edge=True,
         )

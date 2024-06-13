@@ -24,11 +24,11 @@ The `config-types` operation accepts various config value types.
     ⤶
     ⤶
        Flags
-    |                Default                                   |
-    |  b             True                                      |
-    |  f             4.567                                     |
-    |  i             123                                       |
-    |  s             Abc                                       |
+    |                Default                                  |
+    |  b             True                                     |
+    |  f             4.567                                    |
+    |  i             123                                      |
+    |  s             Abc                                      |
     <0>
 
 There are no runs to start.

@@ -39,6 +39,7 @@ def get_help(opspec: str, context: RunContext):
 
 
 def FlagsPanel(config: dict[str, RunConfigValue]):
+    import os
     flags_table = Table(
         highlight=True,
         show_header=True,
