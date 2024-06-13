@@ -35,7 +35,7 @@ Create a sample script to generate output.
 
 Create a run output instance.
 
-    >>> output = RunOutput("output")
+    >>> output = RunOutputWriter("output")
 
 Output is read from process output via `output.open()`. Create a process
 to read from. To read both stdout and stderr, use pipes for each stream.
@@ -106,7 +106,14 @@ While output can be read directly from `output_filename` as a text file,
 a run output reader provides timestamp and stream type information for
 each line.
 
-    >>> with RunOutputReader("output") as reader:  # +parse
+An output reader is created with a name and handles to the output and
+index files.
+
+    >>> with RunOutputReader(
+    ...     "output",
+    ...     open("output", "rb"),
+    ...     open("output.index", "rb")
+    ... ) as reader:  # +parse
     ...     for timestamp, stream, line in reader:
     ...         print(timestamp, stream, line)
     {:timestamp} 0 stdout line 0
@@ -159,7 +166,11 @@ Show captured output.
 
 The order is the same using an output reader.
 
-    >>> with RunOutputReader("output") as reader:  # +parse
+    >>> with RunOutputReader(
+    ...     "output",
+    ...     open("output", "rb"),
+    ...     open("output.index", "rb")
+    ... ) as reader:  # +parse
     ...     for timestamp, stream, line in reader:
     ...         print(timestamp, stream, line)
     {:timestamp} 0 stdout line 0
@@ -197,9 +208,9 @@ Create a callback to handle output.
     ...     def close(self):
     ...         print("Handler close")
 
-Create a run output object with a callback.
+Create a run output writer with a callback.
 
-    >>> output = RunOutput("output", output_cb=OutputHandler())
+    >>> output = RunOutputWriter("output", output_cb=OutputHandler())
 
     >>> p = subprocess.Popen(
     ...     [sys.executable, "prog.py"],
@@ -227,7 +238,7 @@ Create a run output object with a callback.
 Output is captured up to the end of file, even when a line ending isn't
 used.
 
-    >>> output = RunOutput("output")
+    >>> output = RunOutputWriter("output")
 
 Run a process that prints text without a line ending.
 

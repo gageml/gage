@@ -159,7 +159,7 @@ Generate a run.
     >>> ls(include_dirs=True)  # +parse
     .runs
     .runs/{run_id:run_id}
-    .runs/{:run_id}.meta
+    .runs/{:run_id}.meta.zip
     {}
     gage.yaml
     hello.py

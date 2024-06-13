@@ -24,10 +24,12 @@ from natsort import natsorted
 
 from .. import cli
 
-from ..run_comment import get_comments
-from ..run_output import RunOutputReader
+from ..run_attr import *
 from ..run_util import *
 
+from ..run_comment import get_comments
+from ..run_meta import iter_output
+from ..run_output import RunOutputReader
 from ..util import format_user_dir
 
 from .impl_support import format_summary_value
@@ -114,7 +116,7 @@ def Attributes(run: Run):
 
 
 def Config(run: Run, table_only: bool = False):
-    config = meta_config(run)
+    config = run_config(run)
     if not config:
         return Group()
 
@@ -278,47 +280,26 @@ def _format_file_size(size: int):
 
 
 def Output(run: Run):
-    output = list(_iter_run_output(run))
+    output = list(iter_output(run))
     if not output:
         return Group()
     if len(output) == 1:
-        name, reader = output[0]
+        reader = output[0]
         return cli.Panel(OutputTable(reader), title="Output")
     return cli.Panel(
         Group(
             *(
-                OutputTable(reader, name, pad=i > 0)
-                for i, (name, reader) in enumerate(output)
+                OutputTable(reader, _output_name(reader), pad=i > 0)
+                for i, reader in enumerate(output)
             )
         ),
         title="Output",
     )
 
 
-def _iter_run_output(run: Run) -> Generator[tuple[str, RunOutputReader], Any, None]:
-    output_dirname = run_meta_path(run, "output")
-    if not os.path.exists(output_dirname):
-        return
-    for name in sorted(os.listdir(output_dirname)):
-        if os.path.splitext(name)[1] != ".index":
-            continue
-        name = name[:-6]
-        filename = os.path.join(output_dirname, name)
-        if not os.path.exists(filename):
-            continue
-        parts = name.split("_")
-        output_name = parts[1] if len(parts) == 2 else parts[0]
-        yield output_name, RunOutputReader(filename)
-
-
-def _output_desc(name: str):
-    return {
-        "sourcecode": "stage source code",
-        "runtime": "stage runtime",
-        "dependencies": "stage dependencies",
-        "run": "run",
-        "finalize": "finalize run",
-    }.get(name, name)
+def _output_name(reader: RunOutputReader):
+    parts = reader.name.split("_")
+    return parts[0] if len(parts) == 1 else parts[1]
 
 
 def OutputTable(reader: RunOutputReader, name: str = "", pad: bool = False):
@@ -335,7 +316,7 @@ def OutputTable(reader: RunOutputReader, name: str = "", pad: bool = False):
     except Exception as e:
         log.warning(
             "Error reading run output (%s): %s",
-            reader.filename,
+            reader.name,
             e,
         )
     else:
@@ -411,8 +392,8 @@ def _show_summary_and_exit(run: Run):
 
 
 def _show_output_and_exit(run: Run):
-    for output_name, reader in _iter_run_output(run):
-        if output_name != "run":
+    for reader in iter_output(run):
+        if reader.name != OutputName.run:
             continue
         for line in reader:
             print(line.text)

@@ -13,8 +13,8 @@ import time
 
 from .. import cli
 
+from ..run_attr import run_user_dir
 from ..file_util import make_temp_dir
-from ..run_util import run_user_dir
 from ..util import flatten
 from ..util import which
 from ..var import runs_dir
@@ -166,12 +166,15 @@ def _src_run_includes(runs: list[Run]):
     src_root = None
     includes: list[str] = []
     for run in runs:
-        for src_dir in _run_src_dirs(run):
-            src_parent, name = os.path.split(src_dir)
+        for src in _run_sources(run):
+            src_parent, name = os.path.split(src)
             if not src_root:
                 src_root = src_parent
-            assert src_parent == src_root, (src_dir, src_parent)
-            includes.append(f"/{name}/**")
+            assert src_parent == src_root, (src, src_parent)
+            if os.path.isdir(src):
+                includes.append(f"/{name}/**")
+            else:
+                includes.append(f"/{name}")
     assert src_root
     return src_root, includes
 
@@ -181,7 +184,7 @@ def _empty_src_run_includes() -> tuple[str, list[str]]:
     return tmp, []
 
 
-def _run_src_dirs(run: Run):
+def _run_sources(run: Run):
     if not os.path.exists(run.meta_dir):
         return
     yield run.meta_dir

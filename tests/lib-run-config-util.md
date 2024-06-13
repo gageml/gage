@@ -4,9 +4,9 @@ test-options: +paths
 
 # Run config support
 
-`run_config` provides support for run configuration implementation.
+`run_config_util` provides support for run configuration implementation.
 
-    >>> from gage._internal.run_config import *
+    >>> from gage._internal.run_config_util import *
     >>> from gage._internal.types import *
 
 ## RunConfig base class
@@ -157,7 +157,7 @@ Multiple excludes extend the excluded results.
 The private function `_parse_path()` converts a a path into
 `ParsedPath`.
 
-    >>> from gage._internal.run_config import _parse_path
+    >>> from gage._internal.run_config_util import _parse_path
 
 A parsed path consists of four parts: file pattern, file excluded flag,
 key pattern, and key excluded flag.
@@ -227,7 +227,7 @@ The private function `_select_files()` selects files from a directory
 given a list of parsed paths. See **Parsing paths** above for details
 about parsed paths.
 
-    >>> from gage._internal.run_config import _select_files
+    >>> from gage._internal.run_config_util import _select_files
 
 Create a sample directory structure.
 
@@ -326,7 +326,7 @@ format is not supported, the function raises `UnsupportedFileFormat`.
 
     >>> read_file_config(path_join(target_dir, "config.json"))  # +parse
     Traceback (most recent call last):
-    gage._internal.run_config.UnsupportedFileFormat: {:path}/config.json
+    gage._internal.run_config_util.UnsupportedFileFormat: {:path}/config.json
 
 Raises `FileNotFoundError` if the specified file doesn't exist.
 
@@ -339,7 +339,7 @@ Raises `FileNotFoundError` if the specified file doesn't exist.
 The private function `_selected_keys()` returns a list of config keys
 that apply to a list of selected files.
 
-    >>> from gage._internal.run_config import _select_keys
+    >>> from gage._internal.run_config_util import _select_keys
 
 `_select_keys()` requires the following:
 

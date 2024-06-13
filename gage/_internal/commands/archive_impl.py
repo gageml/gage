@@ -64,7 +64,13 @@ def _handle_list(args: Args):
 
 
 def _run_count(dirname: str):
-    return len([name for name in safe_list_dir(dirname) if name.endswith(".meta")])
+    return len(
+        [
+            name
+            for name in safe_list_dir(dirname)
+            if name.endswith(".meta") or name.endswith(".meta.zip")
+        ]
+    )
 
 
 def _handle_delete(args: Args):

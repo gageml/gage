@@ -4,9 +4,7 @@ from typing import *
 
 from .types import *
 
-from .run_util import run_status
-from .run_util import run_summary
-from .run_util import run_user_attrs
+from .run_attr import *
 
 __all__ = ["string_match_filter"]
 

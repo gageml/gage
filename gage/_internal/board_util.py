@@ -10,7 +10,7 @@ import operator
 
 from functools import cmp_to_key
 
-from .run_util import *
+from .run_attr import *
 
 from .summary_util import format_summary_value
 from .util import kebab_to_camel
@@ -187,7 +187,7 @@ def _apply_field_col(field_name: str, col_defs: dict[str, Any]):
 
 
 def _config_fields(run: Run, field_cols: dict[str, Any]):
-    return _gen_fields(meta_config(run), "config", field_cols)
+    return _gen_fields(run_config(run), "config", field_cols)
 
 
 def _summary_fields(run: Run, field_cols: dict[str, Any]):

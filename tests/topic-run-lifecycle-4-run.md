@@ -1,6 +1,11 @@
 ---
-test-options: +skip=WINDOWS_FIX  # locking on Windows
+test-options: +skip=WINDOWS_FIX (locking on Windows)
 ---
+
+TODO - finalize_run changes the run's meta dir from the directory form
+to the zip form - but this isn't being applied to the run attr. Also,
+need to list the zip contents rather than cat them, once the run is
+finalized.
 
 # Starting a staged run
 
@@ -60,75 +65,114 @@ Run output is written to `output/40_run`.
 
 List meta dir contents.
 
-    >>> ls(run.meta_dir, permissions=True)  # +diff
-    -r--r--r-- __schema__
-    -r--r--r-- config.json
-    -r--r--r-- id
-    -r--r--r-- initialized
-    -rw-rw-rw- log/files
-    -rw-rw-rw- log/runner
-    -rw-rw-rw- manifest
-    -r--r--r-- opdef.json
-    -r--r--r-- opref
-    -r--r--r-- output/10_sourcecode
-    -r--r--r-- output/10_sourcecode.index
-    -r--r--r-- output/40_run
-    -r--r--r-- output/40_run.index
-    -r--r--r-- proc/cmd.json
-    -r--r--r-- proc/env.json
-    -r--r--r-- staged
-    -r--r--r-- started
+    >>> ls(run.meta_dir)  # +diff
+    __schema__
+    config.json
+    id
+    initialized
+    log/files
+    log/runner
+    manifest
+    opdef.json
+    opref
+    output/10_sourcecode
+    output/10_sourcecode.index
+    output/40_run
+    output/40_run.index
+    proc/cmd.json
+    proc/env.json
+    staged
+    started
 
 Note that some files are writeable. These are log, output, and manifest
 files that are updated during the run and when the run is finalized.
 
 Show run output.
 
-    >>> cat(run_meta_path(run, "output", "10_sourcecode"))
+    >>> cat(path_join(run.meta_dir, "output", "10_sourcecode"))
     Stage source
 
-    >>> cat(run_meta_path(run, "output", "40_run"))
+    >>> cat(path_join(run.meta_dir, "output", "40_run"))
     Hi there
+
+    >>> ls(run.meta_dir)  # +diff
+    __schema__
+    config.json
+    id
+    initialized
+    log/files
+    log/runner
+    manifest
+    opdef.json
+    opref
+    output/10_sourcecode
+    output/10_sourcecode.index
+    output/40_run
+    output/40_run.index
+    proc/cmd.json
+    proc/env.json
+    staged
+    started
 
 At this point the run process has completed but the run is not yet
 finalized. `finalize_run()` is responsible for finalizing a run.
 
 Finalize the run.
 
-    >>> finalize_run(run)
+    >>> finalized_run = finalize_run(run)
 
-Show the meta files. All files are read only.
+Finalize generates a zip meta directory. The run meta directory no
+longer exists.
 
-    >>> ls(run.meta_dir, permissions=True)  # +diff
-    -r--r--r-- __schema__
-    -r--r--r-- config.json
-    -r--r--r-- id
-    -r--r--r-- initialized
-    -r--r--r-- log/files
-    -r--r--r-- log/runner
-    -r--r--r-- manifest
-    -r--r--r-- opdef.json
-    -r--r--r-- opref
-    -r--r--r-- output/10_sourcecode
-    -r--r--r-- output/10_sourcecode.index
-    -r--r--r-- output/40_run
-    -r--r--r-- output/40_run.index
-    -r--r--r-- proc/cmd.json
-    -r--r--r-- proc/env.json
-    -r--r--r-- proc/exit
-    -r--r--r-- staged
-    -r--r--r-- started
-    -r--r--r-- stopped
-    -r--r--r-- summary.json
+    >>> os.path.exists(run.meta_dir)
+    False
 
-Show the run files.
+The finalized run is updated to use the zipped meta directory.
 
-    >>> ls(run.run_dir, permissions=True)  # +diff
+    >>> os.path.basename(finalized_run.meta_dir)  # +parse
+    '{x:run_id}.meta.zip'
+
+    >>> assert x == run.id == finalized_run.id
+
+Use `run_meta` to list the zip contents.
+
+    >>> from gage._internal import run_meta
+
+    >>> for name in run_meta.ls(finalized_run.meta_dir):
+    ...     print(name)  # +diff
+    __schema__
+    config.json
+    id
+    initialized
+    log/
+    log/files
+    log/runner
+    manifest
+    opdef.json
+    opref
+    output/
+    output/10_sourcecode
+    output/10_sourcecode.index
+    output/40_run
+    output/40_run.index
+    proc/
+    proc/cmd.json
+    proc/env.json
+    proc/exit
+    staged
+    started
+    stopped
+    summary.json
+
+Show the run finalized files.
+
+    >>> ls(finalized_run.run_dir, permissions=True)  # +diff
     -r--r--r-- say.py
 
 Show the finalize run manifest.
 
-    >>> cat(run_meta_path(run, "manifest"))  # +diff
+    >>> with run_meta.open_manifest(finalized_run) as f:
+    ...     print(f.read(), end="")
     s 3f9c639e1d6b056c071b44752ea97c694127291443065afa2689bf78ef3b8fb0 say.py
 
 ## Run with config
@@ -148,5 +192,5 @@ Execute the run.
 
 Show run output.
 
-    >>> cat(run_meta_path(run, "output", "40_run"))
-    Ho there
+    >>> run_meta.read_output(run, "40_run")
+    'Ho there\n'

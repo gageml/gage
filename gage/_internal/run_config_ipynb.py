@@ -5,7 +5,7 @@ from typing import *
 import json
 import re
 
-from .run_config import *
+from .run_config_util import *
 from .run_config_py import PythonConfig
 
 __all__ = ["JupyterNotebookConfig"]

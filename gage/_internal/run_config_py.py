@@ -4,7 +4,7 @@ from typing import *
 
 import libcst as cst
 
-from .run_config import *
+from .run_config_util import *
 
 __all__ = ["PythonConfig"]
 

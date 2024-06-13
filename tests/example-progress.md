@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX  # file locking
+test-options: +skip=WINDOWS_FIX (file locking)
 ---
 
 # Progress example
@@ -41,7 +41,7 @@ the progress updates to prevent them from appearing in the run output.
     {meta_dir:path}
     <0>
 
-    >>> cat(path_join(meta_dir, "output", "40_run"))
+    >>> run("gage show --output")
     Doing stuff 1
     Doing stuff 2
     Doing stuff 3
@@ -52,3 +52,4 @@ the progress updates to prevent them from appearing in the run output.
     Doing stuff 8
     Doing stuff 9
     Doing stuff 10
+    <0>

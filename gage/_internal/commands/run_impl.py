@@ -18,7 +18,11 @@ from .. import run_sourcecode
 
 from ..run_util import *
 
-from ..run_config import read_project_config
+from ..run_attr import run_config
+from ..run_attr import run_opref
+from ..run_attr import run_status
+
+from ..run_config_util import read_project_config
 from ..run_context import resolve_run_context
 from ..run_output import Progress
 from ..run_select import find_comparable_run
@@ -81,7 +85,7 @@ def _handle_start(args: Args):
             f"Run \"{run.id}\" is '{status}'\n\n"
             "Only staged runs can be started with '--start'."
         )
-    config = meta_config(run)
+    config = run_config(run)
     _verify_run_or_stage(args, config, run)
     _exec_and_finalize(run, args)
 
@@ -287,7 +291,7 @@ class _RunPhaseStatus(_RunPhaseContextManager):
     def __init__(self, run: Run, args: Args):
         self._args = args
         self._status = _DefaultStatus(args)
-        self._run_attrs = {"op_name": meta_opref(run).op_name}
+        self._run_attrs = {"op_name": run_opref(run).op_name}
 
     def __enter__(self):
         self._status.start()

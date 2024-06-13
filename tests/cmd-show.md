@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX  # file size calc issue on windows
+test-options: +skip=WINDOWS_FIX (file size calc issue on windows)
 ---
 
 # `show` command

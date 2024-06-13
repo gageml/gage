@@ -47,3 +47,11 @@ Show run files using the `cat` command.
     This
     is a message!
     <0>
+
+Hidden options are used for developer convenience.
+
+`--summary` opens the meta summary file.
+
+    >>> run("gage cat --summary")
+    {}
+    <0>
