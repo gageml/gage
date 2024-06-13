@@ -463,17 +463,30 @@ def _iter_dir_output(meta_dir: str):
 # =================================================================
 
 
+class RunnerLog(logging.Logger):
+    def __init__(self, filename: str):
+        super().__init__("runner")
+        self._handler = handler = logging.FileHandler(filename)
+        self.addHandler(handler)
+        if log.getEffectiveLevel() <= logging.INFO:
+            self.addHandler(logging.StreamHandler())
+        formatter = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%dT%H:%M:%S%z")
+        handler.setFormatter(formatter)
+
+    def close(self):
+        self._handler.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: Any):
+        self.close()
+
+
 def runner_log(run: Run):
     filename = _log_filename(run.meta_dir, "runner")
     ensure_dir(os.path.dirname(filename))
-    runner_log = logging.Logger("runner")
-    handler = logging.FileHandler(filename)
-    runner_log.addHandler(handler)
-    if log.getEffectiveLevel() <= logging.INFO:
-        runner_log.addHandler(logging.StreamHandler())
-    formatter = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%dT%H:%M:%S%z")
-    handler.setFormatter(formatter)
-    return runner_log
+    return RunnerLog(filename)
 
 
 def _log_filename(meta_dir: str, log_name: str):

@@ -190,14 +190,15 @@ def init_run_meta(
 ):
     _write_schema_file(run)
     log = run_meta.runner_log(run)
-    _write_run_id(run, log)
-    _write_opdef(opdef, run, log)
-    _write_config(config, run, log)
-    _write_proc_cmd(cmd.args, run, log)
-    _write_proc_env(cmd.env, run, log)
-    if system_attrs:
-        _write_system_attrs(system_attrs, run, log)
-    _write_timestamp("initialized", run, log)
+    with log:
+        _write_run_id(run, log)
+        _write_opdef(opdef, run, log)
+        _write_config(config, run, log)
+        _write_proc_cmd(cmd.args, run, log)
+        _write_proc_env(cmd.env, run, log)
+        if system_attrs:
+            _write_system_attrs(system_attrs, run, log)
+        _write_timestamp("initialized", run, log)
 
 
 def _write_schema_file(run: Run):
@@ -310,11 +311,12 @@ def stage_run(run: Run, project_dir: str):
 
 
 def stage_sourcecode(run: Run, project_dir: str, _log_files: bool = True):
-    log = run_meta.runner_log(run)
     opdef = run_meta.read_opdef(run)
     run_phase_channel.notify("stage-sourcecode", run)
-    _copy_sourcecode(run, project_dir, opdef, log)
-    _stage_sourcecode_hook(run, project_dir, opdef, log)
+    log = run_meta.runner_log(run)
+    with log:
+        _copy_sourcecode(run, project_dir, opdef, log)
+        _stage_sourcecode_hook(run, project_dir, opdef, log)
     if _log_files:
         _apply_to_files_log(run, "s")
 
@@ -341,11 +343,12 @@ def _stage_sourcecode_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger
 
 
 def apply_config(run: Run):
-    log = run_meta.runner_log(run)
     config = run_meta.read_config(run)
     opdef = run_meta.read_opdef(run)
     run_phase_channel.notify("stage-config", run)
-    log.info("Applying configuration (see log/patched)")
+    log = run_meta.runner_log(run)
+    with log:
+        log.info("Applying configuration (see log/patched)")
     diffs = run_config_util.apply_config(config, opdef, run.run_dir)
     if diffs:
         run_meta.write_patched(run, diffs)
@@ -353,10 +356,11 @@ def apply_config(run: Run):
 
 
 def stage_runtime(run: Run, project_dir: str):
-    log = run_meta.runner_log(run)
     opdef = run_meta.read_opdef(run)
     run_phase_channel.notify("stage-runtime", run)
-    _stage_runtime_hook(run, project_dir, opdef, log)
+    log = run_meta.runner_log(run)
+    with log:
+        _stage_runtime_hook(run, project_dir, opdef, log)
     _apply_to_files_log(run, "r")
 
 
@@ -376,11 +380,12 @@ def _stage_runtime_hook(run: Run, project_dir: str, opdef: OpDef, log: Logger):
 
 
 def stage_dependencies(run: Run, project_dir: str):
-    log = run_meta.runner_log(run)
     opdef = run_meta.read_opdef(run)
     run_phase_channel.notify("stage-dependencies", run)
-    _resolve_dependencies(run, project_dir, opdef, log)
-    _stage_dependencies_hook(run, project_dir, opdef, log)
+    log = run_meta.runner_log(run)
+    with log:
+        _resolve_dependencies(run, project_dir, opdef, log)
+        _stage_dependencies_hook(run, project_dir, opdef, log)
     _apply_to_files_log(run, "d")
 
 
@@ -411,8 +416,9 @@ def _stage_dependencies_hook(run: Run, project_dir: str, opdef: OpDef, log: Logg
 
 def finalize_staged_run(run: Run):
     log = run_meta.runner_log(run)
-    _write_staged_files_manifest(run, log)
-    _write_timestamp("staged", run, log)
+    with log:
+        _write_staged_files_manifest(run, log)
+        _write_timestamp("staged", run, log)
 
 
 def _write_staged_files_manifest(run: Run, log: Logger):
@@ -444,7 +450,6 @@ def _reduce_files_log(run: Run):
 
 
 def exec_run(run: Run):
-    log = run_meta.runner_log(run)
     opdef = run_meta.read_opdef(run)
     cmd = OpCmd(
         run_meta.read_proc_cmd(run),
@@ -452,16 +457,18 @@ def exec_run(run: Run):
     )
     env = {**_run_env(run), **cmd.env}
     run_phase_channel.notify("run", run)
-    _write_timestamp("started", run, log)
-    _run_phase_exec(
-        run,
-        "run",
-        cmd.args,
-        env,
-        opdef.get_progress().get_run(),
-        OutputName.run,
-        log,
-    )
+    log = run_meta.runner_log(run)
+    with log:
+        _write_timestamp("started", run, log)
+        _run_phase_exec(
+            run,
+            "run",
+            cmd.args,
+            env,
+            opdef.get_progress().get_run(),
+            OutputName.run,
+            log,
+        )
 
 
 def _run_env(run: Run):
@@ -479,16 +486,17 @@ def _run_env(run: Run):
 
 
 def finalize_run(run: Run, exit_code: int = 0):
-    log = run_meta.runner_log(run)
     opdef = run_meta.read_opdef(run)
     run_phase_channel.notify("finalize", run)
     ensure_dir(run.run_dir)
-    _finalize_run_summary(run, opdef, log)
-    _write_timestamp("stopped", run, log)
-    _write_exit_code(exit_code, run, log)
-    _finalize_run_hook(run, opdef, log)
-    _apply_to_files_log(run, "g")
-    _write_run_files_manifest(run, log)
+    log = run_meta.runner_log(run)
+    with log:
+        _finalize_run_summary(run, opdef, log)
+        _write_timestamp("stopped", run, log)
+        _write_exit_code(exit_code, run, log)
+        _finalize_run_hook(run, opdef, log)
+        _apply_to_files_log(run, "g")
+        _write_run_files_manifest(run, log)
     if os.getenv("NO_ZIP_META") != "1":
         zip_filename = _zip_meta(run)
         return run_for_meta_dir(zip_filename)
