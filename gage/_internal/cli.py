@@ -248,13 +248,19 @@ class pager:
 
     def __enter__(self):
         if self._pager_env is None:
-            os.environ["PAGER"] = "less -r"
+            os.environ["PAGER"] = _default_pager()
         return self._pager.__enter__()
 
     def __exit__(self, *exc: Any):
         self._pager.__exit__(*exc)
         if self._pager_env is None:
             del os.environ["PAGER"]
+
+
+def _default_pager():
+    if sys.platform == "win32":
+        return "more"
+    return "less -r"
 
 
 def _pager_supports_styles(pager: str | None):
