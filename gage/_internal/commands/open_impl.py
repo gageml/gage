@@ -6,7 +6,6 @@ from ..types import *
 
 import logging
 import os
-import shlex
 import subprocess
 import sys
 
@@ -14,6 +13,7 @@ from .. import cli
 from .. import run_meta
 
 from ..run_attr import run_user_dir
+from ..shlex_util import shlex_split
 
 from .impl_support import one_run
 
@@ -146,7 +146,7 @@ def _default_open_f():
 
 
 def _proc_f(prog: str):
-    cmd = shlex.split(prog)
+    cmd = shlex_split(prog)
 
     def f(path: str):
         try:
