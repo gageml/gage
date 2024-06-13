@@ -27,14 +27,14 @@ Run the operation.
 
 Show the run files.
 
-    >>> run("gage show --files") # +table
+    >>> run("gage show --files")  # +table +parse
     | name                      | type              |     size |
     |---------------------------|-------------------|----------|
     | generated-file            | generated         |      0 B |
     | generated-file-2          | generated         |      0 B |
     | required-file             | dependency        |      0 B |
-    | gage.toml                 | source code       |    364 B |
+    | gage.toml                 | source code       |     {} B |
     | sourcecode-file           | source code       |      0 B |
-    | touch.py                  | source code       |    141 B |
+    | touch.py                  | source code       |     {} B |
     | runtime-file              | runtime           |      0 B |
     <0>
