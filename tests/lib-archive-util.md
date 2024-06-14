@@ -48,8 +48,8 @@ Find an archive directory by name using `find_archive_directory`.
     >>> find_archive_dir("hello")  # +parse
     '{x}'
 
-    >>> assert x == dirname
-    ... # +skip=WINDOWS_FIX x contains '\\\\' whereas dirname '\\'
+    >>> compare_paths(x, dirname)
+    True
 
 An archive name can be read using `get_archive_name`.
 

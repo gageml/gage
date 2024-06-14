@@ -1,5 +1,5 @@
 ---
-test-options: +skip=WINDOWS_FIX (file locking)
+test-options: -windows - progress example is implemented for POSIX
 ---
 
 # Progress example
@@ -11,10 +11,10 @@ test-options: +skip=WINDOWS_FIX (file locking)
     <0>
 
     >>> run("gage ops")
-    | operation | description                   |
-    |-----------|-------------------------------|
-    | progress  | Shows progress for run phases |
-    | tqdm      | Show tqdm based progress      |
+    | operation     | description                              |
+    |---------------|------------------------------------------|
+    | progress      | Shows progress for run phases            |
+    | tqdm          | Show tqdm based progress                 |
     <0>
 
 The `tqdm` example uses the `tqdm` module to show progress. Gage parses

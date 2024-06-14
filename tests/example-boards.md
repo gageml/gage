@@ -1,15 +1,11 @@
----
-test-options: +skip=WINDOWS_FIX  # table formatting
----
-
 # 'boards' Example
 
     >>> use_example("boards")
 
     >>> run("gage ops")
-    | operation | description        |
-    |-----------|--------------------|
-    | op        | A sample operation |
+    | operation           | description                        |
+    |---------------------|------------------------------------|
+    | op                  | A sample operation                 |
     <0>
 
 Generate some runs.
