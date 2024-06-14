@@ -40,7 +40,7 @@ be used as a replacement in all cases.
     >>> shlex_split("a b c")
     ['a', 'b', 'c']
 
-    >>> shlex_split("a \"b c\"")  # -windows
+    >>> shlex_split("a \"b c\"")
     ['a', 'b c']
 
     >>> shlex_split("'a b' c")
@@ -48,61 +48,106 @@ be used as a replacement in all cases.
 
 ## Quote
 
-    >>> shlex_quote(None)
+    >>> shlex_quote(None)  # -windows
     "''"
 
-    >>> shlex_quote("")
+    >>> shlex_quote(None)  # +windows
+    '""'
+
+    >>> shlex_quote("")  # -windows
     "''"
+
+    >>> shlex_quote("")  # +windows
+    '""'
 
     >>> shlex_quote("foo")
     'foo'
 
-    >>> shlex_quote("foo bar")
+    >>> shlex_quote("foo bar")  # -windows
     "'foo bar'"
+
+    >>> shlex_quote("foo bar") # +windows
+    '"foo bar"'
 
     >>> shlex_quote("/foo/bar")
     '/foo/bar'
 
-    >>> shlex_quote("/foo bar")
+    >>> shlex_quote("/foo bar")  # -windows
     "'/foo bar'"
 
-    >>> shlex_quote("\\foo\\bar")
+    >>> shlex_quote("/foo bar")  # +windows
+    '"/foo bar"'
+
+    >>> shlex_quote("\\foo\\bar")  # -windows
     "'\\foo\\bar'"
 
-    >>> shlex_quote("D:\\foo\\bar")
+    >>> shlex_quote("\\foo\\bar")  # +windows
+    '\\foo\\bar'
+
+    >>> shlex_quote("D:\\foo\\bar")  # -windows
     "'D:\\foo\\bar'"
 
-    >>> shlex_quote("D:\\foo bar")
+    >>> shlex_quote("D:\\foo\\bar")  # +windows
+    'D:\\foo\\bar'
+
+    >>> shlex_quote("D:\\foo bar")  # -windows
     "'D:\\foo bar'"
+
+    >>> shlex_quote("D:\\foo bar")  # +windows
+    '"D:\\foo bar"'
 
     >>> shlex_quote("'a b c'")
     '"\'a b c\'"'
 
-    >>> shlex_quote("~")
+    >>> shlex_quote("~")  # -windows
     "'~'"
 
-    >>> shlex_quote("a ~ b")
+    >>> shlex_quote("~")  # +windows
+    '"~"'
+
+    >>> shlex_quote("a ~ b")  # -windows
     "'a ~ b'"
 
-    >>> shlex_quote("*")
+    >>> shlex_quote("a ~ b")  # +windows
+    '"a ~ b"'
+
+    >>> shlex_quote("*")  # -windows
     "'*'"
 
-    >>> shlex_quote("?")
+    >>> shlex_quote("*")  # +windows
+    '"*"'
+
+    >>> shlex_quote("?")  # -windows
     "'?'"
 
-    >>> shlex_quote("a b")
+    >>> shlex_quote("?")  # +windows
+    '"?"'
+
+    >>> shlex_quote("a b")  # -windows
     "'a b'"
 
-    >>> shlex_quote("\"a\" b")
+    >>> shlex_quote("a b")  # +windows
+    '"a b"'
+
+    >>> shlex_quote("\"a\" b")  # -windows
     '\'"a" b\''
 
-    >>> shlex_quote("'a' b")
+    >>> shlex_quote("\"a\" b")  # +windows
+    '"\\"a\\" b"'
+
+    >>> shlex_quote("'a' b")  # -windows
     '\'\'"\'"\'a\'"\'"\' b\''
+
+    >>> shlex_quote("'a' b")  # +windows
+    '"\'a\' b"'
 
 ## Join
 
-    >>> shlex_join(["a", "b c"])
+    >>> shlex_join(["a", "b c"])  # -windows
     "a 'b c'"
+
+    >>> shlex_join(["a", "b c"])  # +windows
+    'a "b c"'
 
 ## Unquoting
 

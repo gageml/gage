@@ -49,7 +49,7 @@ def shlex_quote(s: str):
     return _simplify_shlex_quote(shlex.quote(s))
 
 
-_find_windows_unsafe = re.compile(r'[^\w@%+=:,./-]', re.ASCII).search
+_find_windows_unsafe = re.compile(r"[^\w@%+=:,./\\-]", re.ASCII).search
 
 
 def _shlex_quote_windows(s: str):
@@ -82,7 +82,7 @@ _ENV_ASSIGN_P = re.compile(r"([\w]+)=(.*)")
 def split_env(cmd: str) -> tuple[str, dict[str, str]]:
     if not cmd:
         return cmd, {}
-    parts = shlex_split(cmd)
+    parts = shlex.split(cmd)
     env = {}
     for i, part in enumerate(parts):
         m = _ENV_ASSIGN_P.match(part)
