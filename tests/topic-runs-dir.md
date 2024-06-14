@@ -124,7 +124,7 @@ the project directory.
     gage.yaml
     hello.py
 
-    >>> run("gage ops", cols=27)
+    >>> run("gage ops")
     | operation | description |
     |-----------|-------------|
     | hello     | Says hello  |

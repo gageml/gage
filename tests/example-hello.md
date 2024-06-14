@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX (table border off-by-one, file size calcs)
----
-
 # Hello example
 
 The [`hello`](../examples/hello) example demonstrates the simplest
@@ -54,7 +50,10 @@ Run hello.
     Hello Gage
     <0>
 
-    >>> run("gage show")  # +parse +table +diff +paths
+Show the run. We skip on Windows due to issues with file size cols.
+Windows is tested using a different show command below.
+
+    >>> run("gage show")  # +parse +table +diff -windows
     {:run_id}
     | hello:hello                                    completed |
     ⤶
@@ -82,6 +81,36 @@ Run hello.
     | Hello Gage                                               |
     <0>
 
+    >>> run("gage show", env={"TERM": "DUMB"}, cols=80)
+    ...   # +windows +panel +parse +diff
+    +----------------------- {:run_id} -----------------------+
+    | hello:hello                                   completed |
+    +---------------------------------------------------------+
+    +---------------------- Attributes -----------------------+
+    | id         {run_id:run_id}                              |
+    | name       {:run_name}                                  |
+    | started    {:datetime}                                  |
+    | stopped    {:datetime}                                  |
+    | location   {runs_dir:path}                              |
+    | project    {:path}\examples\hello                       |
+    | exit_code  0                                            |
+    +---------------------------------------------------------+
+    +------------------------ Config -------------------------+
+    | name  Gage                                              |
+    +---------------------------------------------------------+
+    +------------------------- Files -------------------------+
+    | name           |type               |               size |
+    | ---------------+-------------------+------------------- |
+    | gage.toml      |source code        |              153 B |
+    | hello.py       |source code        |               41 B |
+    | ---------------+-------------------+------------------- |
+    | 2 files        |                   |       total: 194 B |
+    +---------------------------------------------------------+
+    +------------------------ Output -------------------------+
+    | Hello Gage                                              |
+    +---------------------------------------------------------+
+    <0>
+
 List run files:
 
     >>> run_dir = path_join(runs_dir, run_id)
@@ -98,8 +127,8 @@ Run with a different `name`.
     Hello Joe
     <0>
 
-    >>> run("gage show")  # +parse +table
-    {run_id:run_id}
+    >>> run("gage show")  # +parse -windows
+    {:run_id}
     {}
     | exit_code  0                                             |
     ⤶
@@ -143,7 +172,7 @@ Stage `hello` with a custom name.
 
 Show the run.
 
-    >>> run("gage show")  # +parse +table
+    >>> run("gage show")  # +parse +panel
     {run_id:run_id}
     | hello:hello                                       staged |
     ⤶

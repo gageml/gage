@@ -24,7 +24,7 @@ def operations():
 
 def operations_table():
     gf = gagefile_for_project()
-    table = cli.Table("operation", "description")
+    table = cli.Table("operation", "description", expand=True)
     for name, opdef in sorted(gf.get_operations().items()):
         table.add_row(
             cli.label(name),
