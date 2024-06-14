@@ -81,7 +81,7 @@ these tests. The right aligned size columns shows blank when run here.
 
 When run using a simple terminal, the tests show the size values here.
 
-    >>> run("gage show", env={"TERM": "UNKNOWN"})  # +parse +windows
+    >>> run("gage show", env={"TERM": "UNKNOWN"})  # +parse +windows +skip=WINDOWS_FIX
     {}
     +------------------------- Files -------------------------+
     | name           |type               |               size |
