@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX  # sample ops don't run on Windows
----
-
 # Run Errors
 
 These tests illustrate how Gage handles run errors. The use the

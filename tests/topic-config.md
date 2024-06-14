@@ -20,16 +20,14 @@ contain potential config matches.
 
     >>> use_project(sample("projects", "config"))
 
-    >>> run("gage run hello -y")
-    Hi
-    Hola
+    >>> run("gage run hello-2 -y")
+    Hi Hola
     <0>
 
-    >>> run("gage show --files", cols=37)
-    | name         | type        | size |
-    |--------------|-------------|------|
-    | foo/hello.py | source code | 26 B |
-    | hello.py     | source code | 24 B |
+    >>> run("gage show --files")  # +parse +table
+    | name      | type        | size |
+    |-----------|-------------|------|
+    | hello2.py | source code | {} B |
     <0>
 
 ## Config key shorthand

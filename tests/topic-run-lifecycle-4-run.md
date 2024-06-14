@@ -1,12 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX (locking on Windows)
----
-
-TODO - finalize_run changes the run's meta dir from the directory form
-to the zip form - but this isn't being applied to the run attr. Also,
-need to list the zip contents rather than cat them, once the run is
-finalized.
-
 # Starting a staged run
 
     >>> from gage._internal.run_util import *
@@ -173,7 +164,7 @@ Show the finalize run manifest.
 
     >>> with run_meta.open_manifest(finalized_run) as f:
     ...     print(f.read(), end="")
-    s 3f9c639e1d6b056c071b44752ea97c694127291443065afa2689bf78ef3b8fb0 say.py
+    s 8e701bd990eafeb11b51ab584ea083e6e097d8c7f9a691166143dcef7f7256d0 say.py
 
 ## Run with config
 

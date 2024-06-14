@@ -125,9 +125,9 @@ the project directory.
     hello.py
 
     >>> run("gage ops")
-    | operation | description |
-    |-----------|-------------|
-    | hello     | Says hello  |
+    | operation                 | description                  |
+    |---------------------------|------------------------------|
+    | hello                     | Says hello                   |
     <0>
 
     >>> run("gage runs -s")

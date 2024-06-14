@@ -18,6 +18,8 @@ hello:
 
 hello-2:
   exec: python hello2.py
+  sourcecode:
+    - hello2.py
   config:
     - hello2.py#msg1
     - '#msg2'
