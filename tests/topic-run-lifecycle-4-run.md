@@ -163,7 +163,11 @@ Show the run finalized files.
 Show the finalize run manifest.
 
     >>> with run_meta.open_manifest(finalized_run) as f:
-    ...     print(f.read(), end="")
+    ...     print(f.read(), end="")  # -windows
+    s 3f9c639e1d6b056c071b44752ea97c694127291443065afa2689bf78ef3b8fb0 say.py
+
+    >>> with run_meta.open_manifest(finalized_run) as f:
+    ...     print(f.read(), end="")  # +windows
     s 8e701bd990eafeb11b51ab584ea083e6e097d8c7f9a691166143dcef7f7256d0 say.py
 
 ## Run with config

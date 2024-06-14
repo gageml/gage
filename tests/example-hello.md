@@ -121,13 +121,13 @@ List run files:
 
 ## Custom name
 
-Run with a different `name`.
+Run with different `name` config.
 
     >>> run("gage run hello name=Joe -y")
     Hello Joe
     <0>
 
-    >>> run("gage show")  # +parse -windows
+    >>> run("gage show")  # +parse +table -windows
     {:run_id}
     {}
     | exit_code  0                                             |
