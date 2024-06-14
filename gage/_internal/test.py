@@ -661,8 +661,11 @@ def rm(filename: str, force: bool = False):
         return
     os.remove(filename)
 
+
 def UserHome(path: str):
-    return Env({
-        "HOME": path,
-        "USERPROFILE": path,  # Windows
-    })
+    return Env(
+        {
+            "HOME": path,
+            "USERPROFILE": path,  # Windows
+        }
+    )
