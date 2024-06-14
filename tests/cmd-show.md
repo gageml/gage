@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX (file size calc issue on windows)
----
-
 # `show` command
 
     >>> run("gage show -h")  # +diff
@@ -38,7 +34,7 @@ Generate a run.
 
 Show the run.
 
-    >>> run("gage show")  # +parse +panel +diff
+    >>> run("gage show")  # +parse +panel +diff -windows
     {:run_id}
     | hello:hello                                    completed |
     ⤶
@@ -66,27 +62,68 @@ Show the run.
     | Hello Gage                                               |
     <0>
 
+Note there is surprising behavior on Windows for the show command and
+these tests. The right aligned size columns shows blank when run here.
+
+    >>> run("gage show")  # +parse +windows
+    {}
+                               Files
+    | name             |type                |                 |
+    | -----------------|--------------------|---------------- |
+    | gage.toml        |source code         |                 |
+    | hello.py         |source code         |                 |
+    | -----------------|--------------------|---------------- |
+    | 2 files          |                    |         total:  |
+    ⤶
+                              Output
+    | Hello Gage                                              |
+    <0>
+
+When run using a simple terminal, the tests show the size values here.
+
+    >>> run("gage show", env={"TERM": "UNKNOWN"})  # +parse +windows
+    {}
+    +------------------------- Files -------------------------+
+    | name           |type               |               size |
+    | ---------------+-------------------+------------------- |
+    | gage.toml      |source code        |              153 B |
+    | hello.py       |source code        |               41 B |
+    | ---------------+-------------------+------------------- |
+    | 2 files        |                   |       total: 194 B |
+    +---------------------------------------------------------+
+    +------------------------ Output -------------------------+
+    | Hello Gage                                              |
+    +---------------------------------------------------------+
+    <0>
+
 Limit files using `--limit-files`. The limit is 50 by default to avoid
 huge lists. This can be increased or decreased as needed.
 
-    >>> run("gage show --limit-files 1")  # +wildcard=///
-    ///
+    >>> run("gage show --limit-files 1")  # +parse -windows
+    {}
     | name                        |type         |         size |
     | ----------------------------|-------------|------------- |
     | gage.toml                   |source code  |        143 B |
     | ...                         |...          |          ... |
     | ----------------------------|-------------|------------- |
     | truncated (1 of 2 files)    |             | total: 181 B |
-    ///
+    {}
     <0>
 
 Show files.
 
-    >>> run("gage show --files")
+    >>> run("gage show --files")  # -windows
     | name      | type        |  size |
     |-----------|-------------|-------|
     | gage.toml | source code | 143 B |
     | hello.py  | source code |  38 B |
+    <0>
+
+    >>> run("gage show --files")  # +windows
+    | name      | type        |  size |
+    |-----------|-------------|-------|
+    | gage.toml | source code | 153 B |
+    | hello.py  | source code |  41 B |
     <0>
 
 Show output.
@@ -103,7 +140,7 @@ Show output.
     Writing summary to summary.json
     <0>
 
-    >>> run("gage show")  # +parse
+    >>> run("gage show")  # +parse +panel
     {}
                                Config
     | fake_speed  0.1                                          |
