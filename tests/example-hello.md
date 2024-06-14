@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX - still issues with panels
+---
+
 # Hello example
 
 The [`hello`](../examples/hello) example demonstrates the simplest

@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX - still issues with panels
----
-
 # Help Topics
 
 Gage provides separate help topics, which can be listed using `gage
