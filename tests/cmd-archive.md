@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX (nagging table formatting inconsistencies)
----
-
 # `archive` Command
 
 The `archive` command moves runs out of the runs dir into an
