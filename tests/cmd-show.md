@@ -112,18 +112,11 @@ huge lists. This can be increased or decreased as needed.
 
 Show files.
 
-    >>> run("gage show --files")  # -windows
+    >>> run("gage show --files")
     | name      | type        |  size |
     |-----------|-------------|-------|
     | gage.toml | source code | 143 B |
     | hello.py  | source code |  38 B |
-    <0>
-
-    >>> run("gage show --files")  # +windows
-    | name      | type        |  size |
-    |-----------|-------------|-------|
-    | gage.toml | source code | 153 B |
-    | hello.py  | source code |  41 B |
     <0>
 
 Show output.
