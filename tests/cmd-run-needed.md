@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX
----
-
 # Run when Needed
 
 The `--needed` option tells Gage to look for a comparable run before
@@ -84,9 +80,8 @@ Run again with `--needed`.
 
 Run a different operation.
 
-    >>> run("gage run hello --needed -y")
-    Hi
-    Hola
+    >>> run("gage run hello-2 --needed -y")
+    Hi Hola
     <0>
 
     >>> run("gage select --name")  # +parse
@@ -95,7 +90,7 @@ Run a different operation.
 
 And again with `--needed`.
 
-    >>> run("gage run hello --needed -y")  # +parse
+    >>> run("gage run hello-2 --needed -y")  # +parse
     Run skipped because a comparable run exists ({x})
     ⤶
     For details, run 'gage show {y}'

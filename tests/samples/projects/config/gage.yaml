@@ -1,4 +1,6 @@
 hello:
+  # NOTE exec below doesn't run correctly on Windows - the
+  # second line is not executed as a command under cmd.exe
   exec: |
     python hello.py
     python foo/hello.py
