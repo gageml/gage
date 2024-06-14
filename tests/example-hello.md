@@ -85,7 +85,7 @@ Windows is tested using a different show command below.
     | Hello Gage                                               |
     <0>
 
-    >>> run("gage show", env={"TERM": "DUMB"}, cols=80)
+    >> run("gage show", env={"TERM": "DUMB"}, cols=80)
     ...   # +windows +panel +parse +diff
     +----------------------- {:run_id} -----------------------+
     | hello:hello                                   completed |
