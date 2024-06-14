@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX  # 'true' is not recognized cmd
----
-
 # Run filter support
 
 Run filters are implemented in `gage._internal.run_filter`.

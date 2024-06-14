@@ -1,7 +1,7 @@
 [no-op]
 
-exec = "true"
+exec = "python -c \"pass\""
 
 [hello]
 
-exec = "echo Hi"
+exec = "python -c \"print('Hi')\""

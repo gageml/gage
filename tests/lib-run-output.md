@@ -1,9 +1,9 @@
 ---
 test-options: |
   +retry-on-fail=2
-  +skip=WINDOWS_FIX - OS line ending prob, and timestamp?
 parse-types:
   timestamp: 1[6-7]\d{11}
+  lf: '\\n|\\r\\n'
 ---
 
 # Run output
@@ -219,10 +219,10 @@ Create a run output writer with a callback.
     ... )
 
     >>> output.open(p)
-    >>> p.wait()
-    Got output [0]: b'Line 1\n'
-    Got output [0]: b'Line 2\n'
-    Got output [0]: b'Line 3\n'
+    >>> p.wait()  # +parse
+    Got output [0]: b'Line 1{:lf}'
+    Got output [0]: b'Line 2{:lf}'
+    Got output [0]: b'Line 3{:lf}'
     0
 
     >>> output.wait_and_close()
