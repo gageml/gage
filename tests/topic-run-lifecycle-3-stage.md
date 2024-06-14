@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX  # Locking and global write permissions
----
-
 # Staging a run dir
 
     >>> from gage._internal.run_util import *

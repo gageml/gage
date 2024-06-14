@@ -1,5 +1,5 @@
 ---
-test-options: +paths +skip=WINDOWS_FIX  # config.as_json() returning {}
+test-options: +paths
 ---
 
 # User config
@@ -283,7 +283,7 @@ Create system config that defines a repo.
     ... }
     ... """)
 
-    >>> user_config().as_json()  # +json
+    >>> user_config().as_json()  # +json +skip=WINDOWS_FIX
     {
       "repos": {
         "backup": {
@@ -314,7 +314,7 @@ Define a repo for the project.
 User config maintains references to parents. In this case, the project
 level user config references the system level config.
 
-    >>> user_config().parent.as_json()  # +json
+    >>> user_config().parent.as_json()  # +json +skip=WINDOWS_FIX
     {
       "repos": {
         "backup": {
@@ -329,10 +329,10 @@ Show the repositories defined in the user config.
 
     >>> repos = user_config().get_repositories()
 
-    >>> sorted(repos.keys())
+    >>> sorted(repos.keys())  # +skip=WINDOWS_FIX
     ['backup', 'remote']
 
-    >>> repos['backup'].as_json()  # +json
+    >>> repos['backup'].as_json()  # +json +skip=WINDOWS_FIX
     {
       "path": "/Backup"
     }

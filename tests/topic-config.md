@@ -1,7 +1,3 @@
----
-test-options: +paths +skip=WINDOWS_FIX  # Config is broken on Windows
----
-
 # Run Config
 
 TODO: Lots to cover here topic wise. Initial motivation is to test
