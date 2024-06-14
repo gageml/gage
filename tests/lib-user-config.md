@@ -18,7 +18,7 @@ User config defined for a project extends system wide user config.
 
     >>> from gage._internal.user_config import *
 
-Create sample project config.
+Create a sample project and write a configuration file in it.
 
     >>> project_dir = make_temp_dir()
     >>> cd(project_dir)
@@ -32,7 +32,7 @@ Create sample project config.
     ... path = "~/Backups/gage-runs"
     ... """)
 
-Load the config.
+Load the user config for the current project.
 
     >>> config = user_config_for_dir(".")
 
@@ -48,6 +48,8 @@ Load the config.
         }
       }
     }
+
+Validate that the configuration conforms to the user config schema.
 
     >>> validate_user_config_data(config.as_json())
 
@@ -71,7 +73,6 @@ Load the config.
       "path": "~/Backups/gage-runs"
     }
 
-
 Each repository has a type.
 
     >>> git_repo.get_type()
@@ -92,6 +93,8 @@ The default type is 'local'.
 
 ## Validation
 
+Create a helper function to format validation output.
+
     >>> from gage._internal.schema_util import validation_errors
 
     >>> def validate(data):
@@ -100,20 +103,20 @@ The default type is 'local'.
     ...     except UserConfigValidationError as e:
     ...         json_pprint([str(err) for err in validation_errors(e)])
 
-Empty config.
+Empty config:
 
     >>> validate({})
 
     >>> validate({"repos": {}})
 
-Unknown top-level attributes.
+Unknown top-level attributes:
 
     >>> validate({"unknown": {}})
     [
       "Additional properties: ['unknown']"
     ]
 
-Invalid repository type.
+Invalid repository type:
 
     >>> validate({"repos": 123})
     [
@@ -121,7 +124,7 @@ Invalid repository type.
       "The instance must be of type \"object\""
     ]
 
-Invalid repo type.
+Invalid repo type:
 
     >>> validate({"repos": {"test": 123}})  # +wildcard
     [
@@ -131,7 +134,7 @@ Invalid repo type.
       ...
     ]
 
-Missing required type or path.
+Missing required type or path:
 
     >>> validate({"repos": {"test": {}}})  # +wildcard
     [
@@ -151,7 +154,7 @@ Missing required type or path.
       "The object is missing required properties ['path']"
     ]
 
-Invalid type attribute.
+Invalid type attribute:
 
     >>> validate({"repos": {"test": {"type": 123}}})
     [
@@ -161,7 +164,7 @@ Invalid type attribute.
       "The instance must be of type \"string\""
     ]
 
-Invalid path attribute.
+Invalid path attribute:
 
     >>> validate({"repos": {"test": {"path": 123}}})
     [
@@ -170,7 +173,6 @@ Invalid path attribute.
       "Properties ['path'] are invalid",
       "The instance must be of type \"string\""
     ]
-
 
 ## User config file locations
 
@@ -247,21 +249,23 @@ Apply `user_config_path_for_dir()` to the current directory.
 
 ## Combining project config and system config
 
-Project config extends system config.
+Project config extends system config. System config is user
+configuration defined at the global level.
 
 Create a sample project directory.
 
     >>> project_dir = make_temp_dir()
 
-Create a sample user directory.
+Create a sample user directory. We store the system config in this
+directory later.
 
     >>> user_dir = make_temp_dir()
 
-Function to return user config for the project directory given
+Create a function to return user config for the project directory given
 the user directory.
 
     >>> def user_config():
-    ...     with Env({"HOME": user_dir}):
+    ...     with UserHome(user_dir):
     ...         return user_config_for_project(project_dir)
 
 The user config is currently empty - there's nothing defined at the
@@ -270,7 +274,8 @@ project or system level.
     >>> user_config().as_json()  # +json
     {}
 
-Create system config that defines a repo.
+Create system config that defines a repo. The config is located in a
+`.gage` subdirectory and stored in a file named `config.json`.
 
     >>> make_dir(path_join(user_dir, ".gage"))
     >>> write(path_join(user_dir, ".gage", "config.json"), """
@@ -283,7 +288,9 @@ Create system config that defines a repo.
     ... }
     ... """)
 
-    >>> user_config().as_json()  # +json +skip=WINDOWS_FIX
+At this point, the user config is defined only at the system level.
+
+    >>> user_config().as_json()  # +json
     {
       "repos": {
         "backup": {
@@ -314,7 +321,7 @@ Define a repo for the project.
 User config maintains references to parents. In this case, the project
 level user config references the system level config.
 
-    >>> user_config().parent.as_json()  # +json +skip=WINDOWS_FIX
+    >>> user_config().parent.as_json()  # +json
     {
       "repos": {
         "backup": {
@@ -329,10 +336,10 @@ Show the repositories defined in the user config.
 
     >>> repos = user_config().get_repositories()
 
-    >>> sorted(repos.keys())  # +skip=WINDOWS_FIX
+    >>> sorted(repos.keys())
     ['backup', 'remote']
 
-    >>> repos['backup'].as_json()  # +json +skip=WINDOWS_FIX
+    >>> repos['backup'].as_json()  # +json
     {
       "path": "/Backup"
     }

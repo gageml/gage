@@ -32,6 +32,7 @@ __all__ = [
     "SetCwd",
     "StderrCapture",
     "SysPath",
+    "UserHome",
     "basename",
     "cat",
     "cat_json",
@@ -659,3 +660,9 @@ def rm(filename: str, force: bool = False):
     if force and not os.path.exists(filename):
         return
     os.remove(filename)
+
+def UserHome(path: str):
+    return Env({
+        "HOME": path,
+        "USERPROFILE": path,  # Windows
+    })

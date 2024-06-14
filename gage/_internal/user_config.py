@@ -68,7 +68,7 @@ def user_config_candidates():
 
 def user_config_for_project(cwd: str | None = None):
     project_config = _try_project_config(cwd)
-    system_config = _try_system_config(cwd)
+    system_config = _try_system_config()
     if not project_config and not system_config:
         return _empty_config()
     if not project_config:
@@ -87,7 +87,7 @@ def _try_project_config(cwd: str | None):
         return None
 
 
-def _try_system_config(cwd: str | None):
+def _try_system_config():
     try:
         return user_config_for_dir(os.path.expanduser("~"))
     except FileNotFoundError:
