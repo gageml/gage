@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX (Various issues - locks, digests)
----
-
 # Run utils
 
     >>> from gage._internal.types import *
@@ -233,11 +229,11 @@ The list of source code files in `log/files` reflects the creation of
 
     >>> finalize_staged_run(run)
 
-    >>> cat(path_join(run.meta_dir, "manifest"))
-    s 5cc1441b4902cd35921288754e412e0eb949d44d81e4e0fcb281a913a7c3e820 config.json
-    s 2e800a0aca54fbeca8d7f5a75f6be7bde6bc12ce6d3c5fc0236edb69660b9ffd config.json.in
-    s d49cee364b51492d3330dfa0ff98173704ac632e03a938e73036459fd56a9827 setup.py
-    s e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 train.py
+    >>> cat(path_join(run.meta_dir, "manifest"))  # +parse
+    s {:sha256} config.json
+    s {:sha256} config.json.in
+    s {:sha256} setup.py
+    s {:sha256} train.py
 
 ## Copy dependencies
 
