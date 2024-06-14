@@ -8,7 +8,6 @@ from subprocess import Popen
 
 import io
 import logging
-import os
 import struct
 import threading
 import time
@@ -137,54 +136,26 @@ class RunOutputWriter:
         assert self._proc.stderr
         self._gen_tee_run(self._proc.stderr, 1)
 
-    def _gen_tee_run(
-        self,
-        input_stream: IO[bytes],
-        stream_type: StreamType,
-    ):
+    def _gen_tee_run(self, input_stream: IO[bytes], stream_type: StreamType):
         assert self._output
         assert self._index
-        os_read = os.read
-        os_write = os.write
-        input_fileno = input_stream.fileno()
-        output_fileno = self._output.fileno()
-        index_fileno = self._index.fileno()
-        lock = self._output_lock
-        line: list[int] = []
-
-        def handle_eol():
+        while line := input_stream.readline():
             line_bytes, progress = self._process_line(line)
-            del line[:]
-            with lock:
-                os_write(output_fileno, line_bytes)
+            with self._output_lock:
+                self._output.write(line)
                 index_entry = struct.pack("!QB", time.time_ns() // 1000000, stream_type)
-                os_write(index_fileno, index_entry)
+                self._index.write(index_entry)
             self._apply_output_cb(stream_type, line_bytes, progress)
 
-        while True:
-            buf = os_read(input_fileno, RUN_OUTPUT_STREAM_BUFFER)
-            if not buf:
-                break
-            for b in buf:
-                if b < 9:  # non-printable
-                    continue
-                line.append(b)
-                if b not in (10, 13):
-                    continue
-                handle_eol()
-        if line:
-            handle_eol()
-
-    def _process_line(self, line: list[int]):
-        output = bytes(line)
+    def _process_line(self, line: bytes):
         if not self._progress_parser:
-            return output, None
+            return line, None
         try:
-            return self._progress_parser(output)
+            return self._progress_parser(line)
         except Exception:
             log.exception("error in output callback (will be removed)")
             self._progress_parser = None
-            return output, None
+            return line, None
 
     def _apply_output_cb(
         self, stream_type: StreamType, output: bytes, progress: Any | None
