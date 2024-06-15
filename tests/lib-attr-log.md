@@ -5,6 +5,8 @@ logged by adding new entries that are time-sortable. Previous attribute
 values are not overwritten. Current values are derived by applying log
 entries in time order.
 
+Support for attr logs is provided by `attr_log`.
+
     >>> from gage._internal.attr_log import *
 
 ## Basics
@@ -81,6 +83,7 @@ Sarah doesn't yet see this label.
 
 `merge_attrs()` is a convenience function in `attr_log` for applying
 attribute logs from one directory (src) to another directory (dest).
+This simulates a merges across distributed logs.
 
 Apply Sam's logs to Sarah's.
 
