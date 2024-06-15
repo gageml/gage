@@ -210,7 +210,7 @@ which convert the string 'null' into None.
 
 A reference can be escaped:
 
-    >>> resolve_all_refs({"a": "\${foo}"})
+    >>> resolve_all_refs({"a": "\\${foo}"})
     {'a': '${foo}'}
 
 ## Nested config
