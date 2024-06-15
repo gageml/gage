@@ -131,335 +131,295 @@ user home directory.
     >>> compare_paths(x, os.path.expanduser("~"))
     True
 
-## Move Runs
+## List Runs
 
-TODO - tell the delete / archive and restore story
+Use `list_runs()` to return a list of runs for the current runs
+directory.
 
-`run_move` provides support for run moves.
+Create a sample runs directory.
 
-    >> from gage._internal.run_move import *
+    >>> runs_dir = make_temp_dir()
 
-A run move is an action that moves a run from one virtual container to
-another.
+The list is empty.
 
-A virtual container may be one of:
-
-- active
-- trash
-- an archive
-
-Active runs are listed by running `gage runs`.
-
-Runs in `trash` are deleted and are listed by running `gage runs
---deleted`.
-
-Runs located in an archive appear are listed by running `gage runs
---archive <name>`.
-
-Runs are physically located together in a single directory regardless of
-the virtual container they're in.
-
-Create a directory to store runs in.
-
-    >> runs_dir = make_temp_dir()
+    >>> with Env({"GAGE_RUNS": runs_dir}):
+    ...     var.list_runs()
+    []
 
 Create a run.
 
-    >> from gage._internal.types import *
-    >> from gage._internal.run_util import make_run
+    >>> from gage._internal.types import OpRef
+    >>> from gage._internal.run_util import make_run
 
-    >> run = make_run(OpRef("test", "test"), runs_dir, "aaa")
+    >>> make_run(OpRef("test", "test"), runs_dir, "aaa")
+    <Run id="aaa" name="babab-bopop">
 
-    >> ls(runs_dir)
+List the runs.
+
+    >>> with Env({"GAGE_RUNS": runs_dir}):
+    ...     var.list_runs()
+    [<Run id="aaa" name="babab-bopop">]
+
+`list_runs()` accepts an explicit runs directory (root).
+
+    >>> var.list_runs(runs_dir)
+    [<Run id="aaa" name="babab-bopop">]
+
+Run meta and run dirs are associated with the runs dir they're located
+in.
+
+    >>> run = var.list_runs(runs_dir)[0]
+
+    >>> run.id
+    'aaa'
+
+    >>> run.run_dir  # +parse
+    '{x:path}/aaa'
+
+    >>> run.meta_dir  # +parse
+    '{y:path}/aaa.meta'
+
+    >>> compare_paths(x, runs_dir)
+    True
+
+    >>> compare_paths(y, runs_dir)
+    True
+
+### Filter Runs
+
+The result from `list_run()` can be filtered using a run filter. A run
+filter is a function that accepts a single run as an argument and
+returns a boolean indicating whether or not the include the run in the
+list.
+
+Create two more runs in `runs_dir`.
+
+    >>> make_run(OpRef("test", "test"), runs_dir, "bbb")
+    <Run id="bbb" name="babab-bovur">
+
+    >>> make_run(OpRef("test", "test"), runs_dir, "ccc")
+    <Run id="ccc" name="babab-bugas">
+
+List runs whose ID starts with "a":
+
+    >>> var.list_runs(runs_dir, filter=lambda run: run.id[:1] == "a")
+    [<Run id="aaa" name="babab-bopop">]
+
+### Sort Runs
+
+Results from `list_runs()` can be sorted by specifying a list of sort
+rules. By default, result sort order is unspecified and can't be relied
+on for deterministic behavior.
+
+Order runs by ID in ascending order:
+
+    >>> var.list_runs(runs_dir, sort=["id"])  # -space
+    [<Run id="aaa" name="babab-bopop">,
+     <Run id="bbb" name="babab-bovur">,
+     <Run id="ccc" name="babab-bugas">]
+
+Order runs by ID in descending order:
+
+    >>> var.list_runs(runs_dir, sort=["-id"])  # -space
+    [<Run id="ccc" name="babab-bugas">,
+     <Run id="bbb" name="babab-bovur">,
+     <Run id="aaa" name="babab-bopop">]
+
+## Move Runs
+
+Use `move_runs()` or `move_run()` to move runs within a run directory to
+virtual containers.
+
+Run moves do not change the file system location of runs.
+
+Run moves are used to non-permanently delete runs, archive runs, and to
+restore runs.
+
+Create a new runs directory.
+
+    >>> runs_dir = make_temp_dir()
+
+Create a sample run.
+
+    >>> run = make_run(OpRef("test", "test"), runs_dir, "aaa")
+
+    >>> ls(runs_dir)
     aaa.meta/opref
 
+    >>> var.list_runs(runs_dir)
+    [<Run id="aaa" name="babab-bopop">]
 
---------------------------------------------------------------------------
-OLD TESTS
---------------------------------------------------------------------------
+Use the `run_move` module to get information about a run's current
+container.
 
-    >> from gage._internal.run_attr import *
-    >> from gage._internal.run_util import *
-    >> from gage._internal.types import *
+    >>> from gage._internal.run_move import run_container
 
-The `var` module provides system wide data related services.
+    >>> run_container(run)  # +pprint
+    'active'
 
-    >> from gage._internal import var
+The "active" container is the default container used for lists. The name
+of the active container is defined in `run_move.ACTIVE_CONTAINER`.
 
-Create a new runs dir.
+    >>> from gage._internal.run_move import ACTIVE_CONTAINER
 
-    >> runs_dir = make_temp_dir()
-    >> set_runs_dir(runs_dir)
+    >>> ACTIVE_CONTAINER
+    'active'
 
-The initial list of runs is empty.
+Move the run to the "trash" container.
 
-    >> var.list_runs()
+    >>> var.move_run(run, var.TRASH)
+
+    >>> run_container(run)
+    'trash'
+
+The run is not returned by `list_runs()`.
+
+    >>> var.list_runs(runs_dir)
     []
 
-Create a new run.
+It is returned when we specify its container.
 
-    >> opref = OpRef("test", "test")
-    >> run = make_run(opref, runs_dir)
+    >>> var.list_runs(runs_dir, container=var.TRASH)
+    [<Run id="aaa" name="babab-bopop">]
 
-A run is represented by a `.meta` directory. The minimum definition of a
-run is an `opref` file in the meta directory.
+Containers are designated by markers, which are located in a `.move`
+sidecar directory.
 
-    >> ls(runs_dir)  # +parse
-    {id:run_id}.meta/opref
+    >>> ls(runs_dir)  # +parse
+    aaa.meta/opref
+    aaa.move/{:uuid4}-trash
 
-    >> var.list_runs()  # +parse
-    [<Run id="{x:run_id}" name="{:run_name}">]
+Restore the run using `restore_run()`. This is equivalent of moving the
+run to the "active" container.
 
-By default, the run ID is the base name of the meta dir.
+    >>> var.restore_run(run)
 
-    >> assert x == id
+    >>> run_container(run)
+    'active'
 
-Run ID, run dir, and meta dir can be read from the run itself as
-attributes.
+This removes the run from the "trash" container.
 
-    >> run = var.list_runs()[0]
+    >>> var.list_runs(runs_dir, container=var.TRASH)
+    []
 
-Run ID:
+The run appears in the default list.
 
-    >> run.id  # +parse
-    '{x:run_id}'
+    >>> var.list_runs(runs_dir)
+    [<Run id="aaa" name="babab-bopop">]
 
-    >> assert x == id
+Move markers are added to the run move directory. The latest marker
+indicates the run's container.
 
-Run directory:
+    >>> ls(runs_dir, natsort=False)  # +parse
+    aaa.meta/opref
+    aaa.move/{:uuid4}-trash
+    aaa.move/{:uuid4}-active
 
-    >> os.path.basename(run.run_dir)  # +parse
-    '{x:run_id}'
+This scheme is used to support move operations across systems with the
+ability to merge moves to resolve a final location (last time based move
+wins).
 
-    >> assert x == id
+Moves are used to archive runs.
 
-    >> assert run.run_dir == os.path.join(runs_dir, run.id)
+    >>> var.move_run(run, "archive-1")
 
-Meta dir:
+    >>> run_container(run)
+    'archive-1'
 
-    >> os.path.basename(run.meta_dir)  # +parse
-    '{x:run_id}.meta'
+    >>> var.list_runs(runs_dir)
+    []
 
-    >> assert x == id
+    >>> var.list_runs(runs_dir, container="archive-1")
+    [<Run id="aaa" name="babab-bopop">]
 
-    >> assert run.meta_dir == os.path.join(runs_dir, run.id + ".meta")
+Archived runs can be moved to trash.
 
-Runs have other directories associated with them.
+    >>> var.move_run(run, var.TRASH)
 
-    >> os.path.basename(run_project_ref(run))  # +parse
-    '{x:run_id}.project'
+    >>> var.list_runs(runs_dir, container="archive-1")
+    []
 
-    >> assert x == id
+    >>> var.list_runs(runs_dir, container="trash")
+    [<Run id="aaa" name="babab-bopop">]
 
-    >> os.path.basename(run_user_dir(run))  # +parse
-    '{x:run_id}.user'
+And finally restore. In this case we move the run to the "active"
+container, which is the equivalent to restoring.
 
-    >> assert x == id
+    >>> var.move_run(run, container=var.ACTIVE)
 
-## Explicit run ID
+    >>> var.list_runs(runs_dir, container="trash")
+    []
 
-An explicit run ID is specified by an `id` attribute file in the meta
-directory.
+    >>> var.list_runs(runs_dir)
+    [<Run id="aaa" name="babab-bopop">]
 
-    >> write(os.path.join(runs_dir, id + ".meta", "id"), "abc")
-
-    >> var.list_runs()
-    [<Run id="abc" name="babab-bopus">]
-
-This attribute only effects the run ID. It does not change run paths.
-
-    >> run = var.list_runs()[0]
-
-    >> assert run.run_dir == os.path.join(runs_dir, id)
-    >> assert run.meta_dir == os.path.join(runs_dir, id + ".meta")
+    >>> var.list_runs(runs_dir, container=var.ACTIVE)
+    [<Run id="aaa" name="babab-bopop">]
 
 ## Delete runs
 
-Use `var.delete_runs` to delete one or more runs.
+`delete_runs()` and `delete_run()` permanently deletes runs and their
+associated sidecar directories.
 
-By default, runs are not permanently deleted. Each run directory is
-renamed with a `.deleted` extension.
+Create a new runs directory.
 
-    >> var.delete_runs(var.list_runs())
-    [<Run id="abc" name="babab-bopus">]
+    >>> runs_dir = make_temp_dir()
 
-    >> ls(runs_dir)  # +parse
-    {x:run_id}.meta.deleted/id
-    {y:run_id}.meta.deleted/opref
+Create a run.
 
-    >> assert x == y == id
+    >>> run = make_run(OpRef("test", "test"), runs_dir, "bbb")
 
-Deleted runs aren't returned by `var.list_runs` by default.
+    >>> var.list_runs(runs_dir)
+    [<Run id="bbb" name="babab-bovur">]
 
-    >> var.list_runs()
-    []
+The run is defined by a single `opref` file in a meta directory.
 
-However, they are included if `deleted` is True.
-
-    >> var.list_runs(deleted=True)
-    [<Run id="abc" name="babab-bopus">]
-
-All run related paths end with '.deleted' to signify that the run is
-deleted. The run ID itself does not change.
-
-    >> run = var.list_runs(deleted=True)[0]
-
-Run ID:
-
-    >> run.id
-    'abc'
-
-Run dir:
-
-    >> os.path.basename(run.run_dir)  # +parse
-    '{x:run_id}.deleted'
-
-    >> assert x == id
-
-    >> assert run.run_dir == os.path.join(runs_dir, id + ".deleted")
-
-Run meta dir:
-
-    >> os.path.basename(run.meta_dir)  # +parse
-    '{x:run_id}.meta.deleted'
-
-    >> assert x == id
-
-    >> assert run.meta_dir == os.path.join(runs_dir, id + ".meta.deleted")
-
-Project ref:
-
-    >> os.path.basename(run_project_ref(run))  # +parse
-    '{x:run_id}.project.deleted'
-
-    >> assert x == id
-
-User dir:
-
-    >> os.path.basename(run_user_dir(run))  # +parse
-    '{x:run_id}.user.deleted'
-
-    >> assert x == id
-
-## Restore runs
-
-Runs can be restored with `var.restore_runs`.
-
-    >> var.restore_runs(var.list_runs(deleted=True))
-    [<Run id="abc" name="babab-bopus">]
-
-    >> ls(runs_dir) # +parse
-    {x:run_id}.meta/id
-    {y:run_id}.meta/opref
-
-    >> assert x == y == id
-
-    >> var.list_runs(deleted=True)
-    []
-
-    >> var.list_runs()
-    [<Run id="abc" name="babab-bopus">]
-
-## Purging runs
-
-Purging runs permanently deletes all associated files.
-
-    >> var.purge_runs(var.list_runs())
-    [<Run id="abc" name="babab-bopus">]
-
-    >> ls(runs_dir)
-    <empty>
-
-## Canonical run dirs
-
-A run is associated with multiple directories under runs dir. These are
-the canonical run directories.
-
-| Dir                | Purpose                                            |
-| ------------------ | -------------------------------------------------- |
-| `<rundir>`         | User files (source code, runtime, deps, generated) |
-| `<rundir>.meta`    | Gage-written files (attrs, logs, summaries)        |
-| `<rundir>.user`    | User attributes                                    |
-| `<rundir>.project` | Project reference                                  |
-
-Deleted runs mirror this structure where each directory ends with
-`.deleted`.
-
-Create a new run.
-
-    >> make_run(OpRef("test", "test"), runs_dir, "abc")
-    <Run id="abc" name="babab-bopus">
-
-    >> ls(runs_dir, include_dirs=True)
-    abc.meta
-    abc.meta/opref
-
-    >> var.list_runs()
-    [<Run id="abc" name="babab-bopus">]
-
-The canonical directories:
-
-    >> run = var.list_runs()[0]
-
-    >> os.path.basename(run.run_dir)
-    'abc'
-
-    >> os.path.basename(run.meta_dir)
-    'abc.meta'
-
-    >> os.path.basename(run_user_dir(run))
-    'abc.user'
-
-    >> os.path.basename(run_project_ref(run))
-    'abc.project'
-
-Create the remaining canonical directories.
-
-    >> make_dir(run.run_dir)
-    >> make_dir(run_user_dir(run))
-    >> touch(run_project_ref(run))
-
-Create a non-canonical file.
-
-    >> touch(os.path.join(runs_dir, run.id + ".misc"))
-
-Runs dir contains the canonical list plus `<rundir>.misc`, which is not
-considered part of the run.
-
-    >> ls(runs_dir, include_dirs=True)
-    abc
-    abc.meta
-    abc.meta/opref
-    abc.misc
-    abc.project
-    abc.user
+    >>> ls(runs_dir)
+    bbb.meta/opref
 
 Delete the run.
 
-    >> var.delete_runs([run])
-    [<Run id="abc" name="babab-bopus">]
+    >>> var.delete_run(run)
 
-    >> ls(runs_dir, include_dirs=True)
-    abc.deleted
-    abc.meta.deleted
-    abc.meta.deleted/opref
-    abc.misc
-    abc.project.deleted
-    abc.user.deleted
+    >>> var.list_runs(runs_dir)
+    []
 
-Note that `abc.misc` is not renamed.
+    >>> ls(runs_dir)
+    <empty>
 
-Restore the run.
+Create another runs and include some sidecar files.
 
-    >> run = var.list_runs(deleted=True)[0]
+    >>> run = make_run(OpRef("test", "test"), runs_dir, "ccc")
 
-    >> var.restore_runs([run])
-    [<Run id="abc" name="babab-bopus">]
+    >>> make_dir(path_join(runs_dir, "ccc"))
+    >>> touch(path_join(runs_dir, "ccc", "eval.py"))
+    >>> touch(path_join(runs_dir, "ccc.abc"))
+    >>> touch(path_join(runs_dir, "ccc.xyz"))
 
-    >> ls(runs_dir, include_dirs=True)
-    abc
-    abc.meta
-    abc.meta/opref
-    abc.misc
-    abc.project
-    abc.user
+Move the run to generate some move markers.
+
+    >>> var.move_run(run, "archive-1")
+    >>> var.move_run(run, "active")
+
+Show the run files.
+
+    >>> ls(runs_dir, natsort=False)  # +parse
+    ccc.abc
+    ccc.meta/opref
+    ccc.move/{:uuid4}-archive-1
+    ccc.move/{:uuid4}-active
+    ccc.xyz
+    ccc/eval.py
+
+Delete the run.
+
+    >>> var.delete_run(run)
+
+    >>> ls(runs_dir)
+    <empty>
+
+A deleted can't be moved.
+
+    >>> var.move_run(run, var.TRASH)  # +parse
+    Traceback (most recent call last):
+    FileNotFoundError: {}/ccc.meta

@@ -120,7 +120,7 @@ def _local_runs(args: SelectRunsSupport, deleted: bool):
     return var.list_runs(
         sort=["-timestamp"],
         filter=_runs_filter(args),
-        deleted=deleted,
+        container=(var.TRASH if deleted else var.ACTIVE),
     )
 
 

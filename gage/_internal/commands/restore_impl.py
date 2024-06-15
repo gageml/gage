@@ -42,8 +42,9 @@ def runs_restore(args: Args):
     if args.archive:
         _restore_archived_runs(_strip_index(runs))
     else:
-        restored = var.restore_runs(_strip_index(runs))
-        cli.err(_restored_msg(restored, args))
+        to_restore = _strip_index(runs)
+        restored = var.restore_runs(to_restore)
+        cli.err(_restored_msg(to_restore, args))
 
 
 def _apply_implicit_all_for_archive(args: Args):

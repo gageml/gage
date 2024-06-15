@@ -33,8 +33,9 @@ def runs_purge(args: Args):
     if not runs:
         cli.exit_with_message("Nothing selected")
     _verify_purge(args, runs)
-    removed = var.purge_runs(_strip_index(runs))
-    cli.err(_removed_msg(removed, args))
+    to_purge = _strip_index(runs)
+    var.delete_runs(to_purge)
+    cli.err(_removed_msg(to_purge, args))
 
 
 def _verify_purge(args: Args, runs: list[tuple[int, Run]]):

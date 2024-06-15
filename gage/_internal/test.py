@@ -319,14 +319,20 @@ def ls(
     include_dirs: bool = False,
     ignore: FindIgnore | None = None,
     permissions: bool = False,
+    natsort: bool = True,
 ):
-    import natsort
+    if natsort:
+        from natsort import natsort_key
+
+        sort_key = natsort_key
+    else:
+        sort_key = None
 
     paths = file_util.ls(root, follow_links, include_dirs)
     if ignore:
         paths = _filter_ignored(paths, ignore)
     paths = _standardize_paths(paths)
-    paths.sort(key=natsort.natsort_key)
+    paths.sort(key=sort_key)
     if not paths:
         print("<empty>")
     else:

@@ -26,6 +26,11 @@ this case we use the author 'test'.
 
     >>> log_attrs(attrs_dir, "test", {"color": "green"})
 
+Attributes are written to a time-sortable UUID named JSON file.
+
+    >>> ls(attrs_dir)  # +parse
+    {:uuid4}.json
+
 Get the attrs.
 
     >>> get_attrs(attrs_dir)

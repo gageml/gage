@@ -436,3 +436,16 @@ Run the test op.
 
     >>> assert compare_paths(cwd, run_dir)
     >>> assert compare_paths(parent_pwd, tmp)
+
+## Run Timestamps
+
+`make_run_timestamp()` returns a microsecond epoch timestamp that is
+ever increasing.
+
+    >>> timestamps = [make_run_timestamp() for _ in range(10_000)]
+
+    >>> prev = None
+    >>> for x in timestamps:
+    ...     if prev is not None:
+    ...         assert x > prev
+    ...     prev = x

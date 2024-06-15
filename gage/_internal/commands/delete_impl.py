@@ -35,8 +35,12 @@ def runs_delete(args: Args):
     if not runs:
         cli.exit_with_error("Nothing selected")
     _user_confirm_delete(args, runs)
-    deleted = var.delete_runs(_strip_index(runs), args.permanent)
-    cli.err(_deleted_msg(deleted, args))
+    to_delete = _strip_index(runs)
+    if args.permanent:
+        var.delete_runs(to_delete)
+    else:
+        var.move_runs(to_delete, var.TRASH)
+    cli.err(_deleted_msg(to_delete, args))
 
 
 def _apply_implicit_all(args: Args):

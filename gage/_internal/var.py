@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import *
+
 from .types import *
 
 import functools
@@ -9,11 +10,12 @@ import os
 
 from .run_attr import run_attr
 
-from .run_util import run_for_meta_dir
-from .run_util import run_user_dir
-from .run_util import run_project_ref
+from .run_move import ACTIVE_CONTAINER
+from .run_move import log_run_move
+from .run_move import run_container
 
-from .file_util import ensure_safe_delete_tree
+from .run_util import run_for_meta_dir
+
 from .file_util import safe_delete_tree
 
 from .project_util import find_project_dir
@@ -22,18 +24,19 @@ from .gagefile import GageFileLoadError
 from .gagefile import gagefile_for_dir
 
 __all__ = [
-    "archives_dir",
     "delete_run",
     "delete_runs",
     "list_runs",
-    "purge_runs",
-    "set_archives_dir",
+    "move_run",
+    "move_runs",
     "set_runs_dir",
-    "restore_runs",
     "runs_dir",
 ]
 
 log = logging.getLogger(__name__)
+
+TRASH = "trash"
+ACTIVE = ACTIVE_CONTAINER
 
 
 # =================================================================
@@ -140,12 +143,12 @@ def list_runs(
     root: str | None = None,
     filter: RunFilter | None = None,
     sort: list[str] | None = None,
-    deleted: bool = False,
+    container: str = ACTIVE,
 ):
     root = root or runs_dir()
     log.debug("Getting runs from %s", root)
     filter = filter or _all_runs_filter
-    runs_iter = _iter_runs(root, deleted)
+    runs_iter = _iter_runs(root, container)
     runs = [run for run in runs_iter if filter(run)] if filter else list(runs_iter)
     if not sort:
         return runs
@@ -156,26 +159,29 @@ def _all_runs_filter(run: Run):
     return True
 
 
-def _iter_runs(root: str, deleted: bool = False):
+def _iter_runs(root: str, container: str):
     try:
         names = os.listdir(root)
     except OSError:
         pass
     else:
         for name in names:
-            if not _is_meta_name(name, deleted):
+            if not _is_meta_name(name):
                 continue
             meta_dir = os.path.join(root, name)
             run = run_for_meta_dir(meta_dir)
-            if run:
+            if not run:
+                continue
+            if _match_run_container(run, container):
                 yield run
 
 
-def _is_meta_name(name: str, deleted: bool):
-    if deleted:
-        return name.endswith(".meta.deleted") or name.endswith(".meta.zip.deleted")
-    else:
-        return name.endswith(".meta") or name.endswith(".meta.zip")
+def _is_meta_name(name: str):
+    return name.endswith(".meta") or name.endswith(".meta.zip")
+
+
+def _match_run_container(run: Run, container: str):
+    return run_container(run) == container
 
 
 def _run_sort_key(sort: list[str]):
@@ -209,89 +215,53 @@ def _run_attr_cmp(a: Run, b: Run, attr: str):
 
 
 # =================================================================
+# Move runs
+# =================================================================
+
+
+def move_runs(runs: list[Run], container: str):
+    for run in runs:
+        move_run(run, container)
+
+
+def move_run(run: Run, container: str):
+    if not os.path.exists(run.meta_dir):
+        raise FileNotFoundError(run.meta_dir)
+    log_run_move(run, container)
+
+
+def restore_runs(runs: list[Run]):
+    for run in runs:
+        restore_run(run)
+
+
+def restore_run(run: Run):
+    move_run(run, ACTIVE_CONTAINER)
+
+
+# =================================================================
 # Delete runs
 # =================================================================
 
 
-def delete_runs(runs: list[Run], permanent: bool = False):
+def delete_runs(runs: list[Run]):
     for run in runs:
-        delete_run(run, permanent)
-    return runs
+        delete_run(run)
 
 
-def delete_run(run: Run, permanent: bool):
-    for src in _existing_run_sources(run):
-        _handle_delete_run_source(src, permanent)
+def delete_run(run: Run):
+    for path in _iter_run_sources_for_delete(run):
+        log.debug("Permanently deleting run source: %s", path)
+        safe_delete_tree(path)
 
 
-def _handle_delete_run_source(src: str, permanent: bool):
-    if permanent:
-        safe_delete_tree(src)
-    else:
-        deleted_src_target = src + ".deleted"
-        ensure_safe_delete_tree(deleted_src_target)
-        os.rename(src, deleted_src_target)
-
-
-def _existing_run_sources(run: Run):
-    return [path for path in _canonical_run_sources(run) if os.path.exists(path)]
-
-
-def _canonical_run_sources(run: Run):
-    return [
-        run.meta_dir,
-        run.run_dir,
-        run_user_dir(run),
-        run_project_ref(run),
-    ]
-
-
-# =================================================================
-# Restore runs
-# =================================================================
-
-
-def restore_runs(runs: list[Run]):
-    restored: list[Run] = []
-    for run in runs:
-        try:
-            _restore_run(run)
-        except FileExistsError as e:
-            log.warning("%s has already been restored", run.id)
-        else:
-            restored.append(run)
-    return restored
-
-
-def _restore_run(run: Run):
-    for src, target in _safe_restorable(run):
-        assert not os.path.exists(target)
-        os.rename(src, target)
-
-
-def _safe_restorable(run: Run):
-    sources = _canonical_run_sources(run)
-    targets = _restore_targets(sources)
-    for path in targets:
-        if os.path.exists(path):
-            raise FileExistsError(path)
-    return [
-        (src, target)
-        for src, target in zip(sources, targets)  # \
-        if os.path.exists(src)
-    ]
-
-
-def _restore_targets(sources: list[str]):
-    assert all(src.endswith(".deleted") for src in sources), sources
-    return [src[:-8] for src in sources]
-
-
-# =================================================================
-# Purge runs
-# =================================================================
-
-
-def purge_runs(runs: list[Run]):
-    removed = delete_runs(runs, permanent=True)
-    return removed
+def _iter_run_sources_for_delete(run: Run):
+    # Yield meta dir first as this is how a run is defined on disk
+    yielded_meta_dir_name = None
+    if os.path.exists(run.meta_dir):
+        yield run.meta_dir
+        yielded_meta_dir_name = run.meta_dir
+    run_parent_dir = os.path.dirname(run.meta_dir)
+    for name in os.listdir(run_parent_dir):
+        if name.startswith(run.id) and name != yielded_meta_dir_name:
+            yield os.path.join(run_parent_dir, name)

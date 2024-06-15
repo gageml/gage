@@ -115,7 +115,7 @@ def _delete_runs(runs: list[Run], description: str):
         description=description,
         transient=True,
     ):
-        delete_run(run, permanent=True)
+        delete_run(run)
 
 
 def _delete_empty_archive_dir(dirname: str):
