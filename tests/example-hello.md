@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX - still issues with panels
----
-
 # Hello example
 
 The [`hello`](../examples/hello) example demonstrates the simplest
@@ -57,7 +53,7 @@ Run hello.
 Show the run. We skip on Windows due to issues with file size cols.
 Windows is tested using a different show command below.
 
-    >>> run("gage show")  # +parse +table +diff -windows
+    >>> run("gage show")  # +parse +panel +diff -windows
     {:run_id}
     | hello:hello                                    completed |
     ⤶
@@ -85,7 +81,7 @@ Windows is tested using a different show command below.
     | Hello Gage                                               |
     <0>
 
-    >> run("gage show", env={"TERM": "DUMB"}, cols=80)
+    >>> run("gage show", env={"TERM": "DUMB"}, cols=80)
     ...   # +windows +panel +parse +diff
     +----------------------- {:run_id} -----------------------+
     | hello:hello                                   completed |
@@ -105,10 +101,10 @@ Windows is tested using a different show command below.
     +------------------------- Files -------------------------+
     | name           |type               |               size |
     | ---------------+-------------------+------------------- |
-    | gage.toml      |source code        |              153 B |
-    | hello.py       |source code        |               41 B |
+    | gage.toml      |source code        |              143 B |
+    | hello.py       |source code        |               38 B |
     | ---------------+-------------------+------------------- |
-    | 2 files        |                   |       total: 194 B |
+    | 2 files        |                   |       total: 181 B |
     +---------------------------------------------------------+
     +------------------------ Output -------------------------+
     | Hello Gage                                              |
