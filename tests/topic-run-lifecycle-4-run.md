@@ -163,12 +163,16 @@ Show the run finalized files.
 Show the finalize run manifest.
 
     >>> with run_meta.open_manifest(finalized_run) as f:
-    ...     print(f.read(), end="")  # -windows
-    s 3f9c639e1d6b056c071b44752ea97c694127291443065afa2689bf78ef3b8fb0 say.py
+    ...     print(f.read(), end="")  # +parse
+    s {manifest_say_hash:sha256} say.py
 
-    >>> with run_meta.open_manifest(finalized_run) as f:
-    ...     print(f.read(), end="")  # +windows
-    s 8e701bd990eafeb11b51ab584ea083e6e097d8c7f9a691166143dcef7f7256d0 say.py
+Confirm that the manifest hash for `say.py` is correct.
+
+    >>> from gage._internal.file_util import file_sha256
+
+    >>> actual_say_hash = file_sha256("say.py")
+
+    >>> assert manifest_say_hash == actual_say_hash
 
 ## Run with config
 
