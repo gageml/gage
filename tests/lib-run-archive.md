@@ -95,7 +95,7 @@ Rename the archive:
 Gage modifies archives by adding a new JSON file, which contains the
 latest properties.
 
-    >>> ls(runs_dir, natsort=False)  # +parse
+    >>> ls(runs_dir, natsort=False)  # +parse +paths
     .archives/{x:uuid4}/{:uuid4}.json
     .archives/{y:uuid4}/{:uuid4}.json
 
@@ -110,7 +110,7 @@ Use `delete_archive` to mark an archive as deleted.
 Gage does not delete the archive files but instead adds a `.deleted`
 marker.
 
-    >>> ls(runs_dir, natsort=False)  # +parse
+    >>> ls(runs_dir, natsort=False)  # +parse +paths
     .archives/{x:uuid4}/{:uuid4}.json
     .archives/{y:uuid4}/{:uuid4}.json
     .archives/{z:uuid4}/{:uuid4}.deleted
