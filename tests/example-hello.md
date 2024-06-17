@@ -72,10 +72,10 @@ Windows is tested using a different show command below.
                                Files
     | name            |type               |               size |
     | ----------------|-------------------|------------------- |
-    | gage.toml       |source code        |             {:d} B |
-    | hello.py        |source code        |             {:d} B |
+    | gage.toml       |source code        |              143 B |
+    | hello.py        |source code        |               38 B |
     | ----------------|-------------------|------------------- |
-    | 2 files         |                   |      total: {:d} B |
+    | 2 files         |                   |      total:  181 B |
     ⤶
                                Output
     | Hello Gage                                               |
@@ -127,7 +127,7 @@ Run with different `name` config.
     Hello Joe
     <0>
 
-    >>> run("gage show")  # +parse +table -windows
+    >>> run("gage show")  # +parse +panel -windows
     {:run_id}
     {}
     | exit_code  0                                             |
@@ -138,10 +138,10 @@ Run with different `name` config.
                                Files
     | name            |type               |               size |
     | ----------------|-------------------|------------------- |
-    | gage.toml       |source code        |             {:d} B |
-    | hello.py        |source code        |             {:d} B |
+    | gage.toml       |source code        |              143 B |
+    | hello.py        |source code        |               37 B |
     | ----------------|-------------------|------------------- |
-    | 2 files         |                   |      total: {:d} B |
+    | 2 files         |                   |      total:  180 B |
     ⤶
                                Output
     | Hello Joe                                                |
