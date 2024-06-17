@@ -241,32 +241,41 @@ def track(
 
 
 class pager:
-    _pager_env = os.getenv("PAGER") or os.getenv("MANPAGER")
+    _pager_env_save: str | None = None
 
     def __init__(self):
+        self._pager_env = (
+            os.getenv("PAGER") or os.getenv("MANPAGER") or _default_pager()
+        )
         self._pager = _out.pager(styles=_pager_supports_styles(self._pager_env))
 
     def __enter__(self):
-        if self._pager_env is None:
-            os.environ["PAGER"] = _default_pager()
+        self._page_env_save = os.getenv("PAGER")
+        if self._pager_env:
+            os.environ["PAGER"] = self._pager_env
         return self._pager.__enter__()
 
     def __exit__(self, *exc: Any):
         self._pager.__exit__(*exc)
-        if self._pager_env is None:
-            del os.environ["PAGER"]
+        if self._page_env_save is not None:
+            os.environ["PAGER"] = self._page_env_save
+        else:
+            try:
+                del os.environ["PAGER"]
+            except KeyError:
+                pass
 
 
 def _default_pager():
     if sys.platform == "win32":
-        return "more"
+        return None
     return "less -r"
 
 
-def _pager_supports_styles(pager: str | None):
-    if pager is None:
-        return True
-    parts = shlex.split(pager)
+def _pager_supports_styles(pager_env: str | None):
+    if pager_env is None:
+        return False
+    parts = shlex.split(pager_env)
     return parts[0] == "less" and "-r" in parts[1:]
 
 
