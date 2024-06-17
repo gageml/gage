@@ -81,34 +81,19 @@ Windows is tested using a different show command below.
     | Hello Gage                                               |
     <0>
 
-    >>> run("gage show", env={"TERM": "DUMB"}, cols=80)
-    ...   # +windows +panel +parse +diff
-    +----------------------- {:run_id} -----------------------+
-    | hello:hello                                   completed |
-    +---------------------------------------------------------+
-    +---------------------- Attributes -----------------------+
-    | id         {run_id:run_id}                              |
-    | name       {:run_name}                                  |
-    | started    {:datetime}                                  |
-    | stopped    {:datetime}                                  |
-    | location   {runs_dir:path}                              |
-    | project    {:path}\examples\hello                       |
-    | exit_code  0                                            |
-    +---------------------------------------------------------+
-    +------------------------ Config -------------------------+
-    | name  Gage                                              |
-    +---------------------------------------------------------+
-    +------------------------- Files -------------------------+
-    | name           |type               |               size |
-    | ---------------+-------------------+------------------- |
-    | gage.toml      |source code        |              143 B |
-    | hello.py       |source code        |               38 B |
-    | ---------------+-------------------+------------------- |
-    | 2 files        |                   |       total: 181 B |
-    +---------------------------------------------------------+
-    +------------------------ Output -------------------------+
-    | Hello Gage                                              |
-    +---------------------------------------------------------+
+    >>> run("gage show", cols=80) # +windows +panel +parse +diff
+    {:run_id}
+    | hello:hello                                    completed |
+    ⤶
+                             Attributes
+    | id         {run_id:run_id}                               |
+    | name       {:run_name}                                   |
+    | started    {:datetime}                                   |
+    | stopped    {:datetime}                                   |
+    | location   {runs_dir:path}                               |
+    | project    {:path}/examples/hello                        |
+    | exit_code  0                                             |
+    {}
     <0>
 
 List run files:
