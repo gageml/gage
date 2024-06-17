@@ -87,7 +87,10 @@ Delete = Annotated[
         "-d",
         "--delete",
         metavar="name",
-        help="Delete the specified archive. Use '--list' to show archives.",
+        help=(
+            "Delete the specified empty archive. Fails if archive is "
+            "not empty. Use '--list' to show archive status."
+        ),
     ),
 ]
 
@@ -130,8 +133,11 @@ def archive(
 
     Use '--list' to list archives.
 
-    Use '--delete' to delete an archive. WARNING: Deleted archives
-    cannot be recovered.
+    Use '--delete' to delete an archive. An archive must be empty before
+    it can be deleted. Use 'gage restore' to move runs out of an
+    archive. Use 'gage purge' to permanently delete archived runs.
+
+    Use '--delete-empty' to delete all empty archives.
 
     Use '--rename' to rename an archive.
 

@@ -88,53 +88,6 @@ def set_runs_dir(dirname: str):
 
 
 # =================================================================
-# Archives dir
-# =================================================================
-
-
-def archives_dir():
-    return os.path.expanduser(
-        os.getenv("GAGE_ARCHIVES")
-        or _project_archives_dir()
-        or _system_default_archives_dir()
-    )
-
-
-def _project_archives_dir():
-    project_dir = find_project_dir()
-    if not project_dir:
-        return None
-    try:
-        gf = gagefile_for_dir(project_dir)
-    except (FileNotFoundError, GageFileLoadError) as e:
-        log.debug("error reading Gage file in %s: %s", project_dir, e)
-        return _project_default_archives_dir(project_dir)
-    else:
-        return _project_configured_archives_dir(gf, project_dir)
-
-
-def _project_default_archives_dir(project_dir: str):
-    return os.path.join(project_dir, ".gage", "archives")
-
-
-def _project_configured_archives_dir(gf: GageFile, project_dir: str):
-    configured = gf.get_archives_dir()
-    return (
-        os.path.join(project_dir, configured)
-        if configured
-        else _project_default_archives_dir(project_dir)
-    )
-
-
-def _system_default_archives_dir():
-    return os.path.join("~", ".gage", "archives")
-
-
-def set_archives_dir(dirname: str):
-    os.environ["GAGE_ARCHIVES"] = dirname
-
-
-# =================================================================
 # List runs
 # =================================================================
 

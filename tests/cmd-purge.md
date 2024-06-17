@@ -1,26 +1,31 @@
 # `purge` command
 
-    >>> run("gage purge -h")
+    >>> run("gage purge -h")  # +diff
     Usage: gage purge [options] [run]...
     ⤶
-      Remove deleted runs.
+      Permanently delete runs.
     ⤶
-      Use to remove deleted runs, freeing disk space. Note
-      that purged runs cannot be recovered.
+      Use to remove deleted or archived runs, freeing disk
+      space. Note that purged runs cannot be recovered.
     ⤶
       Use gage list --deleted to list deleted runs that can be
       removed.
+    ⤶
+      Use gage list --archive NAME to list archived runs that
+      can be removed.
     ⤶
     Arguments:
       [run]...  Runs to remove. Required unless '--all' is
                 specified.
     ⤶
     Options:
-      -w, --where expr  Remove runs matching filter
-                        expression.
-      -a, --all         Remove all deleted runs.
-      -y, --yes         Remove runs without prompting.
-      -h, --help        Show this message and exit.
+      -A, --archive name  Permanently delete archived runs.
+      -w, --where expr    Select runs matching filter
+                          expression.
+      -a, --all           Remove all deleted runs.
+      -y, --yes           Permanently delete runs without
+                          prompting.
+      -h, --help          Show this message and exit.
     <0>
 
 Generate a run.
@@ -61,7 +66,7 @@ Attempt to purge runs without specifying a run or `--all`.
 Purge the run.
 
     >>> run("gage purge -a -y")
-    Permanently removed 1 run
+    Permanently deleted 1 run
     <0>
 
     >>> run("gage ls -s")

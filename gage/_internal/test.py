@@ -597,7 +597,6 @@ def use_project(dirname: str, var_home: Optional[str] = None):
     var.set_runs_dir(runs_dir)
     archives_dir = path_join(var_home, "archives")
     make_dir(archives_dir)
-    var.set_archives_dir(archives_dir)
     cd(dirname)
 
 

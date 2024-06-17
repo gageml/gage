@@ -28,7 +28,6 @@
     gage._internal.__init__
     gage._internal.ansi_util
     gage._internal.api
-    gage._internal.archive_util
     gage._internal.attr_log
     gage._internal.board
     gage._internal.board_util
@@ -91,6 +90,7 @@
     gage._internal.repo_local
     gage._internal.repo_rclone
     gage._internal.repo_util
+    gage._internal.run_archive
     gage._internal.run_attr
     gage._internal.run_comment
     gage._internal.run_config_ipynb

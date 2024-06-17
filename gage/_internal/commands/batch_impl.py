@@ -390,6 +390,7 @@ def _verify_run_or_stage(args: Args, batch: Batch, context: RunContext):
     if args.yes:
         return
     cli.err(_action_desc(args, batch, context))
+    cli.err()
     if not cli.confirm(f"Continue?"):
         raise SystemExit(0)
 

@@ -31,7 +31,7 @@ Running `gage` without arguments shows help.
       open             Open a run or run file.
       operations, ops  Show available operations.
       publish          Publish a board.
-      purge            Remove deleted runs.
+      purge            Permanently delete runs.
       restore          Restore deleted or archived runs.
       run              Start or stage a run.
       select           Selects runs and their attributes.

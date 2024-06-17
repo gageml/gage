@@ -9,7 +9,7 @@ import click
 from .. import cli
 from .. import var
 
-from .impl_support import archive_dir
+from .impl_support import archive_for_name
 from .impl_support import runs_table
 from .impl_support import selected_runs
 
@@ -34,34 +34,22 @@ def runs_restore(args: Args):
             "for additional help."
         )
     runs, from_count = selected_runs(
-        args, deleted=True, archive_dir=_maybe_archive(args)
+        args,
+        deleted=not args.archive,
+        archive=archive_for_name(args.archive).get_id() if args.archive else None,
     )
     if not runs:
         cli.exit_with_message("Nothing selected")
     _verify_restore(args, runs)
-    if args.archive:
-        _restore_archived_runs(_strip_index(runs))
-    else:
-        to_restore = _strip_index(runs)
-        restored = var.restore_runs(to_restore)
-        cli.err(_restored_msg(to_restore, args))
+    to_restore = _strip_index(runs)
+    var.restore_runs(to_restore)
+    cli.err(_restored_msg(to_restore, args))
 
 
 def _apply_implicit_all_for_archive(args: Args):
     if not args.runs and args.archive:
         return Args(**{**args._asdict(), "all": True})
     return args
-
-
-def _restore_archived_runs(runs: list[Run]):
-    # See docs for `restore_runs` for an explanation of this weirdness
-    from .archive_impl import restore_runs
-
-    restore_runs(runs, var.runs_dir())
-
-
-def _maybe_archive(args: Args):
-    return archive_dir(args.archive) if args.archive else None
 
 
 def _verify_restore(args: Args, runs: list[tuple[int, Run]]):
@@ -71,6 +59,7 @@ def _verify_restore(args: Args, runs: list[tuple[int, Run]]):
     cli.out(table)
     run_count = "1 run" if len(runs) == 1 else f"{len(runs)} runs"
     cli.err(f"You are about to restore {run_count}.")
+    cli.err()
     if not cli.confirm(f"Continue?"):
         raise SystemExit(0)
 

@@ -16,9 +16,9 @@ from .. import var
 
 from ..gagefile import gagefile_for_dir
 
-from ..archive_util import find_archive_dir
-
 from ..run_attr import *
+
+from .. import run_archive
 
 from ..summary_util import format_summary_value
 
@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 
 __all__ = [
+    "archive_for_name",
     "one_run",
     "one_run_for_spec",
     "runs_table",
@@ -97,31 +98,18 @@ def _runs_filter(args: OneRunSupport | SelectRunsSupport):
 # =================================================================
 
 
+# TODO - cleanup -> don't separate delete and archive - use container or args!!
 def selected_runs(
     args: SelectRunsSupport,
     deleted: bool = False,
-    archive_dir: str | None = None,
+    archive: str | None = None,
 ):
-    runs = (
-        _archive_runs(archive_dir, args) if archive_dir else _local_runs(args, deleted)
+    runs = var.list_runs(
+        sort=["-timestamp"],
+        filter=_runs_filter(args),
+        container=(var.TRASH if deleted else archive if archive else var.ACTIVE),
     )
     return _select_runs(runs, args), len(runs)
-
-
-def _archive_runs(archive: str, args: SelectRunsSupport):
-    return var.list_runs(
-        archive,
-        sort=["-timestamp"],
-        filter=_runs_filter(args),
-    )
-
-
-def _local_runs(args: SelectRunsSupport, deleted: bool):
-    return var.list_runs(
-        sort=["-timestamp"],
-        filter=_runs_filter(args),
-        container=(var.TRASH if deleted else var.ACTIVE),
-    )
 
 
 def _select_runs(runs: list[Run], args: SelectRunsSupport) -> list[IndexedRun]:
@@ -364,11 +352,11 @@ def _fit(l: list[Any], width: int):
 # =================================================================
 
 
-def archive_dir(archive_name: str):
-    dirname = find_archive_dir(archive_name)
-    if not dirname:
+def archive_for_name(name: str):
+    try:
+        return run_archive.archive_for_name(name)
+    except run_archive.ArchiveNotFoundError:
         cli.exit_with_error(
-            f"archive '{archive_name}' does not exist\n\n"  # \
+            f"archive '{name}' does not exist\n\n"  # \
             "Use '[cmd]gage archive --list[/]' to show available archives."
         )
-    return dirname

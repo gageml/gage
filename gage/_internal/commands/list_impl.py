@@ -6,7 +6,7 @@ from ..types import *
 
 from .. import cli
 
-from .impl_support import archive_dir
+from .impl_support import archive_for_name
 from .impl_support import runs_table
 from .impl_support import selected_runs
 
@@ -26,7 +26,7 @@ def runs_list(args: Args):
     selected, from_count = selected_runs(
         args,
         deleted=args.deleted,
-        archive_dir=_maybe_archive(args),
+        archive=archive_for_name(args.archive).get_id() if args.archive else None,
     )
     limited = _limit_runs(selected, args)
     caption = _table_caption(len(limited), from_count, args)
@@ -37,10 +37,6 @@ def runs_list(args: Args):
         caption=caption,
     )
     cli.out(table)
-
-
-def _maybe_archive(args: Args):
-    return archive_dir(args.archive) if args.archive else None
 
 
 def _limit_runs(runs: list[tuple[int, Run]], args: Args):
