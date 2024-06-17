@@ -7,6 +7,7 @@ from .types import *
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 
@@ -66,8 +67,16 @@ def _archives_dir(runs_dir: str):
     return os.path.join(runs_dir, ".archives")
 
 
+__last_ts = None
+__last_ts_lock = threading.Lock()
+
+
 def _archive_timestamp():
     ts = time.time_ns() // 1000000  # milliseconds, used by ULID
+    with __last_ts_lock:
+        if __last_ts is not None and __last_ts >= ts:
+            ts = __last_ts + 1
+        globals()["__last_ts"] = ts
     return str(ulid.ULID.from_timestamp(ts).to_uuid4())
 
 
