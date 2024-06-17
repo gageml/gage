@@ -15,8 +15,12 @@ archive-specific directory.
     ⤶
       Use '--list' to list archives.
     ⤶
-      Use '--delete' to delete an archive. WARNING: Deleted
-      archives cannot be recovered.
+      Use '--delete' to delete an archive. An archive must be
+      empty before it can be deleted. Use 'gage restore' to
+      move runs out of an archive. Use 'gage purge' to
+      permanently delete archived runs.
+    ⤶
+      Use '--delete-empty' to delete all empty archives.
     ⤶
       Use '--rename' to rename an archive.
     ⤶
@@ -33,8 +37,10 @@ archive-specific directory.
                                 name.
       -A, --archive name        Use an existing archive. Fails
                                 if archive doesn't exit.
-      -d, --delete name         Delete the specified archive.
-                                Use '--list' to show archives.
+      -d, --delete name         Delete the specified empty
+                                archive. Fails if archive is
+                                not empty. Use '--list' to
+                                show archive status.
       --delete-empty            Delete empty archives.
       -r, --rename current new  Rename the archive named
                                 current to new. Use '--list'
@@ -72,8 +78,7 @@ Use `hello` to generate some runs.
 Archive the runs.
 
     >>> run("gage archive --all -y")  # +parse
-    Moved 2 runs
-    Runs archived to '{name}'
+    Archived 2 runs to {name}
     ⤶
     Use 'gage restore --archive {x}' to restore from this archive.
     <0>
@@ -96,26 +101,6 @@ The archived runs are deleted after being copied.
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
-
-The archive is located in a unique directory under the archives
-directory. We can get the current archives directory using the `check`
-command with the verbose option.
-
-    >>> run("gage check -v", cols=120)  # +parse +table
-    {}
-    | archives_directory    | {archives_dir:path} |
-    <0>
-
-    >>> os.listdir(archives_dir)  # +parse
-    ['{subdir:uuid4}']
-
-The archive name is located in the archive subdirectory in a file named
-`.archive`. This is an implementation detail but we can verify it.
-
-    >>> cat(path_join(archives_dir, subdir, ".archive"))  # +parse
-    1{x}
-
-    >>> assert x == name
 
 ## Restore Runs
 
@@ -156,7 +141,7 @@ Delete empty archives using `--delete-empty`.
     >>> run("gage archive -l")  # +parse +table
     | name              | runs | last archived |
     |-------------------|------|---------------|
-    | {x}               | 0    | {}            |
+    | {x}               | 0    |               |
     <0>
 
     >>> assert x == name
@@ -165,16 +150,15 @@ Delete empty archives using `--delete-empty`.
     Deleted 1 empty archive
     <0>
 
-## Delete Archive
+## Purge Archived Runs
 
-Use `--delete` to delete the archive. This permanently deletes the
-archive runs.
+The `purge` with the `--archive` option to permanently deleted archived
+runs.
 
 Archive the current runs.
 
     >>> run("gage archive --all --name my-archive -y")
-    Moved 2 runs
-    Runs archived to 'my-archive'
+    Archived 2 runs to my-archive
     ⤶
     Use 'gage restore --archive my-archive' to restore from this archive.
     <0>
@@ -191,16 +175,17 @@ Archive the current runs.
     | 2 | hello     | completed | name=Moon                    |
     <0>
 
-Delete requires a valid archive name.
+`purge` requires a valid archive name.
 
-    >>> run("gage archive --delete invalid")
-    gage: archive 'invalid' does not exist.
-    Use 'gage archive --list' to show available names.
+    >>> run("gage purge --archive invalid --all -y")
+    gage: archive 'invalid' does not exist
+    ⤶
+    Use 'gage archive --list' to show available archives.
     <1>
 
 The user is notified that the deletion is permanent.
 
-    >>> run(f"gage archive --delete my-archive", timeout=2)  # +parse +table
+    >>> run(f"gage purge --archive my-archive --all", timeout=2)  # +parse +table
     | #  | name   | operation   | started         | status     |
     |----|--------|-------------|-----------------|------------|
     | 1  | {}     | hello       | {}              | completed  |
@@ -211,21 +196,31 @@ The user is notified that the deletion is permanent.
     Continue? (y/N)
     <{:sigint}>
 
-Delete the archive.
+Purge the archived runs.
 
-    >>> run(f"gage archive --delete my-archive -y")
-    Deleted archive 'my-archive'
+    >>> run(f"gage purge --archive my-archive --all -y")
+    Permanently deleted 2 runs
+    <0>
+
+The archive description is not deleted, even when all of its archived
+runs are deleted.
+
+    >>> run("gage archive --list")  # +table
+    | name       | runs | last archived |
+    |------------|------|---------------|
+    | my-archive |    0 |               |
+    <0>
+
+To delete the archive, use the `--delete` option.
+
+    >>> run("gage archive --delete my-archive --yes")
+    Deleted archive my-archive
     <0>
 
     >>> run("gage archive --list")  # +table
     | name | runs | last archived |
     |------|------|---------------|
     <0>
-
-Confirm that the archive directory is deleted.
-
-    >>> os.listdir(archives_dir)
-    []
 
 ## Errors
 

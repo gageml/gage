@@ -17,13 +17,23 @@ RunSpecs = Annotated[
     ),
 ]
 
+Archive = Annotated[
+    str,
+    Option(
+        "-A",
+        "--archive",
+        metavar="name",
+        help="Permanently delete archived runs.",
+    ),
+]
+
 Where = Annotated[
     str,
     Option(
         "-w",
         "--where",
         metavar="expr",
-        help="Remove runs matching filter expression.",
+        help="Select runs matching filter expression.",
     ),
 ]
 
@@ -41,7 +51,7 @@ YesFlag = Annotated[
     Option(
         "-y",
         "--yes",
-        help="Remove runs without prompting.",
+        help="Permanently delete runs without prompting.",
     ),
 ]
 
@@ -49,18 +59,22 @@ YesFlag = Annotated[
 def runs_purge(
     ctx: Context,
     runs: RunSpecs = None,
+    archive: Archive = "",
     where: Where = "",
     all: AllFlag = False,
     yes: YesFlag = False,
 ):
-    """Remove deleted runs.
+    """Permanently delete runs.
 
-    Use to remove deleted runs, freeing disk space. Note that purged
-    runs cannot be recovered.
+    Use to remove deleted or archived runs, freeing disk space. Note
+    that purged runs cannot be recovered.
 
     Use [cmd]gage list --deleted[/] to list deleted runs that can be
     removed.
+
+    Use [cmd]gage list --archive NAME[/] to list archived runs that can
+    be removed.
     """
     from .purge_impl import runs_purge, Args
 
-    runs_purge(Args(ctx, runs or [], where, all, yes))
+    runs_purge(Args(ctx, runs or [], archive, where, all, yes))

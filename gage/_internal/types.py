@@ -3,6 +3,7 @@
 from typing import *
 
 __all__ = [
+    "ArchiveDef",
     "BoardConfigError",
     "BoardConfigLoadError",
     "BoardConfigValidationError",
@@ -572,6 +573,33 @@ class BoardDef:
 
 def _coerce_col(col: Any) -> dict[str, Any]:
     return col if isinstance(col, dict) else {"field": str(col)}
+
+
+# =================================================================
+# Misc
+# =================================================================
+
+
+class ArchiveDef:
+    def __init__(self, filename: str, data: dict[str, Any]):
+        self.filename = filename
+        self._data = data
+
+    def get_id(self):
+        return cast(str, self._data.get("id"))
+
+    def get_name(self):
+        return cast(str, self._data.get("name"))
+
+    def get_last_archived(self):
+        attr: Any = self._data.get("date")
+        return cast(int, attr) if attr else None
+
+    def as_json(self):
+        return self._data
+
+    def __repr__(self):
+        return f"<ArchiveRef id=\"{self.get_id()}\" name=\"{self.get_name()}\">"
 
 
 # =================================================================

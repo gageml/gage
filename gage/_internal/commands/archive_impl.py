@@ -2,27 +2,22 @@
 
 from typing import *
 
-from gage._internal.file_util import safe_list_dir
-
 from ..types import *
 
 import datetime
-import os
 
 import human_readable
 
 from .. import cli
-
-from ..archive_util import *
+from .. import var
 
 from ..shlex_util import shlex_quote
-from ..var import delete_run
 
-from .impl_support import archive_dir
+from ..run_archive import *
+
+from .impl_support import archive_for_name as archive_for_name_or_exit
 from .impl_support import runs_table
 from .impl_support import selected_runs
-
-from .copy_impl import _copy_to_ as copy_runs
 
 
 class Args(NamedTuple):
@@ -52,114 +47,72 @@ def archive(args: Args):
 
 
 def _handle_list(args: Args):
-    table = cli.Table("name", "runs", "last archived")
-    for name, dirname in iter_archives():
-        modified = archive_modified(dirname)
+    table = cli.Table()
+    table.add_column("name")
+    table.add_column("runs", justify="right")
+    table.add_column("last archived")
+    for archive in iter_archives():
+        run_count = _run_count(archive)
         table.add_row(
-            cli.label(name),
-            cli.value(str(_run_count(dirname))),
-            cli.value(human_readable.date_time(modified) if modified else ""),
+            cli.label(archive.get_name()),
+            cli.value(str(run_count)),
+            cli.value(_formatted_last_archived(archive)) if run_count > 0 else "",
         )
     cli.out(table)
 
 
-def _run_count(dirname: str):
-    return len(
-        [
-            name
-            for name in safe_list_dir(dirname)
-            if name.endswith(".meta") or name.endswith(".meta.zip")
-        ]
-    )
+def _run_count(archive: ArchiveDef):
+    return len(var.list_runs(container=archive.get_id()))
+
+
+def _formatted_last_archived(archive: ArchiveDef):
+    last_archived = archive.get_last_archived()
+    if not last_archived:
+        return ""
+    return human_readable.date_time(datetime.datetime.fromtimestamp(last_archived))
 
 
 def _handle_delete(args: Args):
     assert args.delete
-    dirname = find_archive_dir(args.delete)
-    if not dirname:
-        _no_such_archive_error(args.delete)
-    runs = list_archive_runs(dirname)
+    archive = archive_for_name_or_exit(args.delete)
+    runs = var.list_runs(container=archive.get_id())
     if runs:
-        _user_confirm_delete(args, runs)
-        _delete_runs(runs, "Deleting archive runs")
-    delete_archive(dirname)
-    cli.err(f"Deleted archive '{args.delete}'")
-    _delete_empty_archive_dir(dirname)
-
-
-def _no_such_archive_error(name: str) -> NoReturn:
-    cli.exit_with_error(
-        f"archive '{name}' does not exist.\n"
-        "Use '[cmd]gage archive --list[/]' to show available names."
-    )
-
-
-def _user_confirm_delete(args: Args, runs: list[Run]):
-    if args.yes:
-        return
-    indexed_runs = [(i + 1, run) for i, run in enumerate(runs)]
-    table = runs_table(indexed_runs)
-    cli.err(table)
-    run_count = "1 run" if len(runs) == 1 else f"{len(runs)} runs"
-    cli.err(
-        f"[red b]You are about to PERMANENTLY delete {run_count}. "
-        "This cannot be undone.\n"
-    )
-    if not cli.confirm(f"Continue?", default=False):
-        raise SystemExit(0)
-
-
-def _delete_runs(runs: list[Run], description: str):
-    for run in cli.track(
-        runs,
-        description=description,
-        transient=True,
-    ):
-        delete_run(run)
-
-
-def _delete_empty_archive_dir(dirname: str):
-    if not os.listdir(dirname):
-        os.rmdir(dirname)
-        return True
-    cli.err(
-        f"NOTE: archive directory \"{os.path.relpath(dirname)}\" "
-        "was not empty after deleting archived runs and was not deleted."
-    )
-    return False
+        cli.exit_with_error(
+            f"archive [arg]{args.delete}[/arg] is not empty\n\n"
+            "Remove the runs from the archive first by restoring or purging them.\n"
+            "Try '[cmd]gage archive --help[/cmd]' for more information."
+        )
+    delete_archive(archive.get_id())
+    cli.err(f"Deleted archive [arg]{args.delete}[/arg]")
 
 
 def _handle_delete_empty(args: Args):
-    empty = [archive for archive in iter_archives() if _run_count(archive.dirname) == 0]
+    empty = [archive for archive in iter_archives() if _run_count(archive) == 0]
     if not empty:
         cli.err("Nothing to delete")
         return
     _user_confirm_delete_empty(args, empty)
     deleted = 0
     for archive in empty:
-        run_count = _run_count(archive.dirname)
+        run_count = _run_count(archive)
         if run_count:
-            cli.err(f"{archive.name} contains runs - skipping")
+            cli.err(f"archive [arg]{archive.get_name()}[/arg] contains runs - skipping")
             continue
-        delete_archive(archive.dirname)
-        if _delete_empty_archive_dir(archive.dirname):
-            deleted += 1
+        delete_archive(archive.get_id())
+        deleted += 1
     if deleted:
         cli.err(f"Deleted {deleted} empty {'archive' if deleted == 1 else 'archives'}")
     else:
         cli.err("Nothing deleted")
 
 
-def _user_confirm_delete_empty(args: Args, archives: list[ArchiveInfo]):
+def _user_confirm_delete_empty(args: Args, archives: list[ArchiveDef]):
     if args.yes:
         return
     table = cli.Table("name", "runs")
-    for name, dirname in archives:
-        modified = archive_modified(dirname)
+    for archive in archives:
         table.add_row(
-            cli.label(name),
-            # Prompt assumes each archive is empty - rely on downstream
-            # to handle non-empty cases
+            cli.label(archive.get_name()),
             "0",
         )
     cli.err(table)
@@ -167,6 +120,7 @@ def _user_confirm_delete_empty(args: Args, archives: list[ArchiveInfo]):
         "1 empty archive" if len(archives) == 1 else f"{len(archives)} empty archives"
     )
     cli.err(f"You are about to delete {archives_count}.")
+    cli.err()
     if not cli.confirm(f"Continue?", default=True):
         raise SystemExit(0)
 
@@ -175,14 +129,20 @@ def _handle_rename(args: Args):
     cur_name, new_name = args.rename
     assert cur_name
     assert new_name
-    set_archive_name(archive_dir(cur_name), new_name)
+    archive = archive_for_name_or_exit(cur_name)
+    update_archive(archive, name=new_name)
 
 
 def _handle_archive(args: Args):
-
+    _check_archive_arg(args)
     runs = _selected_runs(args)
     _user_confirm_archive(args, runs)
     _archive_runs([run for i, run in runs], args)
+
+
+def _check_archive_arg(args: Args):
+    if args.archive:
+        archive_for_name_or_exit(args.archive)
 
 
 def _selected_runs(args: Args):
@@ -212,50 +172,31 @@ def _user_confirm_archive(args: Args, runs: list[IndexedRun]):
 
 
 def _archive_runs(runs: list[Run], args: Args):
-    archive_dir, name = _ensure_archive_dir(args)
-    copy_runs(runs, archive_dir, no_summary=True)
-    touch_archive(archive_dir)
-    _delete_runs(runs, "Removing local runs")
-    cli.err(f"Moved {len(runs)} {'run' if len(runs) == 1 else 'runs'}")
-    cli.out(
-        f"{'Run' if len(runs) == 1 else 'Runs'} archived to '{name}'\n\n"
+    assert runs
+    archive = _ensure_archive(args)
+    var.move_runs(runs, archive.get_id())
+    name = archive.get_name()
+    cli.err(
+        f"Archived {len(runs)} {'run' if len(runs) == 1 else 'runs'} "
+        f"to [arg]{name}[/arg]\n\n"
         f"Use '[cmd]gage restore --archive {shlex_quote(name)}[/]' to "
         "restore from this archive."
     )
 
 
-def restore_runs(runs: list[Run], target_dir: str):
-    """Restore runs to target dir.
-
-    This is exposed for use by the restore command. This odd arrangement
-    reflects the different approaches used to manage deleted runs and
-    archived runs. This issue is under consideration for a refactor to
-    bring some consistency to the topics.
-
-    In particular, what's odd: `copy_runs` is behavior borrowed from the
-    copy impl, `_delete_runs` is behavior only needed by archive, as
-    archive is a copy+delete operation (whereas delete is a meta dir
-    rename) - and this now exposed to restore, as restore handles both
-    deleted and archived runs. Good times.
-    """
-    copy_runs(runs, target_dir, no_summary=True)
-    _delete_runs(runs, "Removing archived runs")
-    runs_count = "1 run" if len(runs) == 1 else f"{len(runs)} runs"
-    cli.err(f"Restored {runs_count}")
-
-
-def _ensure_archive_dir(args: Args):
+def _ensure_archive(args: Args):
     if args.name:
-        assert not args.archive
-        return (find_archive_dir(args.name) or make_archive_dir(args.name)), args.name
+        try:
+            return archive_for_name(args.name)
+        except ArchiveNotFoundError:
+            return make_archive(name=args.name)
     elif args.archive:
-        dirname = find_archive_dir(args.archive)
-        if not dirname:
-            _no_such_archive_error(args.archive)
-        return dirname, args.archive
+        archive = archive_for_name_or_exit(args.archive)
+        update_archive(archive, last_archived=now_timestamp())
+        return archive
     else:
         name = _make_archive_name()
-        return make_archive_dir(name), name
+        return make_archive(name)
 
 
 def _make_archive_name():
