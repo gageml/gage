@@ -32,13 +32,13 @@ def _parse_tqdm(output: bytes) -> tuple[bytes, Progress | None]:
     progress = None
     stripped_output_parts = []
     for part in output.split(b"\r"):
+        if not part or _TQDM_EMPTY.match(part):
+            continue
         progress_m = _TQDM_PROGRESS.match(part)
         if progress_m:
             progress = int(progress_m.group(1))
         else:
-            empty_m = _TQDM_EMPTY.match(part)
-            if not empty_m:
-                stripped_output_parts.append(part)
+            stripped_output_parts.append(part)
     stripped_output = b"".join(stripped_output_parts)
     if progress is not None:
         return stripped_output, Progress(progress)

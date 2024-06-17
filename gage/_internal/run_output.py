@@ -142,7 +142,7 @@ class RunOutputWriter:
         while line := input_stream.readline():
             line_bytes, progress = self._process_line(line)
             with self._output_lock:
-                self._output.write(line)
+                self._output.write(line_bytes)
                 index_entry = struct.pack("!QB", time.time_ns() // 1000000, stream_type)
                 self._index.write(index_entry)
             self._apply_output_cb(stream_type, line_bytes, progress)

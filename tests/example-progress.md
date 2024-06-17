@@ -42,7 +42,7 @@ in run output.
     {meta_dir:path}
     <0>
 
-    >>> run("gage show --output")  # +skip TODO FIX THIS
+    >>> run("gage show --output")
     Doing stuff 1
     Doing stuff 2
     Doing stuff 3
