@@ -1,7 +1,3 @@
----
-test-options: +skip=WINDOWS_FIX  # relies on "touch" cmd, os-specific
----
-
 # Phases example
 
 The `phases` example creates files for each of the supported run phases:
