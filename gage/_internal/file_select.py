@@ -613,7 +613,7 @@ def _glob_to_re_pattern(pattern: str):
         re_parts.append(re.escape(pattern[pos:start]))
         matcher = pattern[start:end]
         if matcher == "*":
-            re_parts.append(rf"[^{path_sep}]*")
+            re_parts.append(rf"[^{path_sep}{'' if os.name != 'nt' else re.escape('/')}]*")
         elif matcher in ("**/", "**"):
             re_parts.append(r"(?:.+/)*")
         elif matcher == "?":

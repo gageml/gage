@@ -1,5 +1,5 @@
 ---
-test-options: +paths +skip=WINDOWS_FIX - unresolved bugs on Windows
+test-options: +paths
 ---
 
 # File select / copy tree support
