@@ -81,7 +81,7 @@ Windows is tested using a different show command below.
     | Hello Gage                                               |
     <0>
 
-    >>> run("gage show", cols=80) # +windows +panel +parse +diff
+    >>> run("gage show", cols=80) # +windows +panel +parse +paths
     {:run_id}
     | hello:hello                                    completed |
     ⤶
