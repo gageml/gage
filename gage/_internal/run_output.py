@@ -102,8 +102,8 @@ class RunOutputWriter:
         if proc.stdout is None:
             raise RuntimeError("proc stdout must be a PIPE")
         self._proc = proc
-        self._output = self._open_output()
-        self._index = self._open_index()
+        self._output = open(self._filename, "wb")
+        self._index = open(self._filename + ".index", "wb")
         self._out_tee = threading.Thread(target=self._out_tee_run)
         self._out_tee.start()
         if proc.stderr:
@@ -118,13 +118,6 @@ class RunOutputWriter:
         assert self._index is None
         assert self._out_tee is None
         assert self._err_tee is None
-
-    def _open_output(self):
-        return open(self._filename, "wb")
-
-    def _open_index(self):
-        path = self._filename + ".index"
-        return open(path, "wb")
 
     def _out_tee_run(self):
         assert self._proc
