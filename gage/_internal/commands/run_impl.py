@@ -231,11 +231,11 @@ class _DefaultStatus(_Status):
             self._status.update(desc)
 
     def output(self, output: bytes, progress: Progress | None):
-        output_str = output.decode()
         if self._status:
+            output_str = output.decode(errors="replace")
             self._status.console.out(output_str, end="")
         elif not self._quiet:
-            sys.stdout.write(output_str)
+            sys.stdout.buffer.write(output)
 
 
 class _Progress(_Status):
