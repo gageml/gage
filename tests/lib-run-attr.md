@@ -171,6 +171,94 @@ Invalidate the cache and read the label again.
     >>> run_attr(run, "id")
     'xxx'
 
+### Run Status
+
+Run status is provided by `run_status()`.
+
+When a run is first initialized, its status is "pending".
+
+    >>> run_status(run)
+    'pending'
+
+    >>> ls(run.meta_dir)
+    __schema__
+    config.json
+    id
+    initialized
+    log/runner
+    opdef.json
+    proc/cmd.json
+    proc/env.json
+    started
+    stopped
+
+If `initialized` is missing, status is "unknown".
+
+    >>> rm(path_join(run.meta_dir, "initialized"))
+
+    >>> run_status(run)
+    'unknown'
+
+Replace `initialized`.
+
+    >>> touch(path_join(run.meta_dir, "initialized"))
+
+    >>> run_status(run)
+    'pending'
+
+If `staged` exists, status is "staged".
+
+    >>> touch(path_join(run.meta_dir, "staged"))
+
+    >>> run_status(run)
+    'staged'
+
+If a run is running, it has a process lock file under `proc/lock`. Gage
+checks that file to see if there's an active lock file.
+
+If the lock references a running (alive) process, the run status is
+"running".
+
+    >>> write(path_join(run.meta_dir, "proc", "lock"), str(os.getpid()))
+
+    >>> run_status(run)
+    'running'
+
+If the lock refers to a non-running process, the status is "terminated".
+
+    >>> write(path_join(run.meta_dir, "proc", "lock"), "9999999999999")
+
+    >>> run_status(run)
+    'terminated'
+
+If `proc/exit` contains a negative number, the run is "terminated".
+
+    >>> write(path_join(run.meta_dir, "proc", "exit"), "-2")
+
+    >>> run_status(run)
+    'terminated'
+
+A positive number is "error".
+
+    >>> write(path_join(run.meta_dir, "proc", "exit"), "1")
+
+    >>> run._cache.clear()
+    >>> run_status(run)
+    'error'
+
+A zero exit code is "completed".
+
+    >>> write(path_join(run.meta_dir, "proc", "exit"), "0")
+
+    >>> run._cache.clear()
+    >>> run_status(run)
+    'completed'
+
+
+
+
+
+
 ### User attributes
 
 User attributes are written to a run user directory. This directory is

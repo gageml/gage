@@ -72,9 +72,22 @@ def _running_status(run: Run) -> Literal["running", "terminated"] | None:
 
 
 def _is_active_lock(lock: str):
-    # TODO: read lock = should have PID + some process hints to verify
-    # PID belongs to expected run - for now assume valid
-    return True
+    try:
+        pid = int(lock)
+    except ValueError:
+        log.error("Invalid lock value %r - expected PID", lock)
+        return None
+    else:
+        import psutil
+
+        # TODO: read lock = should have PID + some process hints to verify
+        # PID belongs to expected run - for now assume valid
+        try:
+            psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return False
+        else:
+            return True
 
 
 def _staged_status(run: Run) -> Literal["staged"] | None:

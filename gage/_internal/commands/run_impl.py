@@ -458,8 +458,13 @@ def _exec_and_finalize(
 ):
     run_phase_status = run_phase_status or _RunPhaseStatus(run, args)
     with run_phase_status:
-        exit_code = _exec_run(run, args)
-        _finalize_run(run, exit_code, args)
+        try:
+            exit_code = _exec_run(run, args)
+        except KeyboardInterrupt:
+            _finalize_run(run, -2, args)
+            raise
+        else:
+            _finalize_run(run, exit_code, args)
 
 
 def _exec_run(run: Run, args: Args):

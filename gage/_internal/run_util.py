@@ -925,12 +925,14 @@ def _run_phase_exec(
         progress_parser=progress_parser,
     )
     output.open(p)
-    exit_code = p.wait()
-    output.wait_and_close()
-    log.info(f"Exit code for {phase_name}: {exit_code}")
-    _delete_proc_lock(run, log)
-    if exit_code != 0:
-        raise RunExecError(phase_name, proc_args, exit_code)
+    try:
+        exit_code = p.wait()
+        log.info(f"Exit code for {phase_name}: {exit_code}")
+        if exit_code != 0:
+            raise RunExecError(phase_name, proc_args, exit_code)
+    finally:
+        output.wait_and_close()
+        _delete_proc_lock(run, log)
 
 
 def _proc_args(
