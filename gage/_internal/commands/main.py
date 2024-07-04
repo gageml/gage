@@ -26,6 +26,7 @@ from .purge import runs_purge
 from .restore import runs_restore
 from .select import select
 from .show import show
+from .util import app as util_app
 
 # from .sign import sign
 
@@ -78,7 +79,7 @@ def main(
     main(Args(version, cwd, runs_dir, sum(verbose or [])))
 
 
-def main_app():
+def app():
     app = Typer(
         cls=cli.AliasGroup,
         rich_markup_mode="rich",
@@ -114,6 +115,7 @@ def main_app():
     app.command("select")(select)
     app.command("show")(show)
     # app.command("sign")(sign)
+    app.add_typer(util_app(), name="util")
     _PATCH_fix_options_metavar(app)
     return app
 
@@ -127,4 +129,7 @@ def _PATCH_fix_options_metavar(app: Typer):
         if cmd.options_metavar != "[options]":
             cmd.options_metavar = "[options]"
             patched = True
+    for group in app.registered_groups:
+        if group.typer_instance:
+            _PATCH_fix_options_metavar(group.typer_instance)
     assert patched or os.getenv("CI") != "1", "nothing patched - time to remove?"

@@ -19,6 +19,7 @@ __all__ = [
     "TempFile",
     "compare_paths",
     "copy_tree",
+    "delete_file",
     "dir_size",
     "ensure_dir",
     "ensure_safe_delete_tree",
@@ -691,6 +692,12 @@ def format_file_size(size: int):
         # human_readable applies (decimal) formatting to bytes, bypass
         return f"{size} B"
     return human_readable.file_size(size, formatting=".1f")
+
+
+def delete_file(path: str):
+    if os.name == "nt":
+        os.chmod(path, stat.S_IWRITE)
+    os.remove(path)
 
 
 try:

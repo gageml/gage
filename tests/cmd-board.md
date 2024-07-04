@@ -175,7 +175,7 @@ mappings.
     >>> run("gage run foo=b bar=4 -y")
     <0>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | default   | completed | bar=4 foo=b                  |

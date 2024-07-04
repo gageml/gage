@@ -36,6 +36,7 @@ Running `gage` without arguments shows help.
       run              Start or stage a run.
       select           Selects runs and their attributes.
       show             Show information about a run.
+      util             Gage utility commands.
     <0>
 
 ## Help

@@ -9,7 +9,7 @@ from .__init__ import __version__
 from ._internal import cli
 from ._internal import exitcodes
 
-from ._internal.commands.main import main_app
+from ._internal.commands.main import app as main_app
 
 
 if os.getenv("TERM") in ("unknown", "dumb"):
