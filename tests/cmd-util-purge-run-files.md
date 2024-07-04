@@ -1,3 +1,7 @@
+---
+test-options: +skip=WINDOWS_FIX
+---
+
 # `util purge-run-files` command
 
     >>> run("gage util purge-run-files -h")  # +diff
