@@ -42,12 +42,12 @@ Delete the run.
     Deleted 1 run
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
 
-    >>> run("gage ls -s -d")
+    >>> run("gage ls -d -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Gage                    |
@@ -69,13 +69,13 @@ Restore the run.
     Restored 1 run
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Gage                    |
     <0>
 
-    >>> run("gage ls -s -d")
+    >>> run("gage ls -d -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>

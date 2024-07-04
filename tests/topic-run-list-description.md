@@ -34,7 +34,7 @@ Show the runs. Note that `op` runs use fields `z` and `s`, which is the
 ordered list of fields specified for the listing description in the op
 def. `op-2` runs use the default field listing.
 
-    >>> run("gage runs -s", cols=64)  # +table
+    >>> run("gage runs -0", cols=64)  # +table
     | # | operation | status    | description                      |
     |---|-----------|-----------|----------------------------------|
     | 1 | op-2      | completed | ho hi b=true i=123 s=hi z=1.123  |

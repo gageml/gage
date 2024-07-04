@@ -75,7 +75,7 @@ Archive = Annotated[
 SimplifiedFlag = Annotated[
     bool,
     Option(
-        "-s",
+        "-0",
         help="Simplified listing - used for tests",
         hidden=True,
     ),

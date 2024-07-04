@@ -28,6 +28,7 @@ __all__ = [
     "file_sha256",
     "files_differ",
     "files_digest",
+    "format_file_size",
     "ls",
     "find_up",
     "is_readonly",
@@ -681,6 +682,15 @@ def safe_filename(s: str):
     if os.name == "nt":
         s = re.sub(r"[:<>?]", "_", s).rstrip()
     return re.sub(r"[/\\]+", "_", s)
+
+
+def format_file_size(size: int):
+    import human_readable
+
+    if size < 1000:
+        # human_readable applies (decimal) formatting to bytes, bypass
+        return f"{size} B"
+    return human_readable.file_size(size, formatting=".1f")
 
 
 try:

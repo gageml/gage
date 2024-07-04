@@ -32,7 +32,7 @@ Generate a run.
     Hello Gage
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Gage                    |
@@ -76,7 +76,7 @@ Show runs.
 
 Show deleted runs.
 
-    >>> run("gage ls -ds")
+    >>> run("gage ls -d -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Gage                    |
@@ -107,7 +107,7 @@ Show runs.
     |-----|---------|----------------|-------------|-----------|
     <0>
 
-    >>> run("gage list -ds")
+    >>> run("gage list -d -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Gage                    |
@@ -129,7 +129,7 @@ Generate some runs.
     >>> run("gage run hello -l green name=D -qy")
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | green name=D                 |
@@ -155,7 +155,7 @@ specified, assuming the user wants to delete all matching runs.
     Deleted 2 runs
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | green name=D                 |
@@ -168,7 +168,7 @@ Where can be used with run specs.
     Deleted 1 run
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | green name=D                 |

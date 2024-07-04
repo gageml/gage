@@ -54,7 +54,7 @@ Change to the new project location.
 
     >>> cd(tmp)
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -65,7 +65,7 @@ Run `hello` again.
     Hello Gage
     <0>
 
-    >>> run("gage runs -s")  # +parse +table
+    >>> run("gage runs -0")  # +parse +table
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Gage                    |

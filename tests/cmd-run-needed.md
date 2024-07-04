@@ -29,7 +29,7 @@ The `config-types` operation accepts various config value types.
 
 There are no runs to start.
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -111,7 +111,7 @@ Run `exec-error`. This fails.
     >>> run("gage run exec-error -y")
     <3>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation  | status | description                    |
     |---|------------|--------|--------------------------------|
     | 1 | exec-error | error  |                                |
@@ -123,7 +123,7 @@ previous run, even though it has the same name and same config values.
     >>> run("gage run exec-error --needed -y")
     <3>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation  | status | description                    |
     |---|------------|--------|--------------------------------|
     | 1 | exec-error | error  |                                |
@@ -193,7 +193,7 @@ Show the runs.
 
     >>> cd(parent_dir)
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | b:test    | completed |                              |
@@ -257,7 +257,7 @@ We expect two runs, given the batch config.
     Hello Dog 3
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | n=3 name=Dog                 |
@@ -275,7 +275,7 @@ run, which is 5 (see above). This is intentional, signifying that a
 batch with `--needed` often expects comparable runs to exist and that
 skipped runs are not an unexpected result.
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | n=3 name=Dog                 |

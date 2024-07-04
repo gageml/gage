@@ -17,7 +17,7 @@ Generate test runs
     Hello Joe
     <0>
 
-    >>> run("gage list -s")
+    >>> run("gage list -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | Run 2 name=Joe               |
@@ -34,7 +34,7 @@ Copy all runs.
     Copied 2 runs
     <0>
 
-    >>> run(f"gage --runs {tmp} runs -s")
+    >>> run(f"gage --runs {tmp} runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | Run 2 name=Joe               |
@@ -50,7 +50,7 @@ The `--sync` option syncs selected runs to the destination.
 TODO: The output should reflect that there were deletions at the
 destination.
 
-    >>> run(f"gage --runs {tmp} runs -s")
+    >>> run(f"gage --runs {tmp} runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | Run 1 name=Gage              |

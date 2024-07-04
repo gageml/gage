@@ -56,7 +56,7 @@ Generate some sample runs.
 
 List runs.
 
-    >>> run("gage list -s")
+    >>> run("gage list -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | run-3 name=Blue              |

@@ -125,7 +125,7 @@ the project directory.
     | hello                     | Says hello                   |
     <0>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -145,7 +145,7 @@ Generate a run.
     Hello!
     <0>
 
-    >>> run("gage runs -s")  # +parse +table
+    >>> run("gage runs -0")  # +parse +table
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed |                              |

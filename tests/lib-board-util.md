@@ -17,7 +17,7 @@ To show the default behavior, generate some runs.
     >>> run("gage run op-2 x=2 -y")
     <0>
 
-    >>> run("gage ls -s", cols=64)
+    >>> run("gage ls -0", cols=64)
     | # | operation | status    | description                      |
     |---|-----------|-----------|----------------------------------|
     | 1 | op-2      | completed | x=2 speed=1.123 type=red x=2     |

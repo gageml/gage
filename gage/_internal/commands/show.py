@@ -87,6 +87,15 @@ FilesFlag = Annotated[
     ),
 ]
 
+Simplified = Annotated[
+    bool,
+    Option(
+        "-0",
+        help="Simplified output - used for tests",
+        hidden=True,
+    ),
+]
+
 
 def show(
     run: RunSpec = "",
@@ -97,6 +106,7 @@ def show(
     summary: SummaryFlag = False,
     output: OutputFlag = False,
     files: FilesFlag = False,
+    simplified: Simplified = False,
 ):
     """Show information about a run."""
     from .show_impl import show, Args
@@ -111,5 +121,6 @@ def show(
             summary,
             output,
             files,
+            simplified,
         )
     )

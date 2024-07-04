@@ -8,8 +8,6 @@ import datetime
 import logging
 import os
 
-import human_readable
-
 import rich.box
 
 from rich.console import Group
@@ -27,6 +25,7 @@ from .. import cli
 from ..run_attr import *
 from ..run_util import *
 
+from ..file_util import format_file_size
 from ..run_comment import get_comments
 from ..run_meta import iter_output
 from ..run_output import RunOutputReader
@@ -48,6 +47,7 @@ class Args(NamedTuple):
     summary: bool
     output: bool
     files: bool
+    simplified: bool
 
 
 def show(args: Args):
@@ -59,7 +59,7 @@ def show(args: Args):
     if args.output:
         _show_output_and_exit(run)
     if args.files:
-        _show_files_and_exit(run)
+        _show_files_and_exit(run, args)
     with cli.pager():
         _show(run, args)
 
@@ -174,7 +174,12 @@ def Summary(run: Run, table_only: bool = False):
     return cli.Panel(table, title="Summary")
 
 
-def Files(run: Run, table_only: bool = False, limit: int | None = None):
+def Files(
+    run: Run,
+    limit: int | None = None,
+    table_only: bool = False,
+    simplified: bool = False,
+):
     with RunManifest(run) as m:
         files = list(m)
     table = cli.Table(
@@ -193,25 +198,29 @@ def Files(run: Run, table_only: bool = False, limit: int | None = None):
         "type",
         style=cli.STYLE_SUBTEXT,
     )
-    table.add_column(
-        "size",
-        justify="right",
-        style="magenta",
-        footer_style="not b magenta i",
-    )
+    if not simplified:
+        table.add_column(
+            "size",
+            justify="right",
+            style="magenta",
+            footer_style="not b magenta i",
+        )
     total_count = len(files)
     total_size = 0
     displayed = 0
     for path, type in _sort_files(files):
-        stat = os.stat(os.path.join(run.run_dir, path))
-        if limit is None or displayed < limit:
-            table.add_row(
-                path,
-                _type_desc(type),
-                _format_file_size(stat.st_size),
-            )
-            displayed += 1
-        total_size += stat.st_size
+        try:
+            stat = os.stat(os.path.join(run.run_dir, path))
+        except FileNotFoundError:
+            pass
+        else:
+            if limit is None or displayed < limit:
+                row = [path, _type_desc(type)] + (
+                    [format_file_size(stat.st_size)] if not simplified else []
+                )
+                table.add_row(*row)
+                displayed += 1
+            total_size += stat.st_size
     if displayed < total_count:
         table.add_row("...", "...", "...", style="not b magenta i")
     if not table_only:
@@ -221,7 +230,7 @@ def Files(run: Run, table_only: bool = False, limit: int | None = None):
             if displayed < total_count
             else f"{total_count} {files_desc}"
         )
-        table.columns[2].footer = f"[i]total: {_format_file_size(total_size)}"
+        table.columns[2].footer = f"[i]total: {format_file_size(total_size)}"
 
     if table_only:
         return table
@@ -269,13 +278,6 @@ def _type_desc(type: RunFileType):
             return "generated"
         case _:
             return f"unknown (type)"
-
-
-def _format_file_size(size: int):
-    if size < 1000:
-        # human_readable applies (decimal) formatting to bytes, bypass
-        return f"{size} B"
-    return human_readable.file_size(size, formatting=".1f")
 
 
 def Output(run: Run):
@@ -371,7 +373,7 @@ def _show(run: Run, args: Args):
     cli.out(Attributes(run))
     cli.out(Config(run))
     cli.out(Summary(run))
-    cli.out(Files(run, limit=_files_limit(args)))
+    cli.out(Files(run, limit=_files_limit(args), simplified=args.simplified))
     cli.out(Output(run))
     cli.out(Comments(run))
 
@@ -399,6 +401,13 @@ def _show_output_and_exit(run: Run):
     raise SystemExit(0)
 
 
-def _show_files_and_exit(run: Run):
-    cli.out(Files(run, table_only=True))
+def _show_files_and_exit(run: Run, args: Args):
+    cli.out(
+        Files(
+            run,
+            table_only=True,
+            limit=_files_limit(args),
+            simplified=args.simplified,
+        )
+    )
     raise SystemExit(0)

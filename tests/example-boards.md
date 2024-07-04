@@ -19,7 +19,7 @@ Generate some runs.
     >>> run("gage run op x=2 -qy")
     <0>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | op        | completed | x=2 y=3 z=x                  |

@@ -23,7 +23,7 @@ Use the `hello` example to generate some runs.
     Hello C
     <0>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | a test name=C                |
@@ -37,7 +37,7 @@ and label. TODO - include tags when implemented.
 
 Show staged runs.
 
-    >>> run("gage runs -s -w staged")
+    >>> run("gage runs -0 -w staged")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     | 1 | hello     | staged | name=A                          |
@@ -45,7 +45,7 @@ Show staged runs.
 
 Show completed runs.
 
-    >>> run("gage runs -s --where completed")
+    >>> run("gage runs -0 --where completed")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | a test name=C                |
@@ -54,7 +54,7 @@ Show completed runs.
 
 Show runs with 'test' (searches label).
 
-    >>> run("gage runs -s --where test")
+    >>> run("gage runs -0 --where test")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | a test name=C                |
@@ -62,14 +62,14 @@ Show runs with 'test' (searches label).
 
 Filter on something that does not match.
 
-    >>> run("gage runs -s -w does-not-match")
+    >>> run("gage runs -0 -w does-not-match")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
 
 Empty string is equivalent to no filter.
 
-    >>> run("gage runs -s --where ''")
+    >>> run("gage runs -0 --where ''")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | a test name=C                |

@@ -139,7 +139,7 @@ The operation version is reflected in the run.
 
 Version is also now shown in the runs list.
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | op v2     | completed |                              |
@@ -166,7 +166,7 @@ Update the version again.
     >>> run("gage run op --needed -y")
     <0>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | op v3     | completed |                              |

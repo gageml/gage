@@ -14,7 +14,7 @@ Create two test runs.
 
 Show the runs.
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | Saying hi name=Mike          |
@@ -27,7 +27,7 @@ Set the label for run 2.
     Set label for 1 run
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | Saying hi name=Mike          |
@@ -40,7 +40,7 @@ Clear the label for run 1.
     Cleared label for 1 run
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Mike                    |
@@ -53,7 +53,7 @@ Set label for runs 1 and 2.
     Set label for 2 runs
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | Say hi to all name=Mike      |
@@ -66,7 +66,7 @@ Clear all labels.
     Cleared label for 2 runs
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Mike                    |

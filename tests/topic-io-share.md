@@ -68,7 +68,7 @@ Generate a run to share.
     Hello Sharon
     <0>
 
-    >>> run("gage ls -s", cols=62)
+    >>> run("gage ls -0", cols=62)
     | # | operation | status    | description                    |
     |---|-----------|-----------|--------------------------------|
     | 1 | hello     | completed | Something to share name=Sharon |
@@ -84,7 +84,7 @@ Create a "remote location".
 
     >>> remote_runs = make_temp_dir()
 
-    >>> run("gage ls -s", env={"GAGE_RUNS": remote_runs})
+    >>> run("gage ls -0", env={"GAGE_RUNS": remote_runs})
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -114,7 +114,7 @@ is not copied.
 
 List remote runs.
 
-    >>> run("gage ls -s", env={"GAGE_RUNS": remote_runs}, cols=62)
+    >>> run("gage ls -0", env={"GAGE_RUNS": remote_runs}, cols=62)
     | # | operation | status    | description                    |
     |---|-----------|-----------|--------------------------------|
     | 1 | hello     | completed | Something to share name=Sharon |
@@ -154,7 +154,7 @@ Copy runs from the remote location to the retrieve location.
 
 Show retrieved runs.
 
-    >>> run("gage ls -s", env={"GAGE_RUNS": retrieve_runs}, cols=62)
+    >>> run("gage ls -0", env={"GAGE_RUNS": retrieve_runs}, cols=62)
     | # | operation | status    | description                    |
     |---|-----------|-----------|--------------------------------|
     | 1 | hello     | completed | Something to share name=Sharon |

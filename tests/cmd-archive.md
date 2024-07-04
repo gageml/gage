@@ -68,7 +68,7 @@ Use `hello` to generate some runs.
     Hello Room
     <0>
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Room                    |
@@ -97,7 +97,7 @@ Show available archives.
 
 The archived runs are deleted after being copied.
 
-    >>> run("gage runs -s")
+    >>> run("gage runs -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -122,14 +122,14 @@ when restoring deleted runs when run specs aren't provided.
     Restored 2 runs
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Room                    |
     | 2 | hello     | completed | name=Moon                    |
     <0>
 
-    >>> run(f"gage ls -A {name} -s")
+    >>> run(f"gage ls -A {name} -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
@@ -163,12 +163,12 @@ Archive the current runs.
     Use 'gage restore --archive my-archive' to restore from this archive.
     <0>
 
-    >>> run("gage ls -s")
+    >>> run("gage ls -0")
     | # | operation | status | description                     |
     |---|-----------|--------|---------------------------------|
     <0>
 
-    >>> run("gage ls -A my-archive -s")
+    >>> run("gage ls -A my-archive -0")
     | # | operation | status    | description                  |
     |---|-----------|-----------|------------------------------|
     | 1 | hello     | completed | name=Room                    |
