@@ -59,11 +59,7 @@ def _apply_patterns(
     runs: list[IndexedRun], args: PurgeRunFilesArgs
 ) -> list[tuple[Run, str, str | None]]:
     matched = []
-    all_files = [
-        (run[1], path)
-        for run in runs
-        for path in safe_ls(run[1].run_dir)
-    ]
+    all_files = [(run[1], path) for run in runs for path in safe_ls(run[1].run_dir)]
     for run, path in cli.track(all_files, "Finding files", transient=True):
         for pattern in args.patterns:
             if fnmatch.fnmatch(path, pattern):
