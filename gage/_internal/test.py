@@ -43,6 +43,7 @@ __all__ = [
     "datetime_now",
     "datetime_fromiso",
     "delete_temp_dir",
+    "delete_tree",
     "diff",
     "diffl",
     "diffs",
@@ -106,6 +107,7 @@ StderrCapture = util.StderrCapture
 
 basename = os.path.basename
 delete_temp_dir = file_util.delete_temp_dir
+delete_tree = file_util.safe_delete_tree
 compare_paths = file_util.compare_paths
 copytree = file_util.copy_tree
 lsl = file_util.ls

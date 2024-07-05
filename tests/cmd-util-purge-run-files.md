@@ -98,3 +98,21 @@ prompting.
     |------|------|-----|
     | ...  | ...  | ... |
     <0>
+
+    >>> run("gage util purge-run-files -a -f '*' --preview")
+    | Run | Path | Matching Pattern |
+    |-----|------|------------------|
+    <0>
+
+Edge case: delete the run directory.
+
+    >>> run("gage select --run-dir")  # +parse
+    {run_dir:path}
+    <0>
+
+    >>> delete_tree(run_dir)
+
+    >>> run("gage util purge-run-files -a -f '*' --preview")
+    | Run | Path | Matching Pattern |
+    |-----|------|------------------|
+    <0>

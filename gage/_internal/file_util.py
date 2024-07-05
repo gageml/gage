@@ -42,6 +42,7 @@ __all__ = [
     "safe_delete_tree",
     "safe_filename",
     "safe_list_dir",
+    "safe_ls",
     "set_readonly",
     "shorten_path",
     "standardize_path",
@@ -219,6 +220,18 @@ def ls(
         for name in files:
             paths.append(relpath(path, name))
     return paths if unsorted else sorted(paths)
+
+
+def safe_ls(
+    root: str,
+    followlinks: bool = False,
+    include_dirs: bool = False,
+    unsorted: bool = False,
+) -> list[str]:
+    try:
+        return ls(root, followlinks, include_dirs, unsorted)
+    except FileNotFoundError:
+        return []
 
 
 def find_up(
