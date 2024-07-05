@@ -116,3 +116,8 @@ Edge case: delete the run directory.
     | Run | Path | Matching Pattern |
     |-----|------|------------------|
     <0>
+
+    >>> run("gage util purge-run-files -a -f '*' --confirm 'I agree'")
+    gage: No files matched the specified patterns
+    Use '--preview' to show pattern match details.
+    <1>
