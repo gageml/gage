@@ -11,9 +11,26 @@ gage scan
 
 ## Install
 
+Supported plateforms:
+
+- Linux only (macOS and Windows planned)
+
 ### Install prebuilt binary
 
-TODO - instructions for installing dist
+To run the install script, use:
+
+```shell
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/gageml/gage/releases/latest/download/gage-cli-installer.sh | sh
+```
+
+This installs the `gage` binary for your system to `~/.local/bin/gage`.
+It does not require elevated privileges.
+
+Alternatively, use `cargo-binstall`:
+
+```shell
+cargo binstall --git https://github.com/gageml/gage gage-cli
+```
 
 ### Install from source
 
