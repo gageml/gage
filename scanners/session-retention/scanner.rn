@@ -1,0 +1,74 @@
+use gage::{write_note, write_issue, config};
+
+pub const SCANNER = #{
+    name: "session-retention",
+    description: `
+    Warn when Claude Code session retention is left at the default
+
+    Claude Code deletes session transcripts after a number of days set by
+    the "cleanupPeriodDays" setting. When the setting is absent the default
+    applies and transcripts are removed after 30 days. Gage analyzes session
+    history, so a deleted transcript is data it can no longer work from.
+    This scanner checks whether "cleanupPeriodDays" is configured and opens
+    an issue when it is not.
+    `,
+
+    tasks: #{
+        check_retention: #{
+            context: "scan",
+            notes: #{
+                writes: #{
+                    "session-retention.cleanup-period-days": #{
+                        value: "Default retention in days (written only when cleanupPeriodDays is unset)",
+                        metadata: #{
+                            configured: "Always false: the note is written only when cleanupPeriodDays is unset",
+                            default_retention_days: "Days Claude Code retains transcripts when the setting is absent",
+                        },
+                    },
+                },
+            },
+        },
+    },
+};
+
+// Claude Code's retention default when `cleanupPeriodDays` is unset.
+const DEFAULT_RETENTION_DAYS = 30;
+
+pub async fn check_retention() {
+    let setting = config().settings().await.get("cleanupPeriodDays");
+
+    // Any explicit value means the user has chosen a retention period and
+    // is aware of it. Only the unset case --- the silent 30-day default
+    // --- is a finding: record a note as the issue's dated evidence and
+    // open the issue.
+    match setting {
+        Some(_) => {}
+        None => {
+            let note = write_note(
+                #{
+                    name: "session-retention.cleanup-period-days",
+                    value: DEFAULT_RETENTION_DAYS,
+                    explanation: "cleanupPeriodDays is unset; the default retention applies",
+                    metadata: #{
+                        configured: false,
+                        default_retention_days: DEFAULT_RETENTION_DAYS,
+                    },
+                },
+            )
+            .keep_prev()
+            .await?;
+
+            write_issue(
+                #{
+                    name: "session-retention",
+                    title: "Session retention left at the 30-day default",
+                    description: "scanner:issue.md",
+                    evidence: [#{ note, timestamp: note.created }],
+                },
+            )
+            .keep_status()
+            .await?;
+        }
+    }
+    Ok(())
+}
