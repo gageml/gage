@@ -7,6 +7,12 @@ versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [Unreleased]
+
+### Added
+
+- `gage-lsp` - Language server for Gage Rune
+
 ## [0.0.1-pre.2]
 
 - Initial pre-release
