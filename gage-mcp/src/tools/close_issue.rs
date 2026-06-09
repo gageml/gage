@@ -30,6 +30,7 @@ fn call(
 async fn handle(params: JsonObject) -> Result<String, McpError> {
     let issue_id = req_string(&params, "issue_id")?;
     let reason_str = req_string(&params, "reason")?;
+    let message = opt_string(&params, "message");
 
     let reason = match reason_str.as_str() {
         "completed" => ClosedReason::Completed,
@@ -53,7 +54,11 @@ async fn handle(params: JsonObject) -> Result<String, McpError> {
     })?;
 
     let now = gage_core::datetime::now_ms();
-    issue::close(&conn, &issue.id, reason, now)
+    let author = format!(
+        "user:{}",
+        std::env::var("USER").unwrap_or_else(|_| "unknown".into())
+    );
+    issue::close(&conn, &issue.id, reason, &author, message.as_deref(), now)
         .map_err(|e| McpError::internal_error(format!("close issue: {e}"), None))?;
 
     let open = issue::find(
@@ -82,4 +87,12 @@ fn req_string(params: &JsonObject, key: &str) -> Result<String, McpError> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| McpError::invalid_params(format!("missing or non-string `{key}`"), None))
+}
+
+fn opt_string(params: &JsonObject, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }

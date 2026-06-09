@@ -139,6 +139,15 @@ fn migration_1(conn: &Connection) {
             PRIMARY KEY (issue_id, note_id)
         );
 
+        CREATE TABLE issue_event (
+            issue_id  TEXT NOT NULL REFERENCES issue(id),
+            type      TEXT NOT NULL,
+            author    TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            value     TEXT
+        );
+        CREATE INDEX idx_issue_event_issue_id ON issue_event(issue_id);
+
         CREATE TABLE scan (
             id       TEXT PRIMARY KEY,
             created  INTEGER NOT NULL,
@@ -210,7 +219,7 @@ mod tests {
         }
 
         // issue and issue_evidence tables exist
-        for tname in &["issue", "issue_evidence"] {
+        for tname in &["issue", "issue_evidence", "issue_event"] {
             let n: u32 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",

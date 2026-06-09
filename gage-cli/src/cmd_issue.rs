@@ -66,6 +66,9 @@ pub struct IssueDeleteArgs {
 pub struct IssueReopenArgs {
     /// Issue UUID (or prefix)
     id: String,
+    /// Message recorded with the reopen event
+    #[arg(short, long)]
+    message: Option<String>,
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -78,6 +81,9 @@ pub struct IssueCloseArgs {
     /// Close as `skipped` instead of the default `completed`
     #[arg(short, long)]
     skipped: bool,
+    /// Message recorded with the close event
+    #[arg(short, long)]
+    message: Option<String>,
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -358,8 +364,16 @@ pub fn close(args: IssueCloseArgs) {
         }
 
         let now = gage_core::datetime::now_ms();
-        issue::close(&conn, &target_issue.id, reason, now)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+        let author = crate::author::resolve_author(None);
+        issue::close(
+            &conn,
+            &target_issue.id,
+            reason,
+            &author,
+            args.message.as_deref(),
+            now,
+        )
+        .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
 
         Ok(format!(
             "Closed issue {} ({})",
@@ -402,8 +416,15 @@ pub fn reopen(args: IssueReopenArgs) {
         }
 
         let now = gage_core::datetime::now_ms();
-        issue::reopen(&conn, &target_issue.id, now)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+        let author = crate::author::resolve_author(None);
+        issue::reopen(
+            &conn,
+            &target_issue.id,
+            &author,
+            args.message.as_deref(),
+            now,
+        )
+        .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
 
         Ok(format!("Reopened issue {}", short_uuid(&target_issue.id)).into())
     });

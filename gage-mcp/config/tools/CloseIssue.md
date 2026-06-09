@@ -11,6 +11,11 @@ type = "string"
 required = true
 description = "One of: completed, skipped"
 
+[parameters.message]
+type = "string"
+required = false
+description = "Optional message recorded with the close event"
+
 [annotations]
 read_only_hint = false
 idempotent_hint = false

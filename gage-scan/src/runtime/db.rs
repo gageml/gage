@@ -517,7 +517,8 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
             }
 
             if reopen {
-                issue::reopen(&db, &prev.id, now).map_err(|e| Error::Db(e.to_string()))?;
+                issue::reopen(&db, &prev.id, &prev.author, None, now)
+                    .map_err(|e| Error::Db(e.to_string()))?;
             }
 
             let mut result: Issue = (*prev).into();

@@ -55,6 +55,38 @@ impl std::str::FromStr for ClosedReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IssueEventKind {
+    Create,
+    Close,
+    Reopen,
+    Comment,
+}
+
+impl IssueEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IssueEventKind::Create => "create",
+            IssueEventKind::Close => "close",
+            IssueEventKind::Reopen => "reopen",
+            IssueEventKind::Comment => "comment",
+        }
+    }
+}
+
+impl std::str::FromStr for IssueEventKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "create" => Ok(IssueEventKind::Create),
+            "close" => Ok(IssueEventKind::Close),
+            "reopen" => Ok(IssueEventKind::Reopen),
+            "comment" => Ok(IssueEventKind::Comment),
+            other => Err(format!("unknown issue event type '{other}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
@@ -93,6 +125,19 @@ pub struct IssueEvidence {
     pub timestamp: i64,
     /// Optional digest used to detect evidence changes.
     pub digest: Option<String>,
+}
+
+/// A logged change to an issue, recorded in the `issue_event` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueEvent {
+    pub issue_id: String,
+    /// Stored in the `type` column.
+    pub kind: IssueEventKind,
+    pub author: String,
+    /// Epoch milliseconds.
+    pub timestamp: i64,
+    /// Free-form value for the event, e.g. a close/reopen message.
+    pub value: Option<String>,
 }
 
 #[derive(Debug)]
@@ -145,7 +190,8 @@ const ISSUE_COLUMNS: &str =
 /// `(name, target)` already exists; the existing issue is left
 /// untouched and returned so the caller can decide what to do.
 pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
-    let res = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let res = tx.execute(
         &format!(
             "INSERT INTO issue ({ISSUE_COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
@@ -170,6 +216,17 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
         }
         return Err(e.into());
     }
+    insert_event(
+        &tx,
+        &IssueEvent {
+            issue_id: issue.id.clone(),
+            kind: IssueEventKind::Create,
+            author: issue.author.clone(),
+            timestamp: issue.created,
+            value: None,
+        },
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -190,38 +247,123 @@ fn find_by_dup_key(conn: &Connection, name: &str, target: &str) -> Result<Issue,
 }
 
 /// Reopen a closed issue: clears `closed_reason` and sets status back
-/// to `open`. Bumps `modified`.
-pub fn reopen(conn: &Connection, issue_id: &str, modified: i64) -> Result<(), IssueError> {
-    let rows = conn.execute(
+/// to `open`. Bumps `modified` and logs a `Reopen` event carrying the
+/// optional message. The update and event insert share a transaction.
+pub fn reopen(
+    conn: &Connection,
+    issue_id: &str,
+    author: &str,
+    message: Option<&str>,
+    timestamp: i64,
+) -> Result<(), IssueError> {
+    let tx = conn.unchecked_transaction()?;
+    let rows = tx.execute(
         "UPDATE issue
          SET status = 'open', closed_reason = NULL, modified = ?1
          WHERE id = ?2",
-        params![modified, issue_id],
+        params![timestamp, issue_id],
     )?;
     if rows == 0 {
         return Err(IssueError::NotFound(issue_id.to_string()));
     }
+    insert_event(
+        &tx,
+        &IssueEvent {
+            issue_id: issue_id.to_string(),
+            kind: IssueEventKind::Reopen,
+            author: author.to_string(),
+            timestamp,
+            value: message.map(str::to_string),
+        },
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
 /// Mark an issue as closed with the given reason. Idempotent: a
-/// repeat close overwrites `closed_reason` and bumps `modified`.
+/// repeat close overwrites `closed_reason` and bumps `modified`. Logs a
+/// `Close` event carrying the optional message. The update and event
+/// insert share a transaction.
 pub fn close(
     conn: &Connection,
     issue_id: &str,
     reason: ClosedReason,
-    modified: i64,
+    author: &str,
+    message: Option<&str>,
+    timestamp: i64,
 ) -> Result<(), IssueError> {
-    let rows = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let rows = tx.execute(
         "UPDATE issue
          SET status = 'closed', closed_reason = ?1, modified = ?2
          WHERE id = ?3",
-        params![reason.as_str(), modified, issue_id],
+        params![reason.as_str(), timestamp, issue_id],
     )?;
     if rows == 0 {
         return Err(IssueError::NotFound(issue_id.to_string()));
     }
+    insert_event(
+        &tx,
+        &IssueEvent {
+            issue_id: issue_id.to_string(),
+            kind: IssueEventKind::Close,
+            author: author.to_string(),
+            timestamp,
+            value: message.map(str::to_string),
+        },
+    )?;
+    tx.commit()?;
     Ok(())
+}
+
+/// Append an issue event.
+pub fn insert_issue_event(conn: &Connection, event: &IssueEvent) -> Result<(), IssueError> {
+    insert_event(conn, event)
+}
+
+fn insert_event(conn: &Connection, event: &IssueEvent) -> Result<(), IssueError> {
+    conn.execute(
+        "INSERT INTO issue_event (issue_id, type, author, timestamp, value)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event.issue_id,
+            event.kind.as_str(),
+            event.author,
+            event.timestamp,
+            event.value,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Events logged against `issue_id`, ordered by `timestamp` ascending.
+pub fn issue_events_for(conn: &Connection, issue_id: &str) -> Result<Vec<IssueEvent>, IssueError> {
+    let mut stmt = conn.prepare(
+        "SELECT issue_id, type, author, timestamp, value
+         FROM issue_event WHERE issue_id = ?1 ORDER BY timestamp ASC",
+    )?;
+    let rows = stmt
+        .query_map([issue_id], row_to_event)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<IssueEvent> {
+    let kind_str: String = row.get(1)?;
+    let kind = kind_str.parse::<IssueEventKind>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(e)),
+        )
+    })?;
+    Ok(IssueEvent {
+        issue_id: row.get(0)?,
+        kind,
+        author: row.get(2)?,
+        timestamp: row.get(3)?,
+        value: row.get(4)?,
+    })
 }
 
 /// Delete an issue and its `issue_evidence` links. Evidence notes are
@@ -567,6 +709,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn close_logs_event_with_message() {
+        let conn = open_db_in_memory();
+        let issue = sample("issue-aaa", "thinking.empty");
+        insert(&conn, &issue).unwrap();
+
+        close(
+            &conn,
+            "issue-aaa",
+            ClosedReason::Completed,
+            "user:tester",
+            Some("done in PR 42"),
+            1_742_428_900_000,
+        )
+        .unwrap();
+
+        let events = issue_events_for(&conn, "issue-aaa").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, IssueEventKind::Create);
+        assert_eq!(events[0].author, "scanner:test");
+        assert_eq!(events[0].value, None);
+        assert_eq!(events[1].kind, IssueEventKind::Close);
+        assert_eq!(events[1].author, "user:tester");
+        assert_eq!(events[1].value.as_deref(), Some("done in PR 42"));
+
+        let fetched = get(&conn, "issue-aaa").unwrap();
+        assert_eq!(fetched.status, IssueStatus::Closed);
+    }
+
+    #[test]
+    fn reopen_logs_event_and_events_ordered() {
+        let conn = open_db_in_memory();
+        let issue = sample("issue-aaa", "thinking.empty");
+        insert(&conn, &issue).unwrap();
+
+        let created = issue.created;
+        close(
+            &conn,
+            "issue-aaa",
+            ClosedReason::Skipped,
+            "user:tester",
+            None,
+            created + 100,
+        )
+        .unwrap();
+        reopen(
+            &conn,
+            "issue-aaa",
+            "user:tester",
+            Some("resurfaced"),
+            created + 200,
+        )
+        .unwrap();
+
+        let events = issue_events_for(&conn, "issue-aaa").unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind, IssueEventKind::Create);
+        assert_eq!(events[1].kind, IssueEventKind::Close);
+        assert_eq!(events[1].value, None);
+        assert_eq!(events[2].kind, IssueEventKind::Reopen);
+        assert_eq!(events[2].value.as_deref(), Some("resurfaced"));
+
+        let fetched = get(&conn, "issue-aaa").unwrap();
+        assert_eq!(fetched.status, IssueStatus::Open);
+        assert_eq!(fetched.closed_reason, None);
     }
 
     #[test]
