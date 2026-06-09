@@ -2080,6 +2080,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-eval"
+version = "0.0.1-pre.2"
+dependencies = [
+ "chrono",
+ "clap",
+ "cliclack",
+ "console 0.16.3",
+ "gage-claude",
+ "gage-core",
+ "gage-db",
+ "humantime",
+ "indicatif",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tabled",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "gage-lsp"
 version = "0.0.1-pre.2"
 dependencies = [

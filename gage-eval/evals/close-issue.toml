@@ -1,0 +1,90 @@
+[[test]] # --------------------------------------------------------
+
+name = "tool-flag"
+prompt = "What is the eof code for the CloseIssue tool"
+max_turns = 2
+expect.match = "567"
+
+[[test]] # --------------------------------------------------------
+
+name = "close-completed"
+
+prompt = """
+List the open issues and close the one about thinking blocks. Mark it
+completed with message 'Set thinking display to summarized'.
+"""
+
+db_init = """
+INSERT INTO scan (id, created) VALUES ('s1', 0);
+INSERT INTO scan_scanner (id, scan_id, scanner_name, scanner_version)
+  VALUES ('sc1', 's1', 'hidden-thinking', '1');
+INSERT INTO issue (id, name, target, title, status, created, author)
+  VALUES ('i-open-1', 'thinking.empty', '',
+          'Thinking blocks hidden in recent session',
+          'open', 1000, 'scanner:hidden-thinking');
+"""
+
+claude.permissions.allow = [
+  "mcp__plugin_gage_gage__ListIssues",
+  "mcp__plugin_gage_gage__CloseIssue",
+]
+
+# Turns:
+#
+# 1. Use gage:review skill (optional)
+# 2. Call ToolSearch
+# 3. Call ListIssues
+# 4. Call CloseIssue
+# 5. Reply
+expect.max_turns = 5
+max_turns = 6
+
+# Confirm closed issue with status 'completed'
+expect.db_rows = ["""
+SELECT 1 FROM issue
+WHERE id = 'i-open-1'
+  AND status = 'closed'
+  AND closed_reason = 'completed'
+"""]
+
+[[test]] # --------------------------------------------------------
+
+name = "close-skipped"
+
+prompt = """
+List the open issues and skip the thinking-blocks issue with message
+'Not applicable here'.
+"""
+
+db_init = """
+INSERT INTO scan (id, created) VALUES ('s1', 0);
+INSERT INTO scan_scanner (id, scan_id, scanner_name, scanner_version)
+  VALUES ('sc1', 's1', 'hidden-thinking', '1');
+INSERT INTO issue (id, name, target, title, status, created, author)
+  VALUES ('i-open-1', 'thinking.empty', '',
+          'Thinking blocks hidden in recent session',
+          'open', 1000, 'scanner:hidden-thinking');
+"""
+
+claude.permissions.allow = [
+  "mcp__plugin_gage_gage__ListIssues",
+  "mcp__plugin_gage_gage__CloseIssue",
+]
+
+# Turns:
+#
+# 1. Use gage:review skill (optional)
+# 2. Call ToolSearch
+# 3. Call ListIssues
+# 4. Call CloseIssue
+# 5. Reply
+expect.max_turns = 5
+max_turns = 6
+
+# Confirm issue is closed with reason 'skipped'
+expect.db_rows = ["""
+SELECT 1 FROM issue
+WHERE id = 'i-open-1'
+  AND status = 'closed'
+  AND closed_reason = 'skipped'
+"""]

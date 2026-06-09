@@ -1,0 +1,11 @@
+.claude.json
+.last-cleanup
+backups
+cache
+history.jsonl
+plugins
+policy-limits.json
+sessions
+session-env
+settings.json
+shell-snapshots

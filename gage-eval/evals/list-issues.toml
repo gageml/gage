@@ -1,0 +1,52 @@
+[[test]] # --------------------------------------------------------
+
+name = "tool-flag"
+prompt = "What is the eof code for the ListIssues tool"
+max_turns = 2
+expect.match = "456"
+
+[[test]] # --------------------------------------------------------
+
+name = "list-issues"
+
+prompt = "List the open issues"
+
+db_init = """
+INSERT INTO scan (id, created) VALUES ('s1', 0);
+INSERT INTO scan_scanner (id, scan_id, scanner_name, scanner_version)
+  VALUES ('sc1', 's1', 'hidden-thinking', '1');
+INSERT INTO issue (id, name, target, title, status, created, author) VALUES
+  ('i-open-1', 'thinking.empty', '', 'Thinking blocks hidden in recent session',
+   'open', 1000, 'scanner:hidden-thinking');
+INSERT INTO issue (id, name, target, title, status, closed_reason, created, author) VALUES
+  ('i-fixed-1', 'thinking.empty', 'session:past', 'Fixed earlier finding',
+   'closed', 'completed', 500, 'scanner:hidden-thinking');
+"""
+
+claude.permissions.allow = ["mcp__plugin_gage_gage__ListIssues"]
+
+# Turns:
+#
+# 1. Call ToolSearch
+# 2. Call ListIssues
+# 3. Reply
+expect.max_turns = 3
+
+# Match and title and name
+expect.match_all = ["Thinking blocks hidden", "thinking.empty"]
+
+[[test]] # --------------------------------------------------------
+
+name = "empty-issues"
+prompt = "How many open issues do I have?"
+claude.permissions.allow = ["mcp__plugin_gage_gage__ListIssues"]
+
+# Turns:
+#
+# 1. Call ToolSearch
+# 2. Call ListIssues
+# 3. Reply
+expect.max_turns = 3
+
+# Expect no issues
+expect.match = "(?i)no.*open.*issues|0 open|zero"

@@ -32,7 +32,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     let claude_bin = find_claude_or_err()?;
     let marketplace = plugin_marketplace_dir();
 
-    cli::log::step("Plugin\ngage (MCP server + session-review skill)")?;
+    cli::log::step("Plugin\ngage (MCP server + skills)")?;
 
     if !args.yes {
         let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;

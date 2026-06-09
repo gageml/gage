@@ -1,0 +1,32 @@
+[package]
+name = "gage-eval"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gage-eval"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["wrap_help"] }
+cliclack = { workspace = true }
+console = { workspace = true }
+gage-claude = { path = "../gage-claude" }
+gage-core = { path = "../gage-core" }
+gage-db = { path = "../gage-db" }
+humantime = { workspace = true }
+indicatif = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tabled = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true
+
+[package.metadata.dist]
+dist = false

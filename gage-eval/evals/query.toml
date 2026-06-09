@@ -1,0 +1,60 @@
+[[test]] # --------------------------------------------------------
+
+name = "tool-flag"
+prompt = "What is the eof code for the Query tool"
+max_turns = 2
+expect.match = "123"
+
+[[test]] # --------------------------------------------------------
+
+name = "session-count"
+prompt = "How many sessions are there?"
+
+fixture = "query"
+claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
+
+# Turns:
+#
+# 1. Call TooLSearch
+# 2. Call Query
+# 3. Reply
+expect.max_turns = 3
+
+# Fixture has 4 sessions
+expect.match = "4 sessions|4\\.?"
+
+[[test]] # --------------------------------------------------------
+
+name = "empty-sessions"
+prompt = "How many empty sessions are there?"
+
+fixture = "query"
+claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
+
+# Turns:
+#
+# 1. Call TooLSearch
+# 2. Call Query
+# 3. Reply
+expect.max_turns = 3
+
+# Fixture has 3 empty sessions
+expect.match = "3 empty sessions|3\\.?"
+
+[[test]] # --------------------------------------------------------
+
+name = "session-summary"
+prompt = "In one word what is the user concerned about in session c28?"
+
+fixture = "query"
+claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
+
+# Turns:
+#
+# 1. Call TooLSearch
+# 2. Call Query
+# 3. Reply
+expect.max_turns = 4
+
+# Session c28 asks about empty files
+expect.match = "(?i)files|empty|missing"

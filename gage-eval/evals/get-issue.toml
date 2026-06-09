@@ -1,0 +1,41 @@
+[[test]] # --------------------------------------------------------
+
+name = "tool-flag"
+prompt = "What is the eof code for the GetIssue tool"
+max_turns = 2
+expect.match = "678"
+
+[[test]] # --------------------------------------------------------
+
+name = "issue-description"
+
+prompt = """
+What setting does the open issue recommend changing?
+"""
+
+db_init = """
+INSERT INTO scan (id, created) VALUES ('s1', 0);
+INSERT INTO scan_scanner (id, scan_id, scanner_name, scanner_version)
+  VALUES ('sc1', 's1', 'hidden-thinking', '1');
+INSERT INTO issue (id, name, target, title, description, status, created, author)
+  VALUES ('i-open-1', 'thinking.empty', '',
+          'Thinking blocks hidden in recent session',
+          'Set showThinkingSummaries to true in settings.json.',
+          'open', 1000, 'scanner:hidden-thinking');
+"""
+
+claude.permissions.allow = [
+  "mcp__plugin_gage_gage__ListIssues",
+  "mcp__plugin_gage_gage__GetIssue",
+]
+
+# Turns:
+#
+# 1. Call ToolSearch
+# 2. Call ListIssues
+# 3. Call GetIssue
+# 4. Reply
+expect.max_turns = 4
+
+# Setting referenced in issue
+expect.match = "showThinkingSummaries"
