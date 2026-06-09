@@ -385,6 +385,22 @@ fn entry_text(value: &Value) -> Option<String> {
     }
 }
 
+fn longest_backtick_run(s: &str) -> usize {
+    let mut max = 0;
+    let mut cur = 0;
+    for c in s.chars() {
+        if c == '`' {
+            cur += 1;
+            if cur > max {
+                max = cur;
+            }
+        } else {
+            cur = 0;
+        }
+    }
+    max
+}
+
 /// Render each `tool_use` block in `message.content` as a bold name
 /// followed by a list of input key/value pairs.
 fn render_tool_uses(value: &Value) -> Option<String> {
@@ -401,7 +417,16 @@ fn render_tool_uses(value: &Value) -> Option<String> {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    s.push_str(&format!("\n- `{k}`: `{val}`"));
+                    if val.contains('\n') {
+                        let fence = "`".repeat(longest_backtick_run(&val).max(2) + 1);
+                        s.push_str(&format!("\n- `{k}`:\n\n  {fence}\n"));
+                        for line in val.lines() {
+                            s.push_str(&format!("  {line}\n"));
+                        }
+                        s.push_str(&format!("  {fence}\n"));
+                    } else {
+                        s.push_str(&format!("\n- `{k}`: `{val}`"));
+                    }
                 }
             }
             s
