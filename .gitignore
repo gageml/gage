@@ -1,7 +1,9 @@
 # Local
+.claude
 .jj
-.notes
 .local.*
+.notes
+CLAUDE.md
 
 # Rust
 target
