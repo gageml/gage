@@ -55,6 +55,10 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
                 append_plain(out, &pretty, Style::new());
             }
         }
+        "tool_reference" => {
+            let name = block.get("tool_name").and_then(Value::as_str).unwrap_or("");
+            push_header(out, &format!("- tool_name: {name}"), style::text_dim());
+        }
         "tool_result" => {
             let is_error = block
                 .get("is_error")
