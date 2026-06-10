@@ -51,6 +51,9 @@ pub struct IssueAddArgs {
     /// Description (prompted if omitted; leave blank to skip)
     #[arg(short, long)]
     description: Option<String>,
+    /// Issue name
+    #[arg(short, long, default_value = "user-issue")]
+    name: String,
 }
 
 #[derive(Args)]
@@ -256,12 +259,12 @@ pub fn add(args: IssueAddArgs) {
     dialog::run("Add issue", || {
         let title: String = match args.title {
             Some(ref t) => t.clone(),
-            None => cli::input("Title").interact()?,
+            None => cli::input("Title").placeholder("Issue title").interact()?,
         };
         let description: String = match args.description {
             Some(ref d) => d.clone(),
             None => cli::input("Description")
-                .placeholder("optional; leave blank to skip")
+                .placeholder("Type a description (optional)")
                 .required(false)
                 .interact()?,
         };
