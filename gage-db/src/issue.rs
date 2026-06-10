@@ -55,33 +55,47 @@ impl std::str::FromStr for ClosedReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IssueEventKind {
+/// A change logged against an issue. The variant determines the `type`
+/// column; the carried message is the `value` column. `Comment` requires
+/// a message; the others carry an optional one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IssueEvent {
     Create,
-    Close,
-    Reopen,
-    Comment,
+    Close { message: Option<String> },
+    Reopen { message: Option<String> },
+    Comment { message: String },
 }
 
-impl IssueEventKind {
-    pub fn as_str(self) -> &'static str {
+impl IssueEvent {
+    /// Value of the `type` column for this variant.
+    pub fn type_str(&self) -> &'static str {
         match self {
-            IssueEventKind::Create => "create",
-            IssueEventKind::Close => "close",
-            IssueEventKind::Reopen => "reopen",
-            IssueEventKind::Comment => "comment",
+            IssueEvent::Create => "create",
+            IssueEvent::Close { .. } => "close",
+            IssueEvent::Reopen { .. } => "reopen",
+            IssueEvent::Comment { .. } => "comment",
         }
     }
-}
 
-impl std::str::FromStr for IssueEventKind {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "create" => Ok(IssueEventKind::Create),
-            "close" => Ok(IssueEventKind::Close),
-            "reopen" => Ok(IssueEventKind::Reopen),
-            "comment" => Ok(IssueEventKind::Comment),
+    /// Free-form message carried by the event, stored in the `value`
+    /// column. `None` for events without a message.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            IssueEvent::Create => None,
+            IssueEvent::Close { message } | IssueEvent::Reopen { message } => message.as_deref(),
+            IssueEvent::Comment { message } => Some(message),
+        }
+    }
+
+    /// Reconstruct an event from its `type` and `value` columns.
+    fn from_columns(type_str: &str, value: Option<String>) -> Result<Self, String> {
+        match type_str {
+            "create" => Ok(IssueEvent::Create),
+            "close" => Ok(IssueEvent::Close { message: value }),
+            "reopen" => Ok(IssueEvent::Reopen { message: value }),
+            "comment" => Ok(IssueEvent::Comment {
+                message: value.unwrap_or_default(),
+            }),
             other => Err(format!("unknown issue event type '{other}'")),
         }
     }
@@ -127,17 +141,16 @@ pub struct IssueEvidence {
     pub digest: Option<String>,
 }
 
-/// A logged change to an issue, recorded in the `issue_event` table.
+/// A logged change to an issue, recorded in the `issue_event` table:
+/// the envelope (who, when, against which issue) wrapping an
+/// [`IssueEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IssueEvent {
+pub struct LoggedEvent {
     pub issue_id: String,
-    /// Stored in the `type` column.
-    pub kind: IssueEventKind,
     pub author: String,
     /// Epoch milliseconds.
     pub timestamp: i64,
-    /// Free-form value for the event, e.g. a close/reopen message.
-    pub value: Option<String>,
+    pub event: IssueEvent,
 }
 
 #[derive(Debug)]
@@ -218,12 +231,11 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
     }
     insert_event(
         &tx,
-        &IssueEvent {
+        &LoggedEvent {
             issue_id: issue.id.clone(),
-            kind: IssueEventKind::Create,
             author: issue.author.clone(),
             timestamp: issue.created,
-            value: None,
+            event: IssueEvent::Create,
         },
     )?;
     tx.commit()?;
@@ -268,12 +280,13 @@ pub fn reopen(
     }
     insert_event(
         &tx,
-        &IssueEvent {
+        &LoggedEvent {
             issue_id: issue_id.to_string(),
-            kind: IssueEventKind::Reopen,
             author: author.to_string(),
             timestamp,
-            value: message.map(str::to_string),
+            event: IssueEvent::Reopen {
+                message: message.map(str::to_string),
+            },
         },
     )?;
     tx.commit()?;
@@ -304,12 +317,13 @@ pub fn close(
     }
     insert_event(
         &tx,
-        &IssueEvent {
+        &LoggedEvent {
             issue_id: issue_id.to_string(),
-            kind: IssueEventKind::Close,
             author: author.to_string(),
             timestamp,
-            value: message.map(str::to_string),
+            event: IssueEvent::Close {
+                message: message.map(str::to_string),
+            },
         },
     )?;
     tx.commit()?;
@@ -317,27 +331,27 @@ pub fn close(
 }
 
 /// Append an issue event.
-pub fn insert_issue_event(conn: &Connection, event: &IssueEvent) -> Result<(), IssueError> {
+pub fn insert_issue_event(conn: &Connection, event: &LoggedEvent) -> Result<(), IssueError> {
     insert_event(conn, event)
 }
 
-fn insert_event(conn: &Connection, event: &IssueEvent) -> Result<(), IssueError> {
+fn insert_event(conn: &Connection, event: &LoggedEvent) -> Result<(), IssueError> {
     conn.execute(
         "INSERT INTO issue_event (issue_id, type, author, timestamp, value)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             event.issue_id,
-            event.kind.as_str(),
+            event.event.type_str(),
             event.author,
             event.timestamp,
-            event.value,
+            event.event.message(),
         ],
     )?;
     Ok(())
 }
 
 /// Events logged against `issue_id`, ordered by `timestamp` ascending.
-pub fn issue_events_for(conn: &Connection, issue_id: &str) -> Result<Vec<IssueEvent>, IssueError> {
+pub fn issue_events_for(conn: &Connection, issue_id: &str) -> Result<Vec<LoggedEvent>, IssueError> {
     let mut stmt = conn.prepare(
         "SELECT issue_id, type, author, timestamp, value
          FROM issue_event WHERE issue_id = ?1 ORDER BY timestamp ASC",
@@ -348,21 +362,21 @@ pub fn issue_events_for(conn: &Connection, issue_id: &str) -> Result<Vec<IssueEv
     Ok(rows)
 }
 
-fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<IssueEvent> {
-    let kind_str: String = row.get(1)?;
-    let kind = kind_str.parse::<IssueEventKind>().map_err(|e| {
+fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<LoggedEvent> {
+    let type_str: String = row.get(1)?;
+    let value: Option<String> = row.get(4)?;
+    let event = IssueEvent::from_columns(&type_str, value).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::other(e)),
         )
     })?;
-    Ok(IssueEvent {
+    Ok(LoggedEvent {
         issue_id: row.get(0)?,
-        kind,
         author: row.get(2)?,
         timestamp: row.get(3)?,
-        value: row.get(4)?,
+        event,
     })
 }
 
@@ -729,12 +743,15 @@ mod tests {
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].kind, IssueEventKind::Create);
+        assert_eq!(events[0].event, IssueEvent::Create);
         assert_eq!(events[0].author, "scanner:test");
-        assert_eq!(events[0].value, None);
-        assert_eq!(events[1].kind, IssueEventKind::Close);
         assert_eq!(events[1].author, "user:tester");
-        assert_eq!(events[1].value.as_deref(), Some("done in PR 42"));
+        assert_eq!(
+            events[1].event,
+            IssueEvent::Close {
+                message: Some("done in PR 42".to_string())
+            }
+        );
 
         let fetched = get(&conn, "issue-aaa").unwrap();
         assert_eq!(fetched.status, IssueStatus::Closed);
@@ -767,11 +784,14 @@ mod tests {
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 3);
-        assert_eq!(events[0].kind, IssueEventKind::Create);
-        assert_eq!(events[1].kind, IssueEventKind::Close);
-        assert_eq!(events[1].value, None);
-        assert_eq!(events[2].kind, IssueEventKind::Reopen);
-        assert_eq!(events[2].value.as_deref(), Some("resurfaced"));
+        assert_eq!(events[0].event, IssueEvent::Create);
+        assert_eq!(events[1].event, IssueEvent::Close { message: None });
+        assert_eq!(
+            events[2].event,
+            IssueEvent::Reopen {
+                message: Some("resurfaced".to_string())
+            }
+        );
 
         let fetched = get(&conn, "issue-aaa").unwrap();
         assert_eq!(fetched.status, IssueStatus::Open);
