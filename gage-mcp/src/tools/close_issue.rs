@@ -9,7 +9,7 @@ use rmcp::{
 };
 
 use crate::server::GageServer;
-use crate::tool::{ToolDef, build_tool_meta};
+use crate::tool::{ToolDef, agent_author, build_tool_meta};
 
 pub const TOOL: ToolDef = route;
 
@@ -21,13 +21,14 @@ fn route() -> ToolRoute<GageServer> {
 
 fn call(
     _server: &GageServer,
-    _ctx: RequestContext<RoleServer>,
+    ctx: RequestContext<RoleServer>,
     params: JsonObject,
 ) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
-    Box::pin(handle(params))
+    let author = agent_author(&ctx);
+    Box::pin(handle(params, author))
 }
 
-async fn handle(params: JsonObject) -> Result<String, McpError> {
+async fn handle(params: JsonObject, author: String) -> Result<String, McpError> {
     let issue_id = req_string(&params, "issue_id")?;
     let reason_str = req_string(&params, "reason")?;
     let message = opt_string(&params, "message");
@@ -54,10 +55,6 @@ async fn handle(params: JsonObject) -> Result<String, McpError> {
     })?;
 
     let now = gage_core::datetime::now_ms();
-    let author = format!(
-        "user:{}",
-        std::env::var("USER").unwrap_or_else(|_| "unknown".into())
-    );
     issue::close(&conn, &issue.id, reason, &author, message.as_deref(), now)
         .map_err(|e| McpError::internal_error(format!("close issue: {e}"), None))?;
 

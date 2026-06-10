@@ -12,7 +12,8 @@ idempotent_hint = true
 +++
 
 Fetch the full detail for a single issue: description, originating
-scanner, and the notes linked to it as evidence or prior comments.
+scanner, the notes linked to it as evidence, and its history — the log
+of create, close, reopen, and comment events recorded against it.
 
 Use after call to ListIssues to get more detail about a specific issue.
 

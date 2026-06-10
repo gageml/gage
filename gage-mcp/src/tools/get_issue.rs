@@ -4,7 +4,7 @@ use std::pin::Pin;
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::text_resolve::TextResolver;
 use gage_db::db::open_db;
-use gage_db::issue::{self, Issue};
+use gage_db::issue::{self, Issue, LoggedEvent};
 use gage_db::note::Note;
 use gage_scan::scanner::ScannerRegistry;
 use gage_scan::scanner_scheme::{ErrorScheme, ScannerScheme};
@@ -52,8 +52,10 @@ async fn handle(params: JsonObject) -> Result<String, McpError> {
     let description = resolved_description(&issue);
     let related = issue::related_notes(&conn, &issue.id)
         .map_err(|e| McpError::internal_error(format!("load related notes: {e}"), None))?;
+    let events = issue::issue_events_for(&conn, &issue.id)
+        .map_err(|e| McpError::internal_error(format!("load issue events: {e}"), None))?;
 
-    Ok(render(&issue, scanner_name, &description, &related))
+    Ok(render(&issue, scanner_name, &description, &related, &events))
 }
 
 fn render(
@@ -61,6 +63,7 @@ fn render(
     scanner_name: Option<&str>,
     description: &str,
     related: &[Note],
+    events: &[LoggedEvent],
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("**{}**\n\n", issue.title));
@@ -76,10 +79,14 @@ fn render(
     if let Some(s) = scanner_name {
         out.push_str(&format!("- scanner: {s}\n"));
     }
-    out.push('\n');
-
+    out.push_str(&format!("- created: {}\n", ms_to_iso8601(issue.created)));
+    if let Some(m) = issue.modified {
+        out.push_str(&format!("- modified: {}\n", ms_to_iso8601(m)));
+    }
     if !description.is_empty() {
-        out.push_str(description);
+        out.push('\n');
+        out.push_str(description.trim_end());
+        out.push('\n');
     }
 
     if !related.is_empty() {
@@ -89,7 +96,28 @@ fn render(
         }
     }
 
+    if !events.is_empty() {
+        out.push_str("\n## History\n\n");
+        for ev in events {
+            render_event(&mut out, ev);
+        }
+    }
+
     out
+}
+
+fn render_event(out: &mut String, ev: &LoggedEvent) {
+    out.push_str(&format!(
+        "- {} · {} · {}\n",
+        ev.event.type_str(),
+        ev.author,
+        ms_to_iso8601(ev.timestamp),
+    ));
+    if let Some(m) = ev.event.message() {
+        for line in m.lines() {
+            out.push_str(&format!("  > {line}\n"));
+        }
+    }
 }
 
 fn render_note(out: &mut String, note: &Note) {
