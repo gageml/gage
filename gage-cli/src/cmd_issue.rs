@@ -227,11 +227,20 @@ pub fn show(args: IssueShowArgs) {
         }
     };
 
+    let events = match issue::issue_events_for(&conn, &issue.id) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let evidence_label = "evidence";
+    let events_label = "events";
     let label_width = attrs
         .iter()
         .map(|(k, _)| k.len())
-        .chain(std::iter::once(evidence_label.len()))
+        .chain([evidence_label.len(), events_label.len()])
         .max()
         .unwrap_or(0);
     let (_, term_width) = console::Term::stdout().size();
@@ -260,6 +269,26 @@ pub fn show(args: IssueShowArgs) {
             })
             .collect();
         rows.push(vec![evidence_label.to_string(), entries.join("\n\n")]);
+    }
+
+    if !events.is_empty() {
+        let entries: Vec<String> = events
+            .iter()
+            .map(|ev| {
+                let header = console::style(format!(
+                    "{} · {} · {}",
+                    ev.event.type_str(),
+                    ev.author,
+                    gage_core::datetime::ms_to_iso8601(ev.timestamp),
+                ))
+                .dim();
+                match ev.event.message() {
+                    Some(m) => format!("{}\n{}", header, textwrap::fill(m, value_width)),
+                    None => header.to_string(),
+                }
+            })
+            .collect();
+        rows.push(vec![events_label.to_string(), entries.join("\n\n")]);
     }
 
     let table = Table::from_iter(rows)
