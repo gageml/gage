@@ -380,13 +380,14 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<LoggedEvent> {
     })
 }
 
-/// Delete an issue and its `issue_evidence` links. Evidence notes are
-/// not deleted — only the link rows go. Notes target
-/// sessions/scans/projects, never an issue, so the issue owns no notes
-/// of its own.
+/// Delete an issue along with its `issue_evidence` links and
+/// `issue_event` log. Evidence notes are not deleted — only the link
+/// rows go. Notes target sessions/scans/projects, never an issue, so the
+/// issue owns no notes of its own.
 pub fn delete(conn: &Connection, issue_id: &str) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM issue_evidence WHERE issue_id = ?1", [issue_id])?;
+    tx.execute("DELETE FROM issue_event WHERE issue_id = ?1", [issue_id])?;
     let rows = tx.execute("DELETE FROM issue WHERE id = ?1", [issue_id])?;
     if rows == 0 {
         return Err(IssueError::NotFound(issue_id.to_string()));
@@ -796,6 +797,37 @@ mod tests {
         let fetched = get(&conn, "issue-aaa").unwrap();
         assert_eq!(fetched.status, IssueStatus::Open);
         assert_eq!(fetched.closed_reason, None);
+    }
+
+    #[test]
+    fn delete_removes_event_log() {
+        let conn = open_db_in_memory();
+        let issue = sample("issue-aaa", "thinking.empty");
+        insert(&conn, &issue).unwrap();
+        close(
+            &conn,
+            "issue-aaa",
+            ClosedReason::Completed,
+            "user:tester",
+            Some("done"),
+            issue.created + 100,
+        )
+        .unwrap();
+
+        delete(&conn, "issue-aaa").unwrap();
+
+        assert!(matches!(
+            get(&conn, "issue-aaa"),
+            Err(IssueError::NotFound(_))
+        ));
+        let count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM issue_event WHERE issue_id = ?1",
+                ["issue-aaa"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
