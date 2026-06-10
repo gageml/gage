@@ -274,9 +274,10 @@ pub fn add(args: IssueAddArgs) {
             Some(description)
         };
 
+        let id = gage_core::uuid::new_uuid();
         let issue = Issue {
-            id: gage_core::uuid::new_uuid(),
-            name: String::new(),
+            name: format!("user-issue-{}", short_uuid(&id)),
+            id,
             target: String::new(),
             title,
             description,
