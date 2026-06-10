@@ -73,6 +73,11 @@ pub struct ScanRunArgs {
     #[arg(short, long = "scanner", value_name = "NAME")]
     scanners: Vec<String>,
 
+    /// Scanner files to run (repeatable). Like `-s`, including any
+    /// `-f` replaces the default "run all enabled scanners".
+    #[arg(short = 'f', long = "file", value_name = "PATH")]
+    files: Vec<String>,
+
     /// Scan all sessions
     #[arg(short, long, conflicts_with_all = ["limit", "sessions"])]
     all: bool,
@@ -99,11 +104,11 @@ pub struct ScanRunArgs {
     list_scanners: bool,
 
     /// Enable a scanner in settings and exit (repeatable)
-    #[arg(long = "enable", value_name = "NAME", conflicts_with_all = ["sessions", "scanners", "all", "limit", "jobs", "no_progress", "list_scanners"])]
+    #[arg(long = "enable", value_name = "NAME", conflicts_with_all = ["sessions", "scanners", "files", "all", "limit", "jobs", "no_progress", "list_scanners"])]
     enable: Vec<String>,
 
     /// Disable a scanner in settings and exit (repeatable)
-    #[arg(long = "disable", value_name = "NAME", conflicts_with_all = ["sessions", "scanners", "all", "limit", "jobs", "no_progress", "list_scanners"])]
+    #[arg(long = "disable", value_name = "NAME", conflicts_with_all = ["sessions", "scanners", "files", "all", "limit", "jobs", "no_progress", "list_scanners"])]
     disable: Vec<String>,
 }
 
@@ -280,8 +285,8 @@ fn delete(args: ScanDeleteArgs) {
     });
 }
 
-async fn run_scan(args: ScanRunArgs) {
-    let registry = ScannerRegistry::load();
+async fn run_scan(mut args: ScanRunArgs) {
+    let mut registry = ScannerRegistry::load();
 
     if !args.enable.is_empty() || !args.disable.is_empty() {
         apply_enable_disable(&registry, &args.enable, &args.disable);
@@ -292,6 +297,37 @@ async fn run_scan(args: ScanRunArgs) {
         list_scanners(&registry);
         return;
     }
+
+    // Register `-f` files into the registry and append their composite
+    // names to the explicit scanner list. Any `#{...}` config override
+    // suffix on the path is split off first and re-appended to the
+    // composite name so `Scanner::from_spec` parses it normally.
+    let mut file_specs: Vec<String> = Vec::new();
+    let mut errors = 0;
+    for raw in &args.files {
+        let (path_str, override_suffix) = match raw.find("#{") {
+            Some(pos) => (&raw[..pos], &raw[pos..]),
+            None => (raw.as_str(), ""),
+        };
+        match registry.register_file(std::path::Path::new(path_str)) {
+            Ok(name) => {
+                // The same file given twice (paths canonicalize to one
+                // composite name) runs once per distinct config override.
+                let spec = format!("{name}{override_suffix}");
+                if !file_specs.contains(&spec) {
+                    file_specs.push(spec);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+    args.scanners.extend(file_specs);
 
     let explicit_sessions: Option<Vec<(String, std::path::PathBuf)>> = if args.sessions.is_empty() {
         None

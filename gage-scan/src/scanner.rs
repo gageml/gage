@@ -101,6 +101,10 @@ pub struct ScannerDef {
     ast: ast::File,
     source: String,
     pub(crate) embed_key: String,
+    /// True for scanners loaded ad hoc via `-f / --file`. These are
+    /// excluded from listings (`list_visible` / `list_enabled`) and
+    /// from enable/disable settings management.
+    pub from_file: bool,
 }
 
 impl ScannerDef {
@@ -123,6 +127,13 @@ impl ScannerDef {
     /// Filesystem directory containing this scanner's `.rn` source.
     /// Used as the resolution root for relative `scanner:…` URIs.
     pub fn module_dir(&self) -> PathBuf {
+        if self.from_file {
+            return PathBuf::from(&self.embed_key)
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/"));
+        }
+
         let rel = self
             .embed_key
             .rsplit_once('/')
@@ -374,6 +385,59 @@ fn resolve_params(config: &Object) -> Option<json::Value> {
     Some(json::to_value(&rune_val).expect("resolved params serialize to JSON"))
 }
 
+#[derive(Debug)]
+pub enum RegisterFileError {
+    Io(String, std::io::Error),
+    Parse(String),
+    Extension(String),
+}
+
+impl fmt::Display for RegisterFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegisterFileError::Io(path, e) => write!(f, "{path}: {e}"),
+            RegisterFileError::Parse(rendered) => write!(f, "{rendered}"),
+            RegisterFileError::Extension(path) => {
+                write!(f, "{path}: scanner file must have a .rn extension")
+            }
+        }
+    }
+}
+
+fn display_path(abs: &Path, manifest_name: &str) -> String {
+    let home = std::env::var_os("HOME").map(|h| h.to_string_lossy().to_string());
+    display_path_impl(abs, manifest_name, home.as_deref())
+}
+
+/// Elide a canonical bundle path (`…/{name}/scanner.rn`) to its prefix
+/// and substitute `~` for the home directory. Elision is skipped when
+/// the prefix is empty or itself ends in `.rn`, so the result stays
+/// invertible: a path spec ending in `.rn` is always the literal file.
+fn display_path_impl(abs: &Path, manifest_name: &str, home: Option<&str>) -> String {
+    let s = abs.to_string_lossy().to_string();
+
+    let bundle_suffix = format!("/{manifest_name}/scanner.rn");
+    let s = match s.strip_suffix(&bundle_suffix) {
+        Some(prefix) if !prefix.is_empty() && !prefix.ends_with(".rn") => prefix.to_string(),
+        _ => s,
+    };
+
+    if let Some(home) = home {
+        let home = home.trim_end_matches('/');
+        if !home.is_empty() {
+            if s == home {
+                return "~".to_string();
+            }
+            if let Some(rest) = s.strip_prefix(home)
+                && rest.starts_with('/')
+            {
+                return format!("~{rest}");
+            }
+        }
+    }
+    s
+}
+
 pub struct ScannerRegistry {
     defs: HashMap<String, ScannerDef>,
     errors: HashMap<String, String>,
@@ -416,6 +480,33 @@ impl ScannerRegistry {
         ScannerRegistry { defs, errors }
     }
 
+    /// Load a scanner from a filesystem path and register it under a
+    /// composite name `{declared_name}[{display_path}]`. Returns the
+    /// composite name on success — pass it to `Scanner::from_spec`.
+    pub fn register_file(&mut self, path: &Path) -> Result<String, RegisterFileError> {
+        if !path.extension().is_some_and(|ext| ext == "rn") {
+            return Err(RegisterFileError::Extension(path.display().to_string()));
+        }
+        let abs = path
+            .canonicalize()
+            .map_err(|e| RegisterFileError::Io(path.display().to_string(), e))?;
+        let abs_str = abs.to_string_lossy().to_string();
+        let code = std::fs::read_to_string(&abs)
+            .map_err(|e| RegisterFileError::Io(abs_str.clone(), e))?;
+
+        let mut def = match parse_scanner(&code, &abs_str) {
+            Ok(def) => def,
+            Err(e) => return Err(RegisterFileError::Parse(e.render(&abs_str, &code))),
+        };
+
+        let display = display_path(&abs, &def.name);
+        let composite = format!("{}[{}]", def.name, display);
+        def.name = composite.clone();
+        def.from_file = true;
+        self.defs.insert(composite.clone(), def);
+        Ok(composite)
+    }
+
     pub fn get_def(&self, name: &str) -> Option<&ScannerDef> {
         self.defs.get(name)
     }
@@ -444,7 +535,11 @@ impl ScannerRegistry {
     }
 
     pub fn list_visible(&self) -> Vec<&ScannerDef> {
-        let mut defs: Vec<_> = self.defs.values().filter(|d| !d.hidden).collect();
+        let mut defs: Vec<_> = self
+            .defs
+            .values()
+            .filter(|d| !d.hidden && !d.from_file)
+            .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }
@@ -538,6 +633,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
         ast: file,
         source: source.to_string(),
         embed_key: embed_key.to_string(),
+        from_file: false,
     })
 }
 
@@ -816,5 +912,77 @@ fn walk_rn_files_rec(dir: &Path, result: &mut Vec<PathBuf>) {
         } else if path.extension().is_some_and(|ext| ext == "rn") {
             result.push(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn display(path: &str, name: &str, home: Option<&str>) -> String {
+        display_path_impl(Path::new(path), name, home)
+    }
+
+    #[test]
+    fn display_path_elides_bundle_layout() {
+        let home = Some("/home/u");
+        assert_eq!(
+            display("/home/u/scanners/foo/scanner.rn", "foo", home),
+            "~/scanners"
+        );
+    }
+
+    #[test]
+    fn display_path_keeps_non_canonical_layouts_verbatim() {
+        let home = Some("/home/u");
+        assert_eq!(
+            display("/home/u/scanners/bar/scanner.rn", "foo", home),
+            "~/scanners/bar/scanner.rn"
+        );
+        assert_eq!(
+            display("/home/u/scanners/scanner.rn", "foo", home),
+            "~/scanners/scanner.rn"
+        );
+        assert_eq!(
+            display("/home/u/scanners/foo.rn", "foo", home),
+            "~/scanners/foo.rn"
+        );
+    }
+
+    #[test]
+    fn display_path_skips_elision_when_prefix_ends_in_rn() {
+        assert_eq!(
+            display("/x/weird.rn/foo/scanner.rn", "foo", None),
+            "/x/weird.rn/foo/scanner.rn"
+        );
+    }
+
+    #[test]
+    fn display_path_skips_elision_when_prefix_is_empty() {
+        assert_eq!(display("/foo/scanner.rn", "foo", None), "/foo/scanner.rn");
+    }
+
+    #[test]
+    fn display_path_elides_bundle_directly_under_home() {
+        assert_eq!(
+            display("/home/u/foo/scanner.rn", "foo", Some("/home/u")),
+            "~"
+        );
+    }
+
+    #[test]
+    fn display_path_home_requires_component_boundary() {
+        assert_eq!(
+            display("/home/ux/foo.rn", "foo", Some("/home/u")),
+            "/home/ux/foo.rn"
+        );
+    }
+
+    #[test]
+    fn display_path_home_with_trailing_slash() {
+        assert_eq!(
+            display("/home/u/foo.rn", "foo", Some("/home/u/")),
+            "~/foo.rn"
+        );
     }
 }

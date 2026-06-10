@@ -32,10 +32,18 @@ impl ScannerScheme {
         registry: &ScannerRegistry,
         scanner_name: &str,
     ) -> Result<Self, TextResolveError> {
-        let def = registry.get_def(scanner_name).ok_or_else(|| {
-            TextResolveError::SchemeResolve(format!("unknown scanner '{scanner_name}'"))
-        })?;
-        Ok(Self::new(def.module_dir()))
+        if let Some(def) = registry.get_def(scanner_name) {
+            return Ok(Self::new(def.module_dir()));
+        }
+        // Composite names from `-f` file scanners (`{name}[{path-spec}]`)
+        // are not in the registry at display time. Derive the search
+        // root from the composite name.
+        if let Some(dir) = dir_from_composite_name(scanner_name) {
+            return Ok(Self::new(dir));
+        }
+        Err(TextResolveError::SchemeResolve(format!(
+            "unknown scanner '{scanner_name}'"
+        )))
     }
 }
 
@@ -83,6 +91,44 @@ impl TextResolverScheme for ScannerScheme {
     }
 }
 
+/// If `name` matches `{bare}[{path-spec}]`, recover the directory
+/// containing the scanner file by inverting the display-path elision
+/// (see "Scanner file refs" in `.local.design/run-scanner-file.md`):
+/// a path spec ending in `.rn` is the literal file, so the root is its
+/// parent; otherwise the file is `{path-spec}/{bare}/scanner.rn`, so
+/// the root is `{path-spec}/{bare}`.
+fn dir_from_composite_name(name: &str) -> Option<PathBuf> {
+    let open = name.find('[')?;
+    if !name.ends_with(']') {
+        return None;
+    }
+    let bare = &name[..open];
+    let path_spec = &name[open + 1..name.len() - 1];
+    if bare.is_empty() || path_spec.is_empty() {
+        return None;
+    }
+
+    let expanded = if let Some(rest) = path_spec.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")?;
+        PathBuf::from(home).join(rest)
+    } else if path_spec == "~" {
+        PathBuf::from(std::env::var_os("HOME")?)
+    } else {
+        PathBuf::from(path_spec)
+    };
+
+    if path_spec.ends_with(".rn") {
+        Some(
+            expanded
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/")),
+        )
+    } else {
+        Some(expanded.join(bare))
+    }
+}
+
 fn deref_absolute(uri: &str, abs_path: &str) -> Result<String, TextResolveError> {
     let mut searched = Vec::new();
     for home in scanner_home_paths() {
@@ -121,5 +167,33 @@ mod tests {
             .with_scheme("scanner", ScannerScheme::new(PathBuf::from("/nonexistent")));
         let err = r.resolve("scanner:fix.md".into()).unwrap_err();
         assert!(matches!(err, TextResolveError::SchemeResolve(s) if s.contains("scanner:fix.md")));
+    }
+
+    #[test]
+    fn composite_name_with_directory_path_spec() {
+        assert_eq!(
+            dir_from_composite_name("foo[/scanners]"),
+            Some(PathBuf::from("/scanners/foo"))
+        );
+    }
+
+    #[test]
+    fn composite_name_with_literal_file_path_spec() {
+        assert_eq!(
+            dir_from_composite_name("foo[/scanners/foo.rn]"),
+            Some(PathBuf::from("/scanners"))
+        );
+        assert_eq!(
+            dir_from_composite_name("foo[/scanners/bar/scanner.rn]"),
+            Some(PathBuf::from("/scanners/bar"))
+        );
+    }
+
+    #[test]
+    fn non_composite_names_are_rejected() {
+        assert_eq!(dir_from_composite_name("foo"), None);
+        assert_eq!(dir_from_composite_name("foo[]"), None);
+        assert_eq!(dir_from_composite_name("[/scanners]"), None);
+        assert_eq!(dir_from_composite_name("foo[/scanners"), None);
     }
 }
