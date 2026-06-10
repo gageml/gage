@@ -35,6 +35,8 @@ pub enum IssueCommand {
     Close(IssueCloseArgs),
     /// Reopen a closed issue
     Reopen(IssueReopenArgs),
+    /// Comment on an issue
+    Comment(IssueCommentArgs),
 }
 
 #[derive(Args)]
@@ -70,6 +72,18 @@ pub struct IssueReopenArgs {
     /// Issue UUID (or prefix)
     id: String,
     /// Message recorded with the reopen event
+    #[arg(short, long)]
+    message: Option<String>,
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct IssueCommentArgs {
+    /// Issue UUID (or prefix)
+    id: String,
+    /// Comment message (prompted if omitted)
     #[arg(short, long)]
     message: Option<String>,
     /// Skip confirmation prompt
@@ -431,6 +445,48 @@ pub fn reopen(args: IssueReopenArgs) {
         .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
 
         Ok(format!("Reopened issue {}", short_uuid(&target_issue.id)).into())
+    });
+}
+
+pub fn comment(args: IssueCommentArgs) {
+    let conn = db::open_db();
+    let target_issue = match issue::get(&conn, &args.id) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    dialog::run("Comment on issue", || {
+        cli::log::step(format!(
+            "Issue\n{} {}",
+            console::style(short_uuid(&target_issue.id)).dim(),
+            target_issue.title,
+        ))?;
+
+        let message: String = match args.message {
+            Some(ref m) => m.clone(),
+            None => cli::input("Message")
+                .placeholder("Type a comment")
+                .interact()?,
+        };
+
+        if !args.yes {
+            let confirmed = cli::confirm("Add this comment?")
+                .initial_value(true)
+                .interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        let now = gage_core::datetime::now_ms();
+        let author = crate::author::resolve_author(None);
+        issue::comment(&conn, &target_issue.id, &author, &message, now)
+            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+
+        Ok(format!("Commented on issue {}", short_uuid(&target_issue.id)).into())
     });
 }
 

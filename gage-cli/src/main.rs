@@ -136,6 +136,7 @@ async fn main() {
                 cmd_issue::IssueCommand::Delete(args) => cmd_issue::delete(args),
                 cmd_issue::IssueCommand::Close(args) => cmd_issue::close(args),
                 cmd_issue::IssueCommand::Reopen(args) => cmd_issue::reopen(args),
+                cmd_issue::IssueCommand::Comment(args) => cmd_issue::comment(args),
             },
             Command::Test(args) => cmd_test::run(args).await,
             Command::Scan(args) => cmd_scan::run(args).await,

@@ -330,6 +330,39 @@ pub fn close(
     Ok(())
 }
 
+/// Record a comment against an issue. Bumps `modified` so it reflects
+/// last activity, and logs a `Comment` event carrying the message. The
+/// update and event insert share a transaction.
+pub fn comment(
+    conn: &Connection,
+    issue_id: &str,
+    author: &str,
+    message: &str,
+    timestamp: i64,
+) -> Result<(), IssueError> {
+    let tx = conn.unchecked_transaction()?;
+    let rows = tx.execute(
+        "UPDATE issue SET modified = ?1 WHERE id = ?2",
+        params![timestamp, issue_id],
+    )?;
+    if rows == 0 {
+        return Err(IssueError::NotFound(issue_id.to_string()));
+    }
+    insert_event(
+        &tx,
+        &LoggedEvent {
+            issue_id: issue_id.to_string(),
+            author: author.to_string(),
+            timestamp,
+            event: IssueEvent::Comment {
+                message: message.to_string(),
+            },
+        },
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Append an issue event.
 pub fn insert_issue_event(conn: &Connection, event: &LoggedEvent) -> Result<(), IssueError> {
     insert_event(conn, event)
@@ -797,6 +830,46 @@ mod tests {
         let fetched = get(&conn, "issue-aaa").unwrap();
         assert_eq!(fetched.status, IssueStatus::Open);
         assert_eq!(fetched.closed_reason, None);
+    }
+
+    #[test]
+    fn comment_logs_event_and_bumps_modified() {
+        let conn = open_db_in_memory();
+        let issue = sample("issue-aaa", "thinking.empty");
+        insert(&conn, &issue).unwrap();
+
+        comment(
+            &conn,
+            "issue-aaa",
+            "user:tester",
+            "looks related to PR 42",
+            issue.created + 100,
+        )
+        .unwrap();
+
+        let events = issue_events_for(&conn, "issue-aaa").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, IssueEvent::Create);
+        assert_eq!(events[1].author, "user:tester");
+        assert_eq!(
+            events[1].event,
+            IssueEvent::Comment {
+                message: "looks related to PR 42".to_string()
+            }
+        );
+
+        let fetched = get(&conn, "issue-aaa").unwrap();
+        assert_eq!(fetched.modified, Some(issue.created + 100));
+        assert_eq!(fetched.status, IssueStatus::Open);
+    }
+
+    #[test]
+    fn comment_unknown_issue_is_not_found() {
+        let conn = open_db_in_memory();
+        assert!(matches!(
+            comment(&conn, "nope", "user:tester", "hi", 1),
+            Err(IssueError::NotFound(_))
+        ));
     }
 
     #[test]
