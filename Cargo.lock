@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "gage-claude"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "gage-core",
  "ignore",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "gage-cli"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "clap",
  "cliclack",
@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "gage-core"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "gage-db"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "gage-core",
  "rusqlite",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "gage-eval"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "clap",
@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "gage-lsp"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "gage-scan",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "gage-mcp"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "arrow",
  "datafusion",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "gage-query"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "gage-scan"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "gage-tui"
-version = "0.0.1-pre.2"
+version = "0.0.1"
 dependencies = [
  "datafusion",
  "gage-claude",
