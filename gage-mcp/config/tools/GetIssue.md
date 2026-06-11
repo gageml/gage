@@ -17,7 +17,7 @@ of create, close, reopen, and comment events recorded against it.
 
 Use after call to ListIssues to get more detail about a specific issue.
 
-Use the issue detail for context and fix advise. If you complete the
+Use the issue detail for context and fix advice. If you complete the
 issue or decide to skip the issue, use the CloseIssue tool.
 
 ---eof-678---
