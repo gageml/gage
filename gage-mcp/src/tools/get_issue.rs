@@ -38,7 +38,7 @@ async fn handle(params: JsonObject) -> Result<String, McpError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::invalid_params("missing or non-string `issue_id`", None))?;
 
-    let conn = open_db();
+    let conn = open_db().unwrap();
     let issue = issue::get(&conn, issue_id).map_err(|e| match e {
         issue::IssueError::NotFound(_) | issue::IssueError::Ambiguous(_, _) => {
             McpError::invalid_params(e.to_string(), None)
@@ -55,7 +55,13 @@ async fn handle(params: JsonObject) -> Result<String, McpError> {
     let events = issue::issue_events_for(&conn, &issue.id)
         .map_err(|e| McpError::internal_error(format!("load issue events: {e}"), None))?;
 
-    Ok(render(&issue, scanner_name, &description, &related, &events))
+    Ok(render(
+        &issue,
+        scanner_name,
+        &description,
+        &related,
+        &events,
+    ))
 }
 
 fn render(
@@ -142,7 +148,7 @@ fn resolved_description(issue: &Issue) -> String {
     let registry = ScannerRegistry::load();
     let r = TextResolver::new();
     let resolver = match issue.author.strip_prefix("scanner:") {
-        Some(name) => match ScannerScheme::for_scanner_name(&registry, name) {
+        Some(name) => match ScannerScheme::with_scanner_name(&registry, name) {
             Ok(s) => r.with_scheme("scanner", s),
             Err(e) => r.with_scheme("scanner", ErrorScheme::new(e.to_string())),
         },

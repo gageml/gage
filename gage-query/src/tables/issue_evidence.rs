@@ -146,7 +146,7 @@ impl ExecutionPlan for IssueEvidenceExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let conn = gage_db::db::open_db();
+        let conn = gage_db::db::open_db().unwrap();
         let rows = issue::list_issue_evidence(&conn)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 

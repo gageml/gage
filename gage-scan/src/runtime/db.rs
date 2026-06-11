@@ -849,17 +849,17 @@ mod tests {
 
     #[test]
     fn changed_evidence_compares_to_latest_like_name() {
-        // Two 'a' entries; the latest (ts 200) has digest "y".
+        // Two 'a' entries; the latest (ts 200) has digest "y"
         let existing = [
             existing("n1", "a", 100, Some("x")),
             existing("n2", "a", 200, Some("y")),
         ];
-        // Same digest as the latest → not changed.
+        // Same digest as the latest → not changed
         assert!(!has_changed_evidence(
             &existing,
             &[incoming("n3", "a", 300, Some("y"))]
         ));
-        // Different digest from the latest → changed (even matching an older one).
+        // Different digest from the latest → changed (even matching an older one)
         assert!(has_changed_evidence(
             &existing,
             &[incoming("n3", "a", 300, Some("x"))]

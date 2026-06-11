@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gage_core::text_resolve::{TextResolveError, TextResolverScheme};
 
@@ -28,7 +28,7 @@ impl ScannerScheme {
     /// Build a scheme rooted at the directory of the scanner named
     /// `scanner_name`. Used to resolve `scanner:` URIs for a note whose
     /// `author` is `scanner:{name}`.
-    pub fn for_scanner_name(
+    pub fn with_scanner_name(
         registry: &ScannerRegistry,
         scanner_name: &str,
     ) -> Result<Self, TextResolveError> {
@@ -76,7 +76,7 @@ impl TextResolverScheme for ScannerScheme {
             ))
         })?;
         if let Some(abs) = rest.strip_prefix('/') {
-            deref_absolute(input, abs)
+            deref_absolute(input, Path::new(abs))
         } else {
             let dir = self.scanner_dir.as_ref().ok_or_else(|| {
                 TextResolveError::SchemeResolve(format!(
@@ -129,7 +129,7 @@ fn dir_from_composite_name(name: &str) -> Option<PathBuf> {
     }
 }
 
-fn deref_absolute(uri: &str, abs_path: &str) -> Result<String, TextResolveError> {
+fn deref_absolute(uri: &str, abs_path: &Path) -> Result<String, TextResolveError> {
     let mut searched = Vec::new();
     for home in scanner_home_paths() {
         let candidate = home.join(abs_path);

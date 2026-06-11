@@ -224,25 +224,18 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 }
 
 async fn do_call_llm(prompt: String, opts: Object) -> super::Result<LlmSession> {
-    let model_alias = opts
-        .get("model")
-        .and_then(|v| v.borrow_string_ref().ok().map(|s| s.to_string()))
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model_alias = opt_string(&opts, "model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let model = anthropic::resolve_model(&model_alias).to_string();
 
-    let max_rounds = opts
-        .get("max_rounds")
-        .and_then(|v| i64::from_value(v.clone()).ok())
+    let max_rounds = opt_i64(&opts, "max_rounds")
         .map(|v| v as u32)
         .unwrap_or(DEFAULT_MAX_ROUNDS);
 
     let tool_defs = parse_tools(&opts);
     let client = std::sync::Arc::new(HttpClient::from_env()?);
 
-    let system_text = opts
-        .get("system_prompt")
-        .and_then(|v| v.borrow_string_ref().ok().map(|s| s.to_string()))
-        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let system_text =
+        opt_string(&opts, "system_prompt").unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
     let system = vec![SystemBlock::text_cached(system_text)];
 
     let messages = vec![ApiMessage {
@@ -313,10 +306,7 @@ fn parse_tools(opts: &Object) -> Vec<ToolDef> {
         let tool_obj: Object = rune::from_value(val.clone())
             .unwrap_or_else(|_| panic!("call_llm: tool '{name}' must be an object"));
 
-        let description = tool_obj
-            .get("description")
-            .and_then(|v| v.borrow_string_ref().ok().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let description = opt_string(&tool_obj, "description").unwrap_or_default();
 
         let input_schema = parse_tool_inputs(&tool_obj);
 
@@ -343,22 +333,14 @@ fn parse_tool_inputs(tool: &Object) -> json::Value {
         let input_obj: Object =
             rune::from_value(input_val.clone()).expect("call_llm: tool input must be an object");
 
-        let name = input_obj
-            .get("name")
-            .and_then(|v| v.borrow_string_ref().ok().map(|s| s.to_string()))
-            .expect("call_llm: tool input missing 'name'");
+        let name = opt_string(&input_obj, "name").expect("call_llm: tool input missing 'name'");
 
-        let type_str = input_obj
-            .get("type")
-            .and_then(|v| v.borrow_string_ref().ok().map(|s| s.to_string()))
-            .unwrap_or_else(|| "string".to_string());
+        let type_str = opt_string(&input_obj, "type").unwrap_or_else(|| "string".to_string());
 
         let mut prop = json::Map::new();
         prop.insert("type".into(), json::Value::String(type_str));
-        if let Some(desc_val) = input_obj.get("description")
-            && let Ok(desc) = desc_val.borrow_string_ref()
-        {
-            prop.insert("description".into(), json::Value::String(desc.to_string()));
+        if let Some(desc) = opt_string(&input_obj, "description") {
+            prop.insert("description".into(), json::Value::String(desc));
         }
 
         properties.insert(name.clone(), json::Value::Object(prop));
@@ -369,6 +351,21 @@ fn parse_tool_inputs(tool: &Object) -> json::Value {
         "type": "object",
         "properties": properties,
         "required": required,
+    })
+}
+
+fn opt_string(obj: &Object, field: &str) -> Option<String> {
+    obj.get(field).map(|v| {
+        v.borrow_string_ref()
+            .unwrap_or_else(|_| panic!("call_llm: '{field}' must be a string"))
+            .to_string()
+    })
+}
+
+fn opt_i64(obj: &Object, field: &str) -> Option<i64> {
+    obj.get(field).map(|v| {
+        i64::from_value(v.clone())
+            .unwrap_or_else(|_| panic!("call_llm: '{field}' must be an integer"))
     })
 }
 

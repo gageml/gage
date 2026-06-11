@@ -3,7 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use serde::Deserialize;
 
@@ -176,8 +176,10 @@ fn render_test(out: &mut String, run_id: &str, test_name: &str, test: &Test) -> 
         }
     }
     let exit_code_path = storage::error_exit_code_path(run_id, test_name);
-    if let Ok(code) = fs::read_to_string(&exit_code_path) {
-        out.push_str(&format!("- Exit code: `{}`\n", code.trim()));
+    match fs::read_to_string(&exit_code_path) {
+        Ok(code) => out.push_str(&format!("- Exit code: `{}`\n", code.trim())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => out.push_str(&format!("- Exit code: _read failed: {e}_\n")),
     }
     match score::read_score(run_id, test_name) {
         Ok(Some(s)) => {
@@ -316,6 +318,7 @@ fn render_session(path: &Path) -> io::Result<(String, Tokens)> {
         let ts = value.get("timestamp").and_then(Value::as_str);
         if let Some(ts) = ts {
             out.push_str(&format!("- Timestamp: `{ts}`\n"));
+            // Malformed timestamp in session entry; raw ts already shown above
             if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(ts) {
                 let dur = match prev {
                     Some(p) => format_duration_ms((parsed - p).num_milliseconds()),
@@ -502,21 +505,29 @@ fn duration_between(start: &str, end: &str) -> Option<String> {
 /// markdown viewer); falls back to `$PAGER` or `less` if treemd isn't
 /// available or fails to launch.
 pub fn page(path: &Path) -> io::Result<()> {
-    if let Some(status) = Command::new("treemd")
+    try_treemd(path).unwrap_or_else(|| default_page(path))
+}
+
+/// `None` if treemd isn't installed; `Some(_)` if it ran.
+fn try_treemd(path: &Path) -> Option<io::Result<()>> {
+    Command::new("treemd")
         .args(["--collapse", "2", "--no-outline-hash"])
         .arg(path)
         .status()
-        .ok()
-        && status.success()
-    {
-        return Ok(());
-    }
-    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-    let status = Command::new(&pager).arg(path).status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "{pager} exited with status {status}"
-        )));
-    }
-    Ok(())
+        .map_or_else(
+            |e| (e.kind() != io::ErrorKind::NotFound).then_some(Err(e)),
+            |s| Some(check_status("treemd", s)),
+        )
+}
+
+fn default_page(path: &Path) -> io::Result<()> {
+    let cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    check_status(&cmd, Command::new(&cmd).arg(path).status()?)
+}
+
+fn check_status(name: &str, status: ExitStatus) -> io::Result<()> {
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| io::Error::other(format!("{name} exited with status {status}")))
 }

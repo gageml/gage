@@ -75,8 +75,8 @@ impl ScalarUDFImpl for TextSearch {
             }
             Some(ColumnarValue::Scalar(s)) => {
                 let text = scalar_str(s)?;
-                let mask = gage_index::text_search_mask([text.as_deref()], &query)
-                    .map_err(index_err)?;
+                let mask =
+                    gage_index::text_search_mask([text.as_deref()], &query).map_err(index_err)?;
                 Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
                     mask.into_iter().next().flatten(),
                 )))

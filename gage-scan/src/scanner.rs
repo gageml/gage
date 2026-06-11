@@ -445,7 +445,7 @@ pub struct ScannerRegistry {
 
 impl ScannerRegistry {
     pub fn load() -> Self {
-        extract_scanners().expect("failed to extract scanners to ~/.gage/lib/scanners");
+        extract_scanners().unwrap();
         let dir = scanners_dir();
         let mut defs = HashMap::new();
         let mut errors = HashMap::new();
@@ -491,8 +491,8 @@ impl ScannerRegistry {
             .canonicalize()
             .map_err(|e| RegisterFileError::Io(path.display().to_string(), e))?;
         let abs_str = abs.to_string_lossy().to_string();
-        let code = std::fs::read_to_string(&abs)
-            .map_err(|e| RegisterFileError::Io(abs_str.clone(), e))?;
+        let code =
+            std::fs::read_to_string(&abs).map_err(|e| RegisterFileError::Io(abs_str.clone(), e))?;
 
         let mut def = match parse_scanner(&code, &abs_str) {
             Ok(def) => def,

@@ -110,7 +110,7 @@ pub struct NoteDeleteArgs {
 }
 
 pub fn list(args: NoteListArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let session = match args.session {
         Some(prefix) => match one_session(&prefix) {
             Ok(s) => Some(s.id),
@@ -204,7 +204,7 @@ pub fn add(args: NoteAddArgs) {
 
         let author = resolve_author(args.user);
         let note = Note::new(target, &name, parse_note_value(&value), &author);
-        let conn = db::open_db();
+        let conn = db::open_db().unwrap();
         note::insert(&conn, &note)
             .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
 
@@ -214,7 +214,7 @@ pub fn add(args: NoteAddArgs) {
 }
 
 pub fn comment(args: NoteCommentArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let target_note = match note::get(&conn, &args.id) {
         Ok(n) => n,
         Err(e) => {
@@ -260,7 +260,7 @@ pub fn comment(args: NoteCommentArgs) {
 }
 
 pub async fn show(args: NoteShowArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let note = match note::get(&conn, &args.id) {
         Ok(n) => n,
         Err(e) => {
@@ -361,7 +361,7 @@ fn note_text_resolver(note: &Note) -> TextResolver {
     let registry = ScannerRegistry::load();
     let r = TextResolver::new();
     match note.author.strip_prefix("scanner:") {
-        Some(name) => match ScannerScheme::for_scanner_name(&registry, name) {
+        Some(name) => match ScannerScheme::with_scanner_name(&registry, name) {
             Ok(s) => r.with_scheme("scanner", s),
             Err(e) => r.with_scheme("scanner", ErrorScheme::new(e.to_string())),
         },
@@ -392,7 +392,7 @@ fn parse_note_value(input: &str) -> note::NoteValue {
 
 pub fn edit(args: NoteEditArgs) {
     dialog::run("Edit note", || {
-        let conn = db::open_db();
+        let conn = db::open_db().unwrap();
         let note = note::get(&conn, &args.id)
             .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
 
@@ -424,7 +424,7 @@ pub fn delete(args: NoteDeleteArgs) {
         std::process::exit(1);
     }
 
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
 
     let mut notes: Vec<Note> = Vec::new();
     let mut errors = 0;

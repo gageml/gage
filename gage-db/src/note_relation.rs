@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn insert_and_read_back() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         make_note(&conn, "note-a");
         make_note(&conn, "note-b");
 
@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn duplicate_inferred_relation_rejected() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         make_note(&conn, "note-a");
         make_note(&conn, "note-b");
 

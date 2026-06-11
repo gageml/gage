@@ -41,7 +41,7 @@ async fn handle(params: JsonObject) -> Result<String, McpError> {
         }
     };
 
-    let conn = open_db();
+    let conn = open_db().unwrap();
     let issues = issue::find(
         &conn,
         &IssueFilters {

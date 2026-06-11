@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn insert_and_get() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let note = note_with(SESSION_A, "summary", session_target_of(SESSION_A));
         insert(&conn, &note).unwrap();
 
@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn session_note_captures_line_range() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let note = note_with(
             "rng-1",
             "span",
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn line_targets_persist_separately() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         insert(
             &conn,
             &note_with("aaa-001", "score", line_target(SESSION_A, 42)),
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn insert_scan_target() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         add_scan(&conn, "scan-1");
         let note = note_with(
             "bbb-001",
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn insert_project_target() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let note = note_with(
             "ccc-001",
             "project.finding",
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn list_filter_by_session() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         insert(
             &conn,
             &note_with(SESSION_A, "summary", session_target_of(SESSION_A)),
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn list_filter_by_name() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         insert(
             &conn,
             &note_with(SESSION_A, "summary", session_target_of(SESSION_A)),
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn list_filter_by_scanner_matches_author() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let mut a = note_with(SESSION_A, "summary", session_target_of(SESSION_A));
         a.author = "scanner:user_friction".to_string();
         insert(&conn, &a).unwrap();
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn delete_works() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         insert(
             &conn,
             &note_with(SESSION_A, "x", session_target_of(SESSION_A)),
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn duplicate_key_returns_prev_and_keeps_one_row() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let a = Note::new(
             session_target_of(SESSION_A),
             "summary",
@@ -705,7 +705,7 @@ mod tests {
         );
         insert(&conn, &a).unwrap();
 
-        // Same (name, target, author), fresh id and different value.
+        // Same (name, target, author), fresh id and different value
         let b = Note::new(
             session_target_of(SESSION_A),
             "summary",
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn replace_updates_value() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
 
         let a = Note::new(
             session_target_of(SESSION_A),
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn value_roundtrips_all_json_types() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let cases = [
             serde_json::json!({"fast": {"count": 5}, "ok": true}),
             serde_json::json!([1, 2, 3]),
@@ -766,12 +766,12 @@ mod tests {
             serde_json::json!(3.5),
             serde_json::json!("hello"),
             // JSON null serializes to the text "null", which satisfies
-            // the column's NOT NULL constraint (it is not SQL NULL).
+            // the column's NOT NULL constraint (it is not SQL NULL)
             serde_json::json!(null),
         ];
         for (i, json) in cases.into_iter().enumerate() {
             // Distinct name per case so each insert is a fresh note
-            // under the (name, target, author) dedup key.
+            // under the (name, target, author) dedup key
             let note = Note::new(
                 session_target_of(SESSION_A),
                 &format!("n{i}"),
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn value_is_queryable_as_json_in_sqlite() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let note = Note::new(
             session_target_of(SESSION_A),
             "fast-mode.summary",
@@ -807,7 +807,7 @@ mod tests {
 
     #[test]
     fn find_raw_passes_through_raw_json_text() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let mut note = Note::new(
             session_target_of(SESSION_A),
             "n",

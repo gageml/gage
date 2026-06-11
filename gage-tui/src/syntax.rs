@@ -34,18 +34,14 @@ impl Highlighter {
         let mut lines = Vec::new();
 
         for line in LinesWithEndings::from(&code) {
-            let ops = state
-                .parse_line(line, &self.syntax_set)
-                .expect("syntect builtin syntax parses without error");
+            let ops = state.parse_line(line, &self.syntax_set).unwrap();
             let mut spans: Vec<Span<'static>> = Vec::new();
             for (region, op) in ScopeRegionIterator::new(&ops, line) {
                 let region = region.trim_end_matches('\n');
                 if !region.is_empty() {
                     spans.push(Span::styled(region.to_string(), style_for_scope(&stack)));
                 }
-                stack
-                    .apply(op)
-                    .expect("syntect builtin syntax emits valid scope ops");
+                stack.apply(op).unwrap();
             }
             lines.push(Line::from(spans));
         }

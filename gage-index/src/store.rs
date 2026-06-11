@@ -35,8 +35,8 @@ const FP_MTIME_KEY: &str = "gage:source_mtime_ms";
 const FP_SIZE_KEY: &str = "gage:source_size";
 
 fn writer_properties(fingerprint: Option<Fingerprint>) -> WriterProperties {
-    let mut builder = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()));
+    let mut builder =
+        WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default()));
     if let Some(fp) = fingerprint {
         builder = builder.set_key_value_metadata(Some(vec![
             KeyValue::new(FP_MTIME_KEY.to_string(), fp.mtime_ms.to_string()),
@@ -101,10 +101,8 @@ pub(crate) fn read_fingerprint(path: &Path) -> Option<Fingerprint> {
 pub(crate) fn read_message_rows(path: &Path) -> Result<Vec<(i64, String)>> {
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let mask = parquet::arrow::ProjectionMask::roots(
-        builder.parquet_schema(),
-        [COL_LINE, COL_TEXT],
-    );
+    let mask =
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [COL_LINE, COL_TEXT]);
     let reader = builder.with_projection(mask).build()?;
     let mut rows = Vec::new();
     for batch in reader {

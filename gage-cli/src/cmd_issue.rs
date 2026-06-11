@@ -121,7 +121,7 @@ pub struct IssueListArgs {
 }
 
 pub fn list(args: IssueListArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let filters = IssueFilters {
         status: if args.closed {
             IssueStatusFilter::Any
@@ -183,7 +183,7 @@ pub fn list(args: IssueListArgs) {
 }
 
 pub fn show(args: IssueShowArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let issue = match issue::get(&conn, &args.id) {
         Ok(t) => t,
         Err(e) => {
@@ -330,7 +330,7 @@ pub fn add(args: IssueAddArgs) {
             modified: None,
             author: crate::author::resolve_author(None),
         };
-        let conn = db::open_db();
+        let conn = db::open_db().unwrap();
         issue::insert(&conn, &issue)
             .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
 
@@ -340,7 +340,7 @@ pub fn add(args: IssueAddArgs) {
 }
 
 pub fn delete(args: IssueDeleteArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let target_issue = match issue::get(&conn, &args.id) {
         Ok(i) => i,
         Err(e) => {
@@ -373,7 +373,7 @@ pub fn delete(args: IssueDeleteArgs) {
 }
 
 pub fn close(args: IssueCloseArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let target_issue = match issue::get(&conn, &args.id) {
         Ok(i) => i,
         Err(e) => {
@@ -432,7 +432,7 @@ pub fn close(args: IssueCloseArgs) {
 }
 
 pub fn reopen(args: IssueReopenArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let target_issue = match issue::get(&conn, &args.id) {
         Ok(i) => i,
         Err(e) => {
@@ -478,7 +478,7 @@ pub fn reopen(args: IssueReopenArgs) {
 }
 
 pub fn comment(args: IssueCommentArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let target_issue = match issue::get(&conn, &args.id) {
         Ok(i) => i,
         Err(e) => {
@@ -534,7 +534,7 @@ fn issue_text_resolver(issue: &Issue) -> TextResolver {
     let registry = ScannerRegistry::load();
     let r = TextResolver::new();
     match issue.author.strip_prefix("scanner:") {
-        Some(name) => match ScannerScheme::for_scanner_name(&registry, name) {
+        Some(name) => match ScannerScheme::with_scanner_name(&registry, name) {
             Ok(s) => r.with_scheme("scanner", s),
             Err(e) => r.with_scheme("scanner", ErrorScheme::new(e.to_string())),
         },

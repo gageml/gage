@@ -31,7 +31,7 @@ pub const SCANNER = #{
     },
 };
 
-// Claude Code's retention default when `cleanupPeriodDays` is unset.
+// Claude Code's retention default when `cleanupPeriodDays` is unset
 const DEFAULT_RETENTION_DAYS = 30;
 
 pub async fn check_retention() {

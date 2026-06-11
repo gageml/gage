@@ -442,7 +442,7 @@ fn push_files(
             files_read,
         )?);
     }
-    // Fold the walk's own counters in once the iterator is drained.
+    // Fold the walk's own counters in once the iterator is drained
     let walk = iter.metrics();
     files_read.add(walk.files_read as usize);
     dirs_listed.add(walk.dirs_listed as usize);
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn scope_local_walks_project_scope() {
-        // `local` rows live under the project walk.
+        // `local` rows live under the project walk
         let s = set(&["local"]);
         assert_eq!(decide_scopes(Some(&s), None, None), (false, true));
     }

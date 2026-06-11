@@ -19,13 +19,13 @@ use std::time::UNIX_EPOCH;
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::Result;
 use crate::derive::{Fingerprint, SessionAggregates, derive_session};
 use crate::store::{
     STORE_FORMAT_VERSION, read_aggregates, read_fingerprint, read_message_rows, write_aggregates,
     write_session_file,
 };
 use crate::text_index::{INDEX_FORMAT_VERSION, TOKENIZER_CHAIN, TextIndex};
-use crate::Result;
 
 /// How to take the reconcile lock. Queries use `Try` —
 /// skip-with-stale on contention. Explicit maintenance (`gage index`)
@@ -87,7 +87,10 @@ impl std::fmt::Display for Status {
             "sessions:       {} discovered, {} dirty",
             self.discovered, self.dirty
         )?;
-        let last = match self.last_reconcile_ms.and_then(chrono::DateTime::from_timestamp_millis) {
+        let last = match self
+            .last_reconcile_ms
+            .and_then(chrono::DateTime::from_timestamp_millis)
+        {
             Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
             None => "never".to_string(),
         };
@@ -249,7 +252,10 @@ impl IndexStore {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default();
             if let Some(id) = name.strip_suffix(".parquet")
                 && is_session_id(id)
             {
@@ -342,7 +348,7 @@ impl IndexStore {
             },
         }
         // The OS releases the lock when `lock_file` drops — no stale
-        // lock state survives a crash.
+        // lock state survives a crash
         let result = body(self);
         #[allow(clippy::let_underscore_must_use)]
         let _ = FileExt::unlock(&lock_file);
@@ -542,7 +548,11 @@ impl IndexStore {
                 tracing::warn!(session_id = %id, "failed to remove store file: {e}");
             }
             #[allow(clippy::let_underscore_must_use)]
-            let _ = self.footer_cache.lock().expect("footer cache").remove(&path);
+            let _ = self
+                .footer_cache
+                .lock()
+                .expect("footer cache")
+                .remove(&path);
             outcome.removed += 1;
         }
         aggregates.retain(|id, _| walked_ids.contains(id.as_str()));
@@ -631,9 +641,7 @@ impl IndexStore {
 }
 
 fn is_session_id(s: &str) -> bool {
-    s.len() == 36
-        && s.chars()
-            .all(|c| c.is_ascii_hexdigit() || c == '-')
+    s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 fn now_ms() -> i64 {

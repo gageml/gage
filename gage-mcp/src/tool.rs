@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use rmcp::RoleServer;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::model::{JsonObject, Tool as ToolMeta, ToolAnnotations};
 use rmcp::service::RequestContext;
-use rmcp::RoleServer;
 use serde::Deserialize;
 use serde_json::{Value, json};
 

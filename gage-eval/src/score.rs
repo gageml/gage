@@ -122,7 +122,7 @@ fn run_db_rows(run_id: &str, test_id: &str, sql: &str) -> io::Result<u32> {
             db_path.display()
         )));
     }
-    let conn = gage_db::db::open_db_at(&db_path);
+    let conn = gage_db::db::open_db_at(&db_path).map_err(io::Error::other)?;
     let mut stmt = conn.prepare(sql).map_err(io::Error::other)?;
     let mut rows = stmt.query([]).map_err(io::Error::other)?;
     let mut count: u32 = 0;

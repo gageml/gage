@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn insert_and_all() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
 
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_scanners() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
 
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn delete_scan_removes_run_metadata_but_keeps_notes() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
         insert_scan_session(&conn, &scan.id, "sess-1").unwrap();
@@ -245,12 +245,12 @@ mod tests {
 
         delete_scan(&conn, &scan.id).unwrap();
 
-        // Run metadata is gone.
+        // Run metadata is gone
         assert_eq!(all(&conn).unwrap().len(), 0);
         assert_eq!(get_scanners_for_scan(&conn, &scan.id).unwrap().len(), 0);
         assert_eq!(session_ids_for_scan(&conn, &scan.id).unwrap().len(), 0);
 
-        // Notes are not owned by a scan and survive.
+        // Notes are not owned by a scan and survive
         let note_count: u32 = conn
             .query_row("SELECT COUNT(*) FROM note", [], |row| row.get(0))
             .unwrap();
@@ -259,14 +259,14 @@ mod tests {
 
     #[test]
     fn delete_scan_not_found() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let result = delete_scan(&conn, "nonexistent");
         assert!(matches!(result, Err(ScanError::NotFound(_))));
     }
 
     #[test]
     fn scan_session_roundtrip() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
         insert_scan_session(&conn, &scan.id, "sess-a").unwrap();

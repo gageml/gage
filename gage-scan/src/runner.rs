@@ -80,7 +80,7 @@ pub async fn run(
     cancel: CancellationToken,
     on_event: impl FnMut(ScanEvent) + Send,
 ) -> Result<RunSummary, RunError> {
-    // Init scan + per-scanner records, recording the selected session ids.
+    // Init scan + per-scanner records, recording the selected session ids
     let session_ids: Vec<&str> = sessions.iter().map(|(id, _)| id.as_str()).collect();
     let scan_id = {
         let conn = db.lock().unwrap();
@@ -91,21 +91,17 @@ pub async fn run(
     // (id, path); enrich to SessionInfo for the runtime.
     let selected: Vec<SessionInfo> = sessions
         .into_iter()
-        .map(|(id, src)| {
-            let meta = std::fs::metadata(&src).ok();
-            let mtime = meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            SessionInfo {
+        .map(|(id, src)| -> Result<_, RunError> {
+            let meta = std::fs::metadata(&src)?;
+            let mtime = meta.modified().unwrap();
+            Ok(SessionInfo {
                 id,
                 src,
                 mtime,
-                size,
-            }
+                size: meta.len(),
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     // Resolve distinct projects from `~/.claude.json`. Sessions key
     // off the encoded directory name they were stored under; that
@@ -131,7 +127,7 @@ pub async fn run(
         projects,
     });
 
-    // Build per-scanner compilation artifacts.
+    // Build per-scanner compilation artifacts
     let mut slots: Vec<ScannerSlot> = Vec::new();
     let mut scanner_tasks: Vec<HashMap<String, crate::scanner::TaskDef>> = Vec::new();
     for s in scanners {
@@ -280,10 +276,6 @@ fn verify_tasks(slot: &ScannerSlot, def: &ScannerDef) -> Result<(), RunError> {
     Ok(())
 }
 
-// ============================================================
-// Test scanner harness (preserved from the prior runner).
-// ============================================================
-
 pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
     let mut failed = false;
 
@@ -340,14 +332,12 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             continue;
         }
 
-        // Tests run with a stub ScanContext — session()/etc.
-        // return None, sessions() is empty.
         let stub_run = Arc::new(RunContext {
             scan_id: "test".to_string(),
             selected: Arc::from(Vec::<SessionInfo>::new().into_boxed_slice()),
             projects: HashMap::new(),
         });
-        let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory()));
+        let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
 
         for (hash, item) in &tests {
@@ -581,7 +571,7 @@ impl TestRuntime {
             run,
             target: TaskTarget::Scan,
             df_ctx: None,
-            db: Arc::new(Mutex::new(gage_db::db::open_db_in_memory())),
+            db: Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap())),
             runtime_tx: tx,
         });
         runtime::state::SCAN_CTX.scope(ctx, f()).await

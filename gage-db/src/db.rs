@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
@@ -6,74 +7,96 @@ use gage_core::config::gage_home;
 
 const CURRENT_VERSION: u32 = 1;
 
+#[derive(Debug)]
+pub enum DbError {
+    Io(io::Error),
+    Sqlite(rusqlite::Error),
+}
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DbError::Io(e) => write!(f, "{e}"),
+            DbError::Sqlite(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for DbError {}
+
+impl From<io::Error> for DbError {
+    fn from(e: io::Error) -> Self {
+        DbError::Io(e)
+    }
+}
+
+impl From<rusqlite::Error> for DbError {
+    fn from(e: rusqlite::Error) -> Self {
+        DbError::Sqlite(e)
+    }
+}
+
 pub fn db_path() -> PathBuf {
     gage_home().join("data").join("gage.db")
 }
 
-pub fn open_db() -> Connection {
+pub fn open_db() -> Result<Connection, DbError> {
     open_db_at(&db_path())
 }
 
-pub fn open_db_at(path: &std::path::Path) -> Connection {
-    std::fs::create_dir_all(path.parent().unwrap()).expect("failed to create data directory");
-    let conn = Connection::open(path).expect("failed to open gage.db");
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .expect("failed to enable WAL mode");
+pub fn open_db_at(path: &Path) -> Result<Connection, DbError> {
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
     // synchronous=NORMAL is safe under WAL: durability of the most
     // recent commits depends on a checkpoint, but the database itself
     // can never be corrupted. Cuts fsync overhead by ~10x for
     // write-heavy workloads like scan runs.
-    conn.pragma_update(None, "synchronous", "NORMAL")
-        .expect("failed to set synchronous=NORMAL");
-    migrate(&conn);
-    conn
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    migrate(&conn)?;
+    Ok(conn)
 }
 
-pub fn open_db_in_memory() -> Connection {
-    let conn = Connection::open_in_memory().expect("failed to open in-memory database");
-    migrate(&conn);
-    conn
+pub fn open_db_in_memory() -> Result<Connection, DbError> {
+    let conn = Connection::open_in_memory()?;
+    migrate(&conn)?;
+    Ok(conn)
 }
 
-fn migrate(conn: &Connection) {
-    let version = get_version(conn);
+fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let version = get_version(conn)?;
     if version >= CURRENT_VERSION {
-        return;
+        return Ok(());
     }
     if version < 1 {
-        migration_1(conn);
+        migration_1(conn)?;
     }
-    set_version(conn, CURRENT_VERSION);
+    set_version(conn, CURRENT_VERSION)
 }
 
-fn get_version(conn: &Connection) -> u32 {
-    let has_table: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='schema_version'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("failed to check for schema_version table");
+fn get_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
+    let has_table: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
     if !has_table {
-        return 0;
+        return Ok(0);
     }
     conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
-        .expect("failed to read schema version")
 }
 
-fn set_version(conn: &Connection, version: u32) {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
-        .expect("failed to create schema_version table");
-    conn.execute("DELETE FROM schema_version", [])
-        .expect("failed to clear schema_version");
+fn set_version(conn: &Connection, version: u32) -> Result<(), rusqlite::Error> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")?;
+    conn.execute("DELETE FROM schema_version", [])?;
     conn.execute(
         "INSERT INTO schema_version (version) VALUES (?1)",
         [version],
-    )
-    .expect("failed to set schema version");
+    )?;
+    Ok(())
 }
 
-fn migration_1(conn: &Connection) {
+fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE note (
             id          TEXT PRIMARY KEY,
@@ -169,8 +192,8 @@ fn migration_1(conn: &Connection) {
             metadata             TEXT
         );
 ",
-    )
-    .expect("migration 1 failed");
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -179,7 +202,7 @@ mod tests {
 
     #[test]
     fn open_in_memory_creates_schema() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
@@ -233,8 +256,8 @@ mod tests {
 
     #[test]
     fn migrate_is_idempotent() {
-        let conn = open_db_in_memory();
-        migrate(&conn);
+        let conn = open_db_in_memory().unwrap();
+        migrate(&conn).unwrap();
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();

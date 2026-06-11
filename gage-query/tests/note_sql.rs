@@ -17,7 +17,7 @@ async fn value_object_is_queryable_through_json_functions() {
         std::env::set_var("GAGE_HOME", tmp.path());
     }
 
-    let conn = gage_db::db::open_db();
+    let conn = gage_db::db::open_db().unwrap();
     let note = Note::new(
         NoteTarget::Session(SessionTarget::new("sess-1")),
         "fast-mode.summary",

@@ -9,7 +9,6 @@ pub(crate) mod store_scan;
 
 pub use config::ConfigTable;
 pub use entry::EntryTable;
-// Re-exported from the derivation module that owns it now.
 pub use gage_index::entry_text;
 pub use issue::IssueTable;
 pub use issue_evidence::IssueEvidenceTable;

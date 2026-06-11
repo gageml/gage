@@ -165,7 +165,7 @@ impl ExecutionPlan for NoteExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let conn = gage_db::db::open_db();
+        let conn = gage_db::db::open_db().unwrap();
         let notes = note::find_raw(&conn, &NoteFilters::default())
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 

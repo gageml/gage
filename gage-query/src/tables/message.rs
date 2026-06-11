@@ -68,8 +68,7 @@ fn message_schema() -> SchemaRef {
 
 /// The exact row condition distinguishing message rows in the store.
 fn message_row_filter() -> Expr {
-    in_list(col("type"), vec![lit("user"), lit("assistant")], false)
-        .and(col("text").is_not_null())
+    in_list(col("type"), vec![lit("user"), lit("assistant")], false).and(col("text").is_not_null())
 }
 
 #[derive(Debug, Clone)]
@@ -137,9 +136,7 @@ impl TableProvider for MessageTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         match &self.source {
-            SessionSource::Store(store) => {
-                self.scan_store(store, state, projection, filters).await
-            }
+            SessionSource::Store(store) => self.scan_store(store, state, projection, filters).await,
             SessionSource::SingleSession { session_id, path } => {
                 let keep = match IdFilter::new(filters, "session_id")? {
                     Some(f) => f.matches(session_id)?,
@@ -192,7 +189,7 @@ impl MessageTable {
         }
 
         // Inner scan: the requested columns plus whatever the exact
-        // filter below needs.
+        // filter below needs
         let table_projection: Vec<usize> = match projection {
             Some(indices) => indices.clone(),
             None => (0..self.schema.fields().len()).collect(),
@@ -218,9 +215,14 @@ impl MessageTable {
             .map(unqualify)
             .collect();
         let paths: Vec<PathBuf> = files.into_iter().map(|(_, path)| path).collect();
-        let inner =
-            scan_store_files(state, &paths, Some(store_projection.clone()), &forwarded, None)
-                .await?;
+        let inner = scan_store_files(
+            state,
+            &paths,
+            Some(store_projection.clone()),
+            &forwarded,
+            None,
+        )
+        .await?;
 
         // The message-row condition must hold exactly, so apply it as
         // a filter over the scan. The matched-coordinate `line IN`
@@ -281,9 +283,10 @@ async fn search_coordinates(
 async fn derive_message_batch(session_id: &str, path: &Path) -> Result<RecordBatch> {
     let session_id = session_id.to_string();
     let path = path.to_path_buf();
-    let derived = tokio::task::spawn_blocking(move || gage_index::derive_session(&session_id, &path))
-        .await
-        .map_err(|e| DataFusionError::Execution(format!("derive task failed: {e}")))?;
+    let derived =
+        tokio::task::spawn_blocking(move || gage_index::derive_session(&session_id, &path))
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("derive task failed: {e}")))?;
     let batch = match derived {
         Ok(derived) => derived.batch,
         Err(e) => {

@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use datafusion::prelude::SessionContext as DfSessionContext;
 use gage_claude::project::Project;
-use gage_claude::session::SessionInfo;
+use gage_claude::session::{SessionInfo, encode_project_dir};
 use gage_query::tables::{EntryTable, MessageTable};
 use petgraph::Graph;
 use petgraph::algo::tarjan_scc;
@@ -163,7 +163,7 @@ pub(crate) fn plan(
         }
     }
 
-    // Build per-scanner `note_name -> [task_name]` index from `notes.writes`.
+    // Build per-scanner `note_name -> [task_name]` index from `notes.writes`
     let mut writes_index: Vec<HashMap<String, Vec<String>>> =
         vec![HashMap::new(); scanner_tasks.len()];
     for (scanner_idx, defs) in scanner_tasks.iter().enumerate() {
@@ -226,7 +226,7 @@ pub(crate) fn plan(
         }
     }
 
-    // Cycle detection via SCC over the full graph.
+    // Cycle detection via SCC over the full graph
     let sccs = tarjan_scc(&graph);
     for scc in &sccs {
         if scc.len() > 1 {
@@ -246,7 +246,7 @@ pub(crate) fn plan(
         }
     }
 
-    // Build adjacency arrays indexed by task index.
+    // Build adjacency arrays indexed by task index
     let mut downstream = vec![Vec::new(); tasks.len()];
     let mut deps = vec![0u32; tasks.len()];
     for edge in graph.edge_indices() {
@@ -315,7 +315,7 @@ fn expand_targets(context: TaskContext, run: &Arc<RunContext>) -> Vec<(TaskTarge
             let mut seen: HashMap<String, Arc<Project>> = HashMap::new();
             for s in run.selected.iter() {
                 if let Some(p) = run.projects.get(&*s.project_name()) {
-                    seen.entry(p.path.to_string_lossy().into_owned())
+                    seen.entry(encode_project_dir(&p.path))
                         .or_insert_with(|| p.clone());
                 }
             }
@@ -345,7 +345,7 @@ pub(crate) async fn run_plan(
     let jobs = jobs.max(1);
     let plan_total = plan.tasks.len();
 
-    // Surface planner warnings before any task runs.
+    // Surface planner warnings before any task runs
     for w in &plan.warnings {
         on_event(ScanEvent::Warning {
             scanner: w.scanner.clone(),
@@ -425,7 +425,7 @@ async fn run_tasks(
     let (ready_tx, ready_rx) = mpsc::unbounded_channel::<usize>();
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<WorkerMsg>();
 
-    // Seed initial ready set.
+    // Seed initial ready set
     for (i, d) in deps_remaining.iter().enumerate() {
         if d.load(Ordering::SeqCst) == 0 {
             ready_tx.send(i).expect("ready channel open");
@@ -532,7 +532,7 @@ async fn run_tasks(
                     TaskResult::SkippedByFault => {
                         accounting.skipped += 1;
                         // Fault-skips remove work from the pipeline
-                        // rather than counting toward progress.
+                        // rather than counting toward progress
                         status.total = status.total.saturating_sub(1);
                     }
                 }
@@ -677,9 +677,9 @@ fn build_session_ctx(session_id: &str, path: &Path) -> DfSessionContext {
     let entry = EntryTable::with_session(session_id.to_string(), path.to_path_buf());
     let message = MessageTable::with_session(session_id.to_string(), path.to_path_buf());
     ctx.register_table("entry", std::sync::Arc::new(entry))
-        .expect("register entry table");
+        .unwrap();
     ctx.register_table("message", std::sync::Arc::new(message))
-        .expect("register message table");
+        .unwrap();
     ctx
 }
 

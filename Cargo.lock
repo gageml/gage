@@ -2285,6 +2285,7 @@ dependencies = [
  "serde_yaml",
  "tabled",
  "toml 0.8.23",
+ "tracing",
  "uuid",
 ]
 

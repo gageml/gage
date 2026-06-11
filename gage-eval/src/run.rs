@@ -215,7 +215,7 @@ fn run_one(
 
 fn seed_db(gage_home: &Path, sql: &str) -> io::Result<()> {
     let db_path = gage_home.join("data").join("gage.db");
-    let conn = gage_db::db::open_db_at(&db_path);
+    let conn = gage_db::db::open_db_at(&db_path).map_err(io::Error::other)?;
     conn.execute_batch(sql).map_err(io::Error::other)
 }
 

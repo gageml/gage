@@ -156,7 +156,13 @@ pub fn list_runs() -> io::Result<Vec<RunSummary>> {
         return Ok(Vec::new());
     }
     let mut entries: Vec<RunSummary> = fs::read_dir(&root)?
-        .filter_map(|e| e.ok())
+        .filter_map(|e| match e {
+            Ok(e) => Some(e),
+            Err(err) => {
+                tracing::warn!(error = %err);
+                None
+            }
+        })
         .filter_map(|e| {
             let path = e.path();
             if !path.is_dir() {

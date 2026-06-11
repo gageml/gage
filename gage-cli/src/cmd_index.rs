@@ -23,7 +23,7 @@ pub async fn run(args: IndexArgs) {
     if args.status {
         let status = tokio::task::spawn_blocking(move || store.status())
             .await
-            .expect("status task");
+            .unwrap();
         println!("{status}");
         return;
     }
@@ -37,7 +37,7 @@ pub async fn run(args: IndexArgs) {
         }
     })
     .await
-    .expect("reconcile task");
+    .unwrap();
 
     match result {
         Ok(outcome) => {

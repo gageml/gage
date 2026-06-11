@@ -44,7 +44,7 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         }
     };
 
-    let conn = open_db();
+    let conn = open_db().unwrap();
     let issue = issue::get(&conn, &issue_id).map_err(|e| match e {
         issue::IssueError::NotFound(_) | issue::IssueError::Ambiguous(_, _) => {
             McpError::invalid_params(e.to_string(), None)

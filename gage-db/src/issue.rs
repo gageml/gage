@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn insert_and_get() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
         let fetched = get(&conn, "issue-aaa").unwrap();
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn find_filters_resolved_by_default() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let i1 = sample("issue-aaa", "n1");
         let mut i2 = sample("issue-bbb", "n2");
         i2.status = IssueStatus::Closed;
@@ -680,11 +680,11 @@ mod tests {
 
     #[test]
     fn duplicate_key_returns_prev_and_keeps_one_row() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let a = sample("issue-aaa", "thinking.empty");
         insert(&conn, &a).unwrap();
 
-        // Same (name, target), fresh id and different title.
+        // Same (name, target), fresh id and different title
         let mut b = sample("issue-bbb", "thinking.empty");
         b.title = "different".to_string();
         match insert(&conn, &b) {
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn same_name_distinct_target_is_not_duplicate() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let mut a = sample("issue-aaa", "thinking.empty");
         a.target = "session:sess-1".to_string();
         insert(&conn, &a).unwrap();
@@ -720,7 +720,7 @@ mod tests {
         use crate::note::{NoteValue, insert as insert_note};
         use crate::target::{NoteTarget, SessionTarget};
 
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-bbb", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn close_logs_event_with_message() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn reopen_logs_event_and_events_ordered() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn comment_logs_event_and_bumps_modified() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn comment_unknown_issue_is_not_found() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         assert!(matches!(
             comment(&conn, "nope", "user:tester", "hi", 1),
             Err(IssueError::NotFound(_))
@@ -874,7 +874,7 @@ mod tests {
 
     #[test]
     fn delete_removes_event_log() {
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
         close(
@@ -908,7 +908,7 @@ mod tests {
         use crate::note::{NoteValue, insert as insert_note};
         use crate::target::{NoteTarget, SessionTarget};
 
-        let conn = open_db_in_memory();
+        let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-ccc", "thinking.empty");
         insert(&conn, &issue).unwrap();
 

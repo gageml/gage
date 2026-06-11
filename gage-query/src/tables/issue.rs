@@ -165,7 +165,7 @@ impl ExecutionPlan for IssueExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let conn = gage_db::db::open_db();
+        let conn = gage_db::db::open_db().unwrap();
         let issues = issue::find(
             &conn,
             &IssueFilters {

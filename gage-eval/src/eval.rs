@@ -156,7 +156,13 @@ pub fn load_all() -> std::io::Result<Vec<EvalFile>> {
         return Ok(Vec::new());
     }
     let mut files: Vec<PathBuf> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
+        .filter_map(|e| match e {
+            Ok(e) => Some(e),
+            Err(err) => {
+                tracing::warn!(error = %err);
+                None
+            }
+        })
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("toml"))
         .collect();

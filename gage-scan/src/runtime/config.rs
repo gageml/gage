@@ -106,7 +106,7 @@ async fn fetch_settings(q: SettingsQuery) -> Settings {
         }
     };
 
-    // User scope: walk only the settings phase.
+    // User scope: walk only the settings phase
     let files = home
         .config()
         .memory(false)
@@ -124,7 +124,7 @@ async fn fetch_settings(q: SettingsQuery) -> Settings {
     }
 
     // Project scope: locate the project by path and walk settings +
-    // local_settings phases only.
+    // local_settings phases only
     if let Some(target) = q.project {
         let projects = match home.projects() {
             Ok(ps) => ps,

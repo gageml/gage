@@ -40,14 +40,14 @@ const RICH_SESSION: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 fn reconcile_lifecycle() {
     let (store, root, _cache) = store_with_tempdirs();
 
-    // First pass derives the full corpus.
+    // First pass derives the full corpus
     let outcome = store.reconcile(LockMode::Wait).unwrap();
     assert!(!outcome.skipped);
     assert_eq!(outcome.discovered, 4);
     assert_eq!(outcome.derived, 4);
     assert_eq!(store.session_files().len(), 4);
 
-    // Aggregates were consolidated.
+    // Aggregates were consolidated
     let aggregates = store.load_aggregates().unwrap();
     assert_eq!(aggregates.len(), 4);
     let rich = &aggregates[RICH_SESSION];
@@ -56,11 +56,11 @@ fn reconcile_lifecycle() {
     assert_eq!(rich.message_count, 6);
     assert_eq!(rich.input_tokens, 500);
 
-    // The index serves coordinate search.
+    // The index serves coordinate search
     let coords = store.search("main").unwrap();
     assert!(coords.iter().any(|(id, _)| id == RICH_SESSION));
 
-    // Steady state: nothing dirty.
+    // Steady state: nothing dirty
     let outcome = store.reconcile(LockMode::Wait).unwrap();
     assert_eq!(outcome.derived, 0);
     assert_eq!(outcome.removed, 0);
@@ -72,7 +72,7 @@ fn reconcile_lifecycle() {
     assert_eq!(status.dirty, 0);
     assert!(status.last_reconcile_ms.is_some());
 
-    // Append a line: the session re-derives and the index sees it.
+    // Append a line: the session re-derives and the index sees it
     let session_path = root
         .path()
         .join("-home-test-project")
@@ -91,7 +91,7 @@ fn reconcile_lifecycle() {
     assert_eq!(coords.len(), 1);
     assert_eq!(coords[0].0, RICH_SESSION);
 
-    // Remove a session: artifacts are garbage-collected.
+    // Remove a session: artifacts are garbage-collected
     std::fs::remove_file(&session_path).unwrap();
     let outcome = store.reconcile(LockMode::Wait).unwrap();
     assert_eq!(outcome.removed, 1);
@@ -107,7 +107,13 @@ fn rebuild_resets_artifacts() {
     let outcome = store.rebuild().unwrap();
     assert_eq!(outcome.derived, 4);
     assert_eq!(store.session_files().len(), 4);
-    assert!(store.search("main").unwrap().iter().any(|(id, _)| id == RICH_SESSION));
+    assert!(
+        store
+            .search("main")
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == RICH_SESSION)
+    );
 }
 
 #[test]
@@ -130,7 +136,7 @@ fn accelerated_and_rowwise_match_sets_agree() {
     store.reconcile(LockMode::Wait).unwrap();
 
     // Row corpus: every message row, via the same derivation the
-    // store uses.
+    // store uses
     let mut rows: Vec<(String, i64, String)> = Vec::new();
     for project in std::fs::read_dir(fixture_root()).unwrap().flatten() {
         if !project.path().is_dir() {
@@ -177,8 +183,7 @@ fn accelerated_and_rowwise_match_sets_agree() {
         let mut accelerated: Vec<(String, i64)> = store.search(query).unwrap();
         accelerated.sort();
 
-        let mask =
-            text_search_mask(rows.iter().map(|(_, _, t)| Some(t.as_str())), query).unwrap();
+        let mask = text_search_mask(rows.iter().map(|(_, _, t)| Some(t.as_str())), query).unwrap();
         let mut rowwise: Vec<(String, i64)> = rows
             .iter()
             .zip(&mask)

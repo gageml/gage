@@ -123,7 +123,7 @@ pub async fn run_tests(
             selected: std::sync::Arc::from(Vec::<SessionInfo>::new().into_boxed_slice()),
             projects: HashMap::new(),
         });
-        let stub_db = std::sync::Arc::new(Mutex::new(gage_db::db::open_db_in_memory()));
+        let stub_db = std::sync::Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
 
         for (hash, item) in &tests {

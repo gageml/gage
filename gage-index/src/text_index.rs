@@ -46,7 +46,9 @@ fn build_tokenizer() -> TextAnalyzer {
 }
 
 fn register_tokenizer(index: &Index) {
-    index.tokenizers().register(TOKENIZER_NAME, build_tokenizer());
+    index
+        .tokenizers()
+        .register(TOKENIZER_NAME, build_tokenizer());
 }
 
 fn text_options() -> TextOptions {

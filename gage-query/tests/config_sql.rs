@@ -27,7 +27,7 @@ fn fixture() -> (tempfile::TempDir, SessionContext) {
     let home = tmp.path();
     let claude = home.join(".claude");
 
-    // User scope.
+    // User scope
     write(&claude.join("settings.json"), r#"{"theme":"dark"}"#);
     write(&claude.join("CLAUDE.md"), "user memory");
     write(&claude.join("skills/rust/SKILL.md"), "---\n---\n");
@@ -36,7 +36,7 @@ fn fixture() -> (tempfile::TempDir, SessionContext) {
     write(&claude.join("agents/explorer.md"), "agent");
 
     // Project scope: a project rooted at <home>/projsrc registered in
-    // <home>/.claude.json.
+    // <home>/.claude.json
     let project_root = home.join("projsrc");
     fs::create_dir_all(&project_root).unwrap();
     write(&project_root.join("CLAUDE.md"), "project memory");
@@ -128,7 +128,7 @@ async fn type_filter_prunes_rows() {
     .await;
     let batch = &batches[0];
     let names = col_strings(batch, 0);
-    // user skill 'rust' and project skill 'local'.
+    // user skill 'rust' and project skill 'local'
     assert_eq!(names, vec!["local".to_string(), "rust".to_string()]);
 }
 
@@ -193,7 +193,7 @@ fn fixture_with_broken_commands() -> (tempfile::TempDir, SessionContext) {
     fs::create_dir_all(project_root.join(".claude")).unwrap();
     write(&project_root.join("CLAUDE.md"), "memory");
     write(&project_root.join(".claude/settings.json"), "{}");
-    // `commands` is a regular file — readdir on it errors.
+    // `commands` is a regular file — readdir on it errors
     write(&project_root.join(".claude/commands"), "not a dir");
 
     let claude_json = format!(
@@ -214,7 +214,7 @@ fn fixture_with_broken_commands() -> (tempfile::TempDir, SessionContext) {
 #[tokio::test]
 async fn type_filter_skips_unreadable_phase() {
     // `type='memory'` turns off the commands phase, so the broken
-    // `.claude/commands` file never gets read_dir'd — query succeeds.
+    // `.claude/commands` file never gets read_dir'd — query succeeds
     let (_tmp, ctx) = fixture_with_broken_commands();
     let batches = run(
         &ctx,

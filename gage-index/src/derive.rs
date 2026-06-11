@@ -372,7 +372,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             None => None,
         };
 
-        // Aggregates (mirrors the previous session-table scan).
+        // Aggregates (mirrors the previous session-table scan)
         if agg.is_empty && entry_has_content(&entry) {
             agg.is_empty = false;
         }
@@ -418,7 +418,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             _ => {}
         }
 
-        // Store row.
+        // Store row
         b.session_ids.append_value(session_id);
         b.lines.append_value(line_num as i64);
         match entry_uuid {

@@ -148,11 +148,12 @@ fn map_projection(projection: Option<&Vec<usize>>) -> Vec<usize> {
 async fn derive_batch(session_id: &str, path: &Path) -> Result<RecordBatch> {
     let session_id = session_id.to_string();
     let path = path.to_path_buf();
-    let derived = tokio::task::spawn_blocking(move || gage_index::derive_session(&session_id, &path))
-        .await
-        .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("derive task failed: {e}"))
-        })?;
+    let derived =
+        tokio::task::spawn_blocking(move || gage_index::derive_session(&session_id, &path))
+            .await
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!("derive task failed: {e}"))
+            })?;
     match derived {
         Ok(derived) => Ok(derived.batch.project(STORE_PROJECTION)?),
         Err(e) => {

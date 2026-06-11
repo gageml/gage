@@ -53,29 +53,26 @@ mod tests {
     use rune::{Context, Value, Vm};
 
     fn eval(expr: &str) -> Value {
-        let mut context = Context::with_default_modules().expect("default modules to build");
-        context
-            .install(module().expect("json module to build"))
-            .expect("json module to install");
-        let runtime =
-            Arc::try_new(context.runtime().expect("runtime to build")).expect("arc runtime");
+        let mut context = Context::with_default_modules().unwrap();
+        context.install(module().unwrap()).unwrap();
+        let runtime = Arc::try_new(context.runtime().unwrap()).unwrap();
 
         let mut sources = rune::Sources::new();
         sources
-            .insert(rune::Source::memory(format!("pub fn main() {{ {expr} }}")).expect("source"))
-            .expect("source to insert");
+            .insert(rune::Source::memory(format!("pub fn main() {{ {expr} }}")).unwrap())
+            .unwrap();
 
         let unit = rune::prepare(&mut sources)
             .with_context(&context)
             .build()
-            .expect("unit to build");
-        let mut vm = Vm::new(runtime, Arc::try_new(unit).expect("arc unit"));
+            .unwrap();
+        let mut vm = Vm::new(runtime, Arc::try_new(unit).unwrap());
 
-        vm.call(["main"], ()).expect("main to run")
+        vm.call(["main"], ()).unwrap()
     }
 
     fn eval_bool(expr: &str) -> bool {
-        rune::from_value::<bool>(eval(expr)).expect("a bool result")
+        rune::from_value::<bool>(eval(expr)).unwrap()
     }
 
     #[test]
@@ -97,7 +94,7 @@ mod tests {
     #[test]
     fn null_renders_as_null() {
         assert_eq!(
-            rune::from_value::<String>(eval("format!(\"{}\", json::Null)")).expect("a string"),
+            rune::from_value::<String>(eval("format!(\"{}\", json::Null)")).unwrap(),
             "null"
         );
     }

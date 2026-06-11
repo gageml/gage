@@ -298,8 +298,6 @@ async fn run_query(sql: &str) -> Vec<RecordBatch> {
     df.collect().await.unwrap()
 }
 
-// --- Rune types ---
-
 fn key(s: &str) -> alloc::String {
     alloc::String::try_from(s).unwrap()
 }

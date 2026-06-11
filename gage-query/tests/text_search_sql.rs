@@ -27,7 +27,7 @@ async fn term_search_finds_messages() {
 async fn boolean_and_phrase_queries() {
     let ctx = test_ctx().await;
 
-    // AND across terms appearing in the same message.
+    // AND across terms appearing in the same message
     let batches = ctx
         .sql("SELECT line FROM message WHERE text_search(text, 'read AND main') ORDER BY line")
         .await
@@ -36,9 +36,12 @@ async fn boolean_and_phrase_queries() {
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert!(total >= 2, "user prompt and thinking both match, got {total}");
+    assert!(
+        total >= 2,
+        "user prompt and thinking both match, got {total}"
+    );
 
-    // Phrase query: tokenizer splits src/main.rs into src, main, rs.
+    // Phrase query: tokenizer splits src/main.rs into src, main, rs
     let batches = ctx
         .sql("SELECT count(*) AS n FROM message WHERE text_search(text, '\"src main rs\"')")
         .await
@@ -54,7 +57,7 @@ async fn boolean_and_phrase_queries() {
         .value(0);
     assert!(n >= 1);
 
-    // No match.
+    // No match
     let batches = ctx
         .sql("SELECT count(*) AS n FROM message WHERE text_search(text, 'qwertyuiopasdf')")
         .await
@@ -89,7 +92,7 @@ async fn rowwise_composition() {
         .await
         .unwrap();
     let ids = col_strings(&batches[0], 0);
-    // Every session has a user message except none — all four appear.
+    // Every session has a user message except none — all four appear
     assert_eq!(ids.len(), 4);
 
     let batches = ctx
@@ -144,7 +147,7 @@ async fn search_with_session_filter() {
         .collect()
         .await
         .unwrap();
-    // tool_result (line 5) and final text (line 7) both contain hello.
+    // tool_result (line 5) and final text (line 7) both contain hello
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert!(total >= 1);
 

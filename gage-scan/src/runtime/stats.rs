@@ -30,11 +30,11 @@ fn to_f64(value: &Value) -> Result<f64, VmError> {
     let hash = value.type_hash();
 
     if hash == f64::HASH {
-        Ok(value.as_float().expect("value is f64 per type_hash"))
+        Ok(value.as_float().unwrap())
     } else if hash == i64::HASH {
-        Ok(value.as_signed().expect("value is i64 per type_hash") as f64)
+        Ok(value.as_signed().unwrap() as f64)
     } else if hash == u64::HASH {
-        Ok(value.as_unsigned().expect("value is u64 per type_hash") as f64)
+        Ok(value.as_unsigned().unwrap() as f64)
     } else {
         Err(VmError::panic(ExpectedNumber {
             actual: value.type_info().to_string(),
@@ -65,30 +65,27 @@ mod tests {
     use rune::{Context, Vm};
 
     fn call(expr: &str) -> Result<Value, VmError> {
-        let mut context = Context::with_default_modules().expect("default modules to build");
-        context
-            .install(module().expect("stats module to build"))
-            .expect("stats module to install");
-        let runtime =
-            Arc::try_new(context.runtime().expect("runtime to build")).expect("arc runtime");
+        let mut context = Context::with_default_modules().unwrap();
+        context.install(module().unwrap()).unwrap();
+        let runtime = Arc::try_new(context.runtime().unwrap()).unwrap();
 
         let mut sources = rune::Sources::new();
         sources
-            .insert(rune::Source::memory(format!("pub fn main() {{ {expr} }}")).expect("source"))
-            .expect("source to insert");
+            .insert(rune::Source::memory(format!("pub fn main() {{ {expr} }}")).unwrap())
+            .unwrap();
 
         let unit = rune::prepare(&mut sources)
             .with_context(&context)
             .build()
-            .expect("unit to build");
-        let mut vm = Vm::new(runtime, Arc::try_new(unit).expect("arc unit"));
+            .unwrap();
+        let mut vm = Vm::new(runtime, Arc::try_new(unit).unwrap());
 
         vm.call(["main"], ())
     }
 
     fn mean_of(expr: &str) -> Option<f64> {
-        let value = call(expr).expect("mean call to succeed");
-        rune::from_value::<Option<f64>>(value).expect("an Option<f64> result")
+        let value = call(expr).unwrap();
+        rune::from_value::<Option<f64>>(value).unwrap()
     }
 
     #[test]
@@ -126,7 +123,7 @@ mod tests {
 
     #[test]
     fn mean_rejects_non_numbers() {
-        let error = call("stats::mean([1, \"two\", 3])").expect_err("non-number should error");
+        let error = call("stats::mean([1, \"two\", 3])").unwrap_err();
         assert!(
             error.to_string().contains("expected a number"),
             "unexpected error: {error}"
@@ -135,22 +132,16 @@ mod tests {
 
     #[test]
     fn to_f64_coerces_signed() {
-        assert_eq!(
-            to_f64(&rune::to_value(3i64).expect("to_value")).expect("number"),
-            3.0
-        );
+        assert_eq!(to_f64(&rune::to_value(3i64).unwrap()).unwrap(), 3.0);
     }
 
     #[test]
     fn to_f64_coerces_float() {
-        assert_eq!(
-            to_f64(&rune::to_value(2.5f64).expect("to_value")).expect("number"),
-            2.5
-        );
+        assert_eq!(to_f64(&rune::to_value(2.5f64).unwrap()).unwrap(), 2.5);
     }
 
     #[test]
     fn to_f64_rejects_string() {
-        to_f64(&rune::to_value("nope").expect("to_value")).expect_err("string is not a number");
+        to_f64(&rune::to_value("nope").unwrap()).unwrap_err();
     }
 }

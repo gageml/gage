@@ -122,7 +122,7 @@ pub async fn run(args: ScanArgs) {
 }
 
 fn list(args: ScanListArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let runs = match scan::all(&conn) {
         Ok(r) => r,
         Err(e) => {
@@ -176,7 +176,7 @@ fn list(args: ScanListArgs) {
 }
 
 fn show(args: ScanShowArgs) {
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
     let run = match scan::get_scan(&conn, &args.scan_id) {
         Ok(r) => r,
         Err(e) => {
@@ -235,7 +235,7 @@ fn delete(args: ScanDeleteArgs) {
         std::process::exit(1);
     }
 
-    let conn = db::open_db();
+    let conn = db::open_db().unwrap();
 
     let mut runs: Vec<scan::Scan> = Vec::new();
     let mut errors = 0;
@@ -490,7 +490,7 @@ async fn run_dialog(
             }
         })
     };
-    let db = Arc::new(Mutex::new(db::open_db()));
+    let db = Arc::new(Mutex::new(db::open_db().unwrap()));
 
     // Notes and issues are no longer tied to a scan, so "what this scan
     // produced" is derived by diffing before/after: a note count for the
@@ -515,7 +515,7 @@ async fn run_dialog(
             if let Some(ui) = progress.as_mut() {
                 ui.handle(event);
             } else {
-                // --no-progress: route scanner stdout straight through.
+                // --no-progress: route scanner stdout straight through
                 use std::io::Write;
                 match &event {
                     gage_scan::event::ScanEvent::Print { s } => {

@@ -8,20 +8,31 @@
 
 These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 
-- **IMPORTANT: Do not ignore errors!** - Return errors to callers, or handle
-  them, or panic. Do not allow errors to be silently dropped.
+- **IMPORTANT: Do not ignore errors!** - The principle: when you discard a
+  `Result`'s `Err`, you are asserting "no signal here worth surfacing." That
+  assertion has to be defensible. The test: name the failure mode you are
+  discarding and why it doesn't matter. If you can't name it, you don't get to
+  discard it.
 
-  `.ok()` on a `Result` is banned. It drops the error. The only correct things
-  to do with a `Result` are: return it, handle both arms, or panic. If you
-  reached for `.ok()` to silence an unused-`Result` warning, use `.unwrap()`
-  instead.
+  Always wrong (no defensible reading):
+  - `.filter_map(|r| r.ok())` - collection-shaped burial; items vanish with no
+    diagnostic
+  - `let _ = result;` or bare `.ok();` as a statement - discards a `Result` you
+    should have examined
+  - `fn foo() -> bool { result.is_ok() }` - collapses a fallible operation into
+    yes/no; return `Result`
+  - Matching `Ok(x)` and explicitly dropping `Err(e)` to silence a real failure
 
-  Other examples of ignoring errors (what you must avoid):
-  - Matching `Ok(...)` and ignoring `Err`
-  - Returning `bool` in lieu of `Result`. If a function can fail, return
-    `Result`, not `bool`.
-  - Using `.is_ok()` / `.is_err()` to discard a `Result` (tail expression of a
-    fn, or `if x.is_ok() {}` with no error-handling branch).
+  Permitted when the `Err` variant is structurally meaningless at this call
+  site - i.e. the API exposes `Result` for type-system reasons, not because
+  there is information to act on:
+  - `if let Ok(x) = result { ... }` - env var probes, dynamic-type downcasts
+    (Rune, serde Value), best-effort enrichment whose absence is already
+    covered by adjacent output
+  - `result.ok()?` inside a function whose own signature returns `Option` and
+    where "absent" is the documented contract
+  - Prefer the `Option`-shaped API when one exists (`env::var_os` over
+    `env::var`)
 
 - **Handle errors at the call site.** When you call a function that returns
   `Result`, you must address the error --- propagate it with `?`, handle both
@@ -54,12 +65,9 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - Bad:
     `"splitn(2, ' ') always yields at least one element per the API contract"`
 
-  Banned patterns:
-  - `.filter_map(|r| r.ok())` - silently drops errors
-  - `if let Ok(x) = ...` without handling the `Err` case
-  - `match` on Result that discards the `Err` arm
-  - `fn ...() -> bool { ....is_ok() }` - use `Result`
-  - `.is_ok()` / `.is_err()` used to discard a `Result`
+  Other patterns to avoid:
+  - `.is_ok()` / `.is_err()` to discard a `Result` - same rule as above; if you
+    actually need the boolean (rare), name the discarded variant
 
 - `cargo clippy` must pass with no warnings before the change is done. Clippy
   runs the compiler too, so it covers what `cargo build` would catch. Do not
@@ -96,8 +104,16 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   ordering, naming, or splitting the file - not a banner. The reader infers
   structure from the code itself.
 
-- Do not end single-line comments (`//`) with periods. These are sentence
-  fragments, not prose. Doc comments (`///`) are exempt.
+- Comment puntuation rules:
+  - Sentences that provide background or details not obvious in the code should
+    end with periods
+  - Short fragments that demark sections or provide quick clarity to code
+    without filling in detail should not use periods
+
+  Rule of thumb: If it reads like a description, use periods. If it reads like
+  a label or title, omit the period.
+
+  Doc comments (`///`) are prose and follow normal conventions.
 
 - **Use `Path` / `PathBuf` for filesystem paths, not `&str` / `String`.**
   Function parameters, struct fields, and return values that represent a

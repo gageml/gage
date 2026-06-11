@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 
 /// Find the `claude` binary on PATH.
 pub fn find_claude() -> io::Result<PathBuf> {
-    which("claude").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "claude binary not found on PATH")
-    })
+    which("claude")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "claude binary not found on PATH"))
 }
 
 /// Simple PATH lookup (avoids adding a dependency).

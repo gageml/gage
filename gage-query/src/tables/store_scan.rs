@@ -77,10 +77,8 @@ pub(crate) fn unqualify(expr: &Expr) -> Expr {
 
 /// Whether an expression references the `text_search` UDF anywhere.
 pub(crate) fn references_text_search(expr: &Expr) -> bool {
-    expr.exists(|e| {
-        Ok(matches!(e, Expr::ScalarFunction(sf) if sf.func.name() == TEXT_SEARCH_NAME))
-    })
-    .unwrap_or(true)
+    expr.exists(|e| Ok(matches!(e, Expr::ScalarFunction(sf) if sf.func.name() == TEXT_SEARCH_NAME)))
+        .unwrap_or(true)
 }
 
 /// Extract the queries of `text_search(text, '<literal>')` conjuncts —

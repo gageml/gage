@@ -85,7 +85,7 @@ pub struct Fault {
 /// Compilation artifacts + per-scanner mutable bits that survive the
 /// run. The `Vm` is not stored here — a fresh one is built per task.
 #[allow(dead_code)] // embed_key/source_path/source are kept for
-// future scan_progress / error reporting work.
+// future scan_progress / error reporting work
 pub struct ScannerSlot {
     pub name: String,
     pub embed_key: String,
