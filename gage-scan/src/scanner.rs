@@ -484,7 +484,7 @@ impl ScannerRegistry {
     /// composite name `{declared_name}[{display_path}]`. Returns the
     /// composite name on success — pass it to `Scanner::from_spec`.
     pub fn register_file(&mut self, path: &Path) -> Result<String, RegisterFileError> {
-        if !path.extension().is_some_and(|ext| ext == "rn") {
+        if path.extension().is_none_or(|ext| ext != "rn") {
             return Err(RegisterFileError::Extension(path.display().to_string()));
         }
         let abs = path
