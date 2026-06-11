@@ -673,6 +673,7 @@ fn render_task_error(err: rune::runtime::Value) -> String {
 
 fn build_session_ctx(session_id: &str, path: &Path) -> DfSessionContext {
     let ctx = DfSessionContext::new();
+    gage_query::register_udfs(&ctx);
     let entry = EntryTable::with_session(session_id.to_string(), path.to_path_buf());
     let message = MessageTable::with_session(session_id.to_string(), path.to_path_buf());
     ctx.register_table("entry", std::sync::Arc::new(entry))

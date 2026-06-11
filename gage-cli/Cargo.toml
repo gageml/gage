@@ -17,6 +17,7 @@ gage-db = { path = "../gage-db" }
 gage-mcp = { path = "../gage-mcp" }
 gage-tui = { path = "../gage-tui" }
 gage-claude = { path = "../gage-claude" }
+gage-index = { path = "../gage-index" }
 humantime = "2"
 libc = "0.2"
 tabled = { version = "0.20", features = ["ansi"] }

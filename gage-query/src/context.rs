@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use datafusion::prelude::{SessionConfig, SessionContext};
+use gage_index::IndexStore;
 
 use crate::tables::config::ConfigTable;
 use crate::tables::entry::EntryTable;
@@ -21,19 +22,43 @@ fn default_root() -> PathBuf {
     home.join(".claude").join("projects")
 }
 
-pub async fn create_context_default() -> SessionContext {
-    create_context(&default_root()).await
+fn default_cache_dir() -> PathBuf {
+    gage_core::config::gage_home().join("cache")
 }
 
-pub async fn create_context(root: &Path) -> SessionContext {
+/// The derived-artifacts handle for the default corpus and cache
+/// locations — what `gage query`, the MCP server, and `gage index`
+/// all share.
+pub fn default_index_store() -> IndexStore {
+    IndexStore::new(default_root(), default_cache_dir())
+}
+
+pub async fn create_context_default() -> SessionContext {
+    create_context(&default_root(), &default_cache_dir()).await
+}
+
+/// Register the gage UDFs (`text_search`, plus the JSON function
+/// suite) on a context. Used by `create_context` and by contexts
+/// built elsewhere (e.g. gage-scan's per-session scanner context).
+pub fn register_udfs(ctx: &SessionContext) {
+    let mut ctx_clone = ctx.clone();
+    datafusion_functions_json::register_all(&mut ctx_clone).unwrap();
+    ctx.register_udf(crate::udf::text_search_udf());
+}
+
+/// Build a query context over the session corpus at `root`, with
+/// derived artifacts cached under `cache_dir`. Queries against the
+/// session-file tables reconcile the artifacts lazily.
+pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
     let config = SessionConfig::new().with_information_schema(true);
-    let mut ctx = SessionContext::new_with_config(config);
-    datafusion_functions_json::register_all(&mut ctx).unwrap();
-    ctx.register_table("session", Arc::new(SessionTable::new(root)))
+    let ctx = SessionContext::new_with_config(config);
+    register_udfs(&ctx);
+    let store = Arc::new(IndexStore::new(root, cache_dir));
+    ctx.register_table("session", Arc::new(SessionTable::new(store.clone())))
         .unwrap();
-    ctx.register_table("entry", Arc::new(EntryTable::new(root)))
+    ctx.register_table("entry", Arc::new(EntryTable::new(store.clone())))
         .unwrap();
-    ctx.register_table("message", Arc::new(MessageTable::new(root)))
+    ctx.register_table("message", Arc::new(MessageTable::new(store)))
         .unwrap();
     ctx.register_table("note", Arc::new(NoteTable::new()))
         .unwrap();

@@ -29,7 +29,15 @@ pub async fn main(args: QueryArgs) {
     let result = if let Some(sql) = args.command {
         gage_query::exec_command(&ctx, &sql, args.format).await
     } else {
-        gage_query::run_repl(&ctx, args.format, args.quiet, args.timing, args.stats).await
+        gage_query::run_repl(
+            &ctx,
+            Some(gage_query::default_index_store()),
+            args.format,
+            args.quiet,
+            args.timing,
+            args.stats,
+        )
+        .await
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");

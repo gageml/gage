@@ -45,6 +45,7 @@ async fn exec_with_stats(
 
 pub async fn run_repl(
     ctx: &SessionContext,
+    index_store: Option<gage_index::IndexStore>,
     mut format: PrintFormat,
     quiet: bool,
     timing: bool,
@@ -68,6 +69,7 @@ pub async fn run_repl(
         format: &mut format,
         timing,
         stats,
+        index_store,
     };
     let mut buf = String::new();
 
@@ -127,6 +129,7 @@ struct ReplState<'a> {
     format: &'a mut PrintFormat,
     timing: bool,
     stats: bool,
+    index_store: Option<gage_index::IndexStore>,
 }
 
 fn report(stats: &QueryStats, state: &ReplState<'_>) {
@@ -190,10 +193,23 @@ async fn handle_backslash(
         }
         "\\timing" => state.timing = parse_toggle(arg, state.timing, "Timing"),
         "\\stats" => state.stats = parse_toggle(arg, state.stats, "Stats"),
+        "\\index" => match &state.index_store {
+            // The diagnostic for "why didn't my search find X" —
+            // one-directional index staleness is otherwise invisible.
+            Some(store) => {
+                let store = store.clone();
+                match tokio::task::spawn_blocking(move || store.status()).await {
+                    Ok(status) => println!("{status}"),
+                    Err(e) => eprintln!("Error: {e}"),
+                }
+            }
+            None => eprintln!("No index store configured for this session"),
+        },
         "\\?" | "\\help" => {
             println!("\\d              List tables");
             println!("\\d <table>      Show table schema");
             println!("\\format <fmt>   Set output format (table, csv, json, ndjson, yaml)");
+            println!("\\index          Show derived store / text index status");
             println!("\\timing [on|off]  Toggle query wall-clock time");
             println!("\\stats [on|off]   Toggle per-operator plan metrics");
             println!("\\q              Quit");

@@ -27,7 +27,7 @@ async fn value_object_is_queryable_through_json_functions() {
     note::insert(&conn, &note).unwrap();
     drop(conn);
 
-    let ctx = gage_query::create_context(tmp.path()).await;
+    let ctx = gage_query::create_context(tmp.path(), &tmp.path().join("cache")).await;
     let batches = ctx
         .sql(
             "SELECT name, json_get_int(value, 'fast', 'count') AS count \

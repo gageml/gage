@@ -1,51 +1,75 @@
 use std::any::Any;
-use std::fmt::{self, Formatter};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
-use chrono::DateTime;
-use datafusion::arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
-use datafusion::arrow::compute::SortOptions;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion::arrow::array::{Array, BooleanArray, StringArray};
+use datafusion::arrow::compute::filter_record_batch;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
-use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::Result;
-use datafusion::execution::context::TaskContext;
-use datafusion::physical_expr::expressions::col;
-use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::memory::MemoryStream;
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream,
-};
+use datafusion::common::DFSchema;
+use datafusion::datasource::{MemTable, TableProvider, TableType};
+use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::context::ExecutionProps;
+use datafusion::logical_expr::expr_fn::in_list;
+use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::prelude::*;
-use gage_claude::entry::{entry_attachment_blocks, entry_subtype, split_ide_tags};
-use gage_claude::session::{SessionInfo, SessionListBuilder};
-use gage_claude::session_reader::SessionReader;
+use gage_index::{
+    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TEXT,
+    COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+};
 
 use super::SessionSource;
+use super::store_scan::{
+    reconcile_for_query, references_text_search, scan_store_files, store_files,
+    text_search_queries, unqualify,
+};
 use crate::filter::{self, IdFilter};
 
+/// The store columns serving the `message` table, in table-column
+/// order. The table is a filter over the store —
+/// `type IN ('user','assistant') AND text IS NOT NULL` — since the
+/// derivation leaves `text` non-null (possibly empty) exactly for
+/// message rows.
+const STORE_PROJECTION: &[usize] = &[
+    COL_SESSION_ID,
+    COL_LINE,
+    COL_UUID,
+    COL_TYPE,
+    COL_SUBTYPE,
+    COL_TEXT,
+    COL_TIMESTAMP,
+    COL_ATTACHMENTS,
+    COL_IDE_TAGS,
+    COL_RAW,
+];
+
+/// Cap on `line IN (...)` pushdown. Above this, matched coordinates
+/// still prune files but row groups scan unpruned — a huge IN list
+/// costs more in planning than it saves in decode.
+const LINE_PUSHDOWN_CAP: usize = 1000;
+
+static MESSAGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    Arc::new(
+        gage_index::store_schema()
+            .project(STORE_PROJECTION)
+            .expect("store schema serves message projection"),
+    )
+});
+
 fn message_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("session_id", DataType::Utf8, false),
-        Field::new("line", DataType::Int64, false),
-        Field::new("uuid", DataType::Utf8, true),
-        Field::new("type", DataType::Utf8, false),
-        Field::new("subtype", DataType::Utf8, true),
-        Field::new("text", DataType::Utf8, false),
-        Field::new(
-            "timestamp",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            true,
-        ),
-        Field::new("attachments", DataType::Utf8, true),
-        Field::new("ide_tags", DataType::Utf8, true),
-        Field::new("raw", DataType::Utf8, false),
-    ]))
+    MESSAGE_SCHEMA.clone()
+}
+
+/// The exact row condition distinguishing message rows in the store.
+fn message_row_filter() -> Expr {
+    in_list(col("type"), vec![lit("user"), lit("assistant")], false)
+        .and(col("text").is_not_null())
 }
 
 #[derive(Debug, Clone)]
@@ -55,9 +79,9 @@ pub struct MessageTable {
 }
 
 impl MessageTable {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(store: Arc<IndexStore>) -> Self {
         Self {
-            source: SessionSource::Root(root.into()),
+            source: SessionSource::Store(store),
             schema: message_schema(),
         }
     }
@@ -92,6 +116,12 @@ impl TableProvider for MessageTable {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
+        // `session_id`-only filters are Exact (applied by file
+        // pruning). Everything else — including `text_search`
+        // conjuncts — is Inexact: DataFusion re-applies the predicate
+        // row-wise over the scanned rows, which is what makes index
+        // staleness one-directional (a stale index can omit rows but
+        // never wrongly include one).
         let support = filters
             .iter()
             .map(|f| filter::pushdown(f, "session_id"))
@@ -101,459 +131,175 @@ impl TableProvider for MessageTable {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let session_id_filter = IdFilter::new(filters, "session_id")?;
-        let projected_schema = match projection {
-            Some(indices) => Arc::new(self.schema.project(indices)?),
-            None => self.schema.clone(),
-        };
-        Ok(Arc::new(MessageExec::new(
-            self.schema.clone(),
-            projected_schema,
-            self.source.clone(),
-            projection.cloned(),
-            session_id_filter,
-            limit,
-        )))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct MessageExec {
-    source: SessionSource,
-    full_schema: SchemaRef,
-    projected_schema: SchemaRef,
-    projection: Option<Vec<usize>>,
-    session_id_filter: Option<IdFilter>,
-    limit: Option<usize>,
-    properties: PlanProperties,
-}
-
-impl MessageExec {
-    fn new(
-        full_schema: SchemaRef,
-        projected_schema: SchemaRef,
-        source: SessionSource,
-        projection: Option<Vec<usize>>,
-        session_id_filter: Option<IdFilter>,
-        limit: Option<usize>,
-    ) -> Self {
-        let eq_properties = line_ordered_eq_properties(&projected_schema);
-        let properties = PlanProperties::new(
-            eq_properties,
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        );
-        Self {
-            source,
-            full_schema,
-            projected_schema,
-            projection,
-            session_id_filter,
-            limit,
-            properties,
-        }
-    }
-}
-
-/// Build `EquivalenceProperties` advertising `[line ASC]` when the
-/// projection retains the `line` column. `SessionReader` emits rows
-/// top-to-bottom, so this ordering is the natural one. Advertising it
-/// lets DataFusion's `EnforceSorting` rule remove a redundant
-/// `ORDER BY line` from author SQL at plan time.
-fn line_ordered_eq_properties(projected_schema: &SchemaRef) -> EquivalenceProperties {
-    match col("line", projected_schema) {
-        Ok(line_expr) => {
-            let sort = PhysicalSortExpr {
-                expr: line_expr,
-                options: SortOptions {
-                    descending: false,
-                    nulls_first: false,
-                },
-            };
-            EquivalenceProperties::new_with_orderings(projected_schema.clone(), [[sort]])
-        }
-        Err(_) => EquivalenceProperties::new(projected_schema.clone()),
-    }
-}
-
-impl DisplayAs for MessageExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "MessageExec")
-    }
-}
-
-/// Extract the text representation of a raw session entry.
-///
-/// Extracts text from `message.content` blocks (text, thinking,
-/// tool_use, tool_result) and joins them with `\n\n`. Returns `None`
-/// for non-message entries or messages with no text content.
-///
-/// The returned text may contain leading IDE tags — callers that need
-/// them separated should pass the result through `split_ide_tags`.
-pub fn entry_text(entry: &serde_json::Value) -> Option<String> {
-    let type_str = match entry.get("type").and_then(|v| v.as_str()) {
-        Some(t @ ("user" | "assistant")) => t,
-        _ => return None,
-    };
-
-    let content = match entry.get("message").and_then(|m| m.get("content")) {
-        Some(serde_json::Value::Array(arr)) => arr.clone(),
-        Some(serde_json::Value::String(s)) => {
-            vec![serde_json::json!({"type": "text", "text": s})]
-        }
-        _ => return None,
-    };
-
-    let mut texts: Vec<String> = Vec::new();
-
-    for block in &content {
-        let block_type = match block.get("type").and_then(|v| v.as_str()) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        match (type_str, block_type) {
-            (_, "text") => {
-                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                    texts.push(t.to_string());
-                }
-            }
-            ("assistant", "thinking") => {
-                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
-                    texts.push(t.to_string());
-                }
-            }
-            ("assistant", "tool_use") => {
-                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let input = block
-                    .get("input")
-                    .and_then(|v| v.as_object())
-                    .cloned()
-                    .unwrap_or_default();
-                texts.push(format_tool_call_text(name, &input));
-            }
-            ("user", "tool_result") => {
-                texts.push(tool_result_text(block));
-            }
-            _ => {}
-        }
-    }
-
-    if texts.is_empty() {
-        None
-    } else {
-        Some(texts.join("\n\n"))
-    }
-}
-
-fn format_tool_call_text(name: &str, input: &serde_json::Map<String, serde_json::Value>) -> String {
-    // Build a YAML mapping: tool name as key, arguments as nested map
-    let mut mapping = serde_yaml::Mapping::new();
-    let args_mapping: serde_yaml::Mapping = input
-        .iter()
-        .map(|(k, v)| (serde_yaml::Value::String(k.clone()), json_to_yaml(v)))
-        .collect();
-    mapping.insert(
-        serde_yaml::Value::String(name.to_string()),
-        serde_yaml::Value::Mapping(args_mapping),
-    );
-    let yaml = serde_yaml::to_string(&mapping).unwrap_or_default();
-    // serde_yaml adds a trailing newline; trim it for the header portion
-    yaml.trim_end().to_string()
-}
-
-fn json_to_yaml(v: &serde_json::Value) -> serde_yaml::Value {
-    match v {
-        serde_json::Value::Null => serde_yaml::Value::Null,
-        serde_json::Value::Bool(b) => serde_yaml::Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                serde_yaml::Value::Number(i.into())
-            } else if let Some(f) = n.as_f64() {
-                serde_yaml::Value::Number(serde_yaml::Number::from(f))
-            } else {
-                serde_yaml::Value::String(n.to_string())
-            }
-        }
-        serde_json::Value::String(s) => serde_yaml::Value::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            serde_yaml::Value::Sequence(arr.iter().map(json_to_yaml).collect())
-        }
-        serde_json::Value::Object(map) => {
-            let m: serde_yaml::Mapping = map
-                .iter()
-                .map(|(k, v)| (serde_yaml::Value::String(k.clone()), json_to_yaml(v)))
-                .collect();
-            serde_yaml::Value::Mapping(m)
-        }
-    }
-}
-
-struct MessageBuilders {
-    session_ids: StringBuilder,
-    lines: Int64Builder,
-    uuids: StringBuilder,
-    types: StringBuilder,
-    subtypes: StringBuilder,
-    texts: StringBuilder,
-    timestamps: TimestampMillisecondBuilder,
-    attachments: StringBuilder,
-    ide_tags: StringBuilder,
-    raws: StringBuilder,
-}
-
-impl MessageBuilders {
-    fn new() -> Self {
-        Self {
-            session_ids: StringBuilder::new(),
-            lines: Int64Builder::new(),
-            uuids: StringBuilder::new(),
-            types: StringBuilder::new(),
-            subtypes: StringBuilder::new(),
-            texts: StringBuilder::new(),
-            timestamps: TimestampMillisecondBuilder::new(),
-            attachments: StringBuilder::new(),
-            ide_tags: StringBuilder::new(),
-            raws: StringBuilder::new(),
-        }
-    }
-
-    fn finish(mut self, schema: SchemaRef) -> datafusion::error::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(self.session_ids.finish()),
-                Arc::new(self.lines.finish()),
-                Arc::new(self.uuids.finish()),
-                Arc::new(self.types.finish()),
-                Arc::new(self.subtypes.finish()),
-                Arc::new(self.texts.finish()),
-                Arc::new(self.timestamps.finish().with_timezone("UTC")),
-                Arc::new(self.attachments.finish()),
-                Arc::new(self.ide_tags.finish()),
-                Arc::new(self.raws.finish()),
-            ],
-        )?)
-    }
-}
-
-/// Extract tool_result text from a content block's `content` field,
-/// which may be a string or an array of content items.
-fn tool_result_text(block: &serde_json::Value) -> String {
-    match block.get("content") {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(arr)) => {
-            let mut parts = Vec::new();
-            for item in arr {
-                if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                    parts.push(t);
-                }
-            }
-            parts.join("\n")
-        }
-        _ => String::new(),
-    }
-}
-
-/// Process a single session file into message rows (one row per entry).
-///
-/// Text content blocks are joined with `\n\n` into the `text` column.
-/// Everything else (thinking, tool_use, tool_result, image) goes into
-/// the `attachments` column as a JSON array.
-fn process_session(
-    session_id: &str,
-    path: &Path,
-    limit: Option<usize>,
-    b: &mut MessageBuilders,
-) -> usize {
-    let reader = match SessionReader::open(path) {
-        Ok(r) => r,
-        Err(_) => return 0,
-    };
-
-    let mut count = 0;
-    for result in reader {
-        if limit.is_some_and(|l| count >= l) {
-            break;
-        }
-        let (line_num, entry) = match result {
-            Ok(pair) => pair,
-            Err(_) => continue,
-        };
-
-        let type_str = match entry.get("type").and_then(|v| v.as_str()) {
-            Some(t @ ("user" | "assistant")) => t,
-            _ => continue,
-        };
-
-        let entry_uuid = entry.get("uuid").and_then(|v| v.as_str()).map(String::from);
-        let ts_ms = match entry.get("timestamp").and_then(|v| v.as_str()) {
-            Some(s) => match DateTime::parse_from_rfc3339(s) {
-                Ok(dt) => Some(dt.timestamp_millis()),
-                Err(e) => {
-                    tracing::warn!(
-                        session_id,
-                        line = line_num,
-                        timestamp = s,
-                        "unparseable message timestamp: {e}"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-
-        // Skip entries whose `message.content` is absent or neither an
-        // array nor a string — preserving the prior table-builder
-        // behavior of dropping malformed shapes.
-        match entry.get("message").and_then(|m| m.get("content")) {
-            Some(serde_json::Value::Array(_)) | Some(serde_json::Value::String(_)) => {}
-            _ => continue,
-        }
-
-        let subtype = entry_subtype(&entry);
-
-        let mut attachments: Vec<serde_json::Value> = Vec::new();
-        for block in entry_attachment_blocks(&entry) {
-            let content_index = entry
-                .pointer("/message/content")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.iter().position(|b| std::ptr::eq(b, block)))
-                .unwrap_or(0);
-            let mut att = block.clone();
-            if let Some(obj) = att.as_object_mut() {
-                obj.insert(
-                    "ref".to_string(),
-                    serde_json::json!([line_num, content_index]),
-                );
-            }
-            attachments.push(att);
-        }
-
-        let joined = entry_text(&entry).unwrap_or_default();
-        let (text, ide_tags) = split_ide_tags(&joined);
-
-        let attachments_json = if attachments.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Array(attachments).to_string())
-        };
-
-        b.session_ids.append_value(session_id);
-        b.lines.append_value(line_num as i64);
-        match &entry_uuid {
-            Some(v) => b.uuids.append_value(v),
-            None => b.uuids.append_null(),
-        }
-        b.types.append_value(type_str);
-        match subtype {
-            Some(v) => b.subtypes.append_value(v),
-            None => b.subtypes.append_null(),
-        };
-        b.texts.append_value(&text);
-        b.timestamps.append_option(ts_ms);
-        match &attachments_json {
-            Some(v) => b.attachments.append_value(v),
-            None => b.attachments.append_null(),
-        }
-        match &ide_tags {
-            Some(v) => b.ide_tags.append_value(v),
-            None => b.ide_tags.append_null(),
-        }
-        b.raws.append_value(entry.to_string());
-        count += 1;
-    }
-    count
-}
-
-impl ExecutionPlan for MessageExec {
-    fn name(&self) -> &'static str {
-        "MessageExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
-    }
-
-    fn fetch(&self) -> Option<usize> {
-        self.limit
-    }
-
-    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
-        Some(Arc::new(MessageExec::new(
-            self.full_schema.clone(),
-            self.projected_schema.clone(),
-            self.source.clone(),
-            self.projection.clone(),
-            self.session_id_filter.clone(),
-            limit,
-        )))
-    }
-
-    fn execute(
-        &self,
-        _partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> Result<SendableRecordBatchStream> {
-        let mut builders = MessageBuilders::new();
-        let mut remaining = self.limit;
-
         match &self.source {
-            SessionSource::Root(root) => {
-                let sessions = SessionListBuilder::new().root(root).build();
-                let sessions: Vec<SessionInfo> = match &self.session_id_filter {
-                    Some(f) => f.retain(sessions, |s| s.id.as_str())?,
-                    None => sessions.into_iter().collect(),
-                };
-                for session in &sessions {
-                    if remaining == Some(0) {
-                        break;
-                    }
-                    let added =
-                        process_session(&session.id, &session.src, remaining, &mut builders);
-                    if let Some(ref mut r) = remaining {
-                        *r = r.saturating_sub(added);
-                    }
-                }
+            SessionSource::Store(store) => {
+                self.scan_store(store, state, projection, filters).await
             }
             SessionSource::SingleSession { session_id, path } => {
-                let keep = match &self.session_id_filter {
+                let keep = match IdFilter::new(filters, "session_id")? {
                     Some(f) => f.matches(session_id)?,
                     None => true,
                 };
-                if keep {
-                    process_session(session_id, path, remaining, &mut builders);
-                }
+                let batch = if keep {
+                    derive_message_batch(session_id, path).await?
+                } else {
+                    RecordBatch::new_empty(self.schema.clone())
+                };
+                let mem = MemTable::try_new(self.schema.clone(), vec![vec![batch]])?;
+                mem.scan(state, projection, &[], limit).await
+            }
+        }
+    }
+}
+
+impl MessageTable {
+    async fn scan_store(
+        &self,
+        store: &Arc<IndexStore>,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        reconcile_for_query(store).await?;
+        let mut files = store_files(store, filters, "session_id")?;
+
+        // Index acceleration: `text_search(text, '<literal>')`
+        // conjuncts prune the scan to matched coordinates. The
+        // pushdown is Inexact, so DataFusion re-applies the predicate
+        // over whatever we return — false positives are filtered, and
+        // only omissions (bounded staleness) are possible.
+        let queries = text_search_queries(filters);
+        let mut line_filter: Option<Expr> = None;
+        if !queries.is_empty() {
+            let coords = search_coordinates(store, queries).await?;
+            let matched: HashSet<&str> = coords.iter().map(|(id, _)| id.as_str()).collect();
+            files.retain(|(id, _)| matched.contains(id.as_str()));
+            if coords.len() <= LINE_PUSHDOWN_CAP {
+                let lines: HashSet<i64> = coords.iter().map(|(_, line)| *line).collect();
+                let mut lines: Vec<i64> = lines.into_iter().collect();
+                lines.sort_unstable();
+                line_filter = Some(in_list(
+                    col("line"),
+                    lines.into_iter().map(lit).collect(),
+                    false,
+                ));
             }
         }
 
-        let batch = builders.finish(self.full_schema.clone())?;
+        // Inner scan: the requested columns plus whatever the exact
+        // filter below needs.
+        let table_projection: Vec<usize> = match projection {
+            Some(indices) => indices.clone(),
+            None => (0..self.schema.fields().len()).collect(),
+        };
+        let mut store_projection: Vec<usize> = table_projection
+            .iter()
+            .filter_map(|&i| STORE_PROJECTION.get(i).copied())
+            .collect();
+        let requested = store_projection.len();
+        let mut extras = vec![COL_TYPE, COL_TEXT];
+        if line_filter.is_some() {
+            extras.push(COL_LINE);
+        }
+        for extra in extras {
+            if !store_projection.contains(&extra) {
+                store_projection.push(extra);
+            }
+        }
 
-        Ok(Box::pin(MemoryStream::try_new(
-            vec![batch],
-            self.projected_schema.clone(),
-            self.projection.clone(),
-        )?))
+        let forwarded: Vec<Expr> = filters
+            .iter()
+            .filter(|f| !references_text_search(f))
+            .map(unqualify)
+            .collect();
+        let paths: Vec<PathBuf> = files.into_iter().map(|(_, path)| path).collect();
+        let inner =
+            scan_store_files(state, &paths, Some(store_projection.clone()), &forwarded, None)
+                .await?;
+
+        // The message-row condition must hold exactly, so apply it as
+        // a filter over the scan. The matched-coordinate `line IN`
+        // restriction rides in the same conjunction; DataFusion's
+        // physical filter-pushdown moves both into the Parquet source
+        // as its pruning predicate (row-group pruning on `line` and
+        // `type` statistics).
+        let mut exact = message_row_filter();
+        if let Some(expr) = line_filter {
+            exact = exact.and(expr);
+        }
+        let inner_schema = inner.schema();
+        let df_schema = DFSchema::try_from(inner_schema.clone())?;
+        let predicate = create_physical_expr(&exact, &df_schema, &ExecutionProps::new())?;
+        let filtered: Arc<dyn ExecutionPlan> = Arc::new(FilterExec::try_new(predicate, inner)?);
+
+        // Project away the helper columns if the request didn't
+        // include them.
+        if store_projection.len() == requested {
+            return Ok(filtered);
+        }
+        let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = (0..requested)
+            .map(|i| {
+                let name = inner_schema.field(i).name().clone();
+                let expr = datafusion::physical_expr::expressions::col(&name, &inner_schema)?;
+                Ok((expr, name))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Arc::new(ProjectionExec::try_new(exprs, filtered)?))
     }
+}
+
+/// Run the index search for each accelerated conjunct and intersect
+/// the coordinate sets (conjuncts AND together).
+async fn search_coordinates(
+    store: &Arc<IndexStore>,
+    queries: Vec<String>,
+) -> Result<HashSet<(String, i64)>> {
+    let store = Arc::clone(store);
+    tokio::task::spawn_blocking(move || -> gage_index::Result<HashSet<(String, i64)>> {
+        let mut acc: Option<HashSet<(String, i64)>> = None;
+        for query in &queries {
+            let set: HashSet<(String, i64)> = store.search(query)?.into_iter().collect();
+            acc = Some(match acc {
+                Some(prev) => prev.intersection(&set).cloned().collect(),
+                None => set,
+            });
+        }
+        Ok(acc.unwrap_or_default())
+    })
+    .await
+    .map_err(|e| DataFusionError::Execution(format!("index search task failed: {e}")))?
+    .map_err(|e| DataFusionError::Execution(format!("index search failed: {e}")))
+}
+
+/// Derive one session's message rows in memory — the per-session
+/// scanner context, which bypasses the store.
+async fn derive_message_batch(session_id: &str, path: &Path) -> Result<RecordBatch> {
+    let session_id = session_id.to_string();
+    let path = path.to_path_buf();
+    let derived = tokio::task::spawn_blocking(move || gage_index::derive_session(&session_id, &path))
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("derive task failed: {e}")))?;
+    let batch = match derived {
+        Ok(derived) => derived.batch,
+        Err(e) => {
+            tracing::debug!("session not derivable: {e}");
+            return Ok(RecordBatch::new_empty(message_schema()));
+        }
+    };
+    // Message rows: text is non-null exactly for them.
+    let texts = batch
+        .column(COL_TEXT)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| DataFusionError::Internal("store text column type".into()))?;
+    let mask: BooleanArray = (0..batch.num_rows())
+        .map(|i| Some(texts.is_valid(i)))
+        .collect();
+    let filtered = filter_record_batch(&batch, &mask)?;
+    Ok(filtered.project(STORE_PROJECTION)?)
 }

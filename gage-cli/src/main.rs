@@ -26,6 +26,7 @@ fn install_panic_hook() {
 
 mod author;
 mod cmd_config;
+mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
 mod cmd_note;
@@ -80,6 +81,8 @@ enum Command {
     Mcp,
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
+    /// Reconcile the derived session store and text index
+    Index(cmd_index::IndexArgs),
 }
 
 fn parse_duration(s: &str) -> Result<Duration, DurationError> {
@@ -147,6 +150,7 @@ async fn main() {
                 }
             }
             Command::Query(args) => cmd_query::main(args).await,
+            Command::Index(args) => cmd_index::run(args).await,
         }
     };
     tokio::pin!(cmd);

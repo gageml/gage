@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::fmt::{self, Formatter};
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -26,19 +25,17 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion::prelude::*;
-use gage_claude::entry::{entry_to_text, split_ide_tags};
 use gage_claude::session::{SessionInfo, SessionListBuilder};
-use gage_claude::session_reader::SessionReader;
+use gage_index::{IndexStore, SessionAggregates};
 
+use super::store_scan::reconcile_for_query;
 use crate::filter::{self, IdFilter};
 
 // Column layout in the merged `session` schema. Cheap columns
 // (filled from the directory walk) come first; expensive columns
-// (filled by parsing the session JSONL) come after. The expensive
-// region starts at `EXPENSIVE_START` and `message_count` lives at
-// `COL_MESSAGE_COUNT` — these two indices are load-bearing.
+// (read from the store's consolidated aggregates) come after,
+// starting at `EXPENSIVE_START`.
 const EXPENSIVE_START: usize = 5; // title is the first expensive column
-const COL_MESSAGE_COUNT: usize = 7;
 const NUM_COLS: usize = 13;
 
 fn session_schema() -> SchemaRef {
@@ -63,173 +60,16 @@ fn session_schema() -> SchemaRef {
     ]))
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ScannedRow {
-    pub model: Option<String>,
-    pub message_count: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_input_tokens: i64,
-    pub cache_creation_input_tokens: i64,
-    pub title: Option<String>,
-    pub is_empty: bool,
-}
-
-/// Fast message count using byte-level matching. No JSON parsing.
-fn fast_message_count(path: &Path) -> i64 {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0,
-    };
-    let reader = BufReader::new(file);
-    let mut count: i64 = 0;
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if line.contains("\"type\":\"user\"")
-            || line.contains("\"type\": \"user\"")
-            || line.contains("\"type\":\"assistant\"")
-            || line.contains("\"type\": \"assistant\"")
-        {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// Maximum number of characters of source text to include when
-/// deriving a title from the first usable user message. When the
-/// source is longer it is truncated and a trailing `...` is appended.
-const MAX_TITLE_LEN_FROM_MSG: usize = 60;
-
-/// Derive a session title from a user entry, used as a fallback when
-/// no `ai-title` entry is present. Returns `None` when the entry has
-/// no usable text (e.g. purely tag-wrapped meta content) so the caller
-/// can keep scanning.
-fn session_title_from_entry(entry: &serde_json::Value) -> Option<String> {
-    let text = entry_to_text(entry);
-    let (body, _ide_tags) = split_ide_tags(&text);
-    let line_end = body.find('\n').unwrap_or(body.len());
-    let line = body[..line_end].trim();
-    if line.is_empty() {
-        return None;
-    }
-    Some(truncate_with_ellipsis(line, MAX_TITLE_LEN_FROM_MSG))
-}
-
-fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let truncated: String = s.chars().take(max_chars).collect();
-    format!("{}...", truncated.trim_end())
-}
-
-/// Whether a session entry carries real conversational content, used
-/// to decide whether a session is empty. An assistant turn always
-/// counts. A user turn counts only when its message is more than
-/// out-of-band tags: a single content string that is empty after
-/// stripping IDE/harness tags (the local-command caveat, slash-command
-/// echoes like `/exit`, local-command stdout) does not count.
-/// Non-message entries (permission-mode, file-history-snapshot, …)
-/// never count.
-fn entry_has_content(entry: &serde_json::Value) -> bool {
-    match entry.get("type").and_then(|t| t.as_str()) {
-        Some("assistant") => true,
-        Some("user") => match entry.get("message").and_then(|m| m.get("content")) {
-            Some(serde_json::Value::String(s)) => !split_ide_tags(s).0.trim().is_empty(),
-            Some(serde_json::Value::Array(blocks)) => !blocks.is_empty(),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-/// Scan a single session file and return the expensive-column values
-/// plus the number of lines read. Exposed for test use.
-pub(crate) fn scan_session(path: &Path) -> (ScannedRow, usize) {
-    let mut row = ScannedRow {
-        is_empty: true,
-        ..Default::default()
-    };
-
-    let reader = match SessionReader::open(path) {
-        Ok(r) => r,
-        Err(_) => return (row, 0),
-    };
-    let mut lines_read: usize = 0;
-
-    for result in reader {
-        let (_line_num, v) = match result {
-            Ok(pair) => pair,
-            Err(_) => continue,
-        };
-        lines_read += 1;
-
-        if row.is_empty && entry_has_content(&v) {
-            row.is_empty = false;
-        }
-
-        let entry_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-        match entry_type {
-            "user" | "assistant" => {
-                row.message_count += 1;
-
-                if entry_type == "assistant" {
-                    let msg = v.get("message");
-
-                    if row.model.is_none() {
-                        row.model = msg
-                            .and_then(|m| m.get("model"))
-                            .and_then(|m| m.as_str())
-                            .map(String::from);
-                    }
-
-                    if let Some(usage) = msg.and_then(|m| m.get("usage")) {
-                        row.input_tokens += usage
-                            .get("input_tokens")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                        row.output_tokens += usage
-                            .get("output_tokens")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                        row.cache_read_input_tokens += usage
-                            .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                        row.cache_creation_input_tokens += usage
-                            .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                    }
-                } else if entry_type == "user" && row.title.is_none() {
-                    row.title = session_title_from_entry(&v);
-                }
-            }
-            "ai-title" => {
-                row.title = v.get("aiTitle").and_then(|t| t.as_str()).map(String::from);
-            }
-            _ => {}
-        }
-    }
-
-    (row, lines_read)
-}
-
 #[derive(Debug, Clone)]
 pub struct SessionTable {
-    root: PathBuf,
+    store: Arc<IndexStore>,
     schema: SchemaRef,
 }
 
 impl SessionTable {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(store: Arc<IndexStore>) -> Self {
         Self {
-            root: root.into(),
+            store,
             schema: session_schema(),
         }
     }
@@ -264,6 +104,7 @@ impl TableProvider for SessionTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        reconcile_for_query(&self.store).await?;
         let id_filter = IdFilter::new(filters, "id")?;
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
@@ -294,7 +135,7 @@ impl TableProvider for SessionTable {
         Ok(Arc::new(SessionExec::new(
             self.schema.clone(),
             projected_schema,
-            self.root.clone(),
+            self.store.clone(),
             projection.cloned(),
             id_filter,
             limit,
@@ -304,7 +145,7 @@ impl TableProvider for SessionTable {
 
 #[derive(Debug, Clone)]
 struct SessionExec {
-    root: PathBuf,
+    store: Arc<IndexStore>,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -317,7 +158,7 @@ impl SessionExec {
     fn new(
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
-        root: PathBuf,
+        store: Arc<IndexStore>,
         projection: Option<Vec<usize>>,
         id_filter: Option<IdFilter>,
         limit: Option<usize>,
@@ -330,7 +171,7 @@ impl SessionExec {
             Boundedness::Bounded,
         );
         Self {
-            root,
+            store,
             full_schema,
             projected_schema,
             projection,
@@ -341,22 +182,11 @@ impl SessionExec {
     }
 
     /// True if the requested projection only touches cheap columns
-    /// (those filled from the directory walk).
+    /// (those filled from the directory walk) — lets us skip loading
+    /// the aggregates file.
     fn projection_is_cheap_only(&self) -> bool {
         match &self.projection {
             Some(indices) => indices.iter().all(|&i| i < EXPENSIVE_START),
-            None => false,
-        }
-    }
-
-    /// True if the projection only needs `message_count` (and any
-    /// cheap columns) — lets us skip JSON parsing in favor of the
-    /// byte-level line counter.
-    fn projection_is_message_count_only(&self) -> bool {
-        match &self.projection {
-            Some(indices) => indices
-                .iter()
-                .all(|&i| i < EXPENSIVE_START || i == COL_MESSAGE_COUNT),
             None => false,
         }
     }
@@ -429,7 +259,7 @@ impl ExecutionPlan for SessionExec {
         Some(Arc::new(SessionExec::new(
             self.full_schema.clone(),
             self.projected_schema.clone(),
-            self.root.clone(),
+            self.store.clone(),
             self.projection.clone(),
             self.id_filter.clone(),
             limit,
@@ -442,7 +272,7 @@ impl ExecutionPlan for SessionExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let exec_start = std::time::Instant::now();
-        let mut builder = SessionListBuilder::new().root(&self.root);
+        let mut builder = SessionListBuilder::new().root(self.store.root());
         // Limit pushdown is only safe when there is no extra
         // post-filter that could reject rows. An `id` filter is applied
         // here per row, so limit pushdown is skipped whenever one is set.
@@ -460,7 +290,6 @@ impl ExecutionPlan for SessionExec {
         let walked = sessions.len();
 
         let cheap_only = self.projection_is_cheap_only();
-        let count_only = self.projection_is_message_count_only();
 
         let sessions: Vec<SessionInfo> = match &self.id_filter {
             Some(f) => f.retain(sessions, |s| s.id.as_str())?,
@@ -474,22 +303,33 @@ impl ExecutionPlan for SessionExec {
             })
             .collect();
 
-        let path_label = if cheap_only {
-            "cheap_only"
-        } else if count_only {
-            "count_only"
-        } else {
-            "full_parse"
-        };
         tracing::debug!(
             target: "gage_query::session",
             walked,
             after_id_filter = files.len(),
             walk_ms,
             walk_limit_applied = ?walk_limit_applied,
-            path = path_label,
+            path = if cheap_only { "cheap_only" } else { "aggregates" },
             "SessionExec walk complete",
         );
+
+        // The expensive columns come from the store's consolidated
+        // aggregates — written by the reconcile pass that ran at scan
+        // time. A session absent from the map (added during a
+        // skipped, lock-contended reconcile) gets default aggregates
+        // until the next pass absorbs it.
+        let aggregates = if cheap_only {
+            std::collections::HashMap::new()
+        } else {
+            self.store.load_aggregates().unwrap_or_else(|e| {
+                tracing::warn!("unreadable session aggregates: {e}");
+                std::collections::HashMap::new()
+            })
+        };
+        let default_aggregates = SessionAggregates {
+            is_empty: true,
+            ..Default::default()
+        };
 
         let len = files.len();
         let mut ids = StringBuilder::with_capacity(len, len * 36);
@@ -517,41 +357,25 @@ impl ExecutionPlan for SessionExec {
             mtimes.append_value(millis);
             sizes.append_value(*size as i64);
 
-            if cheap_only {
-                titles.append_null();
-                models.append_null();
-                message_counts.append_value(0);
-                input_tokens.append_value(0);
-                output_tokens.append_value(0);
-                cache_read.append_value(0);
-                cache_creation.append_value(0);
-                is_empty.append_value(false);
-            } else if count_only {
-                titles.append_null();
-                models.append_null();
-                message_counts.append_value(fast_message_count(path));
-                input_tokens.append_value(0);
-                output_tokens.append_value(0);
-                cache_read.append_value(0);
-                cache_creation.append_value(0);
-                is_empty.append_value(false);
+            let row = if cheap_only {
+                &default_aggregates
             } else {
-                let (row, _) = scan_session(path);
-                match &row.title {
-                    Some(t) => titles.append_value(t),
-                    None => titles.append_null(),
-                }
-                match &row.model {
-                    Some(m) => models.append_value(m),
-                    None => models.append_null(),
-                }
-                message_counts.append_value(row.message_count);
-                input_tokens.append_value(row.input_tokens);
-                output_tokens.append_value(row.output_tokens);
-                cache_read.append_value(row.cache_read_input_tokens);
-                cache_creation.append_value(row.cache_creation_input_tokens);
-                is_empty.append_value(row.is_empty);
+                aggregates.get(id).unwrap_or(&default_aggregates)
+            };
+            match &row.title {
+                Some(t) => titles.append_value(t),
+                None => titles.append_null(),
             }
+            match &row.model {
+                Some(m) => models.append_value(m),
+                None => models.append_null(),
+            }
+            message_counts.append_value(row.message_count);
+            input_tokens.append_value(row.input_tokens);
+            output_tokens.append_value(row.output_tokens);
+            cache_read.append_value(row.cache_read_input_tokens);
+            cache_creation.append_value(row.cache_creation_input_tokens);
+            is_empty.append_value(row.is_empty);
         }
 
         let mut columns: Vec<Arc<dyn datafusion::arrow::array::Array>> =
@@ -584,22 +408,5 @@ impl ExecutionPlan for SessionExec {
             self.projected_schema.clone(),
             self.projection.clone(),
         )?))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scan_session_reads_all_lines() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("testdata")
-            .join("-home-test-project")
-            .join("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl");
-        let (row, lines_read) = scan_session(&path);
-        assert_eq!(row.title.as_deref(), Some("Read and explain main.rs"));
-        assert_eq!(row.model.as_deref(), Some("claude-sonnet-4-20250514"));
-        assert_eq!(lines_read, 8);
     }
 }
