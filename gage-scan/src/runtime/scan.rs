@@ -1,16 +1,12 @@
-use gage_claude::project::Project as ClaudeProject;
-use gage_claude::session::encode_project_dir;
-use rune::runtime::{Object, Value, VmError};
+use rune::runtime::{Object, Value};
 use rune::{Any, ContextError, Module};
 
-use crate::runtime::state::{TaskTarget, current_scan_ctx};
+use crate::runtime::state::current_scan_ctx;
 
 use super::datetime::DateTime;
 use super::value::json_to_value;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function("session", session).build()?;
-    m.function("project", project).build()?;
     m.function("scan", scan).build()?;
     m.function("params", params).build()?;
     Ok(())
@@ -19,11 +15,9 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
 
-    // Session.id, Project.{name,path} getters are derived by #[rune(get)].
     m.ty::<Session>()?;
     m.ty::<Scan>()?;
     m.function_meta(Scan::sessions)?;
-    m.ty::<Project>()?;
 
     m.ty::<Sessions>()?;
     m.function_meta(Sessions::next__meta)?;
@@ -136,53 +130,6 @@ impl Sessions {
         self.back = self.back.wrapping_sub(1);
         let value = self.items.get(self.back)?.clone();
         Some(value)
-    }
-}
-
-#[derive(Any, Clone)]
-#[rune(item = ::gage)]
-pub struct Project {
-    #[rune(get)]
-    pub name: String,
-    #[rune(get)]
-    pub path: String,
-}
-
-fn session() -> Result<Session, VmError> {
-    let ctx = current_scan_ctx();
-    match &ctx.target {
-        TaskTarget::Session { info, .. } => Ok(Session {
-            id: info.id.clone(),
-            modified: DateTime::from_system_time(info.mtime),
-        }),
-        TaskTarget::Project(_) => Err(VmError::panic(
-            "session() is not available in a project-context task",
-        )),
-        TaskTarget::Scan => Err(VmError::panic(
-            "session() is not available in a scan-context task",
-        )),
-    }
-}
-
-fn project() -> Result<Project, VmError> {
-    let ctx = current_scan_ctx();
-    match &ctx.target {
-        TaskTarget::Session { project, .. } => {
-            project.as_deref().map(rune_project).ok_or_else(|| {
-                VmError::panic("project() is not available: session has no resolved project")
-            })
-        }
-        TaskTarget::Project(p) => Ok(rune_project(p)),
-        TaskTarget::Scan => Err(VmError::panic(
-            "project() is not available in a scan-context task",
-        )),
-    }
-}
-
-fn rune_project(p: &ClaudeProject) -> Project {
-    Project {
-        name: encode_project_dir(&p.path),
-        path: p.path.to_string_lossy().into_owned(),
     }
 }
 

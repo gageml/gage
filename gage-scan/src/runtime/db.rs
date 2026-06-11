@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::runtime::error::Error;
 use crate::runtime::scan::{Scan, Session};
-use crate::runtime::state::{TaskTarget, current_scan_ctx};
+use crate::runtime::state::current_scan_ctx;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function("write_note", |n: Object| NoteInsert::new(n))
@@ -251,8 +251,8 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
     let n = &q.args;
 
     let target = match n.get("target") {
-        Some(v) => target_from_value(v, &ctx.target, &ctx.run.scan_id)?,
-        None => default_target(&ctx.target, &ctx.run.scan_id),
+        Some(v) => target_from_value(v)?,
+        None => return Err(Error::Args("write_note requires 'target'".into())),
     };
 
     let name = required_string(n, "name")?;
@@ -439,10 +439,10 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
     let title = required_string(t, "title")?;
     let description = optional_string(t, "description")?;
 
-    // Omitted target means a global issue (empty string); a structured
-    // target uses the same inference as `write_note`.
+    // Omitted target means a global issue (empty string); otherwise the
+    // target is validated by `target_from_value`.
     let target = match t.get("target") {
-        Some(v) => target_from_value(v, &ctx.target, &ctx.run.scan_id)?.to_uri(),
+        Some(v) => target_from_value(v)?.to_uri(),
         None => String::new(),
     };
 
@@ -624,40 +624,17 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
     })
 }
 
-/// The note target for a task with no explicit `target`: the entity the
-/// task itself runs against.
-fn default_target(task: &TaskTarget, scan_id: &str) -> NoteTarget {
-    match task {
-        TaskTarget::Session { info, .. } => {
-            NoteTarget::Session(SessionTarget::new(info.id.clone()))
-        }
-        TaskTarget::Scan => NoteTarget::Scan(ScanTarget {
-            scan_id: scan_id.to_string(),
-        }),
-        TaskTarget::Project(p) => NoteTarget::Project(ProjectTarget {
-            project_path: p.path.to_string_lossy().into_owned(),
-        }),
-    }
-}
-
-fn current_session_id(task: &TaskTarget) -> Option<String> {
-    match task {
-        TaskTarget::Session { info, .. } => Some(info.id.clone()),
-        _ => None,
-    }
-}
-
 /// Build a `NoteTarget` from a `target` object by inferring the variant
 /// from which fields are present — no `kind` discriminator:
 ///
-/// - `session` / `line` / `line_end` → session target
+/// - `session` (+ optional `line` / `line_end`) → session target
 /// - `scan` → scan target
 /// - `project` → project target
 ///
-/// `line` alone uses the current session id; `line_end` requires `line`.
-/// An empty object falls back to the task's context target. Fields from
-/// more than one group, or fields we don't recognize, are errors.
-fn target_from_value(v: &Value, task: &TaskTarget, scan_id: &str) -> super::Result<NoteTarget> {
+/// `line_end` requires `line`. Fields from more than one group, or
+/// fields we don't recognize, are errors. The target field is required
+/// at the call site; this function rejects empty / unspecified objects.
+fn target_from_value(v: &Value) -> super::Result<NoteTarget> {
     let obj: Object = rune::from_value(v.clone())
         .map_err(|e| Error::Args(format!("target must be an object: {e}")))?;
 
@@ -692,12 +669,9 @@ fn target_from_value(v: &Value, task: &TaskTarget, scan_id: &str) -> super::Resu
         if line_end.is_some() && line.is_none() {
             return Err(Error::Args("target.line_end requires target.line".into()));
         }
-        let session_id = match optional_string(&obj, "session")? {
-            Some(s) => s,
-            None => current_session_id(task).ok_or_else(|| {
-                Error::Args("target.line outside a session task requires target.session".into())
-            })?,
-        };
+        let session_id = optional_string(&obj, "session")?.ok_or_else(|| {
+            Error::Args("target with 'line' or 'line_end' requires 'session'".into())
+        })?;
         return Ok(NoteTarget::Session(SessionTarget {
             session_id,
             line,
@@ -705,16 +679,9 @@ fn target_from_value(v: &Value, task: &TaskTarget, scan_id: &str) -> super::Resu
         }));
     }
 
-    // No recognized fields: an empty object means "the task's target";
-    // anything else is a typo'd or unsupported field set.
-    if obj.iter().next().is_none() {
-        Ok(default_target(task, scan_id))
-    } else {
-        Err(Error::Args(
-            "unrecognized target fields (expected session, line, line_end, scan, or project)"
-                .into(),
-        ))
-    }
+    Err(Error::Args(
+        "target must name a session, scan, or project".into(),
+    ))
 }
 
 impl From<DbNote> for Note {

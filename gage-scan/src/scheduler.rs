@@ -1,14 +1,15 @@
 //! Task scheduler: builds a single DAG over scanner tasks and dispatches
 //! them to a worker pool.
 //!
-//! - One DAG covering all tasks across all context types
-//!   (`session` / `project` / `scan`). There are no phase barriers.
-//! - Nodes are `Task` values (immutable plan units).
-//! - Edges come from `notes.wants`/`notes.writes` declarations: a task's
+//! - One DAG covering every (scanner, task) declaration. There are no
+//!   phase barriers; tasks declare their inter-task dependencies through
+//!   `notes.wants` / `notes.writes`.
+//! - Nodes are `Task` values (immutable plan units): one per declared
+//!   scanner task, dispatched once per run.
+//! - Edges come from `notes.wants`/`notes.writes`: a task's
 //!   `notes.wants` lists *note names* it consumes; the planner
 //!   reverse-looks-up every task in the same scanner whose `notes.writes`
-//!   contains that note name and adds an edge from each producer instance
-//!   to the consumer instance whose targets are compatible.
+//!   contains that note name and adds an edge.
 //! - Unsatisfied `notes.wants` (no task in the scanner writes the note) is a
 //!   planner *warning*, not an error. The task still runs.
 //! - Cycle detection runs at plan time over the full graph.
@@ -21,14 +22,9 @@
 //! Tasks are independent invocations and communicate via notes.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use datafusion::prelude::SessionContext as DfSessionContext;
-use gage_claude::project::Project;
-use gage_claude::session::{SessionInfo, encode_project_dir};
-use gage_query::tables::{EntryTable, MessageTable};
 use petgraph::Graph;
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::NodeIndex;
@@ -36,16 +32,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::event::{RunStatus, RunSummary, ScanEvent, TargetLabel, TaskRef, WorkerStatus};
-use crate::runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot, TaskTarget};
-use crate::scanner::{TaskContext, TaskDef};
+use crate::event::{RunStatus, RunSummary, ScanEvent, TaskRef, WorkerStatus};
+use crate::runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
+use crate::scanner::TaskDef;
 
-/// One planned invocation: a function call from a scanner against a
-/// specific target. Immutable once the planner finishes.
+/// One planned invocation: a function call from a scanner. Immutable
+/// once the planner finishes.
 pub(crate) struct Task {
     pub scanner_idx: usize,
     pub task_name: String,
-    pub target: TaskTarget,
 }
 
 /// Result of dispatching one task.
@@ -114,23 +109,18 @@ impl std::fmt::Display for PlanError {
     }
 }
 
-/// Build a single DAG over all tasks across all context types.
-///
-/// Targets are expanded by context:
-/// - [`TaskContext::Project`]: one task per resolved project per scanner task.
-/// - [`TaskContext::Session`]: one task per selected session per scanner task.
-/// - [`TaskContext::Scan`]: one task per scanner task.
+/// Build a single DAG over every (scanner, task) declaration.
 #[allow(clippy::indexing_slicing)]
 pub(crate) fn plan(
     scanners: &[ScannerSlot],
     scanner_tasks: &[HashMap<String, TaskDef>],
-    run: &Arc<RunContext>,
+    _run: &Arc<RunContext>,
 ) -> Result<Plan, PlanError> {
     let mut graph = Graph::<usize, ()>::new();
     let mut tasks: Vec<Task> = Vec::new();
     let mut warnings: Vec<PlanWarning> = Vec::new();
-    // (scanner_idx, task_name, target_key) -> node index
-    let mut node_index: HashMap<(usize, String, TargetKey), NodeIndex> = HashMap::new();
+    // (scanner_idx, task_name) -> node index
+    let mut node_index: HashMap<(usize, String), NodeIndex> = HashMap::new();
 
     // Walk tasks in (scanner_name, task_name) ascending order so
     // dispatch and UI display are deterministic. Topological order
@@ -150,17 +140,14 @@ pub(crate) fn plan(
             .then_with(|| a.1.cmp(b.1))
     });
 
-    for &(scanner_idx, task_name, def) in &planned {
-        for (target, target_key) in expand_targets(def.context, run) {
-            let task_idx = tasks.len();
-            tasks.push(Task {
-                scanner_idx,
-                task_name: task_name.clone(),
-                target,
-            });
-            let node = graph.add_node(task_idx);
-            node_index.insert((scanner_idx, task_name.clone(), target_key), node);
-        }
+    for &(scanner_idx, task_name, _) in &planned {
+        let task_idx = tasks.len();
+        tasks.push(Task {
+            scanner_idx,
+            task_name: task_name.clone(),
+        });
+        let node = graph.add_node(task_idx);
+        node_index.insert((scanner_idx, task_name.clone()), node);
     }
 
     // Build per-scanner `note_name -> [task_name]` index from `notes.writes`
@@ -181,8 +168,7 @@ pub(crate) fn plan(
     //
     // Each name in `notes.wants` is a *note name*. For every wanted note,
     // find all tasks (within the same scanner) whose `notes.writes` includes
-    // that name. For every (producer instance, consumer instance) pair
-    // whose targets are compatible, add an edge.
+    // that name, and add an edge from each producer to the consumer.
     //
     // An unsatisfied `notes.wants` (no task in the scanner writes the note)
     // is recorded as a warning, not an error — the consumer still
@@ -204,24 +190,9 @@ pub(crate) fn plan(
                     // dependency — would create a self-loop. Skip.
                     continue;
                 }
-                let producer_def = &scanner_tasks[scanner_idx][producer];
-                for (_, producer_key) in expand_targets(producer_def.context, run) {
-                    for (_, consumer_key) in expand_targets(def.context, run) {
-                        if !targets_compatible(&producer_key, &consumer_key, run) {
-                            continue;
-                        }
-                        let from = *node_index
-                            .get(&(scanner_idx, producer.clone(), producer_key.clone()))
-                            .unwrap();
-                        let to = *node_index
-                            .get(&(scanner_idx, task_name.clone(), consumer_key.clone()))
-                            .unwrap();
-                        if from == to {
-                            continue;
-                        }
-                        graph.add_edge(from, to, ());
-                    }
-                }
+                let from = *node_index.get(&(scanner_idx, producer.clone())).unwrap();
+                let to = *node_index.get(&(scanner_idx, task_name.clone())).unwrap();
+                graph.add_edge(from, to, ());
             }
         }
     }
@@ -267,70 +238,6 @@ pub(crate) fn plan(
         deps,
         warnings,
     })
-}
-
-/// Identifier used to group tasks by their target for dependency
-/// resolution.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-enum TargetKey {
-    Session(String),
-    Project(String),
-    Scan,
-}
-
-/// Two targets are compatible (i.e. an edge between tasks at these
-/// targets should be created) when:
-/// - they refer to the same session, or
-/// - they refer to the same project, or
-/// - one is `Scan` (the singleton scan target sees all evidence), or
-/// - one is `Session` for a project and the other is that project's
-///   `Project` target.
-fn targets_compatible(u: &TargetKey, d: &TargetKey, run: &Arc<RunContext>) -> bool {
-    match (u, d) {
-        (TargetKey::Session(a), TargetKey::Session(b)) => a == b,
-        (TargetKey::Project(a), TargetKey::Project(b)) => a == b,
-        (TargetKey::Scan, _) | (_, TargetKey::Scan) => true,
-        (TargetKey::Session(sid), TargetKey::Project(pname))
-        | (TargetKey::Project(pname), TargetKey::Session(sid)) => run
-            .selected
-            .iter()
-            .find(|s| s.id == *sid)
-            .is_some_and(|s| s.project_name() == *pname),
-    }
-}
-
-fn expand_targets(context: TaskContext, run: &Arc<RunContext>) -> Vec<(TaskTarget, TargetKey)> {
-    match context {
-        TaskContext::Session => run
-            .selected
-            .iter()
-            .map(|s| {
-                let info: Arc<SessionInfo> = Arc::new(s.clone());
-                let project = run.projects.get(&*s.project_name()).cloned();
-                let key = TargetKey::Session(info.id.clone());
-                (TaskTarget::Session { info, project }, key)
-            })
-            .collect(),
-        TaskContext::Project => {
-            let mut seen: HashMap<String, Arc<Project>> = HashMap::new();
-            for s in run.selected.iter() {
-                if let Some(p) = run.projects.get(&*s.project_name()) {
-                    seen.entry(encode_project_dir(&p.path))
-                        .or_insert_with(|| p.clone());
-                }
-            }
-            let mut out: Vec<_> = seen
-                .into_iter()
-                .map(|(k, p)| (TaskTarget::Project(p), TargetKey::Project(k)))
-                .collect();
-            out.sort_by(|a, b| match (&a.1, &b.1) {
-                (TargetKey::Project(a), TargetKey::Project(b)) => a.cmp(b),
-                _ => std::cmp::Ordering::Equal,
-            });
-            out
-        }
-        TaskContext::Scan => vec![(TaskTarget::Scan, TargetKey::Scan)],
-    }
 }
 
 /// Run a single plan, dispatching tasks to a pool of `jobs` workers.
@@ -503,7 +410,6 @@ async fn run_tasks(
                 status.workers[worker_id].current = Some(TaskRef {
                     scanner: slot.name.clone(),
                     task: task.task_name.clone(),
-                    target: target_label(&task.target),
                 });
                 on_event(ScanEvent::Status(status.clone()));
             }
@@ -525,7 +431,6 @@ async fn run_tasks(
                         on_event(ScanEvent::TaskFailed {
                             scanner: scanners[task.scanner_idx].name.clone(),
                             task: task.task_name.clone(),
-                            target: target_label(&task.target),
                             message: msg.clone(),
                         });
                     }
@@ -568,14 +473,6 @@ async fn run_tasks(
     Ok(())
 }
 
-fn target_label(target: &TaskTarget) -> TargetLabel {
-    match target {
-        TaskTarget::Session { info, .. } => TargetLabel::Session(info.id.clone()),
-        TaskTarget::Project(p) => TargetLabel::Project(p.path.to_string_lossy().into_owned()),
-        TaskTarget::Scan => TargetLabel::Scan,
-    }
-}
-
 #[allow(clippy::indexing_slicing)]
 async fn dispatch_task(
     task: &Task,
@@ -589,20 +486,10 @@ async fn dispatch_task(
         return TaskResult::SkippedByFault;
     }
 
-    // Session tasks see the full session content on every scan. There
-    // is no skipping or line pruning: idempotency is enforced by note
-    // and issue dedup, not by task validation.
-    let df_ctx = match &task.target {
-        TaskTarget::Session { info, .. } => Some(build_session_ctx(&info.id, &info.src)),
-        _ => None,
-    };
-
     let ctx = Arc::new(ScanContext {
         scanner_name: slot.name.clone(),
         params: slot.params.clone(),
         run: run.clone(),
-        target: task.target.clone(),
-        df_ctx,
         db: slot.db.clone(),
         runtime_tx: msg_tx.clone(),
     });
@@ -669,18 +556,6 @@ fn render_task_error(err: rune::runtime::Value) -> String {
             err.type_info()
         )
     }
-}
-
-fn build_session_ctx(session_id: &str, path: &Path) -> DfSessionContext {
-    let ctx = DfSessionContext::new();
-    gage_query::install_udfs(&ctx);
-    let entry = EntryTable::with_session(session_id.to_string(), path.to_path_buf());
-    let message = MessageTable::with_session(session_id.to_string(), path.to_path_buf());
-    ctx.register_table("entry", std::sync::Arc::new(entry))
-        .unwrap();
-    ctx.register_table("message", std::sync::Arc::new(message))
-        .unwrap();
-    ctx
 }
 
 #[cfg(test)]

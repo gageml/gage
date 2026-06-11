@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use console::style;
-use gage_scan::event::{ScanEvent, TargetLabel};
+use gage_scan::event::ScanEvent;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub struct ProgressUi {
@@ -60,11 +60,10 @@ impl ProgressUi {
             ScanEvent::TaskFailed {
                 scanner,
                 task,
-                target,
                 message,
             } => {
                 self.flush_print_buf();
-                self.task_failed(&scanner, &task, &target, &message);
+                self.task_failed(&scanner, &task, &message);
             }
             ScanEvent::Warning {
                 scanner,
@@ -77,8 +76,8 @@ impl ProgressUi {
         }
     }
 
-    fn task_failed(&self, scanner: &str, task: &str, target: &TargetLabel, message: &str) {
-        let header = format!("error: {scanner}::{task} ({target})");
+    fn task_failed(&self, scanner: &str, task: &str, message: &str) {
+        let header = format!("error: {scanner}::{task}");
         self.println(&style(header).red().bold().to_string());
         for line in message.lines() {
             self.println(&style(line).red().to_string());

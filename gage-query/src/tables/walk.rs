@@ -1,6 +1,7 @@
 //! Shared scan helpers for the session-row table providers
 //! (`message`, `entry`, `session`).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -67,4 +68,21 @@ pub(crate) fn session_paths(
         .into_iter()
         .map(|s| (s.id, s.src))
         .collect())
+}
+
+/// `(id, path)` pairs resolved through an explicit id-to-path map,
+/// filtered by predicates over `session_id`.
+pub(crate) fn lookup_paths(
+    sessions: &Arc<HashMap<String, PathBuf>>,
+    filters: &[Expr],
+) -> Result<Vec<(String, PathBuf)>> {
+    let mut pairs: Vec<(String, PathBuf)> = sessions
+        .iter()
+        .map(|(id, path)| (id.clone(), path.clone()))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    match IdFilter::new(filters, "session_id")? {
+        Some(f) => f.retain(pairs, |(id, _)| id.as_str()),
+        None => Ok(pairs),
+    }
 }

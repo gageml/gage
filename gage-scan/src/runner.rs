@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use datafusion::prelude::SessionContext as DfSessionContext;
 use gage_claude::home::ClaudeHome;
 use gage_claude::project::{Project, project_for_session_name};
 use gage_claude::session::SessionInfo;
@@ -17,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::event::{RunSummary, ScanEvent};
 use crate::runtime;
-use crate::runtime::state::{RunContext, ScanContext, ScannerSlot, TaskTarget};
+use crate::runtime::state::{RunContext, ScanContext, ScannerSlot};
 use crate::scanner::{Scanner, ScannerDef, scanners_dir};
 use crate::scheduler;
 
@@ -121,10 +122,13 @@ pub async fn run(
         }
     }
 
+    let selected: Arc<[SessionInfo]> = Arc::from(selected.into_boxed_slice());
+    let df_ctx = build_run_df_ctx(&selected);
     let run = Arc::new(RunContext {
         scan_id: scan_id.clone(),
-        selected: Arc::from(selected.into_boxed_slice()),
+        selected,
         projects,
+        df_ctx,
     });
 
     // Build per-scanner compilation artifacts
@@ -332,10 +336,13 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             continue;
         }
 
+        let stub_selected: Arc<[SessionInfo]> =
+            Arc::from(Vec::<SessionInfo>::new().into_boxed_slice());
         let stub_run = Arc::new(RunContext {
             scan_id: "test".to_string(),
-            selected: Arc::from(Vec::<SessionInfo>::new().into_boxed_slice()),
+            selected: stub_selected.clone(),
             projects: HashMap::new(),
+            df_ctx: build_run_df_ctx(&stub_selected),
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -346,8 +353,6 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
                 scanner_name: name.clone(),
                 params: scanner.params.clone(),
                 run: stub_run.clone(),
-                target: TaskTarget::Scan,
-                df_ctx: None,
                 db: stub_db.clone(),
                 runtime_tx: stub_tx.clone(),
             });
@@ -559,21 +564,56 @@ impl TestRuntime {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
+        let selected: Arc<[SessionInfo]> = Arc::from(Vec::<SessionInfo>::new().into_boxed_slice());
         let run = Arc::new(RunContext {
             scan_id: "test".to_string(),
-            selected: Arc::from(Vec::<SessionInfo>::new().into_boxed_slice()),
+            selected: selected.clone(),
             projects: HashMap::new(),
+            df_ctx: build_run_df_ctx(&selected),
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ScanContext {
             scanner_name: "test".to_string(),
             params: None,
             run,
-            target: TaskTarget::Scan,
-            df_ctx: None,
             db: Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap())),
             runtime_tx: tx,
         });
         runtime::state::SCAN_CTX.scope(ctx, f()).await
     }
+}
+
+/// Build the run-wide DataFusion context. Registers `entry` and
+/// `message` over a `Lookup` source seeded from `selected`, installs the
+/// shared `SessionCache` extension so per-session derives amortize
+/// across every scanner call in the run, and registers the JSON UDFs.
+pub(crate) fn build_run_df_ctx(
+    selected: &Arc<[gage_claude::session::SessionInfo]>,
+) -> DfSessionContext {
+    use datafusion::prelude::SessionConfig;
+
+    let cache = Arc::new(gage_query::SessionCache::new());
+    let config = SessionConfig::new().with_extension(Arc::clone(&cache));
+    let ctx = DfSessionContext::new_with_config(config);
+    gage_query::install_udfs(&ctx);
+
+    let sessions: Arc<HashMap<String, PathBuf>> = Arc::new(
+        selected
+            .iter()
+            .map(|s| (s.id.clone(), s.src.clone()))
+            .collect(),
+    );
+    ctx.register_table(
+        "entry",
+        Arc::new(gage_query::tables::EntryTable::with_lookup(
+            sessions.clone(),
+        )),
+    )
+    .unwrap();
+    ctx.register_table(
+        "message",
+        Arc::new(gage_query::tables::MessageTable::with_lookup(sessions)),
+    )
+    .unwrap();
+    ctx
 }

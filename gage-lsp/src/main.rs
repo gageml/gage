@@ -1,7 +1,7 @@
 //! Rune language server for Gage scanners.
 //!
 //! The stock `rune-languageserver` compiles scanner sources against Rune's
-//! default context, so every Gage native symbol (`gage::config()`, `io`,
+//! default context, so every Gage native symbol (`gage::user()`, `io`,
 //! `stats`, `json`, the `include_*` macros) reports as a missing item. This
 //! binary runs the same Rune language server with Gage's context instead, so
 //! diagnostics, go-to-definition, and completion match what scanners actually

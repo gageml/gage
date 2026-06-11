@@ -1,4 +1,4 @@
-use gage::{Ignore, write_note, write_issue, config, session, scan};
+use gage::{Ignore, write_note, write_issue, user, scan};
 
 pub const SCANNER = #{
     name: "hidden-thinking",
@@ -12,8 +12,7 @@ pub const SCANNER = #{
     `,
 
     tasks: #{
-        check_thinking: #{
-            context: "session",
+        evidence: #{
             notes: #{
                 writes: #{
                     "thinking.empty": #{
@@ -28,7 +27,6 @@ pub const SCANNER = #{
             },
         },
         issue: #{
-            context: "scan",
             notes: #{
                 wants: ["thinking.empty"],
                 writes: #{
@@ -41,32 +39,34 @@ pub const SCANNER = #{
     },
 };
 
-pub async fn check_thinking() {
-    for msg in session()
-        .messages()
-        .with_type(#{ assistant: "thinking" })
-        .reverse()
-        .await?
-    {
-        let config = format!(
-            "{{\"showThinkingSummaries\": {}}}",
-            config().settings().await.get("showThinkingSummaries").unwrap_or("null")
-        );
-        write_note(
-            #{
-                name: "thinking.empty",
-                value: msg.text == "",
-                target: #{ line: msg.line },
-                metadata: #{
-                    msg_timestamp: msg.timestamp.millis(),
-                    model: msg.model(),
-                    config,
+pub async fn evidence() {
+    let config = format!(
+        "{{\"showThinkingSummaries\": {}}}",
+        user().config().await.get("showThinkingSummaries").unwrap_or("null")
+    );
+    for s in scan().sessions() {
+        for msg in s
+            .messages()
+            .with_type(#{ assistant: "thinking" })
+            .reverse()
+            .await?
+        {
+            write_note(
+                #{
+                    name: "thinking.empty",
+                    value: msg.text == "",
+                    target: #{ session: s.id, line: msg.line },
+                    metadata: #{
+                        msg_timestamp: msg.timestamp.millis(),
+                        model: msg.model(),
+                        config,
+                    },
                 },
-            },
-        )
-        .keep_prev()
-        .await?;
-        break;
+            )
+            .keep_prev()
+            .await?;
+            break;
+        }
     }
     Ok(())
 }

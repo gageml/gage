@@ -64,11 +64,6 @@ impl IdFilter {
             .collect())
     }
 
-    /// Whether a single id satisfies the predicate.
-    pub(crate) fn matches(&self, id: &str) -> Result<bool> {
-        Ok(self.mask(&[id])?.first().copied().unwrap_or(false))
-    }
-
     /// A keep-mask aligned with `ids`: `true` where the predicate holds.
     /// A null result (the predicate evaluated to NULL) counts as no
     /// match, matching SQL `WHERE` semantics.

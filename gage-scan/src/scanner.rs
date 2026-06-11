@@ -52,33 +52,6 @@ pub struct NoteInfo {
     pub explanation: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TaskContext {
-    Session,
-    Scan,
-    Project,
-}
-
-impl TaskContext {
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "session" => Some(TaskContext::Session),
-            "scan" => Some(TaskContext::Scan),
-            "project" => Some(TaskContext::Project),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TaskContext::Session => "session",
-            TaskContext::Scan => "scan",
-            TaskContext::Project => "project",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TaskNotesDef {
     pub wants: Vec<String>,
@@ -88,7 +61,6 @@ pub struct TaskNotesDef {
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDef {
     pub name: String,
-    pub context: TaskContext,
     pub notes: TaskNotesDef,
 }
 
@@ -176,8 +148,6 @@ pub enum ParseError {
     Syntax(rune::compile::Error),
     MissingScanner,
     MissingName,
-    MissingTaskContext { task: String },
-    UnknownTaskContext { task: String, value: String },
     DuplicateTask(String),
     TaskFieldType { task: String, field: &'static str },
 }
@@ -233,16 +203,6 @@ impl fmt::Display for ParseError {
             ParseError::Syntax(e) => write!(f, "{e}"),
             ParseError::MissingScanner => write!(f, "missing SCANNER constant"),
             ParseError::MissingName => write!(f, "SCANNER missing 'name' field"),
-            ParseError::MissingTaskContext { task } => {
-                write!(f, "task '{task}' missing required 'context' field")
-            }
-            ParseError::UnknownTaskContext { task, value } => {
-                write!(
-                    f,
-                    "task '{task}' has unknown context '{value}' \
-                     (expected 'session', 'scan', or 'project')"
-                )
-            }
             ParseError::DuplicateTask(name) => {
                 write!(f, "duplicate task '{name}'")
             }
@@ -661,7 +621,6 @@ fn parse_tasks(
             return Err(ParseError::DuplicateTask(name));
         }
 
-        let mut context: Option<TaskContext> = None;
         let mut notes = TaskNotesDef::default();
 
         for (tf, _) in &task_obj.assignments {
@@ -671,42 +630,18 @@ fn parse_tasks(
             let Some((_, texpr)) = &tf.assign else {
                 continue;
             };
-            match tkey.as_str() {
-                "context" => {
-                    let raw = expr_str(source, texpr).ok_or(ParseError::TaskFieldType {
+            if tkey.as_str() == "notes" {
+                let ast::Expr::Object(notes_obj) = texpr else {
+                    return Err(ParseError::TaskFieldType {
                         task: name.clone(),
-                        field: "context",
-                    })?;
-                    context = Some(TaskContext::parse(&raw).ok_or(
-                        ParseError::UnknownTaskContext {
-                            task: name.clone(),
-                            value: raw,
-                        },
-                    )?);
-                }
-                "notes" => {
-                    let ast::Expr::Object(notes_obj) = texpr else {
-                        return Err(ParseError::TaskFieldType {
-                            task: name.clone(),
-                            field: "notes",
-                        });
-                    };
-                    notes = parse_task_notes(source, notes_obj, &name)?;
-                }
-                _ => {}
+                        field: "notes",
+                    });
+                };
+                notes = parse_task_notes(source, notes_obj, &name)?;
             }
         }
 
-        let context = context.ok_or(ParseError::MissingTaskContext { task: name.clone() })?;
-
-        tasks.insert(
-            name.clone(),
-            TaskDef {
-                name,
-                context,
-                notes,
-            },
-        );
+        tasks.insert(name.clone(), TaskDef { name, notes });
     }
 
     Ok(tasks)

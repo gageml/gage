@@ -529,10 +529,9 @@ async fn run_dialog(
                     gage_scan::event::ScanEvent::TaskFailed {
                         scanner,
                         task,
-                        target,
                         message,
                     } => {
-                        eprintln!("error: {scanner}::{task} ({target})");
+                        eprintln!("error: {scanner}::{task}");
                         for line in message.lines() {
                             eprintln!("{line}");
                         }

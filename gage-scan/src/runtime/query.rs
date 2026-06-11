@@ -95,11 +95,7 @@ impl EntryQuery {
 
 async fn do_fetch_entries(q: EntryQuery) -> super::Result<Vec<Entry>> {
     let ctx = current_scan_ctx();
-    let df_ctx = ctx
-        .df_ctx
-        .as_ref()
-        .expect("query called outside session-context task")
-        .clone();
+    let df_ctx = ctx.run.df_ctx.clone();
 
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<ScalarValue> = Vec::new();
@@ -133,11 +129,7 @@ async fn do_fetch_entries(q: EntryQuery) -> super::Result<Vec<Entry>> {
 
 async fn do_fetch_messages(q: MessageQuery) -> super::Result<Vec<Message>> {
     let ctx = current_scan_ctx();
-    let df_ctx = ctx
-        .df_ctx
-        .as_ref()
-        .expect("query called outside session-context task")
-        .clone();
+    let df_ctx = ctx.run.df_ctx.clone();
 
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<ScalarValue> = Vec::new();
@@ -289,11 +281,7 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
 
 async fn run_query(sql: &str) -> Vec<RecordBatch> {
     let ctx = current_scan_ctx();
-    let df_ctx = ctx
-        .df_ctx
-        .as_ref()
-        .expect("query called outside session-context task")
-        .clone();
+    let df_ctx = ctx.run.df_ctx.clone();
     let df = df_ctx.sql(sql).await.unwrap();
     df.collect().await.unwrap()
 }

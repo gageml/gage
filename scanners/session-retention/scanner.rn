@@ -1,4 +1,4 @@
-use gage::{write_note, write_issue, config};
+use gage::{write_note, write_issue, scan, user};
 
 pub const SCANNER = #{
     name: "session-retention",
@@ -14,8 +14,7 @@ pub const SCANNER = #{
     `,
 
     tasks: #{
-        check_retention: #{
-            context: "scan",
+        main: #{
             notes: #{
                 writes: #{
                     "session-retention.cleanup-period-days": #{
@@ -34,8 +33,8 @@ pub const SCANNER = #{
 // Claude Code's retention default when `cleanupPeriodDays` is unset
 const DEFAULT_RETENTION_DAYS = 30;
 
-pub async fn check_retention() {
-    let setting = config().settings().await.get("cleanupPeriodDays");
+pub async fn main() {
+    let setting = user().config().await.get("cleanupPeriodDays");
 
     // Any explicit value means the user has chosen a retention period and
     // is aware of it. Only the unset case --- the silent 30-day default
@@ -44,10 +43,12 @@ pub async fn check_retention() {
     match setting {
         Some(_) => {}
         None => {
+            let scan_id = scan().id;
             let note = write_note(
                 #{
                     name: "session-retention.cleanup-period-days",
                     value: DEFAULT_RETENTION_DAYS,
+                    target: #{ scan: scan_id },
                     explanation: "cleanupPeriodDays is unset; the default retention applies",
                     metadata: #{
                         configured: false,

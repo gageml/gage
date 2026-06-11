@@ -14,35 +14,20 @@ use crate::scheduler::WorkerMsg;
 /// State shared by all scanners for a single scan run.
 ///
 /// Immutable after run-init. Tasks read this through `current_scan_ctx()`.
-#[allow(dead_code)] // scan_id is informational; not yet exposed to scanners.
 pub struct RunContext {
     pub scan_id: String,
     /// Selected sessions for this run, in load order.
     pub selected: Arc<[SessionInfo]>,
     /// Sanitized-cwd -> resolved Project, populated only for projects
     /// that resolve to a real on-disk directory.
+    #[allow(dead_code)] // retained for future project-scoped queries.
     pub projects: HashMap<String, Arc<Project>>,
-}
-
-/// The target a task is running against.
-///
-/// Determines what `session()`, `project()`, and the
-/// SQL `entry`/`message` views see.
-#[derive(Clone)]
-pub enum TaskTarget {
-    /// `session` context: per-session task.
-    Session {
-        info: Arc<SessionInfo>,
-        project: Option<Arc<Project>>,
-    },
-    /// `scan` context: one call over the full selected cohort,
-    /// consuming notes emitted by upstream tasks.
-    Scan,
-    /// `project` context: per-project task scoped to the project's
-    /// Claude config. The carried `Project` resolves to the project's
-    /// cwd on disk; the task examines project config rather than
-    /// session activity.
-    Project(Arc<Project>),
+    /// One DataFusion context for the whole run. Registers the `entry`
+    /// and `message` tables backed by a `Lookup` source over `selected`
+    /// and shares a `SessionCache`, so per-session derives amortize
+    /// across every `s.messages()` / `s.entries()` / `query(...)` call
+    /// in any scanner.
+    pub df_ctx: DfSessionContext,
 }
 
 /// Per-task state injected via `tokio::task_local!`.
@@ -53,8 +38,6 @@ pub struct ScanContext {
     pub scanner_name: String,
     pub params: Option<json::Value>,
     pub run: Arc<RunContext>,
-    pub target: TaskTarget,
-    pub df_ctx: Option<DfSessionContext>,
     pub db: Arc<Mutex<Connection>>,
     /// Channel from runtime functions (`print`/`println`) back to the
     /// scheduler driver. Workers share this channel for `Started`/

@@ -4,33 +4,10 @@
 //! implement an event sink. Each `Status` event is a self-contained
 //! snapshot — never reassemble state from partial deltas.
 
-/// A target a task is acting against. Carried on `TaskRef` so a UI can
-/// label "scanner::task → target".
-#[derive(Debug, Clone)]
-pub enum TargetLabel {
-    /// Specific session id.
-    Session(String),
-    /// Project cwd; the task ran against that project's Claude config.
-    Project(String),
-    /// All selected sessions of the current scan (scan-context task).
-    Scan,
-}
-
-impl std::fmt::Display for TargetLabel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TargetLabel::Session(id) => write!(f, "session {id}"),
-            TargetLabel::Project(name) => write!(f, "project {name}"),
-            TargetLabel::Scan => write!(f, "scan"),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct TaskRef {
     pub scanner: String,
     pub task: String,
-    pub target: TargetLabel,
 }
 
 /// One worker slot. `current` reflects what that worker is doing right
@@ -80,7 +57,6 @@ pub enum ScanEvent {
     TaskFailed {
         scanner: String,
         task: String,
-        target: TargetLabel,
         message: String,
     },
     /// A non-fatal planner warning (e.g. an unsatisfied `wants` note).

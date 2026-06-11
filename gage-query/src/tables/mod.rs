@@ -18,6 +18,7 @@ pub use message_text::MessageTextFn;
 pub use note::NoteTable;
 pub use session::SessionTable;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,13 +27,14 @@ use gage_index::IndexStore;
 /// Where a session-row table provider (`EntryTable`, `MessageTable`)
 /// finds its data.
 ///
-/// `Corpus` scans the corpus for a whole project, reconciling first
-/// and reading through the per-context session cache — the global
-/// `gage query` use case. `SingleSession` parses one session file in
-/// memory and bypasses the cache — used by gage-scan's per-session
-/// scanner context.
+/// `Corpus` scans the corpus for a whole project, reconciling first and
+/// reading through the per-context session cache — the global `gage
+/// query` use case. `Lookup` resolves session ids through an explicit
+/// id-to-path map and reads through the per-context session cache —
+/// used by gage-scan, whose scan run already enumerated the cohort and
+/// has no need for the corpus index or reconcile.
 #[derive(Debug, Clone)]
 pub(super) enum SessionSource {
     Corpus(Arc<IndexStore>),
-    SingleSession { session_id: String, path: PathBuf },
+    Lookup(Arc<HashMap<String, PathBuf>>),
 }

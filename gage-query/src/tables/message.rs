@@ -1,5 +1,6 @@
 use std::any::Any;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
@@ -18,9 +19,9 @@ use gage_index::{
 };
 
 use super::SessionSource;
-use super::walk::{reconcile_for_query, session_cache, session_paths};
+use super::walk::{lookup_paths, reconcile_for_query, session_cache, session_paths};
 use crate::cache::SessionCache;
-use crate::filter::{self, IdFilter};
+use crate::filter;
 
 /// The derived columns serving the `message` table, in table-column
 /// order. `text` is non-null exactly for message rows (`type IN
@@ -64,14 +65,13 @@ impl MessageTable {
         }
     }
 
-    /// Build a `MessageTable` scoped to one session file. Used by
-    /// per-session scanner contexts; bypasses the session cache.
-    pub fn with_session(session_id: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+    /// Build a `MessageTable` over an explicit `session_id` -> path
+    /// map. Used by gage-scan: the cohort is known up front, so the
+    /// table resolves ids through the map and reads through the
+    /// per-context session cache. No `IndexStore`, no reconcile.
+    pub fn with_lookup(sessions: Arc<HashMap<String, PathBuf>>) -> Self {
         Self {
-            source: SessionSource::SingleSession {
-                session_id: session_id.into(),
-                path: path.into(),
-            },
+            source: SessionSource::Lookup(sessions),
             schema: message_schema(),
         }
     }
@@ -115,16 +115,10 @@ impl TableProvider for MessageTable {
                 let paths = session_paths(store, filters, "session_id")?;
                 load_batches(&cache, paths).await?
             }
-            SessionSource::SingleSession { session_id, path } => {
-                let keep = match IdFilter::new(filters, "session_id")? {
-                    Some(f) => f.matches(session_id)?,
-                    None => true,
-                };
-                if keep {
-                    vec![derive_one(session_id, path).await?]
-                } else {
-                    Vec::new()
-                }
+            SessionSource::Lookup(sessions) => {
+                let cache = session_cache(state)?;
+                let paths = lookup_paths(sessions, filters)?;
+                load_batches(&cache, paths).await?
             }
         };
         let mem = MemTable::try_new(self.schema.clone(), vec![batches])?;
@@ -148,21 +142,6 @@ async fn load_batches(
         batches.push(message_rows(&derived.batch)?);
     }
     Ok(batches)
-}
-
-async fn derive_one(session_id: &str, path: &Path) -> Result<RecordBatch> {
-    let id = session_id.to_string();
-    let path = path.to_path_buf();
-    let derived = tokio::task::spawn_blocking(move || gage_index::derive_session(&id, &path))
-        .await
-        .map_err(|e| DataFusionError::Execution(format!("derive task failed: {e}")))?;
-    match derived {
-        Ok(d) => message_rows(&d.batch),
-        Err(e) => {
-            tracing::debug!("session not derivable: {e}");
-            Ok(RecordBatch::new_empty(message_schema()))
-        }
-    }
 }
 
 /// Filter a derived batch to message rows (text non-null) and project
