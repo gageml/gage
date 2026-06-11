@@ -1,4 +1,0 @@
-pub const SCANNER = #{
-    name: "user-frustration",
-    description: "Detect frustration in user messages",
-};
