@@ -24,7 +24,7 @@ pub use derive::{
     COL_TIMESTAMP, COL_TYPE, COL_UUID, DerivedSession, Fingerprint, SessionAggregates,
     derive_session, entry_text, store_schema,
 };
-pub use reconcile::{IndexStore, LockMode, ReconcileOutcome, Status};
+pub use reconcile::{IndexStore, LockMode, ReconcileEvent, ReconcileOutcome, Status};
 pub use store::STORE_FORMAT_VERSION;
 pub use text_index::{INDEX_FORMAT_VERSION, TOKENIZER_CHAIN, text_search_mask};
 

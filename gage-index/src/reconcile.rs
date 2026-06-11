@@ -49,6 +49,18 @@ pub struct ReconcileOutcome {
     pub reindexed: usize,
     /// Sessions removed from the artifacts.
     pub removed: usize,
+    /// Wall-clock duration of the reconcile pass, in milliseconds.
+    pub elapsed_ms: u64,
+}
+
+/// Progress signal from `reconcile_with_progress` /
+/// `rebuild_with_progress`. `Start` fires once after the diff with the
+/// unit-of-work count (sessions to derive, reindex, or remove);
+/// `Advance` fires after each unit completes.
+#[derive(Debug, Clone, Copy)]
+pub enum ReconcileEvent {
+    Start { total: u64 },
+    Advance,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +75,32 @@ pub struct Status {
     pub store_bytes: u64,
     pub index_bytes: u64,
     pub last_reconcile_ms: Option<i64>,
+    pub cache_dir: PathBuf,
+    pub cache_bytes: u64,
+}
+
+impl Status {
+    pub fn last_reconcile_display(&self) -> String {
+        match self
+            .last_reconcile_ms
+            .and_then(chrono::DateTime::from_timestamp_millis)
+        {
+            Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            None => "never".to_string(),
+        }
+    }
+
+    pub fn store_bytes_display(&self) -> String {
+        human_bytes(self.store_bytes)
+    }
+
+    pub fn index_bytes_display(&self) -> String {
+        human_bytes(self.index_bytes)
+    }
+
+    pub fn cache_bytes_display(&self) -> String {
+        human_bytes(self.cache_bytes)
+    }
 }
 
 impl std::fmt::Display for Status {
@@ -72,14 +110,14 @@ impl std::fmt::Display for Status {
             "store:          v{} ({} sessions cached, {})",
             self.store_version,
             self.cached,
-            human_bytes(self.store_bytes)
+            self.store_bytes_display(),
         )?;
         writeln!(
             f,
             "index:          v{} ({} sessions indexed, {}, tokenizer {})",
             self.index_version,
             self.indexed,
-            human_bytes(self.index_bytes),
+            self.index_bytes_display(),
             self.tokenizer_chain
         )?;
         writeln!(
@@ -87,14 +125,13 @@ impl std::fmt::Display for Status {
             "sessions:       {} discovered, {} dirty",
             self.discovered, self.dirty
         )?;
-        let last = match self
-            .last_reconcile_ms
-            .and_then(chrono::DateTime::from_timestamp_millis)
-        {
-            Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-            None => "never".to_string(),
-        };
-        write!(f, "last reconcile: {last}")
+        writeln!(f, "last reconcile: {}", self.last_reconcile_display())?;
+        write!(
+            f,
+            "cache dir:      {} ({})",
+            self.cache_dir.display(),
+            self.cache_bytes_display(),
+        )
     }
 }
 
@@ -287,11 +324,28 @@ impl IndexStore {
     /// re-derive and re-index changed sessions, garbage-collect
     /// removed ones.
     pub fn reconcile(&self, mode: LockMode) -> Result<ReconcileOutcome> {
-        self.locked(mode, |store| store.reconcile_locked())
+        self.reconcile_with_progress(mode, |_| {})
+    }
+
+    /// As `reconcile`, but with a per-event progress callback.
+    pub fn reconcile_with_progress(
+        &self,
+        mode: LockMode,
+        mut on_event: impl FnMut(ReconcileEvent),
+    ) -> Result<ReconcileOutcome> {
+        self.locked(mode, |store| store.reconcile_locked(&mut on_event))
     }
 
     /// Delete both artifacts and rebuild from scratch.
     pub fn rebuild(&self) -> Result<ReconcileOutcome> {
+        self.rebuild_with_progress(|_| {})
+    }
+
+    /// As `rebuild`, but with a per-event progress callback.
+    pub fn rebuild_with_progress(
+        &self,
+        mut on_event: impl FnMut(ReconcileEvent),
+    ) -> Result<ReconcileOutcome> {
         self.locked(LockMode::Wait, |store| {
             let sessions = store.sessions_dir();
             if sessions.exists() {
@@ -303,7 +357,7 @@ impl IndexStore {
             }
             std::fs::create_dir_all(&sessions)?;
             std::fs::create_dir_all(&index)?;
-            store.reconcile_locked()
+            store.reconcile_locked(&mut on_event)
         })
     }
 
@@ -383,7 +437,10 @@ impl IndexStore {
         }
     }
 
-    fn reconcile_locked(&self) -> Result<ReconcileOutcome> {
+    fn reconcile_locked(
+        &self,
+        on_event: &mut dyn FnMut(ReconcileEvent),
+    ) -> Result<ReconcileOutcome> {
         let start = std::time::Instant::now();
         let sessions_dir = self.sessions_dir();
         let index_dir = self.index_dir();
@@ -487,11 +544,20 @@ impl IndexStore {
             Some(index.writer()?)
         };
 
+        let store_dirty_ids: BTreeSet<&str> =
+            store_dirty.iter().map(|(id, _, _)| id.as_str()).collect();
+        let index_only = index_dirty
+            .iter()
+            .filter(|(id, _, _)| !store_dirty_ids.contains(id.as_str()))
+            .count();
+        let total = store_dirty.len() + index_only + store_removed.len() + index_removed.len();
+        on_event(ReconcileEvent::Start {
+            total: total as u64,
+        });
+
         // 4. Re-derive changed sessions: parse the JSONL once, write
         // the store file (rename into place before its documents are
         // added to the index), then re-index.
-        let store_dirty_ids: BTreeSet<&str> =
-            store_dirty.iter().map(|(id, _, _)| id.as_str()).collect();
         for (id, path, _) in &store_dirty {
             let derived = match derive_session(id, path) {
                 Ok(d) => d,
@@ -511,6 +577,7 @@ impl IndexStore {
             }
             outcome.derived += 1;
             tracing::info!(session_id = %id, "derived session");
+            on_event(ReconcileEvent::Advance);
         }
 
         // 5. Index-only refresh (e.g. after an index rebuild): read
@@ -537,6 +604,7 @@ impl IndexStore {
                 manifest.sessions.insert(id.clone(), *fp);
             }
             outcome.reindexed += 1;
+            on_event(ReconcileEvent::Advance);
         }
 
         // 6. Garbage collection: artifacts for sessions gone from
@@ -554,12 +622,14 @@ impl IndexStore {
                 .expect("footer cache")
                 .remove(&path);
             outcome.removed += 1;
+            on_event(ReconcileEvent::Advance);
         }
         aggregates.retain(|id, _| walked_ids.contains(id.as_str()));
         if let Some(w) = &writer {
             for id in &index_removed {
                 index.delete_session(w, id);
                 manifest.sessions.remove(id);
+                on_event(ReconcileEvent::Advance);
             }
         }
 
@@ -574,12 +644,13 @@ impl IndexStore {
         manifest.last_reconcile_ms = now_ms();
         write_manifest(&self.manifest_path(), &manifest)?;
 
+        outcome.elapsed_ms = start.elapsed().as_millis() as u64;
         tracing::debug!(
             discovered = outcome.discovered,
             derived = outcome.derived,
             reindexed = outcome.reindexed,
             removed = outcome.removed,
-            elapsed_ms = start.elapsed().as_millis(),
+            elapsed_ms = outcome.elapsed_ms,
             "reconcile complete",
         );
         Ok(outcome)
@@ -636,6 +707,8 @@ impl IndexStore {
             index_bytes: dir_size(&self.index_dir()),
             last_reconcile_ms: (manifest.last_reconcile_ms > 0)
                 .then_some(manifest.last_reconcile_ms),
+            cache_dir: self.cache_dir.clone(),
+            cache_bytes: dir_size(&self.cache_dir),
         }
     }
 }
