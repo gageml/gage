@@ -2,7 +2,6 @@
 .claude
 .jj
 .local.*
-CLAUDE.md
 
 # Rust
 target
