@@ -69,7 +69,7 @@ jobs:
         uses: actions/cache@v5
         with:
           key: build-${{ steps.version.outputs.version }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/${{ env.BIN }}
+          path: target/${{ matrix.target }}/release-small/${{ env.BIN }}
 
       - name: Rust
         if:
@@ -83,7 +83,7 @@ jobs:
         if:
           steps.artifact.outputs.exists != 'yes' &&
           steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --release --target ${{ matrix.target }} --bin "$BIN"
+        run: cargo build --profile release-small --target ${{ matrix.target }} --bin "$BIN"
 
       - name: Package
         if: steps.artifact.outputs.exists != 'yes'
@@ -92,7 +92,7 @@ jobs:
         run: |
           version="${{ steps.version.outputs.version }}"
           archive="${PKGNAME}-${version}-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release" -czf "$archive" "$BIN"
+          tar -C "target/${{ matrix.target }}/release-small" -czf "$archive" "$BIN"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Artifact
