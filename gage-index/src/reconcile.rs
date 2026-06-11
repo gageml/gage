@@ -1,14 +1,13 @@
 //! The reconcile pass and the `IndexStore` handle that owns the
-//! derived artifacts.
+//! tantivy text index.
 //!
-//! Any query of the session-file tables reconciles first, then scans
-//! derived artifacts only. Cache writes are lock-free (temp + atomic
-//! rename, deterministic content); the pass itself serializes on an
-//! advisory file lock. Queries try-lock and on contention skip
-//! reconciliation, searching the current committed snapshot — the
-//! contender is reconciling the same corpus, so staleness is bounded
-//! at one pass and is one-directional: missed recent rows, never
-//! wrong rows.
+//! Any query of the message-text TVF or the session-row tables
+//! reconciles first. Index writes are atomic at commit time; the pass
+//! itself serializes on an advisory file lock. Queries try-lock and on
+//! contention skip reconciliation, searching the current committed
+//! snapshot — the contender is reconciling the same corpus, so
+//! staleness is bounded at one pass and one-directional: missed
+//! recent rows, never wrong rows.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
@@ -20,12 +19,8 @@ use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::derive::{Fingerprint, SessionAggregates, derive_session};
-use crate::store::{
-    STORE_FORMAT_VERSION, read_aggregates, read_fingerprint, read_message_rows, write_aggregates,
-    write_session_file,
-};
-use crate::text_index::{INDEX_FORMAT_VERSION, TOKENIZER_CHAIN, TextIndex};
+use crate::derive::{Fingerprint, derive_session};
+use crate::text_index::{Hit, INDEX_FORMAT_VERSION, TOKENIZER_CHAIN, TextIndex};
 
 /// How to take the reconcile lock. Queries use `Try` —
 /// skip-with-stale on contention. Explicit maintenance (`gage index`)
@@ -39,24 +34,21 @@ pub enum LockMode {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReconcileOutcome {
     /// Reconciliation was skipped because another process holds the
-    /// reconcile lock; artifacts are at most one pass stale.
+    /// reconcile lock; the index is at most one pass stale.
     pub skipped: bool,
     /// Sessions discovered on disk.
     pub discovered: usize,
-    /// Sessions re-derived (JSONL parsed, store file rewritten).
-    pub derived: usize,
-    /// Sessions re-indexed from the store without re-deriving.
-    pub reindexed: usize,
-    /// Sessions removed from the artifacts.
+    /// Sessions re-indexed.
+    pub indexed: usize,
+    /// Sessions removed from the index.
     pub removed: usize,
     /// Wall-clock duration of the reconcile pass, in milliseconds.
     pub elapsed_ms: u64,
 }
 
-/// Progress signal from `reconcile_with_progress` /
-/// `rebuild_with_progress`. `Start` fires once after the diff with the
-/// unit-of-work count (sessions to derive, reindex, or remove);
-/// `Advance` fires after each unit completes.
+/// Progress signal. `Start` fires once after the diff with the
+/// unit-of-work count (sessions to reindex or remove); `Advance` fires
+/// after each unit completes.
 #[derive(Debug, Clone, Copy)]
 pub enum ReconcileEvent {
     Start { total: u64 },
@@ -65,14 +57,11 @@ pub enum ReconcileEvent {
 
 #[derive(Debug, Clone)]
 pub struct Status {
-    pub store_version: u32,
     pub index_version: u32,
     pub tokenizer_chain: String,
     pub discovered: usize,
-    pub cached: usize,
     pub indexed: usize,
     pub dirty: usize,
-    pub store_bytes: u64,
     pub index_bytes: u64,
     pub last_reconcile_ms: Option<i64>,
     pub cache_dir: PathBuf,
@@ -90,10 +79,6 @@ impl Status {
         }
     }
 
-    pub fn store_bytes_display(&self) -> String {
-        human_bytes(self.store_bytes)
-    }
-
     pub fn index_bytes_display(&self) -> String {
         human_bytes(self.index_bytes)
     }
@@ -105,13 +90,6 @@ impl Status {
 
 impl std::fmt::Display for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "store:          v{} ({} sessions cached, {})",
-            self.store_version,
-            self.cached,
-            self.store_bytes_display(),
-        )?;
         writeln!(
             f,
             "index:          v{} ({} sessions indexed, {}, tokenizer {})",
@@ -191,28 +169,16 @@ fn process_lock(cache_dir: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// A cache file's own identity: `(mtime_ns, size)`. Session files are
-/// only ever replaced whole (temp + atomic rename), so a matching
-/// stat means matching content.
-type FileStat = (i128, u64);
-
-/// Memoized footer fingerprints, keyed by cache-file path and
-/// validated by the file's stat. Spares each reconcile pass from
-/// re-opening every session file's footer; a replaced file has a new
-/// stat and re-reads.
-type FooterCache = Mutex<HashMap<PathBuf, (FileStat, Option<Fingerprint>)>>;
-
-/// Handle to the derived artifacts for one session corpus.
+/// Handle to the text index for one session corpus.
 ///
 /// `root` is the Claude projects directory the corpus is read from;
-/// `cache_dir` holds the artifacts (`~/.gage/cache` in production).
+/// `cache_dir` holds the index (`~/.gage/cache` in production).
 /// Everything under `cache_dir` is rebuildable; deleting it is a
 /// complete reset.
 #[derive(Debug, Clone)]
 pub struct IndexStore {
     root: PathBuf,
     cache_dir: PathBuf,
-    footer_cache: Arc<FooterCache>,
 }
 
 impl IndexStore {
@@ -220,41 +186,15 @@ impl IndexStore {
         Self {
             root: root.into(),
             cache_dir: cache_dir.into(),
-            footer_cache: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    /// The source fingerprint recorded in a session file's footer,
-    /// memoized on the file's own stat.
-    fn footer_fingerprint(&self, path: &Path) -> Option<Fingerprint> {
-        let meta = path.metadata().ok()?;
-        let stat: FileStat = (
-            meta.modified()
-                .ok()?
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as i128,
-            meta.len(),
-        );
-        let mut cache = self.footer_cache.lock().expect("footer cache");
-        if let Some((cached_stat, fp)) = cache.get(path)
-            && *cached_stat == stat
-        {
-            return *fp;
-        }
-        let fp = read_fingerprint(path);
-        cache.insert(path.to_path_buf(), (stat, fp));
-        fp
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    pub fn sessions_dir(&self) -> PathBuf {
-        self.cache_dir
-            .join("sessions")
-            .join(format!("v{STORE_FORMAT_VERSION}"))
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
     }
 
     fn index_dir(&self) -> PathBuf {
@@ -271,58 +211,19 @@ impl IndexStore {
         self.index_dir().join("manifest.json")
     }
 
-    fn aggregates_path(&self) -> PathBuf {
-        self.sessions_dir().join("sessions.parquet")
-    }
-
-    /// Path of one session's store file.
-    pub fn session_file(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir().join(format!("{session_id}.parquet"))
-    }
-
-    /// List `(session_id, path)` for every session file in the store.
-    pub fn session_files(&self) -> Vec<(String, PathBuf)> {
-        let mut files = Vec::new();
-        let entries = match std::fs::read_dir(self.sessions_dir()) {
-            Ok(entries) => entries,
-            Err(_) => return files,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default();
-            if let Some(id) = name.strip_suffix(".parquet")
-                && is_session_id(id)
-            {
-                files.push((id.to_string(), path));
-            }
-        }
-        files.sort();
-        files
-    }
-
-    /// Load the consolidated session aggregates.
-    pub fn load_aggregates(&self) -> Result<HashMap<String, SessionAggregates>> {
-        read_aggregates(&self.aggregates_path())
-    }
-
-    /// Search the committed text index, returning matched
-    /// `(session_id, line)` coordinates. An absent index matches
-    /// nothing. Query syntax errors are reported as
-    /// [`IndexError::QueryParse`].
-    pub fn search(&self, query: &str) -> Result<Vec<(String, i64)>> {
+    /// Run a query against the committed index, returning the top
+    /// `limit` hits with BM25 scores and snippets capped at
+    /// `snippet_chars`. An absent index matches nothing.
+    pub fn search(&self, query: &str, limit: usize, snippet_chars: usize) -> Result<Vec<Hit>> {
         let dir = self.index_dir();
         if !dir.join("meta.json").exists() {
             return Ok(Vec::new());
         }
-        TextIndex::open_or_create(&dir)?.search(query)
+        TextIndex::open_or_create(&dir)?.search(query, limit, snippet_chars)
     }
 
-    /// Run the reconcile pass: diff the corpus against the artifacts,
-    /// re-derive and re-index changed sessions, garbage-collect
-    /// removed ones.
+    /// Run the reconcile pass: diff the corpus against the index,
+    /// re-index changed sessions, garbage-collect removed ones.
     pub fn reconcile(&self, mode: LockMode) -> Result<ReconcileOutcome> {
         self.reconcile_with_progress(mode, |_| {})
     }
@@ -336,7 +237,7 @@ impl IndexStore {
         self.locked(mode, |store| store.reconcile_locked(&mut on_event))
     }
 
-    /// Delete both artifacts and rebuild from scratch.
+    /// Delete the index and rebuild from scratch.
     pub fn rebuild(&self) -> Result<ReconcileOutcome> {
         self.rebuild_with_progress(|_| {})
     }
@@ -347,15 +248,10 @@ impl IndexStore {
         mut on_event: impl FnMut(ReconcileEvent),
     ) -> Result<ReconcileOutcome> {
         self.locked(LockMode::Wait, |store| {
-            let sessions = store.sessions_dir();
-            if sessions.exists() {
-                std::fs::remove_dir_all(&sessions)?;
-            }
             let index = store.index_dir();
             if index.exists() {
                 std::fs::remove_dir_all(&index)?;
             }
-            std::fs::create_dir_all(&sessions)?;
             std::fs::create_dir_all(&index)?;
             store.reconcile_locked(&mut on_event)
         })
@@ -366,7 +262,6 @@ impl IndexStore {
         mode: LockMode,
         body: impl FnOnce(&Self) -> Result<ReconcileOutcome>,
     ) -> Result<ReconcileOutcome> {
-        std::fs::create_dir_all(self.sessions_dir())?;
         std::fs::create_dir_all(self.index_dir())?;
         self.remove_stale_versions();
 
@@ -409,30 +304,32 @@ impl IndexStore {
         result
     }
 
-    /// Remove version directories other than the current formats'.
+    /// Remove text-index version directories other than the current one.
     fn remove_stale_versions(&self) {
-        for (parent, current) in [
-            (
-                self.cache_dir.join("sessions"),
-                format!("v{STORE_FORMAT_VERSION}"),
-            ),
-            (
-                self.cache_dir.join("text-index"),
-                format!("v{INDEX_FORMAT_VERSION}"),
-            ),
-        ] {
-            let entries = match std::fs::read_dir(&parent) {
-                Ok(entries) => entries,
-                Err(_) => continue,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() && entry.file_name().to_string_lossy() != current {
-                    tracing::info!(path = %path.display(), "removing stale format version");
-                    if let Err(e) = std::fs::remove_dir_all(&path) {
-                        tracing::warn!(path = %path.display(), "failed to remove: {e}");
-                    }
+        let parent = self.cache_dir.join("text-index");
+        let current = format!("v{INDEX_FORMAT_VERSION}");
+        let entries = match std::fs::read_dir(&parent) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && entry.file_name().to_string_lossy() != current {
+                tracing::info!(path = %path.display(), "removing stale text-index version");
+                if let Err(e) = std::fs::remove_dir_all(&path) {
+                    tracing::warn!(path = %path.display(), "failed to remove: {e}");
                 }
+            }
+        }
+        // Migration: also remove any legacy sessions/ parquet store.
+        let legacy_sessions = self.cache_dir.join("sessions");
+        if legacy_sessions.exists() {
+            tracing::info!(
+                path = %legacy_sessions.display(),
+                "removing legacy parquet store",
+            );
+            if let Err(e) = std::fs::remove_dir_all(&legacy_sessions) {
+                tracing::warn!(path = %legacy_sessions.display(), "failed to remove: {e}");
             }
         }
     }
@@ -442,7 +339,6 @@ impl IndexStore {
         on_event: &mut dyn FnMut(ReconcileEvent),
     ) -> Result<ReconcileOutcome> {
         let start = std::time::Instant::now();
-        let sessions_dir = self.sessions_dir();
         let index_dir = self.index_dir();
 
         // 1. Walk: (mtime, size) per session, no file reads.
@@ -469,22 +365,12 @@ impl IndexStore {
                 .collect();
         let walked_ids: BTreeSet<&str> = walked.iter().map(|(id, _, _)| id.as_str()).collect();
 
-        // 2. Current artifact state.
-        let cached: HashMap<String, Option<Fingerprint>> = self
-            .session_files()
-            .into_iter()
-            .map(|(id, path)| {
-                let fp = self.footer_fingerprint(&path);
-                (id, fp)
-            })
-            .collect();
-
         let mut manifest = load_manifest(&self.manifest_path());
         let index = match TextIndex::open_or_create(&index_dir) {
             Ok(index) if manifest.is_current() => index,
             other => {
                 // Version/chain mismatch or unreadable index: wipe and
-                // rebuild. Recovery is a column scan over the store.
+                // rebuild.
                 if let Err(e) = other {
                     tracing::warn!("text index unreadable, rebuilding: {e}");
                 } else {
@@ -497,31 +383,12 @@ impl IndexStore {
             }
         };
 
-        let mut aggregates: BTreeMap<String, SessionAggregates> = self
-            .load_aggregates()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-
-        // 3. Diff. A session missing its aggregates row re-derives —
-        // aggregates come from fields (usage, ai-title) that only the
-        // JSONL parse sees.
-        let store_dirty: Vec<&(String, PathBuf, Fingerprint)> = walked
-            .iter()
-            .filter(|(id, _, fp)| {
-                cached.get(id) != Some(&Some(*fp)) || !aggregates.contains_key(id)
-            })
-            .collect();
-        let index_dirty: Vec<&(String, PathBuf, Fingerprint)> = walked
+        // 2. Diff.
+        let dirty: Vec<&(String, PathBuf, Fingerprint)> = walked
             .iter()
             .filter(|(id, _, fp)| manifest.sessions.get(id) != Some(fp))
             .collect();
-        let store_removed: Vec<String> = cached
-            .keys()
-            .filter(|id| !walked_ids.contains(id.as_str()))
-            .cloned()
-            .collect();
-        let index_removed: Vec<String> = manifest
+        let removed: Vec<String> = manifest
             .sessions
             .keys()
             .filter(|id| !walked_ids.contains(id.as_str()))
@@ -533,113 +400,50 @@ impl IndexStore {
             ..Default::default()
         };
 
-        let work = !store_dirty.is_empty()
-            || !index_dirty.is_empty()
-            || !store_removed.is_empty()
-            || !index_removed.is_empty();
+        let work = !dirty.is_empty() || !removed.is_empty();
+        let mut writer = if work { Some(index.writer()?) } else { None };
 
-        let mut writer = if index_dirty.is_empty() && index_removed.is_empty() {
-            None
-        } else {
-            Some(index.writer()?)
-        };
-
-        let store_dirty_ids: BTreeSet<&str> =
-            store_dirty.iter().map(|(id, _, _)| id.as_str()).collect();
-        let index_only = index_dirty
-            .iter()
-            .filter(|(id, _, _)| !store_dirty_ids.contains(id.as_str()))
-            .count();
-        let total = store_dirty.len() + index_only + store_removed.len() + index_removed.len();
         on_event(ReconcileEvent::Start {
-            total: total as u64,
+            total: (dirty.len() + removed.len()) as u64,
         });
 
-        // 4. Re-derive changed sessions: parse the JSONL once, write
-        // the store file (rename into place before its documents are
-        // added to the index), then re-index.
-        for (id, path, _) in &store_dirty {
+        // 3. Re-index changed sessions: parse the JSONL and write each
+        // message line into the index.
+        for (id, path, fp) in &dirty {
             let derived = match derive_session(id, path) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(session_id = %id, "skipping unreadable session: {e}");
+                    on_event(ReconcileEvent::Advance);
                     continue;
                 }
             };
-            write_session_file(&sessions_dir, &derived)?;
-            aggregates.insert(id.clone(), derived.aggregates.clone());
             if let Some(w) = &writer {
                 index.delete_session(w, id);
                 for (line, text) in message_rows_of(&derived.batch) {
                     index.add_message(w, id, line, text)?;
                 }
-                manifest.sessions.insert(id.clone(), derived.fingerprint);
-            }
-            outcome.derived += 1;
-            tracing::info!(session_id = %id, "derived session");
-            on_event(ReconcileEvent::Advance);
-        }
-
-        // 5. Index-only refresh (e.g. after an index rebuild): read
-        // the text column from the store instead of re-parsing JSONL.
-        for (id, _, _) in &index_dirty {
-            if store_dirty_ids.contains(id.as_str()) {
-                continue;
-            }
-            let Some(Some(fp)) = cached.get(id) else {
-                continue;
-            };
-            let rows = match read_message_rows(&self.session_file(id)) {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::warn!(session_id = %id, "skipping unreadable store file: {e}");
-                    continue;
-                }
-            };
-            if let Some(w) = &writer {
-                index.delete_session(w, id);
-                for (line, text) in &rows {
-                    index.add_message(w, id, *line, text)?;
-                }
                 manifest.sessions.insert(id.clone(), *fp);
             }
-            outcome.reindexed += 1;
+            outcome.indexed += 1;
+            tracing::info!(session_id = %id, "indexed session");
             on_event(ReconcileEvent::Advance);
         }
 
-        // 6. Garbage collection: artifacts for sessions gone from
-        // disk. Stale index entries cannot produce wrong results —
-        // re-application and absent rows see to that.
-        for id in &store_removed {
-            let path = self.session_file(id);
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(session_id = %id, "failed to remove store file: {e}");
-            }
-            #[allow(clippy::let_underscore_must_use)]
-            let _ = self
-                .footer_cache
-                .lock()
-                .expect("footer cache")
-                .remove(&path);
-            outcome.removed += 1;
-            on_event(ReconcileEvent::Advance);
-        }
-        aggregates.retain(|id, _| walked_ids.contains(id.as_str()));
+        // 4. Garbage collection: index entries for sessions gone from
+        // disk.
         if let Some(w) = &writer {
-            for id in &index_removed {
+            for id in &removed {
                 index.delete_session(w, id);
                 manifest.sessions.remove(id);
+                outcome.removed += 1;
                 on_event(ReconcileEvent::Advance);
             }
         }
 
-        // 7. Commit ordering: all cache writes above precede the
-        // index commit; the manifest is written last.
+        // 5. Commit, then write the manifest.
         if let Some(w) = &mut writer {
             w.commit()?;
-        }
-        if work {
-            write_aggregates(&self.aggregates_path(), &aggregates)?;
         }
         manifest.last_reconcile_ms = now_ms();
         write_manifest(&self.manifest_path(), &manifest)?;
@@ -647,8 +451,7 @@ impl IndexStore {
         outcome.elapsed_ms = start.elapsed().as_millis() as u64;
         tracing::debug!(
             discovered = outcome.discovered,
-            derived = outcome.derived,
-            reindexed = outcome.reindexed,
+            indexed = outcome.indexed,
             removed = outcome.removed,
             elapsed_ms = outcome.elapsed_ms,
             "reconcile complete",
@@ -656,7 +459,7 @@ impl IndexStore {
         Ok(outcome)
     }
 
-    /// The status report: format versions, session counts, dirty
+    /// The status report: format version, session counts, dirty
     /// count, on-disk sizes, last reconcile time. Read-only — takes
     /// no lock.
     pub fn status(&self) -> Status {
@@ -680,30 +483,19 @@ impl IndexStore {
             })
             .collect();
 
-        let cached: HashMap<String, Option<Fingerprint>> = self
-            .session_files()
-            .into_iter()
-            .map(|(id, path)| (id, self.footer_fingerprint(&path)))
-            .collect();
         let manifest = load_manifest(&self.manifest_path());
 
         let dirty = walked
             .iter()
-            .filter(|(id, fp)| {
-                cached.get(id.as_str()) != Some(&Some(**fp))
-                    || manifest.sessions.get(id.as_str()) != Some(fp)
-            })
+            .filter(|(id, fp)| manifest.sessions.get(id.as_str()) != Some(fp))
             .count();
 
         Status {
-            store_version: STORE_FORMAT_VERSION,
             index_version: INDEX_FORMAT_VERSION,
             tokenizer_chain: TOKENIZER_CHAIN.to_string(),
             discovered: walked.len(),
-            cached: cached.len(),
             indexed: manifest.sessions.len(),
             dirty,
-            store_bytes: dir_size(&self.sessions_dir()),
             index_bytes: dir_size(&self.index_dir()),
             last_reconcile_ms: (manifest.last_reconcile_ms > 0)
                 .then_some(manifest.last_reconcile_ms),
@@ -711,10 +503,6 @@ impl IndexStore {
             cache_bytes: dir_size(&self.cache_dir),
         }
     }
-}
-
-fn is_session_id(s: &str) -> bool {
-    s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 fn now_ms() -> i64 {

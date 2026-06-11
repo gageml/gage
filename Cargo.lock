@@ -2297,7 +2297,6 @@ dependencies = [
  "chrono",
  "fs4 1.1.0",
  "gage-claude",
- "parquet",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -7,7 +7,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::datasource::{MemTable, TableProvider, TableType};
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::*;
 use gage_index::{
@@ -15,12 +15,11 @@ use gage_index::{
 };
 
 use super::SessionSource;
-use super::store_scan::{reconcile_for_query, scan_store_files, store_files, unqualify};
+use super::walk::{reconcile_for_query, session_cache, session_paths};
+use crate::cache::SessionCache;
 use crate::filter::{self, IdFilter};
 
-/// The store columns serving the `entry` table, in table-column
-/// order: a projection of every store row.
-const STORE_PROJECTION: &[usize] = &[
+const PROJECTION: &[usize] = &[
     COL_SESSION_ID,
     COL_LINE,
     COL_UUID,
@@ -31,9 +30,9 @@ const STORE_PROJECTION: &[usize] = &[
 
 static ENTRY_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(
-        gage_index::store_schema()
-            .project(STORE_PROJECTION)
-            .expect("store schema serves entry projection"),
+        gage_index::derived_schema()
+            .project(PROJECTION)
+            .expect("derived schema serves entry projection"),
     )
 });
 
@@ -50,12 +49,11 @@ pub struct EntryTable {
 impl EntryTable {
     pub fn new(store: Arc<IndexStore>) -> Self {
         Self {
-            source: SessionSource::Store(store),
+            source: SessionSource::Corpus(store),
             schema: entry_schema(),
         }
     }
 
-    /// Build an `EntryTable` scoped to one session file.
     pub fn with_session(session_id: impl Into<String>, path: impl Into<PathBuf>) -> Self {
         Self {
             source: SessionSource::SingleSession {
@@ -85,11 +83,10 @@ impl TableProvider for EntryTable {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
-        let support = filters
+        Ok(filters
             .iter()
             .map(|f| filter::pushdown(f, "session_id"))
-            .collect();
-        Ok(support)
+            .collect())
     }
 
     async fn scan(
@@ -99,63 +96,56 @@ impl TableProvider for EntryTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        match &self.source {
-            SessionSource::Store(store) => {
+        let batches = match &self.source {
+            SessionSource::Corpus(store) => {
                 reconcile_for_query(store).await?;
-                let files: Vec<PathBuf> = store_files(store, filters, "session_id")?
-                    .into_iter()
-                    .map(|(_, path)| path)
-                    .collect();
-                let store_projection = map_projection(projection);
-                let forwarded: Vec<Expr> = filters
-                    .iter()
-                    .filter(|f| !super::store_scan::references_text_search(f))
-                    .map(unqualify)
-                    .collect();
-                scan_store_files(state, &files, Some(store_projection), &forwarded, limit).await
+                let cache = session_cache(state)?;
+                let paths = session_paths(store, filters, "session_id")?;
+                load_batches(&cache, paths).await?
             }
             SessionSource::SingleSession { session_id, path } => {
                 let keep = match IdFilter::new(filters, "session_id")? {
                     Some(f) => f.matches(session_id)?,
                     None => true,
                 };
-                let batch = if keep {
-                    derive_batch(session_id, path).await?
+                if keep {
+                    vec![derive_one(session_id, path).await?]
                 } else {
-                    RecordBatch::new_empty(self.schema.clone())
-                };
-                let mem = MemTable::try_new(self.schema.clone(), vec![vec![batch]])?;
-                mem.scan(state, projection, &[], limit).await
+                    Vec::new()
+                }
             }
-        }
+        };
+        let mem = MemTable::try_new(self.schema.clone(), vec![batches])?;
+        mem.scan(state, projection, &[], limit).await
     }
 }
 
-/// Map a table-schema projection onto store column indices.
-fn map_projection(projection: Option<&Vec<usize>>) -> Vec<usize> {
-    match projection {
-        Some(indices) => indices
-            .iter()
-            .filter_map(|&i| STORE_PROJECTION.get(i).copied())
-            .collect(),
-        None => STORE_PROJECTION.to_vec(),
+async fn load_batches(
+    cache: &Arc<SessionCache>,
+    paths: Vec<(String, PathBuf)>,
+) -> Result<Vec<RecordBatch>> {
+    let mut batches = Vec::with_capacity(paths.len());
+    for (id, path) in paths {
+        let derived = match cache.get(&id, &path).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(session_id = %id, "skipping session: {e}");
+                continue;
+            }
+        };
+        batches.push(derived.batch.project(PROJECTION)?);
     }
+    Ok(batches)
 }
 
-/// Derive one session's entry rows in memory — the per-session
-/// scanner context, which bypasses the store. An unreadable session
-/// yields no rows, matching the corpus walk's behavior.
-async fn derive_batch(session_id: &str, path: &Path) -> Result<RecordBatch> {
-    let session_id = session_id.to_string();
+async fn derive_one(session_id: &str, path: &Path) -> Result<RecordBatch> {
+    let id = session_id.to_string();
     let path = path.to_path_buf();
-    let derived =
-        tokio::task::spawn_blocking(move || gage_index::derive_session(&session_id, &path))
-            .await
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!("derive task failed: {e}"))
-            })?;
+    let derived = tokio::task::spawn_blocking(move || gage_index::derive_session(&id, &path))
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("derive task failed: {e}")))?;
     match derived {
-        Ok(derived) => Ok(derived.batch.project(STORE_PROJECTION)?),
+        Ok(d) => Ok(d.batch.project(PROJECTION)?),
         Err(e) => {
             tracing::debug!("session not derivable: {e}");
             Ok(RecordBatch::new_empty(entry_schema()))

@@ -1,43 +1,51 @@
-//! Tantivy index over `message.text`, plus the per-batch transient
-//! evaluator that defines `text_search` row-wise semantics.
+//! Tantivy index over message text. The persistent index is the sole
+//! FTS surface: it stores the text field so snippet generation needs
+//! no external lookup, and its search returns scores and snippets, not
+//! booleans.
 //!
-//! The persistent index and the per-batch fallback are the same
-//! engine over two index instances, so correctness reduces to both
-//! being built with the same tokenizer chain. One constructor builds
-//! that chain ([`register_tokenizer`]); both consumers live inside
-//! this module, making the single-constructor rule structural.
+//! Schema: `session_id` (STRING|STORED), `line` (u64|STORED|FAST),
+//! `text` (TEXT|STORED). Tokenizer is the default chain (split on
+//! non-alphanumeric, drop tokens over 40 bytes, lowercase). Query
+//! parser defaults to AND across bare terms.
 
-use std::collections::HashSet;
 use std::path::Path;
 
-use tantivy::collector::DocSetCollector;
+use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{
     FAST, Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
     Value as _,
 };
+use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
-use tantivy::{Index, IndexWriter, TantivyDocument, Term, doc};
+use tantivy::{Index, IndexWriter, Score, TantivyDocument, Term, doc};
 
 use crate::{IndexError, Result};
 
 /// Index format version: covers the index schema and tokenizer chain.
 /// Bumping it changes the `v{N}` path component.
-pub const INDEX_FORMAT_VERSION: u32 = 1;
+pub const INDEX_FORMAT_VERSION: u32 = 2;
 
 /// Canonical identifier of the tokenizer chain, recorded in the index
 /// manifest. A mismatch with running code triggers an automatic index
-/// rebuild — tokenizer drift silently drops matches otherwise, since
-/// the result set is `index_matches ∩ rowwise_matches`.
+/// rebuild.
 pub const TOKENIZER_CHAIN: &str = "simple+remove_long:40+lowercase";
 
 const TOKENIZER_NAME: &str = "gage_default";
 const MAX_TOKEN_LEN: usize = 40;
 
-/// The single tokenizer-chain constructor: Tantivy's `default` chain
-/// (split on non-alphanumeric, drop tokens over 40 bytes, lowercase).
-/// Long-token removal suits this corpus — base64 blobs and hashes drop
-/// out instead of bloating the index.
+/// Default character cap on generated snippets.
+pub const DEFAULT_SNIPPET_CHARS: usize = 200;
+
+/// One hit from a `message_text` search.
+#[derive(Debug, Clone)]
+pub struct Hit {
+    pub session_id: String,
+    pub line: i64,
+    pub score: f32,
+    pub snippet: String,
+}
+
 fn build_tokenizer() -> TextAnalyzer {
     TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(RemoveLongFilter::limit(MAX_TOKEN_LEN))
@@ -52,16 +60,15 @@ fn register_tokenizer(index: &Index) {
 }
 
 fn text_options() -> TextOptions {
-    TextOptions::default().set_indexing_options(
-        TextFieldIndexing::default()
-            .set_tokenizer(TOKENIZER_NAME)
-            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-    )
+    TextOptions::default()
+        .set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(TOKENIZER_NAME)
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        )
+        .set_stored()
 }
 
-/// The persistent index over message text. Text is not stored: the
-/// index selects `(session_id, line)` coordinates; rows materialize
-/// from the columnar store.
 pub(crate) struct TextIndex {
     index: Index,
     f_session: Field,
@@ -127,17 +134,31 @@ impl TextIndex {
         Ok(())
     }
 
-    /// Search the committed index, returning matched coordinates.
-    pub(crate) fn search(&self, query: &str) -> Result<Vec<(String, i64)>> {
+    /// Run a query against the committed index, returning the top
+    /// `limit` hits with BM25 scores and snippets capped at
+    /// `snippet_chars`. Matches in snippets are wrapped in guillemets
+    /// (`«match»`). Hits come back ordered by score, descending.
+    pub(crate) fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        snippet_chars: usize,
+    ) -> Result<Vec<Hit>> {
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
-        let parser = QueryParser::for_index(&self.index, vec![self.f_text]);
+        let mut parser = QueryParser::for_index(&self.index, vec![self.f_text]);
+        parser.set_conjunction_by_default();
         let query = parser
             .parse_query(query)
             .map_err(|e| IndexError::QueryParse(e.to_string()))?;
-        let docs = searcher.search(&query, &DocSetCollector)?;
-        let mut coords = Vec::with_capacity(docs.len());
-        for addr in docs {
+
+        let mut snippet_generator = SnippetGenerator::create(&searcher, &*query, self.f_text)?;
+        snippet_generator.set_max_num_chars(snippet_chars);
+
+        let top: Vec<(Score, _)> =
+            searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
+        let mut hits = Vec::with_capacity(top.len());
+        for (score, addr) in top {
             let doc: TantivyDocument = searcher.doc(addr)?;
             let session_id = doc
                 .get_first(self.f_session)
@@ -148,117 +169,124 @@ impl TextIndex {
                 .get_first(self.f_line)
                 .and_then(|v| v.as_u64())
                 .unwrap_or_default() as i64;
-            coords.push((session_id, line));
+            let snippet = snippet_generator.snippet_from_doc(&doc);
+            hits.push(Hit {
+                session_id,
+                line,
+                score,
+                snippet: format_snippet(&snippet),
+            });
         }
-        Ok(coords)
+        Ok(hits)
     }
 }
 
-/// Row-wise `text_search` evaluation over one batch of values: build
-/// a transient single-segment RAM index over the batch, run the
-/// query, return the match mask (the Lucene MemoryIndex pattern).
-/// This implementation defines the predicate's semantics; the
-/// persistent index is purely an accelerator.
-///
-/// NULL inputs yield NULL (SQL predicate semantics); they are not
-/// indexed, so negative queries do not match them.
-pub fn text_search_mask<'a, I>(texts: I, query: &str) -> Result<Vec<Option<bool>>>
-where
-    I: IntoIterator<Item = Option<&'a str>>,
-{
-    let mut builder = Schema::builder();
-    let f_row = builder.add_u64_field("row", FAST);
-    let f_text = builder.add_text_field("text", text_options());
-    let index = Index::create_in_ram(builder.build());
-    register_tokenizer(&index);
-
-    let mut mask: Vec<Option<bool>> = Vec::new();
-    let mut writer: IndexWriter = index.writer_with_num_threads(1, 15_000_000)?;
-    for (row, text) in texts.into_iter().enumerate() {
-        match text {
-            Some(text) => {
-                mask.push(Some(false));
-                writer.add_document(doc!(f_row => row as u64, f_text => text))?;
-            }
-            None => mask.push(None),
-        }
+/// Wrap highlighted ranges in guillemets (`«match»`). Source text
+/// often contains markdown `**...**`, so a markdown delimiter would
+/// collide; guillemets are vanishingly rare in code and prose,
+/// single-codepoint on each side, and a simple regex strips them for
+/// consumers that want the plain fragment.
+fn format_snippet(snippet: &tantivy::snippet::Snippet) -> String {
+    const OPEN: &str = "«";
+    const CLOSE: &str = "»";
+    let fragment = snippet.fragment();
+    let highlights = snippet.highlighted();
+    if highlights.is_empty() {
+        return fragment.to_string();
     }
-    writer.commit()?;
-
-    let reader = index.reader()?;
-    let searcher = reader.searcher();
-    let parser = QueryParser::for_index(&index, vec![f_text]);
-    let query = parser
-        .parse_query(query)
-        .map_err(|e| IndexError::QueryParse(e.to_string()))?;
-    let docs: HashSet<_> = searcher.search(&query, &DocSetCollector)?;
-    for addr in docs {
-        let segment = searcher.segment_reader(addr.segment_ord);
-        let column = segment.fast_fields().u64("row")?;
-        if let Some(row) = column.first(addr.doc_id)
-            && let Some(slot) = mask.get_mut(row as usize)
-        {
-            *slot = Some(true);
+    let mut out =
+        String::with_capacity(fragment.len() + highlights.len() * (OPEN.len() + CLOSE.len()));
+    let mut cursor = 0;
+    let mut sorted: Vec<_> = highlights.to_vec();
+    sorted.sort_by_key(|r| r.start);
+    for range in sorted {
+        // Skip overlapping / out-of-order ranges defensively.
+        if range.start < cursor || range.end > fragment.len() {
+            continue;
         }
+        out.push_str(&fragment[cursor..range.start]);
+        out.push_str(OPEN);
+        out.push_str(&fragment[range.start..range.end]);
+        out.push_str(CLOSE);
+        cursor = range.end;
     }
-    Ok(mask)
+    out.push_str(&fragment[cursor..]);
+    out
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
-    fn matched(mask: &[Option<bool>]) -> Vec<usize> {
-        mask.iter()
-            .enumerate()
-            .filter(|(_, m)| **m == Some(true))
-            .map(|(i, _)| i)
-            .collect()
+    fn temp_index() -> (TextIndex, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let index = TextIndex::open_or_create(dir.path()).unwrap();
+        (index, dir)
+    }
+
+    fn write(index: &TextIndex, docs: &[(&str, i64, &str)]) {
+        let mut writer = index.writer().unwrap();
+        for (sid, line, text) in docs {
+            index.add_message(&writer, sid, *line, text).unwrap();
+        }
+        writer.commit().unwrap();
     }
 
     #[test]
-    fn mask_matches_terms() {
-        let texts = vec![
-            Some("a design decision was made"),
-            Some("nothing relevant"),
-            None,
-            Some("the Design rationale"),
-        ];
-        let mask = text_search_mask(texts, "design").unwrap();
-        assert_eq!(matched(&mask), vec![0, 3]);
-        assert_eq!(mask.get(2), Some(&None));
+    fn search_returns_scored_hits_and_snippets() {
+        let (index, _dir) = temp_index();
+        write(
+            &index,
+            &[
+                ("s1", 1, "design decision was made here"),
+                ("s1", 2, "nothing relevant"),
+                ("s2", 1, "the design rationale and decision matter"),
+            ],
+        );
+        let hits = index
+            .search("design decision", 10, DEFAULT_SNIPPET_CHARS)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].score >= hits[1].score);
+        assert!(hits.iter().all(|h| h.snippet.contains("«")));
     }
 
     #[test]
-    fn mask_boolean_operators() {
-        let texts = vec![
-            Some("design and decision together"),
-            Some("design only"),
-            Some("decision only"),
-        ];
-        let mask = text_search_mask(texts.clone(), "design AND decision").unwrap();
-        assert_eq!(matched(&mask), vec![0]);
-        let mask = text_search_mask(texts, "design OR decision").unwrap();
-        assert_eq!(matched(&mask), vec![0, 1, 2]);
+    fn and_by_default() {
+        let (index, _dir) = temp_index();
+        write(
+            &index,
+            &[
+                ("s1", 1, "alpha and beta together"),
+                ("s2", 1, "only alpha here"),
+                ("s3", 1, "only beta here"),
+            ],
+        );
+        let hits = index
+            .search("alpha beta", 10, DEFAULT_SNIPPET_CHARS)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "s1");
     }
 
     #[test]
-    fn mask_phrase_query() {
-        let texts = vec![Some("a good reason exists"), Some("reason good a")];
-        let mask = text_search_mask(texts, "\"good reason\"").unwrap();
-        assert_eq!(matched(&mask), vec![0]);
+    fn invalid_query_errors() {
+        let (index, _dir) = temp_index();
+        write(&index, &[("s1", 1, "x")]);
+        let err = index.search("\"unterminated", 10, DEFAULT_SNIPPET_CHARS);
+        assert!(matches!(err, Err(IndexError::QueryParse(_))));
     }
 
     #[test]
-    fn mask_invalid_query_errors() {
-        let texts = vec![Some("anything")];
-        assert!(text_search_mask(texts, "\"unterminated").is_err());
-    }
-
-    #[test]
-    fn mask_snake_case_splits() {
-        let texts = vec![Some("call split_ide_tags here")];
-        let mask = text_search_mask(texts, "ide").unwrap();
-        assert_eq!(matched(&mask), vec![0]);
+    fn limit_caps_hits() {
+        let (index, _dir) = temp_index();
+        let docs: Vec<(&str, i64, &str)> = (0..20)
+            .map(|i| ("s1", i as i64, "the term appears here"))
+            .collect();
+        let docs_ref: Vec<_> = docs.iter().map(|(s, l, t)| (*s, *l, *t)).collect();
+        write(&index, &docs_ref);
+        let hits = index.search("term", 5, DEFAULT_SNIPPET_CHARS).unwrap();
+        assert_eq!(hits.len(), 5);
     }
 }

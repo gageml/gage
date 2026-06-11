@@ -63,11 +63,10 @@ pub async fn run(args: IndexArgs) {
     match result {
         Ok(outcome) => {
             println!(
-                "{} sessions ({}): {} derived, {} reindexed, {} removed",
+                "{} sessions ({}): {} indexed, {} removed",
                 outcome.discovered,
                 format_elapsed(outcome.elapsed_ms),
-                outcome.derived,
-                outcome.reindexed,
+                outcome.indexed,
                 outcome.removed,
             );
         }
@@ -105,15 +104,6 @@ fn format_elapsed(ms: u64) -> String {
 
 fn print_status(s: &Status) {
     let rows = [
-        [
-            "store".to_string(),
-            format!(
-                "v{} ({} sessions cached, {})",
-                s.store_version,
-                s.cached,
-                s.store_bytes_display(),
-            ),
-        ],
         [
             "index".to_string(),
             format!(

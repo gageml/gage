@@ -1,9 +1,9 @@
 //! Derivation: session JSONL → derived rows and session aggregates.
 //!
-//! One pass over a session file produces a `RecordBatch` in the store
-//! schema (a superset serving both the `entry` and `message` tables)
-//! plus the session-level aggregates. JSONL is parsed only here;
-//! every query path scans derived artifacts.
+//! One pass over a session file produces a `RecordBatch` in the
+//! derived schema (a superset serving both the `entry` and `message`
+//! tables) plus the session-level aggregates. JSONL is parsed only
+//! here; the in-memory cache in `gage-query` holds the results.
 
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-// Store column indices. The store schema is a superset serving two
-// tables: `entry` is a projection of every row; `message` is a filter
-// (`type IN ('user','assistant') AND text IS NOT NULL`) plus the
-// message-derived columns. `text` is non-null (possibly empty) exactly
-// for the rows the `message` table contains.
+// Derived column indices. The derived schema is a superset serving
+// two tables: `entry` is a projection of every row; `message` is a
+// filter (`type IN ('user','assistant') AND text IS NOT NULL`) plus
+// the message-derived columns. `text` is non-null (possibly empty)
+// exactly for the rows the `message` table contains.
 pub const COL_SESSION_ID: usize = 0;
 pub const COL_LINE: usize = 1;
 pub const COL_UUID: usize = 2;
@@ -35,7 +35,7 @@ pub const COL_TEXT: usize = 7;
 pub const COL_ATTACHMENTS: usize = 8;
 pub const COL_IDE_TAGS: usize = 9;
 
-static STORE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+static DERIVED_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("session_id", DataType::Utf8, false),
         Field::new("line", DataType::Int64, false),
@@ -54,13 +54,13 @@ static STORE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     ]))
 });
 
-pub fn store_schema() -> SchemaRef {
-    STORE_SCHEMA.clone()
+pub fn derived_schema() -> SchemaRef {
+    DERIVED_SCHEMA.clone()
 }
 
 /// Source-file identity: the JSONL's `(mtime, size)` stat'd when
-/// derivation opened it. Embedded in the session file's Parquet footer
-/// and in the index manifest; equality means "absorbed".
+/// derivation opened it. Recorded in the in-memory cache and in the
+/// index manifest; equality means "absorbed".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub mtime_ms: i64,
@@ -83,8 +83,7 @@ impl Fingerprint {
 }
 
 /// Session-level aggregates: the expensive `session` table columns,
-/// computed in the same derivation pass and consolidated into
-/// `sessions.parquet`.
+/// computed in the same derivation pass.
 #[derive(Debug, Clone, Default)]
 pub struct SessionAggregates {
     pub title: Option<String>,
@@ -302,7 +301,7 @@ impl RowBuilders {
 
     fn finish(mut self) -> Result<RecordBatch> {
         Ok(RecordBatch::try_new(
-            store_schema(),
+            derived_schema(),
             vec![
                 Arc::new(self.session_ids.finish()),
                 Arc::new(self.lines.finish()),
@@ -332,7 +331,7 @@ fn is_message_row(entry: &serde_json::Value) -> bool {
     )
 }
 
-/// Parse one session file and derive its store rows and aggregates.
+/// Parse one session file and derive its rows and aggregates.
 ///
 /// Every parseable JSONL line becomes a row. The fingerprint is
 /// stat'd before reading; a write racing the parse leaves a recorded
@@ -418,7 +417,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             _ => {}
         }
 
-        // Store row
+        // Derived row
         b.session_ids.append_value(session_id);
         b.lines.append_value(line_num as i64);
         match entry_uuid {

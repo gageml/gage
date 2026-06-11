@@ -3,9 +3,10 @@ pub mod entry;
 pub mod issue;
 pub mod issue_evidence;
 pub mod message;
+pub mod message_text;
 pub mod note;
 pub mod session;
-pub(crate) mod store_scan;
+pub(crate) mod walk;
 
 pub use config::ConfigTable;
 pub use entry::EntryTable;
@@ -13,6 +14,7 @@ pub use gage_index::entry_text;
 pub use issue::IssueTable;
 pub use issue_evidence::IssueEvidenceTable;
 pub use message::MessageTable;
+pub use message_text::MessageTextFn;
 pub use note::NoteTable;
 pub use session::SessionTable;
 
@@ -24,13 +26,13 @@ use gage_index::IndexStore;
 /// Where a session-row table provider (`EntryTable`, `MessageTable`)
 /// finds its data.
 ///
-/// `Store` scans the derived columnar store for a whole corpus,
-/// reconciling first — the global `gage query` use case.
-/// `SingleSession` derives rows from exactly one session file in
-/// memory, which is the per-session scanner context built by
-/// `gage-scan`'s runner.
+/// `Corpus` scans the corpus for a whole project, reconciling first
+/// and reading through the per-context session cache — the global
+/// `gage query` use case. `SingleSession` parses one session file in
+/// memory and bypasses the cache — used by gage-scan's per-session
+/// scanner context.
 #[derive(Debug, Clone)]
 pub(super) enum SessionSource {
-    Store(Arc<IndexStore>),
+    Corpus(Arc<IndexStore>),
     SingleSession { session_id: String, path: PathBuf },
 }
