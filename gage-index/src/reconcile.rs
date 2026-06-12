@@ -420,8 +420,8 @@ impl IndexStore {
             };
             if let Some(w) = &writer {
                 index.delete_session(w, id);
-                for (line, text) in message_rows_of(&derived.batch) {
-                    index.add_message(w, id, line, text)?;
+                for (line, type_, subtype, text) in message_rows_of(&derived.batch) {
+                    index.add_message(w, id, line, type_, subtype, text)?;
                 }
                 manifest.sessions.insert(id.clone(), *fp);
             }
@@ -550,24 +550,42 @@ fn dir_size(dir: &Path) -> u64 {
 }
 
 /// Iterate `(line, text)` over the message rows of a derived batch.
-fn message_rows_of(batch: &arrow::record_batch::RecordBatch) -> Vec<(i64, &str)> {
+fn message_rows_of(
+    batch: &arrow::record_batch::RecordBatch,
+) -> Vec<(i64, Option<&str>, Option<&str>, &str)> {
     use arrow::array::{Array, Int64Array, StringArray};
 
-    use crate::derive::{COL_LINE, COL_TEXT};
+    use crate::derive::{COL_LINE, COL_SUBTYPE, COL_TEXT, COL_TYPE};
 
     let lines = batch
         .columns()
         .get(COL_LINE)
         .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+    let types = batch
+        .columns()
+        .get(COL_TYPE)
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let subtypes = batch
+        .columns()
+        .get(COL_SUBTYPE)
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
     let texts = batch
         .columns()
         .get(COL_TEXT)
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-    let (Some(lines), Some(texts)) = (lines, texts) else {
+    let (Some(lines), Some(types), Some(subtypes), Some(texts)) = (lines, types, subtypes, texts)
+    else {
         return Vec::new();
     };
     (0..batch.num_rows())
         .filter(|&i| texts.is_valid(i))
-        .map(|i| (lines.value(i), texts.value(i)))
+        .map(|i| {
+            (
+                lines.value(i),
+                types.is_valid(i).then(|| types.value(i)),
+                subtypes.is_valid(i).then(|| subtypes.value(i)),
+                texts.value(i),
+            )
+        })
         .collect()
 }

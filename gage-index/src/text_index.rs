@@ -4,6 +4,7 @@
 //! booleans.
 //!
 //! Schema: `session_id` (STRING|STORED), `line` (u64|STORED|FAST),
+//! `type` (STRING|STORED), `subtype` (STRING|STORED),
 //! `text` (TEXT|STORED). Tokenizer is the default chain (split on
 //! non-alphanumeric, drop tokens over 40 bytes, lowercase). Query
 //! parser defaults to AND across bare terms.
@@ -18,13 +19,13 @@ use tantivy::schema::{
 };
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
-use tantivy::{Index, IndexWriter, Score, TantivyDocument, Term, doc};
+use tantivy::{Index, IndexWriter, Score, TantivyDocument, Term};
 
 use crate::{IndexError, Result};
 
 /// Index format version: covers the index schema and tokenizer chain.
 /// Bumping it changes the `v{N}` path component.
-pub const INDEX_FORMAT_VERSION: u32 = 2;
+pub const INDEX_FORMAT_VERSION: u32 = 3;
 
 /// Canonical identifier of the tokenizer chain, recorded in the index
 /// manifest. A mismatch with running code triggers an automatic index
@@ -42,6 +43,8 @@ pub const DEFAULT_SNIPPET_CHARS: usize = 200;
 pub struct Hit {
     pub session_id: String,
     pub line: i64,
+    pub type_: Option<String>,
+    pub subtype: Option<String>,
     pub score: f32,
     pub snippet: String,
 }
@@ -73,6 +76,8 @@ pub(crate) struct TextIndex {
     index: Index,
     f_session: Field,
     f_line: Field,
+    f_type: Field,
+    f_subtype: Field,
     f_text: Field,
 }
 
@@ -82,6 +87,8 @@ fn index_schema() -> Schema {
     // re-index.
     builder.add_text_field("session_id", STRING | STORED);
     builder.add_u64_field("line", STORED | FAST);
+    builder.add_text_field("type", STRING | STORED);
+    builder.add_text_field("subtype", STRING | STORED);
     builder.add_text_field("text", text_options());
     builder.build()
 }
@@ -101,11 +108,15 @@ impl TextIndex {
         let actual = index.schema();
         let f_session = actual.get_field("session_id")?;
         let f_line = actual.get_field("line")?;
+        let f_type = actual.get_field("type")?;
+        let f_subtype = actual.get_field("subtype")?;
         let f_text = actual.get_field("text")?;
         Ok(Self {
             index,
             f_session,
             f_line,
+            f_type,
+            f_subtype,
             f_text,
         })
     }
@@ -124,13 +135,21 @@ impl TextIndex {
         writer: &IndexWriter,
         session_id: &str,
         line: i64,
+        type_: Option<&str>,
+        subtype: Option<&str>,
         text: &str,
     ) -> Result<()> {
-        writer.add_document(doc!(
-            self.f_session => session_id,
-            self.f_line => line as u64,
-            self.f_text => text,
-        ))?;
+        let mut doc = TantivyDocument::default();
+        doc.add_text(self.f_session, session_id);
+        doc.add_u64(self.f_line, line as u64);
+        if let Some(t) = type_ {
+            doc.add_text(self.f_type, t);
+        }
+        if let Some(s) = subtype {
+            doc.add_text(self.f_subtype, s);
+        }
+        doc.add_text(self.f_text, text);
+        writer.add_document(doc)?;
         Ok(())
     }
 
@@ -169,10 +188,20 @@ impl TextIndex {
                 .get_first(self.f_line)
                 .and_then(|v| v.as_u64())
                 .unwrap_or_default() as i64;
+            let type_ = doc
+                .get_first(self.f_type)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let subtype = doc
+                .get_first(self.f_subtype)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let snippet = snippet_generator.snippet_from_doc(&doc);
             hits.push(Hit {
                 session_id,
                 line,
+                type_,
+                subtype,
                 score,
                 snippet: format_snippet(&snippet),
             });
@@ -228,7 +257,9 @@ mod tests {
     fn write(index: &TextIndex, docs: &[(&str, i64, &str)]) {
         let mut writer = index.writer().unwrap();
         for (sid, line, text) in docs {
-            index.add_message(&writer, sid, *line, text).unwrap();
+            index
+                .add_message(&writer, sid, *line, Some("user"), None, text)
+                .unwrap();
         }
         writer.commit().unwrap();
     }

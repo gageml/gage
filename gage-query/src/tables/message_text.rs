@@ -1,7 +1,7 @@
 //! `message_text(query)` — table-valued full-text search over message
 //! text.
 //!
-//! Returns `(session_id, line, score, snippet)`. One scan = one
+//! Returns `(session_id, line, type, subtype, score, snippet)`. One scan = one
 //! tantivy search; scores are BM25, matched terms in snippets are
 //! wrapped in guillemets (`«term»`). `LIMIT n` is pushed through to
 //! `TopDocs::with_limit(n)`; omitted, the default cap is
@@ -32,6 +32,8 @@ static MESSAGE_TEXT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("session_id", DataType::Utf8, false),
         Field::new("line", DataType::Int64, false),
+        Field::new("type", DataType::Utf8, true),
+        Field::new("subtype", DataType::Utf8, true),
         Field::new("score", DataType::Float32, false),
         Field::new("snippet", DataType::Utf8, false),
     ]))
@@ -147,11 +149,15 @@ fn build_batch(hits: Vec<gage_index::Hit>) -> Result<RecordBatch> {
     let len = hits.len();
     let mut session_ids = StringBuilder::with_capacity(len, len * 36);
     let mut lines = Int64Builder::with_capacity(len);
+    let mut types = StringBuilder::with_capacity(len, len * 8);
+    let mut subtypes = StringBuilder::with_capacity(len, len * 8);
     let mut scores = Float32Builder::with_capacity(len);
     let mut snippets = StringBuilder::with_capacity(len, len * 64);
     for hit in hits {
         session_ids.append_value(&hit.session_id);
         lines.append_value(hit.line);
+        types.append_option(hit.type_.as_deref());
+        subtypes.append_option(hit.subtype.as_deref());
         scores.append_value(hit.score);
         snippets.append_value(&hit.snippet);
     }
@@ -160,6 +166,8 @@ fn build_batch(hits: Vec<gage_index::Hit>) -> Result<RecordBatch> {
         vec![
             Arc::new(session_ids.finish()),
             Arc::new(lines.finish()),
+            Arc::new(types.finish()),
+            Arc::new(subtypes.finish()),
             Arc::new(scores.finish()),
             Arc::new(snippets.finish()),
         ],

@@ -98,11 +98,11 @@ fn build_sql(query: &str, limit: i64, snippet_len: Option<i64>) -> String {
     let q = sql_escape(query);
     match snippet_len {
         Some(n) => format!(
-            "SELECT session_id, line, score, snippet \
+            "SELECT session_id, line, type, subtype, score, snippet \
              FROM message_text('{q}', {n}) LIMIT {limit}"
         ),
         None => format!(
-            "SELECT session_id, line, score, snippet \
+            "SELECT session_id, line, type, subtype, score, snippet \
              FROM message_text('{q}') LIMIT {limit}"
         ),
     }

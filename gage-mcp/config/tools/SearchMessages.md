@@ -21,11 +21,13 @@ read_only_hint = true
 idempotent_hint = true
 +++
 
-Full-text search over Claude Code message content. Returns multi-document
-YAML with `session_id`, `line`, `score`, and `snippet` (BM25 excerpt with
-matched terms in «guillemets»).
+Full-text search over Claude Code message content. Returns multi-document YAML
+with `session_id`, `line`, `type`, `subtype`, `score`, and `snippet` (BM25
+excerpt with matched terms in «guillemets»). `type` is `user`, `assistant`,
+`summary`, or `attachment`; `subtype` qualifies it (`text`, `tool_use`,
+`tool_result`, `thinking`, `meta`, …) and may be null.
 
-Use `Query` to fetch surrounding message context once a hit looks
-interesting: `SELECT * FROM message WHERE session_id = '...' AND line = N`.
+Use `Query` to fetch surrounding message context once a hit looks interesting:
+`SELECT * FROM message WHERE session_id = '...' AND line = N`.
 
 ---eof-789---
