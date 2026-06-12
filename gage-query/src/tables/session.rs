@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::fmt::{self, Formatter};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -6,18 +7,30 @@ use async_trait::async_trait;
 use datafusion::arrow::array::{
     BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
 };
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
-use datafusion::datasource::{MemTable, TableProvider, TableType};
+use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result;
+use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::TableProviderFilterPushDown;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_expr::expressions::col;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
+};
 use datafusion::prelude::*;
+use futures::stream;
+use gage_claude::session::{SessionInfo, SessionListBuilder};
 use gage_index::{IndexStore, SessionAggregates};
 
-use super::walk::{reconcile_for_query, session_cache, walk_sessions};
-use crate::filter;
+use super::walk::{reconcile_for_query, session_cache};
+use crate::cache::SessionCache;
+use crate::filter::{self, IdFilter};
 
 const EXPENSIVE_START: usize = 5; // title is the first expensive column
 
@@ -87,11 +100,205 @@ impl TableProvider for SessionTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         reconcile_for_query(&self.store).await?;
-        let cheap_only = projection
-            .as_ref()
-            .is_some_and(|p| p.iter().all(|&i| i < EXPENSIVE_START));
+        let id_filter = IdFilter::new(filters, "id")?;
+        let projected_schema = match projection {
+            Some(indices) => Arc::new(self.schema.project(indices)?),
+            None => self.schema.clone(),
+        };
+        let cache = session_cache(state)?;
+        Ok(Arc::new(SessionExec::new(
+            self.store.clone(),
+            cache,
+            self.schema.clone(),
+            projected_schema,
+            projection.cloned(),
+            id_filter,
+            limit,
+        )))
+    }
+}
 
-        let sessions = walk_sessions(&self.store, filters, "id")?;
+#[derive(Clone)]
+struct SessionExec {
+    store: Arc<IndexStore>,
+    cache: Arc<SessionCache>,
+    full_schema: SchemaRef,
+    projected_schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    id_filter: Option<IdFilter>,
+    limit: Option<usize>,
+    properties: PlanProperties,
+}
+
+impl fmt::Debug for SessionExec {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("SessionExec")
+            .field("limit", &self.limit)
+            .field("id_filter", &self.id_filter)
+            .finish()
+    }
+}
+
+impl SessionExec {
+    fn new(
+        store: Arc<IndexStore>,
+        cache: Arc<SessionCache>,
+        full_schema: SchemaRef,
+        projected_schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+        id_filter: Option<IdFilter>,
+        limit: Option<usize>,
+    ) -> Self {
+        let eq_properties = mtime_desc_eq_properties(&projected_schema);
+        let properties = PlanProperties::new(
+            eq_properties,
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            store,
+            cache,
+            full_schema,
+            projected_schema,
+            projection,
+            id_filter,
+            limit,
+            properties,
+        }
+    }
+
+    /// True if the requested projection only touches cheap columns
+    /// (those filled from the directory walk).
+    fn projection_is_cheap_only(&self) -> bool {
+        match &self.projection {
+            Some(indices) => indices.iter().all(|&i| i < EXPENSIVE_START),
+            None => false,
+        }
+    }
+}
+
+/// Build `EquivalenceProperties` advertising `[mtime DESC]` when the
+/// projection retains the `mtime` column. `SessionListBuilder::build`
+/// already sorts by mtime descending, so this is the natural order.
+/// Advertising it lets DataFusion push `LIMIT N` past `ORDER BY mtime
+/// DESC`, which we honor by capping the directory walk at N entries.
+fn mtime_desc_eq_properties(projected_schema: &SchemaRef) -> EquivalenceProperties {
+    match col("mtime", projected_schema) {
+        Ok(mtime_expr) => {
+            // SQL `ORDER BY mtime DESC` in DataFusion defaults to NULLS
+            // FIRST; advertise the same so EnforceSorting can elide the
+            // SortExec and LimitPushdown can pass `fetch` to scan().
+            let sort = PhysicalSortExpr {
+                expr: mtime_expr,
+                options: SortOptions {
+                    descending: true,
+                    nulls_first: true,
+                },
+            };
+            EquivalenceProperties::new_with_orderings(projected_schema.clone(), [[sort]])
+        }
+        Err(_) => EquivalenceProperties::new(projected_schema.clone()),
+    }
+}
+
+impl DisplayAs for SessionExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        write!(f, "SessionExec")
+    }
+}
+
+impl ExecutionPlan for SessionExec {
+    fn name(&self) -> &'static str {
+        "SessionExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.limit
+    }
+
+    /// Accept a fetch from DataFusion's LimitPushdown. Combined with
+    /// our advertised `[mtime DESC]` ordering, this is what lets
+    /// `ORDER BY mtime DESC LIMIT N` open at most N session files.
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        Some(Arc::new(SessionExec::new(
+            self.store.clone(),
+            self.cache.clone(),
+            self.full_schema.clone(),
+            self.projected_schema.clone(),
+            self.projection.clone(),
+            self.id_filter.clone(),
+            limit,
+        )))
+    }
+
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let work = self.clone();
+        let schema = self.projected_schema.clone();
+        let stream = stream::once(async move { work.build_batch().await });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+impl SessionExec {
+    async fn build_batch(self) -> Result<RecordBatch> {
+        let exec_start = std::time::Instant::now();
+        let mut builder = SessionListBuilder::new().root(self.store.root());
+        // Limit pushdown is only safe when there is no extra
+        // post-filter that could reject rows. An `id` filter is applied
+        // here per row, so limit pushdown is skipped whenever one is set.
+        let walk_limit_applied = if self.id_filter.is_none()
+            && let Some(n) = self.limit
+        {
+            builder = builder.limit(n);
+            Some(n)
+        } else {
+            None
+        };
+        let walk_start = std::time::Instant::now();
+        let sessions: Vec<SessionInfo> = builder.build().into_iter().collect();
+        let walk_ms = walk_start.elapsed().as_millis();
+        let walked = sessions.len();
+
+        let sessions: Vec<SessionInfo> = match &self.id_filter {
+            Some(f) => f.retain(sessions, |s| s.id.as_str())?,
+            None => sessions,
+        };
+
+        let cheap_only = self.projection_is_cheap_only();
+        tracing::debug!(
+            target: "gage_query::session",
+            walked,
+            after_id_filter = sessions.len(),
+            walk_ms,
+            walk_limit_applied = ?walk_limit_applied,
+            cheap_only,
+            "SessionExec walk complete",
+        );
+
         let len = sessions.len();
         let mut ids = StringBuilder::with_capacity(len, len * 36);
         let mut projects = StringBuilder::with_capacity(len, len * 32);
@@ -107,27 +314,12 @@ impl TableProvider for SessionTable {
         let mut cache_creation = Int64Builder::with_capacity(len);
         let mut is_empty = BooleanBuilder::with_capacity(len);
 
-        let cache = if cheap_only {
-            None
-        } else {
-            Some(session_cache(state)?)
-        };
         let default_aggregates = SessionAggregates {
             is_empty: true,
             ..Default::default()
         };
 
         for s in &sessions {
-            let aggregates = match &cache {
-                None => default_aggregates.clone(),
-                Some(c) => match c.get(&s.id, &s.src).await {
-                    Ok(d) => d.aggregates.clone(),
-                    Err(e) => {
-                        tracing::warn!(session_id = %s.id, "session aggregates unavailable: {e}");
-                        default_aggregates.clone()
-                    }
-                },
-            };
             ids.append_value(&s.id);
             projects.append_value(s.project_name().as_ref());
             paths.append_value(s.src.to_string_lossy().as_ref());
@@ -138,24 +330,43 @@ impl TableProvider for SessionTable {
                 .as_millis() as i64;
             mtimes.append_value(millis);
             sizes.append_value(s.size as i64);
-            match &aggregates.title {
-                Some(t) => titles.append_value(t),
-                None => titles.append_null(),
+
+            if cheap_only {
+                titles.append_null();
+                models.append_null();
+                message_counts.append_value(0);
+                input_tokens.append_value(0);
+                output_tokens.append_value(0);
+                cache_read.append_value(0);
+                cache_creation.append_value(0);
+                is_empty.append_value(false);
+            } else {
+                let aggregates = match self.cache.get(&s.id, &s.src).await {
+                    Ok(d) => d.aggregates.clone(),
+                    Err(e) => {
+                        tracing::warn!(session_id = %s.id, "session aggregates unavailable: {e}");
+                        default_aggregates.clone()
+                    }
+                };
+                match &aggregates.title {
+                    Some(t) => titles.append_value(t),
+                    None => titles.append_null(),
+                }
+                match &aggregates.model {
+                    Some(m) => models.append_value(m),
+                    None => models.append_null(),
+                }
+                message_counts.append_value(aggregates.message_count);
+                input_tokens.append_value(aggregates.input_tokens);
+                output_tokens.append_value(aggregates.output_tokens);
+                cache_read.append_value(aggregates.cache_read_input_tokens);
+                cache_creation.append_value(aggregates.cache_creation_input_tokens);
+                is_empty.append_value(aggregates.is_empty);
             }
-            match &aggregates.model {
-                Some(m) => models.append_value(m),
-                None => models.append_null(),
-            }
-            message_counts.append_value(aggregates.message_count);
-            input_tokens.append_value(aggregates.input_tokens);
-            output_tokens.append_value(aggregates.output_tokens);
-            cache_read.append_value(aggregates.cache_read_input_tokens);
-            cache_creation.append_value(aggregates.cache_creation_input_tokens);
-            is_empty.append_value(aggregates.is_empty);
         }
 
         let batch = RecordBatch::try_new(
-            self.schema.clone(),
+            self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
                 Arc::new(projects.finish()),
@@ -173,7 +384,18 @@ impl TableProvider for SessionTable {
             ],
         )?;
 
-        let mem = MemTable::try_new(self.schema.clone(), vec![vec![batch]])?;
-        mem.scan(state, projection, &[], limit).await
+        let projected = match &self.projection {
+            Some(indices) => batch.project(indices)?,
+            None => batch,
+        };
+
+        tracing::debug!(
+            target: "gage_query::session",
+            rows = projected.num_rows(),
+            elapsed_ms = exec_start.elapsed().as_millis(),
+            "SessionExec done",
+        );
+
+        Ok(projected)
     }
 }

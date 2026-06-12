@@ -9,6 +9,7 @@ async-trait = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
 datafusion-functions-json = "0.52"
+futures = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-claude = { path = "../gage-claude" }

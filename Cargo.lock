@@ -2346,6 +2346,7 @@ dependencies = [
  "clap",
  "datafusion",
  "datafusion-functions-json",
+ "futures",
  "gage-claude",
  "gage-core",
  "gage-db",
