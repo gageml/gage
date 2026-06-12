@@ -60,27 +60,39 @@ pub fn install_theme() {
     cli::set_theme(GageTheme);
 }
 
+/// RAII guard that ignores SIGINT for its lifetime and restores the
+/// previous disposition on drop. The console crate detects Ctrl+C as a
+/// 0x03 byte in raw mode and then calls `libc::raise(SIGINT)`; without
+/// this guard the raised signal terminates the process before the
+/// caller can act on the `ErrorKind::Interrupted` returned by the
+/// prompt.
+pub struct SigintGuard {
+    prev: libc::sighandler_t,
+}
+
+impl SigintGuard {
+    pub fn new() -> Self {
+        let prev = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        Self { prev }
+    }
+}
+
+impl Drop for SigintGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::signal(libc::SIGINT, self.prev);
+        }
+    }
+}
+
 pub fn run<F>(title: &str, f: F)
 where
     F: FnOnce() -> Result<DialogResult, DialogError>,
 {
-    cli::set_theme(GageTheme);
-
-    // Ignore SIGINT for the duration of the dialog. The console crate
-    // detects Ctrl+C as a 0x03 byte in raw mode and then calls
-    // libc::raise(SIGINT). Without this, the raised signal kills the
-    // process before our error handling runs
-    let prev = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
-
+    install_theme();
+    let _sigint = SigintGuard::new();
     cli::intro(style(title).bold()).unwrap();
-    let result = f();
-
-    // Restore previous SIGINT disposition
-    unsafe {
-        libc::signal(libc::SIGINT, prev);
-    }
-
-    handle_result(result);
+    handle_result(f());
 }
 
 pub async fn run_async<F, Fut>(title: &str, f: F)
@@ -88,18 +100,10 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<DialogResult, DialogError>>,
 {
-    cli::set_theme(GageTheme);
-
-    let prev = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
-
+    install_theme();
+    let _sigint = SigintGuard::new();
     cli::intro(style(title).bold()).unwrap();
-    let result = f().await;
-
-    unsafe {
-        libc::signal(libc::SIGINT, prev);
-    }
-
-    handle_result(result);
+    handle_result(f().await);
 }
 
 fn handle_result(result: Result<DialogResult, DialogError>) {

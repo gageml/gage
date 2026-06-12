@@ -464,6 +464,7 @@ async fn pick_session() -> std::io::Result<Option<String>> {
     }
 
     dialog::install_theme();
+    let _sigint = dialog::SigintGuard::new();
     match cli::select("Select a session")
         .items(&items)
         .max_rows(15)
