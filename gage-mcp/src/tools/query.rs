@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use arrow::json::ArrayWriter;
+use gage_query::write_yaml;
 use rmcp::{
     ErrorData as McpError,
     handler::server::router::tool::ToolRoute,
@@ -60,18 +60,12 @@ fn handle(
             .cloned()
             .collect();
         if batches.is_empty() {
-            return Ok(success("[]"));
+            return Ok(success(""));
         }
         let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
         let mut buf: Vec<u8> = Vec::new();
-        let mut writer = ArrayWriter::new(&mut buf);
-        for batch in &batches {
-            if let Err(e) = writer.write(batch) {
-                return Ok(domain_error(format!("JSON serialization error: {e}")));
-            }
-        }
-        if let Err(e) = writer.finish() {
-            return Ok(domain_error(format!("JSON serialization error: {e}")));
+        if let Err(e) = write_yaml(&mut buf, &batches) {
+            return Ok(domain_error(format!("YAML serialization error: {e}")));
         }
         if buf.len() > RESULT_CAP_BYTES {
             let msg = json!({
