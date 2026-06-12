@@ -20,10 +20,10 @@ use crate::tools;
 /// the rmcp router registers them in.
 const TOOLS: &[ToolDef] = &[
     tools::query::TOOL,
-    tools::search_messages::TOOL,
-    tools::list_issues::TOOL,
-    tools::get_issue::TOOL,
-    tools::close_issue::TOOL,
+    tools::text_search::TOOL,
+    tools::issue_list::TOOL,
+    tools::issue_get::TOOL,
+    tools::issue_close::TOOL,
 ];
 
 pub struct GageServer {

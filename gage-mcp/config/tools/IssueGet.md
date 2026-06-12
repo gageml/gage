@@ -1,5 +1,5 @@
 +++
-name = "GetIssue"
+name = "IssueGet"
 
 [parameters.issue_id]
 type = "string"
@@ -15,9 +15,9 @@ Fetch the full detail for a single issue: description, originating
 scanner, the notes linked to it as evidence, and its history — the log
 of create, close, reopen, and comment events recorded against it.
 
-Use after call to ListIssues to get more detail about a specific issue.
+Use after call to IssueList to get more detail about a specific issue.
 
 Use the issue detail for context and fix advice. If you complete the
-issue or decide to skip the issue, use the CloseIssue tool.
+issue or decide to skip the issue, use the IssueClose tool.
 
 ---eof-678---

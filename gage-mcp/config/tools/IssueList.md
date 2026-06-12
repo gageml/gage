@@ -1,5 +1,5 @@
 +++
-name = "ListIssues"
+name = "IssueList"
 
 [parameters.status]
 type = "string"
@@ -16,7 +16,7 @@ List issues. By default open issues are listed.
 An issue is something noteworthy that should be investigated and closed,
 either by applying a fix or skipping the issue.
 
-Use GetIssue to inspect an issue's detail and CloseIssue to mark it
+Use IssueGet to inspect an issue's detail and IssueClose to mark it
 completed or skipped.
 
 ---eof-456---

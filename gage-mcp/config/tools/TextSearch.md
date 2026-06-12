@@ -1,5 +1,5 @@
 +++
-name = "SearchMessages"
+name = "TextSearch"
 
 [parameters.query]
 type = "string"

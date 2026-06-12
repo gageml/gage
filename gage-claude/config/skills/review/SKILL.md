@@ -7,10 +7,10 @@ disable-model-invocation: true
 
 This task uses the following tools:
 
-- `mcp__plugin_gage_gage__ListIssues` - list issues, open by default
-- `mcp__plugin_gage_gage__GetIssue` - fetch one issue's full detail:
+- `mcp__plugin_gage_gage__IssueList` - list issues, open by default
+- `mcp__plugin_gage_gage__IssueGet` - fetch one issue's full detail:
   description, originating scanner, and linked evidence and comments
-- `mcp__plugin_gage_gage__CloseIssue` - mark an issue closed with a reason
+- `mcp__plugin_gage_gage__IssueClose` - mark an issue closed with a reason
   (completed or skipped) and a comment
 
 ## Instructions
@@ -21,16 +21,16 @@ attention as an issue. An issue is open or closed.
 Walk the user through their open issues and close each one according to the
 user's decision.
 
-1. Call `mcp__plugin_gage_gage__ListIssues` to see whats open
+1. Call `mcp__plugin_gage_gage__IssueList` to see whats open
 
 2. Work with user to identify highest value issues and start there
 
-3. Call `mcp__plugin_gage_gage__GetIssue` to show issue detailed description,
+3. Call `mcp__plugin_gage_gage__IssueGet` to show issue detailed description,
    evidence, and comments
 
 4. Work with user as needed to resolve the issue, either by completing it (e.g.
    applying recommended fix or another solution) or by skipping it. Call
-   `mcp__plugin_gage_gage__CloseIssue` with reason completed or skipped along
+   `mcp__plugin_gage_gage__IssueClose` with reason completed or skipped along
    with a comment explaining either how the issue was completed or why it was
    skipped
 

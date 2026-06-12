@@ -1,5 +1,5 @@
-pub mod close_issue;
-pub mod get_issue;
-pub mod list_issues;
+pub mod issue_close;
+pub mod issue_get;
+pub mod issue_list;
 pub mod query;
-pub mod search_messages;
+pub mod text_search;

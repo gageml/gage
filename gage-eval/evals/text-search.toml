@@ -1,7 +1,7 @@
 [[test]] # --------------------------------------------------------
 
 name = "tool-flag"
-prompt = "What is the eof code for the SearchMessages tool"
+prompt = "What is the eof code for the TextSearch tool"
 max_turns = 2
 expect.match = "789"
 
@@ -11,12 +11,12 @@ name = "unique-term"
 prompt = "Which session discusses a flux capacitor? Reply with the session id."
 
 fixture = "search-messages"
-claude.permissions.allow = ["mcp__plugin_gage_gage__SearchMessages"]
+claude.permissions.allow = ["mcp__plugin_gage_gage__TextSearch"]
 
 # Turns:
 #
 # 1. ToolSearch
-# 2. SearchMessages
+# 2. TextSearch
 # 3. Reply
 expect.max_turns = 3
 expect.match = "a1b00000"
@@ -27,7 +27,7 @@ name = "phrase"
 prompt = "Find the session containing the exact phrase \"prepared plan\". Reply with the session id."
 
 fixture = "search-messages"
-claude.permissions.allow = ["mcp__plugin_gage_gage__SearchMessages"]
+claude.permissions.allow = ["mcp__plugin_gage_gage__TextSearch"]
 
 expect.max_turns = 3
 expect.match = "c3d00000"
@@ -38,7 +38,7 @@ name = "boolean"
 prompt = "Find a session that mentions both Levenshtein and parsing. Reply with the session id."
 
 fixture = "search-messages"
-claude.permissions.allow = ["mcp__plugin_gage_gage__SearchMessages"]
+claude.permissions.allow = ["mcp__plugin_gage_gage__TextSearch"]
 
 expect.max_turns = 3
 expect.match = "b2c00000"
@@ -49,7 +49,7 @@ name = "multi-hit-count"
 prompt = "How many messages mention telemetry?"
 
 fixture = "search-messages"
-claude.permissions.allow = ["mcp__plugin_gage_gage__SearchMessages"]
+claude.permissions.allow = ["mcp__plugin_gage_gage__TextSearch"]
 
 expect.max_turns = 3
 # Two messages in session d4e mention "telemetry"

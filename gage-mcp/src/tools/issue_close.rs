@@ -13,7 +13,7 @@ use crate::tool::{ToolDef, agent_author, build_tool_meta};
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/CloseIssue.md");
+const MD: &str = include_str!("../../config/tools/IssueClose.md");
 
 fn route() -> ToolRoute<GageServer> {
     ToolRoute::new(build_tool_meta(MD), call)

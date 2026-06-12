@@ -21,10 +21,10 @@ use crate::tool::{MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_b
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/SearchMessages.md");
+const MD: &str = include_str!("../../config/tools/TextSearch.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "SearchMessages description exceeds Claude Code's 2048-byte cap",
+    "TextSearch description exceeds Claude Code's 2048-byte cap",
 );
 
 const DEFAULT_LIMIT: i64 = 20;

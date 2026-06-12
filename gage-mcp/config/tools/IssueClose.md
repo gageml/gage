@@ -1,5 +1,5 @@
 +++
-name = "CloseIssue"
+name = "IssueClose"
 
 [parameters.issue_id]
 type = "string"

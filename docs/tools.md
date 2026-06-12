@@ -1,7 +1,7 @@
 # Tools
 
-- CloseIssue
-- GetIssue
-- ListIssues
+- IssueClose
+- IssueGet
+- IssueList
 - Query
-- SearchMessages
+- TextSearch

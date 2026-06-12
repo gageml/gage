@@ -477,7 +477,9 @@ fn render_tool_results(value: &Value) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join("\n\n"))
+        let body = parts.join("\n\n");
+        let fence = "`".repeat(longest_backtick_run(&body).max(2) + 1);
+        Some(format!("{fence}\n{body}\n{fence}"))
     }
 }
 

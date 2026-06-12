@@ -18,7 +18,7 @@ use crate::tool::{ToolDef, build_tool_meta};
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/GetIssue.md");
+const MD: &str = include_str!("../../config/tools/IssueGet.md");
 
 fn route() -> ToolRoute<GageServer> {
     ToolRoute::new(build_tool_meta(MD), call)

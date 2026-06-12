@@ -1,7 +1,7 @@
 [[test]] # --------------------------------------------------------
 
 name = "tool-flag"
-prompt = "What is the eof code for the CloseIssue tool"
+prompt = "What is the eof code for the IssueClose tool"
 max_turns = 2
 expect.match = "567"
 
@@ -25,15 +25,15 @@ INSERT INTO issue (id, name, target, title, status, created, author)
 """
 
 claude.permissions.allow = [
-  "mcp__plugin_gage_gage__ListIssues",
-  "mcp__plugin_gage_gage__CloseIssue",
+  "mcp__plugin_gage_gage__IssueList",
+  "mcp__plugin_gage_gage__IssueClose",
 ]
 
 # Turns:
 #
 # 1. ToolSearch
-# 2. ListIssues
-# 3. CloseIssue
+# 2. IssueList
+# 3. IssueClose
 # 4. Reply
 expect.max_turns = 4
 
@@ -71,15 +71,15 @@ INSERT INTO issue (id, name, target, title, status, created, author)
 """
 
 claude.permissions.allow = [
-  "mcp__plugin_gage_gage__ListIssues",
-  "mcp__plugin_gage_gage__CloseIssue",
+  "mcp__plugin_gage_gage__IssueList",
+  "mcp__plugin_gage_gage__IssueClose",
 ]
 
 # Turns:
 #
 # 1. ToolSearch
-# 2. ListIssues
-# 3. CloseIssue
+# 2. IssueList
+# 3. IssueClose
 # 4. Reply
 expect.max_turns = 4
 
