@@ -54,8 +54,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show Gage configuration
-    Config,
+    /// Manage Gage configuration
+    Config {
+        #[command(subcommand)]
+        command: cmd_config::ConfigCommand,
+    },
     /// Setup Gage (register with Claude Code)
     Init(cmd_init::InitArgs),
     /// Manage notes
@@ -117,7 +120,7 @@ async fn main() {
     let cli = Cli::parse();
     let cmd = async {
         match cli.command {
-            Command::Config => cmd_config::run(),
+            Command::Config { command } => cmd_config::run(command),
             Command::Init(args) => cmd_init::run(args),
             Command::Note { command } => match command {
                 cmd_note::NoteCommand::List(args) => cmd_note::list(args),

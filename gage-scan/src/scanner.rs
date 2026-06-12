@@ -504,14 +504,14 @@ impl ScannerRegistry {
         defs
     }
 
-    /// Visible scanners that are enabled per the given settings. Use
+    /// Visible scanners that are enabled per the given config. Use
     /// this when picking the default set of scanners to run; use
     /// `list_visible` when listing all scanners regardless of enabled
     /// state.
-    pub fn list_enabled(&self, settings: &gage_core::config::Settings) -> Vec<&ScannerDef> {
+    pub fn list_enabled(&self, config: &gage_core::config::Config) -> Vec<&ScannerDef> {
         self.list_visible()
             .into_iter()
-            .filter(|d| settings.is_scanner_enabled(&d.name))
+            .filter(|d| config.is_scanner_enabled(&d.name))
             .collect()
     }
 }

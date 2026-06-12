@@ -362,9 +362,11 @@ async fn run_dialog(
 ) -> Result<DialogResult, DialogError> {
     // Scanner selection — default set excludes disabled scanners.
     // Explicit `-s name` (handled below) still runs disabled scanners.
-    let settings = gage_core::config::Settings::load()
+    let cwd = std::env::current_dir()
         .map_err(|e| DialogError::Other(std::io::Error::other(e.to_string())))?;
-    let defs = registry.list_enabled(&settings);
+    let (config, _) = gage_core::config::load_merged(&cwd)
+        .map_err(|e| DialogError::Other(std::io::Error::other(e.to_string())))?;
+    let defs = registry.list_enabled(&config);
     let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     names.sort();
 
@@ -659,10 +661,17 @@ fn list_scanners(registry: &ScannerRegistry) {
         .map(|s| s.to_string())
         .collect();
 
-    let settings = match gage_core::config::Settings::load() {
-        Ok(s) => s,
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("Error reading settings: {e}");
+            eprintln!("Error reading cwd: {e}");
+            std::process::exit(1);
+        }
+    };
+    let config = match gage_core::config::load_merged(&cwd) {
+        Ok((c, _)) => c,
+        Err(e) => {
+            eprintln!("Error reading config: {e}");
             std::process::exit(1);
         }
     };
@@ -672,7 +681,7 @@ fn list_scanners(registry: &ScannerRegistry) {
     let rows: Vec<Vec<String>> = defs
         .into_iter()
         .map(|d| {
-            if settings.is_scanner_enabled(&d.name) {
+            if config.is_scanner_enabled(&d.name) {
                 vec![
                     style(&d.name).yellow().to_string(),
                     style(&d.description).dim().to_string(),
@@ -711,26 +720,27 @@ fn apply_enable_disable(registry: &ScannerRegistry, enable: &[String], disable: 
         std::process::exit(1);
     }
 
-    let mut settings = match gage_core::config::Settings::load() {
-        Ok(s) => s,
+    let user_path = gage_core::config::user_config_path();
+    let mut config = match gage_core::config::Config::load_from(&user_path) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("Error reading settings: {e}");
+            eprintln!("Error reading config: {e}");
             std::process::exit(1);
         }
     };
 
     let mut changed = 0;
     for name in enable {
-        let before = settings.scanners.disable.len();
-        settings.scanners.disable.retain(|n| n != name);
-        if settings.scanners.disable.len() != before {
+        let before = config.scanners.disable.len();
+        config.scanners.disable.retain(|n| n != name);
+        if config.scanners.disable.len() != before {
             changed += 1;
             println!("Enabled {name}");
         }
     }
     for name in disable {
-        if !settings.scanners.disable.iter().any(|n| n == name) {
-            settings.scanners.disable.push(name.clone());
+        if !config.scanners.disable.iter().any(|n| n == name) {
+            config.scanners.disable.push(name.clone());
             changed += 1;
             println!("Disabled {name}");
         }
@@ -741,8 +751,8 @@ fn apply_enable_disable(registry: &ScannerRegistry, enable: &[String], disable: 
         return;
     }
 
-    if let Err(e) = settings.save() {
-        eprintln!("Error writing settings: {e}");
+    if let Err(e) = config.save_to(&user_path) {
+        eprintln!("Error writing config: {e}");
         std::process::exit(1);
     }
 }

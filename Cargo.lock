@@ -2242,6 +2242,7 @@ dependencies = [
  "textwrap",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2252,6 +2253,7 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "toml 0.8.23",
  "uuid",
 ]
 
