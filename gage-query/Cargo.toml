@@ -15,6 +15,7 @@ gage-claude = { path = "../gage-claude" }
 gage-index = { path = "../gage-index" }
 rustyline = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 tracing = { workspace = true }
 

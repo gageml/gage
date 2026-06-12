@@ -57,11 +57,11 @@ impl TableFunctionImpl for MessageTextFn {
             | Some(Expr::Literal(ScalarValue::Utf8View(Some(q)), _)) => q.clone(),
             _ => {
                 return Err(DataFusionError::Plan(
-                    "message_text(query [, snippet_chars]) requires a string literal query".into(),
+                    "message_text(query [, snippet_len]) requires a string literal query".into(),
                 ));
             }
         };
-        let snippet_chars = match args.get(1) {
+        let snippet_len = match args.get(1) {
             None => DEFAULT_SNIPPET_CHARS,
             Some(Expr::Literal(ScalarValue::Int64(Some(n)), _)) if *n > 0 => *n as usize,
             Some(Expr::Literal(ScalarValue::Int32(Some(n)), _)) if *n > 0 => *n as usize,
@@ -69,18 +69,18 @@ impl TableFunctionImpl for MessageTextFn {
             Some(Expr::Literal(ScalarValue::UInt32(Some(n)), _)) if *n > 0 => *n as usize,
             _ => {
                 return Err(DataFusionError::Plan(
-                    "message_text snippet_chars must be a positive integer literal".into(),
+                    "message_text snippet_len must be a positive integer literal".into(),
                 ));
             }
         };
         if args.len() > 2 {
             return Err(DataFusionError::Plan(
-                "message_text takes at most two arguments: query [, snippet_chars]".into(),
+                "message_text takes at most two arguments: query [, snippet_len]".into(),
             ));
         }
         Ok(Arc::new(MessageTextTable {
             query,
-            snippet_chars,
+            snippet_len,
             store: Arc::clone(&self.store),
         }))
     }
@@ -89,7 +89,7 @@ impl TableFunctionImpl for MessageTextFn {
 #[derive(Debug)]
 struct MessageTextTable {
     query: String,
-    snippet_chars: usize,
+    snippet_len: usize,
     store: Arc<IndexStore>,
 }
 
@@ -123,9 +123,9 @@ impl TableProvider for MessageTextTable {
 
         let store = Arc::clone(&self.store);
         let query = self.query.clone();
-        let snippet_chars = self.snippet_chars;
+        let snippet_len = self.snippet_len;
         let hits =
-            tokio::task::spawn_blocking(move || store.search(&query, effective, snippet_chars))
+            tokio::task::spawn_blocking(move || store.search(&query, effective, snippet_len))
                 .await
                 .map_err(|e| DataFusionError::Execution(format!("search task failed: {e}")))?
                 .map_err(|e| DataFusionError::Execution(format!("search failed: {e}")))?;
