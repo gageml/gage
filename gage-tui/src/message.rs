@@ -74,7 +74,7 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
                 Some(Value::String(text)) => append_plain(out, text, Style::new()),
                 Some(Value::Array(blocks)) => {
                     for inner in blocks {
-                        append_block(out, inner);
+                        append_tool_result_block(out, inner);
                     }
                 }
                 _ => {}
@@ -88,6 +88,19 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
             };
             push_header(out, &label, style::text_dim());
         }
+    }
+}
+
+/// Inner blocks of a `tool_result` — text is plain (not markdown) so
+/// tool output like YAML or JSON isn't reinterpreted as headings/lists.
+fn append_tool_result_block(out: &mut Vec<Line<'static>>, block: &Value) {
+    let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+    if block_type == "text" {
+        if let Some(text) = block.get("text").and_then(Value::as_str) {
+            append_plain(out, text, Style::new());
+        }
+    } else {
+        append_block(out, block);
     }
 }
 
