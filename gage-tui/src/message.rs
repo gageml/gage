@@ -71,7 +71,7 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
             };
             push_header(out, label, style);
             match block.get("content") {
-                Some(Value::String(text)) => append_plain(out, text, Style::new()),
+                Some(Value::String(text)) => append_maybe_json(out, text, Style::new()),
                 Some(Value::Array(blocks)) => {
                     for inner in blocks {
                         append_tool_result_block(out, inner);
@@ -97,7 +97,7 @@ fn append_tool_result_block(out: &mut Vec<Line<'static>>, block: &Value) {
     let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
     if block_type == "text" {
         if let Some(text) = block.get("text").and_then(Value::as_str) {
-            append_plain(out, text, Style::new());
+            append_maybe_json(out, text, Style::new());
         }
     } else {
         append_block(out, block);
@@ -135,6 +135,21 @@ fn is_client_tag(text: &str) -> bool {
         return false;
     }
     trimmed.ends_with(&format!("</{name}>"))
+}
+
+/// If `text` parses as JSON, render it pretty-printed; otherwise render
+/// it as-is. Used for `tool_result` content where structured payloads are
+/// common and the indented form is easier to read.
+fn append_maybe_json(out: &mut Vec<Line<'static>>, text: &str, style: Style) {
+    let trimmed = text.trim_start();
+    if matches!(trimmed.as_bytes().first(), Some(b'{' | b'['))
+        && let Ok(value) = serde_json::from_str::<Value>(trimmed)
+        && let Ok(pretty) = serde_json::to_string_pretty(&value)
+    {
+        append_plain(out, &pretty, style);
+        return;
+    }
+    append_plain(out, text, style);
 }
 
 fn append_plain(out: &mut Vec<Line<'static>>, text: &str, style: Style) {
