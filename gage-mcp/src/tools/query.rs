@@ -3,8 +3,10 @@ use std::pin::Pin;
 
 use arrow::json::ArrayWriter;
 use rmcp::{
-    ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
-    service::RequestContext,
+    ErrorData as McpError,
+    handler::server::router::tool::ToolRoute,
+    handler::server::tool::ToolCallContext,
+    model::{CallToolResult, Content},
 };
 use serde_json::json;
 
@@ -27,62 +29,73 @@ const _: () = assert!(
 const RESULT_CAP_BYTES: usize = 60_000;
 
 fn route() -> ToolRoute<GageServer> {
-    ToolRoute::new(build_tool_meta(MD), call)
+    ToolRoute::new_dyn(
+        build_tool_meta(MD),
+        |ctx: ToolCallContext<'_, GageServer>| Box::pin(handle(ctx)),
+    )
 }
 
-fn call(
-    server: &GageServer,
-    _ctx: RequestContext<RoleServer>,
-    params: JsonObject,
-) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
-    Box::pin(handle(server, params))
+fn handle(
+    ctx: ToolCallContext<'_, GageServer>,
+) -> Pin<Box<dyn Future<Output = Result<CallToolResult, McpError>> + Send + '_>> {
+    Box::pin(async move {
+        let params = ctx.arguments.unwrap_or_default();
+        let sql = params
+            .get("sql")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("missing or non-string `sql`", None))?;
+
+        let session_ctx = ctx.service.ctx().await;
+        let df = match session_ctx.sql(sql).await {
+            Ok(df) => df,
+            Err(e) => return Ok(domain_error(format!("SQL error: {e}"))),
+        };
+        let batches = match df.collect().await {
+            Ok(b) => b,
+            Err(e) => return Ok(domain_error(format!("query execution error: {e}"))),
+        };
+        let batches: Vec<_> = batches
+            .iter()
+            .filter(|b| b.num_rows() > 0)
+            .cloned()
+            .collect();
+        if batches.is_empty() {
+            return Ok(success("[]"));
+        }
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut writer = ArrayWriter::new(&mut buf);
+        for batch in &batches {
+            if let Err(e) = writer.write(batch) {
+                return Ok(domain_error(format!("JSON serialization error: {e}")));
+            }
+        }
+        if let Err(e) = writer.finish() {
+            return Ok(domain_error(format!("JSON serialization error: {e}")));
+        }
+        if buf.len() > RESULT_CAP_BYTES {
+            let msg = json!({
+                "error": "result exceeds size cap",
+                "bytes": buf.len(),
+                "cap_bytes": RESULT_CAP_BYTES,
+                "rows": row_count,
+                "suggestion": "Re-run with a smaller LIMIT, paginate with `line > N`, \
+                               SELECT substr(raw, 1, 800) instead of raw, \
+                               or omit the raw column entirely.",
+            })
+            .to_string();
+            return Ok(domain_error(msg));
+        }
+        let text = String::from_utf8(buf)
+            .map_err(|e| McpError::internal_error(format!("UTF-8 error: {e}"), None))?;
+        Ok(success(text))
+    })
 }
 
-async fn handle(server: &GageServer, params: JsonObject) -> Result<String, McpError> {
-    let sql = params
-        .get("sql")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::invalid_params("missing or non-string `sql`", None))?;
+fn success(text: impl Into<String>) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(text.into())])
+}
 
-    let ctx = server.ctx().await;
-    let df = ctx
-        .sql(sql)
-        .await
-        .map_err(|e| McpError::invalid_params(format!("SQL error: {e}"), None))?;
-    let batches = df
-        .collect()
-        .await
-        .map_err(|e| McpError::internal_error(format!("query execution error: {e}"), None))?;
-    let batches: Vec<_> = batches
-        .iter()
-        .filter(|b| b.num_rows() > 0)
-        .cloned()
-        .collect();
-    if batches.is_empty() {
-        return Ok("[]".to_string());
-    }
-    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut writer = ArrayWriter::new(&mut buf);
-    for batch in &batches {
-        writer.write(batch).map_err(|e| {
-            McpError::internal_error(format!("JSON serialization error: {e}"), None)
-        })?;
-    }
-    writer
-        .finish()
-        .map_err(|e| McpError::internal_error(format!("JSON serialization error: {e}"), None))?;
-    if buf.len() > RESULT_CAP_BYTES {
-        return Ok(json!({
-            "error": "result exceeds size cap",
-            "bytes": buf.len(),
-            "cap_bytes": RESULT_CAP_BYTES,
-            "rows": row_count,
-            "suggestion": "Re-run with a smaller LIMIT, paginate with `line > N`, \
-                           SELECT substr(raw, 1, 800) instead of raw, \
-                           or omit the raw column entirely.",
-        })
-        .to_string());
-    }
-    String::from_utf8(buf).map_err(|e| McpError::internal_error(format!("UTF-8 error: {e}"), None))
+fn domain_error(text: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(text.into())])
 }
