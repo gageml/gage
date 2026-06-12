@@ -20,6 +20,7 @@ use crate::tools;
 /// the rmcp router registers them in.
 const TOOLS: &[ToolDef] = &[
     tools::query::TOOL,
+    tools::search_messages::TOOL,
     tools::list_issues::TOOL,
     tools::get_issue::TOOL,
     tools::close_issue::TOOL,

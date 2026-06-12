@@ -19,6 +19,7 @@ rmcp = { version = "0.16", features = ["server", "transport-io", "schemars"] }
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tokio-util = { workspace = true }
