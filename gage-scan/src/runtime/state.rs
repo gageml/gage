@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use datafusion::prelude::SessionContext as DfSessionContext;
 use gage_claude::project::Project;
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
+use gage_query::ScanSessionContext;
 use serde_json as json;
 use tokio::sync::mpsc;
 
@@ -26,8 +26,8 @@ pub struct RunContext {
     /// and `message` tables backed by a `Lookup` source over `selected`
     /// and shares a `SessionCache`, so per-session derives amortize
     /// across every `s.messages()` / `s.entries()` / `query(...)` call
-    /// in any scanner.
-    pub df_ctx: DfSessionContext,
+    /// in any scanner. Exposes `cached_session_count()` for progress.
+    pub scan_ctx: Arc<ScanSessionContext>,
 }
 
 /// Per-task state injected via `tokio::task_local!`.

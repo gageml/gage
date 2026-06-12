@@ -1,5 +1,6 @@
 use std::num::IntErrorKind;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
@@ -13,9 +14,10 @@ use tabled::{
     },
 };
 
-use gage_claude::session;
+use gage_claude::session::{self, SessionInfo};
 use gage_core::uuid::short_uuid;
 use gage_db::{db, scan};
+use gage_query::ScanSessionContext;
 use gage_scan::scanner::{Scanner, ScannerRegistry};
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -477,10 +479,31 @@ async fn run_dialog(
     let started = std::time::Instant::now();
     let jobs = args.jobs.unwrap_or_else(num_cpus::get).max(1);
 
+    // Enrich (id, path) → SessionInfo; the DataFusion-side context
+    // built next is keyed off this set and exposes a `cached_session_count()`
+    // counter the CLI polls for progress.
+    let selected: Arc<[SessionInfo]> = {
+        let mut out: Vec<SessionInfo> = Vec::with_capacity(sessions.len());
+        for (id, src) in sessions {
+            let meta = std::fs::metadata(&src)
+                .map_err(|e| DialogError::Other(std::io::Error::other(e.to_string())))?;
+            let mtime = meta.modified().unwrap();
+            out.push(SessionInfo {
+                id,
+                src,
+                mtime,
+                size: meta.len(),
+            });
+        }
+        Arc::from(out.into_boxed_slice())
+    };
+    let total_sessions = selected.len();
+    let scan_ctx = Arc::new(ScanSessionContext::new(&selected));
+
     let mut progress = if args.no_progress {
         None
     } else {
-        Some(crate::scan_progress::ProgressUi::new())
+        Some(crate::scan_progress::ProgressUi::new(total_sessions))
     };
     let cancel = crate::panic_token().child_token();
     let signal_task = {
@@ -492,6 +515,34 @@ async fn run_dialog(
             }
         })
     };
+
+    // Poll the session cache and drive the "Sessions read" bar. The
+    // bar finishes itself once the count reaches total; the task then
+    // exits. Cancellation (Ctrl-C, panic) also exits cleanly.
+    let poll_task = if let Some(ui) = progress.as_ref() {
+        let bar = ui.sessions_bar();
+        let scan_ctx = Arc::clone(&scan_ctx);
+        let cancel = cancel.clone();
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tick.tick() => {
+                        let n = scan_ctx.cached_session_count() as u64;
+                        bar.set_position(n);
+                        if n >= total_sessions as u64 {
+                            bar.finish_and_clear();
+                            break;
+                        }
+                    }
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     let db = Arc::new(Mutex::new(db::open_db().unwrap()));
 
     // Notes and issues are no longer tied to a scan, so "what this scan
@@ -510,7 +561,8 @@ async fn run_dialog(
     let result = gage_scan::runner::run(
         db.clone(),
         scanners,
-        sessions,
+        selected,
+        scan_ctx,
         jobs,
         cancel.clone(),
         |event| {
@@ -558,6 +610,12 @@ async fn run_dialog(
         && !e.is_cancelled()
     {
         panic!("signal task joined cleanly: {e}");
+    }
+    if let Some(task) = poll_task
+        && let Err(e) = task.await
+        && !e.is_cancelled()
+    {
+        panic!("poll task joined cleanly: {e}");
     }
 
     if let Some(ui) = progress {

@@ -14,13 +14,25 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub struct ProgressUi {
     multi: MultiProgress,
+    sessions: ProgressBar,
     summary: ProgressBar,
     print_buf: String,
 }
 
 impl ProgressUi {
-    pub fn new() -> Self {
+    pub fn new(total_sessions: usize) -> Self {
         let multi = MultiProgress::new();
+
+        let sessions = multi.add(ProgressBar::new(total_sessions as u64));
+        sessions.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.cyan} {msg} {bar:30.white/bright.black} ({pos}/{len})",
+            )
+            .unwrap()
+            .progress_chars("▬▬"),
+        );
+        sessions.set_message("Session cache");
+        sessions.enable_steady_tick(Duration::from_millis(120));
 
         let summary = multi.add(ProgressBar::new(0));
         summary.set_style(
@@ -30,14 +42,22 @@ impl ProgressUi {
             .unwrap()
             .progress_chars("▬▬"),
         );
-        summary.set_message("Scanning");
+        summary.set_message("Tasks");
         summary.enable_steady_tick(Duration::from_millis(120));
 
         Self {
             multi,
+            sessions,
             summary,
             print_buf: String::new(),
         }
+    }
+
+    /// Handle to the "Sessions read" bar. The bar is removed when it
+    /// reaches its length; further sets after that are no-ops on a
+    /// finished bar (cheap, safe to call from a polling task).
+    pub fn sessions_bar(&self) -> ProgressBar {
+        self.sessions.clone()
     }
 
     pub fn handle(&mut self, event: ScanEvent) {
@@ -103,6 +123,7 @@ impl ProgressUi {
 
     pub fn finish(mut self) {
         self.flush_print_buf();
+        self.sessions.finish_and_clear();
         self.summary.finish_and_clear();
         #[allow(clippy::let_underscore_must_use)]
         let _ = self.multi.clear();

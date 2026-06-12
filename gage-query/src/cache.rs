@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use datafusion::error::{DataFusionError, Result};
@@ -25,6 +26,7 @@ type Slot = Arc<OnceCell<Arc<DerivedSession>>>;
 #[derive(Default)]
 pub struct SessionCache {
     map: Mutex<HashMap<String, Slot>>,
+    loaded: AtomicUsize,
 }
 
 impl std::fmt::Debug for SessionCache {
@@ -41,6 +43,13 @@ impl SessionCache {
         Self::default()
     }
 
+    /// Number of sessions whose JSONL has been parsed into a
+    /// `DerivedSession`. Monotonically non-decreasing across the
+    /// cache's lifetime. Lock-free.
+    pub fn loaded(&self) -> usize {
+        self.loaded.load(Ordering::Relaxed)
+    }
+
     /// Return the cached `DerivedSession` for `session_id`, parsing
     /// `path` if absent or if the cached fingerprint no longer matches
     /// the file's stat. A fresh `stat` on every call keeps the cache
@@ -52,8 +61,13 @@ impl SessionCache {
             let slot = self.slot(session_id);
             let id = session_id.to_string();
             let path = path.to_path_buf();
+            let loaded = &self.loaded;
             let cached = slot
-                .get_or_try_init(|| async move { parse(id, path).await })
+                .get_or_try_init(|| async move {
+                    let derived = parse(id, path).await?;
+                    loaded.fetch_add(1, Ordering::Relaxed);
+                    Ok::<_, DataFusionError>(derived)
+                })
                 .await?;
             if cached.fingerprint == want {
                 return Ok(Arc::clone(cached));

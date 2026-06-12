@@ -4,12 +4,12 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use datafusion::prelude::SessionContext as DfSessionContext;
 use gage_claude::home::ClaudeHome;
 use gage_claude::project::{Project, project_for_session_name};
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
 use gage_db::scan::{Scan, ScanScanner, insert_scan, insert_scan_session, insert_scanner};
+use gage_query::ScanSessionContext;
 use rune::alloc::prelude::TryToOwned;
 use rune::runtime::Vm;
 use rune::sync::Arc as RuneArc;
@@ -76,33 +76,18 @@ impl From<gage_db::scan::ScanError> for RunError {
 pub async fn run(
     db: Arc<Mutex<Connection>>,
     scanners: Vec<Scanner<'_>>,
-    sessions: Vec<(String, PathBuf)>,
+    selected: Arc<[SessionInfo]>,
+    scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
     cancel: CancellationToken,
     on_event: impl FnMut(ScanEvent) + Send,
 ) -> Result<RunSummary, RunError> {
     // Init scan + per-scanner records, recording the selected session ids
-    let session_ids: Vec<&str> = sessions.iter().map(|(id, _)| id.as_str()).collect();
+    let session_ids: Vec<&str> = selected.iter().map(|s| s.id.as_str()).collect();
     let scan_id = {
         let conn = db.lock().unwrap();
         init_run(&scanners, &session_ids, &conn)?
     };
-
-    // Resolve selected sessions to SessionInfo. The CLI gives us
-    // (id, path); enrich to SessionInfo for the runtime.
-    let selected: Vec<SessionInfo> = sessions
-        .into_iter()
-        .map(|(id, src)| -> Result<_, RunError> {
-            let meta = std::fs::metadata(&src)?;
-            let mtime = meta.modified().unwrap();
-            Ok(SessionInfo {
-                id,
-                src,
-                mtime,
-                size: meta.len(),
-            })
-        })
-        .collect::<Result<_, _>>()?;
 
     // Resolve distinct projects from `~/.claude.json`. Sessions key
     // off the encoded directory name they were stored under; that
@@ -112,7 +97,7 @@ pub async fn run(
     // resolve to no project.
     let claude_home = ClaudeHome::from_env()?;
     let mut projects: HashMap<String, Arc<Project>> = HashMap::new();
-    for s in &selected {
+    for s in selected.iter() {
         let name = s.project_name().to_string();
         if projects.contains_key(&name) {
             continue;
@@ -122,13 +107,11 @@ pub async fn run(
         }
     }
 
-    let selected: Arc<[SessionInfo]> = Arc::from(selected.into_boxed_slice());
-    let df_ctx = build_run_df_ctx(&selected);
     let run = Arc::new(RunContext {
         scan_id: scan_id.clone(),
         selected,
         projects,
-        df_ctx,
+        scan_ctx,
     });
 
     // Build per-scanner compilation artifacts
@@ -342,7 +325,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             scan_id: "test".to_string(),
             selected: stub_selected.clone(),
             projects: HashMap::new(),
-            df_ctx: build_run_df_ctx(&stub_selected),
+            scan_ctx: Arc::new(ScanSessionContext::new(&stub_selected)),
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -569,7 +552,7 @@ impl TestRuntime {
             scan_id: "test".to_string(),
             selected: selected.clone(),
             projects: HashMap::new(),
-            df_ctx: build_run_df_ctx(&selected),
+            scan_ctx: Arc::new(ScanSessionContext::new(&selected)),
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ScanContext {
@@ -581,39 +564,4 @@ impl TestRuntime {
         });
         runtime::state::SCAN_CTX.scope(ctx, f()).await
     }
-}
-
-/// Build the run-wide DataFusion context. Registers `entry` and
-/// `message` over a `Lookup` source seeded from `selected`, installs the
-/// shared `SessionCache` extension so per-session derives amortize
-/// across every scanner call in the run, and registers the JSON UDFs.
-pub(crate) fn build_run_df_ctx(
-    selected: &Arc<[gage_claude::session::SessionInfo]>,
-) -> DfSessionContext {
-    use datafusion::prelude::SessionConfig;
-
-    let cache = Arc::new(gage_query::SessionCache::new());
-    let config = SessionConfig::new().with_extension(Arc::clone(&cache));
-    let ctx = DfSessionContext::new_with_config(config);
-    gage_query::install_udfs(&ctx);
-
-    let sessions: Arc<HashMap<String, PathBuf>> = Arc::new(
-        selected
-            .iter()
-            .map(|s| (s.id.clone(), s.src.clone()))
-            .collect(),
-    );
-    ctx.register_table(
-        "entry",
-        Arc::new(gage_query::tables::EntryTable::with_lookup(
-            sessions.clone(),
-        )),
-    )
-    .unwrap();
-    ctx.register_table(
-        "message",
-        Arc::new(gage_query::tables::MessageTable::with_lookup(sessions)),
-    )
-    .unwrap();
-    ctx
 }

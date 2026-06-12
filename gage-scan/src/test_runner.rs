@@ -9,7 +9,8 @@ use rune::runtime::Vm;
 use rune::sync::Arc as RuneArc;
 use rune::{Diagnostics, Source, Sources};
 
-use crate::runner::build_run_df_ctx;
+use gage_query::ScanSessionContext;
+
 use crate::runtime;
 use crate::runtime::state::{RunContext, SCAN_CTX, ScanContext};
 use crate::scanner::{extract_scanners, scanners_dir};
@@ -125,7 +126,7 @@ pub async fn run_tests(
             scan_id: "test".to_string(),
             selected: stub_selected.clone(),
             projects: HashMap::new(),
-            df_ctx: build_run_df_ctx(&stub_selected),
+            scan_ctx: std::sync::Arc::new(ScanSessionContext::new(&stub_selected)),
         });
         let stub_db = std::sync::Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
