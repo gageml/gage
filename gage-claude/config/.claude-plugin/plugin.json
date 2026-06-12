@@ -2,11 +2,5 @@
   "name": "gage",
   "version": "%VERSION%",
   "description": "Claude Code session analysis - scan for and resolve issues",
-  "author": { "name": "Gage" },
-  "mcpServers": {
-    "gage": {
-      "command": "%GAGE_BIN%",
-      "args": ["mcp"]
-    }
-  }
+  "author": { "name": "Gage" }
 }

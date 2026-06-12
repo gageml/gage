@@ -90,9 +90,13 @@ mod tests {
         let content = fs::read_to_string(&plugin_json).unwrap();
         assert!(content.contains("\"name\": \"gage\""));
         assert!(content.contains(&format!("\"version\": \"{}\"", VERSION)));
-        assert!(content.contains("/usr/local/bin/gage"));
         assert!(!content.contains("%VERSION%"));
-        assert!(!content.contains("%GAGE_BIN%"));
+
+        let mcp_json = dir.path().join(".mcp.json");
+        assert!(mcp_json.exists());
+        let mcp_content = fs::read_to_string(&mcp_json).unwrap();
+        assert!(mcp_content.contains("/usr/local/bin/gage"));
+        assert!(!mcp_content.contains("%GAGE_BIN%"));
 
         let skill = dir.path().join("skills").join("review").join("SKILL.md");
         assert!(skill.exists());

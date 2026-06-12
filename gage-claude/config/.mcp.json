@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gage": {
+      "command": "%GAGE_BIN%",
+      "args": ["mcp"]
+    }
+  }
+}
