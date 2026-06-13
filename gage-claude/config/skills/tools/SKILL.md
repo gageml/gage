@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 description: |
   Empty skill (do not invoke)
 
@@ -9,7 +10,6 @@ description: |
   `mcp__plugin_gage_gage__IssueList` - list open issues
   `mcp__plugin_gage_gage__IssueGet` - fetch one issue's full detail
   `mcp__plugin_gage_gage__IssueClose` - close an issue
-
 
   Once the desired tools are loaded, use them directly accordingly
   to their schema definitions.
