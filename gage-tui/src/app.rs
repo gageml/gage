@@ -19,14 +19,20 @@ use ratatui::widgets::{
 };
 
 use crate::doc::{Document, Entry};
+use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::syntax::Highlighter;
 use crate::{message, style};
 
-pub fn run(terminal: &mut DefaultTerminal, doc: &Document) -> io::Result<()> {
+pub fn run(
+    terminal: &mut DefaultTerminal,
+    doc: &Document,
+    options: &ViewOptions,
+) -> io::Result<()> {
+    let turns = options.show_turns.then(|| compute_turns(doc));
     let mut state = AppState::new(doc);
     loop {
-        terminal.draw(|frame| draw(frame, doc, &mut state))?;
+        terminal.draw(|frame| draw(frame, doc, &mut state, turns.as_deref()))?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
@@ -219,7 +225,7 @@ fn page_size(viewport: u16) -> u16 {
     ((v * 9) / 10).max(1) as u16
 }
 
-fn draw(frame: &mut Frame, doc: &Document, state: &mut AppState) {
+fn draw(frame: &mut Frame, doc: &Document, state: &mut AppState, turns: Option<&[Option<usize>]>) {
     let [header_area, middle_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -234,7 +240,7 @@ fn draw(frame: &mut Frame, doc: &Document, state: &mut AppState) {
         Paragraph::new(Line::from(format!("Session {}", doc.session.id))).style(style::header());
     frame.render_widget(header, header_area);
 
-    draw_outline(frame, doc, state, outline_area);
+    draw_outline(frame, doc, state, outline_area, turns);
     draw_body(frame, doc, state, body_area);
 
     let footer = Paragraph::new(Line::from(
@@ -244,7 +250,13 @@ fn draw(frame: &mut Frame, doc: &Document, state: &mut AppState) {
     frame.render_widget(footer, footer_area);
 }
 
-fn draw_outline(frame: &mut Frame, doc: &Document, state: &mut AppState, area: Rect) {
+fn draw_outline(
+    frame: &mut Frame,
+    doc: &Document,
+    state: &mut AppState,
+    area: Rect,
+    turns: Option<&[Option<usize>]>,
+) {
     let active = state.focus == Focus::Outline;
 
     state.outline_viewport = area.height.saturating_sub(2);
@@ -255,7 +267,7 @@ fn draw_outline(frame: &mut Frame, doc: &Document, state: &mut AppState, area: R
         .rows()
         .iter()
         .enumerate()
-        .map(|(i, row)| row_to_item(row, doc, Some(i) == selected))
+        .map(|(i, row)| row_to_item(row, doc, Some(i) == selected, turns))
         .collect();
 
     let list = List::new(items)
@@ -284,7 +296,12 @@ fn draw_outline(frame: &mut Frame, doc: &Document, state: &mut AppState, area: R
     );
 }
 
-fn row_to_item(row: &crate::outline::Row, doc: &Document, is_selected: bool) -> ListItem<'static> {
+fn row_to_item(
+    row: &crate::outline::Row,
+    doc: &Document,
+    is_selected: bool,
+    turns: Option<&[Option<usize>]>,
+) -> ListItem<'static> {
     let indent = "  ".repeat(row.level.saturating_sub(1));
     let glyph = if row.has_children {
         if row.expanded { "▼ " } else { "▶ " }
@@ -307,10 +324,14 @@ fn row_to_item(row: &crate::outline::Row, doc: &Document, is_selected: bool) -> 
             } else {
                 style::text_dim()
             };
+            let turn_suffix = turns
+                .and_then(|t| t.get(index).copied().flatten())
+                .map(|n| format!(" {}", circled_number(n)))
+                .unwrap_or_default();
             Line::from(vec![
                 prefix,
                 Span::styled(format!("{} ", index + 1), number_style),
-                Span::raw(kind),
+                Span::raw(format!("{kind}{turn_suffix}")),
             ])
         }
     };
@@ -483,6 +504,55 @@ fn draw_body_scrollbar(frame: &mut Frame, state: &AppState, active: bool, area: 
         }),
         &mut scrollbar_state,
     );
+}
+
+/// One slot per entry; `Some(n)` on assistant entries, where `n` is the 1-based
+/// turn index. A turn is one distinct assistant `message.id`; multiple entries
+/// (thinking, text, tool_use) sharing that id all map to the same turn.
+fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
+    let mut out = Vec::with_capacity(doc.entries.len());
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut next: usize = 0;
+    for entry in &doc.entries {
+        let turn = if entry.entry_type() == "assistant" {
+            entry
+                .message()
+                .and_then(|m| m.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|id| match seen.get(id) {
+                    Some(&n) => n,
+                    None => {
+                        next += 1;
+                        seen.insert(id.to_string(), next);
+                        next
+                    }
+                })
+        } else {
+            None
+        };
+        out.push(turn);
+    }
+    out
+}
+
+/// Render `n` as circled-digit unicode. 1..=20 use a single glyph (U+2460..);
+/// past 20, digits compose individually (⓪..⑨), so 21 renders as ②①.
+fn circled_number(n: usize) -> String {
+    if (1..=20).contains(&n) {
+        return char::from_u32(0x2460 + (n as u32) - 1)
+            .expect("U+2460..=U+2473 are valid scalars")
+            .to_string();
+    }
+    n.to_string().chars().map(circled_digit).collect()
+}
+
+fn circled_digit(d: char) -> char {
+    match d {
+        '0' => '\u{24EA}',
+        '1'..='9' => char::from_u32(0x2460 + (d as u32 - '1' as u32))
+            .expect("U+2460..=U+2468 are valid scalars"),
+        _ => d,
+    }
 }
 
 fn scrollbar(active: bool) -> Scrollbar<'static> {

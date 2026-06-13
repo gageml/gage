@@ -34,6 +34,10 @@ pub enum SessionCommand {
 pub struct SessionViewArgs {
     /// Session ID (prefix match); omit to pick from recent sessions
     pub session: Option<String>,
+
+    /// View options (comma-separated). Known terms: turns
+    #[arg(short, long, value_delimiter = ',')]
+    pub options: Vec<String>,
 }
 
 #[derive(Args)]
@@ -404,7 +408,14 @@ pub async fn view(args: SessionViewArgs) {
             }
         },
     };
-    if let Err(e) = gage_tui::run(&session_id).await {
+    let options = match gage_tui::ViewOptions::parse(&args.options) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("gage session view: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = gage_tui::run(&session_id, options).await {
         eprintln!("gage session view: {e}");
         std::process::exit(1);
     }
