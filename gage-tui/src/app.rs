@@ -2,23 +2,27 @@
 //! active. In the outline: j/k/g/G/PgUp/PgDn navigate, Enter toggles
 //! expansion, Right expands, Left collapses (or moves to parent when the
 //! current row has no children to collapse). In the body: j/k/g/G/PgUp/PgDn
-//! scroll. Entry rows render the raw JSON as syntax-highlighted YAML; the
-//! session row shows session-level attributes.
+//! scroll. `n` opens a note dialog over the selected entry; `e` edits the
+//! selected user comment note; `d` deletes the selected user-authored note.
 
 use std::io;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use gage_db::note::{self, Note, NoteValue};
+use gage_db::rusqlite::Connection;
+use gage_db::target::{NoteTarget, SessionTarget};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Wrap,
 };
 
-use crate::doc::{Document, Entry};
+use crate::doc::Document;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::syntax::Highlighter;
@@ -26,16 +30,33 @@ use crate::{message, style};
 
 pub fn run(
     terminal: &mut DefaultTerminal,
-    doc: &Document,
+    doc: Document,
     options: &ViewOptions,
+    db: &Connection,
 ) -> io::Result<()> {
-    let turns = options.show_turns.then(|| compute_turns(doc));
+    let turns = options.show_turns.then(|| compute_turns(&doc));
     let mut state = AppState::new(doc);
     loop {
-        terminal.draw(|frame| draw(frame, doc, &mut state, turns.as_deref()))?;
+        terminal.draw(|frame| draw(frame, &mut state, turns.as_deref()))?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            // Dialog input takes precedence over global keys.
+            match &mut state.dialog {
+                Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
+                    handle_note_dialog(&mut state, key.code, key.modifiers, db);
+                    continue;
+                }
+                Dialog::ConfirmCancel { .. } => {
+                    handle_confirm_cancel(&mut state, key.code);
+                    continue;
+                }
+                Dialog::ConfirmDelete { .. } => {
+                    handle_confirm_delete(&mut state, key.code, db);
+                    continue;
+                }
+                Dialog::None => {}
+            }
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
@@ -66,6 +87,9 @@ pub fn run(
                 KeyCode::Enter if state.focus == Focus::Outline => state.toggle_selected(),
                 KeyCode::Right if state.focus == Focus::Outline => state.expand_selected(),
                 KeyCode::Left if state.focus == Focus::Outline => state.collapse_selected(),
+                KeyCode::Char('n') => state.begin_add_note(),
+                KeyCode::Char('e') => state.begin_edit_note(),
+                KeyCode::Char('d') => state.begin_delete_note(),
                 _ => {}
             }
         }
@@ -78,26 +102,65 @@ enum Focus {
     Body,
 }
 
+enum Dialog {
+    None,
+    AddNote {
+        entry_index: usize,
+        text: String,
+    },
+    EditNote {
+        note_id: String,
+        text: String,
+    },
+    /// Sub-dialog layered over the editor when the user pressed Esc with
+    /// non-empty content. `y` discards `pending`; anything else restores it.
+    ConfirmCancel {
+        pending: Box<Dialog>,
+    },
+    ConfirmDelete {
+        note_id: String,
+    },
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 struct AppState {
+    doc: Document,
+    username: String,
     outline: Outline,
     list_state: ListState,
     focus: Focus,
     body_scroll: u16,
-    /// Viewport metrics from the last draw. Input handlers read these to size
-    /// page jumps and clamp scroll positions; the draw refreshes them and
-    /// re-clamps so a resize that shrinks a viewport snaps back next frame.
     body_max_scroll: u16,
     body_viewport: u16,
     outline_viewport: u16,
     highlighter: Highlighter,
+    dialog: Dialog,
 }
 
 impl AppState {
-    fn new(doc: &Document) -> Self {
-        let outline = Outline::new(doc.entries.len());
+    fn new(doc: Document) -> Self {
+        let entry_note_ids: Vec<Vec<String>> = doc
+            .entries
+            .iter()
+            .map(|e| {
+                doc.notes_for_line(e.line)
+                    .into_iter()
+                    .map(|n| n.id.clone())
+                    .collect()
+            })
+            .collect();
+        let outline = Outline::new(entry_note_ids);
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         Self {
+            doc,
+            username: resolve_username(),
             outline,
             list_state,
             focus: Focus::Outline,
@@ -106,7 +169,12 @@ impl AppState {
             body_viewport: 0,
             outline_viewport: 0,
             highlighter: Highlighter::new(),
+            dialog: Dialog::None,
         }
+    }
+
+    fn author(&self) -> String {
+        format!("user:{}", self.username)
     }
 
     fn toggle_focus(&mut self) {
@@ -130,8 +198,6 @@ impl AppState {
         self.body_scroll = 0;
     }
 
-    /// Move selection by `delta` rows, clamped to `[0, len-1]`. Resets the
-    /// body scroll because the body content is tied to the selection.
     fn select_by(&mut self, delta: isize) {
         let len = self.outline.len();
         if len == 0 {
@@ -209,14 +275,194 @@ impl AppState {
         self.body_scroll = self.body_max_scroll;
     }
 
-    /// Page size for paged navigation — 90% of the viewport, with a floor of
-    /// 1 so very short viewports still advance.
     fn outline_page(&self) -> u16 {
         page_size(self.outline_viewport)
     }
 
     fn body_page(&self) -> u16 {
         page_size(self.body_viewport)
+    }
+
+    /// Entry index for the current selection — the entry row itself, or the
+    /// parent entry of the selected note row. None for the session row.
+    fn selected_entry_index(&self) -> Option<usize> {
+        let row = self
+            .list_state
+            .selected()
+            .and_then(|i| self.outline.row(i))?;
+        match &row.kind {
+            RowKind::Entry { index } => Some(*index),
+            RowKind::Note { entry_index, .. } => Some(*entry_index),
+            RowKind::Session => None,
+        }
+    }
+
+    fn selected_note(&self) -> Option<(usize, &Note)> {
+        let row = self
+            .list_state
+            .selected()
+            .and_then(|i| self.outline.row(i))?;
+        if let RowKind::Note {
+            entry_index,
+            note_id,
+        } = &row.kind
+        {
+            self.doc.note(note_id).map(|n| (*entry_index, n))
+        } else {
+            None
+        }
+    }
+
+    fn begin_add_note(&mut self) {
+        if let Some(entry_index) = self.selected_entry_index() {
+            self.dialog = Dialog::AddNote {
+                entry_index,
+                text: String::new(),
+            };
+        }
+    }
+
+    fn begin_edit_note(&mut self) {
+        let Some((_, note)) = self.selected_note() else {
+            return;
+        };
+        if note.author != self.author() || note.name != "comment" {
+            return;
+        }
+        let text = note
+            .value
+            .0
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| note.value.to_json());
+        let note_id = note.id.clone();
+        self.dialog = Dialog::EditNote { note_id, text };
+    }
+
+    fn begin_delete_note(&mut self) {
+        let Some((_, note)) = self.selected_note() else {
+            return;
+        };
+        if note.author != self.author() {
+            return;
+        }
+        self.dialog = Dialog::ConfirmDelete {
+            note_id: note.id.clone(),
+        };
+    }
+}
+
+fn resolve_username() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn handle_note_dialog(state: &mut AppState, code: KeyCode, mods: KeyModifiers, db: &Connection) {
+    let text = match &mut state.dialog {
+        Dialog::AddNote { text, .. } | Dialog::EditNote { text, .. } => text,
+        _ => return,
+    };
+    match code {
+        KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => text.push('\n'),
+        KeyCode::Enter => {
+            if text.trim().is_empty() {
+                state.dialog = Dialog::None;
+                return;
+            }
+            commit_note(state, db);
+        }
+        KeyCode::Esc => {
+            if text.trim().is_empty() {
+                state.dialog = Dialog::None;
+            } else {
+                let pending = std::mem::replace(&mut state.dialog, Dialog::None);
+                state.dialog = Dialog::ConfirmCancel {
+                    pending: Box::new(pending),
+                };
+            }
+        }
+        KeyCode::Backspace => {
+            text.pop();
+        }
+        KeyCode::Char(c) => text.push(c),
+        _ => {}
+    }
+}
+
+fn commit_note(state: &mut AppState, db: &Connection) {
+    match std::mem::replace(&mut state.dialog, Dialog::None) {
+        Dialog::AddNote { entry_index, text } => {
+            let Some(entry) = state.doc.entries.get(entry_index) else {
+                return;
+            };
+            let target = NoteTarget::Session(
+                SessionTarget::new(&state.doc.session.id).with_line(entry.line),
+            );
+            let note = Note::new(target, "comment", NoteValue::from(text), &state.author());
+            if let Ok(()) = note::insert(db, &note) {
+                let id = note.id.clone();
+                state.doc.add_note(note);
+                if let Some(row) = state.outline.add_note(entry_index, id) {
+                    state.list_state.select(Some(row));
+                    state.body_scroll = 0;
+                }
+            }
+        }
+        Dialog::EditNote { note_id, text } => {
+            let Some(existing) = state.doc.note(&note_id).cloned() else {
+                return;
+            };
+            let mut updated = existing;
+            updated.value = NoteValue::from(text);
+            if let Ok(new) = note::replace(db, &note_id, &updated) {
+                state.doc.replace_note_value(
+                    &note_id,
+                    new.value,
+                    new.modified.unwrap_or_else(now_ms),
+                );
+            }
+        }
+        other => state.dialog = other,
+    }
+}
+
+fn handle_confirm_cancel(state: &mut AppState, code: KeyCode) {
+    let pending = match std::mem::replace(&mut state.dialog, Dialog::None) {
+        Dialog::ConfirmCancel { pending } => pending,
+        other => {
+            state.dialog = other;
+            return;
+        }
+    };
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Discard the editor; dialog stays None.
+        }
+        _ => state.dialog = *pending,
+    }
+}
+
+fn handle_confirm_delete(state: &mut AppState, code: KeyCode, db: &Connection) {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Dialog::ConfirmDelete { note_id } =
+                std::mem::replace(&mut state.dialog, Dialog::None)
+                && note::delete(db, &note_id).is_ok()
+            {
+                state.doc.remove_note(&note_id);
+                if let Some(entry_index) = state.outline.remove_note(&note_id) {
+                    let target_row = state.outline.rows().iter().position(
+                        |r| matches!(&r.kind, RowKind::Entry { index } if *index == entry_index),
+                    );
+                    if let Some(r) = target_row {
+                        state.list_state.select(Some(r));
+                    } else {
+                        state.clamp_selection();
+                    }
+                    state.body_scroll = 0;
+                }
+            }
+        }
+        _ => state.dialog = Dialog::None,
     }
 }
 
@@ -225,7 +471,7 @@ fn page_size(viewport: u16) -> u16 {
     ((v * 9) / 10).max(1) as u16
 }
 
-fn draw(frame: &mut Frame, doc: &Document, state: &mut AppState, turns: Option<&[Option<usize>]>) {
+fn draw(frame: &mut Frame, state: &mut AppState, turns: Option<&[Option<usize>]>) {
     let [header_area, middle_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -236,23 +482,40 @@ fn draw(frame: &mut Frame, doc: &Document, state: &mut AppState, turns: Option<&
     let [outline_area, body_area] =
         Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(middle_area);
 
-    let header =
-        Paragraph::new(Line::from(format!("Session {}", doc.session.id))).style(style::header());
+    let header = Paragraph::new(Line::from(format!("Session {}", state.doc.session.id)))
+        .style(style::header());
     frame.render_widget(header, header_area);
 
-    draw_outline(frame, doc, state, outline_area, turns);
-    draw_body(frame, doc, state, body_area);
+    draw_outline(frame, state, outline_area, turns);
+    draw_body(frame, state, body_area);
 
-    let footer = Paragraph::new(Line::from(
-        "q quit · Tab switch pane · j/k g/G PgUp/PgDn · Enter ◂ ▸",
-    ))
-    .style(style::footer());
+    let footer = Paragraph::new(Line::from(footer_hint(state))).style(style::footer());
     frame.render_widget(footer, footer_area);
+
+    draw_dialog(frame, state);
+}
+
+fn footer_hint(state: &AppState) -> String {
+    let mut hints = vec![
+        "q quit",
+        "Tab pane",
+        "j/k g/G PgUp/PgDn",
+        "Enter ◂ ▸",
+        "n note",
+    ];
+    if let Some((_, note)) = state.selected_note()
+        && note.author == state.author()
+    {
+        if note.name == "comment" {
+            hints.push("e edit");
+        }
+        hints.push("d delete");
+    }
+    hints.join(" · ")
 }
 
 fn draw_outline(
     frame: &mut Frame,
-    doc: &Document,
     state: &mut AppState,
     area: Rect,
     turns: Option<&[Option<usize>]>,
@@ -267,7 +530,7 @@ fn draw_outline(
         .rows()
         .iter()
         .enumerate()
-        .map(|(i, row)| row_to_item(row, doc, Some(i) == selected, turns))
+        .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, turns))
         .collect();
 
     let list = List::new(items)
@@ -309,23 +572,20 @@ fn row_to_item(
         "  "
     };
     let prefix = Span::raw(format!("{indent}{glyph}"));
-    let line = match row.kind {
+    let line = match &row.kind {
         RowKind::Session => Line::from(vec![prefix, Span::raw(doc.session.id.clone())]),
         RowKind::Entry { index } => {
             let kind = doc
                 .entries
-                .get(index)
+                .get(*index)
                 .map_or("?".to_string(), |e| e.label().to_string());
-            // Dim on unselected rows only — the row's `reversed()` highlight
-            // composes with `DIM` to a visibly different cell bg, so the
-            // selected row drops the dim and inherits the plain reverse style.
             let number_style = if is_selected {
                 Style::new()
             } else {
                 style::text_dim()
             };
             let turn_suffix = turns
-                .and_then(|t| t.get(index).copied().flatten())
+                .and_then(|t| t.get(*index).copied().flatten())
                 .map(|n| format!(" {}", circled_number(n)))
                 .unwrap_or_default();
             Line::from(vec![
@@ -334,33 +594,52 @@ fn row_to_item(
                 Span::raw(format!("{kind}{turn_suffix}")),
             ])
         }
+        RowKind::Note { note_id, .. } => {
+            let label = doc
+                .note(note_id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| "?".to_string());
+            Line::from(vec![prefix, Span::raw(label)])
+        }
     };
     ListItem::new(line)
 }
 
-fn draw_body(frame: &mut Frame, doc: &Document, state: &mut AppState, area: Rect) {
+fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let active = state.focus == Focus::Body;
-    let row = state
+    let row_kind = state
         .list_state
         .selected()
-        .and_then(|i| state.outline.row(i));
+        .and_then(|i| state.outline.row(i))
+        .map(|r| r.kind.clone());
 
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(style::panel_border(active))
-        .title(body_title(doc, row.map(|r| &r.kind)));
+        .title(body_title(&state.doc, row_kind.as_ref()));
     let inner = outer.inner(area);
     state.body_viewport = inner.height;
     frame.render_widget(outer, area);
 
-    match row.map(|r| &r.kind) {
+    match row_kind {
         Some(RowKind::Session) => {
-            let lines = state.highlighter.highlight(&doc.session.yaml(), "yaml");
+            let yaml = state.doc.session.yaml();
+            let lines = state.highlighter.highlight(&yaml, "yaml");
             draw_scrollable(frame, state, lines, inner);
         }
-        Some(RowKind::Entry { index }) => match doc.entries.get(*index) {
-            Some(entry) => draw_entry(frame, state, entry, inner),
-            None => draw_placeholder(frame, "(missing entry)", inner),
+        Some(RowKind::Entry { index }) => {
+            let snap = state.doc.entries.get(index).map(|e| EntrySnap {
+                yaml: e.yaml(),
+                message: e.message().cloned(),
+            });
+            match snap {
+                Some(snap) => draw_entry(frame, state, &snap, inner),
+                None => draw_placeholder(frame, "(missing entry)", inner),
+            }
+        }
+        Some(RowKind::Note { note_id, .. }) => match state.doc.note(&note_id) {
+            Some(note) => draw_note(frame, note, inner),
+            None => draw_placeholder(frame, "(missing note)", inner),
         },
         None => draw_placeholder(frame, "(no selection)", inner),
     }
@@ -371,23 +650,102 @@ fn draw_body(frame: &mut Frame, doc: &Document, state: &mut AppState, area: Rect
 fn body_title(doc: &Document, kind: Option<&RowKind>) -> String {
     match kind {
         Some(RowKind::Session) => doc.session.id.clone(),
-        Some(RowKind::Entry { index }) => {
-            let kind = doc
-                .entries
-                .get(*index)
-                .map_or("?".to_string(), |e| e.label().to_string());
-            format!("{} {}", index + 1, kind)
+        Some(RowKind::Entry { index }) => entry_header(doc, *index),
+        Some(RowKind::Note {
+            entry_index,
+            note_id,
+        }) => {
+            let head = entry_header(doc, *entry_index);
+            let name = doc
+                .note(note_id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| "?".to_string());
+            format!("{head} • {name}")
         }
         None => "Body".to_string(),
     }
 }
 
-fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &Entry, area: Rect) {
-    // Build the stack of widgets that compose the entry body. Each contributes
-    // a height; we render them into an offscreen buffer at their stacked y
-    // offsets, then blit the visible window into the frame.
+fn entry_header(doc: &Document, index: usize) -> String {
+    let kind = doc
+        .entries
+        .get(index)
+        .map_or("?".to_string(), |e| e.label().to_string());
+    format!("{} {}", index + 1, kind)
+}
+
+fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
+    let value = match &note.value.0 {
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    };
+    let modified_suffix = note
+        .modified
+        .map(|m| format!(" · edited {}", format_ms(m)))
+        .unwrap_or_default();
+    let header = Line::from(Span::styled(
+        format!(
+            "{} · {}{}",
+            note.author,
+            format_ms(note.created),
+            modified_suffix
+        ),
+        style::text_dim(),
+    ));
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(header);
+    lines.push(Line::from(""));
+    for l in value.lines() {
+        lines.push(Line::from(l.to_string()));
+    }
+    let p = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().padding(Padding::uniform(1)));
+    frame.render_widget(p, area);
+}
+
+fn format_ms(ms: i64) -> String {
+    // Render as a UTC ISO-ish stamp using gage-core's helper if available;
+    // otherwise fall back to the raw seconds value. Keep it simple: the
+    // intent here is human orientation, not parseable output.
+    let secs = ms / 1000;
+    let datetime = chrono_like(secs);
+    datetime.unwrap_or_else(|| format!("{secs}s"))
+}
+
+fn chrono_like(secs: i64) -> Option<String> {
+    // Lightweight UTC formatter: yyyy-mm-dd hh:mm without pulling in chrono.
+    // Days from epoch -> civil date via Howard Hinnant's algorithm.
+    let days = secs.div_euclid(86_400);
+    let time = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days)?;
+    let h = time / 3600;
+    let mi = (time % 3600) / 60;
+    Some(format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}"))
+}
+
+fn civil_from_days(z: i64) -> Option<(i32, u32, u32)> {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = (y + if m <= 2 { 1 } else { 0 }) as i32;
+    Some((y, m, d))
+}
+
+struct EntrySnap {
+    yaml: String,
+    message: Option<serde_json::Value>,
+}
+
+fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: Rect) {
     let mut sections: Vec<Section> = Vec::new();
-    if let Some(message) = entry.message() {
+    if let Some(message) = &entry.message {
         let panel = Paragraph::new(message::render(message))
             .wrap(Wrap { trim: false })
             .block(Block::default().padding(Padding::uniform(1)));
@@ -398,8 +756,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &Entry, area: Rect
         ));
     }
     sections.push(Section::from_paragraph(
-        Paragraph::new(state.highlighter.highlight(&entry.yaml(), "yaml"))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(state.highlighter.highlight(&entry.yaml, "yaml")).wrap(Wrap { trim: false }),
         area.width,
     ));
 
@@ -408,8 +765,6 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &Entry, area: Rect
 
 type RenderFn = Box<dyn FnOnce(Rect, &mut ratatui::buffer::Buffer)>;
 
-/// A widget plus the height it needs at the current width. Held boxed so the
-/// stack can mix paragraph variants under one type.
 struct Section {
     widget: RenderFn,
     height: u16,
@@ -427,8 +782,6 @@ impl Section {
     }
 }
 
-/// Renders `sections` stacked vertically into a virtual document, then blits
-/// the `body_scroll`-offset slice into `area`. Updates scroll bounds.
 fn draw_stack(frame: &mut Frame, state: &mut AppState, sections: Vec<Section>, area: Rect) {
     let total: u16 = sections
         .iter()
@@ -506,9 +859,95 @@ fn draw_body_scrollbar(frame: &mut Frame, state: &AppState, active: bool, area: 
     );
 }
 
-/// One slot per entry; `Some(n)` on assistant entries, where `n` is the 1-based
-/// turn index. A turn is one distinct assistant `message.id`; multiple entries
-/// (thinking, text, tool_use) sharing that id all map to the same turn.
+fn draw_dialog(frame: &mut Frame, state: &AppState) {
+    match &state.dialog {
+        Dialog::None => {}
+        Dialog::AddNote { text, .. } => draw_editor(frame, "Add note", text),
+        Dialog::EditNote { text, .. } => draw_editor(frame, "Edit note", text),
+        Dialog::ConfirmCancel { pending } => {
+            match pending.as_ref() {
+                Dialog::AddNote { text, .. } => draw_editor(frame, "Add note", text),
+                Dialog::EditNote { text, .. } => draw_editor(frame, "Edit note", text),
+                _ => {}
+            }
+            draw_confirm(
+                frame,
+                "Confirm that you want to cancel by pressing 'y'. You will lose your changes.",
+            );
+        }
+        Dialog::ConfirmDelete { .. } => {
+            draw_confirm(frame, "Delete this note? This cannot be undone.")
+        }
+    }
+}
+
+fn draw_editor(frame: &mut Frame, title: &str, text: &str) {
+    let area = centered_rect(frame.area(), 70, 40);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(title.to_string(), style::text_dim()))
+        .border_style(style::text_dim())
+        .padding(Padding::uniform(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [text_area, hint_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+    let mut display = text.to_string();
+    display.push('▌');
+    let p = Paragraph::new(display).wrap(Wrap { trim: false });
+    frame.render_widget(p, text_area);
+
+    let hint = Paragraph::new(Line::from(Span::styled(
+        "Enter save · Shift+Enter newline · Esc cancel",
+        style::text_dim(),
+    )))
+    .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(hint, hint_area);
+}
+
+fn draw_confirm(frame: &mut Frame, message: &str) {
+    let area = centered_rect(frame.area(), 50, 20);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled("Confirm", style::text_dim()))
+        .border_style(style::text_dim())
+        .padding(Padding::uniform(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [msg_area, hint_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(message.to_string()).wrap(Wrap { trim: false }),
+        msg_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("y / n", style::text_dim())))
+            .alignment(ratatui::layout::Alignment::Center),
+        hint_area,
+    );
+}
+
+fn centered_rect(area: Rect, pct_x: u16, pct_y: u16) -> Rect {
+    let [_, v, _] = Layout::vertical([
+        Constraint::Percentage((100 - pct_y) / 2),
+        Constraint::Percentage(pct_y),
+        Constraint::Percentage((100 - pct_y) / 2),
+    ])
+    .areas(area);
+    let [_, h, _] = Layout::horizontal([
+        Constraint::Percentage((100 - pct_x) / 2),
+        Constraint::Percentage(pct_x),
+        Constraint::Percentage((100 - pct_x) / 2),
+    ])
+    .areas(v);
+    h
+}
+
 fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
     let mut out = Vec::with_capacity(doc.entries.len());
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -535,8 +974,6 @@ fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
     out
 }
 
-/// Render `n` as circled-digit unicode. 1..=20 use a single glyph (U+2460..);
-/// past 20, digits compose individually (⓪..⑨), so 21 renders as ②①.
 fn circled_number(n: usize) -> String {
     if (1..=20).contains(&n) {
         return char::from_u32(0x2460 + (n as u32) - 1)

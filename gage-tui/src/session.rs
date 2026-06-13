@@ -1,19 +1,33 @@
-//! Load the session row and entry rows for a session via `gage-query`.
+//! Load the session row and entry rows for a session via `gage-query`, plus
+//! session-scoped notes from the gage db.
 
 use std::error::Error;
 
-use datafusion::arrow::array::{Array, RecordBatch, StringArray};
+use datafusion::arrow::array::{Array, Int64Array, RecordBatch, StringArray};
 use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
+use gage_db::note::{self, NoteFilters};
+use gage_db::rusqlite::Connection;
 use serde_json::Value;
 
 use crate::doc::{Document, Entry, Session};
 
-pub async fn load(session_id: &str) -> Result<Document, Box<dyn Error>> {
+pub async fn load(session_id: &str, db: &Connection) -> Result<Document, Box<dyn Error>> {
     let ctx = gage_query::create_context_default().await;
     let session = load_session(&ctx, session_id).await?;
     let entries = load_entries(&ctx, session_id).await?;
-    Ok(Document { session, entries })
+    let notes = note::find(
+        db,
+        &NoteFilters {
+            session: Some(session_id.to_string()),
+            ..Default::default()
+        },
+    )?;
+    Ok(Document {
+        session,
+        entries,
+        notes,
+    })
 }
 
 async fn load_session(ctx: &SessionContext, session_id: &str) -> Result<Session, Box<dyn Error>> {
@@ -34,10 +48,6 @@ async fn load_session(ctx: &SessionContext, session_id: &str) -> Result<Session,
     })
 }
 
-/// Serialize the first row of `batch` as a JSON object via arrow's
-/// `ArrayWriter`, then parse it back into a `Value`. The roundtrip is the
-/// path of least resistance — `ArrayWriter` is already the canonical
-/// arrow-to-JSON conversion in this workspace.
 fn first_row_as_value(batch: &RecordBatch) -> Result<Value, Box<dyn Error>> {
     let row = batch.slice(0, 1);
     let mut buf: Vec<u8> = Vec::new();
@@ -53,20 +63,26 @@ async fn load_entries(
     session_id: &str,
 ) -> Result<Vec<Entry>, Box<dyn Error>> {
     let sql = format!(
-        "SELECT raw FROM entry WHERE session_id = '{}' ORDER BY line",
+        "SELECT line, raw FROM entry WHERE session_id = '{}' ORDER BY line",
         session_id.replace('\'', "''")
     );
     let batches = ctx.sql(&sql).await?.collect().await?;
     let mut entries = Vec::new();
     for batch in &batches {
-        let raws = batch
+        let lines = batch
             .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("entry.line is a non-null Int64 column");
+        let raws = batch
+            .column(1)
             .as_any()
             .downcast_ref::<StringArray>()
             .expect("entry.raw is a non-null Utf8 column");
         for i in 0..batch.num_rows() {
             let value = serde_json::from_str(raws.value(i))?;
-            entries.push(Entry { value });
+            let line = u32::try_from(lines.value(i)).unwrap_or(0);
+            entries.push(Entry { line, value });
         }
     }
     Ok(entries)

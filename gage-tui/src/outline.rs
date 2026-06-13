@@ -1,13 +1,18 @@
 //! Outline tree state + visible-row projection.
 //!
 //! `Outline` owns the tree *shape* (what's expanded, what's visible). Row
-//! content — labels for the session, entry titles — is composed by the
-//! renderer from the `Document`, keyed off `RowKind::Entry { index }`. This
-//! split keeps Outline a pure UI structure with no per-entry data duplication.
+//! content — labels for the session, entry titles, note names — is composed by
+//! the renderer from the `Document`, keyed off `RowKind`.
+
+use std::collections::HashSet;
 
 pub struct Outline {
-    entry_count: usize,
     session_expanded: bool,
+    entry_expanded: HashSet<usize>,
+    /// `entry_note_ids[i]` is the ordered list of note ids attached to entry
+    /// `i`'s line. Mutated when notes are added or removed; outline rebuilds
+    /// from this projection.
+    entry_note_ids: Vec<Vec<String>>,
     visible: Vec<Row>,
 }
 
@@ -18,29 +23,25 @@ pub struct Row {
     pub kind: RowKind,
 }
 
+#[derive(Clone)]
 pub enum RowKind {
     Session,
     Entry { index: usize },
+    Note { entry_index: usize, note_id: String },
 }
 
-/// Outcome of a `Left`-style collapse. The caller decides what to do with the
-/// selection — collapse may invalidate descendants; "no children to collapse"
-/// promotes the gesture into a move-to-parent.
 pub enum CollapseOutcome {
-    /// Subtree collapsed. The caller should clamp selection if it pointed
-    /// into the collapsed subtree.
     Collapsed,
-    /// No collapse possible here; caller should select this row instead.
     SelectParent(usize),
-    /// Nothing to do (no children, no parent).
     None,
 }
 
 impl Outline {
-    pub fn new(entry_count: usize) -> Self {
+    pub fn new(entry_note_ids: Vec<Vec<String>>) -> Self {
         let mut o = Self {
-            entry_count,
             session_expanded: true,
+            entry_expanded: HashSet::new(),
+            entry_note_ids,
             visible: Vec::new(),
         };
         o.rebuild();
@@ -59,7 +60,6 @@ impl Outline {
         self.visible.len()
     }
 
-    /// Toggle the selected row's expansion. Returns true if anything changed.
     pub fn toggle(&mut self, idx: usize) -> bool {
         let Some(row) = self.visible.get(idx) else {
             return false;
@@ -72,7 +72,6 @@ impl Outline {
         true
     }
 
-    /// Expand the selected row if it has children and is currently collapsed.
     pub fn expand(&mut self, idx: usize) -> bool {
         let Some(row) = self.visible.get(idx) else {
             return false;
@@ -84,8 +83,6 @@ impl Outline {
         true
     }
 
-    /// Collapse the selected row, or — when it has no children to collapse —
-    /// instruct the caller to move selection to the parent.
     pub fn collapse(&mut self, idx: usize) -> CollapseOutcome {
         let Some(row) = self.visible.get(idx) else {
             return CollapseOutcome::None;
@@ -100,17 +97,55 @@ impl Outline {
         CollapseOutcome::None
     }
 
+    /// Append a note id under `entry_index`, ensure the entry is expanded so
+    /// the new note is visible, and rebuild. Returns the visible-row index of
+    /// the new note row.
+    pub fn add_note(&mut self, entry_index: usize, note_id: String) -> Option<usize> {
+        self.entry_note_ids
+            .get_mut(entry_index)?
+            .push(note_id.clone());
+        self.entry_expanded.insert(entry_index);
+        self.rebuild();
+        self.visible.iter().position(|r| match &r.kind {
+            RowKind::Note { note_id: id, .. } => id == &note_id,
+            _ => false,
+        })
+    }
+
+    /// Remove a note id wherever it appears, then rebuild. Returns the entry
+    /// index that previously owned the note, if any.
+    pub fn remove_note(&mut self, note_id: &str) -> Option<usize> {
+        let mut found: Option<usize> = None;
+        for (i, ids) in self.entry_note_ids.iter_mut().enumerate() {
+            if let Some(pos) = ids.iter().position(|n| n == note_id) {
+                ids.remove(pos);
+                found = Some(i);
+                break;
+            }
+        }
+        self.rebuild();
+        found
+    }
+
     fn set_expanded(&mut self, idx: usize, expanded: bool) {
         let Some(row) = self.visible.get(idx) else {
             return;
         };
-        match row.kind {
+        match &row.kind {
             RowKind::Session => {
                 self.session_expanded = expanded;
-                self.rebuild();
             }
-            RowKind::Entry { .. } => {}
+            RowKind::Entry { index } => {
+                let index = *index;
+                if expanded {
+                    self.entry_expanded.insert(index);
+                } else {
+                    self.entry_expanded.remove(&index);
+                }
+            }
+            RowKind::Note { .. } => return,
         }
+        self.rebuild();
     }
 
     fn parent_of(&self, idx: usize) -> usize {
@@ -129,21 +164,37 @@ impl Outline {
     }
 
     fn rebuild(&mut self) {
-        let mut rows = Vec::with_capacity(1 + self.entry_count);
+        let entry_count = self.entry_note_ids.len();
+        let mut rows = Vec::with_capacity(1 + entry_count);
         rows.push(Row {
             level: 1,
-            has_children: self.entry_count > 0,
+            has_children: entry_count > 0,
             expanded: self.session_expanded,
             kind: RowKind::Session,
         });
         if self.session_expanded {
-            for i in 0..self.entry_count {
+            for (i, notes) in self.entry_note_ids.iter().enumerate() {
+                let has_children = !notes.is_empty();
+                let expanded = has_children && self.entry_expanded.contains(&i);
                 rows.push(Row {
                     level: 2,
-                    has_children: false,
-                    expanded: false,
+                    has_children,
+                    expanded,
                     kind: RowKind::Entry { index: i },
                 });
+                if expanded {
+                    for id in notes {
+                        rows.push(Row {
+                            level: 3,
+                            has_children: false,
+                            expanded: false,
+                            kind: RowKind::Note {
+                                entry_index: i,
+                                note_id: id.clone(),
+                            },
+                        });
+                    }
+                }
             }
         }
         self.visible = rows;
