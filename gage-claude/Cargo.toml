@@ -8,7 +8,6 @@ path = "src/lib.rs"
 
 [dependencies]
 gage-core = { path = "../gage-core" }
-ignore = "0.4"
 regex = { workspace = true }
 rust-embed = { workspace = true }
 serde = { workspace = true }

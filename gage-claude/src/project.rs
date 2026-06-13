@@ -21,11 +21,10 @@ pub struct Project {
 
 impl Project {
     /// Start a finder for project-scope config files rooted at the
-    /// project's cwd. Each phase (settings, local settings, recursive
-    /// memory, skills, commands, agents) is enabled by default; toggle
-    /// individual phases off to skip the I/O they would do (most
-    /// notably `memory(false)` skips the entire recursive walk). Call
-    /// `.find()` to get the lazy iterator.
+    /// project's cwd. Each phase (settings, local settings, memory,
+    /// local memory, skills, commands, agents) is enabled by default;
+    /// toggle individual phases off to skip the I/O they would do.
+    /// Call `.find()` to get the lazy iterator.
     pub fn config(&self) -> ProjectFinder {
         ProjectFinder {
             root: self.path.clone(),
@@ -33,6 +32,7 @@ impl Project {
                 settings: true,
                 local_settings: true,
                 memory: true,
+                local_memory: true,
                 skills: true,
                 commands: true,
                 agents: true,
@@ -61,6 +61,10 @@ impl ProjectFinder {
     }
     pub fn memory(mut self, on: bool) -> Self {
         self.wants.memory = on;
+        self
+    }
+    pub fn local_memory(mut self, on: bool) -> Self {
+        self.wants.local_memory = on;
         self
     }
     /// Skills *and* their rule files. Both come out of one `read_dir`,

@@ -360,12 +360,17 @@ fn collect_rows(
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
         };
-        // Project-scope settings.json yields scope="project"; only
-        // settings.local.json yields scope="local". So the two finder
-        // toggles need to consult both the type and scope filters.
+        // Settings and memory each split into a project-scope and a
+        // local-scope variant (`settings.json` / `settings.local.json`,
+        // `CLAUDE.md` / `CLAUDE.local.md`), so their finder toggles
+        // consult both the type and scope filters.
         let want_project_settings = type_filter.is_none_or(|f| f.contains("settings"))
             && scope_filter.is_none_or(|s| s.contains("project"));
         let want_local_settings = type_filter.is_none_or(|f| f.contains("settings"))
+            && scope_filter.is_none_or(|s| s.contains("local"));
+        let want_project_memory = type_filter.is_none_or(|f| f.contains("memory"))
+            && scope_filter.is_none_or(|s| s.contains("project"));
+        let want_local_memory = type_filter.is_none_or(|f| f.contains("memory"))
             && scope_filter.is_none_or(|s| s.contains("local"));
         // The remaining variants all yield scope="project", so they
         // require the scope filter to permit "project".
@@ -381,7 +386,8 @@ fn collect_rows(
                 .config()
                 .settings(want_project_settings)
                 .local_settings(want_local_settings)
-                .memory(want_project_other && type_filter.is_none_or(|f| f.contains("memory")))
+                .memory(want_project_memory)
+                .local_memory(want_local_memory)
                 .skills(
                     want_project_other
                         && type_filter
@@ -450,11 +456,12 @@ fn push_files(
 }
 
 /// The scope a row will carry, given the variant and the walk it came
-/// from. `LocalSettings` always reports `"local"`; every other variant
-/// inherits the walk's scope (`"user"` or `"project"`).
+/// from. `LocalSettings` and `LocalMemory` always report `"local"`;
+/// every other variant inherits the walk's scope (`"user"` or
+/// `"project"`).
 fn effective_scope<'a>(file: &ConfigFile, source_scope: &'a str) -> &'a str {
     match file {
-        ConfigFile::LocalSettings(_) => "local",
+        ConfigFile::LocalSettings(_) | ConfigFile::LocalMemory(_) => "local",
         _ => source_scope,
     }
 }
@@ -503,7 +510,7 @@ fn is_user_only_type(type_code: &str) -> bool {
 fn type_code_of(file: &ConfigFile) -> &'static str {
     match file {
         ConfigFile::Settings(_) | ConfigFile::LocalSettings(_) => "settings",
-        ConfigFile::Memory { .. } => "memory",
+        ConfigFile::Memory(_) | ConfigFile::LocalMemory(_) => "memory",
         ConfigFile::Skill { .. } => "skill",
         ConfigFile::SkillRule { .. } => "skill-rule",
         ConfigFile::Command { .. } => "command",
@@ -544,17 +551,14 @@ fn into_row(
     let path = file.path().to_string_lossy().into_owned();
     let type_code = type_code_of(&file);
 
-    let scope = match &file {
-        ConfigFile::LocalSettings(_) => "local",
-        _ => source_scope,
-    }
-    .to_string();
+    let scope = effective_scope(&file, source_scope).to_string();
 
     let name: String = match file {
         ConfigFile::Settings(_)
         | ConfigFile::LocalSettings(_)
+        | ConfigFile::Memory(_)
+        | ConfigFile::LocalMemory(_)
         | ConfigFile::InstalledPlugins(_) => String::new(),
-        ConfigFile::Memory { subdir, .. } => subdir.unwrap_or_default(),
         ConfigFile::Skill { name, .. }
         | ConfigFile::Command { name, .. }
         | ConfigFile::Agent { name, .. } => name,

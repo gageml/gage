@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use tracing::{debug, trace};
 
@@ -37,14 +36,11 @@ pub enum ConfigFile {
     Settings(PathBuf),
     LocalSettings(PathBuf),
 
-    /// `subdir` is `None` for the root `CLAUDE.md`, or `Some(rel)` for
-    /// a nested one, where `rel` is the parent directory relative to
-    /// the source root (project root for project scope; `~/.claude/`
-    /// for user scope — though user scope only ever has a root file).
-    Memory {
-        subdir: Option<String>,
-        path: PathBuf,
-    },
+    /// `<root>/CLAUDE.md` for the source scope: `~/.claude/CLAUDE.md`
+    /// at user scope, `<project>/CLAUDE.md` at project scope.
+    Memory(PathBuf),
+    /// `<project>/CLAUDE.local.md`. Only emitted by the project walk.
+    LocalMemory(PathBuf),
 
     Skill {
         name: String,
@@ -113,9 +109,10 @@ impl ConfigFile {
         match self {
             ConfigFile::Settings(p)
             | ConfigFile::LocalSettings(p)
+            | ConfigFile::Memory(p)
+            | ConfigFile::LocalMemory(p)
             | ConfigFile::InstalledPlugins(p) => p,
-            ConfigFile::Memory { path, .. }
-            | ConfigFile::Skill { path, .. }
+            ConfigFile::Skill { path, .. }
             | ConfigFile::SkillRule { path, .. }
             | ConfigFile::Command { path, .. }
             | ConfigFile::Agent { path, .. }
@@ -153,12 +150,8 @@ impl ConfigFile {
 
 /// Snapshot of the filesystem ops performed by a `ConfigFiles` walk so
 /// far. `files_read` counts every `read_to_string` *inside* the walk
-/// (the plugin index, per-plugin manifests, gitignore-style reads done
-/// by the recursive memory walker count only via the `ignore` crate's
-/// internals and are *not* visible here). `dirs_listed` counts every
-/// `read_dir` the walker performs directly; the `ignore` crate's
-/// internal readdirs are approximated by the count of yielded directory
-/// entries.
+/// (the plugin index, per-plugin manifests). `dirs_listed` counts every
+/// `read_dir` the walker performs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WalkMetrics {
     pub files_read: u64,
@@ -226,6 +219,7 @@ pub(crate) struct ProjectWants {
     pub settings: bool,
     pub local_settings: bool,
     pub memory: bool,
+    pub local_memory: bool,
     pub skills: bool,
     pub commands: bool,
     pub agents: bool,
@@ -255,10 +249,7 @@ pub(crate) fn user_files(home: PathBuf, wants: UserWants) -> ConfigFiles {
             ))
             .chain(opt(
                 wants.memory,
-                check_file(claude.join("CLAUDE.md"), |path| ConfigFile::Memory {
-                    subdir: None,
-                    path,
-                }),
+                check_file(claude.join("CLAUDE.md"), ConfigFile::Memory),
             ))
             .chain(opt(
                 wants.skills,
@@ -296,6 +287,7 @@ pub(crate) fn project_files(root: PathBuf, wants: ProjectWants) -> ConfigFiles {
         settings = wants.settings,
         local_settings = wants.local_settings,
         memory = wants.memory,
+        local_memory = wants.local_memory,
         skills = wants.skills,
         commands = wants.commands,
         agents = wants.agents,
@@ -318,7 +310,11 @@ pub(crate) fn project_files(root: PathBuf, wants: ProjectWants) -> ConfigFiles {
             ))
             .chain(opt(
                 wants.memory,
-                walk_memory(root.clone(), counters.clone()),
+                check_file(root.join("CLAUDE.md"), ConfigFile::Memory),
+            ))
+            .chain(opt(
+                wants.local_memory,
+                check_file(root.join("CLAUDE.local.md"), ConfigFile::LocalMemory),
             ))
             .chain(opt(
                 wants.skills,
@@ -522,51 +518,6 @@ fn walk_skills(skills_dir: PathBuf, kind: SkillKind, counters: Arc<Counters>) ->
 
             Box::new(head.chain(rules))
         }),
-    )
-}
-
-fn walk_memory(root: PathBuf, counters: Arc<Counters>) -> ConfigFileIter {
-    // `WalkBuilder` is already lazy; wrap it in `once_with` so even
-    // the builder construction is deferred to first poll. Every
-    // yielded *directory* entry is approximated as one `dirs_listed`
-    // (the `ignore` crate's actual readdirs are below the API).
-    Box::new(
-        iter::once_with(move || -> ConfigFileIter {
-            debug!(root = %root.display(), "memory walk start");
-            let walker = WalkBuilder::new(&root)
-                .hidden(true)
-                .git_ignore(true)
-                .git_global(false)
-                .git_exclude(true)
-                .ignore(true)
-                .parents(true)
-                .build();
-            Box::new(walker.filter_map(move |entry| {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(e) => return Some(Err(io::Error::other(e))),
-                };
-                if entry.file_type().is_some_and(|t| t.is_dir()) {
-                    counters.dir_listed();
-                    trace!(path = %entry.path().display(), "memory walk: dir");
-                }
-                if entry.file_name() != OsStr::new("CLAUDE.md") {
-                    return None;
-                }
-                let path = entry.into_path();
-                let parent = path.parent().unwrap_or(&root);
-                let subdir = if parent == root {
-                    None
-                } else {
-                    match parent.strip_prefix(&root) {
-                        Ok(rel) => Some(rel.to_string_lossy().into_owned()),
-                        Err(_) => return None,
-                    }
-                };
-                Some(Ok(ConfigFile::Memory { subdir, path }))
-            }))
-        })
-        .flatten(),
     )
 }
 
@@ -862,12 +813,7 @@ mod tests {
         for r in rows {
             match r {
                 ConfigFile::Settings(_) => have_settings = true,
-                ConfigFile::Memory { subdir: None, .. } => have_root_memory = true,
-                ConfigFile::Memory {
-                    subdir: Some(_), ..
-                } => {
-                    panic!("user scope shouldn't yield nested memory")
-                }
+                ConfigFile::Memory(_) => have_root_memory = true,
                 ConfigFile::Skill { name, .. } => skills.push(name),
                 ConfigFile::SkillRule { skill, name, .. } => skill_rules.push((skill, name)),
                 ConfigFile::Command { name, .. } => commands.push(name),
@@ -897,18 +843,15 @@ mod tests {
     }
 
     #[test]
-    fn project_scope_walks_memory_and_respects_gitignore() {
+    fn project_scope_emits_root_memory_files() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().join("proj");
         fs::create_dir_all(&project_root).unwrap();
 
         write(&project_root.join("CLAUDE.md"), "root");
+        write(&project_root.join("CLAUDE.local.md"), "root-local");
+        // A nested CLAUDE.md must NOT be picked up.
         write(&project_root.join("docs/CLAUDE.md"), "docs");
-        write(&project_root.join("docs/design/CLAUDE.md"), "design");
-        write(&project_root.join("vendor/CLAUDE.md"), "vendor");
-        write(&project_root.join(".gitignore"), "vendor/\n");
-        // `ignore` crate's `.gitignore` handling requires a git root.
-        fs::create_dir_all(project_root.join(".git")).unwrap();
         write(&project_root.join(".claude/settings.json"), "{}");
         write(&project_root.join(".claude/settings.local.json"), "{}");
 
@@ -917,19 +860,15 @@ mod tests {
         };
         let rows: Vec<ConfigFile> = project.config().find().map(|r| r.unwrap()).collect();
 
-        let mut memory: Vec<Option<String>> = rows
-            .iter()
-            .filter_map(|r| match r {
-                ConfigFile::Memory { subdir, .. } => Some(subdir.clone()),
-                _ => None,
-            })
-            .collect();
-        memory.sort();
-        // vendor/CLAUDE.md is excluded by .gitignore.
-        assert_eq!(
-            memory,
-            vec![None, Some("docs".into()), Some("docs/design".into())]
-        );
+        let has_memory = rows.iter().any(|r| matches!(r, ConfigFile::Memory(_)));
+        let has_local_memory = rows.iter().any(|r| matches!(r, ConfigFile::LocalMemory(_)));
+        let nested = rows.iter().any(|r| match r {
+            ConfigFile::Memory(p) | ConfigFile::LocalMemory(p) => p.parent() != Some(&project_root),
+            _ => false,
+        });
+        assert!(has_memory);
+        assert!(has_local_memory);
+        assert!(!nested, "nested CLAUDE.md must not be discovered");
 
         let has_settings = rows.iter().any(|r| matches!(r, ConfigFile::Settings(_)));
         let has_local = rows
@@ -940,16 +879,14 @@ mod tests {
     }
 
     #[test]
-    fn project_with_missing_root_yields_walk_error() {
-        // The walker reports the missing root once; with no `.claude/`
-        // either, no other rows show up.
+    fn project_with_missing_root_yields_no_rows() {
+        // With no project tree on disk, every phase's `check_file`
+        // reports NotFound (silently) and the walk produces nothing.
         let project = Project {
             path: PathBuf::from("/nonexistent/path/that/does/not/exist"),
         };
         let rows: Vec<io::Result<ConfigFile>> = project.config().find().collect();
-        // Some rows may be Err (walker reporting the missing root); none
-        // should be Ok.
-        assert!(rows.iter().all(|r| r.is_err()));
+        assert!(rows.is_empty());
     }
 
     #[test]
