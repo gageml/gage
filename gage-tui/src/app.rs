@@ -13,7 +13,7 @@ use gage_db::rusqlite::Connection;
 use gage_db::target::{NoteTarget, SessionTarget};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -21,6 +21,8 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
     ScrollbarOrientation, ScrollbarState, Wrap,
 };
+
+use tui_textarea::{CursorMove, TextArea, WrapMode};
 
 use crate::doc::Document;
 use crate::options::ViewOptions;
@@ -44,7 +46,7 @@ pub fn run(
             // Dialog input takes precedence over global keys.
             match &mut state.dialog {
                 Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
-                    handle_note_dialog(&mut state, key.code, key.modifiers, db);
+                    handle_note_dialog(&mut state, key, db);
                     continue;
                 }
                 Dialog::ConfirmCancel { .. } => {
@@ -84,11 +86,17 @@ pub fn run(
                     Focus::Outline => state.select_by(-(state.outline_page() as isize)),
                     Focus::Body => state.body_scroll_by(-(state.body_page() as i32)),
                 },
-                KeyCode::Enter if state.focus == Focus::Outline => state.toggle_selected(),
+                KeyCode::Enter if state.focus == Focus::Outline => {
+                    if !state.begin_edit_note() {
+                        state.toggle_selected();
+                    }
+                }
                 KeyCode::Right if state.focus == Focus::Outline => state.expand_selected(),
                 KeyCode::Left if state.focus == Focus::Outline => state.collapse_selected(),
                 KeyCode::Char('n') => state.begin_add_note(),
-                KeyCode::Char('e') => state.begin_edit_note(),
+                KeyCode::Char('e') => {
+                    state.begin_edit_note();
+                }
                 KeyCode::Char('d') => state.begin_delete_note(),
                 _ => {}
             }
@@ -106,11 +114,12 @@ enum Dialog {
     None,
     AddNote {
         entry_index: usize,
-        text: String,
+        editor: TextArea<'static>,
     },
     EditNote {
         note_id: String,
-        text: String,
+        original: String,
+        editor: TextArea<'static>,
     },
     /// Sub-dialog layered over the editor when the user pressed Esc with
     /// non-empty content. `y` discards `pending`; anything else restores it.
@@ -120,6 +129,18 @@ enum Dialog {
     ConfirmDelete {
         note_id: String,
     },
+}
+
+fn editor_text(editor: &TextArea<'_>) -> String {
+    editor.lines().join("\n")
+}
+
+fn new_editor(text: &str) -> TextArea<'static> {
+    let mut ta = TextArea::new(text.split('\n').map(|s| s.to_string()).collect());
+    ta.set_cursor_line_style(Style::default());
+    ta.set_wrap_mode(WrapMode::WordOrGlyph);
+    ta.move_cursor(CursorMove::End);
+    ta
 }
 
 fn now_ms() -> i64 {
@@ -317,17 +338,17 @@ impl AppState {
         if let Some(entry_index) = self.selected_entry_index() {
             self.dialog = Dialog::AddNote {
                 entry_index,
-                text: String::new(),
+                editor: new_editor(""),
             };
         }
     }
 
-    fn begin_edit_note(&mut self) {
+    fn begin_edit_note(&mut self) -> bool {
         let Some((_, note)) = self.selected_note() else {
-            return;
+            return false;
         };
-        if note.author != self.author() || note.name != "comment" {
-            return;
+        if note.author != self.author() || !is_comment(&note.name) {
+            return false;
         }
         let text = note
             .value
@@ -336,7 +357,12 @@ impl AppState {
             .map(|s| s.to_string())
             .unwrap_or_else(|| note.value.to_json());
         let note_id = note.id.clone();
-        self.dialog = Dialog::EditNote { note_id, text };
+        self.dialog = Dialog::EditNote {
+            note_id,
+            original: text.clone(),
+            editor: new_editor(&text),
+        };
+        true
     }
 
     fn begin_delete_note(&mut self) {
@@ -356,22 +382,45 @@ fn resolve_username() -> String {
     std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
 }
 
-fn handle_note_dialog(state: &mut AppState, code: KeyCode, mods: KeyModifiers, db: &Connection) {
-    let text = match &mut state.dialog {
-        Dialog::AddNote { text, .. } | Dialog::EditNote { text, .. } => text,
-        _ => return,
-    };
-    match code {
-        KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => text.push('\n'),
-        KeyCode::Enter => {
-            if text.trim().is_empty() {
+/// Stored note names are namespaced (e.g. `comment.abcd1234`) so multiple
+/// notes in the same family can coexist under the DB's (name, target, author)
+/// unique key.
+fn is_comment(name: &str) -> bool {
+    name == "comment" || name.starts_with("comment.")
+}
+
+fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
+    // Newline shortcuts. Terminals without the Kitty keyboard protocol can't
+    // distinguish Shift+Enter from Enter, so accept Alt+Enter and Ctrl+J as
+    // fallbacks that legacy input layers always report.
+    let mods = key.modifiers;
+    let is_newline_shortcut = (matches!(key.code, KeyCode::Enter)
+        && (mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::ALT)))
+        || (matches!(key.code, KeyCode::Char('j')) && mods.contains(KeyModifiers::CONTROL));
+
+    match key.code {
+        KeyCode::Enter if !is_newline_shortcut => {
+            let empty = match &state.dialog {
+                Dialog::AddNote { editor, .. } | Dialog::EditNote { editor, .. } => {
+                    editor_text(editor).trim().is_empty()
+                }
+                _ => true,
+            };
+            if empty {
                 state.dialog = Dialog::None;
-                return;
+            } else {
+                commit_note(state, db);
             }
-            commit_note(state, db);
         }
         KeyCode::Esc => {
-            if text.trim().is_empty() {
+            let dirty = match &state.dialog {
+                Dialog::AddNote { editor, .. } => !editor_text(editor).trim().is_empty(),
+                Dialog::EditNote {
+                    editor, original, ..
+                } => &editor_text(editor) != original,
+                _ => false,
+            };
+            if !dirty {
                 state.dialog = Dialog::None;
             } else {
                 let pending = std::mem::replace(&mut state.dialog, Dialog::None);
@@ -380,24 +429,40 @@ fn handle_note_dialog(state: &mut AppState, code: KeyCode, mods: KeyModifiers, d
                 };
             }
         }
-        KeyCode::Backspace => {
-            text.pop();
+        _ => {
+            let editor = match &mut state.dialog {
+                Dialog::AddNote { editor, .. } | Dialog::EditNote { editor, .. } => editor,
+                _ => return,
+            };
+            if is_newline_shortcut {
+                editor.insert_newline();
+            } else {
+                editor.input(key);
+            }
         }
-        KeyCode::Char(c) => text.push(c),
-        _ => {}
     }
 }
 
 fn commit_note(state: &mut AppState, db: &Connection) {
     match std::mem::replace(&mut state.dialog, Dialog::None) {
-        Dialog::AddNote { entry_index, text } => {
+        Dialog::AddNote {
+            entry_index,
+            editor,
+        } => {
             let Some(entry) = state.doc.entries.get(entry_index) else {
                 return;
             };
+            let text = editor_text(&editor);
             let target = NoteTarget::Session(
                 SessionTarget::new(&state.doc.session.id).with_line(entry.line),
             );
-            let note = Note::new(target, "comment", NoteValue::from(text), &state.author());
+            // Notes are keyed by (name, target, author) in the DB, so a literal
+            // "comment" name caps users at one comment per line. Suffix with a
+            // short slice of the note's own UUID to keep the key unique while
+            // the display layer renders the family name "comment".
+            let mut note = Note::new(target, "comment", NoteValue::from(text), &state.author());
+            let suffix: String = note.id.chars().take(8).collect();
+            note.name = format!("comment.{suffix}");
             if let Ok(()) = note::insert(db, &note) {
                 let id = note.id.clone();
                 state.doc.add_note(note);
@@ -407,12 +472,14 @@ fn commit_note(state: &mut AppState, db: &Connection) {
                 }
             }
         }
-        Dialog::EditNote { note_id, text } => {
+        Dialog::EditNote {
+            note_id, editor, ..
+        } => {
             let Some(existing) = state.doc.note(&note_id).cloned() else {
                 return;
             };
             let mut updated = existing;
-            updated.value = NoteValue::from(text);
+            updated.value = NoteValue::from(editor_text(&editor));
             if let Ok(new) = note::replace(db, &note_id, &updated) {
                 state.doc.replace_note_value(
                     &note_id,
@@ -506,7 +573,7 @@ fn footer_hint(state: &AppState) -> String {
     if let Some((_, note)) = state.selected_note()
         && note.author == state.author()
     {
-        if note.name == "comment" {
+        if is_comment(&note.name) {
             hints.push("e edit");
         }
         hints.push("d delete");
@@ -862,18 +929,15 @@ fn draw_body_scrollbar(frame: &mut Frame, state: &AppState, active: bool, area: 
 fn draw_dialog(frame: &mut Frame, state: &AppState) {
     match &state.dialog {
         Dialog::None => {}
-        Dialog::AddNote { text, .. } => draw_editor(frame, "Add note", text),
-        Dialog::EditNote { text, .. } => draw_editor(frame, "Edit note", text),
+        Dialog::AddNote { editor, .. } => draw_editor(frame, "Add note", editor),
+        Dialog::EditNote { editor, .. } => draw_editor(frame, "Edit note", editor),
         Dialog::ConfirmCancel { pending } => {
             match pending.as_ref() {
-                Dialog::AddNote { text, .. } => draw_editor(frame, "Add note", text),
-                Dialog::EditNote { text, .. } => draw_editor(frame, "Edit note", text),
+                Dialog::AddNote { editor, .. } => draw_editor(frame, "Add note", editor),
+                Dialog::EditNote { editor, .. } => draw_editor(frame, "Edit note", editor),
                 _ => {}
             }
-            draw_confirm(
-                frame,
-                "Confirm that you want to cancel by pressing 'y'. You will lose your changes.",
-            );
+            draw_confirm(frame, "Cancel your changes?");
         }
         Dialog::ConfirmDelete { .. } => {
             draw_confirm(frame, "Delete this note? This cannot be undone.")
@@ -881,71 +945,131 @@ fn draw_dialog(frame: &mut Frame, state: &AppState) {
     }
 }
 
-fn draw_editor(frame: &mut Frame, title: &str, text: &str) {
-    let area = centered_rect(frame.area(), 70, 40);
+const EDITOR_BODY_HEIGHT: u16 = 8;
+
+fn draw_editor(frame: &mut Frame, title: &str, editor: &TextArea<'_>) {
+    let area = editor_rect(frame.area());
+    let (body_area, hint_area) = draw_dialog_block(frame, area, title);
+
+    let total_lines = editor.lines().len();
+    let needs_bar = total_lines > body_area.height as usize;
+    let (text_area, bar_area) = if needs_bar {
+        let [t, b] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body_area);
+        (t, Some(b))
+    } else {
+        (body_area, None)
+    };
+    frame.render_widget(editor, text_area);
+
+    if let Some(bar_area) = bar_area {
+        let (cursor_row, _) = editor.cursor();
+        let mut sb_state = ScrollbarState::new(total_lines)
+            .viewport_content_length(text_area.height as usize)
+            .position(cursor_row);
+        frame.render_stateful_widget(scrollbar(true), bar_area, &mut sb_state);
+    }
+
+    draw_hint(
+        frame,
+        hint_area,
+        "Enter save · Shift/Alt+Enter or Ctrl+J newline · Esc cancel",
+    );
+}
+
+/// Editor dialog sizing: width capped at 80 columns, height fits a fixed
+/// `EDITOR_BODY_HEIGHT` body plus the 5 chrome rows (borders, top pad, gap,
+/// hint). The body scrolls so content can exceed its visible height.
+fn editor_rect(frame: Rect) -> Rect {
+    let width = frame.width.saturating_sub(4).clamp(30, 80);
+    let height = (EDITOR_BODY_HEIGHT + 5).min(frame.height.saturating_sub(2));
+    let x = frame.x + (frame.width.saturating_sub(width)) / 2;
+    let y = frame.y + (frame.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn draw_confirm(frame: &mut Frame, message: &str) {
+    let area = confirm_rect(frame.area(), message);
+    let (body_area, hint_area) = draw_dialog_block(frame, area, "Confirm");
+
+    frame.render_widget(
+        Paragraph::new(message.to_string())
+            .wrap(Wrap { trim: false })
+            .alignment(ratatui::layout::Alignment::Center),
+        body_area,
+    );
+    draw_hint(frame, hint_area, "y / n");
+}
+
+/// Confirm prompts size to their content: width capped at 60 columns and at
+/// most half the frame; height matches the wrapped message plus the dialog
+/// chrome — top + bottom border, 1-row top pad, 1-row gap, and 1-row hint
+/// (5 chrome rows total).
+fn confirm_rect(frame: Rect, message: &str) -> Rect {
+    let max_w = frame.width.saturating_sub(4).clamp(20, 60);
+    let inner_w = max_w.saturating_sub(4);
+    let lines = wrapped_line_count(message, inner_w);
+    let height = (lines + 5).min(frame.height.saturating_sub(2));
+    let width = max_w;
+    let x = frame.x + (frame.width.saturating_sub(width)) / 2;
+    let y = frame.y + (frame.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    let p = Paragraph::new(text.to_string()).wrap(Wrap { trim: false });
+    u16::try_from(p.line_count(width)).unwrap_or(u16::MAX)
+}
+
+/// Renders the bordered dialog frame and returns `(body_area, hint_area)`.
+/// Layout inside the border:
+///
+/// ```text
+/// -----
+/// | <space>
+/// | body
+/// | <space>
+/// | hint
+/// -----
+/// ```
+///
+/// The hint sits flush with the bottom border; padding around the body is one
+/// row on top and one column on each side.
+fn draw_dialog_block(frame: &mut Frame, area: Rect, title: &str) -> (Rect, Rect) {
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(title.to_string(), style::text_dim()))
         .border_style(style::text_dim())
-        .padding(Padding::uniform(1));
+        .padding(Padding::new(1, 1, 1, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let [body_area, _gap, hint_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    (body_area, hint_area)
+}
 
-    let [text_area, hint_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-
-    let mut display = text.to_string();
-    display.push('▌');
-    let p = Paragraph::new(display).wrap(Wrap { trim: false });
-    frame.render_widget(p, text_area);
-
-    let hint = Paragraph::new(Line::from(Span::styled(
-        "Enter save · Shift+Enter newline · Esc cancel",
+fn draw_hint(frame: &mut Frame, area: Rect, hint: &str) {
+    let p = Paragraph::new(Line::from(Span::styled(
+        hint.to_string(),
         style::text_dim(),
     )))
     .alignment(ratatui::layout::Alignment::Center);
-    frame.render_widget(hint, hint_area);
-}
-
-fn draw_confirm(frame: &mut Frame, message: &str) {
-    let area = centered_rect(frame.area(), 50, 20);
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled("Confirm", style::text_dim()))
-        .border_style(style::text_dim())
-        .padding(Padding::uniform(1));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let [msg_area, hint_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-    frame.render_widget(
-        Paragraph::new(message.to_string()).wrap(Wrap { trim: false }),
-        msg_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled("y / n", style::text_dim())))
-            .alignment(ratatui::layout::Alignment::Center),
-        hint_area,
-    );
-}
-
-fn centered_rect(area: Rect, pct_x: u16, pct_y: u16) -> Rect {
-    let [_, v, _] = Layout::vertical([
-        Constraint::Percentage((100 - pct_y) / 2),
-        Constraint::Percentage(pct_y),
-        Constraint::Percentage((100 - pct_y) / 2),
-    ])
-    .areas(area);
-    let [_, h, _] = Layout::horizontal([
-        Constraint::Percentage((100 - pct_x) / 2),
-        Constraint::Percentage(pct_x),
-        Constraint::Percentage((100 - pct_x) / 2),
-    ])
-    .areas(v);
-    h
+    frame.render_widget(p, area);
 }
 
 fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
