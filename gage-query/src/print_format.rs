@@ -90,12 +90,13 @@ impl PrintFormat {
 }
 
 /// Emit `batches` as multi-document YAML — one document per row,
-/// `---` separator before each. Field order follows the schema. Cell
-/// values are typed where possible (utf8/int/float/bool/null);
-/// anything else falls back to its Arrow display string. Escaping is
-/// handled by `serde_yaml`.
+/// `---` separator between rows (not before the first). Field order
+/// follows the schema. Cell values are typed where possible
+/// (utf8/int/float/bool/null); anything else falls back to its Arrow
+/// display string. Escaping is handled by `serde_yaml`.
 pub fn write_yaml<W: Write>(w: &mut W, batches: &[RecordBatch]) -> Result<()> {
     let format_opts = FormatOptions::default();
+    let mut first = true;
     for batch in batches {
         let formatters: Vec<ArrayFormatter> = batch
             .columns()
@@ -104,8 +105,12 @@ pub fn write_yaml<W: Write>(w: &mut W, batches: &[RecordBatch]) -> Result<()> {
             .collect::<Result<_, _>>()?;
         let schema = batch.schema();
         for row in 0..batch.num_rows() {
-            writeln!(w, "---")
-                .map_err(|e| DataFusionError::Execution(format!("yaml write: {e}")))?;
+            if first {
+                first = false;
+            } else {
+                writeln!(w, "---")
+                    .map_err(|e| DataFusionError::Execution(format!("yaml write: {e}")))?;
+            }
             let mut mapping = serde_yaml::Mapping::with_capacity(schema.fields().len());
             for (col_idx, field) in schema.fields().iter().enumerate() {
                 let col = batch.column(col_idx);

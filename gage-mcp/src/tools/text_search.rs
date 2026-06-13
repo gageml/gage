@@ -121,13 +121,14 @@ fn domain_error(text: impl Into<String>) -> CallToolResult {
 }
 
 /// Emit `batches` as multi-document YAML — one document per row, `---`
-/// separator before each. Field order follows the schema. Escaping is
-/// handled by `serde_yaml`.
+/// separator between rows (not before the first). Field order follows
+/// the schema. Escaping is handled by `serde_yaml`.
 fn write_yaml<W: std::io::Write>(
     w: &mut W,
     batches: &[RecordBatch],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let format_opts = FormatOptions::default();
+    let mut first = true;
     for batch in batches {
         if batch.num_rows() == 0 {
             continue;
@@ -139,7 +140,11 @@ fn write_yaml<W: std::io::Write>(
             .collect::<Result<_, _>>()?;
         let schema = batch.schema();
         for row in 0..batch.num_rows() {
-            writeln!(w, "---")?;
+            if first {
+                first = false;
+            } else {
+                writeln!(w, "---")?;
+            }
             let mut mapping = serde_yaml::Mapping::with_capacity(schema.fields().len());
             for (col_idx, field) in schema.fields().iter().enumerate() {
                 let col = batch.column(col_idx);
