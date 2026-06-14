@@ -346,6 +346,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         is_empty: true,
         ..Default::default()
     };
+    let mut has_custom_title = false;
 
     for result in reader {
         let (line_num, entry) = match result {
@@ -409,10 +410,18 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
                 }
             }
             "ai-title" => {
-                agg.title = entry
-                    .get("aiTitle")
-                    .and_then(|t| t.as_str())
-                    .map(String::from);
+                if !has_custom_title {
+                    agg.title = entry
+                        .get("aiTitle")
+                        .and_then(|t| t.as_str())
+                        .map(String::from);
+                }
+            }
+            "custom-title" => {
+                if let Some(t) = entry.get("customTitle").and_then(|t| t.as_str()) {
+                    agg.title = Some(t.to_string());
+                    has_custom_title = true;
+                }
             }
             _ => {}
         }
