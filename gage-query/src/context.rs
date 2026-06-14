@@ -1,17 +1,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::sql::TableReference;
+use datafusion_table_providers::sql::db_connection_pool::Mode;
+use datafusion_table_providers::sql::db_connection_pool::sqlitepool::SqliteConnectionPoolFactory;
+use datafusion_table_providers::sqlite::SqliteTableFactory;
 use gage_index::IndexStore;
 
 use crate::cache::SessionCache;
 use crate::tables::config::ConfigTable;
 use crate::tables::entry::EntryTable;
-use crate::tables::issue::IssueTable;
-use crate::tables::issue_evidence::IssueEvidenceTable;
 use crate::tables::message::MessageTable;
 use crate::tables::message_text::MessageTextFn;
-use crate::tables::note::NoteTable;
 use crate::tables::session::SessionTable;
 
 fn default_root() -> PathBuf {
@@ -54,7 +57,15 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
         .with_extension(Arc::clone(&cache));
-    let ctx = SessionContext::new_with_config(config);
+    // Federation rules + query planner so sqlite-only sub-plans are
+    // rewritten into a single SQL query handed to sqlite.
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_default_features()
+        .with_optimizer_rules(datafusion_federation::default_optimizer_rules())
+        .with_query_planner(Arc::new(datafusion_federation::FederatedQueryPlanner::new()))
+        .build();
+    let ctx = SessionContext::new_with_state(state);
     install_udfs(&ctx);
     let store = Arc::new(IndexStore::new(root, cache_dir));
     ctx.register_udtf(
@@ -67,12 +78,7 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
         .unwrap();
     ctx.register_table("message", Arc::new(MessageTable::new(store)))
         .unwrap();
-    ctx.register_table("note", Arc::new(NoteTable::new()))
-        .unwrap();
-    ctx.register_table("issue", Arc::new(IssueTable::new()))
-        .unwrap();
-    ctx.register_table("issue_evidence", Arc::new(IssueEvidenceTable::new()))
-        .unwrap();
+    register_sqlite_tables(&ctx).await;
     // `root` is `<home>/.claude/projects`; recover the home dir for the
     // `config` table. Tests that pass a non-standard `root` (e.g. a
     // bare `testdata/` dir) get an unrelated home — fine as long as
@@ -85,4 +91,30 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
     ctx.register_table("config", Arc::new(ConfigTable::new(home)))
         .unwrap();
     ctx
+}
+
+/// Register the sqlite-backed tables (`note`, `issue`, `issue_evidence`)
+/// via `datafusion-table-providers`. The provider introspects the
+/// schema from sqlite at registration time and, combined with the
+/// `FederationOptimizerRule` installed on the session, rewrites
+/// sqlite-only sub-plans into a single SQL query executed by sqlite.
+async fn register_sqlite_tables(ctx: &SessionContext) {
+    let pool = Arc::new(
+        SqliteConnectionPoolFactory::new(
+            gage_db::db::db_path().to_string_lossy().as_ref(),
+            Mode::File,
+            Duration::from_secs(5),
+        )
+        .build()
+        .await
+        .expect("sqlite connection pool"),
+    );
+    let factory = SqliteTableFactory::new(pool);
+    for name in ["note", "issue", "issue_evidence"] {
+        let provider = factory
+            .table_provider(TableReference::bare(name))
+            .await
+            .unwrap_or_else(|e| panic!("sqlite table provider for {name}: {e}"));
+        ctx.register_table(name, provider).unwrap();
+    }
 }
