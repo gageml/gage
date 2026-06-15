@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "gage-bench",
     "gage-cli",
     "gage-claude",
     "gage-core",

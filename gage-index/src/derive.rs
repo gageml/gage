@@ -82,10 +82,10 @@ impl Fingerprint {
     }
 }
 
-/// Session-level aggregates: the expensive `session` table columns,
+/// Session-level summary: the expensive `session` table columns,
 /// computed in the same derivation pass.
-#[derive(Debug, Clone, Default)]
-pub struct SessionAggregates {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionSummary {
     pub title: Option<String>,
     pub model: Option<String>,
     pub message_count: i64,
@@ -99,7 +99,7 @@ pub struct SessionAggregates {
 pub struct DerivedSession {
     pub session_id: String,
     pub batch: RecordBatch,
-    pub aggregates: SessionAggregates,
+    pub summary: SessionSummary,
     pub fingerprint: Fingerprint,
 }
 
@@ -342,7 +342,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     let reader = SessionReader::open(path)?;
 
     let mut b = RowBuilders::new();
-    let mut agg = SessionAggregates {
+    let mut summary = SessionSummary {
         is_empty: true,
         ..Default::default()
     };
@@ -372,46 +372,45 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             None => None,
         };
 
-        // Aggregates (mirrors the previous session-table scan)
-        if agg.is_empty && entry_has_content(&entry) {
-            agg.is_empty = false;
+        if summary.is_empty && entry_has_content(&entry) {
+            summary.is_empty = false;
         }
         match entry_type.unwrap_or("") {
             "user" | "assistant" => {
-                agg.message_count += 1;
+                summary.message_count += 1;
                 if entry_type == Some("assistant") {
                     let msg = entry.get("message");
-                    if agg.model.is_none() {
-                        agg.model = msg
+                    if summary.model.is_none() {
+                        summary.model = msg
                             .and_then(|m| m.get("model"))
                             .and_then(|m| m.as_str())
                             .map(String::from);
                     }
                     if let Some(usage) = msg.and_then(|m| m.get("usage")) {
-                        agg.input_tokens += usage
+                        summary.input_tokens += usage
                             .get("input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        agg.output_tokens += usage
+                        summary.output_tokens += usage
                             .get("output_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        agg.cache_read_input_tokens += usage
+                        summary.cache_read_input_tokens += usage
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        agg.cache_creation_input_tokens += usage
+                        summary.cache_creation_input_tokens += usage
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
                     }
-                } else if entry_type == Some("user") && agg.title.is_none() {
-                    agg.title = session_title_from_entry(&entry);
+                } else if entry_type == Some("user") && summary.title.is_none() {
+                    summary.title = session_title_from_entry(&entry);
                 }
             }
             "ai-title" => {
                 if !has_custom_title {
-                    agg.title = entry
+                    summary.title = entry
                         .get("aiTitle")
                         .and_then(|t| t.as_str())
                         .map(String::from);
@@ -419,7 +418,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             }
             "custom-title" => {
                 if let Some(t) = entry.get("customTitle").and_then(|t| t.as_str()) {
-                    agg.title = Some(t.to_string());
+                    summary.title = Some(t.to_string());
                     has_custom_title = true;
                 }
             }
@@ -488,7 +487,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     Ok(DerivedSession {
         session_id: session_id.to_string(),
         batch: b.finish()?,
-        aggregates: agg,
+        summary,
         fingerprint,
     })
 }

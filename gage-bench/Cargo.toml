@@ -1,0 +1,65 @@
+[package]
+name = "gage-bench"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gage-bench"
+path = "src/main.rs"
+
+[dependencies]
+gage-claude = { path = "../gage-claude" }
+gage-index = { path = "../gage-index" }
+arrow = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+indicatif = { workspace = true }
+rand = "0.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tabled = { workspace = true }
+zstd = "0.13"
+
+# Format adapters — every feature compiled is run; add features to add formats.
+bincode = { version = "2.0", features = ["serde"], optional = true }
+bitcode = { version = "0.6", optional = true }
+borsh = { version = "1.5", features = ["derive"], optional = true }
+ciborium = { version = "0.2", optional = true }
+flexbuffers = { version = "25", optional = true }
+postcard = { version = "1.1", features = ["alloc"], optional = true }
+pot = { version = "3", optional = true }
+rkyv = { version = "0.8", optional = true }
+rmp-serde = { version = "1.3", optional = true }
+speedy = { version = "0.8", optional = true }
+
+[features]
+default = [
+    "fmt-bincode",
+    "fmt-bitcode",
+    "fmt-borsh",
+    "fmt-ciborium",
+    "fmt-flexbuffers",
+    "fmt-json",
+    "fmt-json-uncompressed",
+    "fmt-postcard",
+    "fmt-pot",
+    "fmt-rkyv",
+    "fmt-rmp-serde",
+    "fmt-speedy",
+]
+
+fmt-bincode = ["dep:bincode"]
+fmt-bitcode = ["dep:bitcode"]
+fmt-borsh = ["dep:borsh"]
+fmt-ciborium = ["dep:ciborium"]
+fmt-flexbuffers = ["dep:flexbuffers"]
+fmt-json = []
+fmt-json-uncompressed = []
+fmt-postcard = ["dep:postcard"]
+fmt-pot = ["dep:pot"]
+fmt-rkyv = ["dep:rkyv"]
+fmt-rmp-serde = ["dep:rmp-serde"]
+fmt-speedy = ["dep:speedy"]
+
+[lints]
+workspace = true
