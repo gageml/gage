@@ -23,7 +23,9 @@ pub struct ScanSessionContext {
 impl ScanSessionContext {
     pub fn new(selected: &Arc<[SessionInfo]>) -> Self {
         let cache = Arc::new(SessionCache::new());
-        let config = SessionConfig::new().with_extension(Arc::clone(&cache));
+        let config = SessionConfig::new()
+            .with_extension(Arc::clone(&cache))
+            .set_str("datafusion.sql_parser.dialect", "PostgreSQL");
         let inner = SessionContext::new_with_config(config);
         crate::install_udfs(&inner);
 

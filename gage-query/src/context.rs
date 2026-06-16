@@ -56,7 +56,8 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
     let cache = Arc::new(SessionCache::new());
     let config = SessionConfig::new()
         .with_information_schema(true)
-        .with_extension(Arc::clone(&cache));
+        .with_extension(Arc::clone(&cache))
+        .set_str("datafusion.sql_parser.dialect", "PostgreSQL");
     // Federation rules + query planner so sqlite-only sub-plans are
     // rewritten into a single SQL query handed to sqlite.
     let state = SessionStateBuilder::new()
