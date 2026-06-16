@@ -25,6 +25,7 @@ fn install_panic_hook() {
 }
 
 mod author;
+mod cmd_agent;
 mod cmd_config;
 mod cmd_index;
 mod cmd_init;
@@ -55,42 +56,59 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Manage Gage configuration
-    Config {
-        #[command(subcommand)]
-        command: cmd_config::ConfigCommand,
-    },
     /// Setup Gage (register with Claude Code)
     Init(cmd_init::InitArgs),
-    /// Manage notes
-    Note {
-        #[command(subcommand)]
-        command: cmd_note::NoteCommand,
-    },
+
     /// Run scanners on sessions
     Scan(cmd_scan::ScanArgs),
+
+    /// Run Claude to perform Gage tasks
+    Agent {
+        #[command(subcommand)]
+        command: cmd_agent::AgentCommand,
+    },
+
     /// Manage sessions
     Session {
         #[command(subcommand)]
         command: cmd_session::SessionCommand,
     },
+
+    /// Manage notes
+    Note {
+        #[command(subcommand)]
+        command: cmd_note::NoteCommand,
+    },
+
     /// Manage issues
     Issue {
         #[command(subcommand)]
         command: cmd_issue::IssueCommand,
     },
-    /// Run tests in scanner modules
-    Test(cmd_test::TestArgs),
-    /// Start the MCP server (stdio transport)
-    Mcp,
+
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
-    /// Reconcile the derived session store and text index
-    Index(cmd_index::IndexArgs),
+
     /// Back up local state to every configured remote
     Push(cmd_sync::PushArgs),
+
     /// Copy a remote's tree into a local inspection directory
     Pull(cmd_sync::PullArgs),
+
+    /// Manage Gage configuration
+    Config {
+        #[command(subcommand)]
+        command: cmd_config::ConfigCommand,
+    },
+
+    /// Reconcile the derived session store and text index
+    Index(cmd_index::IndexArgs),
+
+    /// Start the MCP server (stdio transport)
+    Mcp,
+
+    /// Run tests in scanner modules
+    Test(cmd_test::TestArgs),
 }
 
 fn parse_duration(s: &str) -> Result<Duration, DurationError> {
@@ -125,6 +143,7 @@ async fn main() {
     let cli = Cli::parse();
     let cmd = async {
         match cli.command {
+            Command::Agent { command } => cmd_agent::run(command),
             Command::Config { command } => cmd_config::run(command),
             Command::Init(args) => cmd_init::run(args),
             Command::Note { command } => match command {
