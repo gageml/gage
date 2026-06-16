@@ -228,9 +228,9 @@ pub(crate) struct ProjectWants {
 /// Walk user-scope config rooted at `home` (the parent that contains
 /// `.claude/` and `.claude.json`). Each `wants.*` flag gates one phase
 /// of the walk; a `false` flag elides every I/O the phase would do.
-pub(crate) fn user_files(home: PathBuf, wants: UserWants) -> ConfigFiles {
+pub(crate) fn user_files(claude_home: PathBuf, wants: UserWants) -> ConfigFiles {
     debug!(
-        home = %home.display(),
+        home = %claude_home.display(),
         settings = wants.settings,
         memory = wants.memory,
         skills = wants.skills,
@@ -240,7 +240,7 @@ pub(crate) fn user_files(home: PathBuf, wants: UserWants) -> ConfigFiles {
         "user_files walk",
     );
     let counters = Arc::new(Counters::default());
-    let claude = home.join(".claude");
+    let claude = claude_home;
     let inner: ConfigFileIter = Box::new(
         empty_iter()
             .chain(opt(
@@ -716,10 +716,10 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
-    /// Build a fake `HOME` populated with user-scope config.
+    /// Build a fake claude-home dir populated with user-scope config.
     fn fixture_user_home() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        let claude = tmp.path().join(".claude");
+        let claude = tmp.path().to_path_buf();
         write(&claude.join("settings.json"), "{}");
         write(&claude.join("CLAUDE.md"), "user memory");
         write(&claude.join("skills/python/SKILL.md"), "---\n---\n");
@@ -761,7 +761,7 @@ mod tests {
         fs::create_dir_all(&bob).unwrap();
         fs::create_dir_all(&no_sessions).unwrap();
         // Sessions dirs back alice and bob but not no_sessions.
-        let sessions_root = tmp.path().join(".claude/projects");
+        let sessions_root = tmp.path().join("projects");
         fs::create_dir_all(sessions_root.join(encode_project_dir(&alice))).unwrap();
         fs::create_dir_all(sessions_root.join(encode_project_dir(&bob))).unwrap();
 

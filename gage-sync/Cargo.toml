@@ -7,6 +7,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 async-trait = { workspace = true }

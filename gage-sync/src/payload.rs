@@ -39,7 +39,7 @@ pub fn build_payload(db_snapshot: &Path) -> Vec<TransferItem> {
         });
     }
 
-    if let Some(claude_projects) = claude_projects_dir()
+    if let Some(claude_projects) = gage_claude::session::projects_dir()
         && claude_projects.is_dir()
     {
         items.push(TransferItem {
@@ -49,8 +49,4 @@ pub fn build_payload(db_snapshot: &Path) -> Vec<TransferItem> {
     }
 
     items
-}
-
-fn claude_projects_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude").join("projects"))
 }

@@ -197,7 +197,7 @@ fn run_one(
         .env("CLAUDE_CONFIG_DIR", claude_home)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .env("GAGE_HOME", &gage_home)
-        .env("GAGE_PROJECTS_DIR", &projects_dir)
+        .env("CLAUDE_PROJECTS_DIR", &projects_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))

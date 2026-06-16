@@ -135,7 +135,10 @@ impl SessionListBuilder {
     }
 
     pub fn build(self) -> SessionList {
-        let projects_dir = self.root.unwrap_or_else(default_projects_dir);
+        let projects_dir = self
+            .root
+            .or_else(projects_dir)
+            .expect("CLAUDE_PROJECTS_DIR or HOME must be set");
 
         let mut sessions = Vec::new();
 
@@ -224,21 +227,21 @@ pub fn ls_sessions() -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Root directory holding per-project session subdirectories. Honors
-/// `GAGE_PROJECTS_DIR` for overrides (tests, alternate session stores);
-/// otherwise the standard Claude location.
-fn default_projects_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("GAGE_PROJECTS_DIR") {
-        return PathBuf::from(dir);
+/// Root directory holding per-project session subdirectories. The
+/// canonical resolver — any caller needing this location uses it
+/// rather than hardcoding `.claude/projects`. Honors `CLAUDE_PROJECTS_DIR`
+/// (test fixtures, alternate session stores); otherwise
+/// `claude_home()/projects`. `None` only when neither override nor
+/// `HOME` is set.
+pub fn projects_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_PROJECTS_DIR") {
+        return Some(PathBuf::from(dir));
     }
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .expect("HOME environment variable not set");
-    home.join(".claude").join("projects")
+    crate::home::claude_home().map(|h| h.join("projects"))
 }
 
 pub fn find_session(id_prefix: &str) -> Vec<SessionInfo> {
-    let projects_dir = default_projects_dir();
+    let projects_dir = projects_dir().expect("CLAUDE_PROJECTS_DIR or HOME must be set");
 
     let mut results = Vec::new();
 

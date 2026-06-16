@@ -18,13 +18,7 @@ use crate::tables::message_text::MessageTextFn;
 use crate::tables::session::SessionTable;
 
 fn default_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("GAGE_PROJECTS_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .expect("HOME environment variable not set");
-    home.join(".claude").join("projects")
+    gage_claude::session::projects_dir().expect("CLAUDE_PROJECTS_DIR or HOME must be set")
 }
 
 fn default_cache_dir() -> PathBuf {
@@ -80,16 +74,15 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
     ctx.register_table("message", Arc::new(MessageTable::new(store)))
         .unwrap();
     register_sqlite_tables(&ctx).await;
-    // `root` is `<home>/.claude/projects`; recover the home dir for the
-    // `config` table. Tests that pass a non-standard `root` (e.g. a
-    // bare `testdata/` dir) get an unrelated home — fine as long as
-    // they don't query `config`.
-    let home = root
+    // `root` is `<claude_home>/projects`; recover the claude_home dir
+    // for the `config` table. Tests that pass a non-standard `root`
+    // (e.g. a bare `testdata/` dir) get an unrelated home — fine as
+    // long as they don't query `config`.
+    let claude_home = root
         .parent()
-        .and_then(|p| p.parent())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.to_path_buf());
-    ctx.register_table("config", Arc::new(ConfigTable::new(home)))
+    ctx.register_table("config", Arc::new(ConfigTable::new(claude_home)))
         .unwrap();
     ctx
 }

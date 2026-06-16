@@ -40,7 +40,7 @@ pub struct Test {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude: Option<toml::Value>,
     /// Name of a subdir under `gage-eval/fixtures/` whose `projects/`
-    /// dir is exposed as `GAGE_PROJECTS_DIR`. `None` → an empty
+    /// dir is exposed as `CLAUDE_PROJECTS_DIR`. `None` → an empty
     /// per-test projects dir.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixture: Option<String>,

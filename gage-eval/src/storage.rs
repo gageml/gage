@@ -43,7 +43,7 @@ pub fn test_gage_home(run_id: &str, test_name: &str) -> PathBuf {
     test_dir(run_id, test_name).join("gage-home")
 }
 
-/// Per-test empty `projects/` dir used as `GAGE_PROJECTS_DIR` when a
+/// Per-test empty `projects/` dir used as `CLAUDE_PROJECTS_DIR` when a
 /// test specifies no fixture.
 pub fn test_empty_projects(run_id: &str, test_name: &str) -> PathBuf {
     test_dir(run_id, test_name).join("projects")

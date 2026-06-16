@@ -19,13 +19,12 @@ fn write(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
-/// Build a fake `HOME` plus one resolvable project. Returns the
-/// tempdir (drop it last) and a `SessionContext` with the `config`
+/// Build a fake claude-home dir plus one resolvable project. Returns
+/// the tempdir (drop it last) and a `SessionContext` with the `config`
 /// table pointed at the tempdir.
 fn fixture() -> (tempfile::TempDir, SessionContext) {
     let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path();
-    let claude = home.join(".claude");
+    let claude = tmp.path();
 
     // User scope
     write(&claude.join("settings.json"), r#"{"theme":"dark"}"#);
@@ -35,9 +34,9 @@ fn fixture() -> (tempfile::TempDir, SessionContext) {
     write(&claude.join("commands/summary.md"), "cmd");
     write(&claude.join("agents/explorer.md"), "agent");
 
-    // Project scope: a project rooted at <home>/projsrc registered in
-    // <home>/.claude.json
-    let project_root = home.join("projsrc");
+    // Project scope: a project rooted at <claude>/projsrc registered
+    // in <claude>/.claude.json
+    let project_root = claude.join("projsrc");
     fs::create_dir_all(&project_root).unwrap();
     write(&project_root.join("CLAUDE.md"), "project memory");
     write(&project_root.join(".claude/settings.json"), "{}");
@@ -51,15 +50,15 @@ fn fixture() -> (tempfile::TempDir, SessionContext) {
         r#"{{"projects":{{"{}":{{}}}}}}"#,
         project_root.to_string_lossy()
     );
-    write(&home.join(".claude.json"), &claude_json);
+    write(&claude.join(".claude.json"), &claude_json);
     // A sessions dir under the encoded project name has to exist for
     // `ClaudeHome::projects()` to surface this project.
     let encoded = encode_project_dir(&project_root);
-    fs::create_dir_all(home.join(".claude/projects").join(&encoded)).unwrap();
+    fs::create_dir_all(claude.join("projects").join(&encoded)).unwrap();
 
     let cfg = SessionConfig::new().with_information_schema(true);
     let ctx = SessionContext::new_with_config(cfg);
-    ctx.register_table("config", Arc::new(ConfigTable::new(home)))
+    ctx.register_table("config", Arc::new(ConfigTable::new(claude)))
         .unwrap();
     (tmp, ctx)
 }
@@ -183,13 +182,12 @@ async fn size_and_mtime_populated() {
 /// succeed; one that runs it should fail.
 fn fixture_with_broken_commands() -> (tempfile::TempDir, SessionContext) {
     let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path();
-    let claude = home.join(".claude");
+    let claude = tmp.path();
     // Minimal user scope so user_files has something to walk without
     // hitting the broken path (which lives under the project).
     write(&claude.join("settings.json"), "{}");
 
-    let project_root = home.join("proj");
+    let project_root = claude.join("proj");
     fs::create_dir_all(project_root.join(".claude")).unwrap();
     write(&project_root.join("CLAUDE.md"), "memory");
     write(&project_root.join(".claude/settings.json"), "{}");
@@ -200,13 +198,13 @@ fn fixture_with_broken_commands() -> (tempfile::TempDir, SessionContext) {
         r#"{{"projects":{{"{}":{{}}}}}}"#,
         project_root.to_string_lossy()
     );
-    write(&home.join(".claude.json"), &claude_json);
+    write(&claude.join(".claude.json"), &claude_json);
     let encoded = encode_project_dir(&project_root);
-    fs::create_dir_all(home.join(".claude/projects").join(&encoded)).unwrap();
+    fs::create_dir_all(claude.join("projects").join(&encoded)).unwrap();
 
     let cfg = SessionConfig::new().with_information_schema(true);
     let ctx = SessionContext::new_with_config(cfg);
-    ctx.register_table("config", Arc::new(ConfigTable::new(home)))
+    ctx.register_table("config", Arc::new(ConfigTable::new(claude)))
         .unwrap();
     (tmp, ctx)
 }

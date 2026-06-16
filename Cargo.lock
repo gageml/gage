@@ -2847,6 +2847,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures",
+ "gage-claude",
  "gage-core",
  "gage-db",
  "object_store 0.13.2",
