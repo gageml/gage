@@ -28,7 +28,7 @@ use gage_index::{
 };
 
 use super::SessionSource;
-use super::walk::{lookup_paths, reconcile_for_query, session_paths};
+use super::walk::{lookup_paths, session_paths};
 use crate::filter;
 
 /// The derived columns serving the `message` table, in table-column
@@ -117,10 +117,7 @@ impl TableProvider for MessageTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let paths = match &self.source {
-            SessionSource::Corpus(store) => {
-                reconcile_for_query(store).await?;
-                session_paths(store, filters, "session_id")?
-            }
+            SessionSource::Corpus(store) => session_paths(store, filters, "session_id")?,
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
         let projected_schema = match projection {

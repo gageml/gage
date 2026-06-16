@@ -16,7 +16,7 @@ use gage_index::{
 };
 
 use super::SessionSource;
-use super::walk::{lookup_paths, reconcile_for_query, session_cache, session_paths};
+use super::walk::{lookup_paths, session_cache, session_paths};
 use crate::cache::SessionCache;
 use crate::filter;
 
@@ -98,7 +98,6 @@ impl TableProvider for EntryTable {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let batches = match &self.source {
             SessionSource::Corpus(store) => {
-                reconcile_for_query(store).await?;
                 let cache = session_cache(state)?;
                 let paths = session_paths(store, filters, "session_id")?;
                 load_batches(&cache, paths).await?

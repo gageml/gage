@@ -28,11 +28,16 @@ use futures::stream;
 use gage_claude::session::{SessionInfo, SessionListBuilder};
 use gage_index::{IndexStore, SessionSummary};
 
-use super::walk::{reconcile_for_query, session_cache};
+use super::walk::session_cache;
 use crate::cache::SessionCache;
 use crate::filter::{self, IdFilter};
 
-const EXPENSIVE_START: usize = 5; // title is the first expensive column
+/// Index of the first column whose value comes from parsing the
+/// session JSONL (`title` and everything after). Columns before this
+/// are filled from the directory walk. A projection that touches none
+/// of these — `SELECT COUNT(*)`, `SELECT id FROM session WHERE ...` —
+/// can skip per-row derivation entirely.
+const SUMMARY_COL_START: usize = 5;
 
 fn session_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -99,7 +104,6 @@ impl TableProvider for SessionTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        reconcile_for_query(&self.store).await?;
         let id_filter = IdFilter::new(filters, "id")?;
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
@@ -168,12 +172,13 @@ impl SessionExec {
         }
     }
 
-    /// True if the requested projection only touches cheap columns
-    /// (those filled from the directory walk).
-    fn projection_is_cheap_only(&self) -> bool {
+    /// True when no projected column requires parsing the session
+    /// JSONL. Lets `SELECT COUNT(*)` and id-only filters scan at
+    /// directory-walk speed regardless of cache state.
+    fn projection_needs_summary(&self) -> bool {
         match &self.projection {
-            Some(indices) => indices.iter().all(|&i| i < EXPENSIVE_START),
-            None => false,
+            Some(indices) => indices.iter().any(|&i| i >= SUMMARY_COL_START),
+            None => true,
         }
     }
 }
@@ -288,14 +293,14 @@ impl SessionExec {
             None => sessions,
         };
 
-        let cheap_only = self.projection_is_cheap_only();
+        let needs_summary = self.projection_needs_summary();
         tracing::debug!(
             target: "gage_query::session",
             walked,
             after_id_filter = sessions.len(),
             walk_ms,
             walk_limit_applied = ?walk_limit_applied,
-            cheap_only,
+            needs_summary,
             "SessionExec walk complete",
         );
 
@@ -331,13 +336,21 @@ impl SessionExec {
             mtimes.append_value(millis);
             sizes.append_value(s.size as i64);
 
-            let summary = if cheap_only {
+            let summary = if !needs_summary {
                 default_summary.clone()
             } else {
                 match self.store.session_summary(&s.id, s.mtime) {
                     Some(cached) => cached,
                     None => match self.cache.get(&s.id, &s.src).await {
-                        Ok(d) => d.summary.clone(),
+                        Ok(d) => {
+                            // Populate the on-disk cache so subsequent
+                            // queries hit `session_summary` instead of
+                            // re-parsing the JSONL.
+                            if let Err(e) = self.store.put_session_summary(&s.id, &d.summary) {
+                                tracing::warn!(session_id = %s.id, "failed to write summary cache: {e}");
+                            }
+                            d.summary.clone()
+                        }
                         Err(e) => {
                             tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
                             default_summary.clone()

@@ -222,6 +222,13 @@ impl IndexStore {
         summary_cache::read(&self.cache_dir, id, jsonl_mtime)
     }
 
+    /// Persist a `SessionSummary` to the on-disk cache. Used by the
+    /// session-table lazy path to populate the cache as it derives
+    /// sessions on demand, so subsequent queries hit `session_summary`.
+    pub fn put_session_summary(&self, id: &str, summary: &SessionSummary) -> std::io::Result<()> {
+        summary_cache::write(&self.cache_dir, id, summary)
+    }
+
     /// Run a query against the committed index, returning the top
     /// `limit` hits with BM25 scores and snippets capped at
     /// `snippet_chars`. An absent index matches nothing.
