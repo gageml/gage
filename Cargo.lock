@@ -2739,6 +2739,7 @@ dependencies = [
  "chrono",
  "fs4 1.1.0",
  "gage-claude",
+ "rmp-serde",
  "serde",
  "serde_json",
  "serde_yaml",

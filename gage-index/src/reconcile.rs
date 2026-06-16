@@ -13,13 +13,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::derive::{Fingerprint, derive_session};
+use crate::derive::{Fingerprint, SessionSummary, derive_session};
+use crate::summary_cache;
 use crate::text_index::{Hit, INDEX_FORMAT_VERSION, TOKENIZER_CHAIN, TextIndex};
 
 /// How to take the reconcile lock. Queries use `Try` —
@@ -199,7 +200,7 @@ impl IndexStore {
 
     fn index_dir(&self) -> PathBuf {
         self.cache_dir
-            .join("text-index")
+            .join("text")
             .join(format!("v{INDEX_FORMAT_VERSION}"))
     }
 
@@ -209,6 +210,16 @@ impl IndexStore {
 
     fn manifest_path(&self) -> PathBuf {
         self.index_dir().join("manifest.json")
+    }
+
+    /// Read the cached `SessionSummary` for `id` if its file exists and
+    /// its mtime is at least `jsonl_mtime`. Returns `None` on missing
+    /// file, stale cache, or decode failure — the caller falls through
+    /// to a full parse. Lock-free; the writer is reconcile, whose
+    /// tmp+rename pattern means the reader either sees the old file or
+    /// the new one, never a partial.
+    pub fn session_summary(&self, id: &str, jsonl_mtime: SystemTime) -> Option<SessionSummary> {
+        summary_cache::read(&self.cache_dir, id, jsonl_mtime)
     }
 
     /// Run a query against the committed index, returning the top
@@ -253,6 +264,7 @@ impl IndexStore {
                 std::fs::remove_dir_all(&index)?;
             }
             std::fs::create_dir_all(&index)?;
+            summary_cache::remove_all(&store.cache_dir)?;
             store.reconcile_locked(&mut on_event)
         })
     }
@@ -304,9 +316,10 @@ impl IndexStore {
         result
     }
 
-    /// Remove text-index version directories other than the current one.
+    /// Remove version directories under `text/` and `session/` whose
+    /// `v{N}` doesn't match the current code's version.
     fn remove_stale_versions(&self) {
-        let parent = self.cache_dir.join("text-index");
+        let parent = self.cache_dir.join("text");
         let current = format!("v{INDEX_FORMAT_VERSION}");
         let entries = match std::fs::read_dir(&parent) {
             Ok(entries) => entries,
@@ -321,17 +334,7 @@ impl IndexStore {
                 }
             }
         }
-        // Migration: also remove any legacy sessions/ parquet store.
-        let legacy_sessions = self.cache_dir.join("sessions");
-        if legacy_sessions.exists() {
-            tracing::info!(
-                path = %legacy_sessions.display(),
-                "removing legacy parquet store",
-            );
-            if let Err(e) = std::fs::remove_dir_all(&legacy_sessions) {
-                tracing::warn!(path = %legacy_sessions.display(), "failed to remove: {e}");
-            }
-        }
+        summary_cache::remove_stale_versions(&self.cache_dir);
     }
 
     fn reconcile_locked(
@@ -383,10 +386,14 @@ impl IndexStore {
             }
         };
 
-        // 2. Diff.
+        // 2. Diff. A session is dirty if either the text-index manifest
+        // doesn't have it at the current fingerprint, or its summary
+        // cache file is missing (covers first-run backfill and any
+        // out-of-band deletion under `session/`).
+        let cached = summary_cache::existing_ids(&self.cache_dir);
         let dirty: Vec<&(String, PathBuf, Fingerprint)> = walked
             .iter()
-            .filter(|(id, _, fp)| manifest.sessions.get(id) != Some(fp))
+            .filter(|(id, _, fp)| manifest.sessions.get(id) != Some(fp) || !cached.contains(id))
             .collect();
         let removed: Vec<String> = manifest
             .sessions
@@ -407,8 +414,9 @@ impl IndexStore {
             total: (dirty.len() + removed.len()) as u64,
         });
 
-        // 3. Re-index changed sessions: parse the JSONL and write each
-        // message line into the index.
+        // 3. Re-index changed sessions: parse the JSONL, write each
+        // message line into the text index, and persist the summary
+        // cache for the `session` table fast path.
         for (id, path, fp) in &dirty {
             let derived = match derive_session(id, path) {
                 Ok(d) => d,
@@ -425,17 +433,23 @@ impl IndexStore {
                 }
                 manifest.sessions.insert(id.clone(), *fp);
             }
+            if let Err(e) = summary_cache::write(&self.cache_dir, id, &derived.summary) {
+                tracing::warn!(session_id = %id, "failed to write summary cache: {e}");
+            }
             outcome.indexed += 1;
             tracing::info!(session_id = %id, "indexed session");
             on_event(ReconcileEvent::Advance);
         }
 
-        // 4. Garbage collection: index entries for sessions gone from
-        // disk.
+        // 4. Garbage collection: index entries and summary cache files
+        // for sessions gone from disk.
         if let Some(w) = &writer {
             for id in &removed {
                 index.delete_session(w, id);
                 manifest.sessions.remove(id);
+                if let Err(e) = summary_cache::remove(&self.cache_dir, id) {
+                    tracing::warn!(session_id = %id, "failed to remove summary cache: {e}");
+                }
                 outcome.removed += 1;
                 on_event(ReconcileEvent::Advance);
             }

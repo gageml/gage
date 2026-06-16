@@ -331,38 +331,34 @@ impl SessionExec {
             mtimes.append_value(millis);
             sizes.append_value(s.size as i64);
 
-            if cheap_only {
-                titles.append_null();
-                models.append_null();
-                message_counts.append_value(0);
-                input_tokens.append_value(0);
-                output_tokens.append_value(0);
-                cache_read.append_value(0);
-                cache_creation.append_value(0);
-                is_empty.append_value(false);
+            let summary = if cheap_only {
+                default_summary.clone()
             } else {
-                let summary = match self.cache.get(&s.id, &s.src).await {
-                    Ok(d) => d.summary.clone(),
-                    Err(e) => {
-                        tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
-                        default_summary.clone()
-                    }
-                };
-                match &summary.title {
-                    Some(t) => titles.append_value(t),
-                    None => titles.append_null(),
+                match self.store.session_summary(&s.id, s.mtime) {
+                    Some(cached) => cached,
+                    None => match self.cache.get(&s.id, &s.src).await {
+                        Ok(d) => d.summary.clone(),
+                        Err(e) => {
+                            tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
+                            default_summary.clone()
+                        }
+                    },
                 }
-                match &summary.model {
-                    Some(m) => models.append_value(m),
-                    None => models.append_null(),
-                }
-                message_counts.append_value(summary.message_count);
-                input_tokens.append_value(summary.input_tokens);
-                output_tokens.append_value(summary.output_tokens);
-                cache_read.append_value(summary.cache_read_input_tokens);
-                cache_creation.append_value(summary.cache_creation_input_tokens);
-                is_empty.append_value(summary.is_empty);
+            };
+            match &summary.title {
+                Some(t) => titles.append_value(t),
+                None => titles.append_null(),
             }
+            match &summary.model {
+                Some(m) => models.append_value(m),
+                None => models.append_null(),
+            }
+            message_counts.append_value(summary.message_count);
+            input_tokens.append_value(summary.input_tokens);
+            output_tokens.append_value(summary.output_tokens);
+            cache_read.append_value(summary.cache_read_input_tokens);
+            cache_creation.append_value(summary.cache_creation_input_tokens);
+            is_empty.append_value(summary.is_empty);
         }
 
         let batch = RecordBatch::try_new(

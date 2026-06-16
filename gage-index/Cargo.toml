@@ -8,6 +8,7 @@ arrow = { workspace = true }
 chrono = { workspace = true }
 fs4 = { workspace = true }
 gage-claude = { path = "../gage-claude" }
+rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

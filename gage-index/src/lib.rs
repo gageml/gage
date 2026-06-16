@@ -12,6 +12,7 @@
 
 mod derive;
 mod reconcile;
+mod summary_cache;
 mod text_index;
 
 use std::fmt;

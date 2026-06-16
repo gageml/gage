@@ -86,7 +86,7 @@ fn make_progress_bar() -> ProgressBar {
         .unwrap()
         .progress_chars("▬▬"),
     );
-    bar.set_message("Indexing");
+    bar.set_message("Building index");
     bar.enable_steady_tick(Duration::from_millis(120));
     bar
 }
