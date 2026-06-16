@@ -15,7 +15,7 @@ use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
@@ -642,15 +642,20 @@ fn row_to_item(
             } else {
                 style::text_dim()
             };
-            let turn_suffix = turns
-                .and_then(|t| t.get(*index).copied().flatten())
-                .map(|n| format!(" {}", circled_number(n)))
-                .unwrap_or_default();
-            Line::from(vec![
+            let turn = turns.and_then(|t| t.get(*index).copied().flatten());
+            let mut spans = vec![
                 prefix,
                 Span::styled(format!("{} ", index + 1), number_style),
-                Span::raw(format!("{kind}{turn_suffix}")),
-            ])
+                Span::raw(kind.to_string()),
+            ];
+            if let Some(n) = turn {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    n.to_string(),
+                    Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC),
+                ));
+            }
+            Line::from(spans)
         }
         RowKind::Note { note_id, .. } => {
             let label = doc
@@ -1094,24 +1099,6 @@ fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
         out.push(turn);
     }
     out
-}
-
-fn circled_number(n: usize) -> String {
-    if (1..=20).contains(&n) {
-        return char::from_u32(0x2460 + (n as u32) - 1)
-            .expect("U+2460..=U+2473 are valid scalars")
-            .to_string();
-    }
-    n.to_string().chars().map(circled_digit).collect()
-}
-
-fn circled_digit(d: char) -> char {
-    match d {
-        '0' => '\u{24EA}',
-        '1'..='9' => char::from_u32(0x2460 + (d as u32 - '1' as u32))
-            .expect("U+2460..=U+2468 are valid scalars"),
-        _ => d,
-    }
 }
 
 fn scrollbar(active: bool) -> Scrollbar<'static> {
