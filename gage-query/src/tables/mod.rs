@@ -10,6 +10,27 @@ pub use entry::EntryTable;
 pub use gage_index::entry_text;
 pub use message::MessageTable;
 pub use message_text::MessageTextFn;
+
+use datafusion::arrow::datatypes::SchemaRef;
+
+/// Static descriptor for a table-valued function registered on the
+/// gage session context — surfaced in the repl by `\df`.
+pub struct TvfInfo {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub schema: SchemaRef,
+}
+
+/// All TVFs registered by `create_context`. The repl reads this to
+/// implement `\df` since DataFusion does not expose argument
+/// signatures or output schemas through the `TableFunction` trait.
+pub fn registered_tvfs() -> Vec<TvfInfo> {
+    vec![TvfInfo {
+        name: "message_text",
+        args: message_text::MESSAGE_TEXT_ARGS,
+        schema: message_text::message_text_schema(),
+    }]
+}
 pub use session::SessionTable;
 
 use std::collections::HashMap;

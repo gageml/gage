@@ -28,6 +28,14 @@ use super::walk::reconcile_for_query;
 /// through verbatim with no ceiling.
 const DEFAULT_LIMIT: usize = 100;
 
+/// Argument-list display string for `\df` in the repl. Matches the
+/// shape of psql's "Argument data types" column.
+pub const MESSAGE_TEXT_ARGS: &str = "query text, snippet_len integer DEFAULT 200";
+
+pub fn message_text_schema() -> SchemaRef {
+    MESSAGE_TEXT_SCHEMA.clone()
+}
+
 static MESSAGE_TEXT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("session_id", DataType::Utf8, false),

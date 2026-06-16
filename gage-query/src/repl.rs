@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use datafusion::arrow::array::StringArray;
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::{ExecutionPlan, display::DisplayableExecutionPlan, execute_stream};
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
@@ -8,6 +11,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::print_format::PrintFormat;
+use crate::tables::{TvfInfo, registered_tvfs};
 
 pub async fn exec_command(
     ctx: &SessionContext,
@@ -190,6 +194,11 @@ async fn handle_backslash(
                 eprintln!("Error: {e}");
             }
         }
+        "\\df" => {
+            if let Err(e) = print_df(arg, *state.format) {
+                eprintln!("Error: {e}");
+            }
+        }
         "\\format" => {
             if let Some(fmt_str) = arg {
                 match fmt_str.parse::<PrintFormat>() {
@@ -220,6 +229,8 @@ async fn handle_backslash(
         "\\?" | "\\help" => {
             println!("\\d              List tables");
             println!("\\d <table>      Show table schema");
+            println!("\\df             List table-valued functions");
+            println!("\\df <function>  Show TVF signature and result columns");
             println!("\\format <fmt>   Set output format (table, csv, json, ndjson, yaml)");
             println!("\\index          Show derived store / text index status");
             println!("\\timing [on|off]  Toggle query wall-clock time");
@@ -231,6 +242,89 @@ async fn handle_backslash(
     }
 
     BackslashResult::Continue
+}
+
+fn print_df(arg: Option<&str>, format: PrintFormat) -> Result<(), Box<dyn std::error::Error>> {
+    let tvfs = registered_tvfs();
+    match arg {
+        None => {
+            let batch = list_tvfs_batch(&tvfs)?;
+            format.print_batch(&batch, true)?;
+        }
+        Some(name) => match tvfs.iter().find(|t| t.name == name) {
+            Some(tvf) => {
+                let batch = describe_tvf_batch(tvf)?;
+                format.print_batch(&batch, true)?;
+            }
+            None => eprintln!("No table-valued function named: {name}"),
+        },
+    }
+    Ok(())
+}
+
+fn list_tvfs_batch(tvfs: &[TvfInfo]) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+    let schema: SchemaRef = std::sync::Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("arguments", DataType::Utf8, false),
+        Field::new("returns", DataType::Utf8, false),
+    ]));
+    let names: Vec<&str> = tvfs.iter().map(|t| t.name).collect();
+    let args: Vec<&str> = tvfs.iter().map(|t| t.args).collect();
+    let returns: Vec<String> = tvfs.iter().map(|t| format_returns(&t.schema)).collect();
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            std::sync::Arc::new(StringArray::from(names)),
+            std::sync::Arc::new(StringArray::from(args)),
+            std::sync::Arc::new(StringArray::from(returns)),
+        ],
+    )?;
+    Ok(batch)
+}
+
+fn describe_tvf_batch(tvf: &TvfInfo) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+    let schema: SchemaRef = std::sync::Arc::new(Schema::new(vec![
+        Field::new("column_name", DataType::Utf8, false),
+        Field::new("data_type", DataType::Utf8, false),
+        Field::new("is_nullable", DataType::Utf8, false),
+    ]));
+    let names: Vec<String> = tvf
+        .schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let types: Vec<String> = tvf
+        .schema
+        .fields()
+        .iter()
+        .map(|f| format!("{}", f.data_type()))
+        .collect();
+    let nulls: Vec<&str> = tvf
+        .schema
+        .fields()
+        .iter()
+        .map(|f| if f.is_nullable() { "YES" } else { "NO" })
+        .collect();
+    println!("Function: {}({})", tvf.name, tvf.args);
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            std::sync::Arc::new(StringArray::from(names)),
+            std::sync::Arc::new(StringArray::from(types)),
+            std::sync::Arc::new(StringArray::from(nulls)),
+        ],
+    )?;
+    Ok(batch)
+}
+
+fn format_returns(schema: &SchemaRef) -> String {
+    let cols: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| format!("{} {}", f.name(), f.data_type()))
+        .collect();
+    format!("TABLE({})", cols.join(", "))
 }
 
 fn parse_toggle(arg: Option<&str>, current: bool, label: &str) -> bool {
