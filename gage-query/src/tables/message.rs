@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::fmt::{self, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
@@ -9,18 +10,25 @@ use datafusion::arrow::compute::filter_record_batch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
-use datafusion::datasource::{MemTable, TableProvider, TableType};
+use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::execution::context::TaskContext;
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
+};
 use datafusion::prelude::*;
+use futures::StreamExt;
 use gage_index::{
     COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TEXT,
-    COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+    COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore, derive_session,
 };
 
 use super::SessionSource;
-use super::walk::{lookup_paths, reconcile_for_query, session_cache, session_paths};
-use crate::cache::SessionCache;
+use super::walk::{lookup_paths, reconcile_for_query, session_paths};
 use crate::filter;
 
 /// The derived columns serving the `message` table, in table-column
@@ -66,9 +74,9 @@ impl MessageTable {
     }
 
     /// Build a `MessageTable` over an explicit `session_id` -> path
-    /// map. Used by gage-scan: the cohort is known up front, so the
-    /// table resolves ids through the map and reads through the
-    /// per-context session cache. No `IndexStore`, no reconcile.
+    /// map. Used by gage-scan: the cohort is known up front and the
+    /// table resolves ids through the map. No `IndexStore`, no
+    /// reconcile.
     pub fn with_lookup(sessions: Arc<HashMap<String, PathBuf>>) -> Self {
         Self {
             source: SessionSource::Lookup(sessions),
@@ -103,45 +111,157 @@ impl TableProvider for MessageTable {
 
     async fn scan(
         &self,
-        state: &dyn Session,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let batches = match &self.source {
+        let paths = match &self.source {
             SessionSource::Corpus(store) => {
                 reconcile_for_query(store).await?;
-                let cache = session_cache(state)?;
-                let paths = session_paths(store, filters, "session_id")?;
-                load_batches(&cache, paths).await?
+                session_paths(store, filters, "session_id")?
             }
-            SessionSource::Lookup(sessions) => {
-                let cache = session_cache(state)?;
-                let paths = lookup_paths(sessions, filters)?;
-                load_batches(&cache, paths).await?
-            }
+            SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
-        let mem = MemTable::try_new(self.schema.clone(), vec![batches])?;
-        mem.scan(state, projection, &[], limit).await
+        let projected_schema = match projection {
+            Some(indices) => Arc::new(self.schema.project(indices)?),
+            None => self.schema.clone(),
+        };
+        Ok(Arc::new(MessageExec::new(
+            paths,
+            projected_schema,
+            projection.cloned(),
+            limit,
+        )))
     }
 }
 
-async fn load_batches(
-    cache: &Arc<SessionCache>,
-    paths: Vec<(String, PathBuf)>,
-) -> Result<Vec<RecordBatch>> {
-    let mut batches = Vec::with_capacity(paths.len());
-    for (id, path) in paths {
-        let derived = match cache.get(&id, &path).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(session_id = %id, "skipping session: {e}");
-                continue;
-            }
-        };
-        batches.push(message_rows(&derived.batch)?);
+/// Streaming plan: pulls one session at a time, parses it on a
+/// blocking thread, emits a single batch of its message rows, and
+/// drops the parsed `DerivedSession` before pulling the next.
+#[derive(Clone)]
+struct MessageExec {
+    paths: Arc<Vec<(String, PathBuf)>>,
+    projected_schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    properties: PlanProperties,
+}
+
+impl fmt::Debug for MessageExec {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("MessageExec")
+            .field("sessions", &self.paths.len())
+            .field("limit", &self.limit)
+            .finish()
     }
-    Ok(batches)
+}
+
+impl MessageExec {
+    fn new(
+        paths: Vec<(String, PathBuf)>,
+        projected_schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+        limit: Option<usize>,
+    ) -> Self {
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(projected_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            paths: Arc::new(paths),
+            projected_schema,
+            projection,
+            limit,
+            properties,
+        }
+    }
+}
+
+impl DisplayAs for MessageExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        write!(f, "MessageExec")
+    }
+}
+
+impl ExecutionPlan for MessageExec {
+    fn name(&self) -> &'static str {
+        "MessageExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.limit
+    }
+
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        let mut next = self.clone();
+        next.limit = limit;
+        Some(Arc::new(next))
+    }
+
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let paths = (*self.paths).clone();
+        let projection = self.projection.clone();
+        let schema = self.projected_schema.clone();
+
+        let stream = futures::stream::iter(paths)
+            .then(|(id, path)| async move {
+                let result = tokio::task::spawn_blocking({
+                    let id = id.clone();
+                    move || derive_session(&id, &path)
+                })
+                .await;
+                (id, result)
+            })
+            .filter_map(|(id, joined)| async move {
+                match joined {
+                    Ok(Ok(derived)) => Some(Ok(derived)),
+                    Ok(Err(e)) => {
+                        tracing::warn!(session_id = %id, "skipping session: {e}");
+                        None
+                    }
+                    Err(e) => Some(Err(DataFusionError::Execution(format!(
+                        "derive task for {id}: {e}"
+                    )))),
+                }
+            })
+            .map(move |res| {
+                res.and_then(|derived| {
+                    let batch = message_rows(&derived.batch)?;
+                    match &projection {
+                        Some(p) => batch.project(p).map_err(DataFusionError::from),
+                        None => Ok(batch),
+                    }
+                })
+            });
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
 }
 
 /// Filter a derived batch to message rows (text non-null) and project

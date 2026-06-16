@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use datafusion::physical_plan::{ExecutionPlan, collect, display::DisplayableExecutionPlan};
+use datafusion::physical_plan::{ExecutionPlan, display::DisplayableExecutionPlan, execute_stream};
 use datafusion::prelude::SessionContext;
+use futures::StreamExt;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
@@ -31,14 +32,25 @@ async fn exec_with_stats(
 ) -> Result<QueryStats, Box<dyn std::error::Error>> {
     let start = Instant::now();
     let plan = ctx.sql(sql).await?.create_physical_plan().await?;
-    let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await?;
+    let mut stream = execute_stream(Arc::clone(&plan), ctx.task_ctx())?;
+    let mut rows = 0usize;
+    let mut batches = 0usize;
+    let mut is_first = true;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        format.print_batch(&batch, is_first)?;
+        rows += batch.num_rows();
+        batches += 1;
+        is_first = false;
+    }
     let elapsed = start.elapsed();
-    format.print_batches(&batches)?;
-    let rows = batches.iter().map(|b| b.num_rows()).sum();
     Ok(QueryStats {
         elapsed,
         rows,
-        batches: batches.len(),
+        batches,
         plan,
     })
 }

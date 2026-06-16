@@ -33,58 +33,64 @@ impl FromStr for PrintFormat {
 }
 
 impl PrintFormat {
-    pub fn print_batches(&self, batches: &[RecordBatch]) -> Result<()> {
-        let batches: Vec<_> = batches
-            .iter()
-            .filter(|b| b.num_rows() > 0)
-            .cloned()
-            .collect();
-
+    /// Print one batch incrementally. `is_first` indicates whether any
+    /// preceding non-empty batch has been emitted in this run — used by
+    /// formats that condition headers/separators on it (Csv writes the
+    /// header only on the first batch; Yaml omits the leading `---`).
+    /// Empty batches are skipped.
+    pub fn print_batch(&self, batch: &RecordBatch, is_first: bool) -> Result<()> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
         match self {
             Self::Table => {
-                if batches.is_empty() {
-                    return Ok(());
-                }
-                let formatted = pretty_format_batches(&batches)?;
+                let formatted = pretty_format_batches(std::slice::from_ref(batch))?;
                 println!("{formatted}");
             }
             Self::Csv => {
                 let mut writer = WriterBuilder::new()
-                    .with_header(true)
+                    .with_header(is_first)
                     .build(std::io::stdout());
-                for batch in &batches {
-                    writer.write(batch)?;
-                }
+                writer.write(batch)?;
             }
             Self::Json => {
-                if !batches.is_empty() {
-                    let mut buf: Vec<u8> = Vec::new();
-                    let mut writer = ArrayWriter::new(&mut buf);
-                    for batch in &batches {
-                        writer.write(batch)?;
-                    }
-                    writer.finish()?;
-                    println!("{}", String::from_utf8_lossy(&buf));
-                }
+                // Json array form: emit one self-contained array per
+                // batch. A single array spanning every batch can't be
+                // produced without buffering — use ndjson for clean
+                // streaming.
+                let mut buf: Vec<u8> = Vec::new();
+                let mut writer = ArrayWriter::new(&mut buf);
+                writer.write(batch)?;
+                writer.finish()?;
+                println!("{}", String::from_utf8_lossy(&buf));
             }
             Self::NdJson => {
-                if !batches.is_empty() {
-                    let mut writer = LineDelimitedWriter::new(std::io::stdout());
-                    for batch in &batches {
-                        writer.write(batch)?;
-                    }
-                    writer.finish()?;
-                }
+                let mut writer = LineDelimitedWriter::new(std::io::stdout());
+                writer.write(batch)?;
+                writer.finish()?;
             }
             Self::Yaml => {
                 let stdout = std::io::stdout();
                 let mut out = std::io::BufWriter::new(stdout.lock());
-                write_yaml(&mut out, &batches)?;
+                write_yaml_batch(&mut out, batch, is_first)?;
                 out.flush()
                     .map_err(|e| DataFusionError::Execution(format!("yaml stdout flush: {e}")))?;
             }
         }
+        Ok(())
+    }
 
+    /// Convenience for non-streaming callers — loops over `print_batch`
+    /// tracking the `is_first` flag.
+    pub fn print_batches(&self, batches: &[RecordBatch]) -> Result<()> {
+        let mut is_first = true;
+        for batch in batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            self.print_batch(batch, is_first)?;
+            is_first = false;
+        }
         Ok(())
     }
 }
@@ -95,34 +101,48 @@ impl PrintFormat {
 /// (utf8/int/float/bool/null); anything else falls back to its Arrow
 /// display string. Escaping is handled by `serde_yaml`.
 pub fn write_yaml<W: Write>(w: &mut W, batches: &[RecordBatch]) -> Result<()> {
-    let format_opts = FormatOptions::default();
-    let mut first = true;
+    let mut is_first = true;
     for batch in batches {
-        let formatters: Vec<ArrayFormatter> = batch
-            .columns()
-            .iter()
-            .map(|c| ArrayFormatter::try_new(c.as_ref(), &format_opts))
-            .collect::<Result<_, _>>()?;
-        let schema = batch.schema();
-        for row in 0..batch.num_rows() {
-            if first {
-                first = false;
-            } else {
-                writeln!(w, "---")
-                    .map_err(|e| DataFusionError::Execution(format!("yaml write: {e}")))?;
-            }
-            let mut mapping = serde_yaml::Mapping::with_capacity(schema.fields().len());
-            for (col_idx, field) in schema.fields().iter().enumerate() {
-                let col = batch.column(col_idx);
-                let fmt = formatters
-                    .get(col_idx)
-                    .expect("formatters correspond to batch schema fields");
-                let value = cell_to_yaml(col.as_ref(), row, fmt);
-                mapping.insert(serde_yaml::Value::String(field.name().clone()), value);
-            }
-            serde_yaml::to_writer(&mut *w, &serde_yaml::Value::Mapping(mapping))
-                .map_err(|e| DataFusionError::Execution(format!("yaml encode: {e}")))?;
+        if batch.num_rows() == 0 {
+            continue;
         }
+        write_yaml_batch(w, batch, is_first)?;
+        is_first = false;
+    }
+    Ok(())
+}
+
+/// Emit one batch in the format described by `write_yaml`. The first
+/// row of the run gets no leading separator; every subsequent row
+/// (including the first row of a non-first batch) is preceded by `---`.
+pub fn write_yaml_batch<W: Write>(
+    w: &mut W,
+    batch: &RecordBatch,
+    is_first_batch: bool,
+) -> Result<()> {
+    let format_opts = FormatOptions::default();
+    let formatters: Vec<ArrayFormatter> = batch
+        .columns()
+        .iter()
+        .map(|c| ArrayFormatter::try_new(c.as_ref(), &format_opts))
+        .collect::<Result<_, _>>()?;
+    let schema = batch.schema();
+    for row in 0..batch.num_rows() {
+        if !(is_first_batch && row == 0) {
+            writeln!(w, "---")
+                .map_err(|e| DataFusionError::Execution(format!("yaml write: {e}")))?;
+        }
+        let mut mapping = serde_yaml::Mapping::with_capacity(schema.fields().len());
+        for (col_idx, field) in schema.fields().iter().enumerate() {
+            let col = batch.column(col_idx);
+            let fmt = formatters
+                .get(col_idx)
+                .expect("formatters correspond to batch schema fields");
+            let value = cell_to_yaml(col.as_ref(), row, fmt);
+            mapping.insert(serde_yaml::Value::String(field.name().clone()), value);
+        }
+        serde_yaml::to_writer(&mut *w, &serde_yaml::Value::Mapping(mapping))
+            .map_err(|e| DataFusionError::Execution(format!("yaml encode: {e}")))?;
     }
     Ok(())
 }
