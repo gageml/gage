@@ -39,6 +39,12 @@ Tables:
 - issue_evidence (issue_id, note_id, name, timestamp, digest) - link
   table from issues to the notes that support them
 
+TVF for full-text search over message text:
+
+- message_text(query [, snippet_len]) -> (session_id, line, type,
+  subtype, score, snippet) - Tantivy query string; BM25-ordered. See
+  the `query` skill for syntax and recipes.
+
 Hints:
 
 - Users often refer to sessions using their prefix ID

@@ -4,4 +4,3 @@
 - IssueGet
 - IssueList
 - Query
-- TextSearch

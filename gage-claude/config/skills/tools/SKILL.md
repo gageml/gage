@@ -5,8 +5,7 @@ description: |
 
   Use ToolSearch with these FQN tool names:
 
-  `mcp__plugin_gage_gage__Query` - SQL interface to sessions
-  `mcp__plugin_gage_gage__TextSearch` - full text search over messages (fast!)
+  `mcp__plugin_gage_gage__Query` - SQL interface to sessions (also covers full-text search via the `message_text` TVF)
   `mcp__plugin_gage_gage__IssueList` - list open issues
   `mcp__plugin_gage_gage__IssueGet` - fetch one issue's full detail
   `mcp__plugin_gage_gage__IssueClose` - close an issue
