@@ -28,6 +28,7 @@ console = "0.16.2"
 serde_json = "1"
 gage-query = { path = "../gage-query" }
 gage-scan = { path = "../gage-scan" }
+gage-sync = { path = "../gage-sync" }
 indicatif = "0.18"
 num_cpus = "1"
 tracing = "0.1"

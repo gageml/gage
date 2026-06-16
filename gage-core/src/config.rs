@@ -43,6 +43,36 @@ pub fn display_user_config_path() -> String {
 pub struct Config {
     #[serde(default)]
     pub scanners: ScannerConfig,
+
+    /// Backup destinations. Read from the user config only; `gage push`
+    /// writes to every configured remote.
+    #[serde(default, rename = "remote", skip_serializing_if = "Vec::is_empty")]
+    pub remotes: Vec<Remote>,
+}
+
+/// A single backup destination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Remote {
+    pub name: String,
+    #[serde(flatten)]
+    pub kind: RemoteKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum RemoteKind {
+    /// SSH remote. `url` is an rsync-style target, e.g.
+    /// `user@host:/path/to/dir` or `host:/path/to/dir`.
+    Ssh { url: String },
+    /// S3 (or S3-compatible) remote. `url` is `s3://bucket[/prefix]`.
+    /// Credentials and region come from the standard AWS chain.
+    S3 {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -90,6 +120,7 @@ impl Config {
     pub fn merge_outer(&mut self, other: Config) {
         self.scanners.enable.extend(other.scanners.enable);
         self.scanners.disable.extend(other.scanners.disable);
+        self.remotes.extend(other.remotes);
     }
 
     /// True if the named scanner is enabled per this config.

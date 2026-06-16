@@ -33,6 +33,7 @@ mod cmd_note;
 mod cmd_query;
 mod cmd_scan;
 mod cmd_session;
+mod cmd_sync;
 mod cmd_test;
 mod dialog;
 mod human;
@@ -86,6 +87,10 @@ enum Command {
     Query(cmd_query::QueryArgs),
     /// Reconcile the derived session store and text index
     Index(cmd_index::IndexArgs),
+    /// Back up local state to every configured remote
+    Push(cmd_sync::PushArgs),
+    /// Copy a remote's tree into a local inspection directory
+    Pull(cmd_sync::PullArgs),
 }
 
 fn parse_duration(s: &str) -> Result<Duration, DurationError> {
@@ -154,6 +159,8 @@ async fn main() {
             }
             Command::Query(args) => cmd_query::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
+            Command::Push(args) => cmd_sync::push(args).await,
+            Command::Pull(args) => cmd_sync::pull(args).await,
         }
     };
     tokio::pin!(cmd);

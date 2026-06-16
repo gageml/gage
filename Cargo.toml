@@ -11,6 +11,7 @@ members = [
     "gage-mcp",
     "gage-query",
     "gage-scan",
+    "gage-sync",
     "gage-tui",
 ]
 resolver = "2"
