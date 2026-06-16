@@ -7,6 +7,7 @@ mod outline;
 mod session;
 mod style;
 mod syntax;
+mod textarea;
 
 use std::error::Error;
 use std::io;

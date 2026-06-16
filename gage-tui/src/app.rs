@@ -22,12 +22,11 @@ use ratatui::widgets::{
     ScrollbarOrientation, ScrollbarState, Wrap,
 };
 
-use tui_textarea::{CursorMove, TextArea, WrapMode};
-
 use crate::doc::Document;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::syntax::Highlighter;
+use crate::textarea::TextArea;
 use crate::{message, style};
 
 pub fn run(
@@ -114,12 +113,12 @@ enum Dialog {
     None,
     AddNote {
         entry_index: usize,
-        editor: TextArea<'static>,
+        editor: TextArea,
     },
     EditNote {
         note_id: String,
         original: String,
-        editor: TextArea<'static>,
+        editor: TextArea,
     },
     /// Sub-dialog layered over the editor when the user pressed Esc with
     /// non-empty content. `y` discards `pending`; anything else restores it.
@@ -131,16 +130,8 @@ enum Dialog {
     },
 }
 
-fn editor_text(editor: &TextArea<'_>) -> String {
-    editor.lines().join("\n")
-}
-
-fn new_editor(text: &str) -> TextArea<'static> {
-    let mut ta = TextArea::new(text.split('\n').map(|s| s.to_string()).collect());
-    ta.set_cursor_line_style(Style::default());
-    ta.set_wrap_mode(WrapMode::WordOrGlyph);
-    ta.move_cursor(CursorMove::End);
-    ta
+fn new_editor(text: &str) -> TextArea {
+    TextArea::new(text)
 }
 
 fn now_ms() -> i64 {
@@ -402,7 +393,7 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
         KeyCode::Enter if !is_newline_shortcut => {
             let empty = match &state.dialog {
                 Dialog::AddNote { editor, .. } | Dialog::EditNote { editor, .. } => {
-                    editor_text(editor).trim().is_empty()
+                    editor.text().trim().is_empty()
                 }
                 _ => true,
             };
@@ -414,10 +405,10 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
         }
         KeyCode::Esc => {
             let dirty = match &state.dialog {
-                Dialog::AddNote { editor, .. } => !editor_text(editor).trim().is_empty(),
+                Dialog::AddNote { editor, .. } => !editor.text().trim().is_empty(),
                 Dialog::EditNote {
                     editor, original, ..
-                } => &editor_text(editor) != original,
+                } => &editor.text() != original,
                 _ => false,
             };
             if !dirty {
@@ -452,7 +443,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
             let Some(entry) = state.doc.entries.get(entry_index) else {
                 return;
             };
-            let text = editor_text(&editor);
+            let text = editor.text();
             let target = NoteTarget::Session(
                 SessionTarget::new(&state.doc.session.id).with_line(entry.line),
             );
@@ -479,7 +470,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
                 return;
             };
             let mut updated = existing;
-            updated.value = NoteValue::from(editor_text(&editor));
+            updated.value = NoteValue::from(editor.text());
             if let Ok(new) = note::replace(db, &note_id, &updated) {
                 state.doc.replace_note_value(
                     &note_id,
@@ -559,7 +550,7 @@ fn draw(frame: &mut Frame, state: &mut AppState, turns: Option<&[Option<usize>]>
     let footer = Paragraph::new(Line::from(footer_hint(state))).style(style::footer());
     frame.render_widget(footer, footer_area);
 
-    draw_dialog(frame, state);
+    draw_dialog(frame, &mut state.dialog);
 }
 
 fn footer_hint(state: &AppState) -> String {
@@ -926,13 +917,13 @@ fn draw_body_scrollbar(frame: &mut Frame, state: &AppState, active: bool, area: 
     );
 }
 
-fn draw_dialog(frame: &mut Frame, state: &AppState) {
-    match &state.dialog {
+fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog) {
+    match dialog {
         Dialog::None => {}
         Dialog::AddNote { editor, .. } => draw_editor(frame, "Add note", editor),
         Dialog::EditNote { editor, .. } => draw_editor(frame, "Edit note", editor),
         Dialog::ConfirmCancel { pending } => {
-            match pending.as_ref() {
+            match pending.as_mut() {
                 Dialog::AddNote { editor, .. } => draw_editor(frame, "Add note", editor),
                 Dialog::EditNote { editor, .. } => draw_editor(frame, "Edit note", editor),
                 _ => {}
@@ -947,12 +938,16 @@ fn draw_dialog(frame: &mut Frame, state: &AppState) {
 
 const EDITOR_BODY_HEIGHT: u16 = 8;
 
-fn draw_editor(frame: &mut Frame, title: &str, editor: &TextArea<'_>) {
+fn draw_editor(frame: &mut Frame, title: &str, editor: &mut TextArea) {
     let area = editor_rect(frame.area());
     let (body_area, hint_area) = draw_dialog_block(frame, area, title);
 
-    let total_lines = editor.lines().len();
-    let needs_bar = total_lines > body_area.height as usize;
+    // Compute wrap against the body width minus a potential 1-col scrollbar.
+    // We don't yet know if the bar is needed, but it only appears once content
+    // exceeds the viewport, so probe at the narrower width first.
+    let probe_width = body_area.width.saturating_sub(1).max(1);
+    let total_visual = editor.visual_row_count(probe_width);
+    let needs_bar = total_visual > body_area.height as usize;
     let (text_area, bar_area) = if needs_bar {
         let [t, b] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body_area);
@@ -960,11 +955,14 @@ fn draw_editor(frame: &mut Frame, title: &str, editor: &TextArea<'_>) {
     } else {
         (body_area, None)
     };
-    frame.render_widget(editor, text_area);
+    let cursor_pos = editor.render(text_area, frame.buffer_mut(), Style::default());
+    if let Some((x, y)) = cursor_pos {
+        frame.set_cursor_position((x, y));
+    }
 
     if let Some(bar_area) = bar_area {
-        let (cursor_row, _) = editor.cursor();
-        let mut sb_state = ScrollbarState::new(total_lines)
+        let cursor_row = editor.visual_cursor_row(text_area.width);
+        let mut sb_state = ScrollbarState::new(editor.visual_row_count(text_area.width))
             .viewport_content_length(text_area.height as usize)
             .position(cursor_row);
         frame.render_stateful_widget(scrollbar(true), bar_area, &mut sb_state);
