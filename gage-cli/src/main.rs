@@ -70,6 +70,11 @@ enum Command {
 
     /// Manage sessions
     Session {
+        /// Operate on agent sessions under `<gage_home>/claude` instead
+        /// of the user's Claude Code sessions
+        #[arg(short = 'A', long, global = true)]
+        agent: bool,
+
         #[command(subcommand)]
         command: cmd_session::SessionCommand,
     },
@@ -154,11 +159,19 @@ async fn main() {
                 cmd_note::NoteCommand::Edit(args) => cmd_note::edit(args),
                 cmd_note::NoteCommand::Delete(args) => cmd_note::delete(args),
             },
-            Command::Session { command } => match command {
-                cmd_session::SessionCommand::List(args) => cmd_session::list(args).await,
-                cmd_session::SessionCommand::Delete(args) => cmd_session::delete(args).await,
-                cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
-            },
+            Command::Session { agent, command } => {
+                if agent {
+                    let dir = gage_core::config::gage_home().join("claude");
+                    // SAFETY: set_var is unsafe in edition 2024; we set
+                    // this once at startup, before any threads spawn.
+                    unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &dir) };
+                }
+                match command {
+                    cmd_session::SessionCommand::List(args) => cmd_session::list(args).await,
+                    cmd_session::SessionCommand::Delete(args) => cmd_session::delete(args).await,
+                    cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
+                }
+            }
             Command::Issue { command } => match command {
                 cmd_issue::IssueCommand::List(args) => cmd_issue::list(args),
                 cmd_issue::IssueCommand::Show(args) => cmd_issue::show(args),
