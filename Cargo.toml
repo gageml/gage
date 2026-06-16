@@ -59,6 +59,9 @@ toml = "0.8"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
+[patch.crates-io]
+datafusion-table-providers = { git = "https://github.com/gar1t/datafusion-table-providers", branch = "gar1t-dev-v0.10.1" }
+
 [workspace.lints.clippy]
 let_underscore_must_use = "warn"
 map_err_ignore = "warn"
