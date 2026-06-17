@@ -562,16 +562,16 @@ fn draw(frame: &mut Frame, state: &mut AppState, turns: Option<&[Option<usize>]>
         .get(..8)
         .unwrap_or(&state.doc.session.id);
     let header_text = match state.doc.session.value.get("title").and_then(Value::as_str) {
-        Some(t) if !t.is_empty() => format!(" {short_id} · {t} "),
-        _ => format!(" {short_id} "),
+        Some(t) if !t.is_empty() => format!("{short_id} · {t}"),
+        _ => short_id.to_string(),
     };
-    let header = Paragraph::new(Line::from(header_text)).style(style::header());
+    let header = Paragraph::new(Line::from(header_text).centered()).style(style::header());
     frame.render_widget(header, header_area);
 
     draw_outline(frame, state, outline_area, turns);
     draw_body(frame, state, body_area);
 
-    let footer = Paragraph::new(Line::from(footer_hint(state))).style(style::footer());
+    let footer = Paragraph::new(Line::from(footer_hint(state)).centered()).style(style::footer());
     frame.render_widget(footer, footer_area);
 
     draw_dialog(frame, &mut state.dialog);
