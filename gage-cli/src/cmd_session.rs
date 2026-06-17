@@ -6,7 +6,8 @@ use cliclack as cli;
 use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
-use gage_claude::session::delete_session;
+use gage_claude::home::claude_home;
+use gage_claude::session::{delete_session, encode_project_dir};
 use gage_core::uuid::short_uuid;
 use tabled::{
     Table,
@@ -28,6 +29,21 @@ pub enum SessionCommand {
     Delete(SessionDeleteArgs),
     /// View a session
     View(SessionViewArgs),
+    /// Move a session to a different project directory
+    Move(SessionMoveArgs),
+}
+
+#[derive(Args)]
+pub struct SessionMoveArgs {
+    /// Session ID (prefix match)
+    pub session: String,
+
+    /// Destination project directory (must exist)
+    pub dir: PathBuf,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -486,4 +502,162 @@ async fn pick_session() -> std::io::Result<Option<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+pub fn move_(args: SessionMoveArgs) {
+    let dir = match std::fs::canonicalize(&args.dir) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("gage session move: {}: {e}", args.dir.display());
+            std::process::exit(1);
+        }
+    };
+
+    let session = match gage_claude::session::one_session(&args.session) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gage session move: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let dest_slug = encode_project_dir(&dir);
+    if session.project_name() == dest_slug {
+        eprintln!("gage session move: session is already in {}", dir.display());
+        std::process::exit(1);
+    }
+
+    if let Err(e) = check_not_live(&session.id) {
+        eprintln!("gage session move: {e}");
+        std::process::exit(1);
+    }
+
+    let home = claude_home().expect("CLAUDE_CONFIG_DIR or HOME must be set");
+    let dest_dir = home.join("projects").join(&dest_slug);
+    let dest_jsonl = dest_dir.join(format!("{}.jsonl", session.id));
+    let dest_tools = dest_dir.join(&session.id);
+    if dest_jsonl.exists() {
+        eprintln!(
+            "gage session move: destination already has a session with this id: {}",
+            dest_jsonl.display()
+        );
+        std::process::exit(1);
+    }
+
+    let src_jsonl = session.src.clone();
+    let src_tools = src_jsonl.with_extension("");
+
+    dialog::run("Move session", || {
+        cli::log::remark(format!("Session: {}", short_uuid(&session.id)))?;
+        cli::log::remark(format!("To: {}", dir.display()))?;
+
+        if !args.yes {
+            let confirmed = cli::confirm("Move this session?")
+                .initial_value(true)
+                .interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        do_move(
+            &src_jsonl,
+            &src_tools,
+            &dest_dir,
+            &dest_jsonl,
+            &dest_tools,
+            &dir,
+        )
+        .map_err(|e| DialogError::Failed(format!("move failed: {e}")))?;
+
+        Ok(format!(
+            "Moved session {} to {}",
+            short_uuid(&session.id),
+            dir.display()
+        )
+        .into())
+    });
+}
+
+fn check_not_live(session_id: &str) -> std::io::Result<()> {
+    let home = match claude_home() {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    let sessions_dir = home.join("sessions");
+    let entries = match std::fs::read_dir(&sessions_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id) {
+            return Err(std::io::Error::other(format!(
+                "session is currently live (see {})",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn do_move(
+    src_jsonl: &std::path::Path,
+    src_tools: &std::path::Path,
+    dest_dir: &std::path::Path,
+    dest_jsonl: &std::path::Path,
+    dest_tools: &std::path::Path,
+    new_cwd: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, BufWriter, Write};
+
+    std::fs::create_dir_all(dest_dir)?;
+    let tmp = dest_jsonl.with_extension("jsonl.tmp");
+
+    let src = BufReader::new(std::fs::File::open(src_jsonl)?);
+    let mut out = BufWriter::new(std::fs::File::create(&tmp)?);
+    let new_cwd_str = new_cwd.to_string_lossy();
+    for line in src.lines() {
+        let line = line?;
+        let rewritten = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(mut v) => {
+                if let Some(obj) = v.as_object_mut()
+                    && obj.get("cwd").is_some_and(|c| c.is_string())
+                {
+                    obj.insert(
+                        "cwd".to_string(),
+                        serde_json::Value::String(new_cwd_str.to_string()),
+                    );
+                    serde_json::to_string(&v).unwrap_or(line)
+                } else {
+                    line
+                }
+            }
+            Err(_) => line,
+        };
+        out.write_all(rewritten.as_bytes())?;
+        out.write_all(b"\n")?;
+    }
+    out.flush()?;
+    drop(out);
+
+    std::fs::rename(&tmp, dest_jsonl)?;
+    if src_tools.is_dir() {
+        std::fs::rename(src_tools, dest_tools)?;
+    }
+    std::fs::remove_file(src_jsonl)?;
+    Ok(())
 }
