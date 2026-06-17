@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub enum DbError {

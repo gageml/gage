@@ -7,6 +7,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+chrono = { workspace = true }
 gage-core = { path = "../gage-core" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { workspace = true }

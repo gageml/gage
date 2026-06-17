@@ -6,25 +6,63 @@ use cliclack as cli;
 use gage_claude::plugin;
 use gage_claude::proc::find_claude;
 use gage_core::config::plugin_marketplace_dir;
+use gage_db::import::{ImportReport, import};
 
 use crate::dialog::{self, DialogError, DialogResult};
 
 #[derive(Args)]
 pub struct InitArgs {
     /// Remove Gage from Claude Code instead of installing
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["import_data", "import_data_preview"])]
     pub remove: bool,
 
     /// Skip confirmation prompts
     #[arg(short, long)]
     pub yes: bool,
+
+    /// Apply rows from another gage.db into the local database. Dest-wins on collision; rejected rows are written to a sidecar JSON file next to the dest db
+    #[arg(long, value_name = "PATH", conflicts_with = "import_data_preview")]
+    pub import_data: Option<PathBuf>,
+
+    /// Show what --import-data would do without writing
+    #[arg(long, value_name = "PATH")]
+    pub import_data_preview: Option<PathBuf>,
 }
 
 pub fn run(args: InitArgs) {
+    if let Some(p) = args
+        .import_data
+        .as_ref()
+        .or(args.import_data_preview.as_ref())
+    {
+        let preview = args.import_data_preview.is_some();
+        match import(p, preview) {
+            Ok(report) => print_import_report(&report),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.remove {
         dialog::run("Remove Gage setup", || remove_dialog(&args));
     } else {
         dialog::run("Setup Gage", || install_dialog(&args));
+    }
+}
+
+fn print_import_report(r: &ImportReport) {
+    let mode = if r.preview { " (preview)" } else { "" };
+    println!("Import from {}{mode}", r.source.display());
+    println!("  {:<18}  {:>10}  {:>10}", "table", "accepted", "rejected");
+    for t in &r.tables {
+        println!("  {:<18}  {:>10}  {:>10}", t.name, t.accepted, t.rejected);
+    }
+    if let Some(p) = &r.rejected_path {
+        println!("Rejected rows written to {}", p.display());
+    } else if !r.preview && r.tables.iter().all(|t| t.rejected == 0) {
+        println!("No rejected rows");
     }
 }
 
