@@ -42,8 +42,10 @@ pub enum DialogError {
     /// goes straight to the outro line — no preceding `log::error`,
     /// since the detail was already printed.
     Failed(String),
-    /// Any other I/O error.
-    Other(io::Error),
+    /// Any other error. Carries `anyhow::Error` so the full source
+    /// chain (and any `.context(...)` added at the call site) survives
+    /// to the renderer, which prints with `{:#}`.
+    Other(anyhow::Error),
 }
 
 impl From<io::Error> for DialogError {
@@ -51,8 +53,14 @@ impl From<io::Error> for DialogError {
         if e.kind() == ErrorKind::Interrupted {
             DialogError::Interrupted
         } else {
-            DialogError::Other(e)
+            DialogError::Other(e.into())
         }
+    }
+}
+
+impl From<anyhow::Error> for DialogError {
+    fn from(e: anyhow::Error) -> Self {
+        DialogError::Other(e)
     }
 }
 
@@ -124,7 +132,7 @@ fn handle_result(result: Result<DialogResult, DialogError>) {
         Err(DialogError::Other(e)) => {
             let width = console::Term::stderr().size().1 as usize;
             let wrap_width = width.saturating_sub(4).max(40);
-            let wrapped = textwrap::fill(&format!("{e}"), wrap_width)
+            let wrapped = textwrap::fill(&format!("{e:#}"), wrap_width)
                 .lines()
                 .map(|l| style(l).red().to_string())
                 .collect::<Vec<_>>()

@@ -129,12 +129,7 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
 }
 
 fn find_claude_or_err() -> Result<PathBuf, DialogError> {
-    find_claude().map_err(|e| {
-        DialogError::Other(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("claude not found on PATH: {e}"),
-        ))
-    })
+    find_claude().map_err(|e| DialogError::Other(anyhow::anyhow!("claude not found on PATH: {e}")))
 }
 
 fn run_claude(message: &str, claude_bin: &Path, args: &[&str]) -> Result<(), DialogError> {
@@ -144,15 +139,14 @@ fn run_claude(message: &str, claude_bin: &Path, args: &[&str]) -> Result<(), Dia
         .stderr(std::process::Stdio::inherit())
         .output();
     spinner.finish_and_clear();
-    let output = output.map_err(|e| {
-        DialogError::Other(std::io::Error::other(format!("failed to run claude: {e}")))
-    })?;
+    let output =
+        output.map_err(|e| DialogError::Other(anyhow::anyhow!("failed to run claude: {e}")))?;
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(DialogError::Other(std::io::Error::other(format!(
+        return Err(DialogError::Other(anyhow::anyhow!(
             "claude {} failed: {stdout}",
             args.join(" ")
-        ))));
+        )));
     }
     Ok(())
 }

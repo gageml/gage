@@ -95,14 +95,25 @@ pub async fn run(
     // path encodes to the same name. Sessions whose project isn't in
     // `.claude.json` (e.g. the user deleted the directory) silently
     // resolve to no project.
-    let claude_home = ClaudeHome::from_env()?;
+    let claude_home = ClaudeHome::from_env()
+        .map_err(|e| io::Error::new(e.kind(), format!("resolving Claude home: {e}")))?;
     let mut projects: HashMap<String, Arc<Project>> = HashMap::new();
     for s in selected.iter() {
         let name = s.project_name().to_string();
         if projects.contains_key(&name) {
             continue;
         }
-        if let Some(p) = project_for_session_name(&claude_home, &name)? {
+        let resolved = project_for_session_name(&claude_home, &name).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "resolving project for session {} (encoded name {name}) under {}: {e}",
+                    s.id,
+                    claude_home.path().display(),
+                ),
+            )
+        })?;
+        if let Some(p) = resolved {
             projects.insert(name, Arc::new(p));
         }
     }

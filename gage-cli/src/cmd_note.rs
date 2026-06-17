@@ -1,5 +1,3 @@
-use std::io;
-
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_claude::session::one_session;
@@ -188,7 +186,7 @@ pub fn add(args: NoteAddArgs) {
                 .interact()?,
         };
         let target = resolve_target(&target_input)
-            .map_err(|e| DialogError::Other(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
+            .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
 
         let name: String = match args.name {
             Some(ref n) => n.clone(),
@@ -207,7 +205,7 @@ pub fn add(args: NoteAddArgs) {
         let note = Note::new(target, &name, parse_note_value(&value), &author);
         let conn = db::open_db().unwrap();
         note::insert(&conn, &note)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         cli::log::remark(format!("id: {}", note.id))?;
         Ok("Note added".into())
@@ -251,9 +249,9 @@ pub fn comment(args: NoteCommentArgs) {
         }
 
         note::insert(&conn, &new_note)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
         insert_relation(&conn, &new_note.id, &target_note.id, "")
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         cli::log::remark(format!("id: {}", new_note.id))?;
         Ok("Comment added".into())
@@ -416,7 +414,7 @@ pub fn edit(args: NoteEditArgs) {
     dialog::run("Edit note", || {
         let conn = db::open_db().unwrap();
         let note = note::get(&conn, &args.id)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         let default_input = note.value.to_json();
         let value: String = match args.value {
@@ -430,7 +428,7 @@ pub fn edit(args: NoteEditArgs) {
         let modified = gage_core::datetime::now_ms();
         let note_value = parse_note_value(&value);
         note::update(&conn, &note.id, &note_value, modified)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         cli::log::remark(format!("id: {}", note.id))?;
         Ok("Note updated".into())

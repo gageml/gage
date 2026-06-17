@@ -1,5 +1,3 @@
-use std::io;
-
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::text_resolve::TextResolver;
@@ -332,7 +330,7 @@ pub fn add(args: IssueAddArgs) {
         };
         let conn = db::open_db().unwrap();
         issue::insert(&conn, &issue)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         cli::log::remark(format!("id: {}", issue.id))?;
         Ok("Issue added".into())
@@ -366,7 +364,7 @@ pub fn delete(args: IssueDeleteArgs) {
         }
 
         issue::delete(&conn, &target_issue.id)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         Ok(format!("Deleted issue {}", short_uuid(&target_issue.id)).into())
     });
@@ -420,7 +418,7 @@ pub fn close(args: IssueCloseArgs) {
             args.message.as_deref(),
             now,
         )
-        .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+        .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         Ok(format!(
             "Closed issue {} ({})",
@@ -471,7 +469,7 @@ pub fn reopen(args: IssueReopenArgs) {
             args.message.as_deref(),
             now,
         )
-        .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+        .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         Ok(format!("Reopened issue {}", short_uuid(&target_issue.id)).into())
     });
@@ -513,7 +511,7 @@ pub fn comment(args: IssueCommentArgs) {
         let now = gage_core::datetime::now_ms();
         let author = crate::author::resolve_author(None);
         issue::comment(&conn, &target_issue.id, &author, &message, now)
-            .map_err(|e| DialogError::Other(io::Error::other(e.to_string())))?;
+            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         Ok(format!("Commented on issue {}", short_uuid(&target_issue.id)).into())
     });

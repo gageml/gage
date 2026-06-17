@@ -2,6 +2,7 @@ use std::num::IntErrorKind;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use console::style;
@@ -364,10 +365,9 @@ async fn run_dialog(
 ) -> Result<DialogResult, DialogError> {
     // Scanner selection — default set excludes disabled scanners.
     // Explicit `-s name` (handled below) still runs disabled scanners.
-    let cwd = std::env::current_dir()
-        .map_err(|e| DialogError::Other(std::io::Error::other(e.to_string())))?;
+    let cwd = std::env::current_dir().context("reading current working directory")?;
     let (config, _) = gage_core::config::load_merged(&cwd)
-        .map_err(|e| DialogError::Other(std::io::Error::other(e.to_string())))?;
+        .with_context(|| format!("loading merged config from {}", cwd.display()))?;
     let defs = registry.list_enabled(&config);
     let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     names.sort();
@@ -486,7 +486,7 @@ async fn run_dialog(
         let mut out: Vec<SessionInfo> = Vec::with_capacity(sessions.len());
         for (id, src) in sessions {
             let meta = std::fs::metadata(&src)
-                .map_err(|e| DialogError::Other(std::io::Error::other(e.to_string())))?;
+                .with_context(|| format!("stat session file {}", src.display()))?;
             let mtime = meta.modified().unwrap();
             out.push(SessionInfo {
                 id,
@@ -648,7 +648,9 @@ async fn run_dialog(
             "Scan completed with errors, see above for details".to_string(),
         )),
         Err(gage_scan::runner::RunError::Canceled) => Err(DialogError::Canceled),
-        Err(e) => Err(DialogError::Other(std::io::Error::other(e.to_string()))),
+        Err(e) => Err(DialogError::Other(
+            anyhow::anyhow!("{e}").context("scan runner"),
+        )),
     }
 }
 
