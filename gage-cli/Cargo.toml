@@ -20,6 +20,7 @@ gage-claude = { path = "../gage-claude" }
 gage-index = { path = "../gage-index" }
 humantime = "2"
 libc = "0.2"
+notify = "8"
 tabled = { version = "0.20", features = ["ansi"] }
 textwrap = "0.16"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

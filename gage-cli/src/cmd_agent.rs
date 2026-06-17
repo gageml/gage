@@ -2,20 +2,27 @@
 //!
 //! The judge subcommand assembles a throwaway run dir at
 //! `~/.gage/tmp/<run_id>/` containing `cwd/` (the empty working directory
-//! Claude runs in) and `claude/` (the `CLAUDE_CONFIG_DIR`). On exit it
-//! copies session JSONLs out to `~/.gage/claude/judge/<session-id>.jsonl`
-//! and removes the tmp dir if `cwd/` is empty. Anything the user wrote in
-//! `cwd/` keeps the whole tmp dir around with a message naming the path.
+//! Claude runs in) and `claude/` (the `CLAUDE_CONFIG_DIR`). While Claude
+//! runs, a watcher thread hardlinks each new session JSONL from
+//! `<claude_home>/projects/*/<id>.jsonl` to
+//! `~/.gage/claude/judge/<id>.jsonl`, so the archived view stays current
+//! even if Claude is SIGKILLed. On exit a final sweep covers anything the
+//! watcher missed and the tmp dir is removed if `cwd/` is empty. Anything
+//! the user wrote in `cwd/` keeps the whole tmp dir around with a message
+//! naming the path.
 
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 
 use clap::Subcommand;
 use gage_claude::plugin;
 use gage_core::config::gage_home;
+use notify::{EventKind, RecursiveMode, Watcher};
 use uuid::Uuid;
 
 #[derive(Subcommand)]
@@ -45,9 +52,11 @@ fn judge_inner() -> io::Result<()> {
     let marketplace = claude_home.join(".plugin-marketplace");
     let archive_dir = judge_archive_dir();
 
+    let projects_dir = claude_home.join("projects");
     fs::create_dir_all(&claude_home)?;
     fs::create_dir_all(&cwd)?;
     fs::create_dir_all(&archive_dir)?;
+    fs::create_dir_all(&projects_dir)?;
     seed_claude_home(&claude_home, &cwd)?;
 
     let claude_bin = find_claude()
@@ -61,6 +70,19 @@ fn judge_inner() -> io::Result<()> {
     // tearing down before Claude exits and skipping the cleanup below.
     let prev_sigint = ignore_signal(libc::SIGINT);
     let prev_sigquit = ignore_signal(libc::SIGQUIT);
+
+    // Mirror session JSONLs into the archive dir as Claude creates them,
+    // so a SIGKILL'd run still leaves a viewable session behind. The
+    // watcher is dropped after Claude exits; a final sweep below covers
+    // any file the watcher missed (e.g. created in the gap before the
+    // watcher started).
+    let mirror = match start_session_mirror(&projects_dir, &archive_dir) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("warning: session mirror watcher failed to start: {e}");
+            None
+        }
+    };
 
     // The judge runs under an isolated CLAUDE_CONFIG_DIR, so the gage MCP
     // server it launches would resolve its corpus to this empty agent
@@ -93,6 +115,10 @@ fn judge_inner() -> io::Result<()> {
     restore_signal(libc::SIGINT, prev_sigint);
     restore_signal(libc::SIGQUIT, prev_sigquit);
 
+    if let Some(m) = mirror {
+        m.stop();
+    }
+
     let status = status?;
 
     let archived = archive_sessions(&claude_home, &archive_dir)?;
@@ -114,9 +140,11 @@ fn judge_inner() -> io::Result<()> {
     Ok(())
 }
 
-/// Copy every session JSONL Claude wrote under
-/// `<claude_home>/projects/*/` into `<archive_dir>/<basename>`. Returns
-/// the destination paths.
+/// Link every session JSONL Claude wrote under
+/// `<claude_home>/projects/*/` into `<archive_dir>/<basename>`. The live
+/// mirror watcher does the same work as files appear; this is a final
+/// sweep to catch anything the watcher missed. Returns the destination
+/// paths.
 fn archive_sessions(claude_home: &Path, archive_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let projects = claude_home.join("projects");
     let mut out = Vec::new();
@@ -139,11 +167,84 @@ fn archive_sessions(claude_home: &Path, archive_dir: &Path) -> io::Result<Vec<Pa
                 continue;
             };
             let dest = archive_dir.join(name);
-            fs::copy(&file, &dest)?;
+            link_or_copy(&file, &dest)?;
             out.push(dest);
         }
     }
     Ok(out)
+}
+
+/// Hardlink `src` to `dest`. Treats an existing `dest` as success (the
+/// watcher already mirrored it). Falls back to a one-shot `fs::copy` when
+/// the two paths are on different filesystems (`EXDEV`); that loses the
+/// SIGKILL-safety guarantee for the affected file but keeps the archive
+/// usable.
+fn link_or_copy(src: &Path, dest: &Path) -> io::Result<()> {
+    match fs::hard_link(src, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => fs::copy(src, dest).map(|_| ()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Watcher handle. Calling `stop` drops the watcher (which closes the
+/// event channel) then joins the worker thread.
+struct SessionMirror {
+    watcher: notify::RecommendedWatcher,
+    thread: thread::JoinHandle<()>,
+}
+
+impl SessionMirror {
+    fn stop(self) {
+        drop(self.watcher);
+        if self.thread.join().is_err() {
+            eprintln!("warning: session mirror thread panicked");
+        }
+    }
+}
+
+/// Start a recursive watcher on `projects_dir` that hardlinks each new
+/// `*.jsonl` into `archive_dir` as it appears. Also sweeps any files
+/// already present at start time, in case Claude created a file before
+/// the watcher was armed.
+fn start_session_mirror(projects_dir: &Path, archive_dir: &Path) -> notify::Result<SessionMirror> {
+    let (event_tx, event_rx) = mpsc::channel::<notify::Result<notify::Event>>();
+    let mut watcher = notify::recommended_watcher(event_tx)?;
+    watcher.watch(projects_dir, RecursiveMode::Recursive)?;
+
+    // Initial sweep handles files created before the watcher armed.
+    if let Err(e) = archive_sessions(projects_dir.parent().unwrap_or(projects_dir), archive_dir) {
+        eprintln!("warning: initial session sweep failed: {e}");
+    }
+
+    let archive = archive_dir.to_path_buf();
+    let thread = thread::spawn(move || {
+        // recv returns Err when the watcher (and its event sender) is
+        // dropped on stop. That's the normal exit path.
+        while let Ok(ev) = event_rx.recv() {
+            let Ok(ev) = ev else {
+                continue;
+            };
+            if !matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+                continue;
+            }
+            for path in ev.paths {
+                if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some(name) = path.file_name() else {
+                    continue;
+                };
+                let dest = archive.join(name);
+                if let Err(e) = link_or_copy(&path, &dest) {
+                    eprintln!("warning: mirror link failed for {}: {e}", path.display());
+                }
+            }
+        }
+    });
+
+    Ok(SessionMirror { watcher, thread })
 }
 
 /// Remove the tmp run dir unless the user wrote anything into `cwd/`. If
