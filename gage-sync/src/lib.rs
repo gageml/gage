@@ -3,6 +3,7 @@
 //! inspection directory without ever touching live state.
 
 mod backend;
+mod local;
 mod observer;
 mod payload;
 mod pull;
@@ -13,5 +14,5 @@ mod ssh;
 pub use backend::{Backend, SyncError};
 pub use observer::{NullObserver, Observer};
 pub use payload::TransferItem;
-pub use pull::pull;
-pub use push::push;
+pub use pull::{PullSource, default_pull_dir, pull};
+pub use push::{PushTargets, push};

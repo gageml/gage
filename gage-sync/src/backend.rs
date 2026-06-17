@@ -6,8 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use gage_core::config::{Remote, RemoteKind};
+use gage_core::config::{Remote, RemoteKind, resolve_local_path};
 
+use crate::local::LocalBackend;
 use crate::observer::Observer;
 use crate::payload::TransferItem;
 use crate::s3::S3Backend;
@@ -81,5 +82,9 @@ pub fn open_backend(remote: &Remote) -> Result<Box<dyn Backend>, SyncError> {
             region.as_deref(),
             endpoint.as_deref(),
         )?)),
+        RemoteKind::Local { path } => {
+            let resolved = resolve_local_path(path).map_err(SyncError::Io)?;
+            Ok(Box::new(LocalBackend::new(resolved)))
+        }
     }
 }

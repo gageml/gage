@@ -73,6 +73,37 @@ pub enum RemoteKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
     },
+    /// Local directory remote. Files are copied directly. `path` may use
+    /// a leading `~` for `$HOME` and may be relative to the current
+    /// working directory.
+    Local { path: PathBuf },
+}
+
+/// Resolves a local-remote path: expands a leading `~`/`~/` to `$HOME`,
+/// then joins relative paths against the current working directory.
+pub fn resolve_local_path(p: &Path) -> io::Result<PathBuf> {
+    let expanded = expand_tilde(p);
+    if expanded.is_absolute() {
+        Ok(expanded)
+    } else {
+        Ok(env::current_dir()?.join(expanded))
+    }
+}
+
+fn expand_tilde(p: &Path) -> PathBuf {
+    let Some(s) = p.to_str() else {
+        return p.to_path_buf();
+    };
+    if s == "~" {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    p.to_path_buf()
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

@@ -4,24 +4,28 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
-use gage_core::config::Config;
+use gage_core::config::Remote;
 use gage_db::db::{DbError, db_path, open_db_at};
 
 use crate::backend::{SyncError, open_backend};
 use crate::observer::Observer;
 use crate::payload::build_payload;
 
-/// Pushes the local payload to every configured remote.
+/// Set of destinations for a push.
+pub type PushTargets = Vec<Remote>;
+
+/// Pushes the local payload to each remote in `targets`, in order.
 ///
-/// Remotes are processed serially. A failure on one remote does not
-/// stop the others; this returns `Err` if any remote failed. Honors
-/// `cancel` between remotes and inside each backend operation.
-pub async fn push(observer: Arc<dyn Observer>, cancel: CancellationToken) -> Result<(), SyncError> {
-    let cfg = Config::load_user().map_err(SyncError::Io)?;
-    if cfg.remotes.is_empty() {
-        return Err(SyncError::Config(
-            "No remotes configured. Add `[[remote]]` entries to ~/.gage/config.toml".into(),
-        ));
+/// A failure on one remote does not stop the others; this returns `Err`
+/// if any remote failed. Honors `cancel` between remotes and inside
+/// each backend operation.
+pub async fn push(
+    targets: PushTargets,
+    observer: Arc<dyn Observer>,
+    cancel: CancellationToken,
+) -> Result<(), SyncError> {
+    if targets.is_empty() {
+        return Err(SyncError::Config("no push targets selected".into()));
     }
 
     let snapshot_dir = TempDir::new()?;
@@ -35,7 +39,7 @@ pub async fn push(observer: Arc<dyn Observer>, cancel: CancellationToken) -> Res
 
     let mut failures: Vec<String> = Vec::new();
     let mut interrupted = false;
-    for remote in &cfg.remotes {
+    for remote in &targets {
         if cancel.is_cancelled() {
             interrupted = true;
             break;
