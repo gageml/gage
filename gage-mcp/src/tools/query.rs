@@ -63,10 +63,11 @@ fn handle(
             return Ok(success(""));
         }
         let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut buf: Vec<u8> = b"```yaml\n".to_vec();
         if let Err(e) = write_yaml(&mut buf, &batches) {
             return Ok(domain_error(format!("YAML serialization error: {e}")));
         }
+        buf.extend_from_slice(b"\n```\n");
         if buf.len() > RESULT_CAP_BYTES {
             let msg = json!({
                 "error": "result exceeds size cap",
