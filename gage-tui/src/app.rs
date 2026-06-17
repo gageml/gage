@@ -93,6 +93,12 @@ pub fn run(
                 }
                 KeyCode::Right if state.focus == Focus::Outline => state.expand_selected(),
                 KeyCode::Left if state.focus == Focus::Outline => state.collapse_selected(),
+                KeyCode::Char('l')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && state.focus == Focus::Outline =>
+                {
+                    state.center_selected();
+                }
                 KeyCode::Char('n') => state.begin_add_note(),
                 KeyCode::Char('e') => {
                     state.begin_edit_note();
@@ -286,6 +292,14 @@ impl AppState {
 
     fn body_scroll_to_bottom(&mut self) {
         self.body_scroll = self.body_max_scroll;
+    }
+
+    fn center_selected(&mut self) {
+        let Some(sel) = self.list_state.selected() else {
+            return;
+        };
+        let half = (self.outline_viewport / 2) as usize;
+        *self.list_state.offset_mut() = sel.saturating_sub(half);
     }
 
     fn outline_page(&self) -> u16 {
