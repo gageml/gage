@@ -2884,6 +2884,7 @@ dependencies = [
  "serde_json",
  "serde_yml",
  "syntect",
+ "tokio",
  "unicode-linebreak",
  "unicode-segmentation",
  "unicode-width",

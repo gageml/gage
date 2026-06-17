@@ -97,6 +97,15 @@ impl Outline {
         CollapseOutcome::None
     }
 
+    /// Replace the entry/note projection in place. Preserves expansion state
+    /// (session + per-entry) so a reload doesn't collapse the tree. Entry
+    /// indices that no longer exist drop out of the expanded set.
+    pub fn reload(&mut self, entry_note_ids: Vec<Vec<String>>) {
+        self.entry_expanded.retain(|i| *i < entry_note_ids.len());
+        self.entry_note_ids = entry_note_ids;
+        self.rebuild();
+    }
+
     /// Append a note id under `entry_index`, ensure the entry is expanded so
     /// the new note is visible, and rebuild. Returns the visible-row index of
     /// the new note row.

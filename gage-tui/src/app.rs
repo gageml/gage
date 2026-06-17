@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::doc::Document;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
+use crate::session;
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
 use crate::{message, style};
@@ -36,8 +37,9 @@ pub fn run(
     options: &ViewOptions,
     db: &Connection,
 ) -> io::Result<()> {
-    let turns = options.show_turns.then(|| compute_turns(&doc));
     let mut state = AppState::new(doc);
+    let show_turns = options.show_turns;
+    let mut turns = show_turns.then(|| compute_turns(&state.doc));
     loop {
         terminal.draw(|frame| draw(frame, &mut state, turns.as_deref()))?;
         if let Event::Key(key) = event::read()?
@@ -104,6 +106,12 @@ pub fn run(
                     state.begin_edit_note();
                 }
                 KeyCode::Char('d') => state.begin_delete_note(),
+                KeyCode::Char('r') => {
+                    state.reload(db)?;
+                    if show_turns {
+                        turns = Some(compute_turns(&state.doc));
+                    }
+                }
                 _ => {}
             }
         }
@@ -292,6 +300,48 @@ impl AppState {
 
     fn body_scroll_to_bottom(&mut self) {
         self.body_scroll = self.body_max_scroll;
+    }
+
+    fn reload(&mut self, db: &Connection) -> io::Result<()> {
+        let session_id = self.doc.session.id.clone();
+        let prior = self
+            .list_state
+            .selected()
+            .and_then(|i| self.outline.row(i))
+            .map(|r| r.kind.clone());
+        let doc = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(session::load(&session_id, db))
+        })
+        .map_err(|e| io::Error::other(e.to_string()))?;
+        let entry_note_ids: Vec<Vec<String>> = doc
+            .entries
+            .iter()
+            .map(|e| {
+                doc.notes_for_line(e.line)
+                    .into_iter()
+                    .map(|n| n.id.clone())
+                    .collect()
+            })
+            .collect();
+        self.doc = doc;
+        self.outline.reload(entry_note_ids);
+        let new_sel = prior
+            .and_then(|kind| {
+                self.outline
+                    .rows()
+                    .iter()
+                    .position(|r| match (&r.kind, &kind) {
+                        (RowKind::Session, RowKind::Session) => true,
+                        (RowKind::Entry { index: a }, RowKind::Entry { index: b }) => a == b,
+                        (RowKind::Note { note_id: a, .. }, RowKind::Note { note_id: b, .. }) => {
+                            a == b
+                        }
+                        _ => false,
+                    })
+            })
+            .or(Some(0));
+        self.list_state.select(new_sel);
+        Ok(())
     }
 
     fn center_selected(&mut self) {
@@ -593,6 +643,7 @@ fn footer_hint(state: &AppState) -> String {
         }
         hints.push("d delete");
     }
+    hints.push("r refresh");
     hints.join(" · ")
 }
 

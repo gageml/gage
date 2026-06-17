@@ -16,6 +16,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 unicode-linebreak = "0.1"
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
