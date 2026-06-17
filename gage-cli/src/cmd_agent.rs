@@ -62,10 +62,31 @@ fn judge_inner() -> io::Result<()> {
     let prev_sigint = ignore_signal(libc::SIGINT);
     let prev_sigquit = ignore_signal(libc::SIGQUIT);
 
+    // The judge runs under an isolated CLAUDE_CONFIG_DIR, so the gage MCP
+    // server it launches would resolve its corpus to this empty agent
+    // home. Pin it to the user's real sessions via CLAUDE_PROJECTS_DIR
+    // (Gage's session-corpus override; the `claude` binary uses
+    // CLAUDE_CONFIG_DIR for its own session writes, so this does not
+    // affect archiving).
+    let user_projects = user_claude_projects()?;
+
+    // The judge reads and writes a sandbox database seeded with only
+    // neutral evidence (scanner notes), redirected via GAGE_DB. Every
+    // reader — datafusion tables and MCP tools — resolves through
+    // db_path(), so this one override isolates the model from issues,
+    // commentary, and prior judgments without per-tool filtering.
+    // GAGE_AGENT_JUDGE marks the mode for future skill/tool divergence.
+    let sandbox_db = run_dir.join("gage.db");
+    gage_db::db::create_judge_sandbox(&sandbox_db, &gage_db::db::db_path())
+        .map_err(|e| io::Error::other(format!("create judge sandbox: {e}")))?;
+
     let status = Command::new(&claude_bin)
         .args(["-n", "gage:judge", "/gage:judge"])
         .current_dir(&cwd)
         .env("CLAUDE_CONFIG_DIR", &claude_home)
+        .env("CLAUDE_PROJECTS_DIR", &user_projects)
+        .env("GAGE_DB", &sandbox_db)
+        .env("GAGE_AGENT_JUDGE", "1")
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .status();
 
@@ -242,10 +263,7 @@ fn seed_claude_home(claude_home: &Path, cwd: &Path) -> io::Result<()> {
     ]);
     let mut permissions = serde_json::Map::new();
     permissions.insert("allow".into(), allow);
-    settings.insert(
-        "permissions".into(),
-        serde_json::Value::Object(permissions),
-    );
+    settings.insert("permissions".into(), serde_json::Value::Object(permissions));
     fs::write(
         claude_home.join("settings.json"),
         serde_json::to_vec_pretty(&serde_json::Value::Object(settings))
@@ -302,6 +320,14 @@ fn seed_claude_home(claude_home: &Path, cwd: &Path) -> io::Result<()> {
 fn read_json(path: &Path) -> Option<serde_json::Value> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// The user's real Claude sessions directory (`$HOME/.claude/projects`),
+/// independent of any redirected `CLAUDE_CONFIG_DIR`. This is the corpus
+/// the judge analyzes.
+fn user_claude_projects() -> io::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME not set"))?;
+    Ok(PathBuf::from(home).join(".claude").join("projects"))
 }
 
 fn tmp_run_dir(run_id: &str) -> PathBuf {

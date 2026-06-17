@@ -36,7 +36,14 @@ impl From<rusqlite::Error> for DbError {
     }
 }
 
+/// Path to the gage database. Honors `GAGE_DB` (the agent-judge sandbox
+/// points here via the child environment); otherwise the canonical
+/// `<gage_home>/data/gage.db`. A single override covers every reader —
+/// the datafusion tables and the MCP tools all resolve through here.
 pub fn db_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("GAGE_DB") {
+        return PathBuf::from(p);
+    }
     gage_home().join("data").join("gage.db")
 }
 
@@ -61,6 +68,32 @@ pub fn open_db_in_memory() -> Result<Connection, DbError> {
     let conn = Connection::open_in_memory()?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Build the agent-judge sandbox database at `sandbox_path`: a fresh,
+/// migrated database seeded with only neutral evidence copied from
+/// `source_path` — scanner-authored notes and their session/project
+/// target rows. No issues, events, evidence links, non-scanner notes, or
+/// note relations cross over. The judge reads and writes this database in
+/// isolation; what it writes back is inspected and merged separately.
+pub fn create_judge_sandbox(sandbox_path: &Path, source_path: &Path) -> Result<(), DbError> {
+    // Ensure the source exists and is migrated before we attach it: a
+    // never-opened gage home has no database file yet.
+    drop(open_db_at(source_path)?);
+    let conn = open_db_at(sandbox_path)?;
+    conn.execute(
+        "ATTACH DATABASE ?1 AS src",
+        [source_path.to_string_lossy().as_ref()],
+    )?;
+    conn.execute_batch(
+        "INSERT INTO note SELECT * FROM src.note WHERE author LIKE 'scanner:%';
+         INSERT INTO session_note SELECT * FROM src.session_note
+            WHERE note_id IN (SELECT id FROM note);
+         INSERT INTO project_note SELECT * FROM src.project_note
+            WHERE note_id IN (SELECT id FROM note);",
+    )?;
+    conn.execute("DETACH DATABASE src", [])?;
+    Ok(())
 }
 
 fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -252,6 +285,43 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "missing table {tname}");
         }
+    }
+
+    #[test]
+    fn judge_sandbox_copies_only_scanner_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.db");
+        let sandbox = dir.path().join("sandbox.db");
+
+        {
+            let conn = open_db_at(&source).unwrap();
+            conn.execute_batch(
+                "INSERT INTO note (id, name, target, author, value, created)
+                 VALUES ('s1', 'n', 'session:abc', 'scanner:x', '1', 0),
+                        ('u1', 'n', 'session:abc', 'user:y', '1', 0);
+                 INSERT INTO session_note (session_id, line, line_end, note_id)
+                 VALUES ('abc', 1, 1, 's1'), ('abc', 2, 2, 'u1');
+                 INSERT INTO issue (id, name, target, title, status, created, author)
+                 VALUES ('i1', 'iss', 't', 'T', 'open', 0, 'scanner:x');",
+            )
+            .unwrap();
+        }
+
+        create_judge_sandbox(&sandbox, &source).unwrap();
+
+        let conn = open_db_at(&sandbox).unwrap();
+        let author: String = conn
+            .query_row("SELECT author FROM note", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(author, "scanner:x", "only the scanner note copies");
+        let session_notes: u32 = conn
+            .query_row("SELECT COUNT(*) FROM session_note", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(session_notes, 1, "only the scanner note's target copies");
+        let issues: u32 = conn
+            .query_row("SELECT COUNT(*) FROM issue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(issues, 0, "no issues copy");
     }
 
     #[test]

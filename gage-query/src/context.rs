@@ -21,18 +21,36 @@ fn default_root() -> PathBuf {
     gage_claude::session::projects_dir().expect("CLAUDE_PROJECTS_DIR or HOME must be set")
 }
 
-fn default_cache_dir() -> PathBuf {
-    gage_core::config::gage_home().join("cache")
+/// Cache location for a given corpus `root`. Namespaced by origin so the
+/// two corpora — the user's Claude sessions and the gage agent corpus —
+/// never share a summary cache, text index, or reconcile manifest. They
+/// are keyed by session id, which collides across origins, and reconcile
+/// GCs against a single root walk. There are exactly two origins by
+/// definition, so the segment is a literal: `agent` for the gage agent
+/// corpus (`<gage_home>/claude`, what `gage session -A` selects),
+/// `default` for everything else.
+fn default_cache_dir(root: &Path) -> PathBuf {
+    let gage_home = gage_core::config::gage_home();
+    let origin = if root == gage_home.join("claude") {
+        "agent"
+    } else {
+        "default"
+    };
+    gage_home.join("cache").join(origin)
 }
 
 /// The text-index handle for the default corpus and cache locations
 /// — what `gage query`, the MCP server, and `gage index` all share.
 pub fn default_index_store() -> IndexStore {
-    IndexStore::new(default_root(), default_cache_dir())
+    let root = default_root();
+    let cache_dir = default_cache_dir(&root);
+    IndexStore::new(root, cache_dir)
 }
 
 pub async fn create_context_default() -> SessionContext {
-    create_context(&default_root(), &default_cache_dir()).await
+    let root = default_root();
+    let cache_dir = default_cache_dir(&root);
+    create_context(&root, &cache_dir).await
 }
 
 /// Register the gage JSON UDF suite on a context. Used by
