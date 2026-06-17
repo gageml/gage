@@ -21,6 +21,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
     ScrollbarOrientation, ScrollbarState, Wrap,
 };
+use serde_json::Value;
 
 use crate::doc::Document;
 use crate::options::ViewOptions;
@@ -540,8 +541,17 @@ fn draw(frame: &mut Frame, state: &mut AppState, turns: Option<&[Option<usize>]>
     let [outline_area, body_area] =
         Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(middle_area);
 
-    let header = Paragraph::new(Line::from(format!("Session {}", state.doc.session.id)))
-        .style(style::header());
+    let short_id = state
+        .doc
+        .session
+        .id
+        .get(..8)
+        .unwrap_or(&state.doc.session.id);
+    let header_text = match state.doc.session.value.get("title").and_then(Value::as_str) {
+        Some(t) if !t.is_empty() => format!(" {short_id} · {t} "),
+        _ => format!(" {short_id} "),
+    };
+    let header = Paragraph::new(Line::from(header_text)).style(style::header());
     frame.render_widget(header, header_area);
 
     draw_outline(frame, state, outline_area, turns);
