@@ -382,9 +382,23 @@ fn resolve_display(note: &Note, value: Option<&str>) -> String {
 }
 
 fn format_value_cell(value: &note::NoteValue) -> String {
-    match &value.0 {
+    let raw = match &value.0 {
         serde_json::Value::String(s) => s.clone(),
         _ => value.to_json(),
+    };
+    let flattened: String = raw
+        .split(['\n', '\r'])
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if flattened.len() > 400 {
+        let mut end = 400;
+        while !flattened.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &flattened[..end])
+    } else {
+        flattened
     }
 }
 
