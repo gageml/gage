@@ -154,7 +154,7 @@ pub fn list(args: NoteListArgs) {
             vec![
                 short_uuid(&n.id).to_string(),
                 n.name.clone(),
-                n.value.to_json(),
+                format_value_cell(&n.value),
                 shorten_target(&n.target),
                 crate::human::format_elapsed_ms(n.created),
             ]
@@ -171,6 +171,7 @@ pub fn list(args: NoteListArgs) {
         )
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
+        .modify(Columns::one(2).not(Rows::first()), Color::FG_BRIGHT_CYAN)
         .modify(Columns::new(3..5).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
@@ -377,6 +378,13 @@ fn resolve_display(note: &Note, value: Option<&str>) -> String {
     match resolver.resolve(raw.to_string()) {
         Ok(text) => text,
         Err(e) => format!("(unresolved {raw}: {e})"),
+    }
+}
+
+fn format_value_cell(value: &note::NoteValue) -> String {
+    match &value.0 {
+        serde_json::Value::String(s) => s.clone(),
+        _ => value.to_json(),
     }
 }
 
