@@ -75,8 +75,9 @@ fn handle(
                 "cap_bytes": RESULT_CAP_BYTES,
                 "rows": row_count,
                 "suggestion": "Re-run with a smaller LIMIT, paginate with `line > N`, \
-                               SELECT substr(raw, 1, 800) instead of raw, \
-                               or omit the raw column entirely.",
+                               SELECT substr(text, 1, 800) or substr(raw, 1, 800) \
+                               instead of the full column, or omit wide columns \
+                               (text, raw) entirely.",
             })
             .to_string();
             return Ok(domain_error(msg));
