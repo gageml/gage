@@ -42,16 +42,22 @@ pub fn claude_json() -> Option<PathBuf> {
 #[derive(Debug, Clone)]
 pub struct ClaudeHome {
     path: PathBuf,
+    claude_json: PathBuf,
 }
 
 impl ClaudeHome {
     /// Build a `ClaudeHome` from the ambient environment via
-    /// [`claude_home`]. Errors only when neither `CLAUDE_CONFIG_DIR`
-    /// nor `HOME` is set.
+    /// [`claude_home`]. The `.claude.json` registry is resolved via
+    /// [`claude_json`] — `$CLAUDE_CONFIG_DIR/.claude.json` if that env
+    /// var is set, otherwise `$HOME/.claude.json` (sibling of
+    /// `$HOME/.claude/`, which is what Claude Code itself does).
+    /// Errors only when neither `CLAUDE_CONFIG_DIR` nor `HOME` is set.
     pub fn from_env() -> io::Result<Self> {
         let path =
             claude_home().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME not set"))?;
-        Ok(Self { path })
+        let claude_json =
+            claude_json().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME not set"))?;
+        Ok(Self { path, claude_json })
     }
 
     /// Build a `ClaudeHome` rooted at an explicit claude-home directory
@@ -60,11 +66,16 @@ impl ClaudeHome {
     /// `.claude.json` registry is read from `path.join(".claude.json")`
     /// for this constructor — fixtures lay it out that way.
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        let claude_json = path.join(".claude.json");
+        Self { path, claude_json }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn claude_json_path(&self) -> &Path {
+        &self.claude_json
     }
 
     /// List every project Claude Code has recorded for this home. Reads
@@ -77,9 +88,8 @@ impl ClaudeHome {
     ///   `path()/projects/<encoded>/` (no recorded sessions means there
     ///   is nothing useful to report on the project).
     pub fn projects(&self) -> io::Result<Vec<Project>> {
-        let claude_json = self.path.join(".claude.json");
-        let text = fs::read_to_string(&claude_json)?;
-        debug!(path = %claude_json.display(), bytes = text.len(), "read_to_string: claude.json");
+        let text = fs::read_to_string(&self.claude_json)?;
+        debug!(path = %self.claude_json.display(), bytes = text.len(), "read_to_string: claude.json");
         let parsed: ClaudeJson = serde_json::from_str(&text).map_err(io::Error::other)?;
         let sessions_root = self.path.join("projects");
         let raw_count = parsed.projects.len();
