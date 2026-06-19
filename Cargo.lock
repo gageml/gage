@@ -2666,6 +2666,7 @@ dependencies = [
 name = "gage-claude"
 version = "0.0.1"
 dependencies = [
+ "chrono",
  "gage-core",
  "regex",
  "rust-embed",

@@ -1151,29 +1151,11 @@ fn draw_hint(frame: &mut Frame, area: Rect, hint: &str) {
 }
 
 fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
-    let mut out = Vec::with_capacity(doc.entries.len());
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut next: usize = 0;
-    for entry in &doc.entries {
-        let turn = if entry.entry_type() == "assistant" {
-            entry
-                .message()
-                .and_then(|m| m.get("id"))
-                .and_then(|v| v.as_str())
-                .map(|id| match seen.get(id) {
-                    Some(&n) => n,
-                    None => {
-                        next += 1;
-                        seen.insert(id.to_string(), next);
-                        next
-                    }
-                })
-        } else {
-            None
-        };
-        out.push(turn);
-    }
-    out
+    let mut counter = gage_claude::stats::TurnCounter::new();
+    doc.entries
+        .iter()
+        .map(|e| counter.observe(&e.value))
+        .collect()
 }
 
 fn scrollbar(active: bool) -> Scrollbar<'static> {

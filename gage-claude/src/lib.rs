@@ -6,3 +6,4 @@ pub mod proc;
 pub mod project;
 pub mod session;
 pub mod session_reader;
+pub mod stats;

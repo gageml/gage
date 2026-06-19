@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gage-core = { path = "../gage-core" }
+chrono = { workspace = true }
 regex = { workspace = true }
 rust-embed = { workspace = true }
 serde = { workspace = true }

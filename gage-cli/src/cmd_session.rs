@@ -82,6 +82,12 @@ pub struct SessionListArgs {
     /// Show the full session ID, never truncating it
     #[arg(long)]
     full_id: bool,
+
+    /// Add per-session stats columns: model time, total tokens, turns.
+    /// Computed by parsing each listed session; --stats listings are
+    /// slower than the default
+    #[arg(long)]
+    stats: bool,
 }
 
 #[derive(Args)]
@@ -97,6 +103,29 @@ pub struct SessionDeleteArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     pub yes: bool,
+}
+
+fn format_model_time(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs / 60) % 60)
+    }
+}
+
+fn format_tokens(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else if n < 1_000_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    }
 }
 
 fn home_slug() -> String {
@@ -203,7 +232,7 @@ pub async fn list(args: SessionListArgs) {
     let show = args.limit.show_count(total);
 
     let sql = format!(
-        "SELECT id, project, mtime, size, title, message_count \
+        "SELECT id, project, mtime, size, title, message_count, path \
          FROM session{where_clause} ORDER BY mtime DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
@@ -242,6 +271,11 @@ pub async fn list(args: SessionListArgs) {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
+        let paths = batch
+            .column(6)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
 
         for i in 0..batch.num_rows() {
             let id = ids.value(i);
@@ -263,14 +297,35 @@ pub async fn list(args: SessionListArgs) {
             } else {
                 short_uuid(id).to_string()
             };
-            table_rows.push(vec![id_display, project, modified, size, title, count]);
+            let mut row = vec![id_display, project, modified, size, title, count];
+            if args.stats {
+                let (time, tokens, turns) = match gage_claude::stats::compute_session_stats(
+                    std::path::Path::new(paths.value(i)),
+                ) {
+                    Ok(s) => (
+                        format_model_time(s.model_time_ms),
+                        format_tokens(s.total_tokens),
+                        s.turn_count.to_string(),
+                    ),
+                    Err(_) => ("?".into(), "?".into(), "?".into()),
+                };
+                row.push(time);
+                row.push(tokens);
+                row.push(turns);
+            }
+            table_rows.push(row);
         }
     }
 
-    let header: Vec<String> = ["Id", "Project", "Modified", "Size", "Title", "Messages"]
+    let mut header: Vec<String> = ["Id", "Project", "Modified", "Size", "Title", "Messages"]
         .iter()
         .map(|s| s.to_string())
         .collect();
+    if args.stats {
+        header.push("Model time".into());
+        header.push("Tokens".into());
+        header.push("Turns".into());
+    }
 
     let col_count = header.len();
     let mut table = Table::from_iter(std::iter::once(header).chain(table_rows));
@@ -280,6 +335,9 @@ pub async fn list(args: SessionListArgs) {
         .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
         .modify(Columns::last(), Alignment::right());
+    if args.stats {
+        table.modify(Columns::new(6..col_count), Alignment::right());
+    }
     let term_width = console::Term::stdout().size().1 as usize;
     table.with(
         Width::truncate(term_width)
