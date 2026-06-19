@@ -43,3 +43,43 @@ FROM message_text('telemetry')
 GROUP BY session_id
 ORDER BY hits DESC;
 ```
+
+## Recipe: first event after a marker line
+
+For "find the next `message` row after each marker line" (e.g. the next user
+message after each `msg.interrupt` note), use a window function. A correlated
+scalar subquery in the SELECT list will not work --- see the limitation below.
+
+```sql
+WITH markers AS (
+  SELECT sn.session_id, sn.line AS marker_line
+  FROM note n
+  JOIN session_note sn ON sn.note_id = n.id
+  WHERE n.name = 'msg.interrupt'
+),
+ranked AS (
+  SELECT mk.session_id, mk.marker_line, m.line, m.text,
+         ROW_NUMBER() OVER (
+           PARTITION BY mk.session_id, mk.marker_line
+           ORDER BY m.line ASC
+         ) AS rn
+  FROM markers mk
+  JOIN message m
+    ON m.session_id = mk.session_id
+   AND m.line > mk.marker_line
+   AND m.type = 'user'
+)
+SELECT session_id, marker_line, line, text
+FROM ranked WHERE rn = 1;
+```
+
+For the previous event, swap `m.line > mk.marker_line` for `m.line <
+mk.marker_line` and `ORDER BY m.line ASC` for `DESC`.
+
+## DataFusion limitations
+
+- **Correlated scalar subqueries in the SELECT list are not implemented.** A
+  query like `SELECT i.line, (SELECT m.text FROM message m WHERE m.line >
+  i.line ORDER BY m.line LIMIT 1) FROM interrupts i` will fail with
+  "Physical plan does not support logical expression ScalarSubquery". Use a
+  windowed CTE (see the recipe above) instead.

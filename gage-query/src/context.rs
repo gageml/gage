@@ -105,11 +105,12 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
     ctx
 }
 
-/// Register the sqlite-backed tables (`note`, `issue`, `issue_evidence`)
-/// via `datafusion-table-providers`. The provider introspects the
-/// schema from sqlite at registration time and, combined with the
-/// `FederationOptimizerRule` installed on the session, rewrites
-/// sqlite-only sub-plans into a single SQL query executed by sqlite.
+/// Register the sqlite-backed tables (`note`, `session_note`, `issue`,
+/// `issue_evidence`) via `datafusion-table-providers`. The provider
+/// introspects the schema from sqlite at registration time and,
+/// combined with the `FederationOptimizerRule` installed on the
+/// session, rewrites sqlite-only sub-plans into a single SQL query
+/// executed by sqlite.
 async fn register_sqlite_tables(ctx: &SessionContext) {
     let pool = Arc::new(
         SqliteConnectionPoolFactory::new(
@@ -122,7 +123,7 @@ async fn register_sqlite_tables(ctx: &SessionContext) {
         .expect("sqlite connection pool"),
     );
     let factory = SqliteTableFactory::new(pool);
-    for name in ["note", "issue", "issue_evidence"] {
+    for name in ["note", "session_note", "issue", "issue_evidence"] {
         let provider = factory
             .table_provider(TableReference::bare(name))
             .await

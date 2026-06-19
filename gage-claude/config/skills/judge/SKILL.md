@@ -44,17 +44,13 @@ object.
 `target` tells you what the note referenced. This is essential in your
 investigation. It tells you where to look for the detail underlying a note.
 
-The `target` col value is encoded using the following scheme:
+`target` is advisory --- do not parse it. Use the prefix to pick the right link
+table and join through it:
 
-- `session:<id>` - refers to an entire session - use table cols `session.id` and
-  `note.session_id` to deference
-
-- `session:<id>:<line>` - refers to a specific session line (e.g. a user or
-  assistant message, etc.) - use table cols `note.session_id` and `note.line` to
-  dereference
-
-- `session<id>:<start>-<end>` - refers to a range of session lines inclusive of
-  `<start>` and `<end>`
+- `session:<id>` / `session:<id>:<line>` / `session:<id>:<start>-<end>` - refers
+  to a session, optionally a specific line or line range. Join through the
+  `session_note` link table: `JOIN session_note sn ON sn.note_id = n.id`, then
+  `sn.session_id`, `sn.line`, `sn.line_end` give you what you need.
 
 - `scan:<scan_id>` - refers to a scan run, which dereferences to a set of
   scanned sessions - you have no way to dereference this type of note to this
@@ -62,13 +58,26 @@ The `target` col value is encoded using the following scheme:
 
 - `project:<project_path>` - refers to a session project
 
-### `entry` table
+### `session_note`, `message`, and `entry` tables
 
-To get a session line referenced by a note, use `entry` table `session_id` and
-`line` cols. It may be helpful to extend the range of entry rows using a range
-query over `line`. E.g. if a note target is `session:abc:123` and you're
-interested in line `123` of session `abc` and also preceding and succeeding
-messages, you might use `WHERE line BETWEEN 113 AND 133`.
+To get a session line referenced by a note, join `note` to `session_note` on
+`note_id`, then to `message` on `session_id` and `line`:
+
+```sql
+SELECT m.text
+FROM note n
+JOIN session_note sn ON sn.note_id = n.id
+JOIN message m ON m.session_id = sn.session_id AND m.line = sn.line
+WHERE n.name = '...'
+```
+
+To extend to surrounding messages, widen the `message` join predicate, e.g.
+`AND m.line BETWEEN sn.line - 10 AND sn.line + 10`, or `AND m.line > sn.line`
+for forward search, `AND m.line < sn.line` for backward.
+
+The `message` table's `text` col contains the rendered message content. The
+`entry` table provides the raw JSONL row per session line --- use it when
+`message.text` and the other `message` cols don't have what you need.
 
 As this is an open exercise, use your best judgement.
 
@@ -84,6 +93,7 @@ Use the `config` to read project and user config.
 
 ### Other tables
 
-`issue` contains issues that have been identified in previous investigations.
-
-`issue_evidence` is a detail table for `issue` containing cited notes.
+`issue` and `issue_evidence` hold issues identified in previous investigations.
+For this exercise no issues exist yet --- `IssueList` will return empty and
+these tables are empty. Skip them; do not call `IssueList` and do not query
+`issue` or `issue_evidence`.
