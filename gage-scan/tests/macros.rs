@@ -6,7 +6,8 @@ use rune::{Diagnostics, Source, Sources};
 
 fn run_rune(embed_key: &str, script: &str) -> rune::Value {
     let base: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests"].iter().collect();
-    let rt = gage_scan::runner::TestRuntime::with_scanners_dir(embed_key, base);
+    let source_path = base.join(embed_key);
+    let rt = gage_scan::runner::TestRuntime::new();
     let mut context = rune_modules::default_context().unwrap();
     context.install(rt.types_module().unwrap()).unwrap();
     context.install(rt.macros_module().unwrap()).unwrap();
@@ -15,7 +16,7 @@ fn run_rune(embed_key: &str, script: &str) -> rune::Value {
 
     let mut sources = Sources::new();
     sources
-        .insert(Source::new("test", script).unwrap())
+        .insert(Source::with_path("test", script, &source_path).unwrap())
         .unwrap();
 
     let mut diagnostics = Diagnostics::new();

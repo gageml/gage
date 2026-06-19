@@ -50,17 +50,10 @@ pub async fn run_tests(
         build_errors: 0,
     };
 
-    // Build the context once and reuse it for every file. The std library
-    // and native modules are identical across files; only the base directory
-    // the include_* macros resolve against varies, so it lives in a shared
-    // cell updated per file rather than baked into a per-file context
-    let macro_base = runtime::base_dir("");
     let mut context = rune_modules::with_config(false).unwrap();
     context.install(runtime::io_module().unwrap()).unwrap();
     context.install(runtime::types_module().unwrap()).unwrap();
-    context
-        .install(runtime::macros_module_shared(macro_base.clone(), dir.clone()).unwrap())
-        .unwrap();
+    context.install(runtime::macros_module().unwrap()).unwrap();
     context.install(runtime::gage_module().unwrap()).unwrap();
     context.install(runtime::stats_module().unwrap()).unwrap();
     context.install(runtime::json_module().unwrap()).unwrap();
@@ -74,8 +67,6 @@ pub async fn run_tests(
             .to_string();
 
         let code = std::fs::read_to_string(path)?;
-
-        runtime::set_base_dir(&macro_base, &rel);
 
         let mut sources = Sources::new();
         sources

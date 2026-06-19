@@ -1,50 +1,21 @@
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
 
 use rune::ast;
 use rune::compile;
-use rune::macros::quote;
+use rune::macros::{MacroContext, quote};
 use rune::parse::Parser;
 use rune::{ContextError, Module};
 use serde_json as json;
 
-/// Mutable base directory the `include_*!` macros resolve relative paths
-/// against during compilation. Sharing one cell across files lets a single
-/// macros module (and the context it lives in) be reused for every source:
-/// update the cell with `set_base_dir` before compiling each file
-pub(crate) type SharedBaseDir = Arc<RwLock<String>>;
-
-/// Build a base-dir cell seeded for a single scanner's `embed_key`
-pub(crate) fn base_dir(embed_key: &str) -> SharedBaseDir {
-    Arc::new(RwLock::new(scanner_base_dir(embed_key)))
-}
-
-/// Point an existing cell at the directory of `embed_key`, so a reused macros
-/// module resolves includes relative to the file now being compiled
-pub(crate) fn set_base_dir(base: &SharedBaseDir, embed_key: &str) {
-    *base.write().unwrap() = scanner_base_dir(embed_key);
-}
-
-pub(crate) fn module(embed_key: &str, scanners_dir: PathBuf) -> Result<Module, ContextError> {
-    module_shared(base_dir(embed_key), scanners_dir)
-}
-
-pub(crate) fn module_shared(
-    base_dir: SharedBaseDir,
-    scanners_dir: PathBuf,
-) -> Result<Module, ContextError> {
+pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::new();
 
-    let dir = Arc::new(scanners_dir);
-
-    let base = base_dir.clone();
-    let dir_ref = dir.clone();
     m.macro_(["include_str"], move |cx, stream| {
         let mut p = Parser::from_token_stream(stream, cx.input_span());
         let path_lit = p.parse_all::<ast::LitStr>()?;
         let rel_path = cx.resolve(path_lit)?.try_into_owned()?;
 
-        let file_path = dir_ref.join(format!("{}{rel_path}", base.read().unwrap()));
+        let file_path = resolve_include_path(cx, &rel_path)?;
         let contents = std::fs::read_to_string(&file_path).map_err(|e| {
             compile::Error::msg(cx.macro_span(), format!("{}: {e}", file_path.display()))
         })?;
@@ -53,14 +24,12 @@ pub(crate) fn module_shared(
         Ok(quote!(#lit).into_token_stream(cx)?)
     })?;
 
-    let base = base_dir.clone();
-    let dir_ref = dir.clone();
     m.macro_(["include_json"], move |cx, stream| {
         let mut p = Parser::from_token_stream(stream, cx.input_span());
         let path_lit = p.parse_all::<ast::LitStr>()?;
         let rel_path = cx.resolve(path_lit)?.try_into_owned()?;
 
-        let file_path = dir_ref.join(format!("{}{rel_path}", base.read().unwrap()));
+        let file_path = resolve_include_path(cx, &rel_path)?;
         let raw = std::fs::read_to_string(&file_path).map_err(|e| {
             compile::Error::msg(cx.macro_span(), format!("{}: {e}", file_path.display()))
         })?;
@@ -82,11 +51,18 @@ pub(crate) fn module_shared(
     Ok(m)
 }
 
-fn scanner_base_dir(embed_key: &str) -> String {
-    embed_key
-        .rsplit_once('/')
-        .map(|(dir, _)| format!("{dir}/"))
-        .unwrap_or_default()
+/// Resolve an `include_*!` argument relative to the directory of the source
+/// file containing the macro invocation, matching Rust's `include_str!`
+/// semantics.
+fn resolve_include_path(cx: &MacroContext<'_, '_, '_>, rel_path: &str) -> compile::Result<PathBuf> {
+    let source_path = cx.source_path().ok_or_else(|| {
+        compile::Error::msg(
+            cx.macro_span(),
+            "include_*! requires a source loaded from a filesystem path",
+        )
+    })?;
+    let base = source_path.parent().unwrap_or_else(|| Path::new(""));
+    Ok(base.join(rel_path))
 }
 
 fn strip_jsonc(input: &str) -> String {
@@ -291,12 +267,5 @@ mod tests {
         assert!(src.starts_with("#{ "));
         assert!(src.contains(r#""items": [1, 2]"#));
         assert!(src.contains(r#""ok": true"#));
-    }
-
-    #[test]
-    fn scanner_base_dir_with_path() {
-        assert_eq!(scanner_base_dir("friction.rn"), "");
-        assert_eq!(scanner_base_dir("sub/scanner.rn"), "sub/");
-        assert_eq!(scanner_base_dir("a/b/c.rn"), "a/b/");
     }
 }

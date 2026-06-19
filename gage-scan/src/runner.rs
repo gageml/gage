@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gage_claude::home::ClaudeHome;
@@ -210,9 +209,7 @@ fn compile_scanner(
     let mut context = rune_modules::with_config(false).unwrap();
     context.install(runtime::io_module().unwrap()).unwrap();
     context.install(runtime::types_module().unwrap()).unwrap();
-    context
-        .install(runtime::macros_module(&scanner.def.embed_key, dir).unwrap())
-        .unwrap();
+    context.install(runtime::macros_module().unwrap()).unwrap();
     context.install(runtime::gage_module().unwrap()).unwrap();
     context.install(runtime::stats_module().unwrap()).unwrap();
     context.install(runtime::json_module().unwrap()).unwrap();
@@ -286,9 +283,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
         let mut context = rune_modules::with_config(false).unwrap();
         context.install(runtime::io_module().unwrap()).unwrap();
         context.install(runtime::types_module().unwrap()).unwrap();
-        context
-            .install(runtime::macros_module(&scanner.def.embed_key, dir).unwrap())
-            .unwrap();
+        context.install(runtime::macros_module().unwrap()).unwrap();
         context.install(runtime::gage_module().unwrap()).unwrap();
         context.install(runtime::stats_module().unwrap()).unwrap();
         context.install(runtime::json_module().unwrap()).unwrap();
@@ -482,41 +477,16 @@ fn write_vm_error<W: rune::termcolor::WriteColor>(
 }
 
 // Public TestRuntime preserved for external tests (gage-scan/tests/*).
-pub struct TestRuntime {
-    embed_key: String,
-    scanners_dir: PathBuf,
-}
-
-impl Default for TestRuntime {
-    fn default() -> Self {
-        Self {
-            embed_key: String::new(),
-            scanners_dir: scanners_dir(),
-        }
-    }
-}
+#[derive(Default)]
+pub struct TestRuntime;
 
 impl TestRuntime {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_embed_key(embed_key: &str) -> Self {
-        Self {
-            embed_key: embed_key.to_string(),
-            ..Self::default()
-        }
-    }
-
-    pub fn with_scanners_dir(embed_key: &str, scanners_dir: PathBuf) -> Self {
-        Self {
-            embed_key: embed_key.to_string(),
-            scanners_dir,
-        }
+        Self
     }
 
     pub fn macros_module(&self) -> Result<rune::Module, rune::ContextError> {
-        runtime::macros_module(&self.embed_key, self.scanners_dir.clone())
+        runtime::macros_module()
     }
 
     pub fn gage_module(&self) -> Result<rune::Module, rune::ContextError> {

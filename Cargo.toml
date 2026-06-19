@@ -63,6 +63,10 @@ uuid = { version = "1", features = ["v4"] }
 [patch.crates-io]
 datafusion-table-providers = { git = "https://github.com/gar1t/datafusion-table-providers", branch = "gar1t-dev-v0.10.1" }
 
+[patch."https://github.com/gar1t/rune.git"]
+rune = { path = "../rune/crates/rune" }
+rune-modules = { path = "../rune/crates/rune-modules" }
+
 [workspace.lints.clippy]
 let_underscore_must_use = "warn"
 map_err_ignore = "warn"
