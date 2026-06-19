@@ -42,20 +42,10 @@ pub fn extract_scanners() -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct NoteInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub explanation: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TaskNotesDef {
     pub wants: Vec<String>,
-    pub writes: BTreeMap<String, NoteInfo>,
+    pub writes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -683,7 +673,7 @@ fn parse_task_notes(
                         field: "notes.writes",
                     });
                 };
-                notes.writes = parse_notes(source, writes_obj);
+                notes.writes = parse_notes(source, writes_obj, task)?;
             }
             _ => {}
         }
@@ -691,7 +681,11 @@ fn parse_task_notes(
     Ok(notes)
 }
 
-fn parse_notes(source: &str, obj: &ast::ExprObject) -> BTreeMap<String, NoteInfo> {
+fn parse_notes(
+    source: &str,
+    obj: &ast::ExprObject,
+    task: &str,
+) -> Result<BTreeMap<String, String>, ParseError> {
     let mut notes = BTreeMap::new();
     for (field, _) in &obj.assignments {
         let Some(key) = field_key(source, &field.key) else {
@@ -700,32 +694,13 @@ fn parse_notes(source: &str, obj: &ast::ExprObject) -> BTreeMap<String, NoteInfo
         let Some((_, expr)) = &field.assign else {
             continue;
         };
-        let ast::Expr::Object(note_obj) = expr else {
-            continue;
-        };
-        let mut info = NoteInfo {
-            description: None,
-            value: None,
-            explanation: None,
-        };
-        for (note_field, _) in &note_obj.assignments {
-            let Some(note_key) = field_key(source, &note_field.key) else {
-                continue;
-            };
-            let Some((_, note_expr)) = &note_field.assign else {
-                continue;
-            };
-            let val = expr_str(source, note_expr);
-            match note_key.as_str() {
-                "description" => info.description = val,
-                "value" => info.value = val,
-                "explanation" => info.explanation = val,
-                _ => {}
-            }
-        }
-        notes.insert(key, info);
+        let doc = expr_str(source, expr).ok_or(ParseError::TaskFieldType {
+            task: task.to_string(),
+            field: "notes.writes",
+        })?;
+        notes.insert(key, doc);
     }
-    notes
+    Ok(notes)
 }
 
 fn parse_config(source: &str, obj: &ast::ExprObject) -> Object {

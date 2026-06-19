@@ -17,13 +17,7 @@ pub const SCANNER = #{
         main: #{
             notes: #{
                 writes: #{
-                    "session-retention.cleanup-period-days": #{
-                        value: "Default retention in days (written only when cleanupPeriodDays is unset)",
-                        metadata: #{
-                            configured: "Always false: the note is written only when cleanupPeriodDays is unset",
-                            default_retention_days: "Days Claude Code retains transcripts when the setting is absent",
-                        },
-                    },
+                    "session-retention.cleanup-period-days": "Default retention in days (written only when cleanupPeriodDays is unset). Metadata: configured (Always false: the note is written only when cleanupPeriodDays is unset), default_retention_days (Days Claude Code retains transcripts when the setting is absent).",
                 },
             },
         },

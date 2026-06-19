@@ -7,9 +7,9 @@ pub const SCANNER = #{
         interrupt: #{
             notes: #{
                 writes: #{
-                    "msg.interrupt": #{
-                        value: "'user' or 'tool_use' depending on the interrupt type",
-                    },
+                    "msg.interrupt": include_str!(
+                        "msg.interrupt.md"
+                    ),
                 },
             },
         },

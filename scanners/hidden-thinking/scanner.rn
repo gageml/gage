@@ -15,14 +15,7 @@ pub const SCANNER = #{
         evidence: #{
             notes: #{
                 writes: #{
-                    "thinking.empty": #{
-                        value: "true if thinking blocks are empty, false otherwise",
-                        metadata: #{
-                            timestamp: "Timestamp of msg",
-                            model: "Model thinking block applies to",
-                            config: "Applicable config at the time of writing",
-                        },
-                    },
+                    "thinking.empty": "true if thinking blocks are empty, false otherwise. Metadata: timestamp (Timestamp of msg), model (Model thinking block applies to), config (Applicable config at the time of writing).",
                 },
             },
         },
@@ -30,9 +23,7 @@ pub const SCANNER = #{
             notes: #{
                 wants: ["thinking.empty"],
                 writes: #{
-                    "thinking.empty.issue": #{
-                        explanation: "Issue background info",
-                    },
+                    "thinking.empty.issue": "Issue background info",
                 },
             },
         },
