@@ -23,6 +23,7 @@ const TOOLS: &[ToolDef] = &[
     tools::issue_list::TOOL,
     tools::issue_get::TOOL,
     tools::issue_close::TOOL,
+    tools::note_doc::TOOL,
 ];
 
 pub struct GageServer {

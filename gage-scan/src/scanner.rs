@@ -139,7 +139,16 @@ pub enum ParseError {
     MissingScanner,
     MissingName,
     DuplicateTask(String),
-    TaskFieldType { task: String, field: &'static str },
+    TaskFieldType {
+        task: String,
+        field: &'static str,
+    },
+    IncludeStr {
+        task: String,
+        note: String,
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl ParseError {
@@ -198,6 +207,18 @@ impl fmt::Display for ParseError {
             }
             ParseError::TaskFieldType { task, field } => {
                 write!(f, "task '{task}' field '{field}' has unexpected type")
+            }
+            ParseError::IncludeStr {
+                task,
+                note,
+                path,
+                message,
+            } => {
+                write!(
+                    f,
+                    "task '{task}' note '{note}' include_str!({}): {message}",
+                    path.display()
+                )
             }
         }
     }
@@ -504,6 +525,22 @@ impl ScannerRegistry {
             .filter(|d| config.is_scanner_enabled(&d.name))
             .collect()
     }
+
+    /// Docstring for `note_name` from any scanner's `notes.writes`.
+    /// Resolution order is by scanner name then task name (both ascending);
+    /// last write wins for deterministic behaviour on duplicates. Returns
+    /// `None` if no scanner declares the note.
+    pub fn note_doc(&self, note_name: &str) -> Option<String> {
+        let mut found: Option<String> = None;
+        for def in self.list() {
+            for task in def.tasks.values() {
+                if let Some(doc) = task.notes.writes.get(note_name) {
+                    found = Some(doc.clone());
+                }
+            }
+        }
+        found
+    }
 }
 
 fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError> {
@@ -570,7 +607,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
     }
 
     let tasks = match tasks_obj {
-        Some(obj) => parse_tasks(source, obj)?,
+        Some(obj) => parse_tasks(source, obj, embed_key)?,
         None => BTreeMap::new(),
     };
 
@@ -590,6 +627,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
 fn parse_tasks(
     source: &str,
     obj: &ast::ExprObject,
+    embed_key: &str,
 ) -> Result<BTreeMap<String, TaskDef>, ParseError> {
     let mut tasks: BTreeMap<String, TaskDef> = BTreeMap::new();
 
@@ -627,7 +665,7 @@ fn parse_tasks(
                         field: "notes",
                     });
                 };
-                notes = parse_task_notes(source, notes_obj, &name)?;
+                notes = parse_task_notes(source, notes_obj, &name, embed_key)?;
             }
         }
 
@@ -641,6 +679,7 @@ fn parse_task_notes(
     source: &str,
     obj: &ast::ExprObject,
     task: &str,
+    embed_key: &str,
 ) -> Result<TaskNotesDef, ParseError> {
     let mut notes = TaskNotesDef::default();
     for (field, _) in &obj.assignments {
@@ -673,7 +712,7 @@ fn parse_task_notes(
                         field: "notes.writes",
                     });
                 };
-                notes.writes = parse_notes(source, writes_obj, task)?;
+                notes.writes = parse_notes(source, writes_obj, task, embed_key)?;
             }
             _ => {}
         }
@@ -685,6 +724,7 @@ fn parse_notes(
     source: &str,
     obj: &ast::ExprObject,
     task: &str,
+    embed_key: &str,
 ) -> Result<BTreeMap<String, String>, ParseError> {
     let mut notes = BTreeMap::new();
     for (field, _) in &obj.assignments {
@@ -694,13 +734,69 @@ fn parse_notes(
         let Some((_, expr)) = &field.assign else {
             continue;
         };
-        let doc = expr_str(source, expr).ok_or(ParseError::TaskFieldType {
-            task: task.to_string(),
-            field: "notes.writes",
-        })?;
+        let doc = resolve_note_doc(source, expr, task, &key, embed_key)?;
         notes.insert(key, doc);
     }
     Ok(notes)
+}
+
+/// Resolve a `notes.writes` docstring value. Accepts a string literal or
+/// an `include_str!("relative/path")` macro call resolved against the
+/// scanner's directory (same convention as the Rune `include_str!` macro
+/// in [`runtime::macros`]).
+fn resolve_note_doc(
+    source: &str,
+    expr: &ast::Expr,
+    task: &str,
+    note: &str,
+    embed_key: &str,
+) -> Result<String, ParseError> {
+    if let Some(s) = expr_str(source, expr) {
+        return Ok(s);
+    }
+    if let ast::Expr::MacroCall(mc) = expr {
+        let path_span = mc.path.span();
+        let macro_name = &source[path_span.start.0 as usize..path_span.end.0 as usize];
+        if macro_name == "include_str" {
+            let raw = {
+                let open_end = mc.open.span.end.0 as usize;
+                let close_start = mc.close.span.start.0 as usize;
+                source[open_end..close_start].trim()
+            };
+            let stripped = strip_quotes(raw);
+            if stripped.len() != raw.len() {
+                let path = include_base_dir(embed_key).join(&stripped);
+                return std::fs::read_to_string(&path)
+                    .map(|s| s.trim_end().to_string())
+                    .map_err(|e| ParseError::IncludeStr {
+                        task: task.to_string(),
+                        note: note.to_string(),
+                        path,
+                        message: e.to_string(),
+                    });
+            }
+        }
+    }
+    Err(ParseError::TaskFieldType {
+        task: task.to_string(),
+        field: "notes.writes",
+    })
+}
+
+/// Directory `include_str!` paths in `notes.writes` resolve against.
+/// Mirrors `ScannerDef::module_dir`: absolute `embed_key` (a `--file`
+/// scanner) → its parent; relative `embed_key` (embedded scanner) →
+/// `scanners_dir()` + the leading subdirectory.
+fn include_base_dir(embed_key: &str) -> PathBuf {
+    let p = Path::new(embed_key);
+    if p.is_absolute() {
+        return p
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+    }
+    let rel = embed_key.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    scanners_dir().join(rel)
 }
 
 fn parse_config(source: &str, obj: &ast::ExprObject) -> Object {
