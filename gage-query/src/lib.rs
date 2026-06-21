@@ -4,6 +4,7 @@ mod filter;
 mod print_format;
 mod repl;
 mod scan_context;
+pub mod slow_log;
 pub mod tables;
 
 pub use cache::SessionCache;

@@ -48,6 +48,32 @@ pub struct Config {
     /// writes to every configured remote.
     #[serde(default, rename = "remote", skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<Remote>,
+
+    #[serde(default)]
+    pub query: QueryConfig,
+}
+
+/// Query-tool settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryConfig {
+    /// Queries whose wall-clock time meets or exceeds this many
+    /// milliseconds are written to `<gage_home>/log/slow.jsonl`. Failed
+    /// queries are logged regardless of duration. A value of `0` disables
+    /// the slow query log.
+    #[serde(default = "default_slow_log_ms")]
+    pub slow_log_ms: u64,
+}
+
+fn default_slow_log_ms() -> u64 {
+    1000
+}
+
+impl Default for QueryConfig {
+    fn default() -> Self {
+        Self {
+            slow_log_ms: default_slow_log_ms(),
+        }
+    }
 }
 
 /// A single backup destination.

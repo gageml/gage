@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Instant;
 
+use gage_query::slow_log;
 use gage_query::write_yaml;
 use rmcp::{
     ErrorData as McpError,
@@ -46,23 +48,33 @@ fn handle(
             .ok_or_else(|| McpError::invalid_params("missing or non-string `sql`", None))?;
 
         let session_ctx = ctx.service.ctx().await;
+        let start = Instant::now();
         let df = match session_ctx.sql(sql).await {
             Ok(df) => df,
-            Err(e) => return Ok(domain_error(format!("SQL error: {e}"))),
+            Err(e) => {
+                let msg = format!("SQL error: {e}");
+                slow_log::record(sql, start.elapsed(), None, Some(&msg));
+                return Ok(domain_error(msg));
+            }
         };
         let batches = match df.collect().await {
             Ok(b) => b,
-            Err(e) => return Ok(domain_error(format!("query execution error: {e}"))),
+            Err(e) => {
+                let msg = format!("query execution error: {e}");
+                slow_log::record(sql, start.elapsed(), None, Some(&msg));
+                return Ok(domain_error(msg));
+            }
         };
         let batches: Vec<_> = batches
             .iter()
             .filter(|b| b.num_rows() > 0)
             .cloned()
             .collect();
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        slow_log::record(sql, start.elapsed(), Some(row_count), None);
         if batches.is_empty() {
             return Ok(success(""));
         }
-        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
         let mut buf: Vec<u8> = b"```yaml\n".to_vec();
         if let Err(e) = write_yaml(&mut buf, &batches) {
             return Ok(domain_error(format!("YAML serialization error: {e}")));

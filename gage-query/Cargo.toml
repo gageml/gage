@@ -11,11 +11,13 @@ datafusion = { workspace = true }
 datafusion-federation = "0.4"
 datafusion-functions-json = "0.52"
 datafusion-table-providers = { version = "0.10.1", features = ["sqlite", "sqlite-federation"] }
+chrono = { workspace = true }
 futures = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-claude = { path = "../gage-claude" }
 gage-index = { path = "../gage-index" }
+rusqlite = { version = "0.37", features = ["bundled"] }
 rustyline = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

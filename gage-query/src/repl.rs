@@ -11,6 +11,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::print_format::PrintFormat;
+use crate::slow_log;
 use crate::tables::{TvfInfo, registered_tvfs};
 
 pub async fn exec_command(
@@ -35,12 +36,43 @@ async fn exec_with_stats(
     format: PrintFormat,
 ) -> Result<QueryStats, Box<dyn std::error::Error>> {
     let start = Instant::now();
+    let result = run_query(ctx, sql, format).await;
+    let elapsed = start.elapsed();
+    match &result {
+        Ok((rows, _, _, exec)) => slow_log::record(sql, *exec, Some(*rows), None),
+        Err(e) => slow_log::record(sql, elapsed, None, Some(&e.to_string())),
+    }
+    let (rows, batches, plan, _) = result?;
+    Ok(QueryStats {
+        elapsed,
+        rows,
+        batches,
+        plan,
+    })
+}
+
+type QueryOutput = (usize, usize, Arc<dyn ExecutionPlan>, Duration);
+
+async fn run_query(
+    ctx: &SessionContext,
+    sql: &str,
+    format: PrintFormat,
+) -> Result<QueryOutput, Box<dyn std::error::Error>> {
+    // Time planning and stream-drain only. `print_batch` renders to the
+    // terminal and is excluded so the slow log measures execution, not
+    // output formatting.
+    let exec_start = Instant::now();
     let plan = ctx.sql(sql).await?.create_physical_plan().await?;
     let mut stream = execute_stream(Arc::clone(&plan), ctx.task_ctx())?;
+    let mut exec = exec_start.elapsed();
     let mut rows = 0usize;
     let mut batches = 0usize;
     let mut is_first = true;
-    while let Some(batch) = stream.next().await {
+    loop {
+        let next_start = Instant::now();
+        let next = stream.next().await;
+        exec += next_start.elapsed();
+        let Some(batch) = next else { break };
         let batch = batch?;
         if batch.num_rows() == 0 {
             continue;
@@ -50,13 +82,7 @@ async fn exec_with_stats(
         batches += 1;
         is_first = false;
     }
-    let elapsed = start.elapsed();
-    Ok(QueryStats {
-        elapsed,
-        rows,
-        batches,
-        plan,
-    })
+    Ok((rows, batches, plan, exec))
 }
 
 pub async fn run_repl(
