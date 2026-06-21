@@ -167,7 +167,27 @@ async fn do_poll(inner: std::sync::Arc<Mutex<SessionInner>>) -> super::Result<Po
 async fn send_next_round(inner: &std::sync::Arc<Mutex<SessionInner>>) -> super::Result<()> {
     let (client, req) = {
         let mut state = inner.lock().unwrap();
-        let results = std::mem::take(&mut state.pending_tool_results);
+        let mut results = std::mem::take(&mut state.pending_tool_results);
+        let handled: std::collections::HashSet<String> = results
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        if let Some(last) = state.messages.last() {
+            for block in &last.content {
+                if let ContentBlock::ToolUse { id, .. } = block
+                    && !handled.contains(id)
+                {
+                    results.push(ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: "Bad request: no such tool".to_string(),
+                        is_error: true,
+                    });
+                }
+            }
+        }
         state.messages.push(ApiMessage {
             role: Role::User,
             content: results,
