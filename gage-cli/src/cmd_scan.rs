@@ -736,7 +736,12 @@ fn list_scanners(registry: &ScannerRegistry) {
         }
     };
 
-    let defs = registry.list_visible();
+    let mut defs = registry.list_visible();
+    defs.sort_by(|a, b| {
+        let a_enabled = config.is_scanner_enabled(&a.name);
+        let b_enabled = config.is_scanner_enabled(&b.name);
+        b_enabled.cmp(&a_enabled).then_with(|| a.name.cmp(&b.name))
+    });
 
     let rows: Vec<Vec<String>> = defs
         .into_iter()
