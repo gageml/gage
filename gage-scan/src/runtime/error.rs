@@ -47,6 +47,10 @@ pub enum Error {
     #[rune(constructor)]
     Template(#[rune(get)] String),
 
+    /// Agent subprocess failure (spawn, wait timeout, sandbox merge).
+    #[rune(constructor)]
+    Agent(#[rune(get)] String),
+
     /// A note or issue with the same duplication key already exists.
     /// `prev` is the existing value; `new` is the value that would have
     /// been written, carrying `prev`'s id (so it identifies the existing
@@ -78,6 +82,7 @@ impl std::fmt::Display for Error {
             Error::Http { status, body } => write!(f, "http {status}: {body}"),
             Error::Decode(m) => write!(f, "decode: {m}"),
             Error::Template(m) => write!(f, "template: {m}"),
+            Error::Agent(m) => write!(f, "agent: {m}"),
             Error::Duplicate { prev, .. } => write!(f, "duplicate {}", describe_duplicate(prev)),
         }
     }
@@ -103,6 +108,7 @@ impl std::fmt::Debug for Error {
                 .finish(),
             Error::Decode(m) => write!(f, "Decode({m:?})"),
             Error::Template(m) => write!(f, "Template({m:?})"),
+            Error::Agent(m) => write!(f, "Agent({m:?})"),
             Error::Duplicate { prev, .. } => write!(f, "Duplicate({})", describe_duplicate(prev)),
         }
     }

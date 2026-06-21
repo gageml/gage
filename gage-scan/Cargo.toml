@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 codespan-reporting = "0.13.1"
 datafusion = { workspace = true }
+gage-agent = { path = "../gage-agent" }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-query = { path = "../gage-query" }

@@ -1,0 +1,13 @@
+use gage::call_agent_judge;
+
+pub const SCANNER = #{
+    name: "test-agent",
+    description: "Test agent judge",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let session = call_agent_judge("/gage:judge", #{}).await?;
+    let out = session.wait(900).await?;
+    println!("### {out:?}");
+}

@@ -1,15 +1,22 @@
 //! Run Claude Code in an isolated home for Gage workflows.
 //!
-//! The judge entry point assembles a throwaway run dir at
-//! `~/.gage/tmp/<run_id>/` containing `cwd/` (the empty working directory
-//! Claude runs in) and `claude/` (the `CLAUDE_CONFIG_DIR`). While Claude
-//! runs, a watcher thread hardlinks each new session JSONL from
-//! `<claude_home>/projects/*/<id>.jsonl` to
-//! `~/.gage/claude/judge/<id>.jsonl`, so the archived view stays current
-//! even if Claude is SIGKILLed. On exit a final sweep covers anything the
-//! watcher missed and the tmp dir is removed if `cwd/` is empty. Anything
-//! the user wrote in `cwd/` keeps the whole tmp dir around with a message
-//! naming the path.
+//! Two entry points share the same isolated-home setup:
+//!
+//! - [`judge`] runs the interactive `gage agent judge` command: it spawns
+//!   `claude /gage:judge`, inherits the terminal, and mirrors session
+//!   JSONLs live so a SIGKILL'd run still leaves a viewable session.
+//! - [`spawn_judge`] runs the same judge setup non-interactively via
+//!   `claude -p <prompt>` for the scanner path, returning an
+//!   [`AgentSession`] the caller drives with `wait`/`kill`.
+//!
+//! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` containing
+//! `cwd/` (the empty working directory Claude runs in) and `claude/` (the
+//! `CLAUDE_CONFIG_DIR`), seed an isolated home, install the gage plugin,
+//! and create a judge sandbox db seeded with neutral evidence. The session
+//! JSONL Claude writes is hardlinked into `~/.gage/claude/<name>/`; because
+//! a hardlink shares the inode, that archived view stays current and
+//! survives the run dir's removal on cleanup, so `gage session -A` reads it
+//! without a copy step.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -18,31 +25,31 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use gage_claude::plugin;
 use gage_core::config::gage_home;
 use notify::{EventKind, RecursiveMode, Watcher};
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child as TokioChild, Command as TokioCommand};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+/// Grace period for the `SIGTERM` → `SIGKILL` shutdown `wait` performs when
+/// its timeout elapses.
+const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
+
 pub fn judge() -> io::Result<ExitStatus> {
-    let run_id = Uuid::new_v4().to_string();
-    let run_dir = tmp_run_dir(&run_id);
-    let cwd = run_dir.join("cwd");
-    let claude_home = run_dir.join("claude");
-    let marketplace = claude_home.join(".plugin-marketplace");
-    let archive_dir = judge_archive_dir();
-
+    let PreparedRun {
+        run_dir,
+        cwd,
+        claude_home,
+        archive_dir,
+        claude_bin,
+        user_projects,
+        sandbox_db,
+    } = prepare_run("judge")?;
     let projects_dir = claude_home.join("projects");
-    fs::create_dir_all(&claude_home)?;
-    fs::create_dir_all(&cwd)?;
-    fs::create_dir_all(&archive_dir)?;
-    fs::create_dir_all(&projects_dir)?;
-    seed_claude_home(&claude_home, &cwd)?;
-
-    let claude_bin = find_claude()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
-    let gage_bin = sibling_gage_bin()?;
-    install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin)?;
 
     // Ignore SIGINT (and SIGQUIT) in the parent while Claude runs. Both
     // processes share the foreground process group, so the terminal still
@@ -63,24 +70,6 @@ pub fn judge() -> io::Result<ExitStatus> {
             None
         }
     };
-
-    // The judge runs under an isolated CLAUDE_CONFIG_DIR, so the gage MCP
-    // server it launches would resolve its corpus to this empty agent
-    // home. Pin it to the user's real sessions via CLAUDE_PROJECTS_DIR
-    // (Gage's session-corpus override; the `claude` binary uses
-    // CLAUDE_CONFIG_DIR for its own session writes, so this does not
-    // affect archiving).
-    let user_projects = user_claude_projects()?;
-
-    // The judge reads and writes a sandbox database seeded with only
-    // neutral evidence (scanner notes), redirected via GAGE_DB. Every
-    // reader — datafusion tables and MCP tools — resolves through
-    // db_path(), so this one override isolates the model from issues,
-    // commentary, and prior judgments without per-tool filtering.
-    // GAGE_AGENT_JUDGE marks the mode for future skill/tool divergence.
-    let sandbox_db = run_dir.join("gage.db");
-    gage_db::db::create_judge_sandbox(&sandbox_db, &gage_db::db::db_path())
-        .map_err(|e| io::Error::other(format!("create judge sandbox: {e}")))?;
 
     let status = Command::new(&claude_bin)
         .args(["-n", "gage:judge", "/gage:judge"])
@@ -128,6 +117,296 @@ pub fn judge() -> io::Result<ExitStatus> {
     cleanup_run_dir(&run_dir, &cwd);
 
     Ok(status)
+}
+
+/// Options for [`spawn_judge`], mirroring the `call_agent_judge` Rune opts.
+pub struct JudgeOpts {
+    /// Agent identifier; selects the archive dir `~/.gage/claude/<name>/`.
+    pub name: String,
+    /// `--model` passed to `claude`, if set.
+    pub model: Option<String>,
+    /// `--max-turns` passed to `claude`, if set.
+    pub max_turns: Option<u32>,
+}
+
+/// A spawned non-interactive judge `claude` process and the run state its
+/// exit needs. Drive it with [`wait`](AgentSession::wait) (normal path) or
+/// [`kill`](AgentSession::kill) (forced shutdown). Dropping it SIGKILLs the
+/// child (`kill_on_drop`), so a session abandoned mid-run does not leak.
+pub struct AgentSession {
+    child: TokioChild,
+    stdout: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    stderr: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    mirror: Option<SessionMirror>,
+    output: Option<AgentOutput>,
+    run_dir: PathBuf,
+    cwd: PathBuf,
+    claude_home: PathBuf,
+    archive_dir: PathBuf,
+    sandbox_db: PathBuf,
+}
+
+/// The result of a completed [`AgentSession`].
+#[derive(Clone)]
+pub struct AgentOutput {
+    /// Process exit status.
+    pub status: ExitStatus,
+    /// Captured stdout — the final assistant message from `claude -p`.
+    pub stdout: Vec<u8>,
+    /// Captured stderr.
+    pub stderr: Vec<u8>,
+}
+
+/// Set up an isolated judge home and spawn `claude -p <prompt>`
+/// non-interactively, with stdout and stderr piped so the caller can read
+/// the agent's output. The blocking setup (home seeding, plugin install,
+/// sandbox creation) runs on a blocking thread.
+pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSession> {
+    let name = opts.name.clone();
+    let prep = tokio::task::spawn_blocking(move || prepare_run(&name))
+        .await
+        .map_err(io::Error::other)??;
+
+    let mut cmd = TokioCommand::new(&prep.claude_bin);
+    cmd.arg("-p").arg(prompt);
+    cmd.args(["--thinking-display", "summarized"]);
+    if let Some(model) = &opts.model {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(max_turns) = opts.max_turns {
+        cmd.arg("--max-turns").arg(max_turns.to_string());
+    }
+    cmd.current_dir(&prep.cwd)
+        .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
+        .env("CLAUDE_PROJECTS_DIR", &prep.user_projects)
+        .env("GAGE_DB", &prep.sandbox_db)
+        .env("GAGE_AGENT_JUDGE", "1")
+        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn()?;
+    let stdout = spawn_reader(child.stdout.take());
+    let stderr = spawn_reader(child.stderr.take());
+
+    // Hardlink the session JSONL into the archive dir the moment Claude
+    // creates it, so an abnormal exit (timeout, kill) still leaves a
+    // viewable record well before the caller's wait timeout elapses.
+    let projects_dir = prep.claude_home.join("projects");
+    let mirror = match start_session_mirror(&projects_dir, &prep.archive_dir) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("warning: session mirror watcher failed to start: {e}");
+            None
+        }
+    };
+
+    Ok(AgentSession {
+        child,
+        stdout,
+        stderr,
+        mirror,
+        output: None,
+        run_dir: prep.run_dir,
+        cwd: prep.cwd,
+        claude_home: prep.claude_home,
+        archive_dir: prep.archive_dir,
+        sandbox_db: prep.sandbox_db,
+    })
+}
+
+impl AgentSession {
+    /// OS process id while the child is running; `None` once it has exited.
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// The completed output, available after a successful [`wait`](Self::wait).
+    /// `None` before the child has exited. Cloneable and re-readable any
+    /// number of times.
+    pub fn output(&self) -> Option<AgentOutput> {
+        self.output.clone()
+    }
+
+    /// Await the child's exit, bounded by `timeout`. On the first call, drain
+    /// the captured output, merge the sandbox db back into the main db, remove
+    /// the run dir, and cache the result. Subsequent calls return the cached
+    /// output without repeating that work. On timeout, the child is shut down
+    /// gracefully (`SIGTERM`, then `SIGKILL` after [`TIMEOUT_GRACE`]) and the
+    /// run dir is cleaned up before a `TimedOut` error is returned, so the
+    /// caller need not handle process teardown. The session JSONL is
+    /// hardlinked into the archive dir continuously by the mirror watcher, so
+    /// a timed-out run still leaves a viewable record.
+    pub async fn wait(&mut self, timeout: Duration) -> io::Result<AgentOutput> {
+        if let Some(output) = &self.output {
+            return Ok(output.clone());
+        }
+
+        let status = match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(status) => status?,
+            Err(_) => {
+                // Shut the still-running child down gracefully and clean up
+                // before surfacing the timeout, so the ubiquitous
+                // `wait(t).await?` pattern never leaves a process running.
+                self.terminate(TIMEOUT_GRACE).await?;
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "agent timeout"));
+            }
+        };
+
+        let stdout = join_reader(self.stdout.take()).await?;
+        let stderr = join_reader(self.stderr.take()).await?;
+
+        self.stop_mirror();
+        archive_sessions(&self.claude_home, &self.archive_dir)?;
+        gage_db::db::merge_judge_sandbox(&self.sandbox_db, &gage_db::db::db_path()).map_err(
+            |e| {
+                io::Error::other(format!(
+                    "merge sandbox into gage.db failed: {e}\n\
+                 sandbox preserved at {} for inspection",
+                    self.sandbox_db.display()
+                ))
+            },
+        )?;
+        cleanup_run_dir(&self.run_dir, &self.cwd);
+
+        let output = AgentOutput {
+            status,
+            stdout,
+            stderr,
+        };
+        self.output = Some(output.clone());
+        Ok(output)
+    }
+
+    /// Send `SIGTERM`, wait up to `grace` for the child to exit, then
+    /// `SIGKILL` if it has not. The session JSONL is hardlinked after the
+    /// process is gone. The sandbox is not merged — a killed run is
+    /// incomplete — but the run dir is removed once `cwd/` is empty.
+    pub async fn kill(&mut self, grace: Duration) -> io::Result<()> {
+        self.terminate(grace).await
+    }
+
+    /// Graceful shutdown shared by [`kill`](Self::kill) and `wait`'s timeout
+    /// path: `SIGTERM`, wait up to `grace`, then `SIGKILL`, then stop the
+    /// mirror, run the final archive sweep, and remove the run dir. The
+    /// sandbox is not merged — the run is incomplete.
+    async fn terminate(&mut self, grace: Duration) -> io::Result<()> {
+        if let Some(pid) = self.child.id() {
+            // SAFETY: pid identifies a child process this struct owns and
+            // has not yet reaped; SIGTERM is a valid signal number.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        match tokio::time::timeout(grace, self.child.wait()).await {
+            Ok(status) => {
+                status?;
+            }
+            Err(_) => self.child.kill().await?,
+        }
+
+        self.stop_mirror();
+        archive_sessions(&self.claude_home, &self.archive_dir)?;
+        cleanup_run_dir(&self.run_dir, &self.cwd);
+        Ok(())
+    }
+
+    /// Stop the mirror watcher before the final archive sweep and run-dir
+    /// removal. A no-op if it never started or was already stopped.
+    fn stop_mirror(&mut self) {
+        if let Some(mirror) = self.mirror.take() {
+            mirror.stop();
+        }
+    }
+}
+
+/// Read a piped child stream to end on a background task. Returns `None`
+/// when the stream was not captured.
+fn spawn_reader<R>(stream: Option<R>) -> Option<JoinHandle<io::Result<Vec<u8>>>>
+where
+    R: AsyncReadExt + Unpin + Send + 'static,
+{
+    stream.map(|mut stream| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await?;
+            Ok(buf)
+        })
+    })
+}
+
+/// Await a reader task started by [`spawn_reader`], flattening the join
+/// error and the read error. An absent task yields empty output.
+async fn join_reader(handle: Option<JoinHandle<io::Result<Vec<u8>>>>) -> io::Result<Vec<u8>> {
+    match handle {
+        Some(handle) => handle.await.map_err(io::Error::other)?,
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The isolated-home state shared by both judge entry points, produced by
+/// [`prepare_run`].
+struct PreparedRun {
+    run_dir: PathBuf,
+    cwd: PathBuf,
+    claude_home: PathBuf,
+    archive_dir: PathBuf,
+    claude_bin: PathBuf,
+    user_projects: PathBuf,
+    sandbox_db: PathBuf,
+}
+
+/// Assemble the throwaway run dir, seed the isolated home, install the gage
+/// plugin, and create the judge sandbox db. `name` selects the archive dir.
+fn prepare_run(name: &str) -> io::Result<PreparedRun> {
+    let run_id = Uuid::new_v4().to_string();
+    let run_dir = tmp_run_dir(&run_id);
+    let cwd = run_dir.join("cwd");
+    let claude_home = run_dir.join("claude");
+    let marketplace = claude_home.join(".plugin-marketplace");
+    let archive_dir = agent_archive_dir(name);
+
+    let projects_dir = claude_home.join("projects");
+    fs::create_dir_all(&claude_home)?;
+    fs::create_dir_all(&cwd)?;
+    fs::create_dir_all(&archive_dir)?;
+    fs::create_dir_all(&projects_dir)?;
+    seed_claude_home(&claude_home, &cwd)?;
+
+    let claude_bin = find_claude()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
+    let gage_bin = sibling_gage_bin()?;
+    install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin)?;
+
+    // The judge runs under an isolated CLAUDE_CONFIG_DIR, so the gage MCP
+    // server it launches would resolve its corpus to this empty agent
+    // home. Pin it to the user's real sessions via CLAUDE_PROJECTS_DIR
+    // (Gage's session-corpus override; the `claude` binary uses
+    // CLAUDE_CONFIG_DIR for its own session writes, so this does not
+    // affect archiving).
+    let user_projects = user_claude_projects()?;
+
+    // The judge reads and writes a sandbox database seeded with only
+    // neutral evidence (scanner notes), redirected via GAGE_DB. Every
+    // reader — datafusion tables and MCP tools — resolves through
+    // db_path(), so this one override isolates the model from issues,
+    // commentary, and prior judgments without per-tool filtering.
+    // GAGE_AGENT_JUDGE marks the mode for future skill/tool divergence.
+    let sandbox_db = run_dir.join("gage.db");
+    gage_db::db::create_judge_sandbox(&sandbox_db, &gage_db::db::db_path())
+        .map_err(|e| io::Error::other(format!("create judge sandbox: {e}")))?;
+
+    Ok(PreparedRun {
+        run_dir,
+        cwd,
+        claude_home,
+        archive_dir,
+        claude_bin,
+        user_projects,
+        sandbox_db,
+    })
 }
 
 /// Link every session JSONL Claude wrote under
@@ -427,8 +706,8 @@ fn tmp_run_dir(run_id: &str) -> PathBuf {
     gage_home().join("tmp").join(run_id)
 }
 
-fn judge_archive_dir() -> PathBuf {
-    gage_home().join("claude").join("judge")
+fn agent_archive_dir(name: &str) -> PathBuf {
+    gage_home().join("claude").join(name)
 }
 
 fn sibling_gage_bin() -> io::Result<PathBuf> {

@@ -5,15 +5,20 @@ disable-model-invocation: true
 
 Review evidence from the `note` table using the `mcp__plugin_gage_gage__Query`
 tool. User wants to find issues that can be resolved but does not know what they
-might be. This is an open exercise. Your job is to assess what you find, conduct
-further research using Gage tools, and finally make a judgement about underlying
-issues.
+are ahead of time. This is an open exercise. Your job is to assess what you
+find, conduct further research using Gage tools, and finally make a judgement
+about underlying issues.
 
-For each underlying issue you identify, open it in the issue table by calling
-`mcp__plugin_gage_gage__IssueOpen` with a concise `title`, a `description` that
-records your reasoning, and the IDs of the supporting notes in `evidence`. Open
-one issue per distinct finding. The user will then review the open issues and
-work through resolution with you.
+Once you've identified issues, review them with an eye toward opening issues
+with the `mcp__plugin_gage_gage__IssueOpen` tool. Each issue you open is
+presented to the user for resolution at a later time.
+
+Because issues take time to generate and resolve, apply these rules before
+calling `IssueOpen`:
+
+- Consolidate issues where possible to reduce the number of opened issue
+- Be direct and concise when you report an issue
+- Provide advice for resolving an issue
 
 ## Your main tool: `mcp__plugin_gage_gage__Query`
 
@@ -79,6 +84,15 @@ WHERE n.name = '...'
 To extend to surrounding messages, widen the `message` join predicate, e.g.
 `AND m.line BETWEEN sn.line - 10 AND sn.line + 10`, or `AND m.line > sn.line`
 for forward search, `AND m.line < sn.line` for backward.
+
+Do not use correlated scalar subqueries in the SELECT list (e.g.
+`SELECT ..., (SELECT m.text FROM message m WHERE m.session_id = i.session_id
+AND m.line < i.line ORDER BY m.line DESC LIMIT 1) AS prev ...`). The query
+engine cannot plan a correlated scalar subquery that carries `ORDER BY`/`LIMIT`
+and fails with "Physical plan does not support logical expression
+ScalarSubquery". To find the nearest message before or after a reference line,
+use a window function (`LAG`/`LEAD` over `PARTITION BY session_id ORDER BY
+line`, or `ROW_NUMBER()` with a self-join filtered to `rn = 1`) instead.
 
 The `message` table's `text` col contains the rendered message content. The
 `entry` table provides the raw JSONL row per session line --- use it when

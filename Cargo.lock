@@ -2645,6 +2645,7 @@ dependencies = [
  "libc",
  "notify",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -2850,6 +2851,7 @@ dependencies = [
  "chrono",
  "codespan-reporting",
  "datafusion",
+ "gage-agent",
  "gage-claude",
  "gage-core",
  "gage-db",

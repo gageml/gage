@@ -1,3 +1,4 @@
+pub(crate) mod agent;
 pub(crate) mod config;
 pub(crate) mod datetime;
 pub(crate) mod db;
@@ -45,6 +46,7 @@ pub(crate) fn gage_module() -> std::result::Result<Module, ContextError> {
     query::register(&mut m)?;
     db::register(&mut m)?;
     llm::register(&mut m)?;
+    agent::register(&mut m)?;
     template::register(&mut m)?;
 
     Ok(m)
