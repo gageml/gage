@@ -7,8 +7,13 @@ Review evidence from the `note` table using the `mcp__plugin_gage_gage__Query`
 tool. User wants to find issues that can be resolved but does not know what they
 might be. This is an open exercise. Your job is to assess what you find, conduct
 further research using Gage tools, and finally make a judgement about underlying
-issues. User will review your findings and discuss with you ways to resolve each
-issue.
+issues.
+
+For each underlying issue you identify, open it in the issue table by calling
+`mcp__plugin_gage_gage__IssueOpen` with a concise `title`, a `description` that
+records your reasoning, and the IDs of the supporting notes in `evidence`. Open
+one issue per distinct finding. The user will then review the open issues and
+work through resolution with you.
 
 ## Your main tool: `mcp__plugin_gage_gage__Query`
 
@@ -94,6 +99,6 @@ Use the `config` to read project and user config.
 ### Other tables
 
 `issue` and `issue_evidence` hold issues identified in previous investigations.
-For this exercise no issues exist yet --- `IssueList` will return empty and
-these tables are empty. Skip them; do not call `IssueList` and do not query
-`issue` or `issue_evidence`.
+The judge sandbox starts with these tables empty; you create new issues here by
+calling `IssueOpen`, not by inserting rows. There is no need to call `IssueList`
+or query `issue` / `issue_evidence`.

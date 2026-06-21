@@ -96,6 +96,44 @@ pub fn create_judge_sandbox(sandbox_path: &Path, source_path: &Path) -> Result<(
     Ok(())
 }
 
+/// Merge agent-authored issues from a judge sandbox back into the source
+/// database. Copies every `issue` row whose `author` starts with `agent:`
+/// along with its `issue_event` and `issue_evidence` rows. Returns the
+/// number of issues merged.
+///
+/// Any UNIQUE constraint violation (issue id or `(name, target)`) aborts
+/// the transaction and returns the underlying sqlite error. Caller is
+/// expected to surface this as a hard failure and preserve the sandbox
+/// for inspection.
+pub fn merge_judge_sandbox(sandbox_path: &Path, source_path: &Path) -> Result<usize, DbError> {
+    let conn = open_db_at(source_path)?;
+    conn.execute(
+        "ATTACH DATABASE ?1 AS sb",
+        [sandbox_path.to_string_lossy().as_ref()],
+    )?;
+    let result = (|| -> Result<usize, rusqlite::Error> {
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "INSERT INTO issue SELECT * FROM sb.issue WHERE author LIKE 'agent:%'",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO issue_event SELECT * FROM sb.issue_event
+             WHERE issue_id IN (SELECT id FROM sb.issue WHERE author LIKE 'agent:%')",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO issue_evidence SELECT * FROM sb.issue_evidence
+             WHERE issue_id IN (SELECT id FROM sb.issue WHERE author LIKE 'agent:%')",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    })();
+    conn.execute("DETACH DATABASE sb", [])?;
+    Ok(result?)
+}
+
 fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let version = get_version(conn)?;
     if version >= CURRENT_VERSION {

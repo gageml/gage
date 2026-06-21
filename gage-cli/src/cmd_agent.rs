@@ -132,6 +132,20 @@ fn judge_inner() -> io::Result<()> {
     if archived.is_empty() {
         println!("no session jsonl produced");
     }
+
+    match gage_db::db::merge_judge_sandbox(&sandbox_db, &gage_db::db::db_path()) {
+        Ok(0) => {}
+        Ok(n) => println!("Merged {n} issue(s) into gage.db"),
+        Err(e) => {
+            eprintln!(
+                "gage agent judge: merge sandbox into gage.db failed: {e}\n\
+                 sandbox preserved at {} for inspection",
+                sandbox_db.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
     cleanup_run_dir(&run_dir, &cwd);
 
     if !status.success() {
