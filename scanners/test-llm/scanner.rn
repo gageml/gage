@@ -21,9 +21,9 @@ pub async fn tool() {
     .await?;
     while llm.active() {
         match llm.poll().await? {
-            // Tool("Secret", #{}, id) => {
-            //     llm.tool_result(id, "Abc123")
-            // }
+            Tool("Secret", #{}, id) => {
+                llm.tool_result(id, "Abc123")
+            }
             other => println!("### {other:?}"),
         }
     }

@@ -520,7 +520,7 @@ async fn run_dialog(
     // bar finishes itself once the count reaches total; the task then
     // exits. Cancellation (Ctrl-C, panic) also exits cleanly.
     let poll_task = if let Some(ui) = progress.as_ref() {
-        let bar = ui.sessions_bar();
+        let setter = ui.sessions_setter();
         let scan_ctx = Arc::clone(&scan_ctx);
         let cancel = cancel.clone();
         Some(tokio::spawn(async move {
@@ -530,9 +530,8 @@ async fn run_dialog(
                     _ = cancel.cancelled() => break,
                     _ = tick.tick() => {
                         let n = scan_ctx.cached_session_count() as u64;
-                        bar.set_position(n);
+                        setter.set(n);
                         if n >= total_sessions as u64 {
-                            bar.finish_and_clear();
                             break;
                         }
                     }

@@ -1,11 +1,19 @@
 //! `gage scan` progress UI built on `indicatif::MultiProgress`.
 //!
-//! A single summary progress bar tracks 0 → total. Scanner
-//! `print`/`println` events route through `MultiProgress::println` so
-//! output appears above the bar without corrupting it. `Print` lines
-//! (no terminating newline from the scanner) buffer until a `\n`
-//! arrives.
+//! Bars are created lazily so the UI only shows what's actually moving:
+//!
+//! - An "Initializing" spinner appears immediately and is removed when
+//!   the first `Status` event arrives (i.e. the plan is built).
+//! - The "Tasks" bar is added on the first `Status` with `total > 0`.
+//! - The "Session cache" bar is added the first time the polled cached
+//!   session count is nonzero.
+//!
+//! Scanner `print`/`println` events route through `MultiProgress::println`
+//! so output appears above any active bars without corrupting them.
+//! `Print` lines (no terminating newline from the scanner) buffer until
+//! a `\n` arrives.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use console::style;
@@ -14,8 +22,10 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub struct ProgressUi {
     multi: MultiProgress,
-    sessions: ProgressBar,
-    summary: ProgressBar,
+    total_sessions: u64,
+    sessions: Arc<Mutex<Option<ProgressBar>>>,
+    init: Option<ProgressBar>,
+    summary: Option<ProgressBar>,
     print_buf: String,
 }
 
@@ -23,48 +33,56 @@ impl ProgressUi {
     pub fn new(total_sessions: usize) -> Self {
         let multi = MultiProgress::new();
 
-        let sessions = multi.add(ProgressBar::new(total_sessions as u64));
-        sessions.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.cyan} {msg} {bar:30.white/bright.black} ({pos}/{len})",
-            )
-            .unwrap()
-            .progress_chars("▬▬"),
-        );
-        sessions.set_message("Session cache");
-        sessions.enable_steady_tick(Duration::from_millis(120));
-
-        let summary = multi.add(ProgressBar::new(0));
-        summary.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.magenta} {msg} [{elapsed_precise}] {bar:30.white/bright.black} ({pos}/{len})",
-            )
-            .unwrap()
-            .progress_chars("▬▬"),
-        );
-        summary.set_message("Tasks");
-        summary.enable_steady_tick(Duration::from_millis(120));
+        let init = multi.add(ProgressBar::new_spinner());
+        init.set_style(ProgressStyle::with_template("{spinner:.magenta} {msg}").unwrap());
+        init.set_message("Initializing");
+        init.enable_steady_tick(Duration::from_millis(120));
 
         Self {
             multi,
-            sessions,
-            summary,
+            total_sessions: total_sessions as u64,
+            sessions: Arc::new(Mutex::new(None)),
+            init: Some(init),
+            summary: None,
             print_buf: String::new(),
         }
     }
 
-    /// Handle to the "Sessions read" bar. The bar is removed when it
-    /// reaches its length; further sets after that are no-ops on a
-    /// finished bar (cheap, safe to call from a polling task).
-    pub fn sessions_bar(&self) -> ProgressBar {
-        self.sessions.clone()
+    /// Returns a handle the session-cache poller uses to publish counts.
+    /// The "Session cache" bar is created lazily on the first nonzero
+    /// set, and removed once the count reaches the total.
+    pub fn sessions_setter(&self) -> SessionsSetter {
+        SessionsSetter {
+            multi: self.multi.clone(),
+            bar: self.sessions.clone(),
+            total: self.total_sessions,
+        }
     }
 
     pub fn handle(&mut self, event: ScanEvent) {
         match event {
             ScanEvent::Status(status) => {
-                self.summary.set_length(status.total as u64);
-                self.summary.set_position(status.progress as u64);
+                self.clear_init();
+                let total = status.total as u64;
+                if total == 0 {
+                    return;
+                }
+                let multi = &self.multi;
+                let bar = self.summary.get_or_insert_with(|| {
+                    let bar = multi.add(ProgressBar::new(total));
+                    bar.set_style(
+                        ProgressStyle::with_template(
+                            "{spinner:.magenta} {msg} [{elapsed_precise}] {bar:30.white/bright.black} ({pos}/{len})",
+                        )
+                        .unwrap()
+                        .progress_chars("▬▬"),
+                    );
+                    bar.set_message("Tasks");
+                    bar.enable_steady_tick(Duration::from_millis(120));
+                    bar
+                });
+                bar.set_length(total);
+                bar.set_position(status.progress as u64);
             }
             ScanEvent::Println { s } => {
                 self.flush_print_buf();
@@ -96,6 +114,13 @@ impl ProgressUi {
         }
     }
 
+    fn clear_init(&mut self) {
+        if let Some(init) = self.init.take() {
+            init.finish_and_clear();
+            self.multi.remove(&init);
+        }
+    }
+
     fn task_failed(&self, scanner: &str, task: &str, message: &str) {
         let header = format!("error: {scanner}::{task}");
         self.println(&style(header).red().bold().to_string());
@@ -123,9 +148,54 @@ impl ProgressUi {
 
     pub fn finish(mut self) {
         self.flush_print_buf();
-        self.sessions.finish_and_clear();
-        self.summary.finish_and_clear();
+        self.clear_init();
+        if let Some(bar) = self.summary.take() {
+            bar.finish_and_clear();
+        }
+        if let Some(bar) = self.sessions.lock().unwrap().take() {
+            bar.finish_and_clear();
+        }
         #[allow(clippy::let_underscore_must_use)]
         let _ = self.multi.clear();
+    }
+}
+
+/// Handle to the lazily-created "Session cache" bar. Calls to `set` are
+/// no-ops until `n > 0`; the bar is then inserted above the Tasks bar
+/// and updated. Once `n >= total` the bar finishes and is removed; later
+/// calls are no-ops.
+#[derive(Clone)]
+pub struct SessionsSetter {
+    multi: MultiProgress,
+    bar: Arc<Mutex<Option<ProgressBar>>>,
+    total: u64,
+}
+
+impl SessionsSetter {
+    pub fn set(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let mut guard = self.bar.lock().unwrap();
+        if guard.is_none() {
+            let bar = self.multi.insert(0, ProgressBar::new(self.total));
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.cyan} {msg} {bar:30.white/bright.black} ({pos}/{len})",
+                )
+                .unwrap()
+                .progress_chars("▬▬"),
+            );
+            bar.set_message("Session cache");
+            bar.enable_steady_tick(Duration::from_millis(120));
+            *guard = Some(bar);
+        }
+        let bar = guard.as_ref().unwrap();
+        bar.set_position(n);
+        if n >= self.total {
+            bar.finish_and_clear();
+            self.multi.remove(bar);
+            *guard = None;
+        }
     }
 }
