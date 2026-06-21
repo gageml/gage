@@ -1,0 +1,30 @@
+use gage::{call_llm, PollResult::{Text, Tool, Stop}};
+
+pub const SCANNER = #{
+    name: "test-llm",
+    description: "Test LLM calls",
+    tasks: #{ hello: #{}, tool: #{} },
+};
+
+pub async fn hello() {
+    let llm = call_llm("Say hi", #{}).await?;
+    while llm.active() {
+        println!("### {:?}", llm.poll().await?);
+    }
+}
+
+pub async fn tool() {
+    let llm = call_llm(
+        "What's the secret",
+        #{ tools: #{ "Secret": #{ description: "Get a secret", inputs: [] } } },
+    )
+    .await?;
+    while llm.active() {
+        match llm.poll().await? {
+            Tool("Secret", [], id) => {
+                llm.tool_result(id, Ok("Abc123")).await?
+            }
+            other => println!("### {other:?}"),
+        }
+    }
+}
