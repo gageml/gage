@@ -1,4 +1,4 @@
-use gage::{call_llm, PollResult::{Text, Tool, Stop}};
+use gage::{call_llm, PollResult::Tool};
 
 pub const SCANNER = #{
     name: "test-llm",
@@ -21,9 +21,9 @@ pub async fn tool() {
     .await?;
     while llm.active() {
         match llm.poll().await? {
-            Tool("Secret", [], id) => {
-                llm.tool_result(id, Ok("Abc123")).await?
-            }
+            // Tool("Secret", #{}, id) => {
+            //     llm.tool_result(id, "Abc123")
+            // }
             other => println!("### {other:?}"),
         }
     }
