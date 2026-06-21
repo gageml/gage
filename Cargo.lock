@@ -2636,6 +2636,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-agent"
+version = "0.0.1"
+dependencies = [
+ "gage-claude",
+ "gage-core",
+ "gage-db",
+ "libc",
+ "notify",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "gage-bench"
 version = "0.0.1"
 dependencies = [
@@ -2685,6 +2698,7 @@ dependencies = [
  "cliclack",
  "console 0.16.3",
  "datafusion",
+ "gage-agent",
  "gage-claude",
  "gage-core",
  "gage-db",

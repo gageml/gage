@@ -1,0 +1,19 @@
+[package]
+name = "gage-agent"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gage-core = { path = "../gage-core" }
+gage-db = { path = "../gage-db" }
+gage-claude = { path = "../gage-claude" }
+libc = "0.2"
+notify = "8"
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

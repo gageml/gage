@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "gage-agent",
     "gage-bench",
     "gage-cli",
     "gage-claude",

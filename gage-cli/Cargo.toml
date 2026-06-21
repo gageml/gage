@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+gage-agent = { path = "../gage-agent" }
 cliclack = "0.3"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 datafusion = { workspace = true }
