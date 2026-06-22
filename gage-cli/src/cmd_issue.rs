@@ -249,7 +249,14 @@ pub fn show(args: IssueShowArgs) {
 
     let mut rows: Vec<Vec<String>> = attrs
         .into_iter()
-        .map(|(k, v)| vec![k.to_string(), textwrap::fill(&v, value_width)])
+        .map(|(k, v)| {
+            let value = if k == "description" {
+                crate::markdown::render(&v, value_width)
+            } else {
+                textwrap::fill(&v, value_width)
+            };
+            vec![k.to_string(), value]
+        })
         .collect();
 
     if !related.is_empty() {
