@@ -12,7 +12,7 @@ use datafusion::error::Result;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::*;
 use gage_index::{
-    COL_LINE, COL_RAW, COL_SESSION_ID, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+    COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
 };
 
 use super::SessionSource;
@@ -25,6 +25,7 @@ const PROJECTION: &[usize] = &[
     COL_LINE,
     COL_UUID,
     COL_TYPE,
+    COL_SUBTYPE,
     COL_TIMESTAMP,
     COL_RAW,
 ];

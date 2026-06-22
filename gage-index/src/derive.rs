@@ -13,7 +13,9 @@ use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::DateTime;
-use gage_claude::entry::{entry_attachment_blocks, entry_subtype, entry_to_text, split_ide_tags};
+use gage_claude::entry::{
+    entry_attachment_blocks, entry_subtype, entry_to_text, message_subtype, split_ide_tags,
+};
 use gage_claude::session_reader::SessionReader;
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +36,7 @@ pub const COL_RAW: usize = 6;
 pub const COL_TEXT: usize = 7;
 pub const COL_ATTACHMENTS: usize = 8;
 pub const COL_IDE_TAGS: usize = 9;
+pub const COL_MESSAGE_SUBTYPE: usize = 10;
 
 static DERIVED_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
@@ -51,6 +54,7 @@ static DERIVED_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Field::new("text", DataType::Utf8, true),
         Field::new("attachments", DataType::Utf8, true),
         Field::new("ide_tags", DataType::Utf8, true),
+        Field::new("message_subtype", DataType::Utf8, true),
     ]))
 });
 
@@ -281,6 +285,7 @@ struct RowBuilders {
     texts: StringBuilder,
     attachments: StringBuilder,
     ide_tags: StringBuilder,
+    message_subtypes: StringBuilder,
 }
 
 impl RowBuilders {
@@ -296,6 +301,7 @@ impl RowBuilders {
             texts: StringBuilder::new(),
             attachments: StringBuilder::new(),
             ide_tags: StringBuilder::new(),
+            message_subtypes: StringBuilder::new(),
         }
     }
 
@@ -313,6 +319,7 @@ impl RowBuilders {
                 Arc::new(self.texts.finish()),
                 Arc::new(self.attachments.finish()),
                 Arc::new(self.ide_tags.finish()),
+                Arc::new(self.message_subtypes.finish()),
             ],
         )?)
     }
@@ -439,10 +446,15 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         b.timestamps.append_option(ts_ms);
         b.raws.append_value(entry.to_string());
 
+        match entry_subtype(&entry) {
+            Some(v) => b.subtypes.append_value(v),
+            None => b.subtypes.append_null(),
+        }
+
         if is_message_row(&entry) {
-            match entry_subtype(&entry) {
-                Some(v) => b.subtypes.append_value(v),
-                None => b.subtypes.append_null(),
+            match message_subtype(&entry) {
+                Some(v) => b.message_subtypes.append_value(v),
+                None => b.message_subtypes.append_null(),
             }
 
             let mut attachments: Vec<serde_json::Value> = Vec::new();
@@ -477,7 +489,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
                 None => b.ide_tags.append_null(),
             }
         } else {
-            b.subtypes.append_null();
+            b.message_subtypes.append_null();
             b.texts.append_null();
             b.attachments.append_null();
             b.ide_tags.append_null();

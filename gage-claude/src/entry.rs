@@ -52,7 +52,18 @@ pub fn entry_to_text(entry: &Value) -> String {
     }
 }
 
-/// Infer the subtype of a session entry.
+/// Return the raw `subtype` JSON property of a session entry, verbatim.
+///
+/// This is the literal value present in the JSONL line, not a derived
+/// classification. Most entry types do not carry a `subtype` and this
+/// returns `None` for them. Compare with [`message_subtype`], which
+/// computes a content-shape classification for `user`/`assistant`
+/// entries.
+pub fn entry_subtype(entry: &Value) -> Option<&str> {
+    entry.get("subtype").and_then(Value::as_str)
+}
+
+/// Infer the subtype of a message-shaped session entry.
 ///
 /// - `assistant` → `tool_use` if any content block is `tool_use`,
 ///   else `thinking` if any is `thinking`, else `text`.
@@ -60,8 +71,8 @@ pub fn entry_to_text(entry: &Value) -> String {
 ///   else `meta` if `entry.isMeta` is true, else `text`.
 /// - `attachment` → the inner `attachment.type`
 ///   (e.g. `deferred_tools_delta`, `skill_listing`).
-/// - Other entry types have no subtype.
-pub fn entry_subtype(entry: &Value) -> Option<&'static str> {
+/// - Other entry types have no message subtype.
+pub fn message_subtype(entry: &Value) -> Option<&'static str> {
     let ty = entry.get("type").and_then(Value::as_str)?;
     let blocks: Vec<&str> = entry
         .get("message")

@@ -74,7 +74,7 @@ pub(crate) struct EntryQuery {
     #[rune(skip)]
     session_id: Option<String>,
     #[rune(skip)]
-    type_: Option<String>,
+    type_: Option<Value>,
 }
 
 #[rune::function(instance)]
@@ -87,7 +87,7 @@ fn entries(session: Ref<Session>) -> EntryQuery {
 
 impl EntryQuery {
     #[rune::function(instance)]
-    fn with_type(mut self, t: String) -> Self {
+    fn with_type(mut self, t: Value) -> Self {
         self.type_ = Some(t);
         self
     }
@@ -105,8 +105,9 @@ async fn do_fetch_entries(q: EntryQuery) -> super::Result<Vec<Entry>> {
         clauses.push(format!("session_id = ${}", params.len()));
     }
     if let Some(t) = q.type_ {
-        params.push(ScalarValue::Utf8(Some(t)));
-        clauses.push(format!("type = ${}", params.len()));
+        let spec = serde_json::to_value(&t)
+            .map_err(|e| Error::Args(format!("with_type value could not be read: {e}")))?;
+        clauses.push(type_clause(&spec, &mut params)?);
     }
 
     let where_clause = if clauses.is_empty() {
@@ -268,6 +269,7 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.field_function(&Protocol::GET, "line", |e: &Entry| e.get("line"))?;
     m.field_function(&Protocol::GET, "uuid", |e: &Entry| e.get("uuid"))?;
     m.field_function(&Protocol::GET, "type", |e: &Entry| e.get("type"))?;
+    m.field_function(&Protocol::GET, "subtype", |e: &Entry| e.get("subtype"))?;
     m.field_function(&Protocol::GET, "timestamp", |e: &Entry| e.get("timestamp"))?;
     m.field_function(&Protocol::GET, "raw", |e: &Entry| e.get("raw"))?;
     m.function_meta(Entry::as_object)?;
@@ -550,7 +552,7 @@ impl Entry {
     // from, so printing it would swamp the output
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
-        let fields = ["session_id", "line", "uuid", "type", "timestamp"];
+        let fields = ["session_id", "line", "uuid", "type", "subtype", "timestamp"];
         debug_fields(f, "Entry", &fields, |attr| self.get(attr))
     }
 }
@@ -566,6 +568,7 @@ pub(crate) fn entries_from_batches(batches: Vec<RecordBatch>) -> Vec<Entry> {
         let col_line = schema.index_of("line").unwrap();
         let col_uuid = schema.index_of("uuid").unwrap();
         let col_type = schema.index_of("type").unwrap();
+        let col_subtype = schema.index_of("subtype").unwrap();
         let col_timestamp = schema.index_of("timestamp").unwrap();
         let col_raw = schema.index_of("raw").unwrap();
 
@@ -586,6 +589,11 @@ pub(crate) fn entries_from_batches(batches: Vec<RecordBatch>) -> Vec<Entry> {
             .unwrap();
         let type_arr = batch
             .column(col_type)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let subtype_arr = batch
+            .column(col_subtype)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -613,6 +621,9 @@ pub(crate) fn entries_from_batches(batches: Vec<RecordBatch>) -> Vec<Entry> {
                 .unwrap();
             inner
                 .insert(key("type"), optional_str_to_val(type_arr, row))
+                .unwrap();
+            inner
+                .insert(key("subtype"), optional_str_to_val(subtype_arr, row))
                 .unwrap();
             inner
                 .insert(key("timestamp"), optional_ts_to_val(timestamp_arr, row))

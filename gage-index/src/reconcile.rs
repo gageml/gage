@@ -576,7 +576,7 @@ fn message_rows_of(
 ) -> Vec<(i64, Option<&str>, Option<&str>, &str)> {
     use arrow::array::{Array, Int64Array, StringArray};
 
-    use crate::derive::{COL_LINE, COL_SUBTYPE, COL_TEXT, COL_TYPE};
+    use crate::derive::{COL_LINE, COL_MESSAGE_SUBTYPE, COL_TEXT, COL_TYPE};
 
     let lines = batch
         .columns()
@@ -588,7 +588,7 @@ fn message_rows_of(
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
     let subtypes = batch
         .columns()
-        .get(COL_SUBTYPE)
+        .get(COL_MESSAGE_SUBTYPE)
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
     let texts = batch
         .columns()

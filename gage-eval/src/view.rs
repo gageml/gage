@@ -11,7 +11,7 @@ use crate::eval::Test;
 use crate::score;
 use crate::storage::{self, RunSummary};
 use crate::tokens::{Tokens, entry_tokens, fmt_tokens};
-use gage_claude::entry::entry_subtype;
+use gage_claude::entry::message_subtype;
 use gage_claude::session_reader::SessionReader;
 use serde_json::Value;
 
@@ -308,7 +308,7 @@ fn render_session(path: &Path) -> io::Result<(String, Tokens)> {
             turn_suffix = format!(" {}", circled_digit(t));
         }
         let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-        let subtype = entry_subtype(&value);
+        let subtype = message_subtype(&value);
         let label = match subtype {
             Some("text") | None => ty,
             Some(sub) => sub,

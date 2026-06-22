@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock};
 use async_trait::async_trait;
 use datafusion::arrow::array::{Array, BooleanArray, StringArray};
 use datafusion::arrow::compute::filter_record_batch;
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
@@ -23,8 +23,8 @@ use datafusion::physical_plan::{
 use datafusion::prelude::*;
 use futures::StreamExt;
 use gage_index::{
-    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TEXT,
-    COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
+    COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
 };
 
 use super::SessionSource;
@@ -40,7 +40,7 @@ pub(crate) const PROJECTION: &[usize] = &[
     COL_LINE,
     COL_UUID,
     COL_TYPE,
-    COL_SUBTYPE,
+    COL_MESSAGE_SUBTYPE,
     COL_TEXT,
     COL_TIMESTAMP,
     COL_ATTACHMENTS,
@@ -48,12 +48,28 @@ pub(crate) const PROJECTION: &[usize] = &[
     COL_RAW,
 ];
 
+/// Index into the projected (message-table) schema of the column the
+/// derived batch supplies as `message_subtype` and the message table
+/// exposes as `subtype`.
+const PROJECTED_SUBTYPE: usize = 4;
+
 static MESSAGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    Arc::new(
-        gage_index::derived_schema()
-            .project(PROJECTION)
-            .expect("derived schema serves message projection"),
-    )
+    let projected = gage_index::derived_schema()
+        .project(PROJECTION)
+        .expect("derived schema serves message projection");
+    let fields: Vec<Field> = projected
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            if i == PROJECTED_SUBTYPE {
+                Field::new("subtype", f.data_type().clone(), f.is_nullable())
+            } else {
+                f.as_ref().clone()
+            }
+        })
+        .collect();
+    Arc::new(Schema::new(fields))
 });
 
 pub(crate) fn message_schema() -> SchemaRef {
@@ -276,5 +292,9 @@ fn message_rows(batch: &RecordBatch) -> Result<RecordBatch> {
         .map(|i| Some(texts.is_valid(i)))
         .collect();
     let filtered = filter_record_batch(batch, &mask)?;
-    Ok(filtered.project(PROJECTION)?)
+    let projected = filtered.project(PROJECTION)?;
+    Ok(RecordBatch::try_new(
+        message_schema(),
+        projected.columns().to_vec(),
+    )?)
 }

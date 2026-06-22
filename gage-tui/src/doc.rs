@@ -69,7 +69,7 @@ impl Entry {
     /// `thinking`, `tool_result`, `meta`), otherwise the raw type. Mirrors
     /// the labeling used by `gage eval view`.
     pub fn label(&self) -> &str {
-        match gage_claude::entry::entry_subtype(&self.value) {
+        match gage_claude::entry::message_subtype(&self.value) {
             Some("text") | None => self.entry_type(),
             Some(sub) => sub,
         }
