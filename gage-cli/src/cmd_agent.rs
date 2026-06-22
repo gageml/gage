@@ -7,10 +7,13 @@ pub struct AgentArgs {
     /// Project slug used to archive the session under `~/.gage/claude/<project>/`
     #[arg(short = 'p', long = "project")]
     pub project: Option<String>,
+
+    /// Initial prompt passed to `claude` as its positional argument
+    pub prompt: Option<String>,
 }
 
 pub fn run(args: AgentArgs) {
-    match gage_agent::run(args.project) {
+    match gage_agent::run(args.project, args.prompt) {
         Ok(status) => {
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));

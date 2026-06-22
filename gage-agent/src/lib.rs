@@ -43,7 +43,7 @@ use uuid::Uuid;
 /// its timeout elapses.
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
-pub fn run(name: Option<String>) -> io::Result<ExitStatus> {
+pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatus> {
     let PreparedRun {
         run_dir,
         cwd,
@@ -74,12 +74,15 @@ pub fn run(name: Option<String>) -> io::Result<ExitStatus> {
         }
     };
 
-    let status = Command::new(&claude_bin)
-        .current_dir(&cwd)
+    let mut cmd = Command::new(&claude_bin);
+    cmd.current_dir(&cwd)
         .env("CLAUDE_CONFIG_DIR", &claude_home)
         .env("CLAUDE_PROJECTS_DIR", &user_projects)
-        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
-        .status();
+        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
+    if let Some(prompt) = &prompt {
+        cmd.arg(prompt);
+    }
+    let status = cmd.status();
 
     restore_signal(libc::SIGINT, prev_sigint);
     restore_signal(libc::SIGQUIT, prev_sigquit);
