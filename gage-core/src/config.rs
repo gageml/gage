@@ -180,16 +180,47 @@ impl Config {
         self.remotes.extend(other.remotes);
     }
 
-    /// True if the named scanner is enabled per this config.
+    /// True if the named scanner is enabled per this config. Entries
+    /// in `enable` / `disable` may contain `*` wildcards that match any
+    /// run of characters.
     pub fn is_scanner_enabled(&self, name: &str) -> bool {
-        if self.scanners.disable.iter().any(|n| n == name) {
+        if self.scanners.disable.iter().any(|p| glob_match(p, name)) {
             return false;
         }
         if self.scanners.enable.is_empty() {
             return true;
         }
-        self.scanners.enable.iter().any(|n| n == name)
+        self.scanners.enable.iter().any(|p| glob_match(p, name))
     }
+}
+
+/// Matches `name` against `pattern`, where `*` matches any run of
+/// characters (including empty). All other characters match literally.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let last = parts.len() - 1;
+    let mut rest = name;
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            match rest.strip_prefix(part) {
+                Some(r) => rest = r,
+                None => return false,
+            }
+        } else if i == last {
+            return rest.ends_with(part);
+        } else if part.is_empty() {
+            continue;
+        } else {
+            match rest.find(part) {
+                Some(idx) => rest = rest.split_at(idx + part.len()).1,
+                None => return false,
+            }
+        }
+    }
+    true
 }
 
 /// A loaded config file along with the path it came from.
@@ -310,4 +341,28 @@ pub fn find_project_gage_dir(start: &Path) -> Option<PathBuf> {
         cur = dir.parent();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn glob_literal() {
+        assert!(glob_match("foo", "foo"));
+        assert!(!glob_match("foo", "foobar"));
+    }
+
+    #[test]
+    fn glob_wildcards() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("foo*", "foobar"));
+        assert!(glob_match("*bar", "foobar"));
+        assert!(glob_match("foo*bar", "foo-mid-bar"));
+        assert!(glob_match("a*b*c", "a-b-c"));
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(!glob_match("foo*", "fo"));
+        assert!(!glob_match("*bar", "barx"));
+        assert!(!glob_match("a*b*c", "abx"));
+    }
 }
