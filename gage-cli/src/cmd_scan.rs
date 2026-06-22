@@ -105,14 +105,6 @@ pub struct ScanRunArgs {
     /// List registered scanners and exit
     #[arg(long)]
     list_scanners: bool,
-
-    /// Enable a scanner in settings and exit (repeatable)
-    #[arg(long = "enable", value_name = "NAME", conflicts_with_all = ["sessions", "scanners", "files", "all", "limit", "jobs", "no_progress", "list_scanners"])]
-    enable: Vec<String>,
-
-    /// Disable a scanner in settings and exit (repeatable)
-    #[arg(long = "disable", value_name = "NAME", conflicts_with_all = ["sessions", "scanners", "files", "all", "limit", "jobs", "no_progress", "list_scanners"])]
-    disable: Vec<String>,
 }
 
 pub async fn run(args: ScanArgs) {
@@ -290,11 +282,6 @@ fn delete(args: ScanDeleteArgs) {
 
 async fn run_scan(mut args: ScanRunArgs) {
     let mut registry = ScannerRegistry::load();
-
-    if !args.enable.is_empty() || !args.disable.is_empty() {
-        apply_enable_disable(&registry, &args.enable, &args.disable);
-        return;
-    }
 
     if args.list_scanners {
         list_scanners(&registry);
@@ -770,55 +757,6 @@ fn list_scanners(registry: &ScannerRegistry) {
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .to_string();
     println!("{table}");
-}
-
-fn apply_enable_disable(registry: &ScannerRegistry, enable: &[String], disable: &[String]) {
-    let mut errors = 0;
-    for name in enable.iter().chain(disable.iter()) {
-        if !registry.is_known(name) {
-            eprintln!("Unknown scanner: {name}");
-            errors += 1;
-        }
-    }
-    if errors > 0 {
-        std::process::exit(1);
-    }
-
-    let user_path = gage_core::config::user_config_path();
-    let mut config = match gage_core::config::Config::load_from(&user_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading config: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let mut changed = 0;
-    for name in enable {
-        let before = config.scanners.disable.len();
-        config.scanners.disable.retain(|n| n != name);
-        if config.scanners.disable.len() != before {
-            changed += 1;
-            println!("Enabled {name}");
-        }
-    }
-    for name in disable {
-        if !config.scanners.disable.iter().any(|n| n == name) {
-            config.scanners.disable.push(name.clone());
-            changed += 1;
-            println!("Disabled {name}");
-        }
-    }
-
-    if changed == 0 {
-        println!("No changes");
-        return;
-    }
-
-    if let Err(e) = config.save_to(&user_path) {
-        eprintln!("Error writing config: {e}");
-        std::process::exit(1);
-    }
 }
 
 fn want_positive_number_or_all(s: &str) -> Result<(), &'static str> {
