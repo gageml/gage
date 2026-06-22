@@ -9,22 +9,14 @@ Thinking blocks provide important evidence of model thinking and
 should be visible. Unfortunately, the default settings for Claude
 Code cause thinking blocks to be hidden. This scanner looks for this
 consition and recommends fixes for issues it finds.
-    ",
-
+",
     tasks: #{
         note: #{
             notes: #{
                 writes: #{
-                    "thinking.empty": "
-`true` if thinking blocks are empty, `false` otherwise
-
-**metadata** - `{timestamp, model, config}`
-
-`timestamp` is the msg timestamp, used to find the most
-recent thinking evidence. `model` is the model thinking block
-applies to. `config` is the applicable session project config
-at the tiem of note writing (current project config may differ)
-",
+                    "thinking.empty": include_str!(
+                        "thinking-empty-note.md"
+                    ),
                 },
             },
         },
@@ -40,7 +32,7 @@ pub async fn note() {
     for s in scan().sessions() {
         for msg in s
             .messages()
-            .with_type(#{ assistant: "thinking" })
+            .with_type(#{ "assistant": "thinking" })
             .reverse()
             .await?
         {

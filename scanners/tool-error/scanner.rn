@@ -1,0 +1,93 @@
+use gage::{scan, write_note};
+
+pub const SCANNER = #{
+    name: "tool-error",
+    description: "Highlight tool use errors",
+    tasks: #{
+        note: #{
+            notes: #{
+                writes: #{
+                    "msg.tool_error": include_str!(
+                        "tool-error-note.md"
+                    ),
+                },
+            },
+        },
+    },
+};
+
+pub async fn note() {
+    let tool_names = #{};
+
+    for s in scan().sessions() {
+        for msg in s.messages().with_type(#{ assistant: "tool_use" }).await? {
+            for block in content_blocks(msg) {
+                if block_type(block) != "tool_use" {
+                    continue;
+                }
+                let name = match block.get("name") {
+                    Some(n) if n is String => n,
+                    _ => "<unknown>",
+                };
+                match block.get("id") {
+                    Some(id) if id is String => tool_names[id] = name,
+                    _ => {}
+                }
+            }
+        }
+
+        for msg in s.messages().with_type(#{ "user": "tool_result" }).await? {
+            for block in content_blocks(msg) {
+                if block_type(block) != "tool_result" {
+                    continue;
+                }
+                let is_err = block.get("is_error") == Some(true);
+                if is_err {
+                    let tool_name = match block.get("tool_use_id") {
+                        Some(id) if id is String => match tool_names.get(id) {
+                            Some(n) => n,
+                            None => "<unknown>",
+                        },
+                        _ => "<unknown>",
+                    };
+                    let content = block.get("content").unwrap_or("<undefined>");
+                    let value = format!("{tool_name}: {content}");
+                    write_note(
+                        #{
+                            name: "msg.tool_error",
+                            value,
+                            target: #{ session: s.id, line: msg.line },
+                        },
+                    )
+                    .replace_prev()
+                    .await?;
+                }
+            }
+        }
+    }
+}
+
+// Return the `message.content` array of a message as a Vec of blocks,
+// or an empty Vec when the field is absent or malformed.
+fn content_blocks(msg) {
+    let obj = msg.as_object();
+    let m = match obj.get("message") {
+        Some(v) if v is Object => v,
+        _ => return [],
+    };
+    match m.get("content") {
+        Some(v) if v is Vec => v,
+        _ => [],
+    }
+}
+
+// Return a block's `type` field as a string, or empty when absent.
+fn block_type(block) {
+    if block is not Object {
+        return "";
+    }
+    match block.get("type") {
+        Some(v) if v is String => v,
+        _ => "",
+    }
+}

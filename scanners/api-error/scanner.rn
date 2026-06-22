@@ -3,31 +3,50 @@ use gage::{scan, write_note};
 pub const SCANNER = #{
     name: "api-error",
     description: "Highlight API errors in a session",
-    tasks: #{ main: #{ notes: #{ writes: #{ "msg.api_error": "Xxx" } } } },
+    tasks: #{
+        note: #{
+            notes: #{
+                writes: #{
+                    "msg.api_error": include_str!(
+                        "api-error-note.md"
+                    ),
+                },
+            },
+        },
+    },
 };
 
-pub async fn main() {
+pub async fn note() {
     for s in scan().sessions() {
-        for entry in s.entries().with_type("system").await? {
-            let obj = entry.as_object();
-            if obj.get("subtype") == Some("api_error") {
-                let error = obj.get("error").unwrap();
-                let value = error.message;
-                let metadata = error
-                    .iter()
-                    .filter(|(k, _)| k != "message")
-                    .collect::<Object>();
-                write_note(
-                    #{
-                        name: "msg.api_error",
-                        value,
-                        metadata,
-                        target: #{ session: s.id, line: entry.line },
-                    },
-                )
-                .replace_prev()
-                .await?;
-            }
+        for entry in s.entries().with_type(#{ "system": "api_error" }).await? {
+            let error = entry.as_object().get("error").unwrap();
+            // value is either error.message or error.error.message
+            let value = error
+                .get("message")
+                .unwrap_or_else(
+                    || error
+                        .get("error")
+                        .unwrap_or(#{})
+                        .get("error")
+                        .unwrap_or(#{})
+                        .get("message")
+                        .unwrap_or("<undefined>"),
+                );
+            let metadata = error
+                .iter()
+                .filter(|(k, _)| k != "message")
+                .collect::<Object>();
+            write_note(
+                #{
+                    name: "msg.api_error",
+                    value,
+                    metadata,
+                    target: #{ session: s.id, line: entry.line },
+                },
+            )
+            .replace_prev()
+            .await?;
+
         }
     }
     Ok(())

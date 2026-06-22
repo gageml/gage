@@ -2,9 +2,9 @@ use gage::{scan, write_note};
 
 pub const SCANNER = #{
     name: "user-interrupt",
-    description: "Highlights user interrupts in a session",
+    description: "Highlight user interrupts",
     tasks: #{
-        main: #{
+        note: #{
             notes: #{
                 writes: #{
                     "msg.interrupt": include_str!(
@@ -16,9 +16,9 @@ pub const SCANNER = #{
     },
 };
 
-pub async fn main() {
+pub async fn note() {
     for s in scan().sessions() {
-        for msg in s.messages().with_type(#{ user: "text" }).await? {
+        for msg in s.messages().with_type(#{ "user": "text" }).await? {
             if let Some(value) = if msg.text == "[Request interrupted by user]" {
                 Some("user")
             } else if msg.text == "[Request interrupted by user for tool use]" {
