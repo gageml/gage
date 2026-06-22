@@ -1,5 +1,5 @@
 use rune::alloc;
-use rune::runtime::{Object, Value};
+use rune::runtime::{Object, Value, Vec as RuneVec};
 use serde_json as json;
 
 use super::json::Null;
@@ -39,6 +39,32 @@ pub(crate) fn json_to_value(val: &json::Value) -> Value {
         }
         json::Value::Object(_) => rune::to_value(json_to_object(val)).unwrap(),
     }
+}
+
+/// Convert a Rune `Value` to a `serde_json::Value`, recognising `json::Null`
+/// as JSON null. Rune's built-in `Serialize` for `Value` matches external
+/// types by type-hash and rejects any it doesn't know with "cannot serialize
+/// external references", so we have to intercept `Null` before falling back
+/// to it. Object and Vec values are walked recursively for the same reason.
+pub(crate) fn value_to_json(v: &Value) -> Result<json::Value, String> {
+    if v.borrow_ref::<Null>().is_ok() {
+        return Ok(json::Value::Null);
+    }
+    if let Ok(obj) = v.borrow_ref::<Object>() {
+        let mut map = json::Map::with_capacity(obj.len());
+        for (k, val) in obj.iter() {
+            map.insert(k.as_str().to_owned(), value_to_json(val)?);
+        }
+        return Ok(json::Value::Object(map));
+    }
+    if let Ok(vec) = v.borrow_ref::<RuneVec>() {
+        let mut out = Vec::with_capacity(vec.len());
+        for val in vec.iter() {
+            out.push(value_to_json(val)?);
+        }
+        return Ok(json::Value::Array(out));
+    }
+    json::to_value(v).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

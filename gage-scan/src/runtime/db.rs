@@ -751,7 +751,7 @@ fn optional_object_json(obj: &Object, key: &str) -> super::Result<Option<String>
     match obj.get(key) {
         None => Ok(None),
         Some(v) => {
-            let json = serde_json::to_value(v)
+            let json = crate::runtime::value::value_to_json(v)
                 .map_err(|e| Error::Args(format!("field '{key}' could not be serialized: {e}")))?;
             if !json.is_object() {
                 return Err(Error::Args(format!("field '{key}' must be an object")));
@@ -762,7 +762,7 @@ fn optional_object_json(obj: &Object, key: &str) -> super::Result<Option<String>
 }
 
 fn value_to_note_value(v: &Value) -> super::Result<NoteValue> {
-    let json = serde_json::to_value(v)
+    let json = crate::runtime::value::value_to_json(v)
         .map_err(|e| Error::Args(format!("field 'value' could not be serialized: {e}")))?;
     Ok(NoteValue(json))
 }
