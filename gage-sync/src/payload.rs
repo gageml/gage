@@ -39,6 +39,14 @@ pub fn build_payload(db_snapshot: &Path) -> Vec<TransferItem> {
         });
     }
 
+    let claude = gh.join("claude");
+    if claude.is_dir() {
+        items.push(TransferItem {
+            local: claude,
+            remote: "gage/claude".to_string(),
+        });
+    }
+
     if let Some(claude_projects) = gage_claude::session::projects_dir()
         && claude_projects.is_dir()
     {
