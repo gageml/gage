@@ -1,0 +1,18 @@
+[package]
+name = "gage-log"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { workspace = true }
+flate2 = "1"
+gage-core = { path = "../gage-core" }
+tracing = { workspace = true }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

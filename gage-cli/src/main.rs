@@ -142,8 +142,15 @@ fn init_logging() {
 #[tokio::main]
 async fn main() {
     install_panic_hook();
-    init_logging();
     let cli = Cli::parse();
+    let _log_guard = match &cli.command {
+        Command::Mcp => Some(gage_log::init("mcp").expect("init log dir")),
+        Command::Scan(_) => Some(gage_log::init("scan").expect("init log dir")),
+        _ => {
+            init_logging();
+            None
+        }
+    };
     let cmd = async {
         match cli.command {
             Command::Agent(args) => cmd_agent::run(args),

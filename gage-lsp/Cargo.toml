@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+gage-log = { path = "../gage-log" }
 gage-scan = { path = "../gage-scan" }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage", features = ["languageserver"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

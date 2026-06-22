@@ -16,6 +16,7 @@ use rune::languageserver;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _log_guard = gage_log::init("lsp")?;
     let context = gage_scan::lsp_context()?;
     let options = Options::from_default_env()?;
 
