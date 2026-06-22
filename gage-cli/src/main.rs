@@ -39,6 +39,7 @@ mod cmd_test;
 mod dialog;
 mod human;
 mod limit;
+mod markdown;
 mod scan_progress;
 mod style;
 mod target_content;

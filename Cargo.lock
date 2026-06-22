@@ -2714,6 +2714,7 @@ dependencies = [
  "libc",
  "notify",
  "num_cpus",
+ "pulldown-cmark",
  "serde_json",
  "tabled",
  "textwrap",

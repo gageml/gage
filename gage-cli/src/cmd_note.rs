@@ -87,6 +87,10 @@ pub struct NoteShowArgs {
     /// Show target content
     #[arg(short = 't', long = "target")]
     target_content: bool,
+
+    /// Show note docstring from the scanner that writes this note
+    #[arg(short = 'd', long = "doc")]
+    doc: bool,
 }
 
 #[derive(Args)]
@@ -270,7 +274,7 @@ pub async fn show(args: NoteShowArgs) {
 
     let explanation_display = resolve_display(&note, note.explanation.as_deref());
 
-    let attrs = vec![
+    let mut attrs = vec![
         ("id", note.id.clone()),
         ("name", note.name.clone()),
         ("value", note.value.to_json()),
@@ -286,6 +290,14 @@ pub async fn show(args: NoteShowArgs) {
         ),
         ("metadata", note.metadata.unwrap_or_default()),
     ];
+
+    if args.doc {
+        let registry = ScannerRegistry::load();
+        let doc = registry
+            .note_doc(&note.name)
+            .unwrap_or_else(|| "(no scanner declares this note)".to_string());
+        attrs.push(("doc", doc));
+    }
 
     let related = match note::related(&conn, &note.id) {
         Ok(rs) => rs,
@@ -329,6 +341,8 @@ pub async fn show(args: NoteShowArgs) {
                 } else {
                     textwrap::fill(&v, value_width)
                 }
+            } else if k == "doc" {
+                crate::markdown::render(&v, value_width)
             } else {
                 textwrap::fill(&v, value_width)
             };
