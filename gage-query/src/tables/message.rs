@@ -28,7 +28,7 @@ use gage_index::{
 };
 
 use super::SessionSource;
-use super::walk::{lookup_paths, session_cache, session_paths, session_scope};
+use super::walk::{lookup_paths, session_cache, session_paths};
 use crate::cache::SessionCache;
 use crate::filter;
 
@@ -118,10 +118,7 @@ impl TableProvider for MessageTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let paths = match &self.source {
-            SessionSource::Corpus(store) => {
-                let scope = session_scope(state);
-                session_paths(store, filters, "session_id", scope.as_deref())?
-            }
+            SessionSource::Corpus(store) => session_paths(state, store, filters, "session_id")?,
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
         let cache = session_cache(state)?;

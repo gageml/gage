@@ -25,12 +25,12 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::stream;
-use gage_claude::session::{SessionInfo, SessionListBuilder};
+use gage_claude::session::SessionInfo;
 use gage_index::{IndexStore, SessionSummary};
 
-use super::walk::{SessionScope, session_cache, session_scope};
+use super::walk::{SessionWalker, session_cache, session_walker};
 use crate::cache::SessionCache;
-use crate::filter::{self, IdFilter};
+use crate::filter;
 
 /// Index of the first column whose value comes from parsing the
 /// session JSONL (`title` and everything after). Columns before this
@@ -104,21 +104,20 @@ impl TableProvider for SessionTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let id_filter = IdFilter::new(filters, "id")?;
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),
         };
         let cache = session_cache(state)?;
-        let scope = session_scope(state);
+        let walker = session_walker(state);
         Ok(Arc::new(SessionExec::new(
             self.store.clone(),
             cache,
+            walker,
             self.schema.clone(),
             projected_schema,
             projection.cloned(),
-            id_filter,
-            scope,
+            filters.to_vec(),
             limit,
         )))
     }
@@ -128,11 +127,11 @@ impl TableProvider for SessionTable {
 struct SessionExec {
     store: Arc<IndexStore>,
     cache: Arc<SessionCache>,
+    walker: SessionWalker,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
-    id_filter: Option<IdFilter>,
-    scope: Option<Arc<SessionScope>>,
+    filters: Vec<Expr>,
     limit: Option<usize>,
     properties: PlanProperties,
 }
@@ -141,7 +140,7 @@ impl fmt::Debug for SessionExec {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("SessionExec")
             .field("limit", &self.limit)
-            .field("id_filter", &self.id_filter)
+            .field("filters", &self.filters)
             .finish()
     }
 }
@@ -151,11 +150,11 @@ impl SessionExec {
     fn new(
         store: Arc<IndexStore>,
         cache: Arc<SessionCache>,
+        walker: SessionWalker,
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
-        id_filter: Option<IdFilter>,
-        scope: Option<Arc<SessionScope>>,
+        filters: Vec<Expr>,
         limit: Option<usize>,
     ) -> Self {
         let eq_properties = mtime_desc_eq_properties(&projected_schema);
@@ -168,11 +167,11 @@ impl SessionExec {
         Self {
             store,
             cache,
+            walker,
             full_schema,
             projected_schema,
             projection,
-            id_filter,
-            scope,
+            filters,
             limit,
             properties,
         }
@@ -254,11 +253,11 @@ impl ExecutionPlan for SessionExec {
         Some(Arc::new(SessionExec::new(
             self.store.clone(),
             self.cache.clone(),
+            self.walker.clone(),
             self.full_schema.clone(),
             self.projected_schema.clone(),
             self.projection.clone(),
-            self.id_filter.clone(),
-            self.scope.clone(),
+            self.filters.clone(),
             limit,
         )))
     }
@@ -278,44 +277,18 @@ impl ExecutionPlan for SessionExec {
 impl SessionExec {
     async fn build_batch(self) -> Result<RecordBatch> {
         let exec_start = std::time::Instant::now();
-        let mut builder = SessionListBuilder::new().root(self.store.root());
-        // Limit pushdown is only safe when there is no extra
-        // post-filter that could reject rows. An `id` filter or a session
-        // scope is applied here per row, so limit pushdown is skipped
-        // whenever either is set.
-        let walk_limit_applied = if self.id_filter.is_none()
-            && self.scope.is_none()
-            && let Some(n) = self.limit
-        {
-            builder = builder.limit(n);
-            Some(n)
-        } else {
-            None
-        };
-        let walk_start = std::time::Instant::now();
-        let sessions: Vec<SessionInfo> = builder.build().into_iter().collect();
-        let walk_ms = walk_start.elapsed().as_millis();
-        let walked = sessions.len();
-
-        let sessions: Vec<SessionInfo> = match &self.id_filter {
-            Some(f) => f.retain(sessions, |s| s.id.as_str())?,
-            None => sessions,
-        };
-        let sessions: Vec<SessionInfo> = match &self.scope {
-            Some(scope) => sessions
-                .into_iter()
-                .filter(|s| scope.0.contains(&s.id))
-                .collect(),
-            None => sessions,
-        };
+        let outcome = self
+            .walker
+            .walk(&self.store, &self.filters, "id", self.limit)?;
+        let sessions: Vec<SessionInfo> = outcome.sessions;
 
         let needs_summary = self.projection_needs_summary();
         tracing::debug!(
             target: "gage_query::session",
-            walked,
-            after_id_filter = sessions.len(),
-            walk_ms,
-            walk_limit_applied = ?walk_limit_applied,
+            walked = outcome.walked,
+            after_filters = sessions.len(),
+            walk_ms = outcome.walk_ms,
+            walk_limit_applied = ?outcome.limit_pushed.then_some(self.limit).flatten(),
             needs_summary,
             "SessionExec walk complete",
         );
