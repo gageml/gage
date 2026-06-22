@@ -2,6 +2,7 @@ pub mod config;
 pub mod entry;
 pub mod message;
 pub mod message_text;
+pub mod note_message_context;
 pub mod session;
 pub(crate) mod walk;
 
@@ -10,6 +11,7 @@ pub use entry::EntryTable;
 pub use gage_index::entry_text;
 pub use message::MessageTable;
 pub use message_text::MessageTextFn;
+pub use note_message_context::NoteMessageContextFn;
 
 use datafusion::arrow::datatypes::SchemaRef;
 
@@ -25,11 +27,18 @@ pub struct TvfInfo {
 /// implement `\df` since DataFusion does not expose argument
 /// signatures or output schemas through the `TableFunction` trait.
 pub fn registered_tvfs() -> Vec<TvfInfo> {
-    vec![TvfInfo {
-        name: "message_text",
-        args: message_text::MESSAGE_TEXT_ARGS,
-        schema: message_text::message_text_schema(),
-    }]
+    vec![
+        TvfInfo {
+            name: "message_text",
+            args: message_text::MESSAGE_TEXT_ARGS,
+            schema: message_text::message_text_schema(),
+        },
+        TvfInfo {
+            name: "note_message_context",
+            args: note_message_context::NOTE_MESSAGE_CONTEXT_ARGS,
+            schema: note_message_context::note_message_context_schema(),
+        },
+    ]
 }
 pub use session::SessionTable;
 

@@ -15,6 +15,7 @@ use crate::tables::config::ConfigTable;
 use crate::tables::entry::EntryTable;
 use crate::tables::message::MessageTable;
 use crate::tables::message_text::MessageTextFn;
+use crate::tables::note_message_context::NoteMessageContextFn;
 use crate::tables::session::SessionTable;
 use crate::tables::walk::SessionScope;
 
@@ -123,6 +124,10 @@ async fn create_context_with_scope(
     ctx.register_udtf(
         "message_text",
         Arc::new(MessageTextFn::new(Arc::clone(&store))),
+    );
+    ctx.register_udtf(
+        "note_message_context",
+        Arc::new(NoteMessageContextFn::new(Arc::clone(&store))),
     );
     ctx.register_table("session", Arc::new(SessionTable::new(store.clone())))
         .unwrap();

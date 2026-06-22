@@ -35,7 +35,7 @@ use crate::filter;
 /// The derived columns serving the `message` table, in table-column
 /// order. `text` is non-null exactly for message rows (`type IN
 /// ('user','assistant') AND message.content well-formed`).
-const PROJECTION: &[usize] = &[
+pub(crate) const PROJECTION: &[usize] = &[
     COL_SESSION_ID,
     COL_LINE,
     COL_UUID,
@@ -56,7 +56,7 @@ static MESSAGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     )
 });
 
-fn message_schema() -> SchemaRef {
+pub(crate) fn message_schema() -> SchemaRef {
     MESSAGE_SCHEMA.clone()
 }
 

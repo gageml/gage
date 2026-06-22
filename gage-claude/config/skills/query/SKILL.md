@@ -1,5 +1,5 @@
 ---
-description: Writing SQL for the Gage Query tool, including full-text search over Claude Code messages via the message_text TVF.
+description: Writing SQL for the Gage Query tool, including full-text search over Claude Code messages via the message_text TVF and note-anchored message context via the note_message_context TVF.
 disable-model-invocation: false
 user-invocable: false
 ---
@@ -44,42 +44,43 @@ GROUP BY session_id
 ORDER BY hits DESC;
 ```
 
-## Recipe: first event after a marker line
+## Note-anchored context: `note_message_context(note_id, before, after)`
 
-For "find the next `message` row after each marker line" (e.g. the next user
-message after each `msg.interrupt` note), use a window function. A correlated
-scalar subquery in the SELECT list will not work --- see the limitation below.
+Table-valued function. Returns the messages around the line a note
+targets, with the same schema as the `message` table. `note_id` may be
+a full id or a unique prefix; an ambiguous prefix raises a plan error.
+The note must have a non-null `line` in `session_note` --- whole-session
+notes return no rows.
+
+The window is the note's anchor span (`[line, COALESCE(line_end,
+line)]`, always included verbatim) plus `before` messages immediately
+preceding it and `after` messages immediately following it.
+`before`/`after` count *messages* (rows where `text IS NOT NULL`),
+not raw line offsets --- non-message entries in the JSONL (summaries,
+meta) do not consume from the count. Walks stop at session boundaries;
+fewer rows than requested are returned in that case.
+
+All three arguments must be SQL literals: a string literal for
+`note_id` and integer literals for `before` and `after`. The TVF
+resolves a single note per call --- it can't take a column reference
+on the note id.
+
+### Recipe: read the conversation around a note
 
 ```sql
-WITH markers AS (
-  SELECT sn.session_id, sn.line AS marker_line
-  FROM note n
-  JOIN session_note sn ON sn.note_id = n.id
-  WHERE n.name = 'msg.interrupt'
-),
-ranked AS (
-  SELECT mk.session_id, mk.marker_line, m.line, m.text,
-         ROW_NUMBER() OVER (
-           PARTITION BY mk.session_id, mk.marker_line
-           ORDER BY m.line ASC
-         ) AS rn
-  FROM markers mk
-  JOIN message m
-    ON m.session_id = mk.session_id
-   AND m.line > mk.marker_line
-   AND m.type = 'user'
-)
-SELECT session_id, marker_line, line, text
-FROM ranked WHERE rn = 1;
+SELECT line, type, subtype, text
+FROM note_message_context('abc123', 3, 3)
+ORDER BY line;
 ```
 
-For the previous event, swap `m.line > mk.marker_line` for `m.line <
-mk.marker_line` and `ORDER BY m.line ASC` for `DESC`.
+To scan many notes' context in one query, use a `ROW_NUMBER()` windowed
+CTE over `message` joined to `session_note` --- the TVF is for the
+single-note case.
 
 ## DataFusion limitations
 
 - **Correlated scalar subqueries in the SELECT list are not implemented.** A
   query like `SELECT i.line, (SELECT m.text FROM message m WHERE m.line >
   i.line ORDER BY m.line LIMIT 1) FROM interrupts i` will fail with
-  "Physical plan does not support logical expression ScalarSubquery". Use a
-  windowed CTE (see the recipe above) instead.
+  "Physical plan does not support logical expression ScalarSubquery". Use
+  a `ROW_NUMBER()` windowed CTE instead.
