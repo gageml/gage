@@ -64,10 +64,7 @@ enum Command {
     Scan(cmd_scan::ScanArgs),
 
     /// Run Claude to perform Gage tasks
-    Agent {
-        #[command(subcommand)]
-        command: cmd_agent::AgentCommand,
-    },
+    Agent(cmd_agent::AgentArgs),
 
     /// Manage sessions
     Session {
@@ -149,7 +146,7 @@ async fn main() {
     let cli = Cli::parse();
     let cmd = async {
         match cli.command {
-            Command::Agent { command } => cmd_agent::run(command),
+            Command::Agent(args) => cmd_agent::run(args),
             Command::Config { command } => cmd_config::run(command),
             Command::Init(args) => cmd_init::run(args),
             Command::Note { command } => match command {

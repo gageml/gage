@@ -2,10 +2,10 @@
 //!
 //! Two entry points share the same isolated-home setup:
 //!
-//! - [`judge`] runs the interactive `gage agent judge` command: it spawns
-//!   `claude /gage:judge`, inherits the terminal, and mirrors session
-//!   JSONLs live so a SIGKILL'd run still leaves a viewable session.
-//! - [`spawn_judge`] runs the same judge setup non-interactively via
+//! - [`run`] runs the interactive `gage agent` command: it spawns
+//!   `claude`, inherits the terminal, and mirrors session JSONLs live so
+//!   a SIGKILL'd run still leaves a viewable session.
+//! - [`spawn_judge`] runs the same setup non-interactively via
 //!   `claude -p <prompt>` for the scanner path, returning an
 //!   [`AgentSession`] the caller drives with `wait`/`kill`.
 //!
@@ -15,10 +15,12 @@
 //! plugin. The non-interactive scanner path additionally sets
 //! `GAGE_SCAN_ID` so the MCP server scopes every session-keyed table to
 //! the scan's session set. The session JSONL Claude writes is hardlinked
-//! into `~/.gage/claude/<name>/`; because
-//! a hardlink shares the inode, that archived view stays current and
-//! survives the run dir's removal on cleanup, so `gage session -A` reads it
-//! without a copy step.
+//! into a caller-supplied archive dir under `~/.gage/claude/<name>/`
+//! (`default` for the interactive command, the scanner name for the
+//! scanner path);
+//! because a hardlink shares the inode, that archived view stays current
+//! and survives the run dir's removal on cleanup, so `gage session -A`
+//! reads it without a copy step.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -41,7 +43,7 @@ use uuid::Uuid;
 /// its timeout elapses.
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
-pub fn judge() -> io::Result<ExitStatus> {
+pub fn run(name: Option<String>) -> io::Result<ExitStatus> {
     let PreparedRun {
         run_dir,
         cwd,
@@ -49,7 +51,7 @@ pub fn judge() -> io::Result<ExitStatus> {
         archive_dir,
         claude_bin,
         user_projects,
-    } = prepare_run("judge")?;
+    } = prepare_run(agent_archive_dir(name.as_deref().unwrap_or("default")))?;
     let projects_dir = claude_home.join("projects");
 
     // Ignore SIGINT (and SIGQUIT) in the parent while Claude runs. Both
@@ -73,11 +75,9 @@ pub fn judge() -> io::Result<ExitStatus> {
     };
 
     let status = Command::new(&claude_bin)
-        .args(["-n", "gage:judge", "/gage:judge"])
         .current_dir(&cwd)
         .env("CLAUDE_CONFIG_DIR", &claude_home)
         .env("CLAUDE_PROJECTS_DIR", &user_projects)
-        .env("GAGE_AGENT_JUDGE", "1")
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .status();
 
@@ -154,8 +154,8 @@ pub struct AgentOutput {
 /// the agent's output. The blocking setup (home seeding, plugin install)
 /// runs on a blocking thread.
 pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSession> {
-    let name = opts.name.clone();
-    let prep = tokio::task::spawn_blocking(move || prepare_run(&name))
+    let archive_dir = agent_archive_dir(&opts.name);
+    let prep = tokio::task::spawn_blocking(move || prepare_run(archive_dir))
         .await
         .map_err(io::Error::other)??;
 
@@ -172,7 +172,6 @@ pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSess
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &prep.user_projects)
         .env("GAGE_SCAN_ID", &opts.scan_id)
-        .env("GAGE_AGENT_JUDGE", "1")
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -338,14 +337,13 @@ struct PreparedRun {
 }
 
 /// Assemble the throwaway run dir, seed the isolated home, and install the
-/// gage plugin. `name` selects the archive dir.
-fn prepare_run(name: &str) -> io::Result<PreparedRun> {
+/// gage plugin. `archive_dir` is where session JSONLs get hardlinked.
+fn prepare_run(archive_dir: PathBuf) -> io::Result<PreparedRun> {
     let run_id = Uuid::new_v4().to_string();
     let run_dir = tmp_run_dir(&run_id);
     let cwd = run_dir.join("cwd");
     let claude_home = run_dir.join("claude");
     let marketplace = claude_home.join(".plugin-marketplace");
-    let archive_dir = agent_archive_dir(name);
 
     let projects_dir = claude_home.join("projects");
     fs::create_dir_all(&claude_home)?;

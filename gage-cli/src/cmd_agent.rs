@@ -1,28 +1,23 @@
 //! `gage agent` — UI surface over the `gage-agent` crate.
 
-use clap::Subcommand;
+use clap::Args;
 
-#[derive(Subcommand)]
-pub enum AgentCommand {
-    /// Evaluate scanner evidence for issues
-    Judge,
+#[derive(Args)]
+pub struct AgentArgs {
+    /// Project slug used to archive the session under `~/.gage/claude/<project>/`
+    #[arg(short = 'p', long = "project")]
+    pub project: Option<String>,
 }
 
-pub fn run(command: AgentCommand) {
-    match command {
-        AgentCommand::Judge => judge(),
-    }
-}
-
-fn judge() {
-    match gage_agent::judge() {
+pub fn run(args: AgentArgs) {
+    match gage_agent::run(args.project) {
         Ok(status) => {
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
         }
         Err(e) => {
-            eprintln!("gage agent judge: {e}");
+            eprintln!("gage agent: {e}");
             std::process::exit(1);
         }
     }
