@@ -5,8 +5,8 @@
 //! - An "Initializing" spinner appears immediately and is removed when
 //!   the first `Status` event arrives (i.e. the plan is built).
 //! - The "Tasks" bar is added on the first `Status` with `total > 0`.
-//! - The "Session cache" bar is added the first time the polled cached
-//!   session count is nonzero.
+//! - The "Reading sessions" bar is added the first time the polled
+//!   in-memory session-load count is nonzero.
 //!
 //! Scanner `print`/`println` events route through `MultiProgress::println`
 //! so output appears above any active bars without corrupting them.
@@ -48,8 +48,8 @@ impl ProgressUi {
         }
     }
 
-    /// Returns a handle the session-cache poller uses to publish counts.
-    /// The "Session cache" bar is created lazily on the first nonzero
+    /// Returns a handle the session-load poller uses to publish counts.
+    /// The "Reading sessions" bar is created lazily on the first nonzero
     /// set, and removed once the count reaches the total.
     pub fn sessions_setter(&self) -> SessionsSetter {
         SessionsSetter {
@@ -160,7 +160,7 @@ impl ProgressUi {
     }
 }
 
-/// Handle to the lazily-created "Session cache" bar. Calls to `set` are
+/// Handle to the lazily-created "Reading sessions" bar. Calls to `set` are
 /// no-ops until `n > 0`; the bar is then inserted above the Tasks bar
 /// and updated. Once `n >= total` the bar finishes and is removed; later
 /// calls are no-ops.
@@ -186,7 +186,7 @@ impl SessionsSetter {
                 .unwrap()
                 .progress_chars("▬▬"),
             );
-            bar.set_message("Session cache");
+            bar.set_message("Reading sessions");
             bar.enable_steady_tick(Duration::from_millis(120));
             *guard = Some(bar);
         }

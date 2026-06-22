@@ -24,11 +24,12 @@ use datafusion::prelude::*;
 use futures::StreamExt;
 use gage_index::{
     COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TEXT,
-    COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore, derive_session,
+    COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
 };
 
 use super::SessionSource;
-use super::walk::{lookup_paths, session_paths, session_scope};
+use super::walk::{lookup_paths, session_cache, session_paths, session_scope};
+use crate::cache::SessionCache;
 use crate::filter;
 
 /// The derived columns serving the `message` table, in table-column
@@ -123,12 +124,14 @@ impl TableProvider for MessageTable {
             }
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
+        let cache = session_cache(state)?;
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),
         };
         Ok(Arc::new(MessageExec::new(
             paths,
+            cache,
             projected_schema,
             projection.cloned(),
             limit,
@@ -142,6 +145,7 @@ impl TableProvider for MessageTable {
 #[derive(Clone)]
 struct MessageExec {
     paths: Arc<Vec<(String, PathBuf)>>,
+    cache: Arc<SessionCache>,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
@@ -160,6 +164,7 @@ impl fmt::Debug for MessageExec {
 impl MessageExec {
     fn new(
         paths: Vec<(String, PathBuf)>,
+        cache: Arc<SessionCache>,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
         limit: Option<usize>,
@@ -172,6 +177,7 @@ impl MessageExec {
         );
         Self {
             paths: Arc::new(paths),
+            cache,
             projected_schema,
             projection,
             limit,
@@ -226,28 +232,25 @@ impl ExecutionPlan for MessageExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let paths = (*self.paths).clone();
+        let cache = self.cache.clone();
         let projection = self.projection.clone();
         let schema = self.projected_schema.clone();
 
         let stream = futures::stream::iter(paths)
-            .then(|(id, path)| async move {
-                let result = tokio::task::spawn_blocking({
-                    let id = id.clone();
-                    move || derive_session(&id, &path)
-                })
-                .await;
-                (id, result)
+            .then(move |(id, path)| {
+                let cache = cache.clone();
+                async move {
+                    let result = cache.get(&id, &path).await;
+                    (id, result)
+                }
             })
-            .filter_map(|(id, joined)| async move {
-                match joined {
-                    Ok(Ok(derived)) => Some(Ok(derived)),
-                    Ok(Err(e)) => {
+            .filter_map(|(id, result)| async move {
+                match result {
+                    Ok(derived) => Some(Ok(derived)),
+                    Err(e) => {
                         tracing::warn!(session_id = %id, "skipping session: {e}");
                         None
                     }
-                    Err(e) => Some(Err(DataFusionError::Execution(format!(
-                        "derive task for {id}: {e}"
-                    )))),
                 }
             })
             .map(move |res| {
