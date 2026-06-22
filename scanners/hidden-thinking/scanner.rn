@@ -12,25 +12,32 @@ pub const SCANNER = #{
     `,
 
     tasks: #{
-        evidence: #{
+        note: #{
             notes: #{
                 writes: #{
-                    "thinking.empty": "true if thinking blocks are empty, false otherwise. Metadata: timestamp (Timestamp of msg), model (Model thinking block applies to), config (Applicable config at the time of writing).",
+                    "thinking.empty": "
+                    `true` if thinking blocks are empty, `false` otherwise
+
+                    **metadata** - `{timestamp, model, config}`
+
+                    `timestamp` is the msg timestamp, used to find the most
+                    recent thinking evidence. `model` is the model thinking block
+                    applies to. `config` is the applicable session project config
+                    at the tiem of note writing (current project config may differ)
+                    ",
                 },
             },
         },
         issue: #{
             notes: #{
                 wants: ["thinking.empty"],
-                writes: #{
-                    "thinking.empty.issue": "Issue background info",
-                },
+                writes: #{ "thinking.empty.issue": "Issue background info" },
             },
         },
     },
 };
 
-pub async fn evidence() {
+pub async fn note() {
     let config = format!(
         "{{\"showThinkingSummaries\": {}}}",
         user().config().await.get("showThinkingSummaries").unwrap_or("null")

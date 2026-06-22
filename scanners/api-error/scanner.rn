@@ -1,0 +1,34 @@
+use gage::{scan, write_note};
+
+pub const SCANNER = #{
+    name: "api-error",
+    description: "Highlight API errors in a session",
+    tasks: #{ main: #{ notes: #{ writes: #{ "msg.api_error": "Xxx" } } } },
+};
+
+pub async fn main() {
+    for s in scan().sessions() {
+        for entry in s.entries().with_type("system").await? {
+            let obj = entry.as_object();
+            if obj.get("subtype") == Some("api_error") {
+                let error = obj.get("error").unwrap();
+                let value = error.message;
+                let metadata = error
+                    .iter()
+                    .filter(|(k, _)| k != "message")
+                    .collect::<Object>();
+                write_note(
+                    #{
+                        name: "msg.api_error",
+                        value,
+                        metadata,
+                        target: #{ session: s.id, line: entry.line },
+                    },
+                )
+                .replace_prev()
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}

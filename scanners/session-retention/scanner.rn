@@ -2,6 +2,7 @@ use gage::{write_note, write_issue, scan, user};
 
 pub const SCANNER = #{
     name: "session-retention",
+    hidden: true,
     description: `
     Warn when Claude Code session retention is left at the default
 

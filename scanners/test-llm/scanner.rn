@@ -2,6 +2,7 @@ use gage::{call_llm, PollResult::Tool};
 
 pub const SCANNER = #{
     name: "test-llm",
+    hidden: true,
     description: "Test LLM calls",
     tasks: #{ hello: #{}, tool: #{} },
 };

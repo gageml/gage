@@ -17,10 +17,6 @@ with it. See the note's own `.md` file for the full docstring.
 `user` means the model produced something stopped mid-generation. Nonzero
 `tool_use` means proposed tool calls were rejected.
 
-`session.thinking` --- `{ total, empty }`. Aggregate of the per-line
-`thinking.empty` signal. `empty > 0` means thinking was recorded but content was
-hidden (typically `showThinkingSummaries` disabled).
-
 `session.message_count` --- `{ "<type>.<subtype>": n, ... }`. Session shape.
 Substantive user input (`user.text`) vs harness meta (`user.meta`) vs tool
 replies (`user.tool_result`); assistant text vs tool_use vs thinking.
@@ -70,7 +66,6 @@ of truncated-work complaints.
 ## Tasks
 
 - `interrupt` --- writes `session.interrupt`
-- `thinking` --- writes `session.thinking`
 - `message_count` --- writes `session.message_count`
 - `ide_tags` --- writes `session.ide_tags`
 - `model` --- writes `session.model`

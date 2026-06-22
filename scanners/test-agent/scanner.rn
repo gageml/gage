@@ -2,6 +2,7 @@ use gage::call_agent_judge;
 
 pub const SCANNER = #{
     name: "test-agent",
+    hidden: true,
     description: "Test agent judge",
     tasks: #{ main: #{} },
 };
