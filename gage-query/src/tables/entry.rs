@@ -16,7 +16,7 @@ use gage_index::{
 };
 
 use super::SessionSource;
-use super::walk::{lookup_paths, session_cache, session_paths};
+use super::walk::{lookup_paths, session_cache, session_paths, session_scope};
 use crate::cache::SessionCache;
 use crate::filter;
 
@@ -99,7 +99,8 @@ impl TableProvider for EntryTable {
         let batches = match &self.source {
             SessionSource::Corpus(store) => {
                 let cache = session_cache(state)?;
-                let paths = session_paths(store, filters, "session_id")?;
+                let scope = session_scope(state);
+                let paths = session_paths(store, filters, "session_id", scope.as_deref())?;
                 load_batches(&cache, paths).await?
             }
             SessionSource::Lookup(sessions) => {

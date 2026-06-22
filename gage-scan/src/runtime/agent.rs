@@ -10,6 +10,7 @@ use rune::runtime::{Formatter, Mut, Object, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::runtime::error::Error;
+use crate::runtime::state::current_scan_ctx;
 
 const DEFAULT_NAME: &str = "judge";
 
@@ -151,6 +152,7 @@ async fn do_call_agent_judge(prompt: String, opts: Object) -> super::Result<Agen
     let name = opt_string(&opts, "name")?.unwrap_or_else(|| DEFAULT_NAME.to_string());
     let model = opt_string(&opts, "model")?;
     let max_turns = opt_i64(&opts, "max_turns")?.map(|v| v as u32);
+    let scan_id = current_scan_ctx().run.scan_id.clone();
 
     let inner = gage_agent::spawn_judge(
         &prompt,
@@ -158,6 +160,7 @@ async fn do_call_agent_judge(prompt: String, opts: Object) -> super::Result<Agen
             name,
             model,
             max_turns,
+            scan_id,
         },
     )
     .await

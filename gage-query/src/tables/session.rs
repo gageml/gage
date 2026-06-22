@@ -28,7 +28,7 @@ use futures::stream;
 use gage_claude::session::{SessionInfo, SessionListBuilder};
 use gage_index::{IndexStore, SessionSummary};
 
-use super::walk::session_cache;
+use super::walk::{SessionScope, session_cache, session_scope};
 use crate::cache::SessionCache;
 use crate::filter::{self, IdFilter};
 
@@ -110,6 +110,7 @@ impl TableProvider for SessionTable {
             None => self.schema.clone(),
         };
         let cache = session_cache(state)?;
+        let scope = session_scope(state);
         Ok(Arc::new(SessionExec::new(
             self.store.clone(),
             cache,
@@ -117,6 +118,7 @@ impl TableProvider for SessionTable {
             projected_schema,
             projection.cloned(),
             id_filter,
+            scope,
             limit,
         )))
     }
@@ -130,6 +132,7 @@ struct SessionExec {
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
     id_filter: Option<IdFilter>,
+    scope: Option<Arc<SessionScope>>,
     limit: Option<usize>,
     properties: PlanProperties,
 }
@@ -144,6 +147,7 @@ impl fmt::Debug for SessionExec {
 }
 
 impl SessionExec {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         store: Arc<IndexStore>,
         cache: Arc<SessionCache>,
@@ -151,6 +155,7 @@ impl SessionExec {
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
         id_filter: Option<IdFilter>,
+        scope: Option<Arc<SessionScope>>,
         limit: Option<usize>,
     ) -> Self {
         let eq_properties = mtime_desc_eq_properties(&projected_schema);
@@ -167,6 +172,7 @@ impl SessionExec {
             projected_schema,
             projection,
             id_filter,
+            scope,
             limit,
             properties,
         }
@@ -252,6 +258,7 @@ impl ExecutionPlan for SessionExec {
             self.projected_schema.clone(),
             self.projection.clone(),
             self.id_filter.clone(),
+            self.scope.clone(),
             limit,
         )))
     }
@@ -273,9 +280,11 @@ impl SessionExec {
         let exec_start = std::time::Instant::now();
         let mut builder = SessionListBuilder::new().root(self.store.root());
         // Limit pushdown is only safe when there is no extra
-        // post-filter that could reject rows. An `id` filter is applied
-        // here per row, so limit pushdown is skipped whenever one is set.
+        // post-filter that could reject rows. An `id` filter or a session
+        // scope is applied here per row, so limit pushdown is skipped
+        // whenever either is set.
         let walk_limit_applied = if self.id_filter.is_none()
+            && self.scope.is_none()
             && let Some(n) = self.limit
         {
             builder = builder.limit(n);
@@ -290,6 +299,13 @@ impl SessionExec {
 
         let sessions: Vec<SessionInfo> = match &self.id_filter {
             Some(f) => f.retain(sessions, |s| s.id.as_str())?,
+            None => sessions,
+        };
+        let sessions: Vec<SessionInfo> = match &self.scope {
+            Some(scope) => sessions
+                .into_iter()
+                .filter(|s| scope.0.contains(&s.id))
+                .collect(),
             None => sessions,
         };
 

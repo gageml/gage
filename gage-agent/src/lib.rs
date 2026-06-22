@@ -11,9 +11,11 @@
 //!
 //! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` containing
 //! `cwd/` (the empty working directory Claude runs in) and `claude/` (the
-//! `CLAUDE_CONFIG_DIR`), seed an isolated home, install the gage plugin,
-//! and create a judge sandbox db seeded with neutral evidence. The session
-//! JSONL Claude writes is hardlinked into `~/.gage/claude/<name>/`; because
+//! `CLAUDE_CONFIG_DIR`), seed an isolated home, and install the gage
+//! plugin. The non-interactive scanner path additionally sets
+//! `GAGE_SCAN_ID` so the MCP server scopes every session-keyed table to
+//! the scan's session set. The session JSONL Claude writes is hardlinked
+//! into `~/.gage/claude/<name>/`; because
 //! a hardlink shares the inode, that archived view stays current and
 //! survives the run dir's removal on cleanup, so `gage session -A` reads it
 //! without a copy step.
@@ -47,7 +49,6 @@ pub fn judge() -> io::Result<ExitStatus> {
         archive_dir,
         claude_bin,
         user_projects,
-        sandbox_db,
     } = prepare_run("judge")?;
     let projects_dir = claude_home.join("projects");
 
@@ -76,7 +77,6 @@ pub fn judge() -> io::Result<ExitStatus> {
         .current_dir(&cwd)
         .env("CLAUDE_CONFIG_DIR", &claude_home)
         .env("CLAUDE_PROJECTS_DIR", &user_projects)
-        .env("GAGE_DB", &sandbox_db)
         .env("GAGE_AGENT_JUDGE", "1")
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .status();
@@ -102,18 +102,6 @@ pub fn judge() -> io::Result<ExitStatus> {
         println!("no session jsonl produced");
     }
 
-    match gage_db::db::merge_judge_sandbox(&sandbox_db, &gage_db::db::db_path()) {
-        Ok(0) => {}
-        Ok(n) => println!("Merged {n} issue(s) into gage.db"),
-        Err(e) => {
-            return Err(io::Error::other(format!(
-                "merge sandbox into gage.db failed: {e}\n\
-                 sandbox preserved at {} for inspection",
-                sandbox_db.display()
-            )));
-        }
-    }
-
     cleanup_run_dir(&run_dir, &cwd);
 
     Ok(status)
@@ -127,6 +115,11 @@ pub struct JudgeOpts {
     pub model: Option<String>,
     /// `--max-turns` passed to `claude`, if set.
     pub max_turns: Option<u32>,
+    /// The scan run this judge serves. Passed to the child as
+    /// `GAGE_SCAN_ID`; the MCP server scopes every session-keyed table
+    /// to the scan's `scan_session` set so the judge only sees what is
+    /// being scanned.
+    pub scan_id: String,
 }
 
 /// A spawned non-interactive judge `claude` process and the run state its
@@ -143,7 +136,6 @@ pub struct AgentSession {
     cwd: PathBuf,
     claude_home: PathBuf,
     archive_dir: PathBuf,
-    sandbox_db: PathBuf,
 }
 
 /// The result of a completed [`AgentSession`].
@@ -159,8 +151,8 @@ pub struct AgentOutput {
 
 /// Set up an isolated judge home and spawn `claude -p <prompt>`
 /// non-interactively, with stdout and stderr piped so the caller can read
-/// the agent's output. The blocking setup (home seeding, plugin install,
-/// sandbox creation) runs on a blocking thread.
+/// the agent's output. The blocking setup (home seeding, plugin install)
+/// runs on a blocking thread.
 pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSession> {
     let name = opts.name.clone();
     let prep = tokio::task::spawn_blocking(move || prepare_run(&name))
@@ -179,7 +171,7 @@ pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSess
     cmd.current_dir(&prep.cwd)
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &prep.user_projects)
-        .env("GAGE_DB", &prep.sandbox_db)
+        .env("GAGE_SCAN_ID", &opts.scan_id)
         .env("GAGE_AGENT_JUDGE", "1")
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::null())
@@ -213,7 +205,6 @@ pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSess
         cwd: prep.cwd,
         claude_home: prep.claude_home,
         archive_dir: prep.archive_dir,
-        sandbox_db: prep.sandbox_db,
     })
 }
 
@@ -231,8 +222,8 @@ impl AgentSession {
     }
 
     /// Await the child's exit, bounded by `timeout`. On the first call, drain
-    /// the captured output, merge the sandbox db back into the main db, remove
-    /// the run dir, and cache the result. Subsequent calls return the cached
+    /// the captured output, remove the run dir, and cache the result.
+    /// Subsequent calls return the cached
     /// output without repeating that work. On timeout, the child is shut down
     /// gracefully (`SIGTERM`, then `SIGKILL` after [`TIMEOUT_GRACE`]) and the
     /// run dir is cleaned up before a `TimedOut` error is returned, so the
@@ -260,15 +251,6 @@ impl AgentSession {
 
         self.stop_mirror();
         archive_sessions(&self.claude_home, &self.archive_dir)?;
-        gage_db::db::merge_judge_sandbox(&self.sandbox_db, &gage_db::db::db_path()).map_err(
-            |e| {
-                io::Error::other(format!(
-                    "merge sandbox into gage.db failed: {e}\n\
-                 sandbox preserved at {} for inspection",
-                    self.sandbox_db.display()
-                ))
-            },
-        )?;
         cleanup_run_dir(&self.run_dir, &self.cwd);
 
         let output = AgentOutput {
@@ -282,16 +264,14 @@ impl AgentSession {
 
     /// Send `SIGTERM`, wait up to `grace` for the child to exit, then
     /// `SIGKILL` if it has not. The session JSONL is hardlinked after the
-    /// process is gone. The sandbox is not merged — a killed run is
-    /// incomplete — but the run dir is removed once `cwd/` is empty.
+    /// process is gone, and the run dir is removed once `cwd/` is empty.
     pub async fn kill(&mut self, grace: Duration) -> io::Result<()> {
         self.terminate(grace).await
     }
 
     /// Graceful shutdown shared by [`kill`](Self::kill) and `wait`'s timeout
     /// path: `SIGTERM`, wait up to `grace`, then `SIGKILL`, then stop the
-    /// mirror, run the final archive sweep, and remove the run dir. The
-    /// sandbox is not merged — the run is incomplete.
+    /// mirror, run the final archive sweep, and remove the run dir.
     async fn terminate(&mut self, grace: Duration) -> io::Result<()> {
         if let Some(pid) = self.child.id() {
             // SAFETY: pid identifies a child process this struct owns and
@@ -355,11 +335,10 @@ struct PreparedRun {
     archive_dir: PathBuf,
     claude_bin: PathBuf,
     user_projects: PathBuf,
-    sandbox_db: PathBuf,
 }
 
-/// Assemble the throwaway run dir, seed the isolated home, install the gage
-/// plugin, and create the judge sandbox db. `name` selects the archive dir.
+/// Assemble the throwaway run dir, seed the isolated home, and install the
+/// gage plugin. `name` selects the archive dir.
 fn prepare_run(name: &str) -> io::Result<PreparedRun> {
     let run_id = Uuid::new_v4().to_string();
     let run_dir = tmp_run_dir(&run_id);
@@ -388,16 +367,6 @@ fn prepare_run(name: &str) -> io::Result<PreparedRun> {
     // affect archiving).
     let user_projects = user_claude_projects()?;
 
-    // The judge reads and writes a sandbox database seeded with only
-    // neutral evidence (scanner notes), redirected via GAGE_DB. Every
-    // reader — datafusion tables and MCP tools — resolves through
-    // db_path(), so this one override isolates the model from issues,
-    // commentary, and prior judgments without per-tool filtering.
-    // GAGE_AGENT_JUDGE marks the mode for future skill/tool divergence.
-    let sandbox_db = run_dir.join("gage.db");
-    gage_db::db::create_judge_sandbox(&sandbox_db, &gage_db::db::db_path())
-        .map_err(|e| io::Error::other(format!("create judge sandbox: {e}")))?;
-
     Ok(PreparedRun {
         run_dir,
         cwd,
@@ -405,7 +374,6 @@ fn prepare_run(name: &str) -> io::Result<PreparedRun> {
         archive_dir,
         claude_bin,
         user_projects,
-        sandbox_db,
     })
 }
 

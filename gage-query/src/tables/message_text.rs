@@ -22,7 +22,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 use gage_index::{DEFAULT_SNIPPET_CHARS, IndexStore};
 
-use super::walk::reconcile_for_query;
+use super::walk::{reconcile_for_query, session_scope};
 
 /// Default cap when no `LIMIT` is supplied. Explicit user limits pass
 /// through verbatim with no ceiling.
@@ -126,6 +126,8 @@ impl TableProvider for MessageTextTable {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         reconcile_for_query(&self.store).await?;
 
+        let scope = session_scope(state);
+
         let (effective, default_capped) = match limit {
             Some(n) => (n, false),
             None => (DEFAULT_LIMIT, true),
@@ -139,6 +141,18 @@ impl TableProvider for MessageTextTable {
                 .await
                 .map_err(|e| DataFusionError::Execution(format!("search task failed: {e}")))?
                 .map_err(|e| DataFusionError::Execution(format!("search failed: {e}")))?;
+
+        // Full-text search runs over the whole index; when the context
+        // is scoped to a scan's session set, drop hits outside it. The
+        // search limit is applied pre-scope, so a scoped query can return
+        // fewer than `limit` rows even when more in-scope matches exist.
+        let hits = match &scope {
+            Some(s) => hits
+                .into_iter()
+                .filter(|h| s.0.contains(&h.session_id))
+                .collect::<Vec<_>>(),
+            None => hits,
+        };
 
         if default_capped && hits.len() == effective {
             tracing::info!(
