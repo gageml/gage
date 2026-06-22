@@ -1,0 +1,423 @@
+use gage::{write_note, scan};
+
+pub const SCANNER = #{
+    name: "session-summaries",
+    description: `
+    Per-session aggregate summaries
+
+    Writes one note per signal per session, recording factual counts
+    drawn from the session record. Intended as non-biasing input to
+    downstream issue analysis: the notes report what happened and how
+    often, not what it means.`,
+    tasks: #{
+        interrupt: #{
+            notes: #{
+                writes: #{
+                    "session.interrupt": include_str!(
+                        "notes/interrupt.md"
+                    ),
+                },
+            },
+        },
+        thinking: #{
+            notes: #{
+                writes: #{
+                    "session.thinking": include_str!(
+                        "notes/thinking.md"
+                    ),
+                },
+            },
+        },
+        message_count: #{
+            notes: #{
+                writes: #{
+                    "session.message_count": include_str!(
+                        "notes/message_count.md"
+                    ),
+                },
+            },
+        },
+        ide_tags: #{
+            notes: #{
+                writes: #{
+                    "session.ide_tags": include_str!(
+                        "notes/ide_tags.md"
+                    ),
+                },
+            },
+        },
+        model: #{
+            notes: #{
+                writes: #{ "session.model": include_str!(
+                    "notes/model.md"
+                ) },
+            },
+        },
+        duration: #{
+            notes: #{
+                writes: #{
+                    "session.duration_ms": include_str!(
+                        "notes/duration_ms.md"
+                    ),
+                },
+            },
+        },
+        sidechain: #{
+            notes: #{
+                writes: #{
+                    "session.sidechain": include_str!(
+                        "notes/sidechain.md"
+                    ),
+                },
+            },
+        },
+        compact: #{
+            notes: #{
+                writes: #{
+                    "session.compact": include_str!(
+                        "notes/compact.md"
+                    ),
+                },
+            },
+        },
+        api_error: #{
+            notes: #{
+                writes: #{
+                    "session.api_error": include_str!(
+                        "notes/api_error.md"
+                    ),
+                },
+            },
+        },
+        tools: #{
+            notes: #{
+                writes: #{
+                    "session.tool_use": include_str!(
+                        "notes/tool_use.md"
+                    ),
+                    "session.tool_result": include_str!(
+                        "notes/tool_result.md"
+                    ),
+                    "session.tool_error": include_str!(
+                        "notes/tool_error.md"
+                    ),
+                },
+            },
+        },
+        attachments: #{
+            notes: #{
+                writes: #{
+                    "session.attachment": include_str!(
+                        "notes/attachment.md"
+                    ),
+                    "session.max_turns_reached": include_str!(
+                        "notes/max_turns_reached.md"
+                    ),
+                },
+            },
+        },
+    },
+};
+
+// Write one per-session aggregate note, overwriting any prior value
+// from a previous run --- summaries are deterministic functions of the
+// session record and should always reflect the latest computation.
+async fn write(name, value, session_id) {
+    write_note(
+        #{ name: name, value: value, target: #{ session: session_id } },
+    )
+    .replace_prev()
+    .await?;
+    Ok(())
+}
+
+// Increment `map[key]` by one, treating an absent key as zero.
+fn incr(map, key) {
+    let prev = match map.get(key) {
+        Some(n) => n,
+        None => 0,
+    };
+    map[key] = prev + 1;
+}
+
+pub async fn interrupt() {
+    for s in scan().sessions() {
+        let user = 0;
+        let tool_use = 0;
+        for msg in s.messages().with_type(#{ user: "text" }).await? {
+            if msg.text == "[Request interrupted by user]" {
+                user += 1;
+            } else if msg.text == "[Request interrupted by user for tool use]" {
+                tool_use += 1;
+            }
+        }
+        write("session.interrupt", #{ user: user, tool_use: tool_use }, s.id)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn thinking() {
+    for s in scan().sessions() {
+        let total = 0;
+        let empty = 0;
+        for msg in s.messages().with_type(#{ assistant: "thinking" }).await? {
+            total += 1;
+            if msg.text == "" {
+                empty += 1;
+            }
+        }
+        write("session.thinking", #{ total: total, empty: empty }, s.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn message_count() {
+    for s in scan().sessions() {
+        let counts = #{};
+        for msg in s.messages().await? {
+            let t = msg.type;
+            let st = match msg.subtype {
+                Some(v) => v,
+                None => continue,
+            };
+            incr(counts, `${t}.${st}`);
+        }
+        write("session.message_count", counts, s.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn ide_tags() {
+    for s in scan().sessions() {
+        let counts = #{};
+        for msg in s.messages().await? {
+            let tags = match msg.ide_tags {
+                Some(v) => v,
+                None => continue,
+            };
+            let seen = #{};
+            for name in extract_tag_names(tags) {
+                seen[name] = true;
+            }
+            for entry in seen {
+                let (name, _) = entry;
+                incr(counts, name);
+            }
+        }
+        write("session.ide_tags", counts, s.id).await?;
+    }
+    Ok(())
+}
+
+// Extract opening tag names from the leading `<tag>...</tag>` block
+// that `split_ide_tags` recorded in the `ide_tags` column. Closing
+// tags (those starting with `/`) are skipped; attribute-bearing tags
+// stop at the first whitespace.
+fn extract_tag_names(s) {
+    let names = [];
+    let first = true;
+    for seg in s.split('<') {
+        if first {
+            first = false;
+            continue;
+        }
+        if seg.starts_with("/") {
+            continue;
+        }
+        let name = "";
+        for c in seg.chars() {
+            if c == '>' || c == ' ' || c == '/' || c == '\n' || c == '\t' {
+                break;
+            }
+            name.push(c);
+        }
+        if name != "" {
+            names.push(name);
+        }
+    }
+    names
+}
+
+pub async fn model() {
+    for s in scan().sessions() {
+        let counts = #{};
+        for msg in s.messages().with_type("assistant").await? {
+            let key = match msg.model() {
+                Some(m) => m,
+                None => "<unknown>",
+            };
+            incr(counts, key);
+        }
+        write("session.model", counts, s.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn duration() {
+    for s in scan().sessions() {
+        let first = -1;
+        let last = -1;
+        for msg in s.messages().await? {
+            let ms = msg.timestamp.millis();
+            if first == -1 {
+                first = ms;
+            }
+            last = ms;
+        }
+        let value = if first == -1 {
+            0
+        } else {
+            last - first
+        };
+        write("session.duration_ms", value, s.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn sidechain() {
+    for s in scan().sessions() {
+        let count = 0;
+        for entry in s.entries().await? {
+            let obj = entry.as_object();
+            if obj.get("isSidechain") == Some(true) {
+                count += 1;
+            }
+        }
+        write("session.sidechain", count, s.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn compact() {
+    for s in scan().sessions() {
+        let count = 0;
+        for _ in s.entries().with_type("summary").await? {
+            count += 1;
+        }
+        write("session.compact", count, s.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn api_error() {
+    for s in scan().sessions() {
+        let count = 0;
+        for entry in s.entries().with_type("system").await? {
+            let obj = entry.as_object();
+            if obj.get("subtype") == Some("api_error") {
+                count += 1;
+            }
+        }
+        write("session.api_error", count, s.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn tools() {
+    for s in scan().sessions() {
+        let tool_use_counts = #{};
+        let tool_use_names = #{};
+        let result_ok = 0;
+        let result_err = 0;
+        let error_counts = #{};
+
+        for msg in s.messages().with_type(#{ assistant: "tool_use" }).await? {
+            for block in content_blocks(msg) {
+                if block_type(block) != "tool_use" {
+                    continue;
+                }
+                let name = match block.get("name") {
+                    Some(n) if n is String => n,
+                    _ => "<unknown>",
+                };
+                incr(tool_use_counts, name);
+                match block.get("id") {
+                    Some(id) if id is String => tool_use_names[id] = name,
+                    _ => {}
+                }
+            }
+        }
+
+        for msg in s.messages().with_type(#{ user: "tool_result" }).await? {
+            for block in content_blocks(msg) {
+                if block_type(block) != "tool_result" {
+                    continue;
+                }
+                let is_err = block.get("is_error") == Some(true);
+                if is_err {
+                    result_err += 1;
+                    let name = match block.get("tool_use_id") {
+                        Some(id) if id is String => match tool_use_names.get(id) {
+                            Some(n) => n,
+                            None => "<unknown>",
+                        },
+                        _ => "<unknown>",
+                    };
+                    incr(error_counts, name);
+                } else {
+                    result_ok += 1;
+                }
+            }
+        }
+
+        write("session.tool_use", tool_use_counts, s.id).await?;
+        write(
+            "session.tool_result",
+            #{ ok: result_ok, error: result_err },
+            s.id,
+        )
+        .await?;
+        write("session.tool_error", error_counts, s.id).await?;
+    }
+    Ok(())
+}
+
+// Return the `message.content` array of a message as a Vec of blocks,
+// or an empty Vec when the field is absent or malformed.
+fn content_blocks(msg) {
+    let obj = msg.as_object();
+    let m = match obj.get("message") {
+        Some(v) if v is Object => v,
+        _ => return [],
+    };
+    match m.get("content") {
+        Some(v) if v is Vec => v,
+        _ => [],
+    }
+}
+
+// Return a block's `type` field as a string, or empty when absent.
+fn block_type(block) {
+    if block is not Object {
+        return "";
+    }
+    match block.get("type") {
+        Some(v) if v is String => v,
+        _ => "",
+    }
+}
+
+pub async fn attachments() {
+    for s in scan().sessions() {
+        let counts = #{};
+        let max_turns = 0;
+        for entry in s.entries().with_type("attachment").await? {
+            let obj = entry.as_object();
+            let subtype = match obj.get("attachment") {
+                Some(a) if a is Object => match a.get("type") {
+                    Some(t) if t is String => t,
+                    _ => "<unknown>",
+                },
+                _ => "<unknown>",
+            };
+            incr(counts, subtype);
+            if subtype == "max_turns_reached" {
+                max_turns += 1;
+            }
+        }
+        write("session.attachment", counts, s.id).await?;
+        write("session.max_turns_reached", max_turns, s.id).await?;
+    }
+    Ok(())
+}

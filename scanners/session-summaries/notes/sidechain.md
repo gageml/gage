@@ -1,9 +1,9 @@
-Number of sidechain entries in a session.
+Number of sidechain entries in a session
 
-**value** — integer count of entries whose raw JSON has
+**value** - integer count of entries whose raw JSON has
 `isSidechain: true`. Zero is written.
 
-**target** — `{ session }`.
+**target** - session
 
 Sidechain entries are messages produced by subagent (Task tool)
 invocations rather than the main conversation. A nonzero count

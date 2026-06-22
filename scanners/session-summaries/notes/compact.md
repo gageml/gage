@@ -1,10 +1,10 @@
-Number of conversation compaction events in a session.
+Number of conversation compaction events in a session
 
-**value** — integer count of entries the harness writes when it
+**value** - integer count of entries the harness writes when it
 compacts prior conversation context into a summary (entry types such
 as `compact-summary` / `summary`). Zero is written.
 
-**target** — `{ session }`.
+**target** - session
 
 Compaction occurs when the conversation approaches the context window
 and the harness replaces earlier turns with a generated summary. A

@@ -1,10 +1,10 @@
-Number of API error entries the harness recorded in a session.
+Number of API error entries the harness recorded in a session
 
-**value** — integer count of entries the harness writes to record an
+**value** - integer count of entries the harness writes to record an
 API call failure (typically user-type entries flagged with
 `isApiErrorMessage: true`). Zero is written.
 
-**target** — `{ session }`.
+**target** - session
 
 API errors include rate limits, overload, network failures, and
 provider-side errors. A nonzero count means the harness surfaced at

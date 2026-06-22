@@ -1,6 +1,6 @@
-Counts of messages in a session, keyed by `type.subtype`.
+Counts of messages in a session, keyed by `type.subtype`
 
-**value** — JSON object mapping `"<type>.<subtype>"` to message count.
+**value** - JSON object mapping `"<type>.<subtype>"` to message count.
 Keys observed in practice:
 
 - `assistant.text`
@@ -12,7 +12,7 @@ Keys observed in practice:
 
 Combinations that do not occur are absent (not written as zero).
 
-**target** — `{ session }`.
+**target** - session
 
 The breakdown distinguishes substantive user input (`user.text`) from
 harness-injected meta entries (`user.meta`) and tool replies
