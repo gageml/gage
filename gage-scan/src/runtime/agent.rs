@@ -139,10 +139,9 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(id)?;
     m.function_meta(output)?;
 
-    m.function(
-        "call_agent",
-        |prompt: String, opts: Object| async move { do_call_agent(prompt, opts).await },
-    )
+    m.function("call_agent", |prompt: String, opts: Object| async move {
+        do_call_agent(prompt, opts).await
+    })
     .build()?;
 
     Ok(())
