@@ -120,6 +120,7 @@ impl TableProvider for MessageTable {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
+        // Intentionally limit pushdowns to session_id
         Ok(filters
             .iter()
             .map(|f| filter::pushdown(f, "session_id"))
@@ -248,8 +249,9 @@ impl ExecutionPlan for MessageExec {
         let cache = self.cache.clone();
         let projection = self.projection.clone();
         let schema = self.projected_schema.clone();
+        let limit = self.limit;
 
-        let stream = futures::stream::iter(paths)
+        let batches = futures::stream::iter(paths)
             .then(move |(id, path)| {
                 let cache = cache.clone();
                 async move {
@@ -275,6 +277,29 @@ impl ExecutionPlan for MessageExec {
                     }
                 })
             });
+
+        let stream: futures::stream::BoxStream<'static, Result<RecordBatch>> = match limit {
+            Some(n) => batches
+                .scan(n, |remaining, res| {
+                    let item = if *remaining == 0 {
+                        None
+                    } else {
+                        Some(res.map(|batch| {
+                            if batch.num_rows() > *remaining {
+                                let sliced = batch.slice(0, *remaining);
+                                *remaining = 0;
+                                sliced
+                            } else {
+                                *remaining -= batch.num_rows();
+                                batch
+                            }
+                        }))
+                    };
+                    futures::future::ready(item)
+                })
+                .boxed(),
+            None => batches.boxed(),
+        };
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
