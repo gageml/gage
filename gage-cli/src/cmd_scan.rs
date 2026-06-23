@@ -68,28 +68,23 @@ pub struct ScanDeleteArgs {
 
 #[derive(Args)]
 pub struct ScanRunArgs {
-    /// Sessions to scan (ID or prefix). Repeatable
-    #[arg(value_name = "SESSION", conflicts_with_all = ["all", "limit"])]
+    /// Sessions to scan (ID or prefix)
+    #[arg(value_name = "SESSION", conflicts_with = "limit")]
     sessions: Vec<String>,
 
-    /// Scanners to run (repeatable)
+    /// Scanner to run (repeatable)
     #[arg(short, long = "scanner", value_name = "NAME")]
     scanners: Vec<String>,
 
-    /// Scanner files to run (repeatable). Like `-s`, including any
-    /// `-f` replaces the default "run all enabled scanners".
+    /// Scanner file to run (repeatable)
     #[arg(short = 'f', long = "file", value_name = "PATH")]
     files: Vec<String>,
 
-    /// Scan all sessions
-    #[arg(short, long, conflicts_with_all = ["limit", "sessions"])]
-    all: bool,
-
-    /// Scan most recent N sessions (default: 20)
-    #[arg(short, long, conflicts_with_all = ["all", "sessions"])]
+    /// Scan most recent N sessions
+    #[arg(short, long, value_name = "N", conflicts_with = "sessions")]
     limit: Option<usize>,
 
-    /// Skip confirmation prompts
+    /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
 
@@ -97,8 +92,7 @@ pub struct ScanRunArgs {
     #[arg(short, long, value_name = "N")]
     jobs: Option<usize>,
 
-    /// Suppress the interactive progress display. Per-task bars and
-    /// the summary bar are not shown; scanner stdout flows directly.
+    /// Suppress the interactive progress display
     #[arg(long)]
     no_progress: bool,
 
@@ -422,20 +416,16 @@ async fn run_dialog(
         cli::log::step(format!("Sessions{session_lines}"))?;
         resolved
     } else {
-        let session_limit: Option<usize> = if args.all {
-            cli::log::step(format!("Limit\n{}", style("all").dim()))?;
-            None
-        } else if let Some(n) = args.limit {
+        let session_limit: Option<usize> = if let Some(n) = args.limit {
             cli::log::step(format!("Limit\n{}", style(n).dim()))?;
             Some(n)
         } else if args.yes {
-            let n = 20;
-            cli::log::step(format!("Limit\n{}", style(n).dim()))?;
-            Some(n)
+            cli::log::step(format!("Limit\n{}", style("all").dim()))?;
+            None
         } else {
             let input: String = cli::input("Limit")
-                .default_input("20")
-                .placeholder("number or 'all' (default is 20)")
+                .default_input("all")
+                .placeholder("number or 'all' (default is all)")
                 .validate(|v: &String| want_positive_number_or_all(v))
                 .interact()?;
             let trimmed = input.trim();
