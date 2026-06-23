@@ -11,8 +11,7 @@ description:
 Rune is a dynamically typed scripting language whose syntax closely follows
 Rust. It runs on a virtual machine embedded in a Rust host application. Source
 files use the `.rn` extension. The upstream project is
-https://github.com/rune-rs/rune with documentation at
-https://rune-rs.github.io.
+https://github.com/rune-rs/rune with documentation at https://rune-rs.github.io.
 
 A script may consist of top-level statements, or define functions. When run by
 the Rune CLI, `pub fn main()` is the entry point; embedders may call any public
@@ -38,8 +37,8 @@ Rune looks like Rust but differs in ways that matter when writing it:
 - Generators (`yield`) are a first-class language feature.
 
 Items (function names, types, imports) are still checked at compile time:
-calling an undeclared function or importing a missing module is a compile
-error. This distinguishes Rune from Python or Lua.
+calling an undeclared function or importing a missing module is a compile error.
+This distinguishes Rune from Python or Lua.
 
 ## Variables and memory
 
@@ -164,9 +163,9 @@ patterns (`Foo`, `Foo(1, _)`, `Foo { bar: 1, .. }`), and enum variant patterns
 (`Foo::Variant`, `Foo::Variant(1, _)`, `Foo::Variant { bar: 1, .. }`). Values
 inside patterns are themselves patterns and nest arbitrarily.
 
-`_` ignores a value; a bare identifier binds it. `..` (the rest pattern)
-matches remaining elements or fields; without it, collection patterns must
-match exactly:
+`_` ignores a value; a bare identifier binds it. `..` (the rest pattern) matches
+remaining elements or fields; without it, collection patterns must match
+exactly:
 
 ```rune
 match #{ a: 0, b: 1 } {
@@ -289,8 +288,8 @@ Common methods: `unwrap`, `unwrap_or`, `unwrap_or_else`, `expect`, `map`,
 `and_then`, `is_some`/`is_none`, `is_ok`/`is_err`, `ok_or`, `ok` (Result to
 Option), `transpose`, `take`.
 
-Any value can serve as an error: `Err("message")` and custom marker structs
-like `struct Timeout;` with `Err(Timeout)` are idiomatic.
+Any value can serve as an error: `Err("message")` and custom marker structs like
+`struct Timeout;` with `Err(Timeout)` are idiomatic.
 
 ## Strings, templates, and formatting
 
@@ -440,12 +439,12 @@ An `async fn` containing `yield` is a stream; iterate with
 
 ## Built-in macros
 
-- `println!("fmt", args)` / `print!` — write to stdout
-- `format!("fmt", args)` — build a string
-- `dbg!(value)` — debug-print a value and return it
-- `panic!("msg")` — abort the virtual machine with an error
+- `println!("fmt", args)` / `print!` - write to stdout
+- `format!("fmt", args)` - build a string
+- `dbg!(value)` - debug-print a value and return it
+- `panic!("msg")` - abort the virtual machine with an error
 - `assert!(cond, "msg")`, `assert_eq!(a, b)`, `assert_ne!(a, b)`
-- `stringify!(expr)` — expression source as a string
+- `stringify!(expr)` - expression source as a string
 
 New macros can only be defined natively by the Rust host, not in Rune source.
 
@@ -456,3 +455,77 @@ errors at runtime in Rune: calling a missing instance function, using a moved
 value, type mismatches in operators, formatting a value without a display
 implementation, and resuming a completed generator. Compile-time checks cover
 unknown items, unknown struct fields, and variable use after `move`.
+
+## Gage API
+
+Everything Gage exposes lives under the `gage::` crate. Import what you use:
+
+```rune
+use gage::{scan, write_note, write_issue, user, call_agent, call_llm,
+           query, render_template, DateTime, Ignore};
+```
+
+Top-level functions (all async unless noted):
+
+- `scan()` - current `Scan` context (sync). `.id`, `.sessions()` (iterator of
+  `Session`).
+- `user()` - current `User` (sync). `.config(key)` reads Claude config.
+- `query(sql)` - run a SQL query against the Gage DB; returns rows.
+- `write_note(#{ ... })` - insert a note. Builder methods: `.replace_prev()`,
+  `.keep_prev()`. `await` to commit.
+- `write_issue(#{ ... })` - insert/update an issue. Builder methods:
+  `.keep_status()`, `.open_on_new_evidence()`, `.open_on_changed_evidence()`.
+  `await` to commit.
+- `session_notes(session_id)` / `cohort_notes()` - note queries; chain
+  `.with_name(name)` then `.await?`.
+- `call_agent(prompt, #{ ... })` - spawn an isolated `claude` judge process;
+  returns an `AgentSession`. Methods: `.wait().await`, `.kill()`, `.id()`,
+  `.output()`.
+- `call_llm(prompt, #{ ... })` - direct LLM call; returns an `LlmSession`.
+  Methods: `.active()`, `.tool_result(...)`, `poll(session).await`.
+- `render_template(template, #{ ... })` - Tera-style template render.
+
+Sessions and messages:
+
+```rune
+for s in scan().sessions() {
+    for msg in s.messages().await? {                          // all messages
+    }
+    for msg in s.messages().with_type("assistant").await? { } // by role
+    for msg in s.messages()
+        .with_type(#{ assistant: "tool_use" }).await? { }     // by role+kind
+    // msg.timestamp is a DateTime; msg.as_object(), msg.model(), msg.to_json()
+}
+```
+
+`DateTime` - provides date/time support
+
+- `DateTime::from_millis(ms)`
+- `DateTime::now()`
+- `from_rfc3339(s)`, `parse(s, fmt)`
+- `to_rfc3339()`
+- `to_rfc2822()`
+- `millis()`
+- `year()`, `month()`, `day()`
+- `hour()`, `minute()`, `second()`
+- `weekday()` (0–6) or `weekday_name()`
+- `ordinal()` (day of year)
+- `timestamp()` (seconds)
+- `format(fmt)` - strftime-style
+- `add(Duration)` / `sub(Duration)` (also `+` / `-` protocols)
+- `duration_since(other)` → `Duration`
+- Protocols: `PARTIAL_EQ`, `EQ`, `PARTIAL_CMP`, `CMP`, `DISPLAY_FMT`,
+  `DEBUG_FMT`
+
+`Duration` - provides signed time span support
+
+- `Duration::milliseconds(n)`, `Duration::seconds(n)`, `Duration::minutes(n)`,
+  `Duration::hours(n)`, `Duration::days(n)`, `Duration::weeks(n)`
+- `as_millis()`, `as_seconds()`, `as_minutes()`, `as_hours()`, `as_days()`
+- Protocols: `PARTIAL_EQ`, `EQ`, `PARTIAL_CMP`, `CMP`, `DISPLAY_FMT`,
+  `DEBUG_FMT`
+
+`Ignore` - unit struct returned from a scanner to signal "no result this run".
+
+Errors are the `gage::Error` enum (`Args`, `Db`, `Config`, `Network`, `Http`,
+`Decode`, `Template`, `Agent`, ...). Propagate with `?`.
