@@ -60,10 +60,6 @@ impl Scan {
     fn sessions(&self) -> Sessions {
         Sessions::new(self.session_list.clone())
     }
-
-    pub fn session_ids(&self) -> Vec<String> {
-        self.session_list.iter().map(|s| s.id.clone()).collect()
-    }
 }
 
 // Double-ended iterator over a scan's selected sessions, yielding

@@ -5,6 +5,7 @@ use gage_db::issue::{
     self, Issue as DbIssue, IssueError, IssueEvidence as DbIssueEvidence, IssueStatus,
 };
 use gage_db::note::{self, Note as DbNote, NoteError, NoteFilters, NoteValue};
+use gage_db::scan::{insert_scan_issue, insert_scan_note};
 use gage_db::target::{NoteTarget, ProjectTarget, ScanTarget, SessionTarget};
 use rune::Any;
 use rune::alloc;
@@ -36,7 +37,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     })?;
 
     m.function_meta(session_notes)?;
-    m.function_meta(cohort_notes)?;
+    m.function_meta(scan_notes)?;
     m.function_meta(NotesQuery::with_name)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
         do_fetch_notes(q)
@@ -61,23 +62,28 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
 #[rune(item = ::gage)]
 pub(crate) struct NotesQuery {
     #[rune(skip)]
-    session_ids: Vec<String>,
+    scope: NotesScope,
     #[rune(skip)]
     name: Option<String>,
+}
+
+enum NotesScope {
+    Session(String),
+    Scan(String),
 }
 
 #[rune::function(instance, path = notes)]
 fn session_notes(session: Ref<Session>) -> NotesQuery {
     NotesQuery {
-        session_ids: vec![session.id.clone()],
+        scope: NotesScope::Session(session.id.clone()),
         name: None,
     }
 }
 
 #[rune::function(instance, path = notes)]
-fn cohort_notes(cohort: Ref<Scan>) -> NotesQuery {
+fn scan_notes(scan: Ref<Scan>) -> NotesQuery {
     NotesQuery {
-        session_ids: cohort.session_ids(),
+        scope: NotesScope::Scan(scan.id.clone()),
         name: None,
     }
 }
@@ -92,11 +98,14 @@ impl NotesQuery {
 
 fn do_fetch_notes(q: NotesQuery) -> super::Result<Vec<Note>> {
     let ctx = current_scan_ctx();
-    let filters = NoteFilters {
-        sessions: q.session_ids,
+    let mut filters = NoteFilters {
         name: q.name,
         ..Default::default()
     };
+    match q.scope {
+        NotesScope::Session(id) => filters.session = Some(id),
+        NotesScope::Scan(id) => filters.scan = Some(id),
+    }
     let db = ctx.db.lock().unwrap();
     let db_notes = note::find(&db, &filters).map_err(|e| Error::Db(e.to_string()))?;
     Ok(db_notes.into_iter().map(Note::from).collect())
@@ -287,11 +296,17 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
     );
     let db = ctx.db.lock().unwrap();
     match note::insert(&db, &db_note) {
-        Ok(()) => Ok(db_note.into()),
+        Ok(()) => {
+            insert_scan_note(&db, &ctx.run.scan_id, &db_note.id)
+                .map_err(|e| Error::Db(e.to_string()))?;
+            Ok(db_note.into())
+        }
         Err(NoteError::Duplicate(prev)) => match q.policy {
             DuplicatePolicy::Replace => {
                 let updated =
                     note::replace(&db, &prev.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
+                insert_scan_note(&db, &ctx.run.scan_id, &updated.id)
+                    .map_err(|e| Error::Db(e.to_string()))?;
                 Ok(updated.into())
             }
             DuplicatePolicy::Ignore => Ok((*prev).into()),
@@ -331,6 +346,7 @@ fn do_replace_note(note: Note) -> super::Result<Note> {
     };
     let db = ctx.db.lock().unwrap();
     let updated = note::replace(&db, &note.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
+    insert_scan_note(&db, &ctx.run.scan_id, &updated.id).map_err(|e| Error::Db(e.to_string()))?;
     Ok(updated.into())
 }
 
@@ -479,6 +495,8 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
                 issue::insert_issue_evidence(&db, &ev.row(&db_issue.id))
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
+            insert_scan_issue(&db, &ctx.run.scan_id, &db_issue.id)
+                .map_err(|e| Error::Db(e.to_string()))?;
             Ok(db_issue.into())
         }
         Err(IssueError::Duplicate(prev)) if matches!(q.policy, IssuePolicy::Error) => {
@@ -509,15 +527,22 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
             // Add new evidence only; an already-linked note (by id) is a
             // no-op. `seen` also guards intra-batch duplicate note ids.
             let mut seen: HashSet<String> = existing.iter().map(|e| e.note_id.clone()).collect();
+            let mut added_evidence = false;
             for ev in &evidence {
                 if seen.insert(ev.note_id.clone()) {
                     issue::insert_issue_evidence(&db, &ev.row(&prev.id))
                         .map_err(|e| Error::Db(e.to_string()))?;
+                    added_evidence = true;
                 }
             }
 
             if reopen {
                 issue::reopen(&db, &prev.id, &prev.author, None, now)
+                    .map_err(|e| Error::Db(e.to_string()))?;
+            }
+
+            if added_evidence || reopen {
+                insert_scan_issue(&db, &ctx.run.scan_id, &prev.id)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
 

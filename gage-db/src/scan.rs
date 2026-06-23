@@ -77,6 +77,30 @@ pub fn insert_scan_session(
     Ok(())
 }
 
+/// Record that `note_id` was written during `scan_id`. A repeat write of
+/// the same note in the same scan is a no-op.
+pub fn insert_scan_note(conn: &Connection, scan_id: &str, note_id: &str) -> Result<(), ScanError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO scan_note (scan_id, note_id) VALUES (?1, ?2)",
+        params![scan_id, note_id],
+    )?;
+    Ok(())
+}
+
+/// Record that `issue_id` was written during `scan_id`. A repeat write of
+/// the same issue in the same scan is a no-op.
+pub fn insert_scan_issue(
+    conn: &Connection,
+    scan_id: &str,
+    issue_id: &str,
+) -> Result<(), ScanError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO scan_issue (scan_id, issue_id) VALUES (?1, ?2)",
+        params![scan_id, issue_id],
+    )?;
+    Ok(())
+}
+
 pub fn session_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
     let mut stmt =
         conn.prepare("SELECT session_id FROM scan_session WHERE scan_id = ?1 ORDER BY session_id")?;
@@ -141,6 +165,11 @@ pub fn delete_scan(conn: &Connection, scan_id: &str) -> Result<(), ScanError> {
     )?;
     tx.execute(
         "DELETE FROM scan_session WHERE scan_id = ?1",
+        params![scan_id],
+    )?;
+    tx.execute("DELETE FROM scan_note WHERE scan_id = ?1", params![scan_id])?;
+    tx.execute(
+        "DELETE FROM scan_issue WHERE scan_id = ?1",
         params![scan_id],
     )?;
     tx.execute("DELETE FROM scan WHERE id = ?1", params![scan_id])?;

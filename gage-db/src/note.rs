@@ -117,6 +117,9 @@ pub struct NoteFilters {
     pub session: Option<String>,
     /// Session-scoped filter across multiple session ids (IN).
     pub sessions: Vec<String>,
+    /// Scan-scoped filter; matches notes recorded in `scan_note` for the
+    /// given scan id, regardless of the note's advisory target.
+    pub scan: Option<String>,
     pub author: Option<String>,
     pub name: Option<String>,
     /// Scanner name filter; matches `author = scanner:{name}`.
@@ -381,6 +384,14 @@ fn find_query(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::To
         for s in &filters.sessions {
             values.push(Box::new(s.clone()));
         }
+    }
+    if let Some(scan) = &filters.scan {
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM scan_note sx
+                     WHERE sx.note_id = n.id AND sx.scan_id = ?{})",
+            values.len() + 1
+        ));
+        values.push(Box::new(scan.clone()));
     }
     if let Some(author) = &filters.author {
         clauses.push(format!("n.author = ?{}", values.len() + 1));

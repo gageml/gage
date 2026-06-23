@@ -197,6 +197,20 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
             scanner_version      TEXT NOT NULL,
             metadata             TEXT
         );
+
+        CREATE TABLE scan_note (
+            scan_id TEXT NOT NULL REFERENCES scan(id),
+            note_id TEXT NOT NULL REFERENCES note(id),
+            PRIMARY KEY (scan_id, note_id)
+        );
+        CREATE INDEX idx_scan_note_note_id ON scan_note(note_id);
+
+        CREATE TABLE scan_issue (
+            scan_id  TEXT NOT NULL REFERENCES scan(id),
+            issue_id TEXT NOT NULL REFERENCES issue(id),
+            PRIMARY KEY (scan_id, issue_id)
+        );
+        CREATE INDEX idx_scan_issue_issue_id ON scan_issue(issue_id);
 ",
     )?;
     Ok(())
@@ -236,7 +250,14 @@ mod tests {
         assert_eq!(n, 1, "missing unique dedup index");
 
         // scan-related and note relation tables exist
-        for tname in &["scan_session", "scan", "session_note", "project_note"] {
+        for tname in &[
+            "scan_session",
+            "scan",
+            "session_note",
+            "project_note",
+            "scan_note",
+            "scan_issue",
+        ] {
             let n: u32 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
