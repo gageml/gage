@@ -1,4 +1,4 @@
-use gage::{scan, write_note};
+use gage::{call_agent, scan, write_note};
 
 pub const SCANNER = #{
     name: "user-interrupt",
@@ -13,6 +13,7 @@ pub const SCANNER = #{
                 },
             },
         },
+        judge: #{ notes: #{ wants: ["msg.interrupt"] } },
     },
 };
 
@@ -41,4 +42,12 @@ pub async fn note() {
         }
     }
     Ok(())
+}
+
+const JUDGE_PROMPT = include_str!("judge.md");
+
+pub async fn judge() {
+    let session = call_agent(JUDGE_PROMPT, #{}).await?;
+    let out = session.wait().await?;
+    println!("### {out:?}");
 }

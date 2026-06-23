@@ -1,5 +1,8 @@
 # summaries
 
+NOTE: This scanner is slated for removal, to be replaced by narrowly focused
+scanners.
+
 Per-session aggregate notes. Each task walks the session record and writes one
 or more notes whose `value` is the signal in its natural shape (object when
 multi-dimensional, scalar when single-dimensional). Zero values are written.
@@ -12,14 +15,6 @@ what happened and how often, not what it means.
 
 Each entry gives the note's `value` shape and what a reader can plausibly do
 with it. See the note's own `.md` file for the full docstring.
-
-`session.interrupt` --- `{ user, tool_use }`. User-side veto signal. Nonzero
-`user` means the model produced something stopped mid-generation. Nonzero
-`tool_use` means proposed tool calls were rejected.
-
-`session.message_count` --- `{ "<type>.<subtype>": n, ... }`. Session shape.
-Substantive user input (`user.text`) vs harness meta (`user.meta`) vs tool
-replies (`user.tool_result`); assistant text vs tool_use vs thinking.
 
 `session.ide_tags` --- `{ "<tag>": n, ... }`. Counts of out-of-band tag pairs
 prepended to user messages. `command-name` count approximates slash-command
