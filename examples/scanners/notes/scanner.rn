@@ -1,4 +1,4 @@
-use gage::{DateTime, write_note};
+use gage::{DateTime, scan, write_note};
 
 pub const SCANNER = #{
     name: "test-note",
@@ -11,5 +11,20 @@ pub const SCANNER = #{
 
 pub async fn a() {
     let now = DateTime::now();
-    write_note(#{ name: "a", value: now });
+    for s in scan().sessions() {
+        write_note(
+            #{ name: "a", value: now.millis(), target: #{ session: s.id } },
+        )
+        .replace_prev()
+        .await?;
+    }
+}
+
+pub async fn b() {
+    let notes = scan().notes().with_name("a").await?;
+    write_note(
+        #{ name: "b", value: notes.len(), target: #{ scan: scan().id } },
+    )
+    .replace_prev()
+    .await?
 }
