@@ -1,4 +1,4 @@
-//! `call_agent_judge` — spawn an isolated judge `claude` process from a
+//! `call_agent` — spawn an isolated judge `claude` process from a
 //! scanner and drive it through the `AgentSession` handle.
 
 use std::time::Duration;
@@ -95,10 +95,10 @@ impl From<Output> for AgentOutput {
 }
 
 #[rune::function(instance)]
-async fn wait(mut this: Mut<AgentSession>, timeout_secs: i64) -> super::Result<AgentOutput> {
+async fn wait(mut this: Mut<AgentSession>) -> super::Result<AgentOutput> {
     let out = this
         .inner
-        .wait(secs(timeout_secs))
+        .wait()
         .await
         .map_err(|e| Error::Agent(e.to_string()))?;
     Ok(AgentOutput::from(out))
@@ -140,18 +140,19 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(output)?;
 
     m.function(
-        "call_agent_judge",
-        |prompt: String, opts: Object| async move { do_call_agent_judge(prompt, opts).await },
+        "call_agent",
+        |prompt: String, opts: Object| async move { do_call_agent(prompt, opts).await },
     )
     .build()?;
 
     Ok(())
 }
 
-async fn do_call_agent_judge(prompt: String, opts: Object) -> super::Result<AgentSession> {
+async fn do_call_agent(prompt: String, opts: Object) -> super::Result<AgentSession> {
     let name = opt_string(&opts, "name")?.unwrap_or_else(|| DEFAULT_NAME.to_string());
     let model = opt_string(&opts, "model")?;
     let max_turns = opt_i64(&opts, "max_turns")?.map(|v| v as u32);
+    let timeout = opt_i64(&opts, "timeout")?.map(|v| v.max(0) as usize);
     let scan_id = current_scan_ctx().run.scan_id.clone();
 
     let inner = gage_agent::spawn_judge(
@@ -160,6 +161,7 @@ async fn do_call_agent_judge(prompt: String, opts: Object) -> super::Result<Agen
             name,
             model,
             max_turns,
+            timeout,
             scan_id,
         },
     )
@@ -173,7 +175,7 @@ fn opt_string(obj: &Object, field: &str) -> super::Result<Option<String>> {
         Some(v) => v
             .borrow_string_ref()
             .map(|s| Some(s.to_string()))
-            .map_err(|_e| Error::Args(format!("call_agent_judge: '{field}' must be a string"))),
+            .map_err(|_e| Error::Args(format!("call_agent: '{field}' must be a string"))),
         None => Ok(None),
     }
 }
@@ -183,7 +185,7 @@ fn opt_i64(obj: &Object, field: &str) -> super::Result<Option<i64>> {
     match obj.get(field) {
         Some(v) => i64::from_value(v.clone())
             .map(Some)
-            .map_err(|_e| Error::Args(format!("call_agent_judge: '{field}' must be an integer"))),
+            .map_err(|_e| Error::Args(format!("call_agent: '{field}' must be an integer"))),
         None => Ok(None),
     }
 }

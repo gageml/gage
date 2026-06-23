@@ -43,6 +43,9 @@ use uuid::Uuid;
 /// its timeout elapses.
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
+/// Default [`AgentSession::wait`] timeout when [`JudgeOpts::timeout`] is unset.
+pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
+
 pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatus> {
     let PreparedRun {
         run_dir,
@@ -110,7 +113,7 @@ pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatu
     Ok(status)
 }
 
-/// Options for [`spawn_judge`], mirroring the `call_agent_judge` Rune opts.
+/// Options for [`spawn_judge`], mirroring the `call_agent` Rune opts.
 pub struct JudgeOpts {
     /// Agent identifier; selects the archive dir `~/.gage/claude/<name>/`.
     pub name: String,
@@ -118,6 +121,9 @@ pub struct JudgeOpts {
     pub model: Option<String>,
     /// `--max-turns` passed to `claude`, if set.
     pub max_turns: Option<u32>,
+    /// Wait timeout in seconds applied by [`AgentSession::wait`]. `None`
+    /// uses [`DEFAULT_WAIT_TIMEOUT`].
+    pub timeout: Option<usize>,
     /// The scan run this judge serves. Passed to the child as
     /// `GAGE_SCAN_ID`; the MCP server scopes every session-keyed table
     /// to the scan's `scan_session` set so the judge only sees what is
@@ -139,6 +145,7 @@ pub struct AgentSession {
     cwd: PathBuf,
     claude_home: PathBuf,
     archive_dir: PathBuf,
+    timeout: Option<usize>,
 }
 
 /// The result of a completed [`AgentSession`].
@@ -207,6 +214,7 @@ pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSess
         cwd: prep.cwd,
         claude_home: prep.claude_home,
         archive_dir: prep.archive_dir,
+        timeout: opts.timeout,
     })
 }
 
@@ -223,20 +231,25 @@ impl AgentSession {
         self.output.clone()
     }
 
-    /// Await the child's exit, bounded by `timeout`. On the first call, drain
-    /// the captured output, remove the run dir, and cache the result.
-    /// Subsequent calls return the cached
-    /// output without repeating that work. On timeout, the child is shut down
-    /// gracefully (`SIGTERM`, then `SIGKILL` after [`TIMEOUT_GRACE`]) and the
-    /// run dir is cleaned up before a `TimedOut` error is returned, so the
-    /// caller need not handle process teardown. The session JSONL is
-    /// hardlinked into the archive dir continuously by the mirror watcher, so
-    /// a timed-out run still leaves a viewable record.
-    pub async fn wait(&mut self, timeout: Duration) -> io::Result<AgentOutput> {
+    /// Await the child's exit, bounded by the timeout configured in
+    /// [`JudgeOpts::timeout`] (defaulting to [`DEFAULT_WAIT_TIMEOUT`]). On
+    /// the first call, drain the captured output, remove the run dir, and
+    /// cache the result. Subsequent calls return the cached output without
+    /// repeating that work. On timeout, the child is shut down gracefully
+    /// (`SIGTERM`, then `SIGKILL` after [`TIMEOUT_GRACE`]) and the run dir
+    /// is cleaned up before a `TimedOut` error is returned, so the caller
+    /// need not handle process teardown. The session JSONL is hardlinked
+    /// into the archive dir continuously by the mirror watcher, so a
+    /// timed-out run still leaves a viewable record.
+    pub async fn wait(&mut self) -> io::Result<AgentOutput> {
         if let Some(output) = &self.output {
             return Ok(output.clone());
         }
 
+        let timeout = self
+            .timeout
+            .map(|s| Duration::from_secs(s as u64))
+            .unwrap_or(DEFAULT_WAIT_TIMEOUT);
         let status = match tokio::time::timeout(timeout, self.child.wait()).await {
             Ok(status) => status?,
             Err(_) => {
