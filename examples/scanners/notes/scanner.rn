@@ -1,0 +1,15 @@
+use gage::{DateTime, write_note};
+
+pub const SCANNER = #{
+    name: "test-note",
+    description: "Test note writing",
+    tasks: #{
+        a: #{ notes: #{ writes: #{ "a": "Test note a" } } },
+        b: #{ notes: #{ writes: #{ "b": "Test note b" }, wants: ["a"] } },
+    },
+};
+
+pub async fn a() {
+    let now = DateTime::now();
+    write_note(#{ name: "a", value: now });
+}
