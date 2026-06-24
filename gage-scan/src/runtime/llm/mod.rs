@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use rune::alloc::fmt::TryWrite;
 use rune::alloc::prelude::TryClone;
-use rune::runtime::{Formatter, FromValue, Object, Ref, Value, VmError};
+use rune::runtime::{Formatter, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 use serde_json as json;
 use tracing::debug;
@@ -212,7 +212,7 @@ async fn send_next_round(inner: &std::sync::Arc<Mutex<SessionInner>>) -> super::
         stop_reason = ?resp.stop_reason,
         input_tokens = resp.usage.input_tokens,
         output_tokens = resp.usage.output_tokens,
-        "call_llm round"
+        "llm round"
     );
     state.messages.push(ApiMessage {
         role: Role::Assistant,
@@ -222,6 +222,64 @@ async fn send_next_round(inner: &std::sync::Arc<Mutex<SessionInner>>) -> super::
     state.api_stop_reason = Some(resp.stop_reason);
 
     Ok(())
+}
+
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct CallLlm {
+    #[rune(skip)]
+    prompt: String,
+    #[rune(skip)]
+    model: Option<String>,
+    #[rune(skip)]
+    max_rounds: Option<u32>,
+    #[rune(skip)]
+    system_prompt: Option<String>,
+    #[rune(skip)]
+    tools: Vec<ToolDef>,
+}
+
+impl CallLlm {
+    #[rune::function(instance)]
+    fn model(mut self, model: String) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn max_rounds(mut self, max_rounds: i64) -> Self {
+        self.max_rounds = Some(max_rounds.max(0) as u32);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn system_prompt(mut self, system_prompt: String) -> Self {
+        self.system_prompt = Some(system_prompt);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn tool(mut self, name: String, def: Object) -> Self {
+        let description = opt_string(&def, "description").unwrap_or_default();
+        let input_schema = parse_tool_inputs(&def);
+        self.tools.push(ToolDef {
+            name,
+            description,
+            input_schema,
+        });
+        self
+    }
+}
+
+#[rune::function]
+fn llm(prompt: String) -> CallLlm {
+    CallLlm {
+        prompt,
+        model: None,
+        max_rounds: None,
+        system_prompt: None,
+        tools: Vec::new(),
+    }
 }
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
@@ -235,38 +293,42 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(LlmSession::tool_result)?;
     m.function_meta(poll)?;
 
-    m.function("call_llm", |prompt: String, opts: Object| async move {
-        do_call_llm(prompt, opts).await
-    })
-    .build()?;
+    m.ty::<CallLlm>()?;
+    m.function_meta(CallLlm::model)?;
+    m.function_meta(CallLlm::max_rounds)?;
+    m.function_meta(CallLlm::system_prompt)?;
+    m.function_meta(CallLlm::tool)?;
+    m.function_meta(llm)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |c: CallLlm| async move {
+        do_call_llm(c).await
+    })?;
 
     Ok(())
 }
 
-async fn do_call_llm(prompt: String, opts: Object) -> super::Result<LlmSession> {
-    let model_alias = opt_string(&opts, "model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
+async fn do_call_llm(c: CallLlm) -> super::Result<LlmSession> {
+    let model_alias = c.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let model = anthropic::resolve_model(&model_alias).to_string();
 
-    let max_rounds = opt_i64(&opts, "max_rounds")
-        .map(|v| v as u32)
-        .unwrap_or(DEFAULT_MAX_ROUNDS);
+    let max_rounds = c.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS);
 
-    let tool_defs = parse_tools(&opts);
+    let tool_defs = c.tools;
     let client = std::sync::Arc::new(HttpClient::from_env()?);
 
-    let system_text =
-        opt_string(&opts, "system_prompt").unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let system_text = c
+        .system_prompt
+        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
     let system = vec![SystemBlock::text_cached(system_text)];
 
     let messages = vec![ApiMessage {
         role: Role::User,
         content: vec![ContentBlock::Text {
-            text: prompt,
+            text: c.prompt,
             cache_control: Some(CacheControl::ephemeral()),
         }],
     }];
 
-    debug!(model = model.as_str(), tools = tool_defs.len(), "call_llm");
+    debug!(model = model.as_str(), tools = tool_defs.len(), "llm");
 
     let req = MessagesRequest {
         model: model.clone(),
@@ -283,7 +345,7 @@ async fn do_call_llm(prompt: String, opts: Object) -> super::Result<LlmSession> 
         stop_reason = ?resp.stop_reason,
         input_tokens = resp.usage.input_tokens,
         output_tokens = resp.usage.output_tokens,
-        "call_llm round"
+        "llm round"
     );
 
     let mut all_messages = messages;
@@ -313,32 +375,6 @@ async fn do_call_llm(prompt: String, opts: Object) -> super::Result<LlmSession> 
     })
 }
 
-fn parse_tools(opts: &Object) -> Vec<ToolDef> {
-    let tools_val = match opts.get("tools") {
-        Some(v) => v.clone(),
-        None => return Vec::new(),
-    };
-
-    let tools_obj: Object = rune::from_value(tools_val).expect("call_llm: tools must be an object");
-
-    let mut result = Vec::new();
-    for (name, val) in tools_obj.iter() {
-        let tool_obj: Object = rune::from_value(val.clone())
-            .unwrap_or_else(|_| panic!("call_llm: tool '{name}' must be an object"));
-
-        let description = opt_string(&tool_obj, "description").unwrap_or_default();
-
-        let input_schema = parse_tool_inputs(&tool_obj);
-
-        result.push(ToolDef {
-            name: name.to_string(),
-            description,
-            input_schema,
-        });
-    }
-    result
-}
-
 fn parse_tool_inputs(tool: &Object) -> json::Value {
     let inputs_val = match tool.get("inputs") {
         Some(v) => v.clone(),
@@ -351,9 +387,9 @@ fn parse_tool_inputs(tool: &Object) -> json::Value {
 
     for input_val in &inputs {
         let input_obj: Object =
-            rune::from_value(input_val.clone()).expect("call_llm: tool input must be an object");
+            rune::from_value(input_val.clone()).expect("tool input must be an object");
 
-        let name = opt_string(&input_obj, "name").expect("call_llm: tool input missing 'name'");
+        let name = opt_string(&input_obj, "name").expect("tool input missing 'name'");
 
         let type_str = opt_string(&input_obj, "type").unwrap_or_else(|| "string".to_string());
 
@@ -377,15 +413,8 @@ fn parse_tool_inputs(tool: &Object) -> json::Value {
 fn opt_string(obj: &Object, field: &str) -> Option<String> {
     obj.get(field).map(|v| {
         v.borrow_string_ref()
-            .unwrap_or_else(|_| panic!("call_llm: '{field}' must be a string"))
+            .unwrap_or_else(|_| panic!("tool field '{field}' must be a string"))
             .to_string()
-    })
-}
-
-fn opt_i64(obj: &Object, field: &str) -> Option<i64> {
-    obj.get(field).map(|v| {
-        i64::from_value(v.clone())
-            .unwrap_or_else(|_| panic!("call_llm: '{field}' must be an integer"))
     })
 }
 

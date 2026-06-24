@@ -17,14 +17,14 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
         .build()?;
 
     m.function_meta(messages)?;
-    m.function_meta(MessageQuery::with_type)?;
+    m.function_meta(MessageQuery::of_type)?;
     m.function_meta(MessageQuery::reverse)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: MessageQuery| async move {
         do_fetch_messages(q).await
     })?;
 
     m.function_meta(entries)?;
-    m.function_meta(EntryQuery::with_type)?;
+    m.function_meta(EntryQuery::of_type)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: EntryQuery| async move {
         do_fetch_entries(q).await
     })?;
@@ -54,7 +54,7 @@ fn messages(session: Ref<Session>) -> MessageQuery {
 
 impl MessageQuery {
     #[rune::function(instance)]
-    fn with_type(mut self, t: Value) -> Self {
+    fn of_type(mut self, t: Value) -> Self {
         self.type_ = Some(t);
         self
     }
@@ -87,7 +87,7 @@ fn entries(session: Ref<Session>) -> EntryQuery {
 
 impl EntryQuery {
     #[rune::function(instance)]
-    fn with_type(mut self, t: Value) -> Self {
+    fn of_type(mut self, t: Value) -> Self {
         self.type_ = Some(t);
         self
     }
@@ -106,7 +106,7 @@ async fn do_fetch_entries(q: EntryQuery) -> super::Result<Vec<Entry>> {
     }
     if let Some(t) = q.type_ {
         let spec = serde_json::to_value(&t)
-            .map_err(|e| Error::Args(format!("with_type value could not be read: {e}")))?;
+            .map_err(|e| Error::Args(format!("of_type value could not be read: {e}")))?;
         clauses.push(type_clause(&spec, &mut params)?);
     }
 
@@ -141,7 +141,7 @@ async fn do_fetch_messages(q: MessageQuery) -> super::Result<Vec<Message>> {
     }
     if let Some(t) = q.type_ {
         let spec = serde_json::to_value(&t)
-            .map_err(|e| Error::Args(format!("with_type value could not be read: {e}")))?;
+            .map_err(|e| Error::Args(format!("of_type value could not be read: {e}")))?;
         clauses.push(type_clause(&spec, &mut params)?);
     }
 
@@ -178,7 +178,7 @@ fn type_clause(spec: &serde_json::Value, params: &mut Vec<ScalarValue>) -> super
         J::Object(map) => {
             if map.is_empty() {
                 return Err(Error::Args(
-                    "with_type object must name at least one type".into(),
+                    "of_type object must name at least one type".into(),
                 ));
             }
             let mut ors = Vec::with_capacity(map.len());
@@ -196,7 +196,7 @@ fn type_clause(spec: &serde_json::Value, params: &mut Vec<ScalarValue>) -> super
                     }
                     _ => {
                         return Err(Error::Args(
-                            "with_type subtype must be a string or array of strings".into(),
+                            "of_type subtype must be a string or array of strings".into(),
                         ));
                     }
                 };
@@ -205,7 +205,7 @@ fn type_clause(spec: &serde_json::Value, params: &mut Vec<ScalarValue>) -> super
             Ok(format!("({})", ors.join(" OR ")))
         }
         _ => Err(Error::Args(
-            "with_type expects a string, array of strings, or object".into(),
+            "of_type expects a string, array of strings, or object".into(),
         )),
     }
 }
@@ -217,13 +217,13 @@ fn string_in_list(
 ) -> super::Result<String> {
     if items.is_empty() {
         return Err(Error::Args(format!(
-            "with_type {field} list must be non-empty"
+            "of_type {field} list must be non-empty"
         )));
     }
     let mut placeholders = Vec::with_capacity(items.len());
     for item in items {
         let s = item.as_str().ok_or_else(|| {
-            Error::Args(format!("with_type {field} list must contain only strings"))
+            Error::Args(format!("of_type {field} list must contain only strings"))
         })?;
         params.push(ScalarValue::Utf8(Some(s.to_string())));
         placeholders.push(format!("${}", params.len()));

@@ -18,7 +18,7 @@ pub const SCANNER = #{
 
 pub async fn note() {
     for s in scan().sessions() {
-        for entry in s.entries().with_type(#{ "system": "api_error" }).await? {
+        for entry in s.entries().of_type(#{ "system": "api_error" }).await? {
             let error = entry.as_object().get("error").unwrap();
             // value is either error.message or error.error.message
             let value = error

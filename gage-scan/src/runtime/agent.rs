@@ -1,15 +1,16 @@
-//! `call_agent` — spawn an isolated judge `claude` process from a
-//! scanner and drive it through the `AgentSession` handle.
+//! `agent(prompt)` — builder that spawns an isolated judge `claude`
+//! process from a scanner and returns an `AgentSession` handle on await.
 
 use std::time::Duration;
 
 use gage_agent::{AgentOutput as Output, AgentSession as Session, JudgeOpts};
 use rune::alloc::fmt::TryWrite;
 use rune::alloc::prelude::TryClone;
-use rune::runtime::{Formatter, Mut, Object, VmError};
+use rune::runtime::{Formatter, Mut, Protocol, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::runtime::error::Error;
+use crate::runtime::llm::anthropic;
 use crate::runtime::state::current_scan_ctx;
 
 const DEFAULT_NAME: &str = "judge";
@@ -126,6 +127,58 @@ fn secs(value: i64) -> Duration {
     Duration::from_secs(value.max(0) as u64)
 }
 
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct CallAgent {
+    #[rune(skip)]
+    prompt: String,
+    #[rune(skip)]
+    name: Option<String>,
+    #[rune(skip)]
+    model: Option<String>,
+    #[rune(skip)]
+    max_turns: Option<u32>,
+    #[rune(skip)]
+    timeout: Option<usize>,
+}
+
+impl CallAgent {
+    #[rune::function(instance)]
+    fn name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn model(mut self, model: String) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn max_turns(mut self, max_turns: i64) -> Self {
+        self.max_turns = Some(max_turns.max(0) as u32);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn timeout(mut self, timeout: i64) -> Self {
+        self.timeout = Some(timeout.max(0) as usize);
+        self
+    }
+}
+
+#[rune::function]
+fn agent(prompt: String) -> CallAgent {
+    CallAgent {
+        prompt,
+        name: None,
+        model: None,
+        max_turns: None,
+        timeout: None,
+    }
+}
+
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<AgentSession>()?;
     m.ty::<AgentOutput>()?;
@@ -139,54 +192,37 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(id)?;
     m.function_meta(output)?;
 
-    m.function("call_agent", |prompt: String, opts: Object| async move {
-        do_call_agent(prompt, opts).await
-    })
-    .build()?;
+    m.ty::<CallAgent>()?;
+    m.function_meta(CallAgent::name)?;
+    m.function_meta(CallAgent::model)?;
+    m.function_meta(CallAgent::max_turns)?;
+    m.function_meta(CallAgent::timeout)?;
+    m.function_meta(agent)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |c: CallAgent| async move {
+        do_call_agent(c).await
+    })?;
 
     Ok(())
 }
 
-async fn do_call_agent(prompt: String, opts: Object) -> super::Result<AgentSession> {
-    let name = opt_string(&opts, "name")?.unwrap_or_else(|| DEFAULT_NAME.to_string());
-    let model = opt_string(&opts, "model")?;
-    let max_turns = opt_i64(&opts, "max_turns")?.map(|v| v as u32);
-    let timeout = opt_i64(&opts, "timeout")?.map(|v| v.max(0) as usize);
+async fn do_call_agent(c: CallAgent) -> super::Result<AgentSession> {
+    let name = c.name.unwrap_or_else(|| DEFAULT_NAME.to_string());
+    let model = c.model.map(|m| anthropic::resolve_model(&m).to_string());
     let scan_id = current_scan_ctx().run.scan_id.clone();
 
     let inner = gage_agent::spawn_judge(
-        &prompt,
+        &c.prompt,
         &JudgeOpts {
             name,
             model,
-            max_turns,
-            timeout,
+            max_turns: c.max_turns,
+            timeout: c.timeout,
             scan_id,
         },
     )
     .await
     .map_err(|e| Error::Agent(e.to_string()))?;
     Ok(AgentSession { inner })
-}
-
-fn opt_string(obj: &Object, field: &str) -> super::Result<Option<String>> {
-    match obj.get(field) {
-        Some(v) => v
-            .borrow_string_ref()
-            .map(|s| Some(s.to_string()))
-            .map_err(|_e| Error::Args(format!("call_agent: '{field}' must be a string"))),
-        None => Ok(None),
-    }
-}
-
-fn opt_i64(obj: &Object, field: &str) -> super::Result<Option<i64>> {
-    use rune::runtime::FromValue;
-    match obj.get(field) {
-        Some(v) => i64::from_value(v.clone())
-            .map(Some)
-            .map_err(|_e| Error::Args(format!("call_agent: '{field}' must be an integer"))),
-        None => Ok(None),
-    }
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ pub async fn note() {
     let tool_names = #{};
 
     for s in scan().sessions() {
-        for msg in s.messages().with_type(#{ assistant: "tool_use" }).await? {
+        for msg in s.messages().of_type(#{ assistant: "tool_use" }).await? {
             for block in content_blocks(msg) {
                 if block_type(block) != "tool_use" {
                     continue;
@@ -36,7 +36,7 @@ pub async fn note() {
             }
         }
 
-        for msg in s.messages().with_type(#{ "user": "tool_result" }).await? {
+        for msg in s.messages().of_type(#{ "user": "tool_result" }).await? {
             for block in content_blocks(msg) {
                 if block_type(block) != "tool_result" {
                     continue;

@@ -32,7 +32,7 @@ pub async fn note() {
     for s in scan().sessions() {
         for msg in s
             .messages()
-            .with_type(#{ "assistant": "thinking" })
+            .of_type(#{ "assistant": "thinking" })
             .reverse()
             .await?
         {

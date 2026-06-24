@@ -168,7 +168,7 @@ fn extract_tag_names(s) {
 pub async fn model() {
     for s in scan().sessions() {
         let counts = #{};
-        for msg in s.messages().with_type("assistant").await? {
+        for msg in s.messages().of_type("assistant").await? {
             let key = match msg.model() {
                 Some(m) => m,
                 None => "<unknown>",
@@ -218,7 +218,7 @@ pub async fn sidechain() {
 pub async fn compact() {
     for s in scan().sessions() {
         let count = 0;
-        for _ in s.entries().with_type("summary").await? {
+        for _ in s.entries().of_type("summary").await? {
             count += 1;
         }
         write("session.compact", count, s.id).await?;
@@ -229,7 +229,7 @@ pub async fn compact() {
 pub async fn api_error() {
     for s in scan().sessions() {
         let count = 0;
-        for entry in s.entries().with_type("system").await? {
+        for entry in s.entries().of_type("system").await? {
             let obj = entry.as_object();
             if obj.get("subtype") == Some("api_error") {
                 count += 1;
@@ -248,7 +248,7 @@ pub async fn tools() {
         let result_err = 0;
         let error_counts = #{};
 
-        for msg in s.messages().with_type(#{ assistant: "tool_use" }).await? {
+        for msg in s.messages().of_type(#{ assistant: "tool_use" }).await? {
             for block in content_blocks(msg) {
                 if block_type(block) != "tool_use" {
                     continue;
@@ -265,7 +265,7 @@ pub async fn tools() {
             }
         }
 
-        for msg in s.messages().with_type(#{ user: "tool_result" }).await? {
+        for msg in s.messages().of_type(#{ user: "tool_result" }).await? {
             for block in content_blocks(msg) {
                 if block_type(block) != "tool_result" {
                     continue;
@@ -328,7 +328,7 @@ pub async fn attachments() {
     for s in scan().sessions() {
         let counts = #{};
         let max_turns = 0;
-        for entry in s.entries().with_type("attachment").await? {
+        for entry in s.entries().of_type("attachment").await? {
             let obj = entry.as_object();
             let subtype = match obj.get("attachment") {
                 Some(a) if a is Object => match a.get("type") {
