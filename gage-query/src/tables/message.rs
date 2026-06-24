@@ -135,7 +135,7 @@ impl TableProvider for MessageTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let paths = match &self.source {
-            SessionSource::Corpus(store) => session_paths(state, store, filters, "session_id")?,
+            SessionSource::Corpus(store) => session_paths(store, filters, "session_id")?,
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
         let cache = session_cache(state)?;

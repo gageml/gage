@@ -12,14 +12,20 @@
 //! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` containing
 //! `cwd/` (the empty working directory Claude runs in) and `claude/` (the
 //! `CLAUDE_CONFIG_DIR`), seed an isolated home, and install the gage
-//! plugin. The non-interactive scanner path additionally sets
-//! `GAGE_SCAN_ID` so the MCP server scopes every session-keyed table to
-//! the scan's session set. The session JSONL Claude writes is hardlinked
-//! into a caller-supplied archive dir under `~/.gage/claude/<name>/`
-//! (`default` for the interactive command, the scanner name for the
-//! scanner path);
-//! because a hardlink shares the inode, that archived view stays current
-//! and survives the run dir's removal on cleanup, so `gage session -A`
+//! plugin. The non-interactive scanner path additionally builds a scan
+//! sandbox under the run dir — a filtered sqlite db at `db/gage.sqlite`
+//! containing only the rows associated with the scan, and a
+//! `projects/` tree of hardlinks to the session JSONLs in the scan's
+//! `scan_session` set — and points the child claude at them via
+//! `GAGE_DB` and `CLAUDE_PROJECTS_DIR`. The MCP server resolves those
+//! env vars on first tool call, so the judge process physically cannot
+//! see rows or sessions outside its scan.
+//!
+//! The session JSONL Claude writes is hardlinked into a caller-supplied
+//! archive dir under `~/.gage/claude/<name>/` (`default` for the
+//! interactive command, the scanner name for the scanner path); because
+//! a hardlink shares the inode, that archived view stays current and
+//! survives the run dir's removal on cleanup, so `gage session -A`
 //! reads it without a copy step.
 
 use std::ffi::OsStr;
@@ -53,8 +59,8 @@ pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatu
         claude_home,
         archive_dir,
         claude_bin,
-        user_projects,
     } = prepare_run(agent_archive_dir(name.as_deref().unwrap_or("default")))?;
+    let user_projects = user_claude_projects()?;
     let projects_dir = claude_home.join("projects");
 
     // Ignore SIGINT (and SIGQUIT) in the parent while Claude runs. Both
@@ -124,10 +130,10 @@ pub struct JudgeOpts {
     /// Wait timeout in seconds applied by [`AgentSession::wait`]. `None`
     /// uses [`DEFAULT_WAIT_TIMEOUT`].
     pub timeout: Option<usize>,
-    /// The scan run this judge serves. Passed to the child as
-    /// `GAGE_SCAN_ID`; the MCP server scopes every session-keyed table
-    /// to the scan's `scan_session` set so the judge only sees what is
-    /// being scanned.
+    /// The scan run this judge serves. Drives the sandbox build: a
+    /// filtered sqlite db and a filtered `projects/` tree get
+    /// materialized under the judge's run dir, and the child claude is
+    /// pointed at them via `GAGE_DB` and `CLAUDE_PROJECTS_DIR`.
     pub scan_id: String,
 }
 
@@ -165,9 +171,14 @@ pub struct AgentOutput {
 /// runs on a blocking thread.
 pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSession> {
     let archive_dir = agent_archive_dir(&opts.name);
-    let prep = tokio::task::spawn_blocking(move || prepare_run(archive_dir))
-        .await
-        .map_err(io::Error::other)??;
+    let scan_id = opts.scan_id.clone();
+    let (prep, sandbox) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+        let prep = prepare_run(archive_dir)?;
+        let sandbox = build_scan_sandbox(&prep.run_dir, &scan_id)?;
+        Ok((prep, sandbox))
+    })
+    .await
+    .map_err(io::Error::other)??;
 
     let mut cmd = TokioCommand::new(&prep.claude_bin);
     cmd.arg("-p").arg(prompt);
@@ -180,8 +191,8 @@ pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSess
     }
     cmd.current_dir(&prep.cwd)
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
-        .env("CLAUDE_PROJECTS_DIR", &prep.user_projects)
-        .env("GAGE_SCAN_ID", &opts.scan_id)
+        .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
+        .env("GAGE_DB", &sandbox.db_path)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -349,7 +360,93 @@ struct PreparedRun {
     claude_home: PathBuf,
     archive_dir: PathBuf,
     claude_bin: PathBuf,
-    user_projects: PathBuf,
+}
+
+/// Paths a scan sandbox installs under a run dir. The judge child reads
+/// these via `GAGE_DB` and `CLAUDE_PROJECTS_DIR`.
+struct ScanSandbox {
+    db_path: PathBuf,
+    projects_dir: PathBuf,
+}
+
+/// Build a per-scan sandbox under `run_dir`: a filtered sqlite db at
+/// `<run_dir>/db/gage.sqlite` and a `projects/` tree of hardlinks to the
+/// session JSONLs the scan selected. Falls back to a one-shot copy when
+/// hardlinking would cross filesystems (`EXDEV`).
+fn build_scan_sandbox(run_dir: &Path, scan_id: &str) -> io::Result<ScanSandbox> {
+    let db_path = run_dir.join("db").join("gage.sqlite");
+    let projects_dir = run_dir.join("projects");
+    fs::create_dir_all(&projects_dir)?;
+
+    gage_db::sandbox::materialize_scan_sandbox(&gage_db::db::db_path(), &db_path, scan_id)
+        .map_err(io::Error::other)?;
+
+    let scope = scan_session_ids(scan_id)?;
+    let source_projects = user_claude_projects()?;
+    link_in_scope_sessions(&source_projects, &projects_dir, &scope)?;
+
+    Ok(ScanSandbox {
+        db_path,
+        projects_dir,
+    })
+}
+
+/// Look up the session ids associated with `scan_id` in the canonical
+/// gage db.
+fn scan_session_ids(scan_id: &str) -> io::Result<std::collections::HashSet<String>> {
+    let conn = gage_db::db::open_db().map_err(io::Error::other)?;
+    let ids = gage_db::scan::session_ids_for_scan(&conn, scan_id).map_err(io::Error::other)?;
+    Ok(ids.into_iter().collect())
+}
+
+/// Walk `source_projects/*/<uuid>.jsonl` and hardlink each file whose
+/// stem is in `scope` to the mirrored path under `dest_projects/`. The
+/// project-subdir layout is preserved so `SessionListBuilder` reads the
+/// sandbox the same way it reads the real corpus. A missing source
+/// projects dir yields an empty sandbox (the scan may select nothing the
+/// judge needs).
+fn link_in_scope_sessions(
+    source_projects: &Path,
+    dest_projects: &Path,
+    scope: &std::collections::HashSet<String>,
+) -> io::Result<()> {
+    let projects_iter = match fs::read_dir(source_projects) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for project in projects_iter {
+        let project = project?.path();
+        if !project.is_dir() {
+            continue;
+        }
+        let project_name = match project.file_name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let dest_project = dest_projects.join(project_name);
+        let mut created_dest = false;
+        for file in fs::read_dir(&project)? {
+            let file = file?.path();
+            if file.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = match file.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if !scope.contains(stem) {
+                continue;
+            }
+            if !created_dest {
+                fs::create_dir_all(&dest_project)?;
+                created_dest = true;
+            }
+            let dest = dest_project.join(file.file_name().unwrap());
+            link_or_copy(&file, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 /// Assemble the throwaway run dir, seed the isolated home, and install the
@@ -373,21 +470,12 @@ fn prepare_run(archive_dir: PathBuf) -> io::Result<PreparedRun> {
     let gage_bin = sibling_gage_bin()?;
     install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin)?;
 
-    // The judge runs under an isolated CLAUDE_CONFIG_DIR, so the gage MCP
-    // server it launches would resolve its corpus to this empty agent
-    // home. Pin it to the user's real sessions via CLAUDE_PROJECTS_DIR
-    // (Gage's session-corpus override; the `claude` binary uses
-    // CLAUDE_CONFIG_DIR for its own session writes, so this does not
-    // affect archiving).
-    let user_projects = user_claude_projects()?;
-
     Ok(PreparedRun {
         run_dir,
         cwd,
         claude_home,
         archive_dir,
         claude_bin,
-        user_projects,
     })
 }
 
@@ -708,4 +796,67 @@ fn find_claude() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use tempfile::tempdir;
+
+    #[test]
+    fn link_in_scope_sessions_picks_only_scope_ids() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let dest = dir.path().join("dest");
+        let project = source.join("-Users-x-proj");
+        fs::create_dir_all(&project).unwrap();
+        let in_scope = "11111111-1111-1111-1111-111111111111";
+        let out_of_scope = "22222222-2222-2222-2222-222222222222";
+        fs::write(project.join(format!("{in_scope}.jsonl")), b"a").unwrap();
+        fs::write(project.join(format!("{out_of_scope}.jsonl")), b"b").unwrap();
+        // A stray non-jsonl file in the project dir is ignored.
+        fs::write(project.join("README.md"), b"x").unwrap();
+
+        let mut scope = HashSet::new();
+        scope.insert(in_scope.to_string());
+        fs::create_dir_all(&dest).unwrap();
+        link_in_scope_sessions(&source, &dest, &scope).unwrap();
+
+        let linked = dest.join("-Users-x-proj").join(format!("{in_scope}.jsonl"));
+        assert!(linked.exists(), "in-scope session not linked");
+        assert!(
+            !dest
+                .join("-Users-x-proj")
+                .join(format!("{out_of_scope}.jsonl"))
+                .exists(),
+            "out-of-scope session was linked"
+        );
+    }
+
+    #[test]
+    fn link_in_scope_sessions_handles_missing_source() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let scope: HashSet<String> = HashSet::new();
+        link_in_scope_sessions(&dir.path().join("absent"), &dest, &scope).unwrap();
+    }
+
+    #[test]
+    fn link_in_scope_sessions_skips_empty_project_dirs() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let dest = dir.path().join("dest");
+        let project = source.join("-Users-x-empty");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let scope = HashSet::new();
+        link_in_scope_sessions(&source, &dest, &scope).unwrap();
+        assert!(
+            !dest.join("-Users-x-empty").exists(),
+            "empty project dir was created in dest"
+        );
+    }
 }

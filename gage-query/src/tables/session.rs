@@ -28,7 +28,7 @@ use futures::stream;
 use gage_claude::session::SessionInfo;
 use gage_index::{IndexStore, SessionSummary};
 
-use super::walk::{SessionWalker, session_cache, session_walker};
+use super::walk::{session_cache, walk_sessions};
 use crate::cache::SessionCache;
 use crate::filter;
 
@@ -109,11 +109,9 @@ impl TableProvider for SessionTable {
             None => self.schema.clone(),
         };
         let cache = session_cache(state)?;
-        let walker = session_walker(state);
         Ok(Arc::new(SessionExec::new(
             self.store.clone(),
             cache,
-            walker,
             self.schema.clone(),
             projected_schema,
             projection.cloned(),
@@ -127,7 +125,6 @@ impl TableProvider for SessionTable {
 struct SessionExec {
     store: Arc<IndexStore>,
     cache: Arc<SessionCache>,
-    walker: SessionWalker,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -150,7 +147,6 @@ impl SessionExec {
     fn new(
         store: Arc<IndexStore>,
         cache: Arc<SessionCache>,
-        walker: SessionWalker,
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
@@ -167,7 +163,6 @@ impl SessionExec {
         Self {
             store,
             cache,
-            walker,
             full_schema,
             projected_schema,
             projection,
@@ -253,7 +248,6 @@ impl ExecutionPlan for SessionExec {
         Some(Arc::new(SessionExec::new(
             self.store.clone(),
             self.cache.clone(),
-            self.walker.clone(),
             self.full_schema.clone(),
             self.projected_schema.clone(),
             self.projection.clone(),
@@ -277,9 +271,7 @@ impl ExecutionPlan for SessionExec {
 impl SessionExec {
     async fn build_batch(self) -> Result<RecordBatch> {
         let exec_start = std::time::Instant::now();
-        let outcome = self
-            .walker
-            .walk(&self.store, &self.filters, "id", self.limit)?;
+        let outcome = walk_sessions(&self.store, &self.filters, "id", self.limit)?;
         let sessions: Vec<SessionInfo> = outcome.sessions;
 
         let needs_summary = self.projection_needs_summary();

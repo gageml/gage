@@ -17,7 +17,6 @@ use crate::tables::message::MessageTable;
 use crate::tables::message_text::MessageTextFn;
 use crate::tables::note_message_context::NoteMessageContextFn;
 use crate::tables::session::SessionTable;
-use crate::tables::walk::SessionScope;
 
 fn default_root() -> PathBuf {
     gage_claude::session::projects_dir().expect("CLAUDE_PROJECTS_DIR or HOME must be set")
@@ -52,30 +51,7 @@ pub fn default_index_store() -> IndexStore {
 pub async fn create_context_default() -> SessionContext {
     let root = default_root();
     let cache_dir = default_cache_dir(&root);
-    create_context_with_scope(&root, &cache_dir, scan_scope()).await
-}
-
-/// Session scope for a judge agent running under a scan. When
-/// `GAGE_SCAN_ID` is set, the corpus is restricted to that scan's
-/// `scan_session` set so the judge only sees the sessions being scanned.
-/// Absent otherwise. A scan id that can't be resolved to its session set
-/// (db error) yields an empty scope — the judge sees nothing rather than
-/// the whole corpus — and logs the cause.
-fn scan_scope() -> Option<SessionScope> {
-    let scan_id = std::env::var("GAGE_SCAN_ID").ok()?;
-    let ids = match scan_session_ids(&scan_id) {
-        Ok(ids) => ids,
-        Err(e) => {
-            tracing::error!("GAGE_SCAN_ID set but session set unavailable: {e}");
-            Vec::new()
-        }
-    };
-    Some(SessionScope(ids.into_iter().collect()))
-}
-
-fn scan_session_ids(scan_id: &str) -> Result<Vec<String>, String> {
-    let conn = gage_db::db::open_db_at(&gage_db::db::db_path()).map_err(|e| e.to_string())?;
-    gage_db::scan::session_ids_for_scan(&conn, scan_id).map_err(|e| e.to_string())
+    create_context(&root, &cache_dir).await
 }
 
 /// Register the gage JSON UDF suite on a context. Used by
@@ -90,26 +66,11 @@ pub fn install_udfs(ctx: &SessionContext) {
 /// text index cached under `cache_dir`. Queries reconcile the index
 /// lazily; the per-context session cache parses JSONL on first touch.
 pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
-    create_context_with_scope(root, cache_dir, None).await
-}
-
-/// As [`create_context`], but when `scope` is set every session-keyed
-/// table (`session`, `entry`, `message`, `message_text`) is restricted
-/// to that session-id set. Used by the judge-agent path so the agent
-/// only sees the sessions its scan selected.
-async fn create_context_with_scope(
-    root: &Path,
-    cache_dir: &Path,
-    scope: Option<SessionScope>,
-) -> SessionContext {
     let cache = Arc::new(SessionCache::new());
-    let mut config = SessionConfig::new()
+    let config = SessionConfig::new()
         .with_information_schema(true)
         .with_extension(Arc::clone(&cache))
         .set_str("datafusion.sql_parser.dialect", "PostgreSQL");
-    if let Some(scope) = scope {
-        config = config.with_extension(Arc::new(scope));
-    }
     // Federation rules + query planner so sqlite-only sub-plans are
     // rewritten into a single SQL query handed to sqlite.
     let state = SessionStateBuilder::new()

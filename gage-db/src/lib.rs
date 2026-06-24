@@ -5,5 +5,6 @@ pub mod import;
 pub mod issue;
 pub mod note;
 pub mod note_relation;
+pub mod sandbox;
 pub mod scan;
 pub mod target;

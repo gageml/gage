@@ -34,7 +34,7 @@ use gage_claude::session::SessionListBuilder;
 use gage_index::{COL_LINE, COL_TEXT, IndexStore};
 
 use super::message::{PROJECTION as MESSAGE_PROJECTION, message_schema};
-use super::walk::{scope_filter, session_cache};
+use super::walk::session_cache;
 
 /// Argument-list display string for `\df`.
 pub const NOTE_MESSAGE_CONTEXT_ARGS: &str = "note_id text, before integer, after integer";
@@ -230,9 +230,6 @@ async fn window_for(
     before: usize,
     after: usize,
 ) -> Result<Option<RecordBatch>> {
-    if !scope_filter(state).contains(&target.session_id) {
-        return Ok(None);
-    }
     let Some(path) = SessionListBuilder::new()
         .root(store.root())
         .build()
