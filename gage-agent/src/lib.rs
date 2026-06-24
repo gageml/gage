@@ -1,33 +1,38 @@
 //! Run Claude Code in an isolated home for Gage workflows.
 //!
-//! Two entry points share the same isolated-home setup:
+//! Two entry points share one machinery:
 //!
 //! - [`run`] runs the interactive `gage agent` command: it spawns
 //!   `claude`, inherits the terminal, and mirrors session JSONLs live so
 //!   a SIGKILL'd run still leaves a viewable session.
-//! - [`spawn_judge`] runs the same setup non-interactively via
-//!   `claude -p <prompt>` for the scanner path, returning an
-//!   [`AgentSession`] the caller drives with `wait`/`kill`.
+//! - [`spawn_agent`] runs the same setup non-interactively via
+//!   `claude -p <prompt>` for scanners and other automated callers,
+//!   returning an [`AgentSession`] the caller drives with `wait`/`kill`.
 //!
-//! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` containing
-//! `cwd/` (the empty working directory Claude runs in) and `claude/` (the
-//! `CLAUDE_CONFIG_DIR`), seed an isolated home, and install the gage
-//! plugin. The non-interactive scanner path additionally builds a scan
-//! sandbox under the run dir — a filtered sqlite db at `db/gage.sqlite`
-//! containing only the rows associated with the scan, and a
-//! `projects/` tree of hardlinks to the session JSONLs in the scan's
-//! `scan_session` set — and points the child claude at them via
-//! `GAGE_DB` and `CLAUDE_PROJECTS_DIR`. The MCP server resolves those
-//! env vars on first tool call, so the judge process physically cannot
-//! see rows or sessions outside its scan.
+//! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` and
+//! materialize an *agent sandbox* under it — a sqlite db at
+//! `db/gage.sqlite` and a `projects/` tree of hardlinks to the user's
+//! session JSONLs — then point the child `claude` at them via
+//! `GAGE_DB` and `CLAUDE_PROJECTS_DIR`. The sandbox's rows and sessions
+//! are determined by the caller's [`SandboxSpec`]; per-dimension `None`
+//! means "everything," `Some(ids)` restricts. The MCP server in the
+//! child resolves the two env vars on first tool call and physically
+//! cannot see anything the sandbox does not contain.
+//!
+//! The sandbox also installs a trigger-driven writelog (see
+//! `gage_db::sandbox`). On agent exit, `AgentSession::wait` /
+//! [`run`] drains the writelog into the canonical gage db in a single
+//! transaction before cleaning up. A replay failure preserves the run
+//! dir so the user can inspect the sandbox state.
 //!
 //! The session JSONL Claude writes is hardlinked into a caller-supplied
 //! archive dir under `~/.gage/claude/<name>/` (`default` for the
 //! interactive command, the scanner name for the scanner path); because
-//! a hardlink shares the inode, that archived view stays current and
-//! survives the run dir's removal on cleanup, so `gage session -A`
-//! reads it without a copy step.
+//! a hardlink shares the inode, the archived view stays current and
+//! survives run-dir removal, so `gage session -A` reads it without a
+//! copy step.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -39,29 +44,200 @@ use std::time::Duration;
 
 use gage_claude::plugin;
 use gage_core::config::gage_home;
+pub use gage_db::sandbox::SandboxSpec;
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child as TokioChild, Command as TokioCommand};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+/// Which MCP tools the child claude is permitted to call. `Query` is
+/// always available; nothing else is enabled by default.
+#[derive(Debug, Clone, Default)]
+pub struct ToolPolicy {
+    /// Short tool names (without the `mcp__plugin_gage_gage__` prefix).
+    pub tools: Vec<String>,
+}
+
+impl ToolPolicy {
+    /// The default read-only set used by the interactive `gage agent`
+    /// command and as a baseline by callers that want it.
+    pub fn default_interactive() -> Self {
+        Self {
+            tools: vec![
+                "IssueList".into(),
+                "IssueGet".into(),
+                "IssueOpen".into(),
+                "NoteDoc".into(),
+            ],
+        }
+    }
+}
+
 /// Grace period for the `SIGTERM` → `SIGKILL` shutdown `wait` performs when
 /// its timeout elapses.
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
-/// Default [`AgentSession::wait`] timeout when [`JudgeOpts::timeout`] is unset.
+/// Default [`AgentSession::wait`] timeout when no agent timeout was set.
 pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
-pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatus> {
-    let PreparedRun {
-        run_dir,
-        cwd,
-        claude_home,
-        archive_dir,
-        claude_bin,
-    } = prepare_run(agent_archive_dir(name.as_deref().unwrap_or("default")))?;
-    let user_projects = user_claude_projects()?;
-    let projects_dir = claude_home.join("projects");
+/// Fluent configuration for an [`Agent`]. All fields are optional;
+/// `name` defaults to `"default"`, `sandbox` to the full-corpus spec,
+/// `tools` to [`ToolPolicy`]'s default (Query only).
+#[derive(Debug, Clone, Default)]
+pub struct AgentBuilder {
+    name: Option<String>,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    timeout: Option<usize>,
+    sandbox: SandboxSpec,
+    tools: ToolPolicy,
+}
+
+impl AgentBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Archive name; selects `~/.gage/claude/<name>/` for the session
+    /// JSONL hardlinks. Defaults to `"default"`.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// `--model` passed to the child claude.
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// `--max-turns` passed to the child claude.
+    pub fn max_turns(mut self, n: u32) -> Self {
+        self.max_turns = Some(n);
+        self
+    }
+
+    /// Wait timeout in seconds applied by [`AgentSession::wait`].
+    pub fn timeout(mut self, secs: usize) -> Self {
+        self.timeout = Some(secs);
+        self
+    }
+
+    /// MCP tools the agent is permitted to call. Defaults to
+    /// [`ToolPolicy::default`] (Query only).
+    pub fn tools(mut self, tools: ToolPolicy) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Full sandbox filter spec — what rows and sessions the agent can
+    /// see. Defaults to the unrestricted full-corpus spec.
+    pub fn sandbox(mut self, sandbox: SandboxSpec) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    /// Sugar for restricting the sandbox to a specific set of session
+    /// ids. Overwrites any prior `sandbox().sessions` setting.
+    pub fn sessions(mut self, ids: impl IntoIterator<Item = String>) -> Self {
+        self.sandbox.sessions = Some(ids.into_iter().collect());
+        self
+    }
+
+    pub fn build(self) -> Agent {
+        Agent {
+            name: self.name.unwrap_or_else(|| "default".to_string()),
+            model: self.model,
+            max_turns: self.max_turns,
+            timeout: self.timeout,
+            sandbox_spec: self.sandbox,
+            tools: self.tools,
+            state: None,
+        }
+    }
+}
+
+/// A configured but not-yet-running agent. Construct via [`AgentBuilder`].
+///
+/// The slow pre-spawn setup (plugin install + sandbox materialization)
+/// runs inside [`Agent::init`]. Callers that want to wrap setup with a
+/// progress indicator call `init` explicitly; [`Agent::run`] and
+/// [`Agent::start_session`] call it themselves if it has not been run.
+pub struct Agent {
+    name: String,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    timeout: Option<usize>,
+    sandbox_spec: SandboxSpec,
+    tools: ToolPolicy,
+    state: Option<RunState>,
+}
+
+/// Pre-spawn state owned by an [`Agent`] after [`Agent::init`] succeeds.
+struct RunState {
+    prep: PreparedRun,
+    sandbox: Sandbox,
+}
+
+impl Agent {
+    /// Run the slow pre-spawn setup: assemble the run dir, seed the
+    /// isolated claude home, install the gage plugin, materialize the
+    /// sandbox sqlite db, and hardlink the in-scope session JSONLs.
+    /// Idempotent: a second call is a no-op.
+    pub fn init(&mut self) -> io::Result<()> {
+        if self.state.is_some() {
+            return Ok(());
+        }
+        let archive_dir = agent_archive_dir(&self.name);
+        let prep = prepare_run(archive_dir, &self.tools)?;
+        let sandbox = build_sandbox(&prep.run_dir, &self.sandbox_spec)?;
+        self.state = Some(RunState { prep, sandbox });
+        Ok(())
+    }
+
+    /// Spawn the child claude interactively (inherits stdio) and block
+    /// until it exits. Calls [`Agent::init`] if not already done.
+    pub fn run(mut self, prompt: Option<String>) -> io::Result<ExitStatus> {
+        self.init()?;
+        let RunState { prep, sandbox } = self.state.take().unwrap();
+        run_interactive(prep, sandbox, prompt)
+    }
+
+    /// Spawn the child claude non-interactively (stdio piped) via
+    /// `claude -p <prompt>`. Returns an [`AgentSession`] the caller
+    /// drives with `wait`/`kill`. Calls [`Agent::init`] on a blocking
+    /// thread if not already done.
+    pub async fn start_session(mut self, prompt: &str) -> io::Result<AgentSession> {
+        if self.state.is_none() {
+            let mut taken = self;
+            let agent = tokio::task::spawn_blocking(move || -> io::Result<Agent> {
+                taken.init()?;
+                Ok(taken)
+            })
+            .await
+            .map_err(io::Error::other)??;
+            self = agent;
+        }
+        let RunState { prep, sandbox } = self.state.take().unwrap();
+        start_session_inner(
+            prep,
+            sandbox,
+            self.model,
+            self.max_turns,
+            self.timeout,
+            prompt,
+        )
+        .await
+    }
+}
+
+fn run_interactive(
+    prep: PreparedRun,
+    sandbox: Sandbox,
+    prompt: Option<String>,
+) -> io::Result<ExitStatus> {
+    let projects_dir = prep.claude_home.join("projects");
 
     // Ignore SIGINT (and SIGQUIT) in the parent while Claude runs. Both
     // processes share the foreground process group, so the terminal still
@@ -70,12 +246,7 @@ pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatu
     let prev_sigint = ignore_signal(libc::SIGINT);
     let prev_sigquit = ignore_signal(libc::SIGQUIT);
 
-    // Mirror session JSONLs into the archive dir as Claude creates them,
-    // so a SIGKILL'd run still leaves a viewable session behind. The
-    // watcher is dropped after Claude exits; a final sweep below covers
-    // any file the watcher missed (e.g. created in the gap before the
-    // watcher started).
-    let mirror = match start_session_mirror(&projects_dir, &archive_dir) {
+    let mirror = match start_session_mirror(&projects_dir, &prep.archive_dir) {
         Ok(m) => Some(m),
         Err(e) => {
             eprintln!("warning: session mirror watcher failed to start: {e}");
@@ -83,10 +254,11 @@ pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatu
         }
     };
 
-    let mut cmd = Command::new(&claude_bin);
-    cmd.current_dir(&cwd)
-        .env("CLAUDE_CONFIG_DIR", &claude_home)
-        .env("CLAUDE_PROJECTS_DIR", &user_projects)
+    let mut cmd = Command::new(&prep.claude_bin);
+    cmd.current_dir(&prep.cwd)
+        .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
+        .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
+        .env("GAGE_DB", &sandbox.db_path)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
     if let Some(prompt) = &prompt {
         cmd.arg(prompt);
@@ -102,7 +274,7 @@ pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatu
 
     let status = status?;
 
-    let archived = archive_sessions(&claude_home, &archive_dir)?;
+    let archived = archive_sessions(&prep.claude_home, &prep.archive_dir)?;
     for path in &archived {
         let session_id = path
             .file_stem()
@@ -110,34 +282,41 @@ pub fn run(name: Option<String>, prompt: Option<String>) -> io::Result<ExitStatu
             .unwrap_or_else(|| path.to_str().unwrap_or("?"));
         println!("Saved agent session {session_id}");
     }
-    if archived.is_empty() {
-        println!("no session jsonl produced");
-    }
 
-    cleanup_run_dir(&run_dir, &cwd);
+    let replay_ok = replay_and_report(&sandbox.db_path);
+    if replay_ok {
+        cleanup_run_dir(&prep.run_dir, &prep.cwd);
+    } else {
+        eprintln!(
+            "warning: run dir preserved for inspection: {}",
+            prep.run_dir.display()
+        );
+    }
 
     Ok(status)
 }
 
-/// Options for [`spawn_judge`], mirroring the `call_agent` Rune opts.
-pub struct JudgeOpts {
-    /// Agent identifier; selects the archive dir `~/.gage/claude/<name>/`.
-    pub name: String,
-    /// `--model` passed to `claude`, if set.
-    pub model: Option<String>,
-    /// `--max-turns` passed to `claude`, if set.
-    pub max_turns: Option<u32>,
-    /// Wait timeout in seconds applied by [`AgentSession::wait`]. `None`
-    /// uses [`DEFAULT_WAIT_TIMEOUT`].
-    pub timeout: Option<usize>,
-    /// The scan run this judge serves. Drives the sandbox build: a
-    /// filtered sqlite db and a filtered `projects/` tree get
-    /// materialized under the judge's run dir, and the child claude is
-    /// pointed at them via `GAGE_DB` and `CLAUDE_PROJECTS_DIR`.
-    pub scan_id: String,
+/// Replay the sandbox's writelog into the canonical db. Returns `true`
+/// on success or empty writelog; logs and returns `false` on failure so
+/// the caller can preserve the run dir.
+fn replay_and_report(sandbox_db: &Path) -> bool {
+    match gage_db::sandbox::replay_writes(sandbox_db, &gage_db::db::db_path()) {
+        Ok(0) => true,
+        Ok(n) => {
+            println!(
+                "Replayed {n} agent write{} to main db",
+                if n == 1 { "" } else { "s" }
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("error: agent writeback failed: {e}");
+            false
+        }
+    }
 }
 
-/// A spawned non-interactive judge `claude` process and the run state its
+/// A spawned non-interactive agent `claude` process and the run state its
 /// exit needs. Drive it with [`wait`](AgentSession::wait) (normal path) or
 /// [`kill`](AgentSession::kill) (forced shutdown). Dropping it SIGKILLs the
 /// child (`kill_on_drop`), so a session abandoned mid-run does not leak.
@@ -151,6 +330,7 @@ pub struct AgentSession {
     cwd: PathBuf,
     claude_home: PathBuf,
     archive_dir: PathBuf,
+    sandbox_db: PathBuf,
     timeout: Option<usize>,
 }
 
@@ -165,28 +345,23 @@ pub struct AgentOutput {
     pub stderr: Vec<u8>,
 }
 
-/// Set up an isolated judge home and spawn `claude -p <prompt>`
-/// non-interactively, with stdout and stderr piped so the caller can read
-/// the agent's output. The blocking setup (home seeding, plugin install)
-/// runs on a blocking thread.
-pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSession> {
-    let archive_dir = agent_archive_dir(&opts.name);
-    let scan_id = opts.scan_id.clone();
-    let (prep, sandbox) = tokio::task::spawn_blocking(move || -> io::Result<_> {
-        let prep = prepare_run(archive_dir)?;
-        let sandbox = build_scan_sandbox(&prep.run_dir, &scan_id)?;
-        Ok((prep, sandbox))
-    })
-    .await
-    .map_err(io::Error::other)??;
-
+/// Spawn the child claude non-interactively with the already-built run
+/// state. Shared backend for [`Agent::start_session`].
+async fn start_session_inner(
+    prep: PreparedRun,
+    sandbox: Sandbox,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    timeout: Option<usize>,
+    prompt: &str,
+) -> io::Result<AgentSession> {
     let mut cmd = TokioCommand::new(&prep.claude_bin);
     cmd.arg("-p").arg(prompt);
     cmd.args(["--thinking-display", "summarized"]);
-    if let Some(model) = &opts.model {
+    if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
-    if let Some(max_turns) = opts.max_turns {
+    if let Some(max_turns) = max_turns {
         cmd.arg("--max-turns").arg(max_turns.to_string());
     }
     cmd.current_dir(&prep.cwd)
@@ -203,9 +378,6 @@ pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSess
     let stdout = spawn_reader(child.stdout.take());
     let stderr = spawn_reader(child.stderr.take());
 
-    // Hardlink the session JSONL into the archive dir the moment Claude
-    // creates it, so an abnormal exit (timeout, kill) still leaves a
-    // viewable record well before the caller's wait timeout elapses.
     let projects_dir = prep.claude_home.join("projects");
     let mirror = match start_session_mirror(&projects_dir, &prep.archive_dir) {
         Ok(m) => Some(m),
@@ -225,7 +397,8 @@ pub async fn spawn_judge(prompt: &str, opts: &JudgeOpts) -> io::Result<AgentSess
         cwd: prep.cwd,
         claude_home: prep.claude_home,
         archive_dir: prep.archive_dir,
-        timeout: opts.timeout,
+        sandbox_db: sandbox.db_path,
+        timeout,
     })
 }
 
@@ -277,7 +450,7 @@ impl AgentSession {
 
         self.stop_mirror();
         archive_sessions(&self.claude_home, &self.archive_dir)?;
-        cleanup_run_dir(&self.run_dir, &self.cwd);
+        self.finalize_run();
 
         let output = AgentOutput {
             status,
@@ -286,6 +459,19 @@ impl AgentSession {
         };
         self.output = Some(output.clone());
         Ok(output)
+    }
+
+    /// Replay the sandbox writelog and clean up. Preserves the run dir
+    /// when replay fails so the user can inspect the sandbox.
+    fn finalize_run(&self) {
+        if !replay_and_report(&self.sandbox_db) {
+            eprintln!(
+                "warning: run dir preserved for inspection: {}",
+                self.run_dir.display()
+            );
+            return;
+        }
+        cleanup_run_dir(&self.run_dir, &self.cwd);
     }
 
     /// Send `SIGTERM`, wait up to `grace` for the child to exit, then
@@ -315,7 +501,7 @@ impl AgentSession {
 
         self.stop_mirror();
         archive_sessions(&self.claude_home, &self.archive_dir)?;
-        cleanup_run_dir(&self.run_dir, &self.cwd);
+        self.finalize_run();
         Ok(())
     }
 
@@ -362,53 +548,45 @@ struct PreparedRun {
     claude_bin: PathBuf,
 }
 
-/// Paths a scan sandbox installs under a run dir. The judge child reads
+/// Paths a sandbox installs under a run dir. The child claude reads
 /// these via `GAGE_DB` and `CLAUDE_PROJECTS_DIR`.
-struct ScanSandbox {
+struct Sandbox {
     db_path: PathBuf,
     projects_dir: PathBuf,
 }
 
-/// Build a per-scan sandbox under `run_dir`: a filtered sqlite db at
-/// `<run_dir>/db/gage.sqlite` and a `projects/` tree of hardlinks to the
-/// session JSONLs the scan selected. Falls back to a one-shot copy when
-/// hardlinking would cross filesystems (`EXDEV`).
-fn build_scan_sandbox(run_dir: &Path, scan_id: &str) -> io::Result<ScanSandbox> {
+/// Build an agent sandbox under `run_dir`: a sqlite db at
+/// `<run_dir>/db/gage.sqlite` materialized from the canonical db per
+/// `spec`, and a `projects/` tree of hardlinks to the session JSONLs
+/// the spec selects. Falls back to a one-shot copy when hardlinking
+/// would cross filesystems (`EXDEV`).
+fn build_sandbox(run_dir: &Path, spec: &SandboxSpec) -> io::Result<Sandbox> {
     let db_path = run_dir.join("db").join("gage.sqlite");
     let projects_dir = run_dir.join("projects");
     fs::create_dir_all(&projects_dir)?;
 
-    gage_db::sandbox::materialize_scan_sandbox(&gage_db::db::db_path(), &db_path, scan_id)
+    gage_db::sandbox::materialize_sandbox(&gage_db::db::db_path(), &db_path, spec)
         .map_err(io::Error::other)?;
 
-    let scope = scan_session_ids(scan_id)?;
     let source_projects = user_claude_projects()?;
-    link_in_scope_sessions(&source_projects, &projects_dir, &scope)?;
+    link_sessions(&source_projects, &projects_dir, spec.sessions.as_ref())?;
 
-    Ok(ScanSandbox {
+    Ok(Sandbox {
         db_path,
         projects_dir,
     })
 }
 
-/// Look up the session ids associated with `scan_id` in the canonical
-/// gage db.
-fn scan_session_ids(scan_id: &str) -> io::Result<std::collections::HashSet<String>> {
-    let conn = gage_db::db::open_db().map_err(io::Error::other)?;
-    let ids = gage_db::scan::session_ids_for_scan(&conn, scan_id).map_err(io::Error::other)?;
-    Ok(ids.into_iter().collect())
-}
-
-/// Walk `source_projects/*/<uuid>.jsonl` and hardlink each file whose
-/// stem is in `scope` to the mirrored path under `dest_projects/`. The
-/// project-subdir layout is preserved so `SessionListBuilder` reads the
-/// sandbox the same way it reads the real corpus. A missing source
-/// projects dir yields an empty sandbox (the scan may select nothing the
-/// judge needs).
-fn link_in_scope_sessions(
+/// Walk `source_projects/*/<uuid>.jsonl` and hardlink each file into
+/// the mirrored path under `dest_projects/`. When `scope` is `Some`,
+/// only sessions whose id is in the set are linked; `None` links every
+/// session. The project-subdir layout is preserved so
+/// `SessionListBuilder` reads the sandbox the same way it reads the
+/// real corpus. A missing source projects dir yields an empty sandbox.
+fn link_sessions(
     source_projects: &Path,
     dest_projects: &Path,
-    scope: &std::collections::HashSet<String>,
+    scope: Option<&HashSet<String>>,
 ) -> io::Result<()> {
     let projects_iter = match fs::read_dir(source_projects) {
         Ok(it) => it,
@@ -435,7 +613,9 @@ fn link_in_scope_sessions(
                 Some(s) => s,
                 None => continue,
             };
-            if !scope.contains(stem) {
+            if let Some(set) = scope
+                && !set.contains(stem)
+            {
                 continue;
             }
             if !created_dest {
@@ -451,7 +631,7 @@ fn link_in_scope_sessions(
 
 /// Assemble the throwaway run dir, seed the isolated home, and install the
 /// gage plugin. `archive_dir` is where session JSONLs get hardlinked.
-fn prepare_run(archive_dir: PathBuf) -> io::Result<PreparedRun> {
+fn prepare_run(archive_dir: PathBuf, tools: &ToolPolicy) -> io::Result<PreparedRun> {
     let run_id = Uuid::new_v4().to_string();
     let run_dir = tmp_run_dir(&run_id);
     let cwd = run_dir.join("cwd");
@@ -463,7 +643,7 @@ fn prepare_run(archive_dir: PathBuf) -> io::Result<PreparedRun> {
     fs::create_dir_all(&cwd)?;
     fs::create_dir_all(&archive_dir)?;
     fs::create_dir_all(&projects_dir)?;
-    seed_claude_home(&claude_home, &cwd)?;
+    seed_claude_home(&claude_home, &cwd, tools)?;
 
     let claude_bin = find_claude()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
@@ -674,8 +854,9 @@ fn claude_subcommand(claude_bin: &Path, claude_home: &Path, args: &[&OsStr]) -> 
 
 /// Populate the isolated home with the minimum needed to skip onboarding
 /// and present a familiar UI, without inheriting any setting that could
-/// shift model behavior or what lands in the transcript.
-fn seed_claude_home(claude_home: &Path, cwd: &Path) -> io::Result<()> {
+/// shift model behavior or what lands in the transcript. `tools` drives
+/// the MCP-tool allowlist; `Query` is always included.
+fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &ToolPolicy) -> io::Result<()> {
     let user_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("HOME not set"))?;
@@ -696,13 +877,20 @@ fn seed_claude_home(claude_home: &Path, cwd: &Path) -> io::Result<()> {
     if let Some(theme) = user_settings.as_ref().and_then(|v| v.get("theme")) {
         settings.insert("theme".into(), theme.clone());
     }
-    let allow = serde_json::Value::Array(vec![
-        "mcp__plugin_gage_gage__Query".into(),
-        "mcp__plugin_gage_gage__IssueList".into(),
-        "mcp__plugin_gage_gage__IssueGet".into(),
-        "mcp__plugin_gage_gage__IssueOpen".into(),
-        "mcp__plugin_gage_gage__NoteDoc".into(),
-    ]);
+    let mut allow_set: Vec<String> = Vec::with_capacity(tools.tools.len() + 1);
+    allow_set.push("mcp__plugin_gage_gage__Query".into());
+    for t in &tools.tools {
+        let prefixed = format!("mcp__plugin_gage_gage__{t}");
+        if !allow_set.contains(&prefixed) {
+            allow_set.push(prefixed);
+        }
+    }
+    let allow = serde_json::Value::Array(
+        allow_set
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
     let mut permissions = serde_json::Map::new();
     permissions.insert("allow".into(), allow);
     settings.insert("permissions".into(), serde_json::Value::Object(permissions));
@@ -806,7 +994,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn link_in_scope_sessions_picks_only_scope_ids() {
+    fn link_sessions_picks_only_scope_ids() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("source");
         let dest = dir.path().join("dest");
@@ -822,7 +1010,7 @@ mod tests {
         let mut scope = HashSet::new();
         scope.insert(in_scope.to_string());
         fs::create_dir_all(&dest).unwrap();
-        link_in_scope_sessions(&source, &dest, &scope).unwrap();
+        link_sessions(&source, &dest, Some(&scope)).unwrap();
 
         let linked = dest.join("-Users-x-proj").join(format!("{in_scope}.jsonl"));
         assert!(linked.exists(), "in-scope session not linked");
@@ -836,16 +1024,41 @@ mod tests {
     }
 
     #[test]
-    fn link_in_scope_sessions_handles_missing_source() {
+    fn link_sessions_all_links_everything() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let dest = dir.path().join("dest");
+        let project = source.join("-Users-x-proj");
+        fs::create_dir_all(&project).unwrap();
+        let id_a = "11111111-1111-1111-1111-111111111111";
+        let id_b = "22222222-2222-2222-2222-222222222222";
+        fs::write(project.join(format!("{id_a}.jsonl")), b"a").unwrap();
+        fs::write(project.join(format!("{id_b}.jsonl")), b"b").unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        link_sessions(&source, &dest, None).unwrap();
+        assert!(
+            dest.join("-Users-x-proj")
+                .join(format!("{id_a}.jsonl"))
+                .exists()
+        );
+        assert!(
+            dest.join("-Users-x-proj")
+                .join(format!("{id_b}.jsonl"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn link_sessions_handles_missing_source() {
         let dir = tempdir().unwrap();
         let dest = dir.path().join("dest");
         fs::create_dir_all(&dest).unwrap();
         let scope: HashSet<String> = HashSet::new();
-        link_in_scope_sessions(&dir.path().join("absent"), &dest, &scope).unwrap();
+        link_sessions(&dir.path().join("absent"), &dest, Some(&scope)).unwrap();
     }
 
     #[test]
-    fn link_in_scope_sessions_skips_empty_project_dirs() {
+    fn link_sessions_skips_empty_project_dirs() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("source");
         let dest = dir.path().join("dest");
@@ -853,7 +1066,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&dest).unwrap();
         let scope = HashSet::new();
-        link_in_scope_sessions(&source, &dest, &scope).unwrap();
+        link_sessions(&source, &dest, Some(&scope)).unwrap();
         assert!(
             !dest.join("-Users-x-empty").exists(),
             "empty project dir was created in dest"

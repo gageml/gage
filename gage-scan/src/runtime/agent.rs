@@ -3,7 +3,11 @@
 
 use std::time::Duration;
 
-use gage_agent::{AgentOutput as Output, AgentSession as Session, JudgeOpts};
+use std::collections::HashSet;
+
+use gage_agent::{
+    AgentBuilder, AgentOutput as Output, AgentSession as Session, SandboxSpec, ToolPolicy,
+};
 use rune::alloc::fmt::TryWrite;
 use rune::alloc::prelude::TryClone;
 use rune::runtime::{Formatter, Mut, Protocol, VmError};
@@ -207,22 +211,52 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 
 async fn do_call_agent(c: CallAgent) -> super::Result<AgentSession> {
     let name = c.name.unwrap_or_else(|| DEFAULT_NAME.to_string());
-    let model = c.model.map(|m| anthropic::resolve_model(&m).to_string());
     let scan_id = current_scan_ctx().run.scan_id.clone();
+    let sandbox = scan_sandbox_spec(&scan_id).map_err(|e| Error::Agent(e.to_string()))?;
 
-    let inner = gage_agent::spawn_judge(
-        &c.prompt,
-        &JudgeOpts {
-            name,
-            model,
-            max_turns: c.max_turns,
-            timeout: c.timeout,
-            scan_id,
-        },
-    )
-    .await
-    .map_err(|e| Error::Agent(e.to_string()))?;
+    let mut builder = AgentBuilder::new()
+        .name(name)
+        .sandbox(sandbox)
+        .tools(ToolPolicy::default_interactive());
+    if let Some(m) = c.model {
+        builder = builder.model(anthropic::resolve_model(&m).to_string());
+    }
+    if let Some(n) = c.max_turns {
+        builder = builder.max_turns(n);
+    }
+    if let Some(t) = c.timeout {
+        builder = builder.timeout(t);
+    }
+    let inner = builder
+        .build()
+        .start_session(&c.prompt)
+        .await
+        .map_err(|e| Error::Agent(e.to_string()))?;
     Ok(AgentSession { inner })
+}
+
+/// Build a [`SandboxSpec`] restricting the sandbox to the rows recorded
+/// by the running scan: its `scan_session`, `scan_note`, and
+/// `scan_issue` sets. Reads the canonical gage db once.
+fn scan_sandbox_spec(scan_id: &str) -> Result<SandboxSpec, String> {
+    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
+    let sessions: HashSet<String> = gage_db::scan::session_ids_for_scan(&conn, scan_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    let notes: HashSet<String> = gage_db::scan::note_ids_for_scan(&conn, scan_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    let issues: HashSet<String> = gage_db::scan::issue_ids_for_scan(&conn, scan_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    Ok(SandboxSpec {
+        sessions: Some(sessions),
+        notes: Some(notes),
+        issues: Some(issues),
+    })
 }
 
 #[cfg(test)]

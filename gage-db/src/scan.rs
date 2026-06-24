@@ -110,6 +110,22 @@ pub fn session_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<Stri
     Ok(ids)
 }
 
+pub fn note_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
+    let mut stmt = conn.prepare("SELECT note_id FROM scan_note WHERE scan_id = ?1")?;
+    let ids = stmt
+        .query_map(params![scan_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
+pub fn issue_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
+    let mut stmt = conn.prepare("SELECT issue_id FROM scan_issue WHERE scan_id = ?1")?;
+    let ids = stmt
+        .query_map(params![scan_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 pub fn all(conn: &Connection) -> Result<Vec<Scan>, ScanError> {
     let mut stmt = conn.prepare("SELECT id, created, metadata FROM scan ORDER BY created DESC")?;
     let scans = stmt
