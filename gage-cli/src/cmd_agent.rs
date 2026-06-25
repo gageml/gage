@@ -73,9 +73,7 @@ pub fn run(args: AgentArgs) {
 
     let mut builder = AgentBuilder::new();
     if !tools.is_empty() {
-        let mut allow = ToolPolicy::default_tools();
-        allow.extend(tools);
-        match ToolPolicy::tools(allow, vec![]) {
+        match ToolPolicy::tools(tools, vec![]) {
             Ok(resolved) => builder = builder.tools(resolved),
             Err(e) => {
                 eprintln!("gage agent: --tools: {e}");

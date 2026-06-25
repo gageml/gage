@@ -87,12 +87,19 @@ impl ToolPolicy {
     /// Resolve an allow/deny pair into a concrete allowlist. `"*"` in
     /// either list matches every name in [`TOOL_NAMES`]; every other
     /// entry must exactly match a known short name or this returns
-    /// `Err` naming the offender. Result = (allow matches) − (deny
-    /// matches), preserving [`TOOL_NAMES`] order. An empty allow list
-    /// produces an empty result — callers that want the baseline use
-    /// [`ToolPolicy::default_tools`] instead.
+    /// `Err` naming the offender. Result = ([`default_tools`] ∪ allow
+    /// matches) − deny matches, preserving [`TOOL_NAMES`] order. The
+    /// baseline is always included; remove a default with an explicit
+    /// deny entry (e.g. `deny = ["Query"]`).
+    ///
+    /// [`default_tools`]: ToolPolicy::default_tools
     pub fn tools(allow: Vec<String>, deny: Vec<String>) -> Result<Vec<String>, String> {
-        let allow_set = resolve(&allow)?;
+        let mut allow_set = resolve(&allow)?;
+        for d in Self::default_tools() {
+            if let Some(n) = TOOL_NAMES.iter().find(|n| **n == d.as_str()) {
+                allow_set.insert(*n);
+            }
+        }
         let deny_set = resolve(&deny)?;
         Ok(TOOL_NAMES
             .iter()
@@ -1098,11 +1105,22 @@ mod tests {
     }
 
     #[test]
-    fn tool_policy_empty_allow_yields_empty() {
+    fn tool_policy_empty_allow_yields_defaults() {
         assert_eq!(
             ToolPolicy::tools(vec![], vec![]).unwrap(),
-            Vec::<String>::new()
+            ToolPolicy::default_tools()
         );
+    }
+
+    #[test]
+    fn tool_policy_deny_can_remove_default() {
+        assert!(ToolPolicy::tools(vec![], s(&["Query"])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tool_policy_allow_extends_defaults() {
+        let got = ToolPolicy::tools(s(&["IssueOpen"]), vec![]).unwrap();
+        assert_eq!(got, s(&["Query", "IssueOpen"]));
     }
 
     #[test]
