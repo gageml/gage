@@ -53,6 +53,10 @@ pub struct SandboxSpec {
     pub notes: Option<HashSet<String>>,
     /// Issue ids to retain. `None` keeps every issue.
     pub issues: Option<HashSet<String>>,
+    /// Scan id to retain in the `scan` table so the agent's MCP tools
+    /// can record `scan_note` / `scan_issue` links against it. `None`
+    /// drops every scan row.
+    pub scan: Option<String>,
 }
 
 /// Schema-driven list of writeable tables: every table the agent's MCP
@@ -139,17 +143,19 @@ fn snapshot_into(src: &Path, dest: &Path) -> Result<(), DbError> {
 }
 
 fn prune(tx: &Connection, spec: &SandboxSpec) -> Result<(), DbError> {
-    // Drop every `scan_*` row outright. Sandboxes don't carry scan
-    // bookkeeping — the agent never sees other scans, and its own writes
-    // are recorded by the parent through `insert_scan_*` if relevant.
-    for table in [
-        "scan_scanner",
-        "scan_session",
-        "scan_note",
-        "scan_issue",
-        "scan",
-    ] {
+    // Drop scan bookkeeping the agent never reads. The `scan` row
+    // itself is kept when `spec.scan` is set so the agent's MCP tools
+    // can satisfy the FK on `scan_note` / `scan_issue` inserts.
+    for table in ["scan_scanner", "scan_session", "scan_note", "scan_issue"] {
         tx.execute(&format!("DELETE FROM {table}"), [])?;
+    }
+    match &spec.scan {
+        Some(id) => {
+            tx.execute("DELETE FROM scan WHERE id <> ?1", params![id])?;
+        }
+        None => {
+            tx.execute("DELETE FROM scan", [])?;
+        }
     }
 
     if let Some(ids) = &spec.sessions {
@@ -500,6 +506,7 @@ mod tests {
             sessions: Some(sessions),
             notes: Some(notes),
             issues: Some(issues),
+            scan: None,
         };
         materialize_sandbox(&src, &dest, &spec).unwrap();
         let conn = open_db_at(&dest).unwrap();

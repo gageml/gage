@@ -20,6 +20,7 @@ use crate::tools;
 /// the rmcp router registers them in.
 const TOOLS: &[ToolDef] = &[
     tools::query::TOOL,
+    tools::comment_write::TOOL,
     tools::issue_list::TOOL,
     tools::issue_get::TOOL,
     tools::issue_close::TOOL,
@@ -55,11 +56,34 @@ impl GageServer {
 }
 
 fn build_router() -> ToolRouter<GageServer> {
+    let allowed = gage_tools_env();
     let mut router = ToolRouter::<GageServer>::new();
     for route in TOOLS {
-        router = router.with_route(route());
+        let r = route();
+        if let Some(ref allow) = allowed
+            && !allow.contains(r.attr.name.as_ref())
+        {
+            continue;
+        }
+        router = router.with_route(r);
     }
     router
+}
+
+/// Parse the `GAGE_TOOLS` env var: a comma-delimited list of MCP tool
+/// short names (e.g. `Query,IssueOpen`). `Some(set)` restricts the
+/// router to those names; `None` (unset) leaves the router unrestricted.
+/// Empty or whitespace-only entries are ignored, so an empty string
+/// resolves to `Some(empty_set)` — i.e. no tools exposed.
+fn gage_tools_env() -> Option<std::collections::HashSet<String>> {
+    let raw = std::env::var("GAGE_TOOLS").ok()?;
+    Some(
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 impl ServerHandler for GageServer {

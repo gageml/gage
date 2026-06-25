@@ -11,6 +11,7 @@ use gage_agent::{
 use rune::alloc::fmt::TryWrite;
 use rune::alloc::prelude::TryClone;
 use rune::runtime::{Formatter, Mut, Protocol, VmError};
+use rune::runtime::{FromValue, Value};
 use rune::{Any, ContextError, Module};
 
 use crate::runtime::error::Error;
@@ -144,6 +145,10 @@ pub(crate) struct CallAgent {
     max_turns: Option<u32>,
     #[rune(skip)]
     timeout: Option<usize>,
+    #[rune(skip)]
+    allow_tools: Option<super::Result<Vec<String>>>,
+    #[rune(skip)]
+    deny_tools: Option<super::Result<Vec<String>>>,
 }
 
 impl CallAgent {
@@ -170,6 +175,30 @@ impl CallAgent {
         self.timeout = Some(timeout.max(0) as usize);
         self
     }
+
+    #[rune::function(instance)]
+    fn allow_tools(mut self, tools: Value) -> Self {
+        self.allow_tools = Some(string_list(tools, "allow_tools"));
+        self
+    }
+
+    #[rune::function(instance)]
+    fn deny_tools(mut self, tools: Value) -> Self {
+        self.deny_tools = Some(string_list(tools, "deny_tools"));
+        self
+    }
+}
+
+fn string_list(v: Value, field: &str) -> super::Result<Vec<String>> {
+    let items: rune::runtime::Vec = FromValue::from_value(v)
+        .map_err(|e| Error::Agent(format!("'{field}' must be a list of strings: {e}")))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let s: String = FromValue::from_value(item.clone())
+            .map_err(|e| Error::Agent(format!("'{field}' must be a list of strings: {e}")))?;
+        out.push(s);
+    }
+    Ok(out)
 }
 
 #[rune::function]
@@ -180,6 +209,8 @@ fn call_agent(prompt: String) -> CallAgent {
         model: None,
         max_turns: None,
         timeout: None,
+        allow_tools: None,
+        deny_tools: None,
     }
 }
 
@@ -201,6 +232,8 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(CallAgent::model)?;
     m.function_meta(CallAgent::max_turns)?;
     m.function_meta(CallAgent::timeout)?;
+    m.function_meta(CallAgent::allow_tools)?;
+    m.function_meta(CallAgent::deny_tools)?;
     m.function_meta(call_agent)?;
     m.associated_function(&Protocol::INTO_FUTURE, |c: CallAgent| async move {
         do_call_agent(c).await
@@ -217,7 +250,13 @@ async fn do_call_agent(c: CallAgent) -> super::Result<AgentSession> {
     let mut builder = AgentBuilder::new()
         .name(name)
         .sandbox(sandbox)
-        .tools(ToolPolicy::default_interactive());
+        .scan_id(&scan_id);
+    if c.allow_tools.is_some() || c.deny_tools.is_some() {
+        let allow = c.allow_tools.transpose()?.unwrap_or_default();
+        let deny = c.deny_tools.transpose()?.unwrap_or_default();
+        let resolved = ToolPolicy::tools(allow, deny).map_err(Error::Agent)?;
+        builder = builder.tools(resolved);
+    }
     if let Some(m) = c.model {
         builder = builder.model(anthropic::resolve_model(&m).to_string());
     }
@@ -256,6 +295,7 @@ fn scan_sandbox_spec(scan_id: &str) -> Result<SandboxSpec, String> {
         sessions: Some(sessions),
         notes: Some(notes),
         issues: Some(issues),
+        scan: Some(scan_id.to_string()),
     })
 }
 

@@ -45,7 +45,7 @@ pub fn init(role: &str) -> io::Result<WorkerGuard> {
         .map_err(io::Error::other)?;
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
-    let filter = EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_ansi(false)

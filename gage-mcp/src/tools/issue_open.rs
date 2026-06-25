@@ -5,13 +5,14 @@ use gage_core::uuid::{new_uuid, short_uuid};
 use gage_db::db::open_db;
 use gage_db::issue::{self, Issue, IssueEvidence, IssueStatus};
 use gage_db::note;
+use gage_db::scan::insert_scan_issue;
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
     service::RequestContext,
 };
 
 use crate::server::GageServer;
-use crate::tool::{ToolDef, agent_author, build_tool_meta};
+use crate::tool::{ToolDef, agent_author, build_tool_meta, scan_id_from_env};
 
 pub const TOOL: ToolDef = route;
 
@@ -80,6 +81,11 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         ),
         _ => McpError::internal_error(format!("insert issue: {e}"), None),
     })?;
+
+    if let Some(scan_id) = scan_id_from_env() {
+        insert_scan_issue(&conn, &scan_id, &issue_row.id)
+            .map_err(|e| McpError::internal_error(format!("link issue to scan: {e}"), None))?;
+    }
 
     for n in &evidence_notes {
         issue::insert_issue_evidence(

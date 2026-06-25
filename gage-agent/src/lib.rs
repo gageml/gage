@@ -51,27 +51,72 @@ use tokio::process::{Child as TokioChild, Command as TokioCommand};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-/// Which MCP tools the child claude is permitted to call. `Query` is
-/// always available; nothing else is enabled by default.
-#[derive(Debug, Clone, Default)]
-pub struct ToolPolicy {
-    /// Short tool names (without the `mcp__plugin_gage_gage__` prefix).
-    pub tools: Vec<String>,
-}
+/// Canonical short names of every MCP tool the gage MCP server exposes.
+/// Maintained by hand to mirror `gage-mcp`'s `TOOLS` registry. The order
+/// here is the order resolved allowlists appear in `settings.json`, which
+/// is purely cosmetic. This list is the universe `"*"` expands against in
+/// [`ToolPolicy::tools`].
+pub const TOOL_NAMES: &[&str] = &[
+    "Query",
+    "CommentWrite",
+    "IssueList",
+    "IssueGet",
+    "IssueClose",
+    "IssueComment",
+    "IssueOpen",
+    "NoteDoc",
+];
+
+/// Stateless helpers that produce resolved MCP-tool allowlists for an
+/// [`AgentBuilder`]. Every function returns the final `Vec<String>` of
+/// short names that gets written verbatim (with the
+/// `mcp__plugin_gage_gage__` prefix) into the child claude's
+/// `settings.json` `permissions.allow`.
+pub struct ToolPolicy;
 
 impl ToolPolicy {
-    /// The default read-only set used by the interactive `gage agent`
-    /// command and as a baseline by callers that want it.
-    pub fn default_interactive() -> Self {
-        Self {
-            tools: vec![
-                "IssueList".into(),
-                "IssueGet".into(),
-                "IssueOpen".into(),
-                "NoteDoc".into(),
-            ],
+    /// The shared baseline allowlist used by every entry point that gives
+    /// a child claude access to gage data: the `gage agent` CLI and the
+    /// Rune `call_agent` builder. Keeping a single source of truth here
+    /// is load-bearing — the CLI is the user-visible reflection of what
+    /// a `call_agent` child sees, and the two must not drift.
+    pub fn default_tools() -> Vec<String> {
+        vec!["Query".into()]
+    }
+
+    /// Resolve an allow/deny pair into a concrete allowlist. `"*"` in
+    /// either list matches every name in [`TOOL_NAMES`]; every other
+    /// entry must exactly match a known short name or this returns
+    /// `Err` naming the offender. Result = (allow matches) − (deny
+    /// matches), preserving [`TOOL_NAMES`] order. An empty allow list
+    /// produces an empty result — callers that want the baseline use
+    /// [`ToolPolicy::default_tools`] instead.
+    pub fn tools(allow: Vec<String>, deny: Vec<String>) -> Result<Vec<String>, String> {
+        let allow_set = resolve(&allow)?;
+        let deny_set = resolve(&deny)?;
+        Ok(TOOL_NAMES
+            .iter()
+            .filter(|n| allow_set.contains(**n) && !deny_set.contains(**n))
+            .map(|n| (*n).to_string())
+            .collect())
+    }
+}
+
+fn resolve(patterns: &[String]) -> Result<HashSet<&'static str>, String> {
+    let mut out: HashSet<&'static str> = HashSet::new();
+    for p in patterns {
+        if p == "*" {
+            out.extend(TOOL_NAMES.iter().copied());
+            continue;
+        }
+        match TOOL_NAMES.iter().find(|n| **n == p.as_str()) {
+            Some(n) => {
+                out.insert(*n);
+            }
+            None => return Err(format!("unknown tool: {p}")),
         }
     }
+    Ok(out)
 }
 
 /// Grace period for the `SIGTERM` → `SIGKILL` shutdown `wait` performs when
@@ -83,15 +128,30 @@ pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Fluent configuration for an [`Agent`]. All fields are optional;
 /// `name` defaults to `"default"`, `sandbox` to the full-corpus spec,
-/// `tools` to [`ToolPolicy`]'s default (Query only).
-#[derive(Debug, Clone, Default)]
+/// `tools` to [`ToolPolicy::default_tools`] (Query only).
+#[derive(Debug, Clone)]
 pub struct AgentBuilder {
     name: Option<String>,
     model: Option<String>,
     max_turns: Option<u32>,
     timeout: Option<usize>,
     sandbox: SandboxSpec,
-    tools: ToolPolicy,
+    tools: Vec<String>,
+    scan_id: Option<String>,
+}
+
+impl Default for AgentBuilder {
+    fn default() -> Self {
+        Self {
+            name: None,
+            model: None,
+            max_turns: None,
+            timeout: None,
+            sandbox: SandboxSpec::default(),
+            tools: ToolPolicy::default_tools(),
+            scan_id: None,
+        }
+    }
 }
 
 impl AgentBuilder {
@@ -124,9 +184,11 @@ impl AgentBuilder {
         self
     }
 
-    /// MCP tools the agent is permitted to call. Defaults to
-    /// [`ToolPolicy::default`] (Query only).
-    pub fn tools(mut self, tools: ToolPolicy) -> Self {
+    /// MCP tool allowlist (short names without the
+    /// `mcp__plugin_gage_gage__` prefix). Replaces the default. Build
+    /// the argument with [`ToolPolicy::tools`] for allow/deny semantics
+    /// or [`ToolPolicy::default_tools`] for the Query-only baseline.
+    pub fn tools(mut self, tools: Vec<String>) -> Self {
         self.tools = tools;
         self
     }
@@ -145,6 +207,14 @@ impl AgentBuilder {
         self
     }
 
+    /// Scan id to expose to the child as `GAGE_SCAN_ID`. When set, the
+    /// MCP server in the child links any notes or issues it creates to
+    /// this scan via `scan_note` / `scan_issue`.
+    pub fn scan_id(mut self, scan_id: impl Into<String>) -> Self {
+        self.scan_id = Some(scan_id.into());
+        self
+    }
+
     pub fn build(self) -> Agent {
         Agent {
             name: self.name.unwrap_or_else(|| "default".to_string()),
@@ -153,6 +223,7 @@ impl AgentBuilder {
             timeout: self.timeout,
             sandbox_spec: self.sandbox,
             tools: self.tools,
+            scan_id: self.scan_id,
             state: None,
         }
     }
@@ -170,7 +241,8 @@ pub struct Agent {
     max_turns: Option<u32>,
     timeout: Option<usize>,
     sandbox_spec: SandboxSpec,
-    tools: ToolPolicy,
+    tools: Vec<String>,
+    scan_id: Option<String>,
     state: Option<RunState>,
 }
 
@@ -201,7 +273,7 @@ impl Agent {
     pub fn run(mut self, prompt: Option<String>) -> io::Result<ExitStatus> {
         self.init()?;
         let RunState { prep, sandbox } = self.state.take().unwrap();
-        run_interactive(prep, sandbox, prompt)
+        run_interactive(prep, sandbox, self.scan_id, prompt)
     }
 
     /// Spawn the child claude non-interactively (stdio piped) via
@@ -226,6 +298,7 @@ impl Agent {
             self.model,
             self.max_turns,
             self.timeout,
+            self.scan_id,
             prompt,
         )
         .await
@@ -235,6 +308,7 @@ impl Agent {
 fn run_interactive(
     prep: PreparedRun,
     sandbox: Sandbox,
+    scan_id: Option<String>,
     prompt: Option<String>,
 ) -> io::Result<ExitStatus> {
     let projects_dir = prep.claude_home.join("projects");
@@ -259,7 +333,11 @@ fn run_interactive(
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
         .env("GAGE_DB", &sandbox.db_path)
+        .env("GAGE_TOOLS", prep.tools.join(","))
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
+    if let Some(id) = &scan_id {
+        cmd.env("GAGE_SCAN_ID", id);
+    }
     if let Some(prompt) = &prompt {
         cmd.arg(prompt);
     }
@@ -353,6 +431,7 @@ async fn start_session_inner(
     model: Option<String>,
     max_turns: Option<u32>,
     timeout: Option<usize>,
+    scan_id: Option<String>,
     prompt: &str,
 ) -> io::Result<AgentSession> {
     let mut cmd = TokioCommand::new(&prep.claude_bin);
@@ -368,11 +447,15 @@ async fn start_session_inner(
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
         .env("GAGE_DB", &sandbox.db_path)
+        .env("GAGE_TOOLS", prep.tools.join(","))
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(id) = &scan_id {
+        cmd.env("GAGE_SCAN_ID", id);
+    }
 
     let mut child = cmd.spawn()?;
     let stdout = spawn_reader(child.stdout.take());
@@ -546,6 +629,10 @@ struct PreparedRun {
     claude_home: PathBuf,
     archive_dir: PathBuf,
     claude_bin: PathBuf,
+    /// Resolved MCP-tool allowlist (short names). Exported to the child
+    /// claude as `GAGE_TOOLS` so the in-child gage MCP server registers
+    /// only these tools.
+    tools: Vec<String>,
 }
 
 /// Paths a sandbox installs under a run dir. The child claude reads
@@ -631,7 +718,7 @@ fn link_sessions(
 
 /// Assemble the throwaway run dir, seed the isolated home, and install the
 /// gage plugin. `archive_dir` is where session JSONLs get hardlinked.
-fn prepare_run(archive_dir: PathBuf, tools: &ToolPolicy) -> io::Result<PreparedRun> {
+fn prepare_run(archive_dir: PathBuf, tools: &[String]) -> io::Result<PreparedRun> {
     let run_id = Uuid::new_v4().to_string();
     let run_dir = tmp_run_dir(&run_id);
     let cwd = run_dir.join("cwd");
@@ -648,7 +735,7 @@ fn prepare_run(archive_dir: PathBuf, tools: &ToolPolicy) -> io::Result<PreparedR
     let claude_bin = find_claude()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
     let gage_bin = sibling_gage_bin()?;
-    install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin)?;
+    install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin, tools)?;
 
     Ok(PreparedRun {
         run_dir,
@@ -656,6 +743,7 @@ fn prepare_run(archive_dir: PathBuf, tools: &ToolPolicy) -> io::Result<PreparedR
         claude_home,
         archive_dir,
         claude_bin,
+        tools: tools.to_vec(),
     })
 }
 
@@ -811,8 +899,10 @@ fn install_gage_plugin(
     claude_home: &Path,
     marketplace: &Path,
     gage_bin: &Path,
+    tools: &[String],
 ) -> io::Result<()> {
     plugin::write_plugin_files_to(marketplace, gage_bin)?;
+    plugin::filter_tools_skill(marketplace, tools)?;
     plugin::write_marketplace_manifest_to(marketplace)?;
     claude_subcommand(
         claude_bin,
@@ -854,9 +944,9 @@ fn claude_subcommand(claude_bin: &Path, claude_home: &Path, args: &[&OsStr]) -> 
 
 /// Populate the isolated home with the minimum needed to skip onboarding
 /// and present a familiar UI, without inheriting any setting that could
-/// shift model behavior or what lands in the transcript. `tools` drives
-/// the MCP-tool allowlist; `Query` is always included.
-fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &ToolPolicy) -> io::Result<()> {
+/// shift model behavior or what lands in the transcript. `tools` is the
+/// MCP-tool allowlist verbatim — no entry is implicit.
+fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &[String]) -> io::Result<()> {
     let user_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("HOME not set"))?;
@@ -879,9 +969,8 @@ fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &ToolPolicy) -> io::R
             settings.insert(key.into(), v.clone());
         }
     }
-    let mut allow_set: Vec<String> = Vec::with_capacity(tools.tools.len() + 1);
-    allow_set.push("mcp__plugin_gage_gage__Query".into());
-    for t in &tools.tools {
+    let mut allow_set: Vec<String> = Vec::with_capacity(tools.len());
+    for t in tools {
         let prefixed = format!("mcp__plugin_gage_gage__{t}");
         if !allow_set.contains(&prefixed) {
             allow_set.push(prefixed);
@@ -994,6 +1083,63 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use tempfile::tempdir;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    #[test]
+    fn tool_policy_default_is_query_only() {
+        assert_eq!(ToolPolicy::default_tools(), vec!["Query".to_string()]);
+    }
+
+    #[test]
+    fn tool_policy_empty_allow_yields_empty() {
+        assert_eq!(
+            ToolPolicy::tools(vec![], vec![]).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn tool_policy_star_allow_yields_all() {
+        let got = ToolPolicy::tools(s(&["*"]), vec![]).unwrap();
+        assert_eq!(got.len(), TOOL_NAMES.len());
+        for n in TOOL_NAMES {
+            assert!(got.iter().any(|g| g == n));
+        }
+    }
+
+    #[test]
+    fn tool_policy_star_minus_one() {
+        let got = ToolPolicy::tools(s(&["*"]), s(&["IssueOpen"])).unwrap();
+        assert_eq!(got.len(), TOOL_NAMES.len() - 1);
+        assert!(!got.iter().any(|g| g == "IssueOpen"));
+    }
+
+    #[test]
+    fn tool_policy_explicit_pair() {
+        let got = ToolPolicy::tools(s(&["Query", "IssueGet"]), vec![]).unwrap();
+        // Order follows TOOL_NAMES.
+        assert_eq!(got, s(&["Query", "IssueGet"]));
+    }
+
+    #[test]
+    fn tool_policy_star_deny_star_empty() {
+        assert!(ToolPolicy::tools(s(&["*"]), s(&["*"])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tool_policy_unknown_allow_errors() {
+        let err = ToolPolicy::tools(s(&["IssueOpne"]), vec![]).unwrap_err();
+        assert!(err.contains("IssueOpne"), "err = {err}");
+    }
+
+    #[test]
+    fn tool_policy_unknown_deny_errors() {
+        let err = ToolPolicy::tools(s(&["*"]), s(&["Bogus"])).unwrap_err();
+        assert!(err.contains("Bogus"), "err = {err}");
+    }
 
     #[test]
     fn link_sessions_picks_only_scope_ids() {

@@ -9,7 +9,9 @@ pub const SCANNER = #{
 
 pub async fn agent() {
     let session = call_agent("Write a comment with the text 'Hello Joe'")
+        .allow_tools(["CommentWrite"])
+        .model("medium")
         .await?;
     let out = session.wait().await?;
-    println!("### {out:?}");
+    println!("## agent # {out:?}");
 }

@@ -22,6 +22,13 @@ pub struct AgentArgs {
     /// Initial prompt passed to `claude` as its positional argument
     #[arg(short = 'q', long = "prompt")]
     pub prompt: Option<String>,
+
+    /// Additional MCP tools to expose, comma-separated short names
+    /// (e.g. `IssueOpen,IssueGet`). Use `*` to allow every tool the
+    /// gage MCP server provides. Added to the default `Query` allow
+    /// list; no deny support
+    #[arg(long = "tools", value_name = "LIST", value_delimiter = ',')]
+    pub tools: Vec<String>,
 }
 
 pub fn run(args: AgentArgs) {
@@ -29,7 +36,18 @@ pub fn run(args: AgentArgs) {
         Ok(s) => s,
         Err(()) => std::process::exit(1),
     };
-    let mut builder = AgentBuilder::new().tools(ToolPolicy::default_interactive());
+    let mut builder = AgentBuilder::new();
+    if !args.tools.is_empty() {
+        let mut allow = ToolPolicy::default_tools();
+        allow.extend(args.tools);
+        match ToolPolicy::tools(allow, vec![]) {
+            Ok(resolved) => builder = builder.tools(resolved),
+            Err(e) => {
+                eprintln!("gage agent: --tools: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(name) = args.project {
         builder = builder.name(name);
     }
