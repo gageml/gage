@@ -272,7 +272,7 @@ impl CallLlm {
 }
 
 #[rune::function]
-fn llm(prompt: String) -> CallLlm {
+fn call_llm(prompt: String) -> CallLlm {
     CallLlm {
         prompt,
         model: None,
@@ -298,7 +298,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(CallLlm::max_rounds)?;
     m.function_meta(CallLlm::system_prompt)?;
     m.function_meta(CallLlm::tool)?;
-    m.function_meta(llm)?;
+    m.function_meta(call_llm)?;
     m.associated_function(&Protocol::INTO_FUTURE, |c: CallLlm| async move {
         do_call_llm(c).await
     })?;

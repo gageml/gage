@@ -173,7 +173,7 @@ impl CallAgent {
 }
 
 #[rune::function]
-fn agent(prompt: String) -> CallAgent {
+fn call_agent(prompt: String) -> CallAgent {
     CallAgent {
         prompt,
         name: None,
@@ -201,7 +201,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(CallAgent::model)?;
     m.function_meta(CallAgent::max_turns)?;
     m.function_meta(CallAgent::timeout)?;
-    m.function_meta(agent)?;
+    m.function_meta(call_agent)?;
     m.associated_function(&Protocol::INTO_FUTURE, |c: CallAgent| async move {
         do_call_agent(c).await
     })?;
