@@ -1,4 +1,4 @@
-use gage::{agent, scan, write_note};
+use gage::{call_agent, scan, write_note};
 
 pub const SCANNER = #{
     name: "user-interrupt",
@@ -20,14 +20,7 @@ pub const SCANNER = #{
 pub async fn note() {
     for s in scan().sessions() {
         for msg in s.messages().of_type(#{ "user": "text" }).await? {
-            if let Some(value) = if msg.text == "[Request interrupted by user]" {
-                Some("user")
-            } else if msg.text == "[Request interrupted by user for tool use]" {
-                Some("tool_use")
-            } else {
-                None
-            }
-            {
+            if let Some(value) = interrupt(msg) {
                 write_note(
                     #{
                         name: "msg.interrupt",
@@ -37,17 +30,30 @@ pub async fn note() {
                 )
                 .replace_prev()
                 .await?;
-
             }
         }
     }
     Ok(())
 }
 
+fn interrupt(msg) {
+    if msg.text == "[Request interrupted by user]" {
+        Some("user")
+    } else if msg.text == "[Request interrupted by user for tool use]" {
+        Some("tool_use")
+    } else {
+        None
+    }
+}
+
 const JUDGE_PROMPT = include_str!("judge.md");
 
 pub async fn judge() {
-    let session = agent(JUDGE_PROMPT).model("small").await?;
-    let out = session.wait().await?;
+    println!("TODO - ze judge");
+    if true {
+        return;
+    }
+    let agent = call_agent(JUDGE_PROMPT).model("small").await?;
+    let out = agent.wait().await?;
     println!("### {out:?}");
 }

@@ -8,24 +8,23 @@ pub const SCANNER = #{
 };
 
 pub async fn hello() {
-    let llm = call_llm("Say hi", #{}).await?;
+    let llm = call_llm("Say hello").model("small").await?;
     while llm.active() {
-        println!("### {:?}", llm.poll().await?);
+        println!("## hello # {:?}", llm.poll().await?);
     }
 }
 
 pub async fn tool() {
-    let llm = call_llm(
-        "What's the secret",
-        #{ tools: #{ "Secret": #{ description: "Get a secret", inputs: [] } } },
-    )
-    .await?;
+    let llm = call_llm("What's the secret")
+        .model("small")
+        .tool("Secret", #{ description: "Get a secret", inputs: [] })
+        .await?;
     while llm.active() {
         match llm.poll().await? {
             Tool("Secret", #{}, id) => {
                 llm.tool_result(id, "Abc123")
             }
-            other => println!("### {other:?}"),
+            other => println!("## tool # {other:?}"),
         }
     }
 }

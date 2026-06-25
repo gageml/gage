@@ -3,12 +3,13 @@ use gage::call_agent;
 pub const SCANNER = #{
     name: "test-agent",
     hidden: true,
-    description: "Test agent judge",
-    tasks: #{ main: #{} },
+    description: "Test agent",
+    tasks: #{ agent: #{} },
 };
 
-pub async fn main() {
-    let session = call_agent("/gage:judge", #{}).await?;
+pub async fn agent() {
+    let session = call_agent("Write a comment with the text 'Hello Joe'")
+        .await?;
     let out = session.wait().await?;
     println!("### {out:?}");
 }
