@@ -5,14 +5,12 @@ description: |
 
   Use ToolSearch with these FQN tool names:
 
-  `mcp__plugin_gage_gage__Query` - SQL interface to sessions (also covers full-text search via the `message_text` TVF)
+  `mcp__plugin_gage_gage__Query` - SQL interface to Gage data (sessions, session messages (structural and full text), notes, issues)
   `mcp__plugin_gage_gage__IssueList` - list open issues
   `mcp__plugin_gage_gage__IssueGet` - fetch one issue's full detail
-  `mcp__plugin_gage_gage__IssueOpen` - open a new issue
-  `mcp__plugin_gage_gage__IssueClose` - close an issue
-  `mcp__plugin_gage_gage__IssueComment` - add a comment to an issue
-  `mcp__plugin_gage_gage__NoteDoc` - look up the docstring for a scanner note by name
-
-  Once the desired tools are loaded, use them directly accordingly
-  to their schema definitions.
+  `mcp__plugin_gage_gage__IssueOpen` - open new issue
+  `mcp__plugin_gage_gage__IssueClose` - close issue
+  `mcp__plugin_gage_gage__IssueComment` - add comment to an issue
+  `mcp__plugin_gage_gage__NoteDoc` - get docstring for note name
+  `mcp__plugin_gage_gage__CommentWrite` - write a general comment
 ---
