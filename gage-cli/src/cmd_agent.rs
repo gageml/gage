@@ -10,25 +10,32 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Args)]
 pub struct AgentArgs {
-    /// Sessions visible to the agent (ID or prefix). Omit for full
-    /// corpus.
+    /// Run agent for specified session IDs only (or prefix)
+    ///
+    /// If omitted, all available sessions are available to the agent.
     #[arg(value_name = "SESSION")]
     pub sessions: Vec<String>,
 
-    /// Project slug used to archive the session under `~/.gage/claude/<project>/`
-    #[arg(short = 'p', long = "project")]
-    pub project: Option<String>,
+    /// Agent name
+    ///
+    /// This value is used as the session project name in listings to
+    /// differentiate agent session types. Defaults to "default".
+    #[arg(short, long)]
+    pub name: Option<String>,
 
-    /// Initial prompt passed to `claude` as its positional argument
-    #[arg(short = 'q', long = "prompt")]
+    /// Initial agent prompt
+    #[arg(short, long)]
     pub prompt: Option<String>,
 
-    /// Additional MCP tools to expose, comma-separated short names
-    /// (e.g. `IssueOpen,IssueGet`). Use `*` to allow every tool the
-    /// gage MCP server provides. Added to the default `Query` allow
-    /// list; no deny support
-    #[arg(long = "tools", value_name = "LIST", value_delimiter = ',')]
+    /// Tools available to the agent (comma-separated list)
+    ///
+    /// Use '*' to enable all tools.
+    #[arg(short, long, value_name = "LIST", value_delimiter = ',')]
     pub tools: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 pub fn run(args: AgentArgs) {

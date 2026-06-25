@@ -35,7 +35,7 @@ pub enum SessionCommand {
 
 #[derive(Args)]
 pub struct SessionMoveArgs {
-    /// Session ID (prefix match)
+    /// Session ID (or prefix)
     pub session: String,
 
     /// Destination project directory (must exist)
@@ -48,25 +48,27 @@ pub struct SessionMoveArgs {
 
 #[derive(Args)]
 pub struct SessionViewArgs {
-    /// Session ID (prefix match); omit to pick from recent sessions
+    /// Session ID (or prefix)
     pub session: Option<String>,
 
-    /// View options (comma-separated). Known terms: turns
+    /// View options (comma-separated).
+    ///
+    /// turns - show model turns in outline
     #[arg(short, long, value_delimiter = ',')]
     pub options: Vec<String>,
 }
 
 #[derive(Args)]
 pub struct SessionFilterArgs {
-    /// Filter by project path (can be specified multiple times)
+    /// Filter by project path (repeatable)
     #[arg(short, long, value_name = "PATH")]
     project: Vec<PathBuf>,
 
-    /// Filter to sessions modified within this duration (e.g. 1h, 30m, 7d)
+    /// Filter by how long ago the session was modified (e.g. 1h, 30m, 7d)
     #[arg(short, long, value_parser = super::parse_duration)]
     since: Option<Duration>,
 
-    /// Only show empty sessions (no message with real content)
+    /// Only show empty sessions
     #[arg(long)]
     empty: bool,
 }
@@ -83,20 +85,20 @@ pub struct SessionListArgs {
     #[arg(long)]
     full_id: bool,
 
-    /// Add per-session stats columns: model time, total tokens, turns.
-    /// Computed by parsing each listed session; --stats listings are
-    /// slower than the default
+    /// Include additional stats columns
+    ///
+    /// Added columns: model time, total tokens, turns
     #[arg(long)]
     stats: bool,
 }
 
 #[derive(Args)]
 pub struct SessionDeleteArgs {
-    /// Session IDs (prefix match)
+    /// Session IDs (or prefix)
     #[arg(conflicts_with = "empty")]
     pub ids: Vec<String>,
 
-    /// Delete all empty sessions (no message with real content)
+    /// Delete empty sessions
     #[arg(long)]
     pub empty: bool,
 

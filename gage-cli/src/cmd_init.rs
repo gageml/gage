@@ -12,19 +12,22 @@ use crate::dialog::{self, DialogError, DialogResult};
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// Remove Gage from Claude Code instead of installing
-    #[arg(long, conflicts_with_all = ["import_data", "import_data_preview"])]
+    /// Uninstall Gage from Claude Code
+    #[arg(short, long, conflicts_with_all = ["import_data", "import_data_preview"])]
     pub remove: bool,
 
-    /// Skip confirmation prompts
+    /// Skip confirmation prompt
     #[arg(short, long)]
     pub yes: bool,
 
-    /// Apply rows from another gage.db into the local database. Dest-wins on collision; rejected rows are written to a sidecar JSON file next to the dest db
+    /// Import data from PATH
+    ///
+    /// Rows with same IDs are never overwritten. Rejected rows are written to a
+    /// JSON file next to the modified database file (~/.gage/data/gage.db)
     #[arg(long, value_name = "PATH", conflicts_with = "import_data_preview")]
     pub import_data: Option<PathBuf>,
 
-    /// Show what --import-data would do without writing
+    /// Preview import without modifying the database
     #[arg(long, value_name = "PATH")]
     pub import_data_preview: Option<PathBuf>,
 }

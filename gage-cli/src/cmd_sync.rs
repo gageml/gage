@@ -27,29 +27,28 @@ use crate::style as cli_style;
 ))]
 pub struct PushArgs {
     /// List configured remotes
-    #[arg(long = "list-remotes")]
+    #[arg(long)]
     pub list_remotes: bool,
 
     /// Push to a named remote (repeatable)
     ///
-    /// Selects one configured remote by name. Pass `-r` more than once
-    /// to push to several. Mutually exclusive with `--all` and
-    /// `--target`.
-    #[arg(short = 'r', long = "remote", value_name = "NAME")]
+    /// Selects one configured remote by name. Pass `-r` more than once to push
+    /// to several. Mutually exclusive with `--all` and `--target`.
+    #[arg(short, long, value_name = "NAME")]
     pub remote: Vec<String>,
 
-    /// Push to every configured remote
+    /// Push to all remotes
     ///
     /// Mutually exclusive with `--remote` and `--target`.
-    #[arg(short = 'a', long = "all", conflicts_with_all = ["remote", "target"])]
+    #[arg(short, long, conflicts_with_all = ["remote", "target"])]
     pub all: bool,
 
     /// Push to a local directory
     ///
-    /// Copies the payload directly into DIR (created if it does not
-    /// exist), using the same layout as any other remote. Mutually
-    /// exclusive with `--remote` and `--all`.
-    #[arg(short = 't', long = "target", value_name = "DIR", conflicts_with_all = ["remote", "all"])]
+    /// Copies the payload directly into DIR (created if it does not exist),
+    /// using the same layout as any other remote. Mutually exclusive with
+    /// `--remote` and `--all`.
+    #[arg(short, long, value_name = "DIR", conflicts_with_all = ["remote", "all"])]
     pub target: Option<PathBuf>,
 }
 
@@ -68,19 +67,14 @@ pub struct PullArgs {
     ///
     /// Selects one configured remote by name. Mutually exclusive with
     /// `--source`.
-    #[arg(
-        short = 'r',
-        long = "remote",
-        value_name = "NAME",
-        conflicts_with = "source"
-    )]
+    #[arg(value_name = "NAME", conflicts_with = "source")]
     pub remote: Option<String>,
 
     /// Pull from a local directory
     ///
     /// Reads the payload directly from DIR using the same layout as any
     /// other remote. Mutually exclusive with `--remote`.
-    #[arg(short = 's', long = "source", value_name = "DIR")]
+    #[arg(short, long, value_name = "DIR")]
     pub source: Option<PathBuf>,
 
     /// Destination directory
@@ -88,7 +82,7 @@ pub struct PullArgs {
     /// Where pulled files land locally. Defaults to `~/.gage-pull`. The
     /// remote tree lands under `<DIR>/gage/...` and `<DIR>/claude/...`,
     /// so existing files in DIR are not at risk of being overwritten.
-    #[arg(short = 't', long = "target", value_name = "DIR")]
+    #[arg(short, long, value_name = "DIR")]
     pub target: Option<PathBuf>,
 }
 

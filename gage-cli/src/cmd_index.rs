@@ -12,8 +12,9 @@ use crate::style;
 
 #[derive(Args)]
 pub struct IndexArgs {
-    /// Delete the derived store and text index, then rebuild from
-    /// scratch
+    /// Rebuild the index
+    ///
+    /// Deletes the derived store and text index, then reconciles.
     #[arg(long)]
     rebuild: bool,
 

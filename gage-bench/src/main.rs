@@ -25,15 +25,15 @@ struct Cli {
     names: Vec<String>,
 
     /// Maximum number of sessions to load (default 100)
-    #[arg(short = 'n', long = "limit")]
+    #[arg(short, long)]
     limit: Option<usize>,
 
     /// Load all sessions
-    #[arg(short = 'a', long = "all")]
+    #[arg(short, long)]
     all: bool,
 
     /// Iterations per format (default 10)
-    #[arg(short = 'i', long = "iterations")]
+    #[arg(short, long)]
     iterations: Option<usize>,
 
     /// List available benchmark names

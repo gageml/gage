@@ -58,7 +58,7 @@ pub struct ScanShowArgs {
 
 #[derive(Args)]
 pub struct ScanDeleteArgs {
-    /// Scan run IDs (prefix match)
+    /// Scan run IDs (or prefix)
     ids: Vec<String>,
 
     /// Skip confirmation prompt
@@ -68,7 +68,7 @@ pub struct ScanDeleteArgs {
 
 #[derive(Args)]
 pub struct ScanRunArgs {
-    /// Sessions to scan (ID or prefix)
+    /// Session IDs to scan (or prefix)
     #[arg(value_name = "SESSION", conflicts_with = "limit")]
     sessions: Vec<String>,
 
@@ -92,11 +92,11 @@ pub struct ScanRunArgs {
     #[arg(short, long, value_name = "N")]
     jobs: Option<usize>,
 
-    /// Suppress the interactive progress display
+    /// Don't show progress
     #[arg(long)]
     no_progress: bool,
 
-    /// List registered scanners and exit
+    /// Show available scanners and exit
     #[arg(long)]
     list_scanners: bool,
 }

@@ -27,8 +27,8 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   site - i.e. the API exposes `Result` for type-system reasons, not because
   there is information to act on:
   - `if let Ok(x) = result { ... }` - env var probes, dynamic-type downcasts
-    (Rune, serde Value), best-effort enrichment whose absence is already
-    covered by adjacent output
+    (Rune, serde Value), best-effort enrichment whose absence is already covered
+    by adjacent output
   - `result.ok()?` inside a function whose own signature returns `Option` and
     where "absent" is the documented contract
   - Prefer the `Option`-shaped API when one exists (`env::var_os` over
@@ -46,18 +46,17 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 
   - Use `.expect("<should happen>")` ONLY when an internal assumption made at
     the call site is non-obvious and a bare panic wouldn't reveal it. The
-    argument states what should happen. It does NOT state the error. It does
-    NOT state the obvious, "this should work". If there is no non-obvious
-    argument, use `.unwrap()`.
+    argument states what should happen. It does NOT state the error. It does NOT
+    state the obvious, "this should work". If there is no non-obvious argument,
+    use `.unwrap()`.
 
   - WRONG: `.expect("failed to open file")` - restating the error
   - WRONG: `.expect("should work")` / `.expect("unwrap failed")` - stating the
     obvious
   - RIGHT: `.expect("config should be loaded before server start")` - names a
     precondition that, if violated, tells you the root cause
-  - RIGHT: `fs::create_dir_all(p).unwrap()` - if the filesystem is read-only
-    the panic location alone is sufficient - no `expect` message would add
-    value
+  - RIGHT: `fs::create_dir_all(p).unwrap()` - if the filesystem is read-only the
+    panic location alone is sufficient - no `expect` message would add value
 
   Keep `expect` messages as short as possible while still naming the
   precondition.
@@ -90,8 +89,8 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     (`Vec::with_capacity`, `BufReader::with_capacity`) - use for
     scoping/parameterizing constructors where the inputs are not the data of
     `Self` in another form
-  - `from_xxx(...)` - _conversion_ constructor per [Rust API Guidelines
-    C-CONV]. The inputs _are_ `Self` in another representation (parse, decode,
+  - `from_xxx(...)` - _conversion_ constructor per [Rust API Guidelines C-CONV].
+    The inputs _are_ `Self` in another representation (parse, decode,
     reinterpret). `Target::from_columns(row) -> Target` qualifies;
     `MessageTable::from_session(id, path)` does not.
   - Avoid `for_xxx` - prefer `with_xxx` for the same role
@@ -110,22 +109,22 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - Short fragments that demark sections or provide quick clarity to code
     without filling in detail should not use periods
 
-  Rule of thumb: If it reads like a description, use periods. If it reads like
-  a label or title, omit the period.
+  Rule of thumb: If it reads like a description, use periods. If it reads like a
+  label or title, omit the period.
 
   Doc comments (`///`) are prose and follow normal conventions.
 
 - **Use `Path` / `PathBuf` for filesystem paths, not `&str` / `String`.**
   Function parameters, struct fields, and return values that represent a
-  filesystem path take `&Path` (borrow) or return/store `PathBuf` (owned).
-  Don't `to_string_lossy().into_owned()` a path just to fit it into a `String`
-  field - store the `PathBuf` directly and let the display happen at the
-  rendering boundary.
+  filesystem path take `&Path` (borrow) or return/store `PathBuf` (owned). Don't
+  `to_string_lossy().into_owned()` a path just to fit it into a `String` field -
+  store the `PathBuf` directly and let the display happen at the rendering
+  boundary.
   - RIGHT: `fn find_claude() -> Result<PathBuf, _>`,
     `pub session_path: PathBuf`, `fn run(claude_bin: &Path, ...)`
   - WRONG: `fn find_claude() -> Result<String, _>` followed by
-    `Command::new(&claude_bin)` - `Command::new` already accepts
-    `AsRef<OsStr>`, so the `String` round-trip is pure loss
+    `Command::new(&claude_bin)` - `Command::new` already accepts `AsRef<OsStr>`,
+    so the `String` round-trip is pure loss
   - WRONG: `pub session_path: String` populated via
     `path.to_string_lossy().into_owned()` - silently drops non-UTF-8 components
     and forces every reader to re-parse
@@ -134,12 +133,27 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - `rust-embed` asset keys (forced forward-slash regardless of host OS)
   - HTTP URI paths (use `&str` / `String`, not `Path`)
   - JSON field paths like `"message.content"`
-  - Display strings explicitly intended for human output (e.g. a
-    `~`-substituted config path)
+  - Display strings explicitly intended for human output (e.g. a `~`-substituted
+    config path)
 
-- When writing clap command or arg text, do not include trailing periods in the
-  first line. Clap strips these to enforce their style convention and we should
-  never include them.
+- When writing clap command or arg text:
+  - Look for and follow existing conventions --- this is a user interface and
+    should be consistent throughout the CLI
+  - Do not include trailing periods in the first line. Clap strips these to
+    enforce their style convention and we should never include them.
+  - Always use a short and to-the-point first time - never a full contiguous
+    paragraph --- this is important as it makes the short help much easier to
+    read
+  - To provide additional detail, separate the first line with an empty line and
+    provide detail as needed.
+  - Do not specify the default short or long value: use `short` and `long` when
+    possible and only specify a value when the default is incorrect (e.g. for
+    option `prompt` DO NOT use `short = 'p'` just use `short`, assuming user
+    wants the short form)
+  - When describing content DO NOT describe implementation details. This is user
+    facing help text, NOT code docs.
+
+- When
 
 [Rust API Guidelines C-CONV]:
   https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv

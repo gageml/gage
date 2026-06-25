@@ -39,7 +39,7 @@ pub enum IssueCommand {
 
 #[derive(Args)]
 pub struct IssueShowArgs {
-    /// Issue UUID (or prefix)
+    /// Issue ID (or prefix)
     id: String,
 }
 
@@ -48,18 +48,21 @@ pub struct IssueAddArgs {
     /// Title (prompted if omitted)
     #[arg(short, long)]
     title: Option<String>,
-    /// Description (prompted if omitted; leave blank to skip)
+
+    /// Description (prompted if omitted)
     #[arg(short, long)]
     description: Option<String>,
-    /// Issue name
+
+    /// Issue name (default: user-issue)
     #[arg(short, long, default_value = "user-issue")]
     name: String,
 }
 
 #[derive(Args)]
 pub struct IssueDeleteArgs {
-    /// Issue UUID (or prefix)
+    /// Issue ID (or prefix)
     id: String,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -67,11 +70,13 @@ pub struct IssueDeleteArgs {
 
 #[derive(Args)]
 pub struct IssueReopenArgs {
-    /// Issue UUID (or prefix)
+    /// Issue ID (or prefix)
     id: String,
-    /// Message recorded with the reopen event
+
+    /// Message explaining issue re-open
     #[arg(short, long)]
     message: Option<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -79,11 +84,13 @@ pub struct IssueReopenArgs {
 
 #[derive(Args)]
 pub struct IssueCommentArgs {
-    /// Issue UUID (or prefix)
+    /// Issue ID (or prefix)
     id: String,
-    /// Comment message (prompted if omitted)
+
+    /// Comment text (prompted if omitted)
     #[arg(short, long)]
     message: Option<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -91,14 +98,17 @@ pub struct IssueCommentArgs {
 
 #[derive(Args)]
 pub struct IssueCloseArgs {
-    /// Issue UUID (or prefix)
+    /// Issue ID (or prefix)
     id: String,
-    /// Close as `skipped` instead of the default `completed`
+
+    /// Close as 'skipped' instead of the default 'completed'
     #[arg(short, long)]
     skipped: bool,
-    /// Message recorded with the close event
+
+    /// Message explaining issue close
     #[arg(short, long)]
     message: Option<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,

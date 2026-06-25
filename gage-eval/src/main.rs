@@ -57,7 +57,7 @@ struct DeleteArgs {
     /// Run UUIDs or unique prefixes. Each must match exactly one run
     run_ids: Vec<String>,
 
-    /// Skip the confirmation prompt
+    /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
 }
@@ -67,7 +67,7 @@ struct ViewArgs {
     /// Run UUID or unique prefix
     run_id: String,
 
-    /// Rebuild report.md even if it already exists
+    /// Rebuild report.md
     #[arg(long)]
     refresh: bool,
 }

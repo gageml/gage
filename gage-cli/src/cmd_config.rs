@@ -31,7 +31,7 @@ pub struct EditArgs {
     #[arg(long, conflicts_with_all = ["project", "path"])]
     user: bool,
 
-    /// Edit the nearest project `.gage/config.toml` above cwd
+    /// Edit the nearest project `.gage/config.toml`
     #[arg(long, conflicts_with_all = ["user", "path"])]
     project: bool,
 

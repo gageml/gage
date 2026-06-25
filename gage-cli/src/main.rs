@@ -68,8 +68,9 @@ enum Command {
 
     /// Manage sessions
     Session {
-        /// Operate on agent sessions under `<gage_home>/claude` instead
-        /// of the user's Claude Code sessions
+        /// Operate on agent sessions instead of Claude Code sessions
+        ///
+        /// Agent sessions live under `<gage_home>/claude`.
         #[arg(short = 'A', long, global = true)]
         agent: bool,
 

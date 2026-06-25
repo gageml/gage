@@ -43,9 +43,10 @@ pub struct NoteListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
-    /// Filter by session ID (prefix match)
+    /// Filter by session ID (or prefix)
     #[arg(short, long)]
     session: Option<String>,
+
     /// Filter by note name
     #[arg(short, long)]
     name: Option<String>,
@@ -53,15 +54,21 @@ pub struct NoteListArgs {
 
 #[derive(Args)]
 pub struct NoteAddArgs {
-    /// Target reference (e.g. session-id, session-id:42, session-id:42-50)
+    /// Target reference (e.g. <session_id>, <session_id>:<line>)
     #[arg(short, long)]
     target: Option<String>,
-    /// Note name (default: comment)
+
+    /// Note name
+    ///
+    /// Note names must be unique for a given target and author. Defaults to
+    /// "comment.<random>"
     #[arg(short, long)]
     name: Option<String>,
+
     /// Note value (prompted if omitted)
     #[arg(short, long)]
     value: Option<String>,
+
     /// Author username (default: $USER)
     #[arg(short, long)]
     user: Option<String>,
@@ -69,11 +76,13 @@ pub struct NoteAddArgs {
 
 #[derive(Args)]
 pub struct NoteCommentArgs {
-    /// Target note UUID (or prefix)
+    /// Target note ID (or prefix)
     id: String,
+
     /// Comment message (prompted if omitted)
     #[arg(short)]
     msg: Option<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -81,22 +90,23 @@ pub struct NoteCommentArgs {
 
 #[derive(Args)]
 pub struct NoteShowArgs {
-    /// Note UUID (or prefix)
+    /// Note ID (or prefix)
     id: String,
 
     /// Show target content
     #[arg(short = 't', long = "target")]
-    target_content: bool,
+    short_target: bool,
 
-    /// Show note docstring from the scanner that writes this note
-    #[arg(short = 'd', long = "doc")]
+    /// Show note docstring
+    #[arg(short, long)]
     doc: bool,
 }
 
 #[derive(Args)]
 pub struct NoteEditArgs {
-    /// Note UUID (or prefix)
+    /// Note ID (or prefix)
     id: String,
+
     /// New value (prompted if omitted)
     #[arg(short, long)]
     value: Option<String>,
@@ -104,8 +114,9 @@ pub struct NoteEditArgs {
 
 #[derive(Args)]
 pub struct NoteDeleteArgs {
-    /// Note UUIDs (prefix match)
+    /// Note IDs (or prefix)
     ids: Vec<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -319,7 +330,7 @@ pub async fn show(args: NoteShowArgs) {
         .saturating_sub(label_width + 8)
         .max(20);
 
-    let target_cell = if args.target_content {
+    let target_cell = if args.short_target {
         let ctx = gage_query::create_context_default().await;
         match crate::target_content::render_target_cell(&ctx, &note.target, value_width).await {
             Ok(s) => Some(s),
