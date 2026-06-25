@@ -46,9 +46,10 @@ fn interrupt(msg) {
     }
 }
 
-const JUDGE_PROMPT = include_str!("judge.md");
+const JUDGE_PROMPT = include_str!("judge-prompt.md");
 
 pub async fn judge() {
     let agent = call_agent(JUDGE_PROMPT).allow_tools(["IssueOpen"]).await?;
     agent.wait().await?;
+    // TODO add `judge.user-interrupt` note with agent output?
 }

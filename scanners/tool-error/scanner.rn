@@ -7,13 +7,22 @@ pub const SCANNER = #{
         note: #{
             notes: #{
                 writes: #{
-                    "msg.tool_error": include_str!(
+                    "msg.tool-error": include_str!(
                         "tool-error-note.md"
                     ),
                 },
             },
         },
-        judge: #{ notes: #{ wants: ["msg.tool_error"] } },
+        judge: #{
+            notes: #{
+                wants: ["msg.tool-error"],
+                writes: #{
+                    "judge.tool-error": include_str!(
+                        "judge-note.md"
+                    ),
+                },
+            },
+        },
     },
 };
 
@@ -93,9 +102,22 @@ fn block_type(block) {
     }
 }
 
-const JUDGE_PROMPT = include_str!("judge.md");
+const JUDGE_PROMPT = include_str!("judge-prompt.md");
 
 pub async fn judge() {
-    let agent = call_agent(JUDGE_PROMPT).await?;
-    agent.wait().await?
+    let agent = call_agent(JUDGE_PROMPT).allow_tools(["IssueOpen"]).await?;
+    let out = agent.wait().await?;
+    write_note(
+        #{
+            name: "judge.tool-error",
+            target: #{ scan: scan().id },
+            value: out.stdout,
+            metadata: #{
+                success: out.status.success,
+                exit_code: out.status.code,
+                stderr: out.stderr,
+            },
+        },
+    )
+    .await?
 }
