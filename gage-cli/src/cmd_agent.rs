@@ -4,9 +4,12 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use clap::Args;
-use gage_agent::{AgentBuilder, ToolPolicy};
+use cliclack as cli;
+use gage_agent::{AgentBuilder, TOOL_NAMES, ToolPolicy};
 use gage_claude::session;
 use indicatif::{ProgressBar, ProgressStyle};
+
+use crate::dialog::{self, DialogError, DialogResult};
 
 #[derive(Args)]
 pub struct AgentArgs {
@@ -43,10 +46,31 @@ pub fn run(args: AgentArgs) {
         Ok(s) => s,
         Err(()) => std::process::exit(1),
     };
+
+    let mut tools = args.tools.clone();
+    let mut prompt = args.prompt.clone();
+    if !args.yes && args.tools.is_empty() && args.prompt.is_none() {
+        let mut tools_out: Vec<String> = Vec::new();
+        let mut prompt_out: Option<String> = None;
+        let mut completed = false;
+        dialog::run("Run agent", || {
+            let r = collect_dialog(&mut tools_out, &mut prompt_out);
+            if r.is_ok() {
+                completed = true;
+            }
+            r
+        });
+        if !completed {
+            std::process::exit(1);
+        }
+        tools = tools_out;
+        prompt = prompt_out;
+    }
+
     let mut builder = AgentBuilder::new();
-    if !args.tools.is_empty() {
+    if !tools.is_empty() {
         let mut allow = ToolPolicy::default_tools();
-        allow.extend(args.tools);
+        allow.extend(tools);
         match ToolPolicy::tools(allow, vec![]) {
             Ok(resolved) => builder = builder.tools(resolved),
             Err(e) => {
@@ -55,7 +79,7 @@ pub fn run(args: AgentArgs) {
             }
         }
     }
-    if let Some(name) = args.project {
+    if let Some(name) = args.name {
         builder = builder.name(name);
     }
     if let Some(ids) = sessions {
@@ -69,7 +93,7 @@ pub fn run(args: AgentArgs) {
         std::process::exit(1);
     }
     spinner.finish_and_clear();
-    match agent.run(args.prompt) {
+    match agent.run(prompt) {
         Ok(status) => {
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
@@ -80,6 +104,42 @@ pub fn run(args: AgentArgs) {
             std::process::exit(1);
         }
     }
+}
+
+fn collect_dialog(
+    tools: &mut Vec<String>,
+    prompt: &mut Option<String>,
+) -> Result<DialogResult, DialogError> {
+    let names: Vec<&'static str> = TOOL_NAMES
+        .iter()
+        .copied()
+        .filter(|n| *n != "Query")
+        .collect();
+    let mut ms = cli::multiselect("Tools").required(false);
+    for (i, name) in names.iter().enumerate() {
+        ms = ms.item(i, *name, "");
+    }
+    let picks: Vec<usize> = ms.interact()?;
+    *tools = picks
+        .iter()
+        .map(|&i| {
+            names
+                .get(i)
+                .expect("selected holds positions in names")
+                .to_string()
+        })
+        .collect();
+
+    let entered: String = cli::input("Initial prompt")
+        .placeholder("Optional")
+        .required(false)
+        .interact()?;
+    *prompt = if entered.is_empty() {
+        None
+    } else {
+        Some(entered)
+    };
+    Ok("Starting agent".into())
 }
 
 fn start_spinner(message: &str) -> ProgressBar {
