@@ -33,7 +33,7 @@ use datafusion::prelude::Expr;
 use gage_claude::session::SessionListBuilder;
 use gage_index::{COL_LINE, COL_TEXT, IndexStore};
 
-use super::message::{PROJECTION as MESSAGE_PROJECTION, message_schema};
+use super::message::{into_message_batch, message_schema};
 use super::walk::session_cache;
 
 /// Argument-list display string for `\df`.
@@ -301,7 +301,7 @@ async fn window_for(
         .map(|c| take(c.as_ref(), &idx, None))
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let derived_batch = RecordBatch::try_new(batch.schema(), cols)?;
-    Ok(Some(derived_batch.project(MESSAGE_PROJECTION)?))
+    Ok(Some(into_message_batch(&derived_batch)?))
 }
 
 /// Largest `i` such that `lines[i-1] < target` — i.e. the first row

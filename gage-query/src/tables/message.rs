@@ -317,7 +317,19 @@ fn message_rows(batch: &RecordBatch) -> Result<RecordBatch> {
         .map(|i| Some(texts.is_valid(i)))
         .collect();
     let filtered = filter_record_batch(batch, &mask)?;
-    let projected = filtered.project(PROJECTION)?;
+    into_message_batch(&filtered)
+}
+
+/// Project a derived batch to the message-table columns and reconcile
+/// the result with [`message_schema`]. The derived schema names its
+/// subtype column `message_subtype`; `message_schema` renames it to
+/// `subtype`. Returning the unmodified `project` output would yield a
+/// batch whose schema disagrees with the table's declared schema,
+/// which DataFusion rejects at scan time with "Mismatch between schema
+/// and batches". Always route message-shaped output through this
+/// helper.
+pub(crate) fn into_message_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+    let projected = batch.project(PROJECTION)?;
     Ok(RecordBatch::try_new(
         message_schema(),
         projected.columns().to_vec(),
