@@ -2,7 +2,7 @@ use gage::{call_agent, scan, write_note};
 
 pub const SCANNER = #{
     name: "user-interrupt",
-    description: "Highlight user interrupts",
+    description: "Highlight user interrupts and evaluate",
     tasks: #{
         note: #{
             notes: #{
@@ -49,11 +49,6 @@ fn interrupt(msg) {
 const JUDGE_PROMPT = include_str!("judge.md");
 
 pub async fn judge() {
-    println!("TODO - ze judge");
-    if true {
-        return;
-    }
-    let agent = call_agent(JUDGE_PROMPT).model("small").await?;
-    let out = agent.wait().await?;
-    println!("### {out:?}");
+    let agent = call_agent(JUDGE_PROMPT).allow_tools(["IssueOpen"]).await?;
+    agent.wait().await?;
 }
