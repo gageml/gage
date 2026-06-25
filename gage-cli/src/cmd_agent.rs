@@ -30,6 +30,10 @@ pub struct AgentArgs {
     #[arg(short, long)]
     pub prompt: Option<String>,
 
+    /// Model passed to the child `claude` as `--model`
+    #[arg(short, long)]
+    pub model: Option<String>,
+
     /// Tools available to the agent (comma-separated list)
     ///
     /// Use '*' to enable all tools.
@@ -81,6 +85,9 @@ pub fn run(args: AgentArgs) {
     }
     if let Some(name) = args.name {
         builder = builder.name(name);
+    }
+    if let Some(model) = args.model {
+        builder = builder.model(model);
     }
     if let Some(ids) = sessions {
         builder = builder.sessions(ids);

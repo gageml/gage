@@ -273,7 +273,7 @@ impl Agent {
     pub fn run(mut self, prompt: Option<String>) -> io::Result<ExitStatus> {
         self.init()?;
         let RunState { prep, sandbox } = self.state.take().unwrap();
-        run_interactive(prep, sandbox, self.scan_id, prompt)
+        run_interactive(prep, sandbox, self.model, self.scan_id, prompt)
     }
 
     /// Spawn the child claude non-interactively (stdio piped) via
@@ -308,6 +308,7 @@ impl Agent {
 fn run_interactive(
     prep: PreparedRun,
     sandbox: Sandbox,
+    model: Option<String>,
     scan_id: Option<String>,
     prompt: Option<String>,
 ) -> io::Result<ExitStatus> {
@@ -337,6 +338,9 @@ fn run_interactive(
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
     if let Some(id) = &scan_id {
         cmd.env("GAGE_SCAN_ID", id);
+    }
+    if let Some(model) = &model {
+        cmd.arg("--model").arg(model);
     }
     if let Some(prompt) = &prompt {
         cmd.arg(prompt);
