@@ -13,7 +13,7 @@ use tabled::{
     Table,
     settings::{
         Color, Style, Width,
-        object::{Columns, Object, Rows},
+        object::{Cell, Columns, Object, Rows},
         peaker::PriorityMax,
     },
 };
@@ -288,7 +288,7 @@ pub async fn show(args: NoteShowArgs) {
     let mut attrs = vec![
         ("id", note.id.clone()),
         ("name", note.name.clone()),
-        ("value", note.value.to_json()),
+        ("value", format_value(&note.value)),
         ("target", note.target.to_uri()),
         ("explanation", explanation_display),
         ("author", note.author.clone()),
@@ -366,7 +366,7 @@ pub async fn show(args: NoteShowArgs) {
             .iter()
             .map(|r| {
                 let header = format!("{} ({})", r.name, short_uuid(&r.id));
-                let value_str = r.value.to_json();
+                let value_str = format_value(&r.value);
                 let value = textwrap::fill(&value_str, value_width);
                 format!("{header}\n{value}")
             })
@@ -377,6 +377,7 @@ pub async fn show(args: NoteShowArgs) {
     let table = Table::from_iter(rows)
         .with(Style::rounded())
         .modify(Columns::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Cell::new(2, 1), Color::FG_BRIGHT_CYAN)
         .to_string();
     println!("{table}");
 }
@@ -404,11 +405,15 @@ fn resolve_display(note: &Note, value: Option<&str>) -> String {
     }
 }
 
-fn format_value_cell(value: &note::NoteValue) -> String {
-    let raw = match &value.0 {
+fn format_value(value: &note::NoteValue) -> String {
+    match &value.0 {
         serde_json::Value::String(s) => s.clone(),
         _ => value.to_json(),
-    };
+    }
+}
+
+fn format_value_cell(value: &note::NoteValue) -> String {
+    let raw = format_value(value);
     let flattened: String = raw
         .split(['\n', '\r'])
         .filter(|s| !s.is_empty())
