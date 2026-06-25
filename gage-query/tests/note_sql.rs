@@ -9,6 +9,7 @@ use gage_db::target::{NoteTarget, SessionTarget};
 /// tempdir, write a note whose value is an object, then query a nested
 /// field through DataFusion.
 #[tokio::test]
+#[serial_test::serial(gage_home)]
 async fn value_object_is_queryable_through_json_functions() {
     let tmp = tempfile::tempdir().unwrap();
     // SAFETY: the note provider resolves its DB via `GAGE_HOME`; this
@@ -68,6 +69,7 @@ async fn value_object_is_queryable_through_json_functions() {
 /// reverts to row sampling, `metadata` here would resolve to `Null`
 /// and the assertion fails.
 #[tokio::test]
+#[serial_test::serial(gage_home)]
 async fn note_metadata_resolves_to_utf8_not_null() {
     let tmp = tempfile::tempdir().unwrap();
     // SAFETY: see `value_object_is_queryable_through_json_functions`.
