@@ -8,7 +8,7 @@ pub const SCANNER = #{
             notes: #{
                 writes: #{
                     "msg.interrupt": include_str!(
-                        "msg.interrupt.md"
+                        "interrupt-note.md"
                     ),
                 },
             },
