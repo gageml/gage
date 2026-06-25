@@ -874,8 +874,10 @@ fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &ToolPolicy) -> io::R
         "showThinkingSummaries".into(),
         serde_json::Value::Bool(true),
     );
-    if let Some(theme) = user_settings.as_ref().and_then(|v| v.get("theme")) {
-        settings.insert("theme".into(), theme.clone());
+    for key in ["theme", "tui"] {
+        if let Some(v) = user_settings.as_ref().and_then(|s| s.get(key)) {
+            settings.insert(key.into(), v.clone());
+        }
     }
     let mut allow_set: Vec<String> = Vec::with_capacity(tools.tools.len() + 1);
     allow_set.push("mcp__plugin_gage_gage__Query".into());
