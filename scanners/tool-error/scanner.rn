@@ -7,7 +7,7 @@ pub const SCANNER = #{
         note: #{
             notes: #{
                 writes: #{
-                    "msg.tool-error": include_str!(
+                    "msg.tool_error": include_str!(
                         "tool-error-note.md"
                     ),
                 },
@@ -15,7 +15,7 @@ pub const SCANNER = #{
         },
         judge: #{
             notes: #{
-                wants: ["msg.tool-error"],
+                wants: ["msg.tool_error"],
                 writes: #{
                     "judge.tool-error": include_str!(
                         "judge-note.md"
@@ -60,8 +60,13 @@ pub async fn note() {
                         },
                         _ => "<unknown>",
                     };
-                    let content = block.get("content").unwrap_or("<undefined>");
-                    let value = format!("{tool_name}: {content}");
+                    let content = format!(
+                        "{}", block.get("content").unwrap_or("<undefined>")
+                    );
+                    if is_user_rejection(content) {
+                        continue;
+                    }
+                    let value = format!("{tool_name}: {}", truncate(content, 150, 100));
                     write_note(
                         #{
                             name: "msg.tool_error",
@@ -89,6 +94,38 @@ fn content_blocks(msg) {
         Some(v) if v is Vec => v,
         _ => [],
     }
+}
+
+// Bound a value to its first `head` and last `tail` characters, joined by an
+// ellipsis, so bulk `SELECT value` stays under the query size cap. Errors
+// front-load their signal (e.g. "File has not been read yet") while Bash
+// output and tracebacks carry theirs at the tail, so keep both ends.
+fn truncate(s, head, tail) {
+    let chars = s.chars().collect::<Vec>();
+    let total = chars.len();
+    if total <= head + tail + 1 {
+        return s;
+    }
+    let h = "";
+    let t = "";
+    let i = 0;
+    for c in chars {
+        if i < head {
+            h.push(c);
+        } else if i >= total - tail {
+            t.push(c);
+        }
+        i = i + 1;
+    }
+    format!("{h} … {t}")
+}
+
+// A user rejection ("doesn't want to proceed" / "tool use was rejected") is
+// recorded as a tool_result error, but it is not a tool failure. The user
+// declined the action; these belong to the `tool-rejection` scanner.
+fn is_user_rejection(content) {
+    content.contains("doesn't want to proceed")
+        || content.contains("tool use was rejected")
 }
 
 // Return a block's `type` field as a string, or empty when absent.
