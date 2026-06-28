@@ -17,6 +17,7 @@ gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-claude = { path = "../gage-claude" }
 gage-index = { path = "../gage-index" }
+gage-registry = { path = "../gage-registry" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustyline = { workspace = true }
 serde_json = { workspace = true }

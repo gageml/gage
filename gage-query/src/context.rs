@@ -15,6 +15,7 @@ use crate::tables::config::ConfigTable;
 use crate::tables::entry::EntryTable;
 use crate::tables::message::MessageTable;
 use crate::tables::message_text::MessageTextFn;
+use crate::tables::note_doc::note_doc_table;
 use crate::tables::note_message_context::NoteMessageContextFn;
 use crate::tables::session::SessionTable;
 
@@ -106,6 +107,8 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.to_path_buf());
     ctx.register_table("config", Arc::new(ConfigTable::new(claude_home)))
+        .unwrap();
+    ctx.register_table("note_doc", note_doc_table().unwrap())
         .unwrap();
     ctx
 }

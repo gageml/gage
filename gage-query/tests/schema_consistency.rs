@@ -28,6 +28,7 @@ const TABLES: &[&str] = &[
     "issue_evidence",
     "message",
     "note",
+    "note_doc",
     "session",
     "session_note",
 ];

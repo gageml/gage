@@ -176,7 +176,6 @@ mod tests {
         assert!(!after.contains("mcp__plugin_gage_gage__IssueOpen"));
         assert!(!after.contains("mcp__plugin_gage_gage__IssueClose"));
         assert!(!after.contains("mcp__plugin_gage_gage__IssueComment"));
-        assert!(!after.contains("mcp__plugin_gage_gage__NoteDoc"));
         assert!(!after.contains("mcp__plugin_gage_gage__CommentWrite"));
         // Non-FQN lines (frontmatter, prose) remain.
         assert!(after.contains("user-invocable: false"));

@@ -64,7 +64,6 @@ pub const TOOL_NAMES: &[&str] = &[
     "IssueClose",
     "IssueComment",
     "IssueOpen",
-    "NoteDoc",
 ];
 
 /// Stateless helpers that produce resolved MCP-tool allowlists for an

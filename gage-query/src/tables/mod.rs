@@ -2,6 +2,7 @@ pub mod config;
 pub mod entry;
 pub mod message;
 pub mod message_text;
+pub mod note_doc;
 pub mod note_message_context;
 pub mod session;
 pub(crate) mod walk;
