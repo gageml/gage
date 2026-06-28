@@ -1,4 +1,3 @@
-use std::num::IntErrorKind;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +14,7 @@ use tabled::{
     },
 };
 
-use gage_claude::session::{self, SessionInfo};
+use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::uuid::short_uuid;
 use gage_db::{db, scan};
 use gage_query::ScanSessionContext;
@@ -69,7 +68,7 @@ pub struct ScanDeleteArgs {
 #[derive(Args)]
 pub struct ScanRunArgs {
     /// Session IDs to scan (or prefix)
-    #[arg(value_name = "SESSION", conflicts_with = "limit")]
+    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "all"])]
     sessions: Vec<String>,
 
     /// Scanner to run (repeatable)
@@ -81,8 +80,16 @@ pub struct ScanRunArgs {
     files: Vec<String>,
 
     /// Scan most recent N sessions
-    #[arg(short, long, value_name = "N", conflicts_with = "sessions")]
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "all"])]
     limit: Option<usize>,
+
+    /// Scan sessions modified in the last N days
+    #[arg(short, long, value_name = "N", conflicts_with = "all")]
+    days: Option<u32>,
+
+    /// Scan all sessions
+    #[arg(short, long)]
+    all: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -416,30 +423,30 @@ async fn run_dialog(
         cli::log::step(format!("Sessions{session_lines}"))?;
         resolved
     } else {
-        let session_limit: Option<usize> = if let Some(n) = args.limit {
-            cli::log::step(format!("Limit\n{}", style(n).dim()))?;
-            Some(n)
-        } else if args.yes {
-            cli::log::step(format!("Limit\n{}", style("all").dim()))?;
+        let days = if args.all || args.limit.is_some() {
             None
         } else {
-            let input: String = cli::input("Limit")
-                .default_input("all")
-                .placeholder("number or 'all' (default is all)")
-                .validate(|v: &String| want_positive_number_or_all(v))
-                .interact()?;
-            let trimmed = input.trim();
-            if trimmed.eq_ignore_ascii_case("all") {
-                None
-            } else {
-                Some(trimmed.parse::<usize>().unwrap())
-            }
+            Some(args.days.unwrap_or(30))
         };
-        let mut sessions = session::ls_sessions();
-        if let Some(n) = session_limit {
-            sessions.truncate(n);
+
+        let label = if args.all {
+            "all".to_string()
+        } else if let Some(n) = args.limit {
+            format!("{n} most recent")
+        } else {
+            let d = days.unwrap();
+            format!("last {d} day{}", if d == 1 { "" } else { "s" })
+        };
+        cli::log::step(format!("Sessions\n{}", style(label).dim()))?;
+
+        let mut builder = SessionListBuilder::new();
+        if let Some(d) = days {
+            builder = builder.since(Duration::from_secs(u64::from(d) * 86_400));
         }
-        sessions
+        if let Some(n) = args.limit {
+            builder = builder.limit(n);
+        }
+        builder.build().into_iter().map(|s| (s.id, s.src)).collect()
     };
 
     // Confirmation
@@ -747,24 +754,4 @@ fn list_scanners(registry: &ScannerRegistry) {
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .to_string();
     println!("{table}");
-}
-
-fn want_positive_number_or_all(s: &str) -> Result<(), &'static str> {
-    const MSG: &str = "enter a positive number or 'all'";
-    let s = s.trim();
-    if s.eq_ignore_ascii_case("all") {
-        return Ok(());
-    }
-    match s.parse::<usize>() {
-        Ok(n) if n > 0 => Ok(()),
-        Ok(_) => Err(MSG),
-        Err(e) => match e.kind() {
-            IntErrorKind::InvalidDigit
-            | IntErrorKind::Empty
-            | IntErrorKind::PosOverflow
-            | IntErrorKind::NegOverflow
-            | IntErrorKind::Zero => Err(MSG),
-            kind => panic!("unexpected IntErrorKind: {kind:?}"),
-        },
-    }
 }
