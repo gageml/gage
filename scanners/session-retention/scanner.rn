@@ -32,7 +32,7 @@ pub async fn note_and_issue() {
             #{
                 name: "session-retention",
                 title: "Unset session retention policy - sessions may be unexpected deleted",
-                description: "scanner:issue.md",
+                description: "scanner:/session-retention/issue.md",
                 evidence: [#{ note, timestamp: note.created }],
             },
         )

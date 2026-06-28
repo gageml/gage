@@ -61,13 +61,13 @@ pub async fn issue() {
     let note = latest_evidence().await?.ok_or(Ignore)?;
 
     // Only report issues for empty text (value is true)
-    if note.value {
+    if true || note.value {
         let timestamp = note.metadata.get("msg_timestamp").unwrap();
         write_issue(
             #{
                 name: "hidden-thinking",
                 title: "Thinking blocks hidden in recent session",
-                description: "scanner:issue.md",
+                description: "scanner:/hidden-thinking/issue.md",
                 evidence: [#{ note, timestamp }],
             },
         )

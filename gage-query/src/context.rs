@@ -61,6 +61,7 @@ pub async fn create_context_default() -> SessionContext {
 pub fn install_udfs(ctx: &SessionContext) {
     let mut ctx_clone = ctx.clone();
     datafusion_functions_json::register_all(&mut ctx_clone).unwrap();
+    ctx.register_udf(crate::udf::resolve_ref_udf());
 }
 
 /// Build a query context over the session corpus at `root`, with the

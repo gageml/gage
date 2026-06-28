@@ -6,6 +6,7 @@ mod repl;
 mod scan_context;
 pub mod slow_log;
 pub mod tables;
+pub mod udf;
 
 pub use cache::SessionCache;
 pub use context::{create_context, create_context_default, default_index_store, install_udfs};
