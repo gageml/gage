@@ -59,8 +59,6 @@ use uuid::Uuid;
 pub const TOOL_NAMES: &[&str] = &[
     "Query",
     "CommentWrite",
-    "IssueList",
-    "IssueGet",
     "IssueClose",
     "IssueComment",
     "IssueOpen",
@@ -1140,9 +1138,9 @@ mod tests {
 
     #[test]
     fn tool_policy_explicit_pair() {
-        let got = ToolPolicy::tools(s(&["Query", "IssueGet"]), vec![]).unwrap();
+        let got = ToolPolicy::tools(s(&["Query", "IssueClose"]), vec![]).unwrap();
         // Order follows TOOL_NAMES.
-        assert_eq!(got, s(&["Query", "IssueGet"]));
+        assert_eq!(got, s(&["Query", "IssueClose"]));
     }
 
     #[test]

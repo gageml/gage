@@ -1,7 +1,7 @@
 # Tools
 
+- CommentWrite
 - IssueClose
-- IssueGet
-- IssueList
+- IssueComment
 - IssueOpen
 - Query

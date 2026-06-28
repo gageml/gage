@@ -90,7 +90,7 @@ impl ScalarUDFImpl for ResolveRef {
 /// Absolute `scanner:/...` reads the first matching file under any
 /// scanner home path; lookup failures (no home matched, read error,
 /// missing leading `/`) return an inline `(unresolved ...)` marker.
-fn resolve_one(input: &str, homes: &[PathBuf]) -> String {
+pub fn resolve_one(input: &str, homes: &[PathBuf]) -> String {
     let Some(rest) = input.strip_prefix("scanner:") else {
         return input.to_string();
     };

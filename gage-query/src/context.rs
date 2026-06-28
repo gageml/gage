@@ -13,6 +13,7 @@ use gage_index::IndexStore;
 use crate::cache::SessionCache;
 use crate::tables::config::ConfigTable;
 use crate::tables::entry::EntryTable;
+use crate::tables::issue_report::IssueReportFn;
 use crate::tables::message::MessageTable;
 use crate::tables::message_text::MessageTextFn;
 use crate::tables::note_doc::note_doc_table;
@@ -92,6 +93,7 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
         "note_message_context",
         Arc::new(NoteMessageContextFn::new(Arc::clone(&store))),
     );
+    ctx.register_udtf("issue_report", Arc::new(IssueReportFn::new()));
     ctx.register_table("session", Arc::new(SessionTable::new(store.clone())))
         .unwrap();
     ctx.register_table("entry", Arc::new(EntryTable::new(store.clone())))

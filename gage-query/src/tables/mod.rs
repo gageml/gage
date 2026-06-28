@@ -1,5 +1,6 @@
 pub mod config;
 pub mod entry;
+pub mod issue_report;
 pub mod message;
 pub mod message_text;
 pub mod note_doc;
@@ -10,6 +11,7 @@ pub(crate) mod walk;
 pub use config::ConfigTable;
 pub use entry::EntryTable;
 pub use gage_index::entry_text;
+pub use issue_report::IssueReportFn;
 pub use message::MessageTable;
 pub use message_text::MessageTextFn;
 pub use note_message_context::NoteMessageContextFn;
@@ -38,6 +40,11 @@ pub fn registered_tvfs() -> Vec<TvfInfo> {
             name: "note_message_context",
             args: note_message_context::NOTE_MESSAGE_CONTEXT_ARGS,
             schema: note_message_context::note_message_context_schema(),
+        },
+        TvfInfo {
+            name: "issue_report",
+            args: issue_report::ISSUE_REPORT_ARGS,
+            schema: issue_report::issue_report_schema(),
         },
     ]
 }
