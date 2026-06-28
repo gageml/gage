@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use crate::event::{RunSummary, ScanEvent};
 use crate::runtime;
 use crate::runtime::state::{RunContext, ScanContext, ScannerSlot};
-use crate::scanner::{Scanner, ScannerDef, scanners_dir};
 use crate::scheduler;
+use gage_registry::scanner::{Scanner, ScannerDef, scanners_dir};
 
 pub enum RunError {
     Io(io::Error),
@@ -126,7 +126,7 @@ pub async fn run(
 
     // Build per-scanner compilation artifacts
     let mut slots: Vec<ScannerSlot> = Vec::new();
-    let mut scanner_tasks: Vec<HashMap<String, crate::scanner::TaskDef>> = Vec::new();
+    let mut scanner_tasks: Vec<HashMap<String, gage_registry::scanner::TaskDef>> = Vec::new();
     for s in scanners {
         let slot = compile_scanner(&s, db.clone())?;
         verify_tasks(&slot, s.def)?;

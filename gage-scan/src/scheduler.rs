@@ -34,7 +34,7 @@ use tracing::debug;
 
 use crate::event::{RunStatus, RunSummary, ScanEvent, TaskRef, WorkerStatus};
 use crate::runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
-use crate::scanner::TaskDef;
+use gage_registry::scanner::TaskDef;
 
 /// One planned invocation: a function call from a scanner. Immutable
 /// once the planner finishes.

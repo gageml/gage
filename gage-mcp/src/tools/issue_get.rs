@@ -6,8 +6,8 @@ use gage_core::text_resolve::TextResolver;
 use gage_db::db::open_db;
 use gage_db::issue::{self, Issue, LoggedEvent};
 use gage_db::note::Note;
-use gage_scan::scanner::ScannerRegistry;
-use gage_scan::scanner_scheme::{ErrorScheme, ScannerScheme};
+use gage_registry::scanner::ScannerRegistry;
+use gage_registry::scheme::{ErrorScheme, ScannerScheme};
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
     service::RequestContext,

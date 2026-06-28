@@ -2744,6 +2744,7 @@ dependencies = [
  "gage-log",
  "gage-mcp",
  "gage-query",
+ "gage-registry",
  "gage-scan",
  "gage-sync",
  "gage-tui",
@@ -2859,6 +2860,7 @@ dependencies = [
  "gage-core",
  "gage-db",
  "gage-query",
+ "gage-registry",
  "gage-scan",
  "num_cpus",
  "rmcp",
@@ -2899,6 +2901,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-registry"
+version = "0.0.1"
+dependencies = [
+ "codespan-reporting",
+ "gage-core",
+ "rune",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "gage-scan"
 version = "0.0.1"
 dependencies = [
@@ -2911,13 +2926,13 @@ dependencies = [
  "gage-core",
  "gage-db",
  "gage-query",
+ "gage-registry",
  "minijinja",
  "num_cpus",
  "petgraph 0.6.5",
  "reqwest",
  "rune",
  "rune-modules",
- "rust-embed",
  "serde",
  "serde_json",
  "tokio",
@@ -2937,6 +2952,7 @@ dependencies = [
  "gage-core",
  "gage-db",
  "gage-query",
+ "gage-registry",
  "gage-scan",
  "indicatif",
  "num_cpus",

@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use gage_claude::session::{self, SessionInfo};
 use gage_db::db;
 use gage_query::ScanSessionContext;
+use gage_registry::scanner::{Scanner, ScannerRegistry};
 use gage_scan::event::ScanEvent;
-use gage_scan::scanner::{Scanner, ScannerRegistry};
 
 use crate::sink::UiEvent;
 

@@ -1,4 +1,4 @@
-use gage_scan::scanner::{Scanner, ScannerRegistry};
+use gage_registry::scanner::{Scanner, ScannerRegistry};
 
 fn registry() -> ScannerRegistry {
     ScannerRegistry::load()

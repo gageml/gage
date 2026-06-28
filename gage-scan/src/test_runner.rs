@@ -13,7 +13,7 @@ use gage_query::ScanSessionContext;
 
 use crate::runtime;
 use crate::runtime::state::{RunContext, SCAN_CTX, ScanContext};
-use crate::scanner::{extract_scanners, scanners_dir};
+use gage_registry::scanner::{extract_scanners, scanners_dir};
 
 pub enum TestOutcome {
     Pass,

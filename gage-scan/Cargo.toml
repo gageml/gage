@@ -15,10 +15,10 @@ gage-agent = { path = "../gage-agent" }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-query = { path = "../gage-query" }
+gage-registry = { path = "../gage-registry" }
 minijinja = "2"
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 rune-modules = { git = "https://github.com/gar1t/rune.git", branch = "gage", features = ["time", "rand", "thread_rng"] }
-rust-embed = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",

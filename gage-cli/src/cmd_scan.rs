@@ -18,7 +18,7 @@ use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::uuid::short_uuid;
 use gage_db::{db, scan};
 use gage_query::ScanSessionContext;
-use gage_scan::scanner::{Scanner, ScannerRegistry};
+use gage_registry::scanner::{Scanner, ScannerRegistry};
 
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::style as s;

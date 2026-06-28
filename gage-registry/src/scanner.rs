@@ -62,7 +62,7 @@ pub struct ScannerDef {
     pub tasks: BTreeMap<String, TaskDef>,
     ast: ast::File,
     source: String,
-    pub(crate) embed_key: String,
+    pub embed_key: String,
     /// True for scanners loaded ad hoc via `-f / --file`. These are
     /// excluded from listings (`list_visible` / `list_enabled`) and
     /// from enable/disable settings management.
@@ -124,7 +124,7 @@ impl ScannerDef {
         None
     }
 
-    pub(crate) fn source(&self) -> &str {
+    pub fn source(&self) -> &str {
         &self.source
     }
 

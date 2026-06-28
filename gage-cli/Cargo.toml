@@ -32,6 +32,7 @@ console = "0.16.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde_json = "1"
 gage-query = { path = "../gage-query" }
+gage-registry = { path = "../gage-registry" }
 gage-scan = { path = "../gage-scan" }
 gage-sync = { path = "../gage-sync" }
 indicatif = "0.18"

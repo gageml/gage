@@ -7,8 +7,8 @@ use gage_db::db;
 use gage_db::note::{self, Note, NoteFilters};
 use gage_db::note_relation::insert_relation;
 use gage_db::target::{NoteTarget, SessionTarget};
-use gage_scan::scanner::ScannerRegistry;
-use gage_scan::scanner_scheme::{ErrorScheme, ScannerScheme};
+use gage_registry::scanner::ScannerRegistry;
+use gage_registry::scheme::{ErrorScheme, ScannerScheme};
 use tabled::{
     Table,
     settings::{

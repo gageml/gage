@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use gage_scan::scanner::ScannerRegistry;
+use gage_registry::scanner::ScannerRegistry;
 use rmcp::{
     ErrorData as McpError,
     handler::server::router::tool::ToolRoute,
