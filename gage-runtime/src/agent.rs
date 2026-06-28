@@ -14,9 +14,9 @@ use rune::runtime::{Formatter, Mut, Protocol, VmError};
 use rune::runtime::{FromValue, Value};
 use rune::{Any, ContextError, Module};
 
-use crate::runtime::error::Error;
-use crate::runtime::llm::anthropic;
-use crate::runtime::state::current_scan_ctx;
+use crate::error::Error;
+use crate::llm::anthropic;
+use crate::state::current_scan_ctx;
 
 const DEFAULT_NAME: &str = "judge";
 

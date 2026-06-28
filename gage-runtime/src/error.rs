@@ -9,7 +9,7 @@ use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::runtime::db::{Issue, Note};
+use crate::db::{Issue, Note};
 
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]

@@ -10,8 +10,8 @@ use rune::{Any, ContextError, Module};
 use serde_json as json;
 use tracing::debug;
 
-use crate::runtime::error::Error;
-use crate::runtime::value::json_to_object;
+use crate::error::Error;
+use crate::value::json_to_object;
 
 use anthropic::{
     CacheControl, Client, ContentBlock, HttpClient, LlmError, Message as ApiMessage,

@@ -1,7 +1,7 @@
 use rune::runtime::{Object, Value};
 use rune::{Any, ContextError, Module};
 
-use crate::runtime::state::current_scan_ctx;
+use crate::state::current_scan_ctx;
 
 use super::datetime::DateTime;
 use super::value::json_to_value;

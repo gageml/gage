@@ -16,10 +16,10 @@ use rune::{Diagnostics, Source, Sources};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{RunSummary, ScanEvent};
-use crate::runtime;
-use crate::runtime::state::{RunContext, ScanContext, ScannerSlot};
 use crate::scheduler;
 use gage_registry::scanner::{Scanner, ScannerDef, scanners_dir};
+use gage_runtime as runtime;
+use gage_runtime::state::{RunContext, ScanContext, ScannerSlot};
 
 pub enum RunError {
     Io(io::Error),

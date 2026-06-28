@@ -33,8 +33,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::event::{RunStatus, RunSummary, ScanEvent, TaskRef, WorkerStatus};
-use crate::runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
 use gage_registry::scanner::TaskDef;
+use gage_runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
 
 /// One planned invocation: a function call from a scanner. Immutable
 /// once the planner finishes.
@@ -57,9 +57,10 @@ pub(crate) enum TaskResult {
     SkippedByFault,
 }
 
-/// Channel message — emitted by worker tasks (Started, Completed) and
-/// Rune runtime functions (Print, Println). The scheduler driver
-/// consumes these to drive the DAG and to emit public events.
+/// Channel message — emitted by worker tasks (Started, Completed). The
+/// scheduler driver consumes these to drive the DAG. Print/Println from
+/// Rune `print`/`println` flow over a separate
+/// [`gage_runtime::RuntimeOutput`] channel.
 #[derive(Debug)]
 pub(crate) enum WorkerMsg {
     Started {
@@ -70,12 +71,6 @@ pub(crate) enum WorkerMsg {
         worker_id: usize,
         task_idx: usize,
         outcome: TaskResult,
-    },
-    Print {
-        s: String,
-    },
-    Println {
-        s: String,
     },
 }
 
@@ -331,6 +326,7 @@ async fn run_tasks(
 
     let (ready_tx, ready_rx) = mpsc::unbounded_channel::<usize>();
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<WorkerMsg>();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<gage_runtime::RuntimeOutput>();
 
     // Seed initial ready set
     for (i, d) in deps_remaining.iter().enumerate() {
@@ -347,6 +343,7 @@ async fn run_tasks(
         let tasks = tasks.clone();
         let ready_rx = ready_rx.clone();
         let msg_tx = msg_tx.clone();
+        let out_tx = out_tx.clone();
         worker_handles.push(tokio::spawn(async move {
             loop {
                 let task_idx = {
@@ -364,7 +361,7 @@ async fn run_tasks(
                 {
                     break;
                 }
-                let outcome = dispatch_task(task, &scanners, &run, &msg_tx).await;
+                let outcome = dispatch_task(task, &scanners, &run, &out_tx).await;
                 if msg_tx
                     .send(WorkerMsg::Completed {
                         worker_id,
@@ -379,11 +376,16 @@ async fn run_tasks(
         }));
     }
     drop(msg_tx);
+    drop(out_tx);
 
     let mut completed = 0usize;
     let mut canceled = false;
     while completed < task_count {
-        let msg = tokio::select! {
+        enum Tick {
+            Msg(Option<WorkerMsg>),
+            Out(Option<gage_runtime::RuntimeOutput>),
+        }
+        let tick = tokio::select! {
             biased;
             _ = cancel.cancelled(), if !canceled => {
                 canceled = true;
@@ -392,7 +394,19 @@ async fn run_tasks(
                 }
                 continue;
             }
-            msg = msg_rx.recv() => msg,
+            msg = msg_rx.recv() => Tick::Msg(msg),
+            out = out_rx.recv() => Tick::Out(out),
+        };
+        let msg = match tick {
+            Tick::Out(Some(out)) => {
+                match out {
+                    gage_runtime::RuntimeOutput::Print(s) => on_event(ScanEvent::Print { s }),
+                    gage_runtime::RuntimeOutput::Println(s) => on_event(ScanEvent::Println { s }),
+                }
+                continue;
+            }
+            Tick::Out(None) => continue,
+            Tick::Msg(msg) => msg,
         };
         let Some(msg) = msg else {
             if canceled {
@@ -450,12 +464,13 @@ async fn run_tasks(
                     }
                 }
             }
-            WorkerMsg::Print { s } => {
-                on_event(ScanEvent::Print { s });
-            }
-            WorkerMsg::Println { s } => {
-                on_event(ScanEvent::Println { s });
-            }
+        }
+    }
+    // Drain any remaining Print/Println so output isn't lost.
+    while let Ok(out) = out_rx.try_recv() {
+        match out {
+            gage_runtime::RuntimeOutput::Print(s) => on_event(ScanEvent::Print { s }),
+            gage_runtime::RuntimeOutput::Println(s) => on_event(ScanEvent::Println { s }),
         }
     }
     drop(ready_tx);
@@ -478,7 +493,7 @@ async fn dispatch_task(
     task: &Task,
     scanners: &[ScannerSlot],
     run: &Arc<RunContext>,
-    msg_tx: &mpsc::UnboundedSender<WorkerMsg>,
+    out_tx: &mpsc::UnboundedSender<gage_runtime::RuntimeOutput>,
 ) -> TaskResult {
     let slot = &scanners[task.scanner_idx];
 
@@ -491,7 +506,7 @@ async fn dispatch_task(
         params: slot.params.clone(),
         run: run.clone(),
         db: slot.db.clone(),
-        runtime_tx: msg_tx.clone(),
+        runtime_tx: out_tx.clone(),
     });
 
     let task_name = task.task_name.clone();
@@ -511,7 +526,7 @@ async fn dispatch_task(
                     Result<rune::runtime::Value, rune::runtime::Value>,
                 >(val)
                 {
-                    Ok(Err(err)) if crate::runtime::ignore::is_ignore(&err) => TaskResult::Ok,
+                    Ok(Err(err)) if gage_runtime::ignore::is_ignore(&err) => TaskResult::Ok,
                     Ok(Err(err)) => TaskResult::Error(render_task_error(err)),
                     _ => TaskResult::Ok,
                 },
@@ -546,7 +561,7 @@ fn render_vm_err(e: &rune::runtime::VmError, sources: &rune::Sources) -> String 
 // typed Error and use its Rust `Debug` instead — that is plain Rust
 // formatting, not the Rune protocol, so it is safe post-VM.
 fn render_task_error(err: rune::runtime::Value) -> String {
-    if let Ok(e) = rune::from_value::<crate::runtime::error::Error>(err.clone()) {
+    if let Ok(e) = rune::from_value::<gage_runtime::error::Error>(err.clone()) {
         format!("{e:?}")
     } else if let Ok(s) = rune::from_value::<String>(err.clone()) {
         s
@@ -561,7 +576,7 @@ fn render_task_error(err: rune::runtime::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::error::Error;
+    use gage_runtime::error::Error;
 
     // Guards the off-VM rendering path: a task's Err must render via the
     // typed Error's Rust Debug, never the Rune DEBUG_FMT protocol (which

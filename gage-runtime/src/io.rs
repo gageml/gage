@@ -14,8 +14,8 @@
 
 use rune::{ContextError, Module};
 
-use crate::runtime::state::current_scan_ctx;
-use crate::scheduler::WorkerMsg;
+use crate::RuntimeOutput;
+use crate::state::current_scan_ctx;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate_item("std", ["io"])?;
@@ -27,11 +27,11 @@ pub(crate) fn module() -> Result<Module, ContextError> {
 fn print_impl(s: &str) {
     let ctx = current_scan_ctx();
     #[allow(clippy::let_underscore_must_use)]
-    let _ = ctx.runtime_tx.send(WorkerMsg::Print { s: s.to_string() });
+    let _ = ctx.runtime_tx.send(RuntimeOutput::Print(s.to_string()));
 }
 
 fn println_impl(s: &str) {
     let ctx = current_scan_ctx();
     #[allow(clippy::let_underscore_must_use)]
-    let _ = ctx.runtime_tx.send(WorkerMsg::Println { s: s.to_string() });
+    let _ = ctx.runtime_tx.send(RuntimeOutput::Println(s.to_string()));
 }

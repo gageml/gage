@@ -9,7 +9,7 @@ use gage_query::ScanSessionContext;
 use serde_json as json;
 use tokio::sync::mpsc;
 
-use crate::scheduler::WorkerMsg;
+use crate::RuntimeOutput;
 
 /// State shared by all scanners for a single scan run.
 ///
@@ -39,10 +39,9 @@ pub struct ScanContext {
     pub params: Option<json::Value>,
     pub run: Arc<RunContext>,
     pub db: Arc<Mutex<Connection>>,
-    /// Channel from runtime functions (`print`/`println`) back to the
-    /// scheduler driver. Workers share this channel for `Started`/
-    /// `Completed` signaling.
-    pub runtime_tx: mpsc::UnboundedSender<WorkerMsg>,
+    /// Channel from Rune `print`/`println` calls back to the scan
+    /// orchestrator. The receiver lives in the scheduler.
+    pub runtime_tx: mpsc::UnboundedSender<RuntimeOutput>,
 }
 
 tokio::task_local! {

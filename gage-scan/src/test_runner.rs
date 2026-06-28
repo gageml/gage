@@ -11,9 +11,9 @@ use rune::{Diagnostics, Source, Sources};
 
 use gage_query::ScanSessionContext;
 
-use crate::runtime;
-use crate::runtime::state::{RunContext, SCAN_CTX, ScanContext};
 use gage_registry::scanner::{extract_scanners, scanners_dir};
+use gage_runtime as runtime;
+use gage_runtime::state::{RunContext, SCAN_CTX, ScanContext};
 
 pub enum TestOutcome {
     Pass,

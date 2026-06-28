@@ -13,9 +13,9 @@ use rune::runtime::{FromValue, Object, Protocol, Ref, Value, Vec as RuneVec};
 use rune::{ContextError, Module};
 use tracing::warn;
 
-use crate::runtime::error::Error;
-use crate::runtime::scan::{Scan, Session};
-use crate::runtime::state::current_scan_ctx;
+use crate::error::Error;
+use crate::scan::{Scan, Session};
+use crate::state::current_scan_ctx;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function("write_note", |n: Object| NoteInsert::new(n))
@@ -776,7 +776,7 @@ fn optional_object_json(obj: &Object, key: &str) -> super::Result<Option<String>
     match obj.get(key) {
         None => Ok(None),
         Some(v) => {
-            let json = crate::runtime::value::value_to_json(v)
+            let json = crate::value::value_to_json(v)
                 .map_err(|e| Error::Args(format!("field '{key}' could not be serialized: {e}")))?;
             if !json.is_object() {
                 return Err(Error::Args(format!("field '{key}' must be an object")));
@@ -787,7 +787,7 @@ fn optional_object_json(obj: &Object, key: &str) -> super::Result<Option<String>
 }
 
 fn value_to_note_value(v: &Value) -> super::Result<NoteValue> {
-    let json = crate::runtime::value::value_to_json(v)
+    let json = crate::value::value_to_json(v)
         .map_err(|e| Error::Args(format!("field 'value' could not be serialized: {e}")))?;
     Ok(NoteValue(json))
 }

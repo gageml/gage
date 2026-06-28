@@ -18,7 +18,7 @@ use rune::{Any, ContextError, Module};
 use serde_json as json;
 use tracing::warn;
 
-use crate::runtime::value::json_to_value;
+use crate::value::json_to_value;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function("user", user).build()?;

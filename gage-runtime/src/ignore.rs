@@ -17,6 +17,6 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
 
 /// True when a task's `Err` value is the `Ignore` sentinel, an early
 /// exit that should not count as a failure.
-pub(crate) fn is_ignore(err: &Value) -> bool {
+pub fn is_ignore(err: &Value) -> bool {
     err.type_hash() == Ignore::HASH
 }

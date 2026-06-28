@@ -2914,12 +2914,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "gage-scan"
+name = "gage-runtime"
 version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
- "codespan-reporting",
  "datafusion",
  "gage-agent",
  "gage-claude",
@@ -2928,9 +2927,31 @@ dependencies = [
  "gage-query",
  "gage-registry",
  "minijinja",
+ "reqwest",
+ "rune",
+ "rune-modules",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "gage-scan"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "codespan-reporting",
+ "gage-agent",
+ "gage-claude",
+ "gage-core",
+ "gage-db",
+ "gage-query",
+ "gage-registry",
+ "gage-runtime",
  "num_cpus",
  "petgraph 0.6.5",
- "reqwest",
  "rune",
  "rune-modules",
  "serde",

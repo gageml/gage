@@ -13,6 +13,7 @@ members = [
     "gage-mcp",
     "gage-query",
     "gage-registry",
+    "gage-runtime",
     "gage-scan",
     "gage-scan-ui",
     "gage-sync",

@@ -1,24 +1,33 @@
-pub(crate) mod agent;
-pub(crate) mod config;
-pub(crate) mod datetime;
-pub(crate) mod db;
-pub(crate) mod error;
-pub(crate) mod ignore;
-pub(crate) mod io;
-pub(crate) mod json;
-pub(crate) mod llm;
-pub(crate) mod macros;
-pub(crate) mod query;
+pub mod agent;
+pub mod config;
+pub mod datetime;
+pub mod db;
+pub mod error;
+pub mod ignore;
+pub mod io;
+pub mod json;
+pub mod llm;
+pub mod macros;
+pub mod query;
 mod result;
-pub(crate) mod scan;
-pub(crate) mod state;
-pub(crate) mod stats;
-pub(crate) mod template;
-pub(crate) mod value;
+pub mod scan;
+pub mod state;
+pub mod stats;
+pub mod template;
+pub mod value;
 
 pub(crate) use result::Result;
 
 use rune::{Context, ContextError, Module};
+
+/// Output emitted by Rune-runtime `print`/`println` calls. The orchestrator
+/// owns the receiver end of an `UnboundedSender<RuntimeOutput>` it places in
+/// every task's [`state::ScanContext`].
+#[derive(Debug)]
+pub enum RuntimeOutput {
+    Print(String),
+    Println(String),
+}
 
 /// Build a Rune context for the language server: the same native modules the
 /// runtime installs (`runner::run`), so scanner sources resolve `gage::*`,
@@ -34,11 +43,11 @@ pub fn lsp_context() -> std::result::Result<Context, ContextError> {
     Ok(context)
 }
 
-pub(crate) fn macros_module() -> std::result::Result<Module, ContextError> {
+pub fn macros_module() -> std::result::Result<Module, ContextError> {
     macros::module()
 }
 
-pub(crate) fn gage_module() -> std::result::Result<Module, ContextError> {
+pub fn gage_module() -> std::result::Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
 
     scan::register(&mut m)?;
@@ -52,18 +61,18 @@ pub(crate) fn gage_module() -> std::result::Result<Module, ContextError> {
     Ok(m)
 }
 
-pub(crate) fn io_module() -> std::result::Result<Module, ContextError> {
+pub fn io_module() -> std::result::Result<Module, ContextError> {
     io::module()
 }
 
-pub(crate) fn stats_module() -> std::result::Result<Module, ContextError> {
+pub fn stats_module() -> std::result::Result<Module, ContextError> {
     stats::module()
 }
 
-pub(crate) fn json_module() -> std::result::Result<Module, ContextError> {
+pub fn json_module() -> std::result::Result<Module, ContextError> {
     json::module()
 }
 
-pub(crate) fn types_module() -> std::result::Result<Module, ContextError> {
+pub fn types_module() -> std::result::Result<Module, ContextError> {
     scan::types_module()
 }

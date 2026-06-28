@@ -7,10 +7,10 @@ use rune::alloc::prelude::TryClone;
 use rune::runtime::{Formatter, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::runtime::datetime::DateTime;
-use crate::runtime::error::Error;
-use crate::runtime::scan::Session;
-use crate::runtime::state::current_scan_ctx;
+use crate::datetime::DateTime;
+use crate::error::Error;
+use crate::scan::Session;
+use crate::state::current_scan_ctx;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function("query", |sql: String| async move { do_query(sql).await })
@@ -34,7 +34,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub(crate) struct MessageQuery {
+pub struct MessageQuery {
     #[rune(skip)]
     session_id: Option<String>,
     #[rune(skip)]
@@ -70,7 +70,7 @@ impl MessageQuery {
 
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub(crate) struct EntryQuery {
+pub struct EntryQuery {
     #[rune(skip)]
     session_id: Option<String>,
     #[rune(skip)]
@@ -339,10 +339,10 @@ fn optional_ts_to_val(arr: &TimestampMillisecondArray, row: usize) -> Value {
 }
 
 #[derive(Any)]
-pub(crate) struct Message {
-    pub(crate) inner: Object,
+pub struct Message {
+    pub inner: Object,
     #[rune(skip)]
-    pub(crate) object: std::sync::OnceLock<Value>,
+    pub object: std::sync::OnceLock<Value>,
 }
 
 impl Message {
@@ -516,10 +516,10 @@ pub(crate) fn messages_from_batches(batches: Vec<RecordBatch>) -> Vec<Message> {
 }
 
 #[derive(Any)]
-pub(crate) struct Entry {
-    pub(crate) inner: Object,
+pub struct Entry {
+    pub inner: Object,
     #[rune(skip)]
-    pub(crate) object: std::sync::OnceLock<Value>,
+    pub object: std::sync::OnceLock<Value>,
 }
 
 impl Entry {

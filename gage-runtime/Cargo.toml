@@ -1,5 +1,5 @@
 [package]
-name = "gage-scan"
+name = "gage-runtime"
 version.workspace = true
 edition.workspace = true
 
@@ -7,17 +7,20 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
-codespan-reporting = "0.13.1"
+datafusion = { workspace = true }
 gage-agent = { path = "../gage-agent" }
 gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-query = { path = "../gage-query" }
 gage-registry = { path = "../gage-registry" }
-gage-runtime = { path = "../gage-runtime" }
-num_cpus = { workspace = true }
-petgraph = "0.6"
+minijinja = "2"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 rune-modules = { git = "https://github.com/gar1t/rune.git", branch = "gage", features = ["time", "rand", "thread_rng"] }
 serde = { workspace = true }
@@ -25,10 +28,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-
-[[bench]]
-name = "vm_lifecycle"
-harness = false
 
 [lints]
 workspace = true
