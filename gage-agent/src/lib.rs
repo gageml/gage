@@ -641,13 +641,15 @@ async fn start_streaming_session_inner(
     prompt: &str,
 ) -> io::Result<StreamingAgentSession> {
     let mut cmd = TokioCommand::new(&prep.claude_bin);
-    cmd.arg("-p").arg(prompt);
+    // Headless mode without a prompt arg — the initial user message is
+    // sent via the stream-json stdin channel below, matching how the
+    // SDK drives `claude -p` with `--input-format stream-json`.
+    cmd.arg("-p");
     cmd.args(["--input-format", "stream-json"]);
     cmd.args(["--output-format", "stream-json"]);
-    // No `--thinking-display`: in stream-json mode the assistant
-    // messages carry raw `thinking` content blocks regardless. The flag
-    // only controls human-readable rendering (and `raw` isn't accepted
-    // anyway — the CLI allows `summarized` or `omitted`).
+    // --print + --output-format=stream-json requires --verbose
+    cmd.arg("--verbose");
+    cmd.args(["--thinking-display", "summarized"]);
     cmd.arg("--disable-slash-commands");
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
@@ -676,33 +678,69 @@ async fn start_streaming_session_inner(
         cmd.env("GAGE_SCAN_ID", id);
     }
 
+    tracing::debug!(
+        claude = %prep.claude_bin.display(),
+        cwd = %prep.cwd.display(),
+        mcp_url = ?mcp_url,
+        model = ?model,
+        max_turns = ?max_turns,
+        "spawning streaming claude child",
+    );
     let mut child = cmd.spawn()?;
-    let stdin = child.stdin.take();
+    let pid = child.id();
+    tracing::debug!(?pid, "streaming child spawned");
+    let mut stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = spawn_reader(child.stderr.take());
+
+    // Send the initial user message before returning. Stays inside this
+    // function so the caller observes the session in "running with one
+    // turn queued" state; further turns go via
+    // [`StreamingAgentSession::send_user_message`].
+    if let Some(s) = stdin.as_mut() {
+        let msg = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": prompt },
+        });
+        let mut buf = serde_json::to_vec(&msg).map_err(io::Error::other)?;
+        buf.push(b'\n');
+        s.write_all(&buf).await?;
+        s.flush().await?;
+        tracing::debug!(bytes = buf.len(), "sent initial user message");
+    }
 
     let (tx, rx) = tokio_mpsc::unbounded_channel::<StreamMessage>();
     let stdout_task = stdout.map(|out| {
         tokio::spawn(async move {
             let mut lines = BufReader::new(out).lines();
+            let mut n = 0u64;
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
                         if line.trim().is_empty() {
                             continue;
                         }
-                        if tx.send(parse_stream_message(&line)).is_err() {
+                        n += 1;
+                        let msg = parse_stream_message(&line);
+                        tracing::debug!(
+                            seq = n,
+                            kind = stream_message_kind(&msg),
+                            line_len = line.len(),
+                            line = %line,
+                            "stream-json line",
+                        );
+                        if tx.send(msg).is_err() {
+                            tracing::debug!(seq = n, "stream-json channel closed by receiver");
                             return;
                         }
                     }
-                    Ok(None) => return,
+                    Ok(None) => {
+                        tracing::debug!(total = n, "stream-json stdout EOF");
+                        return;
+                    }
                     Err(e) => {
-                        // Read error on a closing pipe is unactionable
-                        // here — the caller observes EOF via the
-                        // dropped channel and reaps the child / drains
-                        // stderr for the real diagnosis. Surface to
-                        // the parent log so it isn't silent.
                         eprintln!("warning: stream-json stdout read error: {e}");
+                        tracing::warn!(error = %e, "stream-json stdout read error");
                         return;
                     }
                 }
@@ -734,6 +772,17 @@ async fn start_streaming_session_inner(
         sandbox_db: sandbox.db_path,
         timeout,
     })
+}
+
+fn stream_message_kind(m: &StreamMessage) -> &'static str {
+    match m {
+        StreamMessage::System(_) => "system",
+        StreamMessage::Assistant(_) => "assistant",
+        StreamMessage::User(_) => "user",
+        StreamMessage::Result(_) => "result",
+        StreamMessage::Other(_) => "other",
+        StreamMessage::ParseError { .. } => "parse_error",
+    }
 }
 
 fn parse_stream_message(line: &str) -> StreamMessage {

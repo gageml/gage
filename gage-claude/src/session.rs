@@ -205,7 +205,7 @@ impl SessionListBuilder {
             }
         }
 
-        sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.mtime));
         if let Some(n) = self.limit {
             sessions.truncate(n);
         }

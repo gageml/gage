@@ -306,6 +306,7 @@ async fn wait(this: Mut<Agent>) -> super::Result<AgentResult> {
 
 async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
     loop {
+        tracing::trace!("agent.poll iteration");
         // Fast path: a buffered event, or an idempotent Stop replay.
         {
             let mut g = inner.lock().unwrap();
@@ -326,7 +327,20 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
             .session
             .take()
             .ok_or_else(|| Error::Agent("agent.poll: session not available".into()))?;
+        tracing::trace!("agent.poll awaiting next stream message");
         let msg = session.recv_event().await;
+        tracing::debug!(
+            kind = msg.as_ref().map(|m| match m {
+                StreamMessage::System(_) => "system",
+                StreamMessage::Assistant(_) => "assistant",
+                StreamMessage::User(_) => "user",
+                StreamMessage::Result(_) => "result",
+                StreamMessage::Other(_) => "other",
+                StreamMessage::ParseError { .. } => "parse_error",
+            }),
+            channel_closed = msg.is_none(),
+            "agent.poll received stream message",
+        );
 
         let should_finalize = {
             let mut g = inner.lock().unwrap();
@@ -364,7 +378,7 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
 /// build `final_result`, and enqueue a single trailing `Event::Stop`.
 /// Sets `stop_seen` so subsequent polls return Stop idempotently.
 async fn do_finalize_and_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()> {
-    // Take session out for async work; lock isn't held across awaits.
+    tracing::debug!("agent.finalize: taking session");
     let mut session = inner
         .lock()
         .unwrap()
@@ -372,18 +386,29 @@ async fn do_finalize_and_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()
         .take()
         .ok_or_else(|| Error::Agent("agent.finalize: session not available".into()))?;
 
+    // Close stdin so claude's stream-json input loop sees EOF and
+    // exits. Without this the child sits waiting for the next user
+    // message even after emitting the terminal `result`.
+    session.close_stdin();
+    tracing::debug!(pid = ?session.id(), "agent.finalize: stdin closed, awaiting child exit");
     let status = session
         .wait_exit()
         .await
         .map_err(|e| Error::Agent(format!("agent: wait child: {e}")))?;
+    tracing::debug!(?status, "agent.finalize: child exited");
     session.join_stdout().await;
     let stderr_bytes = session
         .drain_stderr()
         .await
         .map_err(|e| Error::Agent(format!("agent: drain stderr: {e}")))?;
+    tracing::debug!(
+        stderr_len = stderr_bytes.len(),
+        "agent.finalize: stderr drained"
+    );
     session
         .finalize()
         .map_err(|e| Error::Agent(format!("agent: finalize: {e}")))?;
+    tracing::debug!("agent.finalize: gage-agent finalize done");
     drop(session);
 
     let mut g = inner.lock().unwrap();
