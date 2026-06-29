@@ -11,12 +11,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use gage_mcp::{CustomToolCallback, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, FromValue, Mut, Object, Protocol, Value, VmError};
 use rune::{ContextError, Module};
+use serde_json::Value as JsonValue;
 
 use crate::error::Error;
+use crate::state::current_scan_ctx;
 
 /// Builder produced by `call_agent(prompt)`. Accumulates per-call
 /// configuration; `await` validates and turns it into an [`Agent`].
@@ -101,14 +104,28 @@ pub(crate) struct InputDecl {
     pub description: Option<String>,
 }
 
-/// Handle to a running per-call agent. Methods (`poll`/`wait`/etc.)
-/// are stubbed in this sub-step; the live wiring (claude child, MCP
-/// service registration) is added in 6.4/6.5.
+/// Handle to a running per-call agent. When the call declared any
+/// tools (`.gage_tools(...)` or `.tools(...)`), an MCP service is
+/// registered at `await` time and lives for the lifetime of this
+/// value ([`ServiceHandle`] drops on `Drop`, unregistering from the
+/// host). A call with no tools declared skips MCP entirely — the
+/// agent runs pure text-in/text-out.
+///
+/// Process spawn + event-stream methods (`poll`/`wait`/etc.) land in
+/// 6.4.c/6.4.d.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub(crate) struct Agent {
     #[rune(skip)]
     spec: Arc<CallSpec>,
+    /// MCP URL the (eventual) claude child will connect to. `None`
+    /// when no tools were declared.
+    #[rune(skip)]
+    mcp_url: Option<String>,
+    /// Per-call MCP service registration. Drop unregisters. `None`
+    /// when no tools were declared (no MCP server is running).
+    #[rune(skip)]
+    _service: Option<ServiceHandle>,
 }
 
 impl Agent {
@@ -116,14 +133,20 @@ impl Agent {
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
-            "Agent {{ model: {:?}, max_turns: {:?}, gage_tools: {:?}, custom_tools: {} }}",
+            "Agent {{ model: {:?}, max_turns: {:?}, gage_tools: {:?}, custom_tools: {}, url: {:?} }}",
             self.spec.model,
             self.spec.max_turns,
             self.spec.gage_tools,
-            self.spec.custom_tools.len()
+            self.spec.custom_tools.len(),
+            self.mcp_url,
         )?;
         Ok(())
     }
+}
+
+#[rune::function(instance)]
+fn url(this: &Agent) -> Option<String> {
+    this.mcp_url.clone()
 }
 
 #[rune::function(instance)]
@@ -377,7 +400,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         Some(r) => r?,
         None => Vec::new(),
     };
-    let spec = CallSpec {
+    let spec = Arc::new(CallSpec {
         prompt,
         model,
         max_turns,
@@ -386,15 +409,114 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         append_system_prompt,
         gage_tools,
         custom_tools,
+    });
+
+    let tool_spec = build_tool_spec(&spec);
+    let (mcp_url, service) = if tool_spec.gage_tools.is_empty() && tool_spec.custom_tools.is_empty()
+    {
+        // Pure text-in/text-out call — no need to register an MCP
+        // service or even reach the host.
+        (None, None)
+    } else {
+        let ctx = current_scan_ctx();
+        let host = ctx.run.mcp_host.clone().ok_or_else(|| {
+            Error::Agent(
+                "call_agent: tools declared but no MCP host available in this run \
+                 (host startup failed?)"
+                    .into(),
+            )
+        })?;
+        let svc = host.register(gage_mcp::build_mcp_service(tool_spec));
+        (Some(svc.url().to_string()), Some(svc))
     };
     Ok(Agent {
-        spec: Arc::new(spec),
+        spec,
+        mcp_url,
+        _service: service,
     })
+}
+
+/// Translate the resolved [`CallSpec`] into [`gage_mcp::ToolSpec`].
+///
+/// `GageTools::All` expands against [`gage_agent::TOOL_NAMES`];
+/// `GageTools::Some(list)` passes through verbatim; `GageTools::None`
+/// yields an empty `gage_tools`. Custom tools become
+/// [`gage_mcp::CustomToolDef`]; the callback is a stub returning a
+/// "not yet implemented" error until 6.4.c plumbs the Rune VM
+/// dispatch through.
+fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
+    let gage_tools = match &spec.gage_tools {
+        GageTools::None => Vec::new(),
+        GageTools::Some(list) => list.clone(),
+        GageTools::All => gage_agent::TOOL_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    let custom_tools = spec
+        .custom_tools
+        .iter()
+        .map(|def| gage_mcp::CustomToolDef {
+            name: def.mcp_name.clone(),
+            description: def.description.clone(),
+            input_schema: render_input_schema(&def.inputs),
+            callback: stub_callback(def.mcp_name.clone()),
+        })
+        .collect();
+    ToolSpec {
+        gage_tools,
+        custom_tools,
+    }
+}
+
+/// Render `InputDecl[]` to the MCP `{"type": "object", "properties":
+/// {...}, "required": [...]}` schema.
+fn render_input_schema(inputs: &[InputDecl]) -> rmcp_json::JsonObject {
+    let mut properties = rmcp_json::JsonObject::new();
+    let mut required: Vec<JsonValue> = Vec::new();
+    for inp in inputs {
+        let mut prop = rmcp_json::JsonObject::new();
+        prop.insert("type".into(), JsonValue::String(inp.type_str.clone()));
+        if let Some(desc) = &inp.description {
+            prop.insert("description".into(), JsonValue::String(desc.clone()));
+        }
+        properties.insert(inp.name.clone(), JsonValue::Object(prop));
+        if inp.required {
+            required.push(JsonValue::String(inp.name.clone()));
+        }
+    }
+    let mut obj = rmcp_json::JsonObject::new();
+    obj.insert("type".into(), JsonValue::String("object".into()));
+    obj.insert("properties".into(), JsonValue::Object(properties));
+    obj.insert("required".into(), JsonValue::Array(required));
+    obj
+}
+
+/// Placeholder callback for scanner-defined tools. Replaced in 6.4.c
+/// when the runtime can dispatch into a fresh `rune::Vm` scoped to
+/// the calling task's `ScanContext`.
+fn stub_callback(name: String) -> CustomToolCallback {
+    Arc::new(move |_args| {
+        let name = name.clone();
+        Box::pin(async move {
+            Err(format!(
+                "scanner-defined tool '{name}' not yet dispatched (6.4.c)"
+            ))
+        })
+    })
+}
+
+/// `rmcp::model::JsonObject` re-exported via `gage_mcp::CustomToolDef`'s
+/// `input_schema` field type — alias kept local so this module doesn't
+/// import the rmcp crate just for one type name.
+mod rmcp_json {
+    pub type JsonObject = serde_json::Map<String, serde_json::Value>;
 }
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Agent>()?;
     m.function_meta(Agent::debug)?;
+    m.function_meta(url)?;
     m.function_meta(poll)?;
     m.function_meta(wait)?;
     m.function_meta(try_wait)?;

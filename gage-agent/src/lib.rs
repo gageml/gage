@@ -120,7 +120,7 @@ pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 /// Fluent configuration for an [`Agent`]. All fields are optional;
 /// `name` defaults to `"default"`, `sandbox` to the full-corpus spec,
 /// `tools` to empty (the caller must list every tool to expose).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentBuilder {
     name: Option<String>,
     model: Option<String>,
@@ -134,21 +134,6 @@ pub struct AgentBuilder {
     /// claude is launched with `--mcp-config` + `--strict-mcp-config`
     /// pointing at this URL.
     mcp_url: Option<String>,
-}
-
-impl Default for AgentBuilder {
-    fn default() -> Self {
-        Self {
-            name: None,
-            model: None,
-            max_turns: None,
-            timeout: None,
-            sandbox: SandboxSpec::default(),
-            tools: Vec::new(),
-            scan_id: None,
-            mcp_url: None,
-        }
-    }
 }
 
 impl AgentBuilder {
@@ -999,6 +984,14 @@ fn claude_subcommand(claude_bin: &Path, claude_home: &Path, args: &[&OsStr]) -> 
 /// and present a familiar UI, without inheriting any setting that could
 /// shift model behavior or what lands in the transcript. `tools` is the
 /// MCP-tool allowlist verbatim — no entry is implicit.
+///
+/// HTTP-MCP path (`use_http_mcp = true`) does not seed `skills/` into
+/// the home. The plugin path ships a `tools` skill whose description
+/// eagerly loads MCP tool FQNs into the model's context, sparing it
+/// from guessing names or burning `ToolSearch` calls — that hack is
+/// intentionally not replicated here. Callers of `call_agent` and
+/// `gage agent` who want similar guidance compose it explicitly via
+/// `.append_system_prompt(...)` or the prompt itself.
 fn seed_claude_home(
     claude_home: &Path,
     cwd: &Path,

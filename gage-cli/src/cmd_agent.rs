@@ -41,7 +41,12 @@ pub struct AgentArgs {
     ///
     /// Mirrors `call_agent.gage_tools(...)`. Use '*' to enable all
     /// built-in Gage tools.
-    #[arg(short = 't', long = "tools", value_name = "LIST", value_delimiter = ',')]
+    #[arg(
+        short = 't',
+        long = "tools",
+        value_name = "LIST",
+        value_delimiter = ','
+    )]
     pub gage_tools: Vec<String>,
 
     /// Skip confirmation prompt
@@ -138,7 +143,7 @@ fn collect_dialog(
     tools: &mut Vec<String>,
     prompt: &mut Option<String>,
 ) -> Result<DialogResult, DialogError> {
-    let names: Vec<&'static str> = TOOL_NAMES.iter().copied().collect();
+    let names: Vec<&'static str> = TOOL_NAMES.to_vec();
     let mut ms = cli::multiselect("Tools").required(false);
     for (i, name) in names.iter().enumerate() {
         ms = ms.item(i, *name, "");
