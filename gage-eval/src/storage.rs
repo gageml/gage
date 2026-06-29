@@ -210,7 +210,7 @@ pub fn list_runs() -> io::Result<Vec<RunSummary>> {
             })
         })
         .collect();
-    entries.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.started_at_ms));
     Ok(entries)
 }
 

@@ -171,7 +171,7 @@ fn cmd_delete(args: DeleteArgs) {
             }
         }
     }
-    resolved.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
+    resolved.sort_by_key(|e| std::cmp::Reverse(e.started_at_ms));
 
     if args.yes {
         let deleted = delete_runs(&resolved);

@@ -177,12 +177,12 @@ async fn handle_one(req: DispatchRequest, registry: Registry, run: Weak<RunConte
 
     let module = registry.lock().unwrap().get(&module_id).cloned();
     let Some(module) = module else {
-        let _ = reply.send(Err(format!("dispatcher: unknown module '{module_id}'")));
+        drop(reply.send(Err(format!("dispatcher: unknown module '{module_id}'"))));
         return;
     };
 
     let Some(run) = run.upgrade() else {
-        let _ = reply.send(Err("dispatcher: scan run already dropped".into()));
+        drop(reply.send(Err("dispatcher: scan run already dropped".into())));
         return;
     };
 
@@ -204,7 +204,7 @@ async fn handle_one(req: DispatchRequest, registry: Registry, run: Weak<RunConte
     });
 
     let result = SCAN_CTX.scope(ctx, run_one(module, fn_name, args)).await;
-    let _ = reply.send(result);
+    drop(reply.send(result));
 }
 
 async fn run_one(

@@ -148,7 +148,10 @@ pub async fn run(
     // dispatcher itself holds only a Weak<RunContext> so this edge
     // does not form a strong cycle.
     let dispatcher = gage_runtime::dispatcher::ToolDispatcher::start(Arc::downgrade(&run));
-    let _ = run.dispatcher.set(dispatcher);
+    run.dispatcher
+        .set(dispatcher)
+        .ok()
+        .expect("dispatcher should only be set once on a fresh RunContext");
 
     // Build per-scanner compilation artifacts
     let mut slots: Vec<ScannerSlot> = Vec::new();
