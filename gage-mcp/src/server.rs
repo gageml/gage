@@ -18,7 +18,7 @@ use crate::tools;
 
 /// Every tool the Gage MCP server exposes. The order here is the order
 /// the rmcp router registers them in.
-const TOOLS: &[ToolDef] = &[
+pub(crate) const TOOLS: &[ToolDef] = &[
     tools::query::TOOL,
     tools::issue_close::TOOL,
     tools::issue_comment::TOOL,
@@ -38,8 +38,15 @@ impl Default for GageServer {
 
 impl GageServer {
     pub fn new() -> Self {
+        GageServer::with_router(build_router())
+    }
+
+    /// Construct a server backed by a custom router. Used by
+    /// [`crate::service::build_mcp_service`] when the tool set is
+    /// driven by a [`crate::service::ToolSpec`].
+    pub fn with_router(tool_router: ToolRouter<Self>) -> Self {
         GageServer {
-            tool_router: build_router(),
+            tool_router,
             ctx: Arc::new(OnceCell::new()),
         }
     }

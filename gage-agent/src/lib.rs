@@ -56,12 +56,7 @@ use uuid::Uuid;
 /// here is the order resolved allowlists appear in `settings.json`, which
 /// is purely cosmetic. This list is the universe `"*"` expands against in
 /// [`ToolPolicy::tools`].
-pub const TOOL_NAMES: &[&str] = &[
-    "Query",
-    "IssueClose",
-    "IssueComment",
-    "IssueOpen",
-];
+pub const TOOL_NAMES: &[&str] = &["Query", "IssueClose", "IssueComment", "IssueOpen"];
 
 /// Stateless helpers that produce resolved MCP-tool allowlists for an
 /// [`AgentBuilder`]. Every function returns the final `Vec<String>` of
