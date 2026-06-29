@@ -8,9 +8,11 @@
 //! spawn + event stream is the runtime's responsibility (steps 6.4/
 //! 6.5 of the unify-llm-api work — currently stubbed).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex;
 
+use gage_agent::{AgentBuilder as GageAgentBuilder, AgentSession as GageAgentSession, SandboxSpec};
 use gage_mcp::{CustomToolCallback, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
@@ -111,21 +113,60 @@ pub(crate) struct InputDecl {
 /// host). A call with no tools declared skips MCP entirely — the
 /// agent runs pure text-in/text-out.
 ///
-/// Process spawn + event-stream methods (`poll`/`wait`/etc.) land in
-/// 6.4.c/6.4.d.
+/// `session` is the spawned `claude -p` child. `poll`/event-stream
+/// methods land in 6.4.d; today's `wait()` drives the child to
+/// completion and returns an [`AgentResult`].
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub(crate) struct Agent {
     #[rune(skip)]
     spec: Arc<CallSpec>,
-    /// MCP URL the (eventual) claude child will connect to. `None`
-    /// when no tools were declared.
+    /// MCP URL the claude child connects to. `None` when no tools
+    /// were declared.
     #[rune(skip)]
     mcp_url: Option<String>,
     /// Per-call MCP service registration. Drop unregisters. `None`
     /// when no tools were declared (no MCP server is running).
     #[rune(skip)]
     _service: Option<ServiceHandle>,
+    /// Spawned `claude -p` child. Wrapped in `Mutex<Option<>>` so
+    /// `wait()` can `.take()` it without requiring `&mut Agent` on a
+    /// Rune-shared value — Rune `Mut<Agent>` does give us &mut, but
+    /// `try_wait`/`running` use `&Agent`, and they need to peek at
+    /// the session too.
+    #[rune(skip)]
+    session: Arc<Mutex<Option<GageAgentSession>>>,
+}
+
+/// What `wait()` returns. Today's fields are minimal — the full
+/// design set (cost, usage, structured_output, etc.) lands in 6.6
+/// when the stream-json parser surfaces them.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct AgentResult {
+    /// Final assistant text from `claude -p`. Empty if the child
+    /// exited without emitting a final message.
+    #[rune(get)]
+    pub text: String,
+    /// Child exit code; `-1` if the process was signaled.
+    #[rune(get, copy)]
+    pub status: i64,
+    /// Captured stderr — useful for diagnosing claude warnings that
+    /// sit outside the JSON stream.
+    #[rune(get)]
+    pub stderr: String,
+}
+
+impl AgentResult {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(
+            f,
+            "AgentResult {{ status: {}, text: {:?}, stderr: {:?} }}",
+            self.status, self.text, self.stderr
+        )?;
+        Ok(())
+    }
 }
 
 impl Agent {
@@ -157,10 +198,23 @@ async fn poll(_this: Mut<Agent>) -> super::Result<()> {
 }
 
 #[rune::function(instance)]
-async fn wait(_this: Mut<Agent>) -> super::Result<()> {
-    Err(Error::Agent(
-        "agent.wait(): not implemented yet (6.4)".into(),
-    ))
+async fn wait(this: Mut<Agent>) -> super::Result<AgentResult> {
+    let session = this
+        .session
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| Error::Agent("agent.wait(): session already consumed".into()))?;
+    let mut session = session;
+    let out = session
+        .wait()
+        .await
+        .map_err(|e| Error::Agent(format!("agent.wait(): {e}")))?;
+    Ok(AgentResult {
+        text: String::from_utf8_lossy(&out.stdout).into_owned(),
+        status: out.status.code().map(i64::from).unwrap_or(-1),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
 #[rune::function(instance)]
@@ -412,6 +466,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     });
 
     let tool_spec = build_tool_spec(&spec);
+    let gage_tools_resolved = tool_spec.gage_tools.clone();
     let (mcp_url, service) = if tool_spec.gage_tools.is_empty() && tool_spec.custom_tools.is_empty()
     {
         // Pure text-in/text-out call — no need to register an MCP
@@ -429,10 +484,72 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         let svc = host.register(gage_mcp::build_mcp_service(tool_spec));
         (Some(svc.url().to_string()), Some(svc))
     };
+
+    let scan_id = current_scan_ctx().run.scan_id.clone();
+    let sandbox = scan_sandbox_spec(&scan_id).map_err(Error::Agent)?;
+    // `settings.json` permissions.allow must include both built-in
+    // Gage tools and scanner-defined custom tools — otherwise claude
+    // prompts the user on every custom-tool call, which in `-p`
+    // headless mode means the call is rejected.
+    let mut auto_allow = gage_tools_resolved;
+    for def in &spec.custom_tools {
+        auto_allow.push(def.mcp_name.clone());
+    }
+    let mut builder = GageAgentBuilder::new()
+        .tools(auto_allow)
+        .sandbox(sandbox)
+        .scan_id(&scan_id);
+    if let Some(url) = &mcp_url {
+        builder = builder.mcp_url(url.clone());
+    }
+    if let Some(m) = &spec.model {
+        // Preserve `call_llm`'s alias support — `"small"`/`"medium"`/
+        // `"large"` round-trip to concrete claude model ids so existing
+        // scanner code keeps working unchanged.
+        builder = builder.model(crate::llm::anthropic::resolve_model(m).to_string());
+    }
+    if let Some(n) = spec.max_turns {
+        builder = builder.max_turns(n);
+    }
+    if let Some(t) = spec.timeout_secs {
+        builder = builder.timeout(t as usize);
+    }
+    let session = builder
+        .build()
+        .start_session(&spec.prompt)
+        .await
+        .map_err(|e| Error::Agent(format!("call_agent: start_session: {e}")))?;
+
     Ok(Agent {
         spec,
         mcp_url,
         _service: service,
+        session: Arc::new(Mutex::new(Some(session))),
+    })
+}
+
+/// Restrict the agent's sandbox to the running scan's rows. Reads the
+/// canonical gage db once for the scan-session / scan-note / scan-issue
+/// sets that already exist.
+fn scan_sandbox_spec(scan_id: &str) -> Result<SandboxSpec, String> {
+    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
+    let sessions: HashSet<String> = gage_db::scan::session_ids_for_scan(&conn, scan_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    let notes: HashSet<String> = gage_db::scan::note_ids_for_scan(&conn, scan_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    let issues: HashSet<String> = gage_db::scan::issue_ids_for_scan(&conn, scan_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    Ok(SandboxSpec {
+        sessions: Some(sessions),
+        notes: Some(notes),
+        issues: Some(issues),
+        scan: Some(scan_id.to_string()),
     })
 }
 
@@ -516,6 +633,8 @@ mod rmcp_json {
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Agent>()?;
     m.function_meta(Agent::debug)?;
+    m.ty::<AgentResult>()?;
+    m.function_meta(AgentResult::debug)?;
     m.function_meta(url)?;
     m.function_meta(poll)?;
     m.function_meta(wait)?;
