@@ -7,7 +7,7 @@ Look for recurring patterns. A single interrupt is not typically enough evidence
 to indicate an underlying problem.
 
 If you find a pattern worth reporting as an issue, use the
-`mcp__plugin_gage_gage__IssueOpen` tool to report it. Include the associated
+`mcp__gage__IssueOpen` tool to report it. Include the associated
 notes as evidence. This issue will be reviewed by the user.
 
 Not every interrupt implies an issue. Look for patterns. When you open an issue

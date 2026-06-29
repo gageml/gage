@@ -106,9 +106,17 @@ fn resolve(patterns: &[String]) -> Result<HashSet<&'static str>, String> {
     Ok(out)
 }
 
-/// Render the `--mcp-config` argument for the HTTP-MCP path. Names the
-/// server `gage`, which determines the `mcp__gage__<Tool>` wire prefix
-/// Claude uses for tool calls.
+/// Render the `--mcp-config` argument for the HTTP-MCP path. Names
+/// the server `gage`, producing the `mcp__gage__<Tool>` wire prefix.
+///
+/// This deliberately differs from the plugin-install path
+/// (`mcp__plugin_gage_gage__<Tool>`): claude treats any MCP server
+/// whose name starts with `plugin_` as plugin-installed and attaches
+/// plugin-identity context (ambient skills get attributed to the
+/// "gage plugin", etc.). Spoofing that name to align FQNs caused
+/// worse behavior than the FQN divergence itself. Prompts and skills
+/// that hard-code an FQN must use the prefix matching their entry
+/// path — see [`call_agent`-targeted prompts using `mcp__gage__`].
 fn mcp_config_json(url: &str) -> String {
     format!(
         r#"{{"mcpServers":{{"gage":{{"type":"http","url":"{}"}}}}}}"#,
@@ -991,13 +999,13 @@ fn claude_subcommand(claude_bin: &Path, claude_home: &Path, args: &[&OsStr]) -> 
 /// shift model behavior or what lands in the transcript. `tools` is the
 /// MCP-tool allowlist verbatim — no entry is implicit.
 ///
-/// HTTP-MCP path (`use_http_mcp = true`) does not seed `skills/` into
-/// the home. The plugin path ships a `tools` skill whose description
-/// eagerly loads MCP tool FQNs into the model's context, sparing it
-/// from guessing names or burning `ToolSearch` calls — that hack is
-/// intentionally not replicated here. Callers of `call_agent` and
-/// `gage agent` who want similar guidance compose it explicitly via
-/// `.append_system_prompt(...)` or the prompt itself.
+/// Does not seed `skills/` into the home. The plugin path ships a
+/// `tools` skill whose description eagerly loads MCP tool FQNs into
+/// the model's context, sparing it from guessing names or burning
+/// `ToolSearch` calls — that hack is intentionally not replicated
+/// here. Callers of `call_agent` and `gage agent` who want similar
+/// guidance compose it explicitly via `.append_system_prompt(...)`
+/// or the prompt itself.
 fn seed_claude_home(
     claude_home: &Path,
     cwd: &Path,
@@ -1026,9 +1034,14 @@ fn seed_claude_home(
             settings.insert(key.into(), v.clone());
         }
     }
-    // HTTP-MCP path: tool names live under `mcp__gage__<Name>` (the
-    // server-name key in `--mcp-config`). Plugin path: under
-    // `mcp__plugin_gage_gage__<Name>`.
+    // The two entry paths produce different FQN prefixes:
+    // - Plugin path: claude prefixes plugin-installed MCP tools as
+    //   `mcp__plugin_<marketplace>_<server>__<Tool>` — for our gage
+    //   marketplace + gage server, that's `mcp__plugin_gage_gage__`.
+    // - HTTP path: server name in `--mcp-config` is plain `gage`,
+    //   yielding `mcp__gage__`. We deliberately avoid the `plugin_`
+    //   prefix here so claude doesn't mistake the server for a
+    //   plugin-installed one (see `mcp_config_json`).
     let prefix = if use_http_mcp {
         "mcp__gage__"
     } else {
