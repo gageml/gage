@@ -9,4 +9,5 @@ description: |
   `mcp__plugin_gage_gage__IssueOpen` - open new issue
   `mcp__plugin_gage_gage__IssueClose` - close issue
   `mcp__plugin_gage_gage__IssueComment` - add comment to an issue
+  `mcp__plugin_gage_gage__NoteWrite` - write a note (comment or finding)
 ---

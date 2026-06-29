@@ -23,6 +23,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
     tools::issue_close::TOOL,
     tools::issue_comment::TOOL,
     tools::issue_open::TOOL,
+    tools::note_write::TOOL,
 ];
 
 pub struct GageServer {

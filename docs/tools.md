@@ -3,4 +3,5 @@
 - IssueClose
 - IssueComment
 - IssueOpen
+- NoteWrite
 - Query
