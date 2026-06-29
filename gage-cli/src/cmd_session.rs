@@ -130,6 +130,10 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
+fn format_model(model: &str) -> String {
+    model.strip_prefix("claude-").unwrap_or(model).to_string()
+}
+
 fn home_slug() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut slug = String::new();
@@ -234,7 +238,7 @@ pub async fn list(args: SessionListArgs) {
     let show = args.limit.show_count(total);
 
     let sql = format!(
-        "SELECT id, project, mtime, size, title, message_count, path \
+        "SELECT id, project, mtime, size, title, model, message_count, path \
          FROM session{where_clause} ORDER BY mtime DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
@@ -268,13 +272,18 @@ pub async fn list(args: SessionListArgs) {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let counts = batch
+        let models = batch
             .column(5)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let counts = batch
+            .column(6)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         let paths = batch
-            .column(6)
+            .column(7)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -299,7 +308,12 @@ pub async fn list(args: SessionListArgs) {
             } else {
                 short_uuid(id).to_string()
             };
-            let mut row = vec![id_display, project, modified, size, title, count];
+            let model = if models.is_null(i) {
+                String::new()
+            } else {
+                format_model(models.value(i))
+            };
+            let mut row = vec![id_display, project, modified, size, title, model, count];
             if args.stats {
                 let (time, tokens, turns) = match gage_claude::stats::compute_session_stats(
                     std::path::Path::new(paths.value(i)),
@@ -319,10 +333,12 @@ pub async fn list(args: SessionListArgs) {
         }
     }
 
-    let mut header: Vec<String> = ["Id", "Project", "Modified", "Size", "Title", "Messages"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut header: Vec<String> = [
+        "Id", "Project", "Modified", "Size", "Title", "Model", "Messages",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     if args.stats {
         header.push("Model time".into());
         header.push("Tokens".into());
@@ -336,9 +352,10 @@ pub async fn list(args: SessionListArgs) {
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
-        .modify(Columns::last(), Alignment::right());
+        .modify(Columns::last(), Alignment::right())
+        .modify(Columns::new(6..7), Alignment::right());
     if args.stats {
-        table.modify(Columns::new(6..col_count), Alignment::right());
+        table.modify(Columns::new(7..col_count), Alignment::right());
     }
     let term_width = console::Term::stdout().size().1 as usize;
     table.with(
