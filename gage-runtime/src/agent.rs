@@ -160,6 +160,14 @@ struct AgentInner {
     terminal_json: Option<JsonValue>,
     /// Built once the child has been reaped and finalize has run.
     final_result: Option<AgentResult>,
+    /// `task_id`s of background sub-agents spawned via the `Agent` tool
+    /// that have not yet reported completion. Populated from
+    /// `system / subtype: task_started` and drained on `task_notification`.
+    /// While non-empty, `wait()` treats per-turn `Result` (end_turn)
+    /// messages as non-terminal: Claude Code auto-resumes the parent
+    /// turn when each notification arrives, so we must keep reading the
+    /// stream rather than interrupting the child.
+    pending_tasks: HashSet<String>,
 }
 
 /// What `wait()` returns and what `result()` carries once the session
@@ -185,7 +193,7 @@ pub(crate) struct AgentResult {
     pub stop_reason: String,
     /// `result.num_turns` — number of assistant turns in this session.
     #[rune(get, copy)]
-    pub num_turns: i64,
+    pub turns: i64,
     /// `result.duration_ms` — wall-clock duration of the run.
     #[rune(get, copy)]
     pub duration_ms: i64,
@@ -230,12 +238,12 @@ impl AgentResult {
         write!(
             f,
             "AgentResult {{ exit_code: {}, is_error: {}, stop_reason: {:?}, \
-             num_turns: {}, duration_ms: {}, cost_usd: {}, session_id: {:?}, \
+             turns: {}, duration_ms: {}, cost_usd: {}, session_id: {:?}, \
              text: {:?}, stderr: {:?} }}",
             self.exit_code,
             self.is_error,
             self.stop_reason,
-            self.num_turns,
+            self.turns,
             self.duration_ms,
             self.cost_usd,
             self.session_id,
@@ -243,6 +251,40 @@ impl AgentResult {
             self.stderr,
         )?;
         Ok(())
+    }
+
+    /// Subset of fields suitable for a note's `metadata` object.
+    /// `duration` is reported in seconds.
+    #[rune::function(instance)]
+    fn as_metadata(&self) -> Object {
+        let mut obj = Object::new();
+        let key = |s: &str| rune::alloc::String::try_from(s).unwrap();
+        obj.insert(key("is_error"), rune::to_value(self.is_error).unwrap())
+            .unwrap();
+        obj.insert(
+            key("stop_reason"),
+            rune::to_value(self.stop_reason.clone()).unwrap(),
+        )
+        .unwrap();
+        obj.insert(key("turns"), rune::to_value(self.turns).unwrap())
+            .unwrap();
+        obj.insert(
+            key("duration"),
+            rune::to_value(self.duration_ms as f64 / 1000.0).unwrap(),
+        )
+        .unwrap();
+        obj.insert(key("cost_usd"), rune::to_value(self.cost_usd).unwrap())
+            .unwrap();
+        obj.insert(
+            key("session_id"),
+            rune::to_value(self.session_id.clone()).unwrap(),
+        )
+        .unwrap();
+        obj.insert(key("exit_code"), rune::to_value(self.exit_code).unwrap())
+            .unwrap();
+        obj.insert(key("stderr"), rune::to_value(self.stderr.clone()).unwrap())
+            .unwrap();
+        obj
     }
 }
 
@@ -364,7 +406,14 @@ async fn wait(this: Mut<Agent>) -> super::Result<AgentResult> {
         let ev = do_poll(Arc::clone(&inner)).await?;
         match ev {
             Event::Stop(_) => break,
-            Event::TurnEnd(_) if !auto_stopped => {
+            // Background sub-agents spawned via the `Agent` tool
+            // (system / task_started) keep the session live past the
+            // first `Result`: Claude Code auto-resumes the parent turn
+            // when each `task_notification` arrives. Defer the
+            // auto-stop until no tasks are outstanding.
+            Event::TurnEnd(_)
+                if !auto_stopped && inner.lock().unwrap().pending_tasks.is_empty() =>
+            {
                 do_stop(Arc::clone(&inner)).await?;
                 auto_stopped = true;
             }
@@ -429,13 +478,22 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
                         .to_string();
                     g.terminal_json = Some(v);
                     g.stop_reason = reason.clone();
-                    // Per-turn end: emit TurnEnd, keep the session
-                    // alive. Caller decides whether to send more or
-                    // call stop().
                     g.event_buf.push_back(Event::TurnEnd(reason));
-                    false
+                    // If no background sub-agents are still in flight,
+                    // this Result is the genuine session end — finalize
+                    // so `running()` flips to false and a `while
+                    // running() { poll() }` loop terminates without the
+                    // caller having to call `stop()`. When tasks are
+                    // pending, Claude Code auto-resumes the parent on
+                    // each `task_notification`, so keep the session
+                    // alive and let subsequent Results drive the same
+                    // check.
+                    g.pending_tasks.is_empty()
                 }
                 Some(other) => {
+                    if let StreamMessage::System(v) = &other {
+                        track_task_event(v, &mut g.pending_tasks);
+                    }
                     expand_to_events(other, &mut g.event_buf);
                     false
                 }
@@ -565,7 +623,7 @@ fn build_agent_result(
         text: get_str("result"),
         is_error: get_bool("is_error"),
         stop_reason,
-        num_turns: get_i64("num_turns"),
+        turns: get_i64("num_turns"),
         duration_ms: get_i64("duration_ms"),
         duration_api_ms: get_i64("duration_api_ms"),
         cost_usd: get_f64("total_cost_usd"),
@@ -588,6 +646,31 @@ fn result(this: &Agent) -> Option<AgentResult> {
 #[rune::function(instance)]
 fn running(this: &Agent) -> bool {
     this.inner.lock().unwrap().final_result.is_none()
+}
+
+/// Update the pending-task set from a `system` stream-json message.
+///
+/// Claude Code reports background sub-agent lifecycle on the `system`
+/// channel: `subtype: task_started` opens a task and `task_notification`
+/// closes one (any terminal `status`). `task_updated` is informational
+/// and ignored here. See `.local.notes/claude/sub-agents.md` for the
+/// captured wire shape.
+fn track_task_event(v: &JsonValue, pending: &mut HashSet<String>) {
+    let Some(subtype) = v.get("subtype").and_then(|s| s.as_str()) else {
+        return;
+    };
+    let Some(task_id) = v.get("task_id").and_then(|t| t.as_str()) else {
+        return;
+    };
+    match subtype {
+        "task_started" => {
+            pending.insert(task_id.to_string());
+        }
+        "task_notification" => {
+            pending.remove(task_id);
+        }
+        _ => {}
+    }
 }
 
 /// Walk an SDK stream-json message and push one or more [`Event`]s
@@ -1046,6 +1129,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
             stop_reason: String::new(),
             terminal_json: None,
             final_result: None,
+            pending_tasks: HashSet::new(),
         })),
     })
 }
@@ -1183,6 +1267,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(Agent::debug)?;
     m.ty::<AgentResult>()?;
     m.function_meta(AgentResult::debug)?;
+    m.function_meta(AgentResult::as_metadata)?;
     m.ty::<Event>()?;
     m.function_meta(Event::debug)?;
     m.function_meta(url)?;
