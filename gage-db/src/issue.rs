@@ -729,7 +729,7 @@ mod tests {
             author: "user:test".to_string(),
             created: 1_742_428_800_000,
             modified: None,
-            target: NoteTarget::Session(SessionTarget::new("sess-1")),
+            target: NoteTarget::Session(SessionTarget::new("11111111-1111-1111-1111-111111111111")),
             name: "thinking.empty".to_string(),
             value: NoteValue::from("yes"),
             explanation: None,
@@ -912,7 +912,10 @@ mod tests {
         let issue = sample("issue-ccc", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
-        for (id, session) in [("note-a", "sess-1"), ("note-b", "sess-2")] {
+        for (id, session) in [
+            ("note-a", "11111111-1111-1111-1111-111111111111"),
+            ("note-b", "22222222-2222-2222-2222-222222222222"),
+        ] {
             insert_note(
                 &conn,
                 &Note {

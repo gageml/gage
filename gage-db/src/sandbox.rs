@@ -454,11 +454,11 @@ mod tests {
         let dest = dir.path().join("sandbox.db");
         {
             let conn = open_db_at(&src).unwrap();
-            let note_a = mk_note("a", "sess-a");
-            let note_b = mk_note("b", "sess-b");
+            let note_a = mk_note("a", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+            let note_b = mk_note("b", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
             note::insert(&conn, &note_a).unwrap();
             note::insert(&conn, &note_b).unwrap();
-            let issue_a = mk_issue("issue-a", "ia", "sess-a");
+            let issue_a = mk_issue("issue-a", "ia", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
             issue::insert(&conn, &issue_a).unwrap();
         }
         materialize_sandbox(&src, &dest, &SandboxSpec::default()).unwrap();
@@ -487,17 +487,17 @@ mod tests {
         let issue_b;
         {
             let conn = open_db_at(&src).unwrap();
-            note_a = mk_note("a", "sess-a");
-            note_b = mk_note("b", "sess-b");
+            note_a = mk_note("a", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+            note_b = mk_note("b", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
             note::insert(&conn, &note_a).unwrap();
             note::insert(&conn, &note_b).unwrap();
-            issue_a = mk_issue("issue-a", "ia", "sess-a");
-            issue_b = mk_issue("issue-b", "ib", "sess-b");
+            issue_a = mk_issue("issue-a", "ia", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+            issue_b = mk_issue("issue-b", "ib", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
             issue::insert(&conn, &issue_a).unwrap();
             issue::insert(&conn, &issue_b).unwrap();
         }
         let mut sessions = HashSet::new();
-        sessions.insert("sess-a".to_string());
+        sessions.insert("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string());
         let mut notes = HashSet::new();
         notes.insert(note_a.id.clone());
         let mut issues = HashSet::new();
@@ -533,9 +533,9 @@ mod tests {
         // Simulate an agent write inside the sandbox. Note insert writes
         // to both `note` and `session_note`; both should replay.
         let conn = open_db_at(&sandbox).unwrap();
-        let n = mk_note("agent-note", "sess-x");
+        let n = mk_note("agent-note", "cccccccc-cccc-cccc-cccc-cccccccccccc");
         note::insert(&conn, &n).unwrap();
-        let i = mk_issue("issue-new", "new", "sess-x");
+        let i = mk_issue("issue-new", "new", "cccccccc-cccc-cccc-cccc-cccccccccccc");
         issue::insert(&conn, &i).unwrap();
         drop(conn);
 
@@ -572,7 +572,11 @@ mod tests {
         // the sandbox writer's attempt — duplicate-key conflict.
         {
             let conn = open_db_at(&main).unwrap();
-            issue::insert(&conn, &mk_issue("issue-pre", "x", "sess-x")).unwrap();
+            issue::insert(
+                &conn,
+                &mk_issue("issue-pre", "x", "cccccccc-cccc-cccc-cccc-cccccccccccc"),
+            )
+            .unwrap();
         }
         materialize_sandbox(&main, &sandbox, &SandboxSpec::default()).unwrap();
         // Agent writes a different-id issue with same (name, target).
@@ -580,9 +584,13 @@ mod tests {
         // duplicate-key constraint fires inside the sandbox itself.
         {
             let conn = open_db_at(&sandbox).unwrap();
-            issue::insert(&conn, &mk_issue("issue-new", "x", "sess-x")).unwrap_err();
+            issue::insert(
+                &conn,
+                &mk_issue("issue-new", "x", "cccccccc-cccc-cccc-cccc-cccccccccccc"),
+            )
+            .unwrap_err();
             // A replayable write succeeds in the sandbox.
-            let n = mk_note("agent-note", "sess-x");
+            let n = mk_note("agent-note", "cccccccc-cccc-cccc-cccc-cccccccccccc");
             note::insert(&conn, &n).unwrap();
         }
         let applied = replay_writes(&sandbox, &main).unwrap();

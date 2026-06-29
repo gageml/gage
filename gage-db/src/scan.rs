@@ -275,13 +275,15 @@ mod tests {
         let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
-        insert_scan_session(&conn, &scan.id, "sess-1").unwrap();
+        insert_scan_session(&conn, &scan.id, "11111111-1111-1111-1111-111111111111").unwrap();
 
         let scanner = test_scanner(&scan.id);
         insert_scanner(&conn, &scanner).unwrap();
 
         let note = Note::new(
-            NoteTarget::Session(SessionTarget::new("sess-1").with_line(5)),
+            NoteTarget::Session(
+                SessionTarget::new("11111111-1111-1111-1111-111111111111").with_line(5),
+            ),
             "scan.friction.score",
             NoteValue::from(1i64),
             "scanner:user_friction",
@@ -314,9 +316,15 @@ mod tests {
         let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
-        insert_scan_session(&conn, &scan.id, "sess-a").unwrap();
-        insert_scan_session(&conn, &scan.id, "sess-b").unwrap();
+        insert_scan_session(&conn, &scan.id, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        insert_scan_session(&conn, &scan.id, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
         let ids = session_ids_for_scan(&conn, &scan.id).unwrap();
-        assert_eq!(ids, vec!["sess-a".to_string(), "sess-b".to_string()]);
+        assert_eq!(
+            ids,
+            vec![
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string(),
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string()
+            ]
+        );
     }
 }

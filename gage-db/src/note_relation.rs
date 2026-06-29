@@ -33,7 +33,7 @@ mod tests {
             author: "test".to_string(),
             created: 1_745_452_800_000,
             modified: None,
-            target: NoteTarget::Session(SessionTarget::new("sess-1")),
+            target: NoteTarget::Session(SessionTarget::new("11111111-1111-1111-1111-111111111111")),
             name: format!("test.note.{id}"),
             value: crate::note::NoteValue::from(""),
             explanation: None,

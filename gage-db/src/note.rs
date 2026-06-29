@@ -133,6 +133,11 @@ pub enum NoteError {
     /// A note with the same `(name, target, author)` already exists. The
     /// existing note is returned so the caller can decide what to do.
     Duplicate(Box<Note>),
+    /// A session target carried a `session_id` that is not the expected
+    /// UUID form. There is no FK on `session_note.session_id` (sessions
+    /// live in the filesystem, not a table), so this is the cheap
+    /// shape check we use in place of one.
+    InvalidSessionId(String),
     Db(rusqlite::Error),
 }
 
@@ -160,6 +165,9 @@ impl std::fmt::Display for NoteError {
                     prev.name,
                     prev.target.to_uri()
                 )
+            }
+            NoteError::InvalidSessionId(id) => {
+                write!(f, "invalid session id: '{id}' (expected 36-char UUID)")
             }
             NoteError::Db(e) => write!(f, "database error: {e}"),
         }
@@ -272,6 +280,9 @@ pub fn replace(conn: &Connection, prev_id: &str, new: &Note) -> Result<Note, Not
 fn insert_target_relation(conn: &Connection, note: &Note) -> Result<(), NoteError> {
     match &note.target {
         NoteTarget::Session(s) => {
+            if !is_session_id_shape(&s.session_id) {
+                return Err(NoteError::InvalidSessionId(s.session_id.clone()));
+            }
             conn.execute(
                 "INSERT INTO session_note (session_id, line, line_end, note_id)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -287,6 +298,17 @@ fn insert_target_relation(conn: &Connection, note: &Note) -> Result<(), NoteErro
         NoteTarget::Scan(_) => {}
     }
     Ok(())
+}
+
+/// Cheap shape check: 36 chars and 4 hyphens at the UUID v4 positions.
+/// Stand-in for a real FK; the canonical session lives in the filesystem.
+fn is_session_id_shape(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 36
+        && b.get(8) == Some(&b'-')
+        && b.get(13) == Some(&b'-')
+        && b.get(18) == Some(&b'-')
+        && b.get(23) == Some(&b'-')
 }
 
 pub fn update(

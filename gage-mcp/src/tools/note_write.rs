@@ -47,6 +47,14 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
     let session_line = opt_u32(&params, "session_line")?;
     let scan_id = scan_id_from_env();
 
+    if let Some(id) = &session_id
+        && !is_session_id_shape(id)
+    {
+        return Ok(format!(
+            "error: `session_id` must be a 36-char UUID; got `{id}`."
+        ));
+    }
+
     let target = match (session_id, session_line, &scan_id) {
         (Some(id), Some(line), _) => NoteTarget::Session(SessionTarget::new(id).with_line(line)),
         (Some(id), None, _) => NoteTarget::Session(SessionTarget::new(id)),
@@ -80,6 +88,15 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
     }
 
     Ok(format!("Added {note_type} {}.", short_uuid(&note.id)))
+}
+
+fn is_session_id_shape(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 36
+        && b.get(8) == Some(&b'-')
+        && b.get(13) == Some(&b'-')
+        && b.get(18) == Some(&b'-')
+        && b.get(23) == Some(&b'-')
 }
 
 fn req_string(params: &JsonObject, key: &str) -> Result<String, McpError> {
