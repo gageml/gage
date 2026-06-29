@@ -143,13 +143,16 @@ struct AgentInner {
     /// Events expanded from received [`StreamMessage`]s, ready for
     /// `poll()` to return one at a time.
     event_buf: VecDeque<Event>,
-    /// `true` once the synthetic [`Event::Stop`] has been emitted. From
-    /// this point `running()` reports false and `result()` returns
-    /// `Some`.
+    /// `true` once `do_stop` has finalized the session and pushed the
+    /// trailing [`Event::Stop`]. `running()` reports false and
+    /// `result()` returns `Some` from this point on. Distinct from
+    /// "saw a `Result` message" — that emits [`Event::TurnEnd`] and
+    /// leaves the session alive until the caller stops it.
     stop_seen: bool,
-    /// Stop reason carried by [`Event::Stop`]. Populated either from the
-    /// SDK `result.stop_reason` field or `"eof"` when the stream closed
-    /// without a terminal `Result` message.
+    /// Stop reason carried by [`Event::TurnEnd`] and the trailing
+    /// [`Event::Stop`]. Populated from the SDK `result.stop_reason`
+    /// field on turn end, or `"eof"` when the stream closed without
+    /// a terminal `result`.
     stop_reason: String,
     /// Raw SDK terminal `result` JSON object, captured for use in
     /// `AgentResult` construction. `None` if the stream closed without
@@ -160,22 +163,63 @@ struct AgentInner {
 }
 
 /// What `wait()` returns and what `result()` carries once the session
-/// has terminated. Today's fields are the minimal subset wired
-/// through; the full SDK set (cost, usage, structured_output,
-/// num_turns, …) lands in step 6.6 once `AgentInner::terminal_json`
-/// gets fully unpacked.
+/// has terminated. Mirrors the SDK terminal `result` message
+/// (`SDKResultMessage`) plus proc-level diagnostics. Structured
+/// sub-objects (`usage`, `model_usage`, `permission_denials`,
+/// `structured_output`) are surfaced as JSON-encoded strings; the
+/// scanner author parses them with `serde::from_str` if it cares
+/// about the inner shape.
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub(crate) struct AgentResult {
-    /// Final assistant text from the SDK terminal `result.result`
-    /// field. Empty if the child exited without emitting one.
+    /// Final assistant text from the SDK `result.result` field. Empty
+    /// if the child exited without emitting one.
     #[rune(get)]
     pub text: String,
+    /// `result.is_error`. `false` for a normal completion.
+    #[rune(get, copy)]
+    pub is_error: bool,
+    /// `result.stop_reason` (`"end_turn"`, `"max_tokens"`, …), or
+    /// `"eof"` when the stream closed without a terminal `result`.
+    #[rune(get)]
+    pub stop_reason: String,
+    /// `result.num_turns` — number of assistant turns in this session.
+    #[rune(get, copy)]
+    pub num_turns: i64,
+    /// `result.duration_ms` — wall-clock duration of the run.
+    #[rune(get, copy)]
+    pub duration_ms: i64,
+    /// `result.duration_api_ms` — sum of api round-trip times.
+    #[rune(get, copy)]
+    pub duration_api_ms: i64,
+    /// `result.total_cost_usd`.
+    #[rune(get, copy)]
+    pub cost_usd: f64,
+    /// `result.usage` JSON: input/output/cache token counts.
+    #[rune(get)]
+    pub usage: String,
+    /// `result.modelUsage` JSON: per-model token + cost breakdown.
+    #[rune(get)]
+    pub model_usage: String,
+    /// `result.permission_denials` JSON: tool calls that were blocked.
+    #[rune(get)]
+    pub permission_denials: String,
+    /// `result.structured_output` JSON; empty string when the call did
+    /// not use `--json-schema`.
+    #[rune(get)]
+    pub structured_output: String,
+    /// `result.session_id` — claude's session id, also the JSONL
+    /// filename under `~/.gage/claude/<name>/`.
+    #[rune(get)]
+    pub session_id: String,
+    /// `result.uuid` — unique id for this terminal `result` event.
+    #[rune(get)]
+    pub uuid: String,
     /// Child exit code; `-1` if the process was signaled.
     #[rune(get, copy)]
-    pub status: i64,
-    /// Captured stderr — useful for diagnosing claude warnings that
-    /// sit outside the JSON stream.
+    pub exit_code: i64,
+    /// Captured stderr — diagnoses claude warnings that sit outside
+    /// the JSON stream.
     #[rune(get)]
     pub stderr: String,
 }
@@ -185,8 +229,18 @@ impl AgentResult {
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
-            "AgentResult {{ status: {}, text: {:?}, stderr: {:?} }}",
-            self.status, self.text, self.stderr
+            "AgentResult {{ exit_code: {}, is_error: {}, stop_reason: {:?}, \
+             num_turns: {}, duration_ms: {}, cost_usd: {}, session_id: {:?}, \
+             text: {:?}, stderr: {:?} }}",
+            self.exit_code,
+            self.is_error,
+            self.stop_reason,
+            self.num_turns,
+            self.duration_ms,
+            self.cost_usd,
+            self.session_id,
+            self.text,
+            self.stderr,
         )?;
         Ok(())
     }
@@ -229,9 +283,17 @@ pub(crate) enum Event {
     /// compatibility with new init fields the SDK adds.
     #[rune(constructor)]
     System(#[rune(get)] String),
-    /// Terminal event. `reason` is the SDK `result.stop_reason` when
-    /// available, `"eof"` if the stream closed without a terminal
-    /// `result` message.
+    /// Per-turn termination. The model finished its response and the
+    /// SDK emitted a `result` message with this `stop_reason`
+    /// (`"end_turn"`, `"max_tokens"`, …). The session is still alive;
+    /// the caller can `send`/`send_now` another user message to
+    /// continue, or `stop()`/`wait()` to actually end the session.
+    #[rune(constructor)]
+    TurnEnd(#[rune(get)] String),
+    /// Session-level termination. Fires exactly once after `stop()`
+    /// has finalized the child, or when the stream closed without a
+    /// terminal `result` (`reason: "eof"`). Subsequent polls return
+    /// `Stop` idempotently; `result()` returns `Some`.
     #[rune(constructor)]
     Stop(#[rune(get)] String),
     /// Any SDK message `type` we haven't enumerated (status,
@@ -252,6 +314,7 @@ impl Event {
             Event::ToolUse { name, input } => write!(f, "ToolUse({name:?}, {input})")?,
             Event::ToolResult { id, output } => write!(f, "ToolResult({id:?}, {output:?})")?,
             Event::System(s) => write!(f, "System({s})")?,
+            Event::TurnEnd(r) => write!(f, "TurnEnd({r:?})")?,
             Event::Stop(r) => write!(f, "Stop({r:?})")?,
             Event::Other(s) => write!(f, "Other({s})")?,
             Event::ParseError(s) => write!(f, "ParseError({s:?})")?,
@@ -287,13 +350,25 @@ async fn poll(this: Mut<Agent>) -> super::Result<Event> {
     do_poll(inner).await
 }
 
+/// Block to the session-level terminal. `Result` (a per-turn end)
+/// auto-triggers `stop()` once so a one-shot `let r =
+/// call_agent(...).wait().await?` works without the caller managing
+/// the lifecycle. Multi-turn scanners drive `poll`/`send` and call
+/// `stop` themselves; calling `wait()` after `stop()` returns the
+/// cached `AgentResult` immediately.
 #[rune::function(instance)]
 async fn wait(this: Mut<Agent>) -> super::Result<AgentResult> {
     let inner = Arc::clone(&this.inner);
+    let mut auto_stopped = false;
     loop {
         let ev = do_poll(Arc::clone(&inner)).await?;
-        if matches!(ev, Event::Stop(_)) {
-            break;
+        match ev {
+            Event::Stop(_) => break,
+            Event::TurnEnd(_) if !auto_stopped => {
+                do_stop(Arc::clone(&inner)).await?;
+                auto_stopped = true;
+            }
+            _ => {}
         }
     }
     inner
@@ -342,7 +417,7 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
             "agent.poll received stream message",
         );
 
-        let should_finalize = {
+        let eof = {
             let mut g = inner.lock().unwrap();
             g.session = Some(session);
             match msg {
@@ -353,14 +428,21 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
                         .unwrap_or("end_turn")
                         .to_string();
                     g.terminal_json = Some(v);
-                    g.stop_reason = reason;
-                    true
+                    g.stop_reason = reason.clone();
+                    // Per-turn end: emit TurnEnd, keep the session
+                    // alive. Caller decides whether to send more or
+                    // call stop().
+                    g.event_buf.push_back(Event::TurnEnd(reason));
+                    false
                 }
                 Some(other) => {
                     expand_to_events(other, &mut g.event_buf);
                     false
                 }
                 None => {
+                    // Stream closed without a turn-end marker — child
+                    // exited (crashed or got SIGKILL'd). Finalize so
+                    // the run dir is cleaned up and Stop fires.
                     if g.stop_reason.is_empty() {
                         g.stop_reason = "eof".to_string();
                     }
@@ -368,66 +450,134 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
                 }
             }
         };
-        if should_finalize {
-            do_finalize_and_stop(Arc::clone(&inner)).await?;
+        if eof {
+            do_stop(Arc::clone(&inner)).await?;
         }
     }
 }
 
-/// Reap the child, drain stderr, run the gage-agent finalize sweep,
-/// build `final_result`, and enqueue a single trailing `Event::Stop`.
-/// Sets `stop_seen` so subsequent polls return Stop idempotently.
-async fn do_finalize_and_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()> {
-    tracing::debug!("agent.finalize: taking session");
+/// Send interrupt + EOF on stdin, reap the child, run the gage-agent
+/// finalize sweep, build `final_result`, and enqueue a single
+/// trailing `Event::Stop`. Idempotent — second call is a no-op.
+async fn do_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()> {
+    if inner.lock().unwrap().stop_seen {
+        return Ok(());
+    }
+    tracing::debug!("agent.stop: taking session");
     let mut session = inner
         .lock()
         .unwrap()
         .session
         .take()
-        .ok_or_else(|| Error::Agent("agent.finalize: session not available".into()))?;
+        .ok_or_else(|| Error::Agent("agent.stop: session not available".into()))?;
 
-    // Close stdin so claude's stream-json input loop sees EOF and
-    // exits. Without this the child sits waiting for the next user
-    // message even after emitting the terminal `result`.
+    // Best-effort interrupt; ignore BrokenPipe (the child may have
+    // exited on its own already — common on the EOF path).
+    if let Err(e) = session.send_interrupt().await
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        inner.lock().unwrap().session = Some(session);
+        return Err(Error::Agent(format!("agent.stop: send interrupt: {e}")));
+    }
     session.close_stdin();
-    tracing::debug!(pid = ?session.id(), "agent.finalize: stdin closed, awaiting child exit");
+    tracing::debug!(pid = ?session.id(), "agent.stop: stdin closed, awaiting child exit");
     let status = session
         .wait_exit()
         .await
-        .map_err(|e| Error::Agent(format!("agent: wait child: {e}")))?;
-    tracing::debug!(?status, "agent.finalize: child exited");
+        .map_err(|e| Error::Agent(format!("agent.stop: wait child: {e}")))?;
+    tracing::debug!(?status, "agent.stop: child exited");
     session.join_stdout().await;
     let stderr_bytes = session
         .drain_stderr()
         .await
-        .map_err(|e| Error::Agent(format!("agent: drain stderr: {e}")))?;
+        .map_err(|e| Error::Agent(format!("agent.stop: drain stderr: {e}")))?;
     tracing::debug!(
         stderr_len = stderr_bytes.len(),
-        "agent.finalize: stderr drained"
+        "agent.stop: stderr drained"
     );
     session
         .finalize()
-        .map_err(|e| Error::Agent(format!("agent: finalize: {e}")))?;
-    tracing::debug!("agent.finalize: gage-agent finalize done");
+        .map_err(|e| Error::Agent(format!("agent.stop: finalize: {e}")))?;
+    tracing::debug!("agent.stop: gage-agent finalize done");
     drop(session);
 
     let mut g = inner.lock().unwrap();
-    let text = g
-        .terminal_json
-        .as_ref()
-        .and_then(|v| v.get("result"))
-        .and_then(|r| r.as_str())
-        .unwrap_or("")
-        .to_string();
-    g.final_result = Some(AgentResult {
-        text,
-        status: status.code().map(i64::from).unwrap_or(-1),
-        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
-    });
+    if g.stop_reason.is_empty() {
+        g.stop_reason = "eof".to_string();
+    }
+    let result = build_agent_result(
+        g.terminal_json.as_ref(),
+        &g.stop_reason,
+        status.code().map(i64::from).unwrap_or(-1),
+        String::from_utf8_lossy(&stderr_bytes).into_owned(),
+    );
+    g.final_result = Some(result);
     g.stop_seen = true;
     let reason = g.stop_reason.clone();
     g.event_buf.push_back(Event::Stop(reason));
     Ok(())
+}
+
+/// Materialize an [`AgentResult`] from the SDK terminal `result`
+/// JSON, the synthetic stop reason (used when no terminal arrived),
+/// child exit code, and drained stderr. Missing fields fall back to
+/// defaults so a half-completed session still produces a usable
+/// value.
+fn build_agent_result(
+    terminal: Option<&JsonValue>,
+    fallback_stop_reason: &str,
+    exit_code: i64,
+    stderr: String,
+) -> AgentResult {
+    let v = terminal;
+    let get_str = |k: &str| -> String {
+        v.and_then(|j| j.get(k))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let get_i64 = |k: &str| -> i64 {
+        v.and_then(|j| j.get(k))
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0)
+    };
+    let get_f64 = |k: &str| -> f64 {
+        v.and_then(|j| j.get(k))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0)
+    };
+    let get_bool = |k: &str| -> bool {
+        v.and_then(|j| j.get(k))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false)
+    };
+    let get_json = |k: &str| -> String {
+        v.and_then(|j| j.get(k))
+            .map(|x| x.to_string())
+            .unwrap_or_default()
+    };
+    let stop_reason = v
+        .and_then(|j| j.get("stop_reason"))
+        .and_then(|s| s.as_str())
+        .unwrap_or(fallback_stop_reason)
+        .to_string();
+    AgentResult {
+        text: get_str("result"),
+        is_error: get_bool("is_error"),
+        stop_reason,
+        num_turns: get_i64("num_turns"),
+        duration_ms: get_i64("duration_ms"),
+        duration_api_ms: get_i64("duration_api_ms"),
+        cost_usd: get_f64("total_cost_usd"),
+        usage: get_json("usage"),
+        model_usage: get_json("modelUsage"),
+        permission_denials: get_json("permission_denials"),
+        structured_output: get_json("structured_output"),
+        session_id: get_str("session_id"),
+        uuid: get_str("uuid"),
+        exit_code,
+        stderr,
+    }
 }
 
 #[rune::function(instance)]
@@ -554,31 +704,64 @@ fn tool_result_output(block: &JsonValue) -> String {
 }
 
 #[rune::function(instance)]
-async fn send(_this: Mut<Agent>, _msg: String) -> super::Result<()> {
-    Err(Error::Agent(
-        "agent.send(): not implemented yet (6.5)".into(),
-    ))
+async fn send(this: Mut<Agent>, msg: String) -> super::Result<()> {
+    let inner = Arc::clone(&this.inner);
+    let mut session = inner
+        .lock()
+        .unwrap()
+        .session
+        .take()
+        .ok_or_else(|| Error::Agent("agent.send: session not available".into()))?;
+    let res = session.send_user_message(&msg).await;
+    inner.lock().unwrap().session = Some(session);
+    res.map_err(|e| Error::Agent(format!("agent.send: {e}")))
+}
+
+/// Interrupt the current turn and queue `msg` as the next user
+/// message. Sends a `control_request` interrupt on stdin, then the
+/// user message — stdin stays open so the session continues past
+/// the interrupt.
+#[rune::function(instance)]
+async fn send_now(this: Mut<Agent>, msg: String) -> super::Result<()> {
+    let inner = Arc::clone(&this.inner);
+    let mut session = inner
+        .lock()
+        .unwrap()
+        .session
+        .take()
+        .ok_or_else(|| Error::Agent("agent.send_now: session not available".into()))?;
+    let res = async {
+        session.send_interrupt().await?;
+        session.send_user_message(&msg).await
+    }
+    .await;
+    inner.lock().unwrap().session = Some(session);
+    res.map_err(|e| Error::Agent(format!("agent.send_now: {e}")))
+}
+
+/// End the session: send an `interrupt` control-request, close
+/// stdin, reap the child, run the gage-agent finalize sweep
+/// (archive, WAL replay, run-dir cleanup), and queue `Event::Stop`.
+/// Idempotent — calling `stop` after the session has already ended
+/// is a no-op. `result()` returns `Some` once this completes.
+#[rune::function(instance)]
+async fn stop(this: Mut<Agent>) -> super::Result<()> {
+    do_stop(Arc::clone(&this.inner)).await
 }
 
 #[rune::function(instance)]
-async fn send_now(_this: Mut<Agent>, _msg: String) -> super::Result<()> {
-    Err(Error::Agent(
-        "agent.send_now(): not implemented yet (6.5)".into(),
-    ))
-}
-
-#[rune::function(instance)]
-async fn stop(_this: Mut<Agent>) -> super::Result<()> {
-    Err(Error::Agent(
-        "agent.stop(): not implemented yet (6.5)".into(),
-    ))
-}
-
-#[rune::function(instance)]
-async fn kill(_this: Mut<Agent>, _grace_secs: i64) -> super::Result<()> {
-    Err(Error::Agent(
-        "agent.kill(): not implemented yet (6.5)".into(),
-    ))
+async fn kill(this: Mut<Agent>, grace_secs: i64) -> super::Result<()> {
+    let inner = Arc::clone(&this.inner);
+    let mut session = inner
+        .lock()
+        .unwrap()
+        .session
+        .take()
+        .ok_or_else(|| Error::Agent("agent.kill: session not available".into()))?;
+    let grace = std::time::Duration::from_secs(grace_secs.max(0) as u64);
+    let res = session.kill(grace).await;
+    inner.lock().unwrap().session = Some(session);
+    res.map_err(|e| Error::Agent(format!("agent.kill: {e}")))
 }
 
 impl CallAgent {
@@ -812,7 +995,6 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     };
 
     let scan_id = current_scan_ctx().run.scan_id.clone();
-    let sandbox = scan_sandbox_spec(&scan_id).map_err(Error::Agent)?;
     // `settings.json` permissions.allow must include both built-in
     // Gage tools and scanner-defined custom tools — otherwise claude
     // prompts the user on every custom-tool call, which in `-p`
@@ -821,10 +1003,17 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     for def in &spec.custom_tools {
         auto_allow.push(def.mcp_name.clone());
     }
-    let mut builder = GageAgentBuilder::new()
-        .tools(auto_allow)
-        .sandbox(sandbox)
-        .scan_id(&scan_id);
+    let mut builder = GageAgentBuilder::new().tools(auto_allow).scan_id(&scan_id);
+    // Sandbox materialization gated by tool declarations: no tools →
+    // pure text-in/text-out → skip the heavy sqlite + session
+    // hardlink setup. Tools declared → restrict to the running scan's
+    // rows.
+    if mcp_url.is_some() {
+        let sandbox = scan_sandbox_spec(&scan_id).map_err(Error::Agent)?;
+        builder = builder.sandbox(sandbox);
+    } else {
+        builder = builder.no_sandbox();
+    }
     if let Some(url) = &mcp_url {
         builder = builder.mcp_url(url.clone());
     }
@@ -832,7 +1021,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         // Preserve `call_llm`'s alias support — `"small"`/`"medium"`/
         // `"large"` round-trip to concrete claude model ids so existing
         // scanner code keeps working unchanged.
-        builder = builder.model(crate::llm::anthropic::resolve_model(m).to_string());
+        builder = builder.model(crate::model::resolve_model(m).to_string());
     }
     if let Some(n) = spec.max_turns {
         builder = builder.max_turns(n);

@@ -1,0 +1,30 @@
+use gage::{call_agent, Event::Assistant};
+
+pub const SCANNER = #{
+    name: "user-reply",
+    hidden: true,
+    description: "Test agent",
+    tasks: #{ user_reply: #{} },
+};
+
+/// Writes a comment using Gage NoteWrite tool.
+pub async fn user_reply() {
+    let agent = call_agent("Say 'red'").model("medium").await?;
+    while agent.running() {
+        match agent.poll().await? {
+            Assistant(resp) => {
+                println!("## user-reply # model said {resp}");
+                if resp == "red" {
+                    agent.send("Now say blue").await?;
+                } else {
+                    agent.stop().await?;
+                }
+            }
+            other => {
+                println!("## user-reply # {other:?}");
+            }
+        }
+    }
+    let out = agent.result();
+    println!("## user-reply # {out:?}");
+}

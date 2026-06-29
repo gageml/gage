@@ -7,8 +7,8 @@ pub mod error;
 pub mod ignore;
 pub mod io;
 pub mod json;
-pub mod llm;
 pub mod macros;
+pub(crate) mod model;
 pub mod query;
 mod result;
 pub mod scan;
@@ -55,7 +55,6 @@ pub fn gage_module() -> std::result::Result<Module, ContextError> {
     config::register(&mut m)?;
     query::register(&mut m)?;
     db::register(&mut m)?;
-    llm::register(&mut m)?;
     agent::register(&mut m)?;
     template::register(&mut m)?;
 

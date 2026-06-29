@@ -174,6 +174,12 @@ match #{ a: 0, b: 1 } {
 }
 ```
 
+**Match is not exhaustiveness-checked.** Unmatched arms are not an error —
+the `match` expression evaluates to `()` when no arm fits, and execution
+continues. A single-arm match on one enum variant is a valid, common idiom
+when you only care about that variant and want the rest dropped silently.
+Do not flag missing arms as a bug.
+
 ## Vectors
 
 Dynamic lists holding values of any type:

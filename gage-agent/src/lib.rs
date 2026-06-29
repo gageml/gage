@@ -2,28 +2,32 @@
 //!
 //! Two entry points share one machinery:
 //!
-//! - [`run`] runs the interactive `gage agent` command: it spawns
-//!   `claude`, inherits the terminal, and mirrors session JSONLs live so
-//!   a SIGKILL'd run still leaves a viewable session.
-//! - [`spawn_agent`] runs the same setup non-interactively via
-//!   `claude -p <prompt>` for scanners and other automated callers,
-//!   returning an [`AgentSession`] the caller drives with `wait`/`kill`.
+//! - [`Agent::run`] is the interactive `gage agent` command: spawns
+//!   `claude`, inherits the terminal, and mirrors session JSONLs live
+//!   so a SIGKILL'd run still leaves a viewable session. Uses the
+//!   plugin-install path (stdio MCP).
+//! - [`Agent::start_streaming_session`] is the scanner-driven path,
+//!   spawning `claude -p` with `--input-format stream-json` /
+//!   `--output-format stream-json` and a per-call HTTP MCP server.
+//!   Returns a [`StreamingAgentSession`] the caller drives
+//!   event-by-event via `recv_event`.
 //!
 //! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` and
-//! materialize an *agent sandbox* under it — a sqlite db at
-//! `db/gage.sqlite` and a `projects/` tree of hardlinks to the user's
-//! session JSONLs — then point the child `claude` at them via
-//! `GAGE_DB` and `CLAUDE_PROJECTS_DIR`. The sandbox's rows and sessions
-//! are determined by the caller's [`SandboxSpec`]; per-dimension `None`
-//! means "everything," `Some(ids)` restricts. The MCP server in the
-//! child resolves the two env vars on first tool call and physically
-//! cannot see anything the sandbox does not contain.
+//! (optionally) materialize an *agent sandbox* under it — a sqlite
+//! db at `db/gage.sqlite` and a `projects/` tree of hardlinks to the
+//! user's session JSONLs — then point the child `claude` at them via
+//! `GAGE_DB` and `CLAUDE_PROJECTS_DIR`. The sandbox's rows and
+//! sessions are determined by the caller's [`SandboxSpec`];
+//! per-dimension `None` means "everything," `Some(ids)` restricts.
+//! The MCP server in the child resolves the two env vars on first
+//! tool call and physically cannot see anything the sandbox does not
+//! contain.
 //!
 //! The sandbox also installs a trigger-driven writelog (see
-//! `gage_db::sandbox`). On agent exit, `AgentSession::wait` /
-//! [`run`] drains the writelog into the canonical gage db in a single
-//! transaction before cleaning up. A replay failure preserves the run
-//! dir so the user can inspect the sandbox state.
+//! `gage_db::sandbox`). On agent exit, the run finalize drains the
+//! writelog into the canonical gage db in a single transaction
+//! before cleaning up. A replay failure preserves the run dir so the
+//! user can inspect the sandbox state.
 //!
 //! The session JSONL Claude writes is hardlinked into a caller-supplied
 //! archive dir under `~/.gage/claude/<name>/` (`default` for the
@@ -129,19 +133,25 @@ fn mcp_config_json(url: &str) -> String {
 /// its timeout elapses.
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
-/// Default [`AgentSession::wait`] timeout when no agent timeout was set.
+/// Default [`StreamingAgentSession::wait_exit`] timeout when no agent timeout was set.
 pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Fluent configuration for an [`Agent`]. All fields are optional;
 /// `name` defaults to `"default"`, `sandbox` to the full-corpus spec,
 /// `tools` to empty (the caller must list every tool to expose).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AgentBuilder {
     name: Option<String>,
     model: Option<String>,
     max_turns: Option<u32>,
     timeout: Option<usize>,
     sandbox: SandboxSpec,
+    /// When `false`, [`Agent::init`] skips the sandbox sqlite + session
+    /// hardlink materialization, the spawn omits `GAGE_DB` /
+    /// `CLAUDE_PROJECTS_DIR`, and finalize skips the WAL replay. Used
+    /// by the streaming path when the call declares no tools (the
+    /// child runs pure text-in/text-out and never touches the db).
+    materialize_sandbox: bool,
     tools: Vec<String>,
     scan_id: Option<String>,
     /// Streamable-HTTP MCP endpoint to wire as the child claude's MCP
@@ -149,6 +159,22 @@ pub struct AgentBuilder {
     /// claude is launched with `--mcp-config` + `--strict-mcp-config`
     /// pointing at this URL.
     mcp_url: Option<String>,
+}
+
+impl Default for AgentBuilder {
+    fn default() -> Self {
+        Self {
+            name: None,
+            model: None,
+            max_turns: None,
+            timeout: None,
+            sandbox: SandboxSpec::default(),
+            materialize_sandbox: true,
+            tools: Vec::new(),
+            scan_id: None,
+            mcp_url: None,
+        }
+    }
 }
 
 impl AgentBuilder {
@@ -175,7 +201,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Wait timeout in seconds applied by [`AgentSession::wait`].
+    /// Wait timeout in seconds applied by [`StreamingAgentSession::wait_exit`].
     pub fn timeout(mut self, secs: usize) -> Self {
         self.timeout = Some(secs);
         self
@@ -195,6 +221,16 @@ impl AgentBuilder {
     /// see. Defaults to the unrestricted full-corpus spec.
     pub fn sandbox(mut self, sandbox: SandboxSpec) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    /// Skip the sandbox materialization entirely. The child runs
+    /// without `GAGE_DB` / `CLAUDE_PROJECTS_DIR` and finalize skips
+    /// the WAL replay. Only meaningful on the streaming path with no
+    /// MCP tools declared — interactive/non-streaming flows require a
+    /// sandbox.
+    pub fn no_sandbox(mut self) -> Self {
+        self.materialize_sandbox = false;
         self
     }
 
@@ -228,6 +264,7 @@ impl AgentBuilder {
             max_turns: self.max_turns,
             timeout: self.timeout,
             sandbox_spec: self.sandbox,
+            materialize_sandbox: self.materialize_sandbox,
             tools: self.tools,
             scan_id: self.scan_id,
             mcp_url: self.mcp_url,
@@ -248,6 +285,7 @@ pub struct Agent {
     max_turns: Option<u32>,
     timeout: Option<usize>,
     sandbox_spec: SandboxSpec,
+    materialize_sandbox: bool,
     tools: Vec<String>,
     scan_id: Option<String>,
     mcp_url: Option<String>,
@@ -255,23 +293,30 @@ pub struct Agent {
 }
 
 /// Pre-spawn state owned by an [`Agent`] after [`Agent::init`] succeeds.
+/// `sandbox` is `None` when the builder set `no_sandbox()` — see
+/// [`AgentBuilder::no_sandbox`] for when that applies.
 struct RunState {
     prep: PreparedRun,
-    sandbox: Sandbox,
+    sandbox: Option<Sandbox>,
 }
 
 impl Agent {
     /// Run the slow pre-spawn setup: assemble the run dir, seed the
     /// isolated claude home, install the gage plugin, materialize the
-    /// sandbox sqlite db, and hardlink the in-scope session JSONLs.
-    /// Idempotent: a second call is a no-op.
+    /// sandbox sqlite db (skipped when `no_sandbox()` was set), and
+    /// hardlink the in-scope session JSONLs. Idempotent: a second
+    /// call is a no-op.
     pub fn init(&mut self) -> io::Result<()> {
         if self.state.is_some() {
             return Ok(());
         }
         let archive_dir = agent_archive_dir(&self.name);
         let prep = prepare_run(archive_dir, &self.tools, self.mcp_url.is_some())?;
-        let sandbox = build_sandbox(&prep.run_dir, &self.sandbox_spec)?;
+        let sandbox = if self.materialize_sandbox {
+            Some(build_sandbox(&prep.run_dir, &self.sandbox_spec)?)
+        } else {
+            None
+        };
         self.state = Some(RunState { prep, sandbox });
         Ok(())
     }
@@ -281,6 +326,7 @@ impl Agent {
     pub fn run(mut self, prompt: Option<String>) -> io::Result<ExitStatus> {
         self.init()?;
         let RunState { prep, sandbox } = self.state.take().unwrap();
+        let sandbox = sandbox.expect("interactive `run` requires a sandbox");
         run_interactive(
             prep,
             sandbox,
@@ -291,41 +337,11 @@ impl Agent {
         )
     }
 
-    /// Spawn the child claude non-interactively (stdio piped) via
-    /// `claude -p <prompt>`. Returns an [`AgentSession`] the caller
-    /// drives with `wait`/`kill`. Calls [`Agent::init`] on a blocking
-    /// thread if not already done.
-    pub async fn start_session(mut self, prompt: &str) -> io::Result<AgentSession> {
-        if self.state.is_none() {
-            let mut taken = self;
-            let agent = tokio::task::spawn_blocking(move || -> io::Result<Agent> {
-                taken.init()?;
-                Ok(taken)
-            })
-            .await
-            .map_err(io::Error::other)??;
-            self = agent;
-        }
-        let RunState { prep, sandbox } = self.state.take().unwrap();
-        start_session_inner(
-            prep,
-            sandbox,
-            self.model,
-            self.max_turns,
-            self.timeout,
-            self.scan_id,
-            self.mcp_url,
-            prompt,
-        )
-        .await
-    }
-
     /// Spawn the child claude non-interactively with stream-json input
     /// and output, piped stdin held open for `send`/`stop`. Returns a
     /// [`StreamingAgentSession`] the caller drives event-by-event via
-    /// `recv_event`. Requires an `mcp_url` (per-call HTTP MCP service);
-    /// the plugin/`GAGE_TOOLS` env path is not supported here. Calls
-    /// [`Agent::init`] on a blocking thread if not already done.
+    /// `recv_event`. Calls [`Agent::init`] on a blocking thread if not
+    /// already done.
     pub async fn start_streaming_session(
         mut self,
         prompt: &str,
@@ -386,11 +402,6 @@ fn run_interactive(
         .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
         .env("GAGE_DB", &sandbox.db_path)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
-    if mcp_url.is_none() {
-        // Only the plugin path consults GAGE_TOOLS; the HTTP path
-        // configures the per-call service's tool set server-side.
-        cmd.env("GAGE_TOOLS", prep.tools.join(","));
-    }
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
         cmd.arg("--strict-mcp-config");
@@ -462,118 +473,13 @@ fn replay_and_report(sandbox_db: &Path) -> bool {
     }
 }
 
-/// A spawned non-interactive agent `claude` process and the run state its
-/// exit needs. Drive it with [`wait`](AgentSession::wait) (normal path) or
-/// [`kill`](AgentSession::kill) (forced shutdown). Dropping it SIGKILLs the
-/// child (`kill_on_drop`), so a session abandoned mid-run does not leak.
-pub struct AgentSession {
-    child: TokioChild,
-    stdout: Option<JoinHandle<io::Result<Vec<u8>>>>,
-    stderr: Option<JoinHandle<io::Result<Vec<u8>>>>,
-    mirror: Option<SessionMirror>,
-    output: Option<AgentOutput>,
-    run_dir: PathBuf,
-    cwd: PathBuf,
-    claude_home: PathBuf,
-    archive_dir: PathBuf,
-    sandbox_db: PathBuf,
-    timeout: Option<usize>,
-}
-
-/// The result of a completed [`AgentSession`].
-#[derive(Clone)]
-pub struct AgentOutput {
-    /// Process exit status.
-    pub status: ExitStatus,
-    /// Captured stdout — the final assistant message from `claude -p`.
-    pub stdout: Vec<u8>,
-    /// Captured stderr.
-    pub stderr: Vec<u8>,
-}
-
-/// Spawn the child claude non-interactively with the already-built run
-/// state. Shared backend for [`Agent::start_session`].
-#[allow(clippy::too_many_arguments)]
-async fn start_session_inner(
-    prep: PreparedRun,
-    sandbox: Sandbox,
-    model: Option<String>,
-    max_turns: Option<u32>,
-    timeout: Option<usize>,
-    scan_id: Option<String>,
-    mcp_url: Option<String>,
-    prompt: &str,
-) -> io::Result<AgentSession> {
-    let mut cmd = TokioCommand::new(&prep.claude_bin);
-    cmd.arg("-p").arg(prompt);
-    cmd.args(["--thinking-display", "summarized"]);
-    if let Some(model) = &model {
-        cmd.arg("--model").arg(model);
-    }
-    if let Some(max_turns) = max_turns {
-        cmd.arg("--max-turns").arg(max_turns.to_string());
-    }
-    if let Some(url) = &mcp_url {
-        cmd.arg("--mcp-config").arg(mcp_config_json(url));
-        cmd.arg("--strict-mcp-config");
-        // `user` = our seeded settings.json in CLAUDE_CONFIG_DIR
-        // (theme, tui, showThinkingSummaries, permissions.allow).
-        // Skip `project` / `local` so we don't pick up settings from
-        // the cwd directory.
-        cmd.arg("--setting-sources").arg("user");
-    }
-    cmd.current_dir(&prep.cwd)
-        .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
-        .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
-        .env("GAGE_DB", &sandbox.db_path)
-        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    if mcp_url.is_none() {
-        cmd.env("GAGE_TOOLS", prep.tools.join(","));
-    }
-    if let Some(id) = &scan_id {
-        cmd.env("GAGE_SCAN_ID", id);
-    }
-
-    let mut child = cmd.spawn()?;
-    let stdout = spawn_reader(child.stdout.take());
-    let stderr = spawn_reader(child.stderr.take());
-
-    let projects_dir = prep.claude_home.join("projects");
-    let mirror = match start_session_mirror(&projects_dir, &prep.archive_dir) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            eprintln!("warning: session mirror watcher failed to start: {e}");
-            None
-        }
-    };
-
-    Ok(AgentSession {
-        child,
-        stdout,
-        stderr,
-        mirror,
-        output: None,
-        run_dir: prep.run_dir,
-        cwd: prep.cwd,
-        claude_home: prep.claude_home,
-        archive_dir: prep.archive_dir,
-        sandbox_db: sandbox.db_path,
-        timeout,
-    })
-}
-
 /// A spawned `claude -p --input-format stream-json --output-format
 /// stream-json` child wired for event-by-event observation and live
-/// stdin injection. Distinct from [`AgentSession`] (the
-/// terminal-oriented non-streaming flow used by `gage agent`):
-/// `claude`'s output is parsed line-by-line into [`StreamMessage`]
-/// values pushed onto an `mpsc` channel the caller drains via
-/// [`recv_event`](Self::recv_event); stdin is held open so the caller
-/// can `send_user_message` or `close_stdin` during the session.
+/// stdin injection. `claude`'s output is parsed line-by-line into
+/// [`StreamMessage`] values pushed onto an `mpsc` channel the caller
+/// drains via [`recv_event`](Self::recv_event); stdin is held open
+/// so the caller can `send_user_message` or `close_stdin` during the
+/// session.
 ///
 /// Lifecycle: drain events to the terminal `Result` message, then
 /// `wait_exit` (reaps the child) and `finalize` (mirror stop + archive
@@ -595,7 +501,10 @@ pub struct StreamingAgentSession {
     cwd: PathBuf,
     claude_home: PathBuf,
     archive_dir: PathBuf,
-    sandbox_db: PathBuf,
+    /// Sandbox sqlite path for the WAL replay in `finalize`. `None`
+    /// when the builder set `no_sandbox()` — finalize then skips
+    /// replay altogether.
+    sandbox_db: Option<PathBuf>,
     timeout: Option<usize>,
 }
 
@@ -632,7 +541,7 @@ pub enum StreamMessage {
 #[allow(clippy::too_many_arguments)]
 async fn start_streaming_session_inner(
     prep: PreparedRun,
-    sandbox: Sandbox,
+    sandbox: Option<Sandbox>,
     model: Option<String>,
     max_turns: Option<u32>,
     timeout: Option<usize>,
@@ -667,13 +576,15 @@ async fn start_streaming_session_inner(
     }
     cmd.current_dir(&prep.cwd)
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
-        .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
-        .env("GAGE_DB", &sandbox.db_path)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(sb) = &sandbox {
+        cmd.env("CLAUDE_PROJECTS_DIR", &sb.projects_dir)
+            .env("GAGE_DB", &sb.db_path);
+    }
     if let Some(id) = &scan_id {
         cmd.env("GAGE_SCAN_ID", id);
     }
@@ -769,7 +680,7 @@ async fn start_streaming_session_inner(
         cwd: prep.cwd,
         claude_home: prep.claude_home,
         archive_dir: prep.archive_dir,
-        sandbox_db: sandbox.db_path,
+        sandbox_db: sandbox.map(|s| s.db_path),
         timeout,
     })
 }
@@ -858,6 +769,27 @@ impl StreamingAgentSession {
         self.stdin = None;
     }
 
+    /// Send a control-request `interrupt` line on stdin. Wire shape:
+    /// `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}`.
+    /// Returns `BrokenPipe` if stdin was already closed.
+    pub async fn send_interrupt(&mut self) -> io::Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin closed"))?;
+        let request_id = format!("interrupt-{}", Uuid::new_v4());
+        let msg = serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "interrupt" },
+        });
+        let mut buf = serde_json::to_vec(&msg).map_err(io::Error::other)?;
+        buf.push(b'\n');
+        stdin.write_all(&buf).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
     /// Await child exit, bounded by the configured timeout (default
     /// [`DEFAULT_WAIT_TIMEOUT`]). On timeout the child is shut down
     /// gracefully ([`TIMEOUT_GRACE`] before `SIGKILL`) before the
@@ -908,7 +840,11 @@ impl StreamingAgentSession {
         self.finalized = true;
         self.stop_mirror();
         archive_sessions(&self.claude_home, &self.archive_dir)?;
-        if replay_and_report(&self.sandbox_db) {
+        let replay_ok = match &self.sandbox_db {
+            Some(db) => replay_and_report(db),
+            None => true,
+        };
+        if replay_ok {
             cleanup_run_dir(&self.run_dir, &self.cwd);
         } else {
             eprintln!(
@@ -936,118 +872,6 @@ impl StreamingAgentSession {
         }
     }
 
-    fn stop_mirror(&mut self) {
-        if let Some(mirror) = self.mirror.take() {
-            mirror.stop();
-        }
-    }
-}
-
-impl AgentSession {
-    /// OS process id while the child is running; `None` once it has exited.
-    pub fn id(&self) -> Option<u32> {
-        self.child.id()
-    }
-
-    /// The completed output, available after a successful [`wait`](Self::wait).
-    /// `None` before the child has exited. Cloneable and re-readable any
-    /// number of times.
-    pub fn output(&self) -> Option<AgentOutput> {
-        self.output.clone()
-    }
-
-    /// Await the child's exit, bounded by the timeout configured in
-    /// [`JudgeOpts::timeout`] (defaulting to [`DEFAULT_WAIT_TIMEOUT`]). On
-    /// the first call, drain the captured output, remove the run dir, and
-    /// cache the result. Subsequent calls return the cached output without
-    /// repeating that work. On timeout, the child is shut down gracefully
-    /// (`SIGTERM`, then `SIGKILL` after [`TIMEOUT_GRACE`]) and the run dir
-    /// is cleaned up before a `TimedOut` error is returned, so the caller
-    /// need not handle process teardown. The session JSONL is hardlinked
-    /// into the archive dir continuously by the mirror watcher, so a
-    /// timed-out run still leaves a viewable record.
-    pub async fn wait(&mut self) -> io::Result<AgentOutput> {
-        if let Some(output) = &self.output {
-            return Ok(output.clone());
-        }
-
-        let timeout = self
-            .timeout
-            .map(|s| Duration::from_secs(s as u64))
-            .unwrap_or(DEFAULT_WAIT_TIMEOUT);
-        let status = match tokio::time::timeout(timeout, self.child.wait()).await {
-            Ok(status) => status?,
-            Err(_) => {
-                // Shut the still-running child down gracefully and clean up
-                // before surfacing the timeout, so the ubiquitous
-                // `wait(t).await?` pattern never leaves a process running.
-                self.terminate(TIMEOUT_GRACE).await?;
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "agent timeout"));
-            }
-        };
-
-        let stdout = join_reader(self.stdout.take()).await?;
-        let stderr = join_reader(self.stderr.take()).await?;
-
-        self.stop_mirror();
-        archive_sessions(&self.claude_home, &self.archive_dir)?;
-        self.finalize_run();
-
-        let output = AgentOutput {
-            status,
-            stdout,
-            stderr,
-        };
-        self.output = Some(output.clone());
-        Ok(output)
-    }
-
-    /// Replay the sandbox writelog and clean up. Preserves the run dir
-    /// when replay fails so the user can inspect the sandbox.
-    fn finalize_run(&self) {
-        if !replay_and_report(&self.sandbox_db) {
-            eprintln!(
-                "warning: run dir preserved for inspection: {}",
-                self.run_dir.display()
-            );
-            return;
-        }
-        cleanup_run_dir(&self.run_dir, &self.cwd);
-    }
-
-    /// Send `SIGTERM`, wait up to `grace` for the child to exit, then
-    /// `SIGKILL` if it has not. The session JSONL is hardlinked after the
-    /// process is gone, and the run dir is removed once `cwd/` is empty.
-    pub async fn kill(&mut self, grace: Duration) -> io::Result<()> {
-        self.terminate(grace).await
-    }
-
-    /// Graceful shutdown shared by [`kill`](Self::kill) and `wait`'s timeout
-    /// path: `SIGTERM`, wait up to `grace`, then `SIGKILL`, then stop the
-    /// mirror, run the final archive sweep, and remove the run dir.
-    async fn terminate(&mut self, grace: Duration) -> io::Result<()> {
-        if let Some(pid) = self.child.id() {
-            // SAFETY: pid identifies a child process this struct owns and
-            // has not yet reaped; SIGTERM is a valid signal number.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
-        }
-        match tokio::time::timeout(grace, self.child.wait()).await {
-            Ok(status) => {
-                status?;
-            }
-            Err(_) => self.child.kill().await?,
-        }
-
-        self.stop_mirror();
-        archive_sessions(&self.claude_home, &self.archive_dir)?;
-        self.finalize_run();
-        Ok(())
-    }
-
-    /// Stop the mirror watcher before the final archive sweep and run-dir
-    /// removal. A no-op if it never started or was already stopped.
     fn stop_mirror(&mut self) {
         if let Some(mirror) = self.mirror.take() {
             mirror.stop();
@@ -1087,10 +911,6 @@ struct PreparedRun {
     claude_home: PathBuf,
     archive_dir: PathBuf,
     claude_bin: PathBuf,
-    /// Resolved MCP-tool allowlist (short names). Exported to the child
-    /// claude as `GAGE_TOOLS` so the in-child gage MCP server registers
-    /// only these tools.
-    tools: Vec<String>,
 }
 
 /// Paths a sandbox installs under a run dir. The child claude reads
@@ -1207,7 +1027,6 @@ fn prepare_run(
         claude_home,
         archive_dir,
         claude_bin,
-        tools: tools.to_vec(),
     })
 }
 
