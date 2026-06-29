@@ -4,32 +4,45 @@ pub const SCANNER = #{
     name: "test-agent",
     hidden: true,
     description: "Test agent",
-    tasks: #{ agent: #{} },
+    tasks: #{ gage_tool: #{}, scanner_tool: #{} },
 };
 
-pub async fn agent() {
-    let session = call_agent("Write a comment with the text 'Hello Joe'")
-        .tools(
-            #{
-                comment: #{
-                    name: "Comment",
-                    description: "Write a comment",
-                    inputs: #{
-                        text: #{ type: "string", description: "Comment text" },
-                    },
+/// Writes a comment using Gage NoteWrite tool.
+pub async fn gage_tool() {
+    let session = call_agent(
+        "Write a comment 'Hello, Joe' with the NoteWrite tool.",
+    )
+    .gage_tools(["NoteWrite"])
+    .model("medium")
+    .await?;
+    let out = session.wait().await?;
+    println!("## agent # {out:?}");
+}
+
+/// Writes a comment using a scanner tool.
+pub async fn scanner_tool() {
+    let session = call_agent(
+        "Write a comment 'Hello, Mike' with the Comment tool.",
+    )
+    .tools(
+        #{
+            comment: #{
+                name: "Comment",
+                description: "Write a comment.",
+                inputs: #{
+                    text: #{ type: "string", description: "Comment text" },
                 },
             },
-        )
-        .model("medium")
-        .await?;
+        },
+    )
+    .model("medium")
+    .await?;
     let out = session.wait().await?;
     println!("## agent # {out:?}");
 }
 
 pub async fn comment(#{ text }) {
-    write_note(
-        #{ name: "comment.test", value: text, target: #{ scan: scan().id } },
-    )
-    .replace_prev()
-    .await?
+    write_note(#{ name: "comment", value: text, target: #{ scan: scan().id } })
+        .replace_prev()
+        .await
 }

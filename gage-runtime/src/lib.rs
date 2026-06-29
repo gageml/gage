@@ -2,6 +2,7 @@ pub mod agent;
 pub mod config;
 pub mod datetime;
 pub mod db;
+pub mod dispatcher;
 pub mod error;
 pub mod ignore;
 pub mod io;

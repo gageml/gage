@@ -10,6 +10,8 @@ use serde_json as json;
 use tokio::sync::mpsc;
 
 use crate::RuntimeOutput;
+use crate::dispatcher::ToolDispatcher;
+use std::sync::OnceLock;
 
 /// State shared by all scanners for a single scan run.
 ///
@@ -32,6 +34,10 @@ pub struct RunContext {
     /// invocation in this run. `None` in test contexts that don't
     /// exercise `call_agent`; `call_agent` errors when this is unset.
     pub mcp_host: Option<Arc<gage_mcp::McpHost>>,
+    /// Tool dispatch server. Initialized after the `RunContext`'s Arc
+    /// is created so the dispatcher can hold a `Weak<RunContext>`
+    /// without forming a strong cycle. Set once via [`OnceLock::set`].
+    pub dispatcher: OnceLock<Arc<ToolDispatcher>>,
 }
 
 /// Per-task state injected via `tokio::task_local!`.
@@ -46,6 +52,12 @@ pub struct ScanContext {
     /// Channel from Rune `print`/`println` calls back to the scan
     /// orchestrator. The receiver lives in the scheduler.
     pub runtime_tx: mpsc::UnboundedSender<RuntimeOutput>,
+    /// Scanner's compiled Rune runtime context — needed by
+    /// `call_agent` to spawn a fresh Vm per scanner-tool callback
+    /// (see `.tools(...)` dispatch in `agent.rs`).
+    pub rt: rune::sync::Arc<rune::runtime::RuntimeContext>,
+    pub unit: rune::sync::Arc<rune::runtime::Unit>,
+    pub sources: Arc<rune::Sources>,
 }
 
 tokio::task_local! {

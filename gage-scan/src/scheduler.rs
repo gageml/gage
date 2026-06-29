@@ -501,18 +501,20 @@ async fn dispatch_task(
         return TaskResult::SkippedByFault;
     }
 
+    let task_name = task.task_name.clone();
+    let rt = slot.rt.clone();
+    let unit = slot.unit.clone();
+    let sources = slot.sources.clone();
     let ctx = Arc::new(ScanContext {
         scanner_name: slot.name.clone(),
         params: slot.params.clone(),
         run: run.clone(),
         db: slot.db.clone(),
         runtime_tx: out_tx.clone(),
+        rt: rt.clone(),
+        unit: unit.clone(),
+        sources: sources.clone(),
     });
-
-    let task_name = task.task_name.clone();
-    let rt = slot.rt.clone();
-    let unit = slot.unit.clone();
-    let sources = slot.sources.clone();
     let label_task = task_name.clone();
     let outcome = SCAN_CTX
         .scope(ctx, async move {

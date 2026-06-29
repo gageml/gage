@@ -557,10 +557,11 @@ fn scan_sandbox_spec(scan_id: &str) -> Result<SandboxSpec, String> {
 ///
 /// `GageTools::All` expands against [`gage_agent::TOOL_NAMES`];
 /// `GageTools::Some(list)` passes through verbatim; `GageTools::None`
-/// yields an empty `gage_tools`. Custom tools become
-/// [`gage_mcp::CustomToolDef`]; the callback is a stub returning a
-/// "not yet implemented" error until 6.4.c plumbs the Rune VM
-/// dispatch through.
+/// yields an empty `gage_tools`. Each custom tool becomes a
+/// [`gage_mcp::CustomToolDef`] whose callback spawns a fresh
+/// `rune::Vm` over the calling task's compiled unit, scoped to the
+/// same `ScanContext` — see "Scanner-tool callback execution" in the
+/// design doc.
 fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
     let gage_tools = match &spec.gage_tools {
         GageTools::None => Vec::new(),
@@ -570,6 +571,9 @@ fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
             .map(|s| s.to_string())
             .collect(),
     };
+    let ctx = current_scan_ctx();
+    let dispatcher_sender = ctx.run.dispatcher.get().map(|d| d.sender());
+    let module_id = ctx.scanner_name.clone();
     let custom_tools = spec
         .custom_tools
         .iter()
@@ -577,7 +581,11 @@ fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
             name: def.mcp_name.clone(),
             description: def.description.clone(),
             input_schema: render_input_schema(&def.inputs),
-            callback: stub_callback(def.mcp_name.clone()),
+            callback: dispatcher_callback(
+                module_id.clone(),
+                def.fn_name.clone(),
+                dispatcher_sender.clone(),
+            ),
         })
         .collect();
     ToolSpec {
@@ -609,16 +617,34 @@ fn render_input_schema(inputs: &[InputDecl]) -> rmcp_json::JsonObject {
     obj
 }
 
-/// Placeholder callback for scanner-defined tools. Replaced in 6.4.c
-/// when the runtime can dispatch into a fresh `rune::Vm` scoped to
-/// the calling task's `ScanContext`.
-fn stub_callback(name: String) -> CustomToolCallback {
-    Arc::new(move |_args| {
-        let name = name.clone();
+/// Build the MCP callback for a scanner-defined tool. The closure
+/// sends a JSON-only [`DispatchRequest`] to the dispatcher and waits
+/// for the reply — no Rune state crosses the channel.
+fn dispatcher_callback(
+    module_id: String,
+    fn_name: String,
+    sender: Option<tokio::sync::mpsc::UnboundedSender<crate::dispatcher::DispatchRequest>>,
+) -> CustomToolCallback {
+    Arc::new(move |args| {
+        let module_id = module_id.clone();
+        let fn_name = fn_name.clone();
+        let sender = sender.clone();
         Box::pin(async move {
-            Err(format!(
-                "scanner-defined tool '{name}' not yet dispatched (6.4.c)"
-            ))
+            let sender = sender.ok_or_else(|| {
+                "tool dispatcher unavailable for this run (startup failed?)".to_string()
+            })?;
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            sender
+                .send(crate::dispatcher::DispatchRequest {
+                    module_id,
+                    fn_name,
+                    args,
+                    reply: reply_tx,
+                })
+                .map_err(|_send_err| "tool dispatcher channel closed".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_recv_err| "tool dispatcher dropped reply".to_string())?
         })
     })
 }

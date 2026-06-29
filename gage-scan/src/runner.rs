@@ -141,7 +141,14 @@ pub async fn run(
         projects,
         scan_ctx,
         mcp_host,
+        dispatcher: std::sync::OnceLock::new(),
     });
+    // Start the Rune tool dispatcher. Held by `RunContext` so scanners
+    // can reach it through `current_scan_ctx().run.dispatcher`. The
+    // dispatcher itself holds only a Weak<RunContext> so this edge
+    // does not form a strong cycle.
+    let dispatcher = gage_runtime::dispatcher::ToolDispatcher::start(Arc::downgrade(&run));
+    let _ = run.dispatcher.set(dispatcher);
 
     // Build per-scanner compilation artifacts
     let mut slots: Vec<ScannerSlot> = Vec::new();
@@ -149,6 +156,20 @@ pub async fn run(
     for s in scanners {
         let slot = compile_scanner(&s, db.clone())?;
         verify_tasks(&slot, s.def)?;
+        // Register the compiled module with the dispatcher so MCP
+        // tool-call requests for this scanner can resolve to its
+        // rt/unit/scanner-name without crossing rune state through
+        // the channel.
+        if let Some(dispatcher) = run.dispatcher.get() {
+            dispatcher.register(
+                slot.name.clone(),
+                slot.rt.clone(),
+                slot.unit.clone(),
+                slot.sources.clone(),
+                slot.name.clone(),
+                slot.db.clone(),
+            );
+        }
         let tasks: HashMap<String, _> = s
             .def
             .tasks
@@ -352,10 +373,16 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             projects: HashMap::new(),
             scan_ctx: Arc::new(ScanSessionContext::new(&stub_selected)),
             mcp_host: None,
+            dispatcher: std::sync::OnceLock::new(),
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // Test loop does not exercise call_agent custom-tool dispatch,
+        // so a stub empty Sources is fine. (rune::Sources is not Clone,
+        // and Arc'ing the existing instance would funnel every test
+        // iteration through one heap allocation for no benefit.)
+        let stub_sources = Arc::new(rune::Sources::new());
         for (hash, item) in &tests {
             let mut vm = Vm::new(rt.clone(), unit.clone());
             let ctx = Arc::new(ScanContext {
@@ -364,6 +391,9 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
                 run: stub_run.clone(),
                 db: stub_db.clone(),
                 runtime_tx: stub_tx.clone(),
+                rt: rt.clone(),
+                unit: unit.clone(),
+                sources: stub_sources.clone(),
             });
             let result = runtime::state::SCAN_CTX
                 .scope(ctx, async move {
@@ -555,14 +585,24 @@ impl TestRuntime {
             projects: HashMap::new(),
             scan_ctx: Arc::new(ScanSessionContext::new(&selected)),
             mcp_host: None,
+            dispatcher: std::sync::OnceLock::new(),
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // Stub rt/unit/sources. Tests built through `with_scope` don't
+        // exercise the call_agent custom-tool dispatch path, so empty
+        // rune values are fine here.
+        let stub_rt = rune::sync::Arc::try_new(rune::runtime::RuntimeContext::default()).unwrap();
+        let stub_unit = rune::sync::Arc::try_new(rune::runtime::Unit::default()).unwrap();
+        let stub_sources = Arc::new(rune::Sources::new());
         let ctx = Arc::new(ScanContext {
             scanner_name: "test".to_string(),
             params: None,
             run,
             db: Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap())),
             runtime_tx: tx,
+            rt: stub_rt,
+            unit: stub_unit,
+            sources: stub_sources,
         });
         runtime::state::SCAN_CTX.scope(ctx, f()).await
     }

@@ -119,6 +119,7 @@ pub async fn run_tests(
             projects: HashMap::new(),
             scan_ctx: std::sync::Arc::new(ScanSessionContext::new(&stub_selected)),
             mcp_host: None,
+            dispatcher: std::sync::OnceLock::new(),
         });
         let stub_db = std::sync::Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -134,12 +135,21 @@ pub async fn run_tests(
             summary.total += 1;
 
             let mut vm = Vm::new(rt.clone(), unit.clone());
+            // Tests don't exercise call_agent custom-tool dispatch, so a
+            // stub empty Sources is fine. Cloning the real `sources`
+            // is impossible (rune::Sources isn't Clone) and wrapping
+            // the existing value in Arc would force every test loop
+            // iteration through a single heap allocation.
+            let stub_sources = std::sync::Arc::new(rune::Sources::new());
             let ctx = std::sync::Arc::new(ScanContext {
                 scanner_name: module_name.clone(),
                 params: None,
                 run: stub_run.clone(),
                 db: stub_db.clone(),
                 runtime_tx: stub_tx.clone(),
+                rt: rt.clone(),
+                unit: unit.clone(),
+                sources: stub_sources,
             });
             let hash = *hash;
             let result = SCAN_CTX
