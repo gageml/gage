@@ -1,0 +1,22 @@
+use gage::call_agent;
+
+pub const SCANNER = #{
+    name: "agent-loop",
+    hidden: true,
+    description: "Test agent",
+    tasks: #{ agent_loop: #{} },
+};
+
+/// Prints agent loop events
+pub async fn agent_loop() {
+    let agent = call_agent("I need this done ASAP").model("medium").await?;
+    while agent.running() {
+        match agent.poll().await? {
+            event => {
+                println!("## agent-loop # {event:?}");
+            }
+        }
+    }
+    let out = agent.result();
+    println!("## agent-loop # {out:?}");
+}

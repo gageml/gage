@@ -8,11 +8,13 @@
 //! spawn + event stream is the runtime's responsibility (steps 6.4/
 //! 6.5 of the unify-llm-api work — currently stubbed).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use gage_agent::{AgentBuilder as GageAgentBuilder, AgentSession as GageAgentSession, SandboxSpec};
+use gage_agent::{
+    AgentBuilder as GageAgentBuilder, SandboxSpec, StreamMessage, StreamingAgentSession,
+};
 use gage_mcp::{CustomToolCallback, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
@@ -113,9 +115,9 @@ pub(crate) struct InputDecl {
 /// host). A call with no tools declared skips MCP entirely — the
 /// agent runs pure text-in/text-out.
 ///
-/// `session` is the spawned `claude -p` child. `poll`/event-stream
-/// methods land in 6.4.d; today's `wait()` drives the child to
-/// completion and returns an [`AgentResult`].
+/// State is held under a single sync `Mutex<AgentInner>` that callers
+/// briefly lock to inspect or `.take()` the streaming session; async
+/// work happens with the session held in a local, not under the lock.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub(crate) struct Agent {
@@ -129,23 +131,44 @@ pub(crate) struct Agent {
     /// when no tools were declared (no MCP server is running).
     #[rune(skip)]
     _service: Option<ServiceHandle>,
-    /// Spawned `claude -p` child. Wrapped in `Mutex<Option<>>` so
-    /// `wait()` can `.take()` it without requiring `&mut Agent` on a
-    /// Rune-shared value — Rune `Mut<Agent>` does give us &mut, but
-    /// `try_wait`/`running` use `&Agent`, and they need to peek at
-    /// the session too.
     #[rune(skip)]
-    session: Arc<Mutex<Option<GageAgentSession>>>,
+    inner: Arc<Mutex<AgentInner>>,
 }
 
-/// What `wait()` returns. Today's fields are minimal — the full
-/// design set (cost, usage, structured_output, etc.) lands in 6.6
-/// when the stream-json parser surfaces them.
-#[derive(Any)]
+/// Mutable agent state. `poll`/`wait` briefly lock to take the session
+/// out for async work, then re-lock to push expanded events / record
+/// the terminal result.
+struct AgentInner {
+    session: Option<StreamingAgentSession>,
+    /// Events expanded from received [`StreamMessage`]s, ready for
+    /// `poll()` to return one at a time.
+    event_buf: VecDeque<Event>,
+    /// `true` once the synthetic [`Event::Stop`] has been emitted. From
+    /// this point `running()` reports false and `result()` returns
+    /// `Some`.
+    stop_seen: bool,
+    /// Stop reason carried by [`Event::Stop`]. Populated either from the
+    /// SDK `result.stop_reason` field or `"eof"` when the stream closed
+    /// without a terminal `Result` message.
+    stop_reason: String,
+    /// Raw SDK terminal `result` JSON object, captured for use in
+    /// `AgentResult` construction. `None` if the stream closed without
+    /// one (e.g. child crashed mid-stream).
+    terminal_json: Option<JsonValue>,
+    /// Built once the child has been reaped and finalize has run.
+    final_result: Option<AgentResult>,
+}
+
+/// What `wait()` returns and what `result()` carries once the session
+/// has terminated. Today's fields are the minimal subset wired
+/// through; the full SDK set (cost, usage, structured_output,
+/// num_turns, …) lands in step 6.6 once `AgentInner::terminal_json`
+/// gets fully unpacked.
+#[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub(crate) struct AgentResult {
-    /// Final assistant text from `claude -p`. Empty if the child
-    /// exited without emitting a final message.
+    /// Final assistant text from the SDK terminal `result.result`
+    /// field. Empty if the child exited without emitting one.
     #[rune(get)]
     pub text: String,
     /// Child exit code; `-1` if the process was signaled.
@@ -165,6 +188,74 @@ impl AgentResult {
             "AgentResult {{ status: {}, text: {:?}, stderr: {:?} }}",
             self.status, self.text, self.stderr
         )?;
+        Ok(())
+    }
+}
+
+/// One Rune-visible item produced by `Agent::poll`. Content-block
+/// granularity: a single SDK `assistant` message carrying
+/// `[text, thinking, tool_use]` expands into three `Event` values.
+/// Forward-compatible types (anything the SDK adds that we haven't
+/// modeled) surface as `Other(<json>)`.
+#[derive(Any, Clone)]
+#[rune(item = ::gage)]
+pub(crate) enum Event {
+    /// `assistant` content block of type `text`.
+    #[rune(constructor)]
+    Assistant(#[rune(get)] String),
+    /// `assistant` content block of type `thinking` (raw, not summarized).
+    #[rune(constructor)]
+    Thinking(#[rune(get)] String),
+    /// `assistant` content block of type `tool_use`. `input` is the
+    /// raw tool input encoded as a JSON string; the caller parses if
+    /// it cares about structure.
+    #[rune(constructor)]
+    ToolUse {
+        #[rune(get)]
+        name: String,
+        #[rune(get)]
+        input: String,
+    },
+    /// `user` content block of type `tool_result`. `output` is the
+    /// joined text payload (multiple text parts get concatenated).
+    #[rune(constructor)]
+    ToolResult {
+        #[rune(get)]
+        id: String,
+        #[rune(get)]
+        output: String,
+    },
+    /// `{"type": "system"}` init message, JSON-encoded for forward
+    /// compatibility with new init fields the SDK adds.
+    #[rune(constructor)]
+    System(#[rune(get)] String),
+    /// Terminal event. `reason` is the SDK `result.stop_reason` when
+    /// available, `"eof"` if the stream closed without a terminal
+    /// `result` message.
+    #[rune(constructor)]
+    Stop(#[rune(get)] String),
+    /// Any SDK message `type` we haven't enumerated (status,
+    /// rate_limit, hook progress, stream_event, …). JSON-encoded.
+    #[rune(constructor)]
+    Other(#[rune(get)] String),
+    /// A stdout line that did not parse as JSON.
+    #[rune(constructor)]
+    ParseError(#[rune(get)] String),
+}
+
+impl Event {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        match self {
+            Event::Assistant(t) => write!(f, "Assistant({t:?})")?,
+            Event::Thinking(t) => write!(f, "Thinking({t:?})")?,
+            Event::ToolUse { name, input } => write!(f, "ToolUse({name:?}, {input})")?,
+            Event::ToolResult { id, output } => write!(f, "ToolResult({id:?}, {output:?})")?,
+            Event::System(s) => write!(f, "System({s})")?,
+            Event::Stop(r) => write!(f, "Stop({r:?})")?,
+            Event::Other(s) => write!(f, "Other({s})")?,
+            Event::ParseError(s) => write!(f, "ParseError({s:?})")?,
+        }
         Ok(())
     }
 }
@@ -191,40 +282,250 @@ fn url(this: &Agent) -> Option<String> {
 }
 
 #[rune::function(instance)]
-async fn poll(_this: Mut<Agent>) -> super::Result<()> {
-    Err(Error::Agent(
-        "agent.poll(): not implemented yet (6.4)".into(),
-    ))
+async fn poll(this: Mut<Agent>) -> super::Result<Event> {
+    let inner = Arc::clone(&this.inner);
+    do_poll(inner).await
 }
 
 #[rune::function(instance)]
 async fn wait(this: Mut<Agent>) -> super::Result<AgentResult> {
-    let session = this
-        .session
+    let inner = Arc::clone(&this.inner);
+    loop {
+        let ev = do_poll(Arc::clone(&inner)).await?;
+        if matches!(ev, Event::Stop(_)) {
+            break;
+        }
+    }
+    inner
         .lock()
         .unwrap()
+        .final_result
+        .clone()
+        .ok_or_else(|| Error::Agent("agent.wait: result missing after Stop".into()))
+}
+
+async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
+    loop {
+        // Fast path: a buffered event, or an idempotent Stop replay.
+        {
+            let mut g = inner.lock().unwrap();
+            if let Some(ev) = g.event_buf.pop_front() {
+                return Ok(ev);
+            }
+            if g.stop_seen {
+                return Ok(Event::Stop(g.stop_reason.clone()));
+            }
+        }
+
+        // Slow path: pull the next SDK message off the channel. Take
+        // the session out so the lock isn't held across the await; put
+        // it back before processing the message.
+        let mut session = inner
+            .lock()
+            .unwrap()
+            .session
+            .take()
+            .ok_or_else(|| Error::Agent("agent.poll: session not available".into()))?;
+        let msg = session.recv_event().await;
+
+        let should_finalize = {
+            let mut g = inner.lock().unwrap();
+            g.session = Some(session);
+            match msg {
+                Some(StreamMessage::Result(v)) => {
+                    let reason = v
+                        .get("stop_reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("end_turn")
+                        .to_string();
+                    g.terminal_json = Some(v);
+                    g.stop_reason = reason;
+                    true
+                }
+                Some(other) => {
+                    expand_to_events(other, &mut g.event_buf);
+                    false
+                }
+                None => {
+                    if g.stop_reason.is_empty() {
+                        g.stop_reason = "eof".to_string();
+                    }
+                    true
+                }
+            }
+        };
+        if should_finalize {
+            do_finalize_and_stop(Arc::clone(&inner)).await?;
+        }
+    }
+}
+
+/// Reap the child, drain stderr, run the gage-agent finalize sweep,
+/// build `final_result`, and enqueue a single trailing `Event::Stop`.
+/// Sets `stop_seen` so subsequent polls return Stop idempotently.
+async fn do_finalize_and_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()> {
+    // Take session out for async work; lock isn't held across awaits.
+    let mut session = inner
+        .lock()
+        .unwrap()
+        .session
         .take()
-        .ok_or_else(|| Error::Agent("agent.wait(): session already consumed".into()))?;
-    let mut session = session;
-    let out = session
-        .wait()
+        .ok_or_else(|| Error::Agent("agent.finalize: session not available".into()))?;
+
+    let status = session
+        .wait_exit()
         .await
-        .map_err(|e| Error::Agent(format!("agent.wait(): {e}")))?;
-    Ok(AgentResult {
-        text: String::from_utf8_lossy(&out.stdout).into_owned(),
-        status: out.status.code().map(i64::from).unwrap_or(-1),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    })
+        .map_err(|e| Error::Agent(format!("agent: wait child: {e}")))?;
+    session.join_stdout().await;
+    let stderr_bytes = session
+        .drain_stderr()
+        .await
+        .map_err(|e| Error::Agent(format!("agent: drain stderr: {e}")))?;
+    session
+        .finalize()
+        .map_err(|e| Error::Agent(format!("agent: finalize: {e}")))?;
+    drop(session);
+
+    let mut g = inner.lock().unwrap();
+    let text = g
+        .terminal_json
+        .as_ref()
+        .and_then(|v| v.get("result"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .to_string();
+    g.final_result = Some(AgentResult {
+        text,
+        status: status.code().map(i64::from).unwrap_or(-1),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+    });
+    g.stop_seen = true;
+    let reason = g.stop_reason.clone();
+    g.event_buf.push_back(Event::Stop(reason));
+    Ok(())
 }
 
 #[rune::function(instance)]
-fn try_wait(_this: &Agent) -> Option<()> {
-    None
+fn result(this: &Agent) -> Option<AgentResult> {
+    this.inner.lock().unwrap().final_result.clone()
 }
 
 #[rune::function(instance)]
-fn running(_this: &Agent) -> bool {
-    false
+fn running(this: &Agent) -> bool {
+    this.inner.lock().unwrap().final_result.is_none()
+}
+
+/// Walk an SDK stream-json message and push one or more [`Event`]s
+/// onto the buffer. The terminal `result` message is handled by the
+/// caller (it drives finalize); this only sees non-terminal types.
+fn expand_to_events(msg: StreamMessage, buf: &mut VecDeque<Event>) {
+    match msg {
+        StreamMessage::System(v) => buf.push_back(Event::System(v.to_string())),
+        StreamMessage::Assistant(v) => expand_assistant(&v, buf),
+        StreamMessage::User(v) => expand_user(&v, buf),
+        StreamMessage::Result(_) => {
+            // Terminal; the caller intercepted this before calling us.
+            // Pushing nothing here keeps the buffer consistent.
+        }
+        StreamMessage::Other(v) => buf.push_back(Event::Other(v.to_string())),
+        StreamMessage::ParseError { line, error } => {
+            buf.push_back(Event::ParseError(format!("{error}: {line}")));
+        }
+    }
+}
+
+fn expand_assistant(v: &JsonValue, buf: &mut VecDeque<Event>) {
+    let Some(content) = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        buf.push_back(Event::Other(v.to_string()));
+        return;
+    };
+    for block in content {
+        let ty = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match ty {
+            "text" => {
+                let text = block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                buf.push_back(Event::Assistant(text));
+            }
+            "thinking" => {
+                let text = block
+                    .get("thinking")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                buf.push_back(Event::Thinking(text));
+            }
+            "tool_use" => {
+                let name = block
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = block
+                    .get("input")
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                buf.push_back(Event::ToolUse { name, input });
+            }
+            _ => buf.push_back(Event::Other(block.to_string())),
+        }
+    }
+}
+
+fn expand_user(v: &JsonValue, buf: &mut VecDeque<Event>) {
+    let Some(content) = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        buf.push_back(Event::Other(v.to_string()));
+        return;
+    };
+    for block in content {
+        let ty = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if ty == "tool_result" {
+            let id = block
+                .get("tool_use_id")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output = tool_result_output(block);
+            buf.push_back(Event::ToolResult { id, output });
+        } else {
+            buf.push_back(Event::Other(block.to_string()));
+        }
+    }
+}
+
+/// Concatenate the text payload of a tool_result content block.
+/// `content` is either a string or an array of `{type:"text", text}`
+/// objects; everything else stringifies the raw JSON.
+fn tool_result_output(block: &JsonValue) -> String {
+    let Some(content) = block.get("content") else {
+        return String::new();
+    };
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        let mut out = String::new();
+        for part in arr {
+            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                out.push_str(text);
+            } else {
+                out.push_str(&part.to_string());
+            }
+        }
+        return out;
+    }
+    content.to_string()
 }
 
 #[rune::function(instance)]
@@ -242,7 +543,7 @@ async fn send_now(_this: Mut<Agent>, _msg: String) -> super::Result<()> {
 }
 
 #[rune::function(instance)]
-async fn stop(_this: Mut<Agent>, _grace_secs: i64) -> super::Result<()> {
+async fn stop(_this: Mut<Agent>) -> super::Result<()> {
     Err(Error::Agent(
         "agent.stop(): not implemented yet (6.5)".into(),
     ))
@@ -516,15 +817,22 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     }
     let session = builder
         .build()
-        .start_session(&spec.prompt)
+        .start_streaming_session(&spec.prompt)
         .await
-        .map_err(|e| Error::Agent(format!("call_agent: start_session: {e}")))?;
+        .map_err(|e| Error::Agent(format!("call_agent: start_streaming_session: {e}")))?;
 
     Ok(Agent {
         spec,
         mcp_url,
         _service: service,
-        session: Arc::new(Mutex::new(Some(session))),
+        inner: Arc::new(Mutex::new(AgentInner {
+            session: Some(session),
+            event_buf: VecDeque::new(),
+            stop_seen: false,
+            stop_reason: String::new(),
+            terminal_json: None,
+            final_result: None,
+        })),
     })
 }
 
@@ -661,10 +969,12 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(Agent::debug)?;
     m.ty::<AgentResult>()?;
     m.function_meta(AgentResult::debug)?;
+    m.ty::<Event>()?;
+    m.function_meta(Event::debug)?;
     m.function_meta(url)?;
     m.function_meta(poll)?;
     m.function_meta(wait)?;
-    m.function_meta(try_wait)?;
+    m.function_meta(result)?;
     m.function_meta(running)?;
     m.function_meta(send)?;
     m.function_meta(send_now)?;

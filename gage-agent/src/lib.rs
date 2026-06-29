@@ -46,8 +46,9 @@ use gage_claude::plugin;
 use gage_core::config::gage_home;
 pub use gage_db::sandbox::SandboxSpec;
 use notify::{EventKind, RecursiveMode, Watcher};
-use tokio::io::AsyncReadExt;
-use tokio::process::{Child as TokioChild, Command as TokioCommand};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child as TokioChild, ChildStdin, Command as TokioCommand};
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -318,6 +319,40 @@ impl Agent {
         )
         .await
     }
+
+    /// Spawn the child claude non-interactively with stream-json input
+    /// and output, piped stdin held open for `send`/`stop`. Returns a
+    /// [`StreamingAgentSession`] the caller drives event-by-event via
+    /// `recv_event`. Requires an `mcp_url` (per-call HTTP MCP service);
+    /// the plugin/`GAGE_TOOLS` env path is not supported here. Calls
+    /// [`Agent::init`] on a blocking thread if not already done.
+    pub async fn start_streaming_session(
+        mut self,
+        prompt: &str,
+    ) -> io::Result<StreamingAgentSession> {
+        if self.state.is_none() {
+            let mut taken = self;
+            let agent = tokio::task::spawn_blocking(move || -> io::Result<Agent> {
+                taken.init()?;
+                Ok(taken)
+            })
+            .await
+            .map_err(io::Error::other)??;
+            self = agent;
+        }
+        let RunState { prep, sandbox } = self.state.take().unwrap();
+        start_streaming_session_inner(
+            prep,
+            sandbox,
+            self.model,
+            self.max_turns,
+            self.timeout,
+            self.scan_id,
+            self.mcp_url,
+            prompt,
+        )
+        .await
+    }
 }
 
 fn run_interactive(
@@ -529,6 +564,333 @@ async fn start_session_inner(
         sandbox_db: sandbox.db_path,
         timeout,
     })
+}
+
+/// A spawned `claude -p --input-format stream-json --output-format
+/// stream-json` child wired for event-by-event observation and live
+/// stdin injection. Distinct from [`AgentSession`] (the
+/// terminal-oriented non-streaming flow used by `gage agent`):
+/// `claude`'s output is parsed line-by-line into [`StreamMessage`]
+/// values pushed onto an `mpsc` channel the caller drains via
+/// [`recv_event`](Self::recv_event); stdin is held open so the caller
+/// can `send_user_message` or `close_stdin` during the session.
+///
+/// Lifecycle: drain events to the terminal `Result` message, then
+/// `wait_exit` (reaps the child) and `finalize` (mirror stop + archive
+/// sweep + WAL replay + run-dir cleanup). Dropping the session
+/// `SIGKILL`s the child via `kill_on_drop`.
+pub struct StreamingAgentSession {
+    child: TokioChild,
+    /// Held open until the caller invokes `close_stdin` or `stop`. `None`
+    /// once closed; `send_user_message` returns `BrokenPipe` afterward.
+    stdin: Option<ChildStdin>,
+    events: tokio_mpsc::UnboundedReceiver<StreamMessage>,
+    /// Background task that reads stdout line-by-line and parses each
+    /// line into a [`StreamMessage`]. Joined during `finalize`.
+    stdout_task: Option<JoinHandle<()>>,
+    stderr: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    mirror: Option<SessionMirror>,
+    finalized: bool,
+    run_dir: PathBuf,
+    cwd: PathBuf,
+    claude_home: PathBuf,
+    archive_dir: PathBuf,
+    sandbox_db: PathBuf,
+    timeout: Option<usize>,
+}
+
+/// One parsed line from the `--output-format stream-json` stream. The
+/// caller layer (`gage-runtime`) maps these to its Rune-visible `Event`
+/// vocabulary; we keep the raw JSON here so all SDK fields stay
+/// reachable without re-parsing.
+#[derive(Debug, Clone)]
+pub enum StreamMessage {
+    /// `{"type": "system", ...}` — emitted once at session start with
+    /// init info (session id, tools, mcp servers, model, cwd, …).
+    System(serde_json::Value),
+    /// `{"type": "assistant", "message": {...}, ...}` — one assistant
+    /// turn carrying an Anthropic API message with content blocks
+    /// (text, thinking, tool_use).
+    Assistant(serde_json::Value),
+    /// `{"type": "user", "message": {...}, ...}` — tool_result blocks
+    /// produced by the harness in response to assistant tool_use.
+    User(serde_json::Value),
+    /// `{"type": "result", ...}` — terminal message carrying
+    /// `is_error`, `stop_reason`, `duration_ms`, `cost_usd`, `usage`,
+    /// `result` (final text), `session_id`, `uuid`, etc. No further
+    /// messages follow.
+    Result(serde_json::Value),
+    /// Any `type` not enumerated above. Forward-compatible: SDK gains
+    /// (`stream_event`, status, rate-limit, hook progress …) surface
+    /// here unchanged.
+    Other(serde_json::Value),
+    /// A stdout line that did not parse as JSON. Carries the raw text
+    /// and the parse error so diagnostic output isn't silently dropped.
+    ParseError { line: String, error: String },
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_streaming_session_inner(
+    prep: PreparedRun,
+    sandbox: Sandbox,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    timeout: Option<usize>,
+    scan_id: Option<String>,
+    mcp_url: Option<String>,
+    prompt: &str,
+) -> io::Result<StreamingAgentSession> {
+    let mut cmd = TokioCommand::new(&prep.claude_bin);
+    cmd.arg("-p").arg(prompt);
+    cmd.args(["--input-format", "stream-json"]);
+    cmd.args(["--output-format", "stream-json"]);
+    // Raw thinking is the diagnosis signal we want — summarized hides
+    // the model's reasoning trace.
+    cmd.args(["--thinking-display", "raw"]);
+    cmd.arg("--disable-slash-commands");
+    if let Some(url) = &mcp_url {
+        cmd.arg("--mcp-config").arg(mcp_config_json(url));
+        cmd.arg("--strict-mcp-config");
+        // `user` loads our seeded `settings.json` (permissions.allow),
+        // which is required for headless tool calls to avoid prompts.
+        // `project` / `local` are skipped so cwd settings don't leak in.
+        cmd.arg("--setting-sources").arg("user");
+    }
+    if let Some(model) = &model {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(max_turns) = max_turns {
+        cmd.arg("--max-turns").arg(max_turns.to_string());
+    }
+    cmd.current_dir(&prep.cwd)
+        .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
+        .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
+        .env("GAGE_DB", &sandbox.db_path)
+        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(id) = &scan_id {
+        cmd.env("GAGE_SCAN_ID", id);
+    }
+
+    let mut child = cmd.spawn()?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = spawn_reader(child.stderr.take());
+
+    let (tx, rx) = tokio_mpsc::unbounded_channel::<StreamMessage>();
+    let stdout_task = stdout.map(|out| {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(out).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        if tx.send(parse_stream_message(&line)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => return,
+                    Err(e) => {
+                        // Read error on a closing pipe is unactionable
+                        // here — the caller observes EOF via the
+                        // dropped channel and reaps the child / drains
+                        // stderr for the real diagnosis. Surface to
+                        // the parent log so it isn't silent.
+                        eprintln!("warning: stream-json stdout read error: {e}");
+                        return;
+                    }
+                }
+            }
+        })
+    });
+
+    let projects_dir = prep.claude_home.join("projects");
+    let mirror = match start_session_mirror(&projects_dir, &prep.archive_dir) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("warning: session mirror watcher failed to start: {e}");
+            None
+        }
+    };
+
+    Ok(StreamingAgentSession {
+        child,
+        stdin,
+        events: rx,
+        stdout_task,
+        stderr,
+        mirror,
+        finalized: false,
+        run_dir: prep.run_dir,
+        cwd: prep.cwd,
+        claude_home: prep.claude_home,
+        archive_dir: prep.archive_dir,
+        sandbox_db: sandbox.db_path,
+        timeout,
+    })
+}
+
+fn parse_stream_message(line: &str) -> StreamMessage {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => {
+            return StreamMessage::ParseError {
+                line: line.to_string(),
+                error: e.to_string(),
+            };
+        }
+    };
+    let ty = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+    match ty {
+        "system" => StreamMessage::System(v),
+        "assistant" => StreamMessage::Assistant(v),
+        "user" => StreamMessage::User(v),
+        "result" => StreamMessage::Result(v),
+        _ => StreamMessage::Other(v),
+    }
+}
+
+impl StreamingAgentSession {
+    /// OS process id while the child is running; `None` once it has exited.
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// Block until the next [`StreamMessage`] arrives. `None` once the
+    /// stdout reader has reached EOF and the channel is drained — at
+    /// which point the child has either exited or is about to.
+    pub async fn recv_event(&mut self) -> Option<StreamMessage> {
+        self.events.recv().await
+    }
+
+    /// Non-blocking variant of [`recv_event`](Self::recv_event). Returns
+    /// `None` when the queue is empty *or* the channel is closed; the
+    /// caller distinguishes via [`child_status`](Self::child_status).
+    pub fn try_recv_event(&mut self) -> Option<StreamMessage> {
+        self.events.try_recv().ok()
+    }
+
+    /// Non-blocking child status. `Ok(None)` means still running;
+    /// `Ok(Some(status))` means exited with the given status.
+    pub fn child_status(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    /// Send a single user message as a stream-json line to the child's
+    /// stdin. Wire shape: `{"type": "user", "message": {"role": "user",
+    /// "content": <text>}}`. Returns `BrokenPipe` if stdin was already
+    /// closed via [`close_stdin`](Self::close_stdin) or `stop`.
+    pub async fn send_user_message(&mut self, text: &str) -> io::Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin closed"))?;
+        let msg = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": text },
+        });
+        let mut buf = serde_json::to_vec(&msg).map_err(io::Error::other)?;
+        buf.push(b'\n');
+        stdin.write_all(&buf).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
+    /// Close stdin (EOF). The child's stream-json input ends; whether
+    /// claude exits on EOF alone is the open detail noted in the
+    /// design doc. Idempotent.
+    pub fn close_stdin(&mut self) {
+        self.stdin = None;
+    }
+
+    /// Await child exit, bounded by the configured timeout (default
+    /// [`DEFAULT_WAIT_TIMEOUT`]). On timeout the child is shut down
+    /// gracefully ([`TIMEOUT_GRACE`] before `SIGKILL`) before the
+    /// `TimedOut` error returns.
+    pub async fn wait_exit(&mut self) -> io::Result<ExitStatus> {
+        let timeout = self
+            .timeout
+            .map(|s| Duration::from_secs(s as u64))
+            .unwrap_or(DEFAULT_WAIT_TIMEOUT);
+        match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                self.terminate(TIMEOUT_GRACE).await?;
+                Err(io::Error::new(io::ErrorKind::TimedOut, "agent timeout"))
+            }
+        }
+    }
+
+    /// `SIGTERM`, wait up to `grace`, `SIGKILL` if still alive.
+    pub async fn kill(&mut self, grace: Duration) -> io::Result<()> {
+        self.terminate(grace).await
+    }
+
+    async fn terminate(&mut self, grace: Duration) -> io::Result<()> {
+        if let Some(pid) = self.child.id() {
+            // SAFETY: pid identifies a child process this struct owns
+            // and has not yet reaped; SIGTERM is a valid signal number.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        match tokio::time::timeout(grace, self.child.wait()).await {
+            Ok(s) => {
+                s?;
+            }
+            Err(_) => self.child.kill().await?,
+        }
+        Ok(())
+    }
+
+    /// Stop the mirror, hardlink the final session JSONL into the
+    /// archive, replay the sandbox WAL into the canonical db, and
+    /// remove the run dir. Idempotent. Call after the child has exited.
+    pub fn finalize(&mut self) -> io::Result<()> {
+        if self.finalized {
+            return Ok(());
+        }
+        self.finalized = true;
+        self.stop_mirror();
+        archive_sessions(&self.claude_home, &self.archive_dir)?;
+        if replay_and_report(&self.sandbox_db) {
+            cleanup_run_dir(&self.run_dir, &self.cwd);
+        } else {
+            eprintln!(
+                "warning: run dir preserved for inspection: {}",
+                self.run_dir.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Drain captured stderr. Returns an empty `Vec` if the reader was
+    /// never started or has already been taken.
+    pub async fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
+        join_reader(self.stderr.take()).await
+    }
+
+    /// Join the background stdout reader so the task exits cleanly. A
+    /// panic in the reader is logged and treated as a normal join —
+    /// finalize still runs. A no-op once joined.
+    pub async fn join_stdout(&mut self) {
+        if let Some(handle) = self.stdout_task.take()
+            && let Err(e) = handle.await
+        {
+            eprintln!("warning: stream-json stdout reader join error: {e}");
+        }
+    }
+
+    fn stop_mirror(&mut self) {
+        if let Some(mirror) = self.mirror.take() {
+            mirror.stop();
+        }
+    }
 }
 
 impl AgentSession {
