@@ -49,7 +49,17 @@ fn interrupt(msg) {
 const JUDGE_PROMPT = include_str!("judge-prompt.md");
 
 pub async fn judge() {
-    let agent = call_agent(JUDGE_PROMPT).allow_tools(["IssueOpen"]).await?;
-    agent.wait().await?;
-    // TODO add `judge.user-interrupt` note with agent output?
+    let agent = call_agent(JUDGE_PROMPT)
+        .gage_tools(["Query", "IssueOpen"])
+        .await?;
+    let result = agent.wait().await?;
+    write_note(
+        #{
+            name: "agent.user-interrupt-judge",
+            target: #{ scan: scan().id },
+            value: result.text,
+            metadata: result.as_metadata(),
+        },
+    )
+    .await?
 }

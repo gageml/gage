@@ -33,7 +33,7 @@ pub async fn note() {
         for msg in s
             .messages()
             .of_type(#{ "assistant": "thinking" })
-            .reverse()
+            .reverse() // only check latest thinking block
             .await?
         {
             write_note(
@@ -48,8 +48,9 @@ pub async fn note() {
                     },
                 },
             )
-            .keep_prev()
+            .keep_prev() // target is session line so naturally advances
             .await?;
+            // Stop after the latest block
             break;
         }
     }
@@ -61,7 +62,7 @@ pub async fn issue() {
     let note = latest_evidence().await?.ok_or(Ignore)?;
 
     // Only report issues for empty text (value is true)
-    if true || note.value {
+    if note.value {
         let timestamp = note.metadata.get("msg_timestamp").unwrap();
         write_issue(
             #{
@@ -71,7 +72,7 @@ pub async fn issue() {
                 evidence: [#{ note, timestamp }],
             },
         )
-        .keep_status()
+        .open_on_new_evidence()
         .await?;
     }
     Ok(())

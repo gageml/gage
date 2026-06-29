@@ -1,0 +1,29 @@
+use gage::{Ignore, scan, write_issue, write_note};
+
+pub const SCANNER = #{
+    name: "write-issue",
+    description: "Test issue writing with note dep",
+    tasks: #{
+        note: #{ notes: #{ writes: #{ "baz": "Sample note" } } },
+        issue: #{ notes: #{ wants: ["baz"] } },
+    },
+};
+
+pub async fn note() {
+    write_note(#{ name: "baz", value: "Hi baz", target: #{ scan: scan().id } })
+        .replace_prev()
+        .await?
+}
+
+pub async fn issue() {
+    let note = scan().notes().with_name("baz").await?.get(0).ok_or(Ignore)?;
+    write_issue(
+        #{
+            name: "test.baz",
+            title: "Found baz note",
+            description: format!("baz note value: {}", note.value),
+        },
+    )
+    .keep_status()
+    .await?;
+}

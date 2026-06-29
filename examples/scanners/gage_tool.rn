@@ -3,7 +3,7 @@ use gage::call_agent;
 pub const SCANNER = #{
     name: "gage-tool",
     hidden: true,
-    description: "Test agent",
+    description: "Test use of Gage tool",
     tasks: #{ gage_tool: #{} },
 };
 

@@ -1,0 +1,25 @@
+use gage::{DateTime, call_agent};
+
+pub const SCANNER = #{
+    name: "sub-agents",
+    description: "Test use of sub-agents",
+    tasks: #{ sub_agents: #{} },
+};
+
+pub async fn sub_agents() {
+    let agent = call_agent(
+        "Use two sub-agents to use the Value tool to read values and report back",
+    )
+    .tools(#{ value_tool: #{ name: "Value", description: "Read a value" } })
+    .await?;
+    while agent.running() {
+        let event = agent.poll().await?;
+        println!("## sub-agents # {event:?}");
+    }
+    let result = agent.result().unwrap();
+    println!("## sub-agents # {result:?}");
+}
+
+pub async fn value_tool(#{}) {
+    return Ok(DateTime::now().to_rfc2822())
+}
