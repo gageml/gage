@@ -1,6 +1,5 @@
 # Tools
 
-- CommentWrite
 - IssueClose
 - IssueComment
 - IssueOpen

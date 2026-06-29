@@ -58,7 +58,6 @@ use uuid::Uuid;
 /// [`ToolPolicy::tools`].
 pub const TOOL_NAMES: &[&str] = &[
     "Query",
-    "CommentWrite",
     "IssueClose",
     "IssueComment",
     "IssueOpen",
