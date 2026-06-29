@@ -108,11 +108,27 @@ enum Command {
     /// Reconcile the derived session store and text index
     Index(cmd_index::IndexArgs),
 
-    /// Start the MCP server (stdio transport)
-    Mcp,
+    /// Start the MCP server
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommand>,
+    },
 
     /// Run tests in scanner modules
     Test(cmd_test::TestArgs),
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Serve over stdio (default)
+    Stdio,
+
+    /// Serve over HTTP at the given bind address
+    Http {
+        /// Address to bind, e.g. `127.0.0.1:8765`
+        #[arg(short, long, default_value = "127.0.0.1:0")]
+        bind: std::net::SocketAddr,
+    },
 }
 
 fn parse_duration(s: &str) -> Result<Duration, DurationError> {
@@ -145,7 +161,7 @@ async fn main() {
     install_panic_hook();
     let cli = Cli::parse();
     let _log_guard = match &cli.command {
-        Command::Mcp => Some(gage_log::init("mcp").expect("init log dir")),
+        Command::Mcp { .. } => Some(gage_log::init("mcp").expect("init log dir")),
         Command::Scan(_) => Some(gage_log::init("scan").expect("init log dir")),
         _ => {
             init_logging();
@@ -190,12 +206,30 @@ async fn main() {
             },
             Command::Test(args) => cmd_test::run(args).await,
             Command::Scan(args) => cmd_scan::run(args).await,
-            Command::Mcp => {
-                if let Err(e) = gage_mcp::serve_stdio().await {
-                    eprintln!("gage mcp: {e}");
-                    std::process::exit(1);
+            Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
+                McpCommand::Stdio => {
+                    if let Err(e) = gage_mcp::serve_stdio().await {
+                        eprintln!("gage mcp: {e}");
+                        std::process::exit(1);
+                    }
                 }
-            }
+                McpCommand::Http { bind } => {
+                    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                    let addr = match gage_mcp::host::serve_http(bind, shutdown_rx).await {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            eprintln!("gage mcp http: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    eprintln!("gage mcp listening on http://{addr}/mcp");
+                    if let Err(e) = tokio::signal::ctrl_c().await {
+                        eprintln!("gage mcp http: install ctrl-c handler: {e}");
+                    }
+                    #[allow(clippy::unused_result_ok)]
+                    shutdown_tx.send(()).ok();
+                }
+            },
             Command::Query(args) => cmd_query::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_sync::push(args).await,
