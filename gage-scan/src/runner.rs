@@ -117,11 +117,19 @@ pub async fn run(
         }
     }
 
+    let mcp_host = match gage_mcp::McpHost::start().await {
+        Ok(h) => Some(Arc::new(h)),
+        Err(e) => {
+            tracing::warn!("mcp host failed to start: {e}; call_agent will be unavailable");
+            None
+        }
+    };
     let run = Arc::new(RunContext {
         scan_id: scan_id.clone(),
         selected,
         projects,
         scan_ctx,
+        mcp_host,
     });
 
     // Build per-scanner compilation artifacts
@@ -332,6 +340,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             selected: stub_selected.clone(),
             projects: HashMap::new(),
             scan_ctx: Arc::new(ScanSessionContext::new(&stub_selected)),
+            mcp_host: None,
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -534,6 +543,7 @@ impl TestRuntime {
             selected: selected.clone(),
             projects: HashMap::new(),
             scan_ctx: Arc::new(ScanSessionContext::new(&selected)),
+            mcp_host: None,
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ScanContext {

@@ -3,10 +3,13 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use clap::Args;
 use cliclack as cli;
 use gage_agent::{AgentBuilder, TOOL_NAMES, ToolPolicy};
 use gage_claude::session;
+use gage_mcp::{McpHost, ToolSpec, build_mcp_service};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -34,26 +37,27 @@ pub struct AgentArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Tools available to the agent (comma-separated list)
+    /// Gage tools to expose to the agent (comma-separated list)
     ///
-    /// Use '*' to enable all tools.
-    #[arg(short, long, value_name = "LIST", value_delimiter = ',')]
-    pub tools: Vec<String>,
+    /// Mirrors `call_agent.gage_tools(...)`. Use '*' to enable all
+    /// built-in Gage tools.
+    #[arg(short = 't', long = "tools", value_name = "LIST", value_delimiter = ',')]
+    pub gage_tools: Vec<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
     pub yes: bool,
 }
 
-pub fn run(args: AgentArgs) {
+pub async fn run(args: AgentArgs) {
     let sessions = match resolve_sessions(&args.sessions) {
         Ok(s) => s,
         Err(()) => std::process::exit(1),
     };
 
-    let mut tools = args.tools.clone();
+    let mut tools = args.gage_tools.clone();
     let mut prompt = args.prompt.clone();
-    if !args.yes && args.tools.is_empty() && args.prompt.is_none() {
+    if !args.yes && args.gage_tools.is_empty() && args.prompt.is_none() {
         let mut tools_out: Vec<String> = Vec::new();
         let mut prompt_out: Option<String> = None;
         let mut completed = false;
@@ -71,16 +75,33 @@ pub fn run(args: AgentArgs) {
         prompt = prompt_out;
     }
 
-    let mut builder = AgentBuilder::new();
-    if !tools.is_empty() {
-        match ToolPolicy::tools(tools, vec![]) {
-            Ok(resolved) => builder = builder.tools(resolved),
-            Err(e) => {
-                eprintln!("gage agent: --tools: {e}");
-                std::process::exit(1);
-            }
+    let resolved_tools = match ToolPolicy::tools(tools, vec![]) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("gage agent: --tools: {e}");
+            std::process::exit(1);
         }
-    }
+    };
+
+    // Start the in-process MCP host and register a per-call service
+    // exposing the resolved Gage tool set. The child claude connects to
+    // this URL via `--mcp-config`. Holding the handle for the duration
+    // of the run keeps the registration alive.
+    let host = match McpHost::start().await {
+        Ok(h) => Arc::new(h),
+        Err(e) => {
+            eprintln!("gage agent: start mcp host: {e}");
+            std::process::exit(1);
+        }
+    };
+    let spec = ToolSpec {
+        gage_tools: resolved_tools.clone(),
+        custom_tools: Vec::new(),
+    };
+    let _service_handle = host.register(build_mcp_service(spec));
+    let mcp_url = _service_handle.url().to_string();
+
+    let mut builder = AgentBuilder::new().tools(resolved_tools).mcp_url(mcp_url);
     if let Some(name) = args.name {
         builder = builder.name(name);
     }
@@ -100,6 +121,8 @@ pub fn run(args: AgentArgs) {
     spinner.finish_and_clear();
     match agent.run(prompt) {
         Ok(status) => {
+            drop(_service_handle);
+            drop(host);
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
@@ -115,11 +138,7 @@ fn collect_dialog(
     tools: &mut Vec<String>,
     prompt: &mut Option<String>,
 ) -> Result<DialogResult, DialogError> {
-    let names: Vec<&'static str> = TOOL_NAMES
-        .iter()
-        .copied()
-        .filter(|n| *n != "Query")
-        .collect();
+    let names: Vec<&'static str> = TOOL_NAMES.iter().copied().collect();
     let mut ms = cli::multiselect("Tools").required(false);
     for (i, name) in names.iter().enumerate() {
         ms = ms.item(i, *name, "");

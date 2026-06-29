@@ -2954,6 +2954,7 @@ dependencies = [
  "gage-claude",
  "gage-core",
  "gage-db",
+ "gage-mcp",
  "gage-query",
  "gage-registry",
  "gage-runtime",

@@ -28,6 +28,10 @@ pub struct RunContext {
     /// across every `s.messages()` / `s.entries()` / `query(...)` call
     /// in any scanner. Exposes `cached_session_count()` for progress.
     pub scan_ctx: Arc<ScanSessionContext>,
+    /// In-process HTTP MCP host shared across every `call_agent`
+    /// invocation in this run. `None` in test contexts that don't
+    /// exercise `call_agent`; `call_agent` errors when this is unset.
+    pub mcp_host: Option<Arc<gage_mcp::McpHost>>,
 }
 
 /// Per-task state injected via `tokio::task_local!`.

@@ -15,6 +15,7 @@ gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-query = { path = "../gage-query" }
 gage-registry = { path = "../gage-registry" }
+gage-mcp = { path = "../gage-mcp" }
 gage-runtime = { path = "../gage-runtime" }
 num_cpus = { workspace = true }
 petgraph = "0.6"

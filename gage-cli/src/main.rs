@@ -170,7 +170,7 @@ async fn main() {
     };
     let cmd = async {
         match cli.command {
-            Command::Agent(args) => cmd_agent::run(args),
+            Command::Agent(args) => cmd_agent::run(args).await,
             Command::Config { command } => cmd_config::run(command),
             Command::Init(args) => cmd_init::run(args),
             Command::Note { command } => match command {

@@ -118,6 +118,7 @@ pub async fn run_tests(
             selected: stub_selected.clone(),
             projects: HashMap::new(),
             scan_ctx: std::sync::Arc::new(ScanSessionContext::new(&stub_selected)),
+            mcp_host: None,
         });
         let stub_db = std::sync::Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();

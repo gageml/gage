@@ -66,31 +66,14 @@ pub const TOOL_NAMES: &[&str] = &["Query", "IssueClose", "IssueComment", "IssueO
 pub struct ToolPolicy;
 
 impl ToolPolicy {
-    /// The shared baseline allowlist used by every entry point that gives
-    /// a child claude access to gage data: the `gage agent` CLI and the
-    /// Rune `call_agent` builder. Keeping a single source of truth here
-    /// is load-bearing — the CLI is the user-visible reflection of what
-    /// a `call_agent` child sees, and the two must not drift.
-    pub fn default_tools() -> Vec<String> {
-        vec!["Query".into()]
-    }
-
     /// Resolve an allow/deny pair into a concrete allowlist. `"*"` in
     /// either list matches every name in [`TOOL_NAMES`]; every other
     /// entry must exactly match a known short name or this returns
-    /// `Err` naming the offender. Result = ([`default_tools`] ∪ allow
-    /// matches) − deny matches, preserving [`TOOL_NAMES`] order. The
-    /// baseline is always included; remove a default with an explicit
-    /// deny entry (e.g. `deny = ["Query"]`).
-    ///
-    /// [`default_tools`]: ToolPolicy::default_tools
+    /// `Err` naming the offender. Result = (allow matches) − (deny
+    /// matches), preserving [`TOOL_NAMES`] order. There is no implicit
+    /// baseline — every tool the caller wants exposed must be listed.
     pub fn tools(allow: Vec<String>, deny: Vec<String>) -> Result<Vec<String>, String> {
-        let mut allow_set = resolve(&allow)?;
-        for d in Self::default_tools() {
-            if let Some(n) = TOOL_NAMES.iter().find(|n| **n == d.as_str()) {
-                allow_set.insert(*n);
-            }
-        }
+        let allow_set = resolve(&allow)?;
         let deny_set = resolve(&deny)?;
         Ok(TOOL_NAMES
             .iter()
@@ -117,6 +100,16 @@ fn resolve(patterns: &[String]) -> Result<HashSet<&'static str>, String> {
     Ok(out)
 }
 
+/// Render the `--mcp-config` argument for the HTTP-MCP path. Names the
+/// server `gage`, which determines the `mcp__gage__<Tool>` wire prefix
+/// Claude uses for tool calls.
+fn mcp_config_json(url: &str) -> String {
+    format!(
+        r#"{{"mcpServers":{{"gage":{{"type":"http","url":"{}"}}}}}}"#,
+        url.replace('\\', "\\\\").replace('"', "\\\"")
+    )
+}
+
 /// Grace period for the `SIGTERM` → `SIGKILL` shutdown `wait` performs when
 /// its timeout elapses.
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
@@ -126,7 +119,7 @@ pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Fluent configuration for an [`Agent`]. All fields are optional;
 /// `name` defaults to `"default"`, `sandbox` to the full-corpus spec,
-/// `tools` to [`ToolPolicy::default_tools`] (Query only).
+/// `tools` to empty (the caller must list every tool to expose).
 #[derive(Debug, Clone)]
 pub struct AgentBuilder {
     name: Option<String>,
@@ -136,6 +129,11 @@ pub struct AgentBuilder {
     sandbox: SandboxSpec,
     tools: Vec<String>,
     scan_id: Option<String>,
+    /// Streamable-HTTP MCP endpoint to wire as the child claude's MCP
+    /// server. When `Some`, the plugin-install path is skipped and
+    /// claude is launched with `--mcp-config` + `--strict-mcp-config`
+    /// pointing at this URL.
+    mcp_url: Option<String>,
 }
 
 impl Default for AgentBuilder {
@@ -146,8 +144,9 @@ impl Default for AgentBuilder {
             max_turns: None,
             timeout: None,
             sandbox: SandboxSpec::default(),
-            tools: ToolPolicy::default_tools(),
+            tools: Vec::new(),
             scan_id: None,
+            mcp_url: None,
         }
     }
 }
@@ -184,8 +183,9 @@ impl AgentBuilder {
 
     /// MCP tool allowlist (short names without the
     /// `mcp__plugin_gage_gage__` prefix). Replaces the default. Build
-    /// the argument with [`ToolPolicy::tools`] for allow/deny semantics
-    /// or [`ToolPolicy::default_tools`] for the Query-only baseline.
+    /// the argument with [`ToolPolicy::tools`] for allow/deny semantics.
+    /// There is no implicit baseline — every tool to expose must be
+    /// listed.
     pub fn tools(mut self, tools: Vec<String>) -> Self {
         self.tools = tools;
         self
@@ -213,6 +213,14 @@ impl AgentBuilder {
         self
     }
 
+    /// Streamable-HTTP MCP URL the child claude should connect to.
+    /// When set, the plugin-install path is replaced with a direct
+    /// `--mcp-config` injection pointing at this URL.
+    pub fn mcp_url(mut self, url: impl Into<String>) -> Self {
+        self.mcp_url = Some(url.into());
+        self
+    }
+
     pub fn build(self) -> Agent {
         Agent {
             name: self.name.unwrap_or_else(|| "default".to_string()),
@@ -222,6 +230,7 @@ impl AgentBuilder {
             sandbox_spec: self.sandbox,
             tools: self.tools,
             scan_id: self.scan_id,
+            mcp_url: self.mcp_url,
             state: None,
         }
     }
@@ -241,6 +250,7 @@ pub struct Agent {
     sandbox_spec: SandboxSpec,
     tools: Vec<String>,
     scan_id: Option<String>,
+    mcp_url: Option<String>,
     state: Option<RunState>,
 }
 
@@ -260,7 +270,7 @@ impl Agent {
             return Ok(());
         }
         let archive_dir = agent_archive_dir(&self.name);
-        let prep = prepare_run(archive_dir, &self.tools)?;
+        let prep = prepare_run(archive_dir, &self.tools, self.mcp_url.is_some())?;
         let sandbox = build_sandbox(&prep.run_dir, &self.sandbox_spec)?;
         self.state = Some(RunState { prep, sandbox });
         Ok(())
@@ -271,7 +281,14 @@ impl Agent {
     pub fn run(mut self, prompt: Option<String>) -> io::Result<ExitStatus> {
         self.init()?;
         let RunState { prep, sandbox } = self.state.take().unwrap();
-        run_interactive(prep, sandbox, self.model, self.scan_id, prompt)
+        run_interactive(
+            prep,
+            sandbox,
+            self.model,
+            self.scan_id,
+            self.mcp_url,
+            prompt,
+        )
     }
 
     /// Spawn the child claude non-interactively (stdio piped) via
@@ -297,6 +314,7 @@ impl Agent {
             self.max_turns,
             self.timeout,
             self.scan_id,
+            self.mcp_url,
             prompt,
         )
         .await
@@ -308,6 +326,7 @@ fn run_interactive(
     sandbox: Sandbox,
     model: Option<String>,
     scan_id: Option<String>,
+    mcp_url: Option<String>,
     prompt: Option<String>,
 ) -> io::Result<ExitStatus> {
     let projects_dir = prep.claude_home.join("projects");
@@ -332,8 +351,21 @@ fn run_interactive(
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
         .env("GAGE_DB", &sandbox.db_path)
-        .env("GAGE_TOOLS", prep.tools.join(","))
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
+    if mcp_url.is_none() {
+        // Only the plugin path consults GAGE_TOOLS; the HTTP path
+        // configures the per-call service's tool set server-side.
+        cmd.env("GAGE_TOOLS", prep.tools.join(","));
+    }
+    if let Some(url) = &mcp_url {
+        cmd.arg("--mcp-config").arg(mcp_config_json(url));
+        cmd.arg("--strict-mcp-config");
+        // `user` = our seeded settings.json in CLAUDE_CONFIG_DIR
+        // (theme, tui, showThinkingSummaries, permissions.allow).
+        // Skip `project` / `local` so we don't pick up settings from
+        // the cwd directory.
+        cmd.arg("--setting-sources").arg("user");
+    }
     if let Some(id) = &scan_id {
         cmd.env("GAGE_SCAN_ID", id);
     }
@@ -427,6 +459,7 @@ pub struct AgentOutput {
 
 /// Spawn the child claude non-interactively with the already-built run
 /// state. Shared backend for [`Agent::start_session`].
+#[allow(clippy::too_many_arguments)]
 async fn start_session_inner(
     prep: PreparedRun,
     sandbox: Sandbox,
@@ -434,6 +467,7 @@ async fn start_session_inner(
     max_turns: Option<u32>,
     timeout: Option<usize>,
     scan_id: Option<String>,
+    mcp_url: Option<String>,
     prompt: &str,
 ) -> io::Result<AgentSession> {
     let mut cmd = TokioCommand::new(&prep.claude_bin);
@@ -445,16 +479,27 @@ async fn start_session_inner(
     if let Some(max_turns) = max_turns {
         cmd.arg("--max-turns").arg(max_turns.to_string());
     }
+    if let Some(url) = &mcp_url {
+        cmd.arg("--mcp-config").arg(mcp_config_json(url));
+        cmd.arg("--strict-mcp-config");
+        // `user` = our seeded settings.json in CLAUDE_CONFIG_DIR
+        // (theme, tui, showThinkingSummaries, permissions.allow).
+        // Skip `project` / `local` so we don't pick up settings from
+        // the cwd directory.
+        cmd.arg("--setting-sources").arg("user");
+    }
     cmd.current_dir(&prep.cwd)
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
         .env("GAGE_DB", &sandbox.db_path)
-        .env("GAGE_TOOLS", prep.tools.join(","))
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if mcp_url.is_none() {
+        cmd.env("GAGE_TOOLS", prep.tools.join(","));
+    }
     if let Some(id) = &scan_id {
         cmd.env("GAGE_SCAN_ID", id);
     }
@@ -720,7 +765,11 @@ fn link_sessions(
 
 /// Assemble the throwaway run dir, seed the isolated home, and install the
 /// gage plugin. `archive_dir` is where session JSONLs get hardlinked.
-fn prepare_run(archive_dir: PathBuf, tools: &[String]) -> io::Result<PreparedRun> {
+fn prepare_run(
+    archive_dir: PathBuf,
+    tools: &[String],
+    use_http_mcp: bool,
+) -> io::Result<PreparedRun> {
     let run_id = Uuid::new_v4().to_string();
     let run_dir = tmp_run_dir(&run_id);
     let cwd = run_dir.join("cwd");
@@ -732,12 +781,14 @@ fn prepare_run(archive_dir: PathBuf, tools: &[String]) -> io::Result<PreparedRun
     fs::create_dir_all(&cwd)?;
     fs::create_dir_all(&archive_dir)?;
     fs::create_dir_all(&projects_dir)?;
-    seed_claude_home(&claude_home, &cwd, tools)?;
+    seed_claude_home(&claude_home, &cwd, tools, use_http_mcp)?;
 
     let claude_bin = find_claude()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
-    let gage_bin = sibling_gage_bin()?;
-    install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin, tools)?;
+    if !use_http_mcp {
+        let gage_bin = sibling_gage_bin()?;
+        install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin, tools)?;
+    }
 
     Ok(PreparedRun {
         run_dir,
@@ -948,7 +999,12 @@ fn claude_subcommand(claude_bin: &Path, claude_home: &Path, args: &[&OsStr]) -> 
 /// and present a familiar UI, without inheriting any setting that could
 /// shift model behavior or what lands in the transcript. `tools` is the
 /// MCP-tool allowlist verbatim — no entry is implicit.
-fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &[String]) -> io::Result<()> {
+fn seed_claude_home(
+    claude_home: &Path,
+    cwd: &Path,
+    tools: &[String],
+    use_http_mcp: bool,
+) -> io::Result<()> {
     let user_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("HOME not set"))?;
@@ -971,9 +1027,17 @@ fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &[String]) -> io::Res
             settings.insert(key.into(), v.clone());
         }
     }
+    // HTTP-MCP path: tool names live under `mcp__gage__<Name>` (the
+    // server-name key in `--mcp-config`). Plugin path: under
+    // `mcp__plugin_gage_gage__<Name>`.
+    let prefix = if use_http_mcp {
+        "mcp__gage__"
+    } else {
+        "mcp__plugin_gage_gage__"
+    };
     let mut allow_set: Vec<String> = Vec::with_capacity(tools.len());
     for t in tools {
-        let prefixed = format!("mcp__plugin_gage_gage__{t}");
+        let prefixed = format!("{prefix}{t}");
         if !allow_set.contains(&prefixed) {
             allow_set.push(prefixed);
         }
@@ -1091,27 +1155,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_policy_default_is_query_only() {
-        assert_eq!(ToolPolicy::default_tools(), vec!["Query".to_string()]);
+    fn tool_policy_empty_allow_yields_empty() {
+        // No implicit baseline — empty allow means no tools exposed.
+        assert!(ToolPolicy::tools(vec![], vec![]).unwrap().is_empty());
     }
 
     #[test]
-    fn tool_policy_empty_allow_yields_defaults() {
-        assert_eq!(
-            ToolPolicy::tools(vec![], vec![]).unwrap(),
-            ToolPolicy::default_tools()
-        );
-    }
-
-    #[test]
-    fn tool_policy_deny_can_remove_default() {
-        assert!(ToolPolicy::tools(vec![], s(&["Query"])).unwrap().is_empty());
-    }
-
-    #[test]
-    fn tool_policy_allow_extends_defaults() {
+    fn tool_policy_allow_lists_listed_only() {
         let got = ToolPolicy::tools(s(&["IssueOpen"]), vec![]).unwrap();
-        assert_eq!(got, s(&["Query", "IssueOpen"]));
+        assert_eq!(got, s(&["IssueOpen"]));
     }
 
     #[test]

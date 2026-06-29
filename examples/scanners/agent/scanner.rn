@@ -1,4 +1,4 @@
-use gage::call_agent;
+use gage::{call_agent, scan, write_note};
 
 pub const SCANNER = #{
     name: "test-agent",
@@ -9,9 +9,27 @@ pub const SCANNER = #{
 
 pub async fn agent() {
     let session = call_agent("Write a comment with the text 'Hello Joe'")
-        .allow_tools(["CommentWrite"])
+        .tools(
+            #{
+                comment: #{
+                    name: "Comment",
+                    description: "Write a comment",
+                    inputs: #{
+                        text: #{ type: "string", description: "Comment text" },
+                    },
+                },
+            },
+        )
         .model("medium")
         .await?;
     let out = session.wait().await?;
     println!("## agent # {out:?}");
+}
+
+pub async fn comment(#{ text }) {
+    write_note(
+        #{ name: "comment.test", value: text, target: #{ scan: scan().id } },
+    )
+    .replace_prev()
+    .await?
 }
