@@ -17,7 +17,7 @@ pub struct LimitArgs {
     all: bool,
 
     /// Limit the number of items shown (default: 20)
-    #[arg(short, long, conflicts_with = "all")]
+    #[arg(short = 'n', long, conflicts_with = "all")]
     limit: Option<usize>,
 }
 

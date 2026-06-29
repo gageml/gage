@@ -61,11 +61,11 @@ pub struct SessionViewArgs {
 #[derive(Args)]
 pub struct SessionFilterArgs {
     /// Filter by project path (repeatable)
-    #[arg(short, long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH")]
     project: Vec<PathBuf>,
 
     /// Filter by how long ago the session was modified (e.g. 1h, 30m, 7d)
-    #[arg(short, long, value_parser = super::parse_duration)]
+    #[arg(long, value_parser = super::parse_duration)]
     since: Option<Duration>,
 
     /// Only show empty sessions
@@ -88,7 +88,7 @@ pub struct SessionListArgs {
     /// Include additional stats columns
     ///
     /// Added columns: model time, total tokens, turns
-    #[arg(long)]
+    #[arg(short = 'S', long)]
     stats: bool,
 }
 

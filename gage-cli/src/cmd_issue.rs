@@ -120,7 +120,7 @@ pub struct IssueListArgs {
     limit: crate::limit::LimitArgs,
 
     /// Filter by issue name
-    #[arg(short, long)]
+    #[arg(long)]
     name: Option<String>,
 
     /// Include closed issues

@@ -43,12 +43,12 @@ pub struct NoteListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
-    /// Filter by session ID (or prefix)
-    #[arg(short, long)]
+    /// Filter by target session ID (or prefix)
+    #[arg(long)]
     session: Option<String>,
 
     /// Filter by note name
-    #[arg(short, long)]
+    #[arg(long)]
     name: Option<String>,
 }
 
