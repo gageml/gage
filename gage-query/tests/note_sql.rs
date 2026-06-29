@@ -20,7 +20,7 @@ async fn value_object_is_queryable_through_json_functions() {
 
     let conn = gage_db::db::open_db().unwrap();
     let note = Note::new(
-        NoteTarget::Session(SessionTarget::new("sess-1")),
+        NoteTarget::Session(SessionTarget::new("550e8400-e29b-41d4-a716-446655440000")),
         "fast-mode.summary",
         NoteValue::from(serde_json::json!({"fast": {"count": 5}})),
         "user:test",
@@ -79,7 +79,7 @@ async fn note_metadata_resolves_to_utf8_not_null() {
 
     let conn = gage_db::db::open_db().unwrap();
     let note = Note::new(
-        NoteTarget::Session(SessionTarget::new("sess-null-meta")),
+        NoteTarget::Session(SessionTarget::new("550e8400-e29b-41d4-a716-446655440001")),
         "any.name",
         NoteValue::from(serde_json::json!({"x": 1})),
         "user:test",

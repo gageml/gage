@@ -644,9 +644,10 @@ async fn start_streaming_session_inner(
     cmd.arg("-p").arg(prompt);
     cmd.args(["--input-format", "stream-json"]);
     cmd.args(["--output-format", "stream-json"]);
-    // Raw thinking is the diagnosis signal we want — summarized hides
-    // the model's reasoning trace.
-    cmd.args(["--thinking-display", "raw"]);
+    // No `--thinking-display`: in stream-json mode the assistant
+    // messages carry raw `thinking` content blocks regardless. The flag
+    // only controls human-readable rendering (and `raw` isn't accepted
+    // anyway — the CLI allows `summarized` or `omitted`).
     cmd.arg("--disable-slash-commands");
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
