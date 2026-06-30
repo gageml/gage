@@ -397,11 +397,13 @@ fn run_interactive(
     };
 
     let mut cmd = Command::new(&prep.claude_bin);
+    cmd.args(["--tools", "WaitForMcpServers"]);
     cmd.current_dir(&prep.cwd)
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &sandbox.projects_dir)
         .env("GAGE_DB", &sandbox.db_path)
-        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
+        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
+        .env("ENABLE_TOOL_SEARCH", "false");
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
         cmd.arg("--strict-mcp-config");
@@ -556,6 +558,7 @@ async fn start_streaming_session_inner(
     cmd.arg("-p");
     cmd.args(["--input-format", "stream-json"]);
     cmd.args(["--output-format", "stream-json"]);
+    cmd.args(["--tools", "WaitForMcpServers"]);
     // --print + --output-format=stream-json requires --verbose
     cmd.arg("--verbose");
     cmd.args(["--thinking-display", "summarized"]);
@@ -577,6 +580,7 @@ async fn start_streaming_session_inner(
     cmd.current_dir(&prep.cwd)
         .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
+        .env("ENABLE_TOOL_SEARCH", "false")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
