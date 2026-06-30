@@ -53,8 +53,7 @@ const VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 struct Cli {
     /// Log level for gage modules
     ///
-    /// Applies to gage_* crates only so other crates don't drown out the
-    /// output. Accepts trace, debug, info, warn, error. Overrides GAGE_LOG.
+    /// Levels: trace, debug, info, warn, error. Overrides GAGE_LOG.
     #[arg(long, global = true, value_name = "LEVEL")]
     log: Option<String>,
 

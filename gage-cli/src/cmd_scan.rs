@@ -85,7 +85,7 @@ pub struct ScanRunArgs {
     #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "all"])]
     limit: Option<usize>,
 
-    /// Scan sessions modified in the last N days
+    /// Scan sessions modified in past N days (default 30)
     #[arg(short, long, value_name = "N", conflicts_with = "all")]
     days: Option<u32>,
 
