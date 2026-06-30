@@ -1,3 +1,4 @@
+mod error;
 pub mod event;
 pub mod resolve;
 pub mod runner;

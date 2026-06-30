@@ -165,11 +165,14 @@ pub async fn run_tests(
                     TestOutcome::Fail(report)
                 }
                 Ok(value) => {
-                    if let Ok(Err(_err)) = rune::from_value::<
+                    if let Ok(Err(err)) = rune::from_value::<
                         Result<rune::runtime::Value, rune::runtime::Value>,
                     >(value)
                     {
-                        TestOutcome::Fail(format!("{test_name} failed: returned Err(...)"))
+                        let rendered = crate::error::render_task_error(err);
+                        TestOutcome::Fail(format!(
+                            "{test_name} failed: returned Err({rendered})\n  at {rel}\n",
+                        ))
                     } else {
                         TestOutcome::Pass
                     }
@@ -225,7 +228,7 @@ fn format_error(
         term::emit_to_io_write(&mut buf, &config, sources, &diagnostic).unwrap();
         String::from_utf8(buf).unwrap()
     } else {
-        format!("error: {name} failed: {detail}")
+        format!("error: {name} failed: {detail}\n")
     }
 }
 
