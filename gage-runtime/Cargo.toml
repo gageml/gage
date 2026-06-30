@@ -10,6 +10,7 @@ path = "src/lib.rs"
 async-trait = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
+futures = { workspace = true }
 gage-agent = { path = "../gage-agent" }
 gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }

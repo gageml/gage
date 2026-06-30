@@ -1262,6 +1262,117 @@ mod rmcp_json {
     pub type JsonObject = serde_json::Map<String, serde_json::Value>;
 }
 
+/// Queue side of the concurrent agent driver. Built by the scanner via
+/// `AgentRunner::new()`, fed with `add(call_agent, context)`, and turned
+/// into an [`AgentRunnerResults`] via `start()`. Concurrency is fixed at
+/// [`AGENT_RUNNER_CONCURRENCY`]; the scanner has no knob on purpose.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct AgentRunner {
+    #[rune(skip)]
+    queue: Vec<(CallAgent, Object)>,
+}
+
+/// Consumer side returned by [`AgentRunner::start`]. Each call to
+/// `next().await` yields the next completed run in completion order, or
+/// `None` once every queued agent has finished.
+///
+/// Concurrency is bounded by an internal semaphore: every queued run is
+/// pushed into the `FuturesUnordered` up front, but each future blocks on
+/// acquiring a permit before starting work. `next()` drives the futures
+/// inline — agents only make progress while the scanner is awaiting
+/// `next()`, which is acceptable since the inter-completion work
+/// (note writes) is fast relative to agent runtime.
+type RunFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = super::Result<(AgentResult, Object)>>>>;
+
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct AgentRunnerResults {
+    #[rune(skip)]
+    futures: futures::stream::FuturesUnordered<RunFuture>,
+}
+
+/// Cap on agents driven concurrently by a single `AgentRunner`.
+const AGENT_RUNNER_CONCURRENCY: usize = 4;
+
+impl AgentRunner {
+    #[rune::function(path = Self::new)]
+    fn new() -> AgentRunner {
+        AgentRunner { queue: Vec::new() }
+    }
+}
+
+#[rune::function(instance, path = add)]
+fn runner_add(mut this: Mut<AgentRunner>, call: CallAgent, ctx: Object) {
+    this.queue.push((call, ctx));
+}
+
+/// Consume the runner and build its concurrent driver. Each queued call
+/// becomes one future in a `FuturesUnordered`; each future blocks on an
+/// `AGENT_RUNNER_CONCURRENCY`-permit semaphore before doing work, so only
+/// that many agents run at once. The futures execute inline on the
+/// caller's task as it polls `next()`.
+#[rune::function(instance, path = start)]
+fn runner_start(this: AgentRunner) -> AgentRunnerResults {
+    let sem = Arc::new(tokio::sync::Semaphore::new(AGENT_RUNNER_CONCURRENCY));
+    let futures = futures::stream::FuturesUnordered::new();
+    for (call, ctx) in this.queue {
+        let sem = Arc::clone(&sem);
+        let fut: RunFuture = Box::pin(async move {
+            let _permit = sem
+                .acquire_owned()
+                .await
+                .expect("AgentRunner semaphore should remain open for the run's lifetime");
+            let result = call_and_wait(call).await;
+            if let Err(e) = &result {
+                tracing::warn!(error = %e, "AgentRunner: agent run failed");
+            }
+            result.map(|r| (r, ctx))
+        });
+        futures.push(fut);
+    }
+    AgentRunnerResults { futures }
+}
+
+#[rune::function(instance, path = next)]
+async fn runner_results_next(
+    mut this: Mut<AgentRunnerResults>,
+) -> Option<super::Result<(AgentResult, Object)>> {
+    use futures::stream::StreamExt;
+    this.futures.next().await
+}
+
+/// Drive a `CallAgent` from start to its terminal `AgentResult`. Mirrors
+/// `wait()`'s loop: auto-stop on the first `TurnEnd` once no background
+/// sub-agents are pending.
+async fn call_and_wait(call: CallAgent) -> super::Result<AgentResult> {
+    let agent = do_call_agent(call).await?;
+    let inner = Arc::clone(&agent.inner);
+    let mut auto_stopped = false;
+    loop {
+        let ev = do_poll(Arc::clone(&inner)).await?;
+        match ev {
+            Event::Stop(_) => break,
+            Event::TurnEnd(_)
+                if !auto_stopped && inner.lock().unwrap().pending_tasks.is_empty() =>
+            {
+                do_stop(Arc::clone(&inner)).await?;
+                auto_stopped = true;
+            }
+            _ => {}
+        }
+    }
+    let result = inner
+        .lock()
+        .unwrap()
+        .final_result
+        .clone()
+        .ok_or_else(|| Error::Agent("agent.wait: result missing after Stop".into()))?;
+    drop(agent);
+    Ok(result)
+}
+
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Agent>()?;
     m.function_meta(Agent::debug)?;
@@ -1279,6 +1390,13 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(send_now)?;
     m.function_meta(stop)?;
     m.function_meta(kill)?;
+
+    m.ty::<AgentRunner>()?;
+    m.function_meta(AgentRunner::new)?;
+    m.function_meta(runner_add)?;
+    m.function_meta(runner_start)?;
+    m.ty::<AgentRunnerResults>()?;
+    m.function_meta(runner_results_next)?;
 
     m.ty::<CallAgent>()?;
     m.function_meta(CallAgent::model)?;

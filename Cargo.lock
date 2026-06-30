@@ -2927,6 +2927,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "datafusion",
+ "futures",
  "gage-agent",
  "gage-claude",
  "gage-core",
