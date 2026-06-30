@@ -273,15 +273,14 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
     let metadata_raw = optional_object_json(n, "metadata")?;
 
     let db_note = DbNote {
-        id: gage_core::uuid::new_uuid(),
-        author: format!("scanner:{}", ctx.scanner_name),
-        created: gage_core::datetime::now_ms(),
-        modified: None,
-        target,
-        name,
-        value: value_db,
         explanation,
         metadata: metadata_raw,
+        ..DbNote::new(
+            target,
+            &name,
+            value_db,
+            &format!("scanner:{}", ctx.scanner_name),
+        )
     };
 
     tracing::info!(

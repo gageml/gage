@@ -75,8 +75,12 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         }
     };
 
-    let mut note = Note::new(target, &note_type, NoteValue::from(value), &author);
-    note.name = format!("{note_type}.{}", short_uuid(&note.id));
+    let note = Note::new(
+        target,
+        &format!("{note_type}."),
+        NoteValue::from(value),
+        &author,
+    );
 
     let conn = open_db().unwrap();
     note::insert(&conn, &note)

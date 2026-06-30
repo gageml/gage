@@ -177,14 +177,26 @@ impl std::fmt::Display for NoteError {
 impl std::error::Error for NoteError {}
 
 impl Note {
+    /// Build a new note.
+    ///
+    /// A trailing `.` in `name` is expanded to an 8-char suffix derived from
+    /// the generated id, so callers can ask for a unique name (e.g.
+    /// `"comment."` → `"comment.abcd1234"`) without threading the id back
+    /// through the caller.
     pub fn new(target: NoteTarget, name: &str, value: impl Into<NoteValue>, author: &str) -> Self {
+        let id = gage_core::uuid::new_uuid();
+        let name = if name.ends_with('.') {
+            format!("{name}{}", gage_core::uuid::short_uuid(&id))
+        } else {
+            name.to_string()
+        };
         Note {
-            id: gage_core::uuid::new_uuid(),
+            id,
             author: author.to_string(),
             created: gage_core::datetime::now_ms(),
             modified: None,
             target,
-            name: name.to_string(),
+            name,
             value: value.into(),
             explanation: None,
             metadata: None,
