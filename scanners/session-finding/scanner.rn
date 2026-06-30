@@ -1,0 +1,99 @@
+use gage::{AgentRunner, Template, call_agent, scan, write_note};
+
+pub const SCANNER = #{
+    name: "session-finding",
+    description: "Evaluate sessions and write findings",
+    tasks: #{
+        findings: #{
+            notes: #{
+                writes: #{
+                    "session.finding": "Noteworthy finding in a session",
+                    "session.finding.summary": "Summary of session findings",
+                },
+            },
+        },
+    },
+};
+
+pub async fn findings() {
+    let t = Template::new(include_str!("findings-prompt.md")).await?;
+    let runner = AgentRunner::new();
+    for s in scan().sessions() {
+        let prompt = t.render(#{ session_id: s.id }).await?;
+        runner.add(
+            call_agent(prompt).gage_tools(["Query"]).tools(findings_tools()),
+            #{ session: s.id },
+        );
+    }
+    let results = runner.start();
+    write_summaries(results).await?;
+    Ok((()))
+}
+
+async fn write_summaries(results) {
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                write_note(
+                    #{
+                        name: "session.finding.summary.",
+                        target: #{ session },
+                        value: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                )
+                .await?;
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+fn findings_tools() {
+    #{
+        write_finding: #{
+            name: "Finding",
+            description: "Write a finding about the session",
+            inputs: #{
+                description: #{
+                    type: "string",
+                    description: "Finding description",
+                },
+                session: #{ type: "string", description: "Session ID" },
+                lines: #{
+                    type: "string",
+                    description: "Session line numbers associated with the finding",
+                    required: false,
+                },
+                fix: #{
+                    type: "string",
+                    description: "Suggested fix or fix strategy where applicable",
+                    required: false,
+                },
+            },
+        },
+    }
+
+}
+
+pub async fn write_finding(inputs) {
+    let metadata = #{};
+    if let Some(lines) = inputs.get("lines") {
+        metadata.insert("lines", lines)
+    }
+    if let Some(fix) = inputs.get("fix") {
+        metadata.insert("fix", fix);
+    }
+    let note = write_note(
+        #{
+            name: "session.finding.",
+            author: "agent", // TODO want meta.agent or tool_use().xxx
+            value: inputs.description,
+            target: #{ session: inputs.session },
+            metadata,
+        },
+    )
+    .await?;
+    Ok(format!("Wrote note {}", note.id))
+}
