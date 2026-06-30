@@ -51,9 +51,39 @@ const VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 #[derive(Parser)]
 #[command(name = "gage", version = VERSION, about = "Gage CLI")]
 struct Cli {
+    /// Log level for gage modules
+    ///
+    /// Applies to gage_* crates only so other crates don't drown out the
+    /// output. Accepts trace, debug, info, warn, error. Overrides GAGE_LOG.
+    #[arg(long, global = true, value_name = "LEVEL")]
+    log: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
+
+/// Crate-name log targets for `--log`. Underscored form (clap target =
+/// crate name with `-` → `_`). Keep in sync with the workspace members
+/// that actually emit tracing events.
+const GAGE_LOG_TARGETS: &[&str] = &[
+    "gage_agent",
+    "gage_claude",
+    "gage_cli",
+    "gage_core",
+    "gage_db",
+    "gage_eval",
+    "gage_index",
+    "gage_log",
+    "gage_lsp",
+    "gage_mcp",
+    "gage_query",
+    "gage_registry",
+    "gage_runtime",
+    "gage_scan",
+    "gage_scan_ui",
+    "gage_sync",
+    "gage_tui",
+];
 
 #[derive(Subcommand)]
 enum Command {
@@ -160,6 +190,17 @@ fn init_logging() {
 async fn main() {
     install_panic_hook();
     let cli = Cli::parse();
+    if let Some(level) = &cli.log {
+        let directive = GAGE_LOG_TARGETS
+            .iter()
+            .map(|t| format!("{t}={level}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        // SAFETY: set_var is unsafe in edition 2024; we set this once at
+        // startup, before logging init reads GAGE_LOG and before any
+        // threads spawn.
+        unsafe { std::env::set_var("GAGE_LOG", directive) };
+    }
     let _log_guard = match &cli.command {
         Command::Mcp { .. } => Some(gage_log::init("mcp").expect("init log dir")),
         Command::Scan(_) => Some(gage_log::init("scan").expect("init log dir")),
