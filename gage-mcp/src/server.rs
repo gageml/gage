@@ -52,9 +52,22 @@ impl GageServer {
         }
     }
 
+    /// The DataFusion context that the `Query` MCP tool runs against.
+    /// When the calling process has a `GAGE_SCAN_ID` in its
+    /// environment (set by `gage scan` and `gage agent` for the
+    /// duration of a run), the context is scoped to that scan via
+    /// [`gage_query::create_agent_context`]; reads return only rows
+    /// linked through `scan_session` / `scan_note` / `scan_issue`.
+    /// Absent the env var (e.g. ad-hoc MCP clients), the default
+    /// unscoped context is built.
     pub(crate) async fn ctx(&self) -> &SessionContext {
         self.ctx
-            .get_or_init(|| async { gage_query::create_context_default().await })
+            .get_or_init(|| async {
+                match crate::tool::scan_id_from_env() {
+                    Some(scan_id) => gage_query::create_agent_context(scan_id).await,
+                    None => gage_query::create_context_default().await,
+                }
+            })
             .await
     }
 }
