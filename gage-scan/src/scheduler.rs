@@ -8,9 +8,9 @@
 //!   scanner task, dispatched once per run.
 //! - Edges come from `notes.wants`/`notes.writes`: a task's
 //!   `notes.wants` lists *note names* it consumes; the planner
-//!   reverse-looks-up every task in the same scanner whose `notes.writes`
+//!   reverse-looks-up every task across the full plan whose `notes.writes`
 //!   contains that note name and adds an edge.
-//! - Unsatisfied `notes.wants` (no task in the scanner writes the note) is a
+//! - Unsatisfied `notes.wants` (no task in the plan writes the note) is a
 //!   planner *warning*, not an error. The task still runs.
 //! - Cycle detection runs at plan time over the full graph.
 //! - Worker pool: N tokio tasks pulling from an unbounded ready queue.
@@ -145,16 +145,17 @@ pub(crate) fn plan(
         node_index.insert((scanner_idx, task_name.clone()), node);
     }
 
-    // Build per-scanner `note_name -> [task_name]` index from `notes.writes`
-    let mut writes_index: Vec<HashMap<String, Vec<String>>> =
-        vec![HashMap::new(); scanner_tasks.len()];
+    // Build a plan-wide `note_name -> [(scanner_idx, task_name)]` index from
+    // `notes.writes`. Dependency resolution spans all scanners — a consumer
+    // in scanner A can depend on a producer in scanner B.
+    let mut writes_index: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for (scanner_idx, defs) in scanner_tasks.iter().enumerate() {
         for (task_name, def) in defs {
             for note_name in def.notes.writes.keys() {
-                writes_index[scanner_idx]
+                writes_index
                     .entry(note_name.clone())
                     .or_default()
-                    .push(task_name.clone());
+                    .push((scanner_idx, task_name.clone()));
             }
         }
     }
@@ -162,32 +163,33 @@ pub(crate) fn plan(
     // Wire dependencies.
     //
     // Each name in `notes.wants` is a *note name*. For every wanted note,
-    // find all tasks (within the same scanner) whose `notes.writes` includes
-    // that name, and add an edge from each producer to the consumer.
+    // find all tasks in the plan whose `notes.writes` includes that name,
+    // and add an edge from each producer to the consumer.
     //
-    // An unsatisfied `notes.wants` (no task in the scanner writes the note)
-    // is recorded as a warning, not an error — the consumer still
-    // runs.
+    // An unsatisfied `notes.wants` (no task in the plan writes the note)
+    // is recorded as a warning, not an error — the consumer still runs.
     for &(scanner_idx, task_name, def) in &planned {
         for want in &def.notes.wants {
-            let producers = writes_index[scanner_idx].get(want);
+            let producers = writes_index.get(want);
             let Some(producers) = producers else {
                 warnings.push(PlanWarning {
                     scanner: scanners[scanner_idx].name.clone(),
                     task: task_name.clone(),
-                    message: format!("wants note '{want}' but no task in this scanner writes it"),
+                    message: format!("wants note '{want}' but no task writes it"),
                 });
                 continue;
             };
-            for producer in producers {
-                if producer == task_name {
+            for (producer_scanner, producer_task) in producers {
+                if *producer_scanner == scanner_idx && producer_task == task_name {
                     // A task wanting a note it writes itself is a no-op
                     // dependency — would create a self-loop. Skip.
                     continue;
                 }
-                let from = *node_index.get(&(scanner_idx, producer.clone())).unwrap();
+                let from = *node_index
+                    .get(&(*producer_scanner, producer_task.clone()))
+                    .unwrap();
                 let to = *node_index.get(&(scanner_idx, task_name.clone())).unwrap();
-                graph.add_edge(from, to, ());
+                graph.update_edge(from, to, ());
             }
         }
     }
@@ -224,7 +226,6 @@ pub(crate) fn plan(
     }
     for d in &mut downstream {
         d.sort_unstable();
-        d.dedup();
     }
 
     Ok(Plan {
