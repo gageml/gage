@@ -1,6 +1,6 @@
 use minijinja::Environment;
-use rune::runtime::{Object, Value};
-use rune::{ContextError, Module};
+use rune::runtime::{Object, Ref, Value};
+use rune::{Any, ContextError, Module};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 use super::error::Error;
@@ -8,16 +8,44 @@ use super::query::{Entry, Message};
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function("render_template", |template: String, context: Object| {
-        do_render(template, context)
+        do_render(&template, context)
     })
     .build()?;
+
+    m.ty::<Template>()?;
+    m.function_meta(Template::new)?;
+    m.function_meta(render)?;
     Ok(())
 }
 
-fn do_render(template: String, context: Object) -> super::Result<String> {
+fn do_render(template: &str, context: Object) -> super::Result<String> {
     let env = Environment::empty();
-    let rendered = env.render_str(&template, SerObject(&context))?;
+    let rendered = env.render_str(template, SerObject(&context))?;
     Ok(rendered)
+}
+
+/// Pre-validated Jinja-style template source. `new` parses the source
+/// to surface syntax errors early; `render` substitutes a Rune object
+/// context using minijinja.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct Template {
+    #[rune(skip)]
+    source: String,
+}
+
+impl Template {
+    #[rune::function(path = Self::new)]
+    async fn new(source: String) -> super::Result<Self> {
+        let env = Environment::empty();
+        env.template_from_str(&source)?;
+        Ok(Template { source })
+    }
+}
+
+#[rune::function(instance)]
+async fn render(this: Ref<Template>, context: Object) -> super::Result<String> {
+    do_render(&this.source, context)
 }
 
 impl From<minijinja::Error> for Error {

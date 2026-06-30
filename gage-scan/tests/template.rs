@@ -271,3 +271,113 @@ fn message_missing_field_is_empty() {
     );
     assert_eq!(result, "no-sub");
 }
+
+fn run_rune_async(script: &str) -> rune::Value {
+    let rt = gage_scan::runner::TestRuntime::new();
+    let mut context = rune_modules::default_context().unwrap();
+    context.install(rt.types_module().unwrap()).unwrap();
+    context.install(rt.macros_module().unwrap()).unwrap();
+    context.install(rt.gage_module().unwrap()).unwrap();
+    context.install(rt.test_helpers_module().unwrap()).unwrap();
+    let runtime = RuneArc::try_new(context.runtime().unwrap()).unwrap();
+
+    let mut sources = Sources::new();
+    sources
+        .insert(Source::new("test", script).unwrap())
+        .unwrap();
+
+    let mut diagnostics = Diagnostics::new();
+    let result = rune::prepare(&mut sources)
+        .with_context(&context)
+        .with_diagnostics(&mut diagnostics)
+        .build();
+
+    if !diagnostics.is_empty() {
+        let mut writer =
+            rune::termcolor::StandardStream::stderr(rune::termcolor::ColorChoice::Auto);
+        diagnostics.emit(&mut writer, &sources).unwrap();
+    }
+
+    let unit = RuneArc::try_new(result.unwrap()).unwrap();
+    let mut vm = Vm::new(runtime, unit);
+    let rt_tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt_tokio.block_on(async move {
+        vm.execute(["main"], ())
+            .unwrap()
+            .async_complete()
+            .await
+            .unwrap()
+    })
+}
+
+fn run_template_async(script: &str) -> String {
+    let val = run_rune_async(script);
+    rune::from_value::<Result<String, rune::Value>>(val)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn template_struct_simple() {
+    let result = run_template_async(
+        r#"
+        use gage::Template;
+        pub async fn main() {
+            let t = Template::new("Hello {{ name }}!").await?;
+            t.render(#{ name: "world" }).await
+        }
+        "#,
+    );
+    assert_eq!(result, "Hello world!");
+}
+
+#[test]
+fn template_struct_reused() {
+    let result = run_template_async(
+        r#"
+        use gage::Template;
+        pub async fn main() {
+            let t = Template::new("n={{ n }}").await?;
+            let a = t.render(#{ n: 1 }).await?;
+            let b = t.render(#{ n: 2 }).await?;
+            Ok(`${a};${b}`)
+        }
+        "#,
+    );
+    assert_eq!(result, "n=1;n=2");
+}
+
+#[test]
+fn template_struct_parse_error_at_new() {
+    let val = run_rune_async(
+        r#"
+        use gage::{Template, Error};
+        pub async fn main() {
+            match Template::new("{% if %}").await {
+                Ok(_) => "ok",
+                Err(Error::Template(_)) => "template",
+                Err(_) => "other",
+            }
+        }
+        "#,
+    );
+    let result = rune::from_value::<String>(val).unwrap();
+    assert_eq!(result, "template");
+}
+
+#[test]
+fn template_struct_nested_context() {
+    let result = run_template_async(
+        r#"
+        use gage::Template;
+        pub async fn main() {
+            let t = Template::new("{{ msg.line }}: {{ msg.text }}").await?;
+            t.render(#{ msg: #{ line: 5, text: "hello" } }).await
+        }
+        "#,
+    );
+    assert_eq!(result, "5: hello");
+}

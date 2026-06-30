@@ -49,3 +49,53 @@ fn test_vec_combine() {
     let c = a.iter().chain(b).collect::<Vec>();
     assert_eq!(c, [1, 2]);
 }
+
+#[test]
+async fn test_template() {
+    use gage::Template;
+
+    // Simple template with no params
+    let t = Template::new("xyz").await.unwrap();
+    assert_eq!(t.render(#{}).await.unwrap(), "xyz");
+    assert_eq!(t.render(#{foo: 123}).await.unwrap(), "xyz");
+
+    // Single variable substitution
+    let t = Template::new("Hello, {{ name }}").await.unwrap();
+    assert_eq!(
+        t.render(#{ name: "Joe" }).await.unwrap(),
+        "Hello, Joe"
+    );
+    assert_eq!(
+        t.render(#{ name: "Mike" }).await.unwrap(),
+        "Hello, Mike"
+    );
+
+    // Missing variable renders empty
+    let t = Template::new("x={{ x }}").await.unwrap();
+    assert_eq!(t.render(#{}).await.unwrap(), "x=");
+
+    // Fallback
+    let t = Template::new("{{ foo or bar }}").await.unwrap();
+    assert_eq!(t.render(#{}).await.unwrap(), "");
+    assert_eq!(
+        t.render(#{foo: "foo", bar: "bar"}).await.unwrap(),
+        "foo"
+    );
+    assert_eq!(t.render(#{bar: "bar"}).await.unwrap(), "bar");
+
+    // Conditional
+    let t = Template::new("{% if a > 0 %}a{% else %}b{% endif %}")
+        .await
+        .unwrap();
+    assert_eq!(t.render(#{}).await.unwrap(), "b");
+    assert_eq!(t.render(#{a: 0}).await.unwrap(), "b");
+    assert_eq!(t.render(#{a: 1}).await.unwrap(), "a");
+}
+
+#[test]
+async fn test_template_parse_error() {
+    match gage::Template::new("{% if %}").await {
+        Err(gage::Error::Template(_)) => (),
+        other => panic!("expected Template error, got {:?}", other),
+    }
+}
