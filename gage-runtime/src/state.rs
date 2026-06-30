@@ -38,6 +38,12 @@ pub struct RunContext {
     /// is created so the dispatcher can hold a `Weak<RunContext>`
     /// without forming a strong cycle. Set once via [`OnceLock::set`].
     pub dispatcher: OnceLock<Arc<ToolDispatcher>>,
+    /// Run-wide cap on concurrent `call_agent` invocations. Every
+    /// `call_agent(...).await` acquires one permit before spawning the
+    /// claude child and holds it for the lifetime of the resulting
+    /// [`crate::agent::Agent`]. Configured via the CLI's
+    /// `--agent-jobs` flag.
+    pub agent_pool: Arc<tokio::sync::Semaphore>,
 }
 
 /// Per-task state injected via `tokio::task_local!`.

@@ -23,6 +23,8 @@ use gage_registry::scanner::{Scanner, ScannerRegistry};
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::style as s;
 
+const DEFAULT_AGENT_JOBS: usize = 8;
+
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct ScanArgs {
@@ -98,6 +100,10 @@ pub struct ScanRunArgs {
     /// Maximum concurrent task workers (defaults to number of CPUs)
     #[arg(short, long, value_name = "N")]
     jobs: Option<usize>,
+
+    /// Maximum concurrent agents (default 8)
+    #[arg(long, value_name = "N")]
+    agent_jobs: Option<usize>,
 
     /// Don't show progress
     #[arg(long)]
@@ -462,6 +468,7 @@ async fn run_dialog(
     // Run
     let started = std::time::Instant::now();
     let jobs = args.jobs.unwrap_or_else(num_cpus::get).max(1);
+    let agent_jobs = args.agent_jobs.unwrap_or(DEFAULT_AGENT_JOBS).max(1);
 
     // Enrich (id, path) → SessionInfo; the DataFusion-side context
     // built next is keyed off this set and exposes a `cached_session_count()`
@@ -547,6 +554,7 @@ async fn run_dialog(
         selected,
         scan_ctx,
         jobs,
+        agent_jobs,
         cancel.clone(),
         |event| {
             if let Some(ui) = progress.as_mut() {

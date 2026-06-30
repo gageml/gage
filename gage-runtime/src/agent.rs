@@ -131,6 +131,12 @@ pub(crate) struct Agent {
     /// when no tools were declared (no MCP server is running).
     #[rune(skip)]
     _service: Option<ServiceHandle>,
+    /// Permit from the run-wide `agent_pool` semaphore. Held for the
+    /// lifetime of this `Agent` (acquired in `do_call_agent` before
+    /// spawning the claude child); drop releases the slot for the next
+    /// queued `call_agent` invocation.
+    #[rune(skip)]
+    _permit: tokio::sync::OwnedSemaphorePermit,
     #[rune(skip)]
     inner: Arc<Mutex<AgentInner>>,
 }
@@ -1057,6 +1063,17 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         custom_tools,
     });
 
+    // Acquire a slot from the run-wide agent pool BEFORE doing any
+    // expensive setup (MCP register, sandbox materialization, child
+    // spawn). If the pool is saturated this awaits until a previously
+    // running agent finishes; resource use stays bounded by the user's
+    // `--agent-jobs`.
+    let pool = current_scan_ctx().run.agent_pool.clone();
+    let permit = pool
+        .acquire_owned()
+        .await
+        .expect("agent_pool is closed only at process shutdown");
+
     let tool_spec = build_tool_spec(&spec);
     let gage_tools_resolved = tool_spec.gage_tools.clone();
     let (mcp_url, service) = if tool_spec.gage_tools.is_empty() && tool_spec.custom_tools.is_empty()
@@ -1122,6 +1139,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         spec,
         mcp_url,
         _service: service,
+        _permit: permit,
         inner: Arc::new(Mutex::new(AgentInner {
             session: Some(session),
             event_buf: VecDeque::new(),
@@ -1264,8 +1282,11 @@ mod rmcp_json {
 
 /// Queue side of the concurrent agent driver. Built by the scanner via
 /// `AgentRunner::new()`, fed with `add(call_agent, context)`, and turned
-/// into an [`AgentRunnerResults`] via `start()`. Concurrency is fixed at
-/// [`AGENT_RUNNER_CONCURRENCY`]; the scanner has no knob on purpose.
+/// into an [`AgentRunnerResults`] via `start()`. Concurrency across all
+/// `call_agent` invocations (including those routed through `AgentRunner`)
+/// is bounded by the run-wide `agent_pool` semaphore configured via the
+/// CLI's `--agent-jobs` flag; the runner itself does not impose a separate
+/// cap.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub(crate) struct AgentRunner {
@@ -1275,14 +1296,11 @@ pub(crate) struct AgentRunner {
 
 /// Consumer side returned by [`AgentRunner::start`]. Each call to
 /// `next().await` yields the next completed run in completion order, or
-/// `None` once every queued agent has finished.
-///
-/// Concurrency is bounded by an internal semaphore: every queued run is
-/// pushed into the `FuturesUnordered` up front, but each future blocks on
-/// acquiring a permit before starting work. `next()` drives the futures
-/// inline — agents only make progress while the scanner is awaiting
-/// `next()`, which is acceptable since the inter-completion work
-/// (note writes) is fast relative to agent runtime.
+/// `None` once every queued agent has finished. Every queued future
+/// acquires its permit from the shared `agent_pool` inside
+/// `do_call_agent`, so the in-flight set is bounded by `--agent-jobs`.
+/// The futures execute inline on the scanner's task as it polls
+/// `next()`.
 type RunFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = super::Result<(AgentResult, Object)>>>>;
 
@@ -1292,9 +1310,6 @@ pub(crate) struct AgentRunnerResults {
     #[rune(skip)]
     futures: futures::stream::FuturesUnordered<RunFuture>,
 }
-
-/// Cap on agents driven concurrently by a single `AgentRunner`.
-const AGENT_RUNNER_CONCURRENCY: usize = 4;
 
 impl AgentRunner {
     #[rune::function(path = Self::new)]
@@ -1309,21 +1324,15 @@ fn runner_add(mut this: Mut<AgentRunner>, call: CallAgent, ctx: Object) {
 }
 
 /// Consume the runner and build its concurrent driver. Each queued call
-/// becomes one future in a `FuturesUnordered`; each future blocks on an
-/// `AGENT_RUNNER_CONCURRENCY`-permit semaphore before doing work, so only
-/// that many agents run at once. The futures execute inline on the
-/// caller's task as it polls `next()`.
+/// becomes one future in a `FuturesUnordered`; permit acquisition for
+/// the run-wide `agent_pool` happens inside `do_call_agent`, so only
+/// `--agent-jobs` claude processes spawn concurrently. The futures
+/// execute inline on the caller's task as it polls `next()`.
 #[rune::function(instance, path = start)]
 fn runner_start(this: AgentRunner) -> AgentRunnerResults {
-    let sem = Arc::new(tokio::sync::Semaphore::new(AGENT_RUNNER_CONCURRENCY));
     let futures = futures::stream::FuturesUnordered::new();
     for (call, ctx) in this.queue {
-        let sem = Arc::clone(&sem);
         let fut: RunFuture = Box::pin(async move {
-            let _permit = sem
-                .acquire_owned()
-                .await
-                .expect("AgentRunner semaphore should remain open for the run's lifetime");
             let result = call_and_wait(call).await;
             if let Err(e) = &result {
                 tracing::warn!(error = %e, "AgentRunner: agent run failed");

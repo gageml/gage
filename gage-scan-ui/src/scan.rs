@@ -160,6 +160,7 @@ pub async fn run_scan(setup: Setup, tx: mpsc::UnboundedSender<UiEvent>) -> Resul
         selected,
         scan_ctx,
         setup.jobs,
+        4,
         cancel,
         |event| match event {
             ScanEvent::Status(s) => {

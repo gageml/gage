@@ -120,6 +120,7 @@ pub async fn run_tests(
             scan_ctx: std::sync::Arc::new(ScanSessionContext::new(&stub_selected)),
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
+            agent_pool: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let stub_db = std::sync::Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();

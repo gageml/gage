@@ -72,12 +72,14 @@ impl From<gage_db::scan::ScanError> for RunError {
 /// they can query the resulting notes after the run completes — do not
 /// open a second connection for that, since separate WAL connections
 /// take snapshot reads.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     db: Arc<Mutex<Connection>>,
     scanners: Vec<Scanner<'_>>,
     selected: Arc<[SessionInfo]>,
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
+    agent_jobs: usize,
     cancel: CancellationToken,
     on_event: impl FnMut(ScanEvent) + Send,
 ) -> Result<RunSummary, RunError> {
@@ -142,6 +144,7 @@ pub async fn run(
         scan_ctx,
         mcp_host,
         dispatcher: std::sync::OnceLock::new(),
+        agent_pool: Arc::new(tokio::sync::Semaphore::new(agent_jobs)),
     });
     // Start the Rune tool dispatcher. Held by `RunContext` so scanners
     // can reach it through `current_scan_ctx().run.dispatcher`. The
@@ -377,6 +380,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             scan_ctx: Arc::new(ScanSessionContext::new(&stub_selected)),
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
+            agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -589,6 +593,7 @@ impl TestRuntime {
             scan_ctx: Arc::new(ScanSessionContext::new(&selected)),
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
+            agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         // Stub rt/unit/sources. Tests built through `with_scope` don't
