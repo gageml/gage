@@ -1,16 +1,19 @@
 use gage::{AgentRunner, Template, call_agent, scan, write_note};
 
 pub const SCANNER = #{
-    name: "session-finding",
-    description: "Evaluate sessions and write findings",
+    name: "general-issues",
+    description: "Scan sessions for general issues",
     tasks: #{
         findings: #{
             notes: #{
                 writes: #{
                     "session.finding": "Noteworthy finding in a session",
-                    "session.finding.summary": "Summary of session findings",
+                    "session.finding-summary": "Summary of session findings",
                 },
             },
+        },
+        issues: #{
+            notes: #{ wants: ["session.finding", "session.finding-summary"] },
         },
     },
 };
@@ -21,7 +24,11 @@ pub async fn findings() {
     for s in scan().sessions() {
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
-            call_agent(prompt).gage_tools(["Query"]).tools(findings_tools()),
+            call_agent(prompt)
+                .name("session-finding")
+                .gage_tools(["Query"])
+                .tools(findings_tools())
+                .model("small"),
             #{ session: s.id },
         );
     }
@@ -36,7 +43,7 @@ async fn write_summaries(results) {
             Some(Ok((result, #{ session }))) => {
                 write_note(
                     #{
-                        name: "session.finding.summary.",
+                        name: "session.finding-summary.",
                         target: #{ session },
                         value: result.text,
                         metadata: result.as_metadata(),
@@ -96,4 +103,22 @@ pub async fn write_finding(inputs) {
     )
     .await?;
     Ok(format!("Wrote note {}", note.id))
+}
+
+pub async fn issues() {
+    let agent = call_agent(include_str!("issues-prompt.md"))
+        .name("issue-writer")
+        .gage_tools(["Query", "IssueOpen"])
+        .model("large")
+        .await?;
+    let result = agent.wait().await?;
+    write_note(
+        #{
+            name: "issues.summary",
+            value: result.text,
+            target: #{ scan: scan().id },
+            metadata: result.as_metadata(),
+        },
+    )
+    .await?
 }

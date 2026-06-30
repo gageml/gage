@@ -2,7 +2,6 @@ use gage::{call_agent, Event::Assistant};
 
 pub const SCANNER = #{
     name: "user-reply",
-    hidden: true,
     description: "Test interactive agent loop",
     tasks: #{ user_reply: #{} },
 };

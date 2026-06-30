@@ -1,4 +1,4 @@
-session-finding: {{ session_id }}
+Session {{ session_id }}
 
 Look for issues in session {{ session_id }}. An "issue" is a well-understood
 underlying problem based on evidence in the session record.
