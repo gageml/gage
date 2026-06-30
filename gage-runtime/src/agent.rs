@@ -42,6 +42,8 @@ pub(crate) struct CallAgent {
     system_prompt: Option<String>,
     #[rune(skip)]
     append_system_prompt: Option<String>,
+    #[rune(skip)]
+    name: Option<String>,
     /// Deferred parse outcome for `.gage_tools(...)`. Stored as a
     /// `Result` so we can surface argument-shape errors at `await`
     /// time rather than build time.
@@ -62,6 +64,9 @@ pub(crate) struct CallSpec {
     pub append_system_prompt: Option<String>,
     pub gage_tools: GageTools,
     pub custom_tools: Vec<CustomToolDef>,
+    /// Sandbox name passed to [`GageAgentBuilder::name`]. `None`
+    /// leaves the builder default (`"default"`).
+    pub name: Option<String>,
 }
 
 /// What the spec selects from the built-in Gage tool set.
@@ -885,6 +890,12 @@ impl CallAgent {
     }
 
     #[rune::function(instance)]
+    fn name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    #[rune::function(instance)]
     fn gage_tools(mut self, list: Value) -> Self {
         self.gage_tools = Some(parse_gage_tools(list));
         self
@@ -1028,6 +1039,7 @@ fn call_agent(prompt: String) -> CallAgent {
         timeout_secs: None,
         system_prompt: None,
         append_system_prompt: None,
+        name: None,
         gage_tools: None,
         custom_tools: None,
     }
@@ -1041,6 +1053,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         timeout_secs,
         system_prompt,
         append_system_prompt,
+        name,
         gage_tools,
         custom_tools,
     } = c;
@@ -1061,6 +1074,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         append_system_prompt,
         gage_tools,
         custom_tools,
+        name,
     });
 
     // Acquire a slot from the run-wide agent pool BEFORE doing any
@@ -1104,6 +1118,9 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         auto_allow.push(def.mcp_name.clone());
     }
     let mut builder = GageAgentBuilder::new().tools(auto_allow).scan_id(&scan_id);
+    if let Some(n) = &spec.name {
+        builder = builder.name(n.clone());
+    }
     // Sandbox materialization gated by tool declarations: no tools →
     // pure text-in/text-out → skip the heavy sqlite + session
     // hardlink setup. Tools declared → restrict to the running scan's
@@ -1413,6 +1430,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(CallAgent::timeout)?;
     m.function_meta(CallAgent::system_prompt)?;
     m.function_meta(CallAgent::append_system_prompt)?;
+    m.function_meta(CallAgent::name)?;
     m.function_meta(CallAgent::gage_tools)?;
     m.function_meta(CallAgent::tools)?;
     m.function_meta(call_agent)?;
