@@ -54,7 +54,7 @@ struct Cli {
     /// Log level for gage modules
     ///
     /// Levels: trace, debug, info, warn, error. Overrides GAGE_LOG.
-    #[arg(long, global = true, value_name = "LEVEL")]
+    #[arg(long, value_name = "LEVEL")]
     log: Option<String>,
 
     #[command(subcommand)]
@@ -100,7 +100,7 @@ enum Command {
         /// Operate on agent sessions instead of Claude Code sessions
         ///
         /// Agent sessions live under `<gage_home>/claude`.
-        #[arg(short = 'A', long, global = true)]
+        #[arg(short = 'A', long)]
         agent: bool,
 
         #[command(subcommand)]

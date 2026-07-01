@@ -1,6 +1,5 @@
 //! `gage agent` — UI surface over the `gage-agent` crate.
 
-use std::collections::HashSet;
 use std::time::Duration;
 
 use std::sync::Arc;
@@ -8,7 +7,7 @@ use std::sync::Arc;
 use clap::Args;
 use cliclack as cli;
 use gage_agent::{AgentBuilder, TOOL_NAMES, ToolPolicy};
-use gage_claude::session;
+use gage_claude::session::{self, SessionListBuilder};
 use gage_db::scan::{Scan, insert_scan, insert_scan_session};
 use gage_mcp::{McpHost, ToolSpec, build_mcp_service};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -17,17 +16,29 @@ use crate::dialog::{self, DialogError, DialogResult};
 
 #[derive(Args)]
 pub struct AgentArgs {
-    /// Run agent for specified session IDs only (or prefix)
+    /// Scope agent to specified session IDs only (or prefix)
     ///
     /// If omitted, all available sessions are available to the agent.
-    #[arg(value_name = "SESSION")]
+    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "all"])]
     pub sessions: Vec<String>,
+
+    /// Scope to most recent N sessions
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "all"])]
+    pub limit: Option<usize>,
+
+    /// Scope to sessions modified in past N days (default 30)
+    #[arg(short, long, value_name = "N", conflicts_with = "all")]
+    pub days: Option<u32>,
+
+    /// Scope to all sessions
+    #[arg(short, long)]
+    pub all: bool,
 
     /// Agent name
     ///
     /// This value is used as the session project name in listings to
     /// differentiate agent session types. Defaults to "default".
-    #[arg(short, long)]
+    #[arg(long)]
     pub name: Option<String>,
 
     /// Initial agent prompt
@@ -56,7 +67,7 @@ pub struct AgentArgs {
 }
 
 pub async fn run(args: AgentArgs) {
-    let sessions = match resolve_sessions(&args.sessions) {
+    let sessions = match resolve_sessions(&args) {
         Ok(s) => s,
         Err(()) => std::process::exit(1),
     };
@@ -186,16 +197,8 @@ fn start_spinner(message: &str) -> ProgressBar {
 }
 
 /// Insert a fresh `scan` row and populate `scan_session` with the ids
-/// the agent has access to. `sessions = None` means the invocation
-/// was unrestricted, so every session on disk is linked.
-fn register_scan(sessions: Option<HashSet<String>>) -> Result<String, String> {
-    let ids: Vec<String> = match sessions {
-        Some(set) => set.into_iter().collect(),
-        None => session::ls_sessions()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect(),
-    };
+/// the agent has access to.
+fn register_scan(ids: Vec<String>) -> Result<String, String> {
     let conn = gage_db::db::open_db().map_err(|e| format!("open db: {e}"))?;
     let scan_id = gage_core::uuid::new_uuid();
     insert_scan(
@@ -214,29 +217,42 @@ fn register_scan(sessions: Option<HashSet<String>>) -> Result<String, String> {
     Ok(scan_id)
 }
 
-/// Resolve user-supplied session prefixes to full ids. `Ok(None)`
-/// means no selectors were given (full-corpus scope); `Ok(Some(set))`
-/// is the explicit allowlist. Diagnostics for each unresolved prefix
-/// are written to stderr; any failure yields `Err(())`.
-fn resolve_sessions(prefixes: &[String]) -> Result<Option<HashSet<String>>, ()> {
-    if prefixes.is_empty() {
-        return Ok(None);
-    }
-    let mut ids = HashSet::new();
-    let mut failed = false;
-    for prefix in prefixes {
-        match session::one_session(prefix) {
-            Ok(s) => {
-                ids.insert(s.id);
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                failed = true;
+/// Resolve session scope to a concrete list of ids. Explicit prefixes
+/// take precedence; otherwise falls back to `--limit` / `--days` /
+/// `--all`, defaulting to sessions modified in the past 30 days.
+/// Diagnostics for each unresolved prefix are written to stderr; any
+/// failure yields `Err(())`.
+fn resolve_sessions(args: &AgentArgs) -> Result<Vec<String>, ()> {
+    if !args.sessions.is_empty() {
+        let mut ids = Vec::new();
+        let mut failed = false;
+        for prefix in &args.sessions {
+            match session::one_session(prefix) {
+                Ok(s) => ids.push(s.id),
+                Err(e) => {
+                    eprintln!("{e}");
+                    failed = true;
+                }
             }
         }
+        if failed {
+            return Err(());
+        }
+        return Ok(ids);
     }
-    if failed {
-        return Err(());
+
+    let days = if args.all || args.limit.is_some() {
+        None
+    } else {
+        Some(args.days.unwrap_or(30))
+    };
+
+    let mut builder = SessionListBuilder::new();
+    if let Some(d) = days {
+        builder = builder.since(Duration::from_secs(u64::from(d) * 86_400));
     }
-    Ok(Some(ids))
+    if let Some(n) = args.limit {
+        builder = builder.limit(n);
+    }
+    Ok(builder.build().into_iter().map(|s| s.id).collect())
 }
