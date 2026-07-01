@@ -1,9 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use gage_core::uuid::{new_uuid, short_uuid};
+use gage_core::uuid::short_uuid;
 use gage_db::db::open_db;
-use gage_db::issue::{self, Issue, IssueEvidence, IssueStatus};
+use gage_db::issue::{self, Issue, IssueEvidence};
 use gage_db::note;
 use gage_db::scan::insert_scan_issue;
 use rmcp::{
@@ -53,21 +53,8 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         evidence_notes.push(n);
     }
 
-    let now = gage_core::datetime::now_ms();
-    let id = new_uuid();
-    let name = format!("judge.{}", short_uuid(&id));
-    let issue_row = Issue {
-        id: id.clone(),
-        name,
-        target,
-        title,
-        description,
-        status: IssueStatus::Open,
-        closed_reason: None,
-        created: now,
-        modified: None,
-        author,
-    };
+    let issue_row = Issue::new(target, "issue.", title, description, &author);
+    let now = issue_row.created;
 
     issue::insert(&conn, &issue_row).map_err(|e| match e {
         issue::IssueError::Duplicate(prev) => McpError::internal_error(

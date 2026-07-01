@@ -194,6 +194,41 @@ impl std::fmt::Display for IssueError {
 
 impl std::error::Error for IssueError {}
 
+impl Issue {
+    /// Build a new open issue.
+    ///
+    /// A trailing `.` in `name` is expanded to an 8-char suffix derived from
+    /// the generated id, so callers can ask for a unique name (e.g.
+    /// `"judge."` → `"judge.abcd1234"`) without threading the id back
+    /// through the caller.
+    pub fn new(
+        target: String,
+        name: &str,
+        title: String,
+        description: Option<String>,
+        author: &str,
+    ) -> Self {
+        let id = gage_core::uuid::new_uuid();
+        let name = if name.ends_with('.') {
+            format!("{name}{}", gage_core::uuid::short_uuid(&id))
+        } else {
+            name.to_string()
+        };
+        Issue {
+            id,
+            name,
+            target,
+            title,
+            description,
+            status: IssueStatus::Open,
+            closed_reason: None,
+            created: gage_core::datetime::now_ms(),
+            modified: None,
+            author: author.to_string(),
+        }
+    }
+}
+
 const ISSUE_COLUMNS: &str =
     "id, name, target, title, description, status, closed_reason, created, modified, author";
 
