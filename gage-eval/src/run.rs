@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
-use uuid::Uuid;
 
 use crate::eval::Test;
 use crate::score::{self, Score};
@@ -63,7 +62,7 @@ pub fn run_batch(
     note: Option<&str>,
     mut on_event: impl FnMut(Event<'_>),
 ) -> io::Result<RunResult> {
-    let run_id = Uuid::new_v4().to_string();
+    let run_id = gage_core::uuid::new_uuid();
     let started_at = now_iso();
     let names: Vec<String> = tests.iter().map(|t| t.id()).collect();
 
