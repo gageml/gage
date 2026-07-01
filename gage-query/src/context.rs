@@ -113,9 +113,14 @@ async fn build_context(
     );
     ctx.register_udtf("issue_report", Arc::new(IssueReportFn::new()));
 
-    register_disk_table(&ctx, "session", "id", ScopeEdge::Session, &agent_scan_id, || {
-        Arc::new(SessionTable::new(store.clone()))
-    });
+    register_disk_table(
+        &ctx,
+        "session",
+        "id",
+        ScopeEdge::Session,
+        &agent_scan_id,
+        || Arc::new(SessionTable::new(store.clone())),
+    );
     register_disk_table(
         &ctx,
         "entry",

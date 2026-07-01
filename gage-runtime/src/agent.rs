@@ -12,9 +12,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use gage_agent::{
-    AgentBuilder as GageAgentBuilder, SandboxSpec, StreamMessage, StreamingAgentSession,
-};
+use gage_agent::{AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgentSession};
 use gage_mcp::{CustomToolCallback, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
@@ -1121,16 +1119,6 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     if let Some(n) = &spec.name {
         builder = builder.name(n.clone());
     }
-    // Sandbox materialization gated by tool declarations: no tools →
-    // pure text-in/text-out → skip the heavy sqlite + session
-    // hardlink setup. Tools declared → restrict to the running scan's
-    // rows.
-    if mcp_url.is_some() {
-        let sandbox = scan_sandbox_spec(&scan_id).map_err(Error::Agent)?;
-        builder = builder.sandbox(sandbox);
-    } else {
-        builder = builder.no_sandbox();
-    }
     if let Some(url) = &mcp_url {
         builder = builder.mcp_url(url.clone());
     }
@@ -1166,31 +1154,6 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
             final_result: None,
             pending_tasks: HashSet::new(),
         })),
-    })
-}
-
-/// Restrict the agent's sandbox to the running scan's rows. Reads the
-/// canonical gage db once for the scan-session / scan-note / scan-issue
-/// sets that already exist.
-fn scan_sandbox_spec(scan_id: &str) -> Result<SandboxSpec, String> {
-    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
-    let sessions: HashSet<String> = gage_db::scan::session_ids_for_scan(&conn, scan_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .collect();
-    let notes: HashSet<String> = gage_db::scan::note_ids_for_scan(&conn, scan_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .collect();
-    let issues: HashSet<String> = gage_db::scan::issue_ids_for_scan(&conn, scan_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .collect();
-    Ok(SandboxSpec {
-        sessions: Some(sessions),
-        notes: Some(notes),
-        issues: Some(issues),
-        scan: Some(scan_id.to_string()),
     })
 }
 
