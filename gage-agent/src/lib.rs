@@ -248,10 +248,10 @@ impl Agent {
 
     /// Spawn the child claude interactively (inherits stdio) and block
     /// until it exits. Calls [`Agent::init`] if not already done.
-    pub fn run(mut self, prompt: Option<String>) -> io::Result<ExitStatus> {
+    pub fn run(mut self) -> io::Result<ExitStatus> {
         self.init()?;
         let prep = self.prep.take().unwrap();
-        run_interactive(prep, self.model, self.scan_id, self.mcp_url, prompt)
+        run_interactive(prep, self.model, self.scan_id, self.mcp_url)
     }
 
     /// Spawn the child claude non-interactively with stream-json input
@@ -292,7 +292,6 @@ fn run_interactive(
     model: Option<String>,
     scan_id: Option<String>,
     mcp_url: Option<String>,
-    prompt: Option<String>,
 ) -> io::Result<ExitStatus> {
     let projects_dir = prep.claude_home.join("projects");
 
@@ -332,9 +331,6 @@ fn run_interactive(
     }
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
-    }
-    if let Some(prompt) = &prompt {
-        cmd.arg(prompt);
     }
     let status = cmd.status();
 

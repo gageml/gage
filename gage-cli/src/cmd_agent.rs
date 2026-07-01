@@ -149,7 +149,7 @@ pub async fn run(args: AgentArgs) {
         std::process::exit(1);
     }
     spinner.finish_and_clear();
-    match agent.run(None) {
+    match agent.run() {
         Ok(status) => {
             drop(_service_handle);
             drop(host);
