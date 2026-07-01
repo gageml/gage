@@ -1,0 +1,17 @@
+use gage::call_agent;
+
+pub const SCANNER = #{
+    name: "query",
+    description: "Use Query to answer a question",
+    tasks: #{ query: #{} },
+};
+
+/// Ask a question with Query tool available.
+pub async fn query() {
+    let agent = call_agent("How many sessions are there?")
+        .gage_tools(["Query"])
+        .model("small")
+        .await?;
+    let out = agent.wait().await?;
+    println!("## query # {out:?}");
+}
