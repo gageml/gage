@@ -79,7 +79,7 @@ pub async fn issue() {
 }
 
 async fn latest_evidence() {
-    let notes = scan().notes().with_name("thinking.empty").await?;
+    let notes = scan().notes().names(["thinking.empty"]).await?;
     if notes.is_empty() {
         return Ok(None);
     }

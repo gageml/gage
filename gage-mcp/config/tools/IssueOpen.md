@@ -29,8 +29,7 @@ idempotent_hint = false
 
 Use to open a new issue for a finding you have judged from the evidence.
 
-Open one issue per distinct finding. Include the note IDs that support
-the finding in `evidence` so the judgment links back to the evidence it
-rests on.
+Open one issue per distinct finding. Include the note IDs that support the
+finding in `evidence` so the judgment links back to the evidence it rests on.
 
 ---eof-789---

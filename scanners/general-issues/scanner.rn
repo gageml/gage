@@ -2,6 +2,7 @@ use gage::{AgentRunner, Template, call_agent, scan, write_note};
 
 pub const SCANNER = #{
     name: "general-issues",
+    generation: 1,
     description: "Scan sessions for general issues",
     tasks: #{
         findings: #{
@@ -21,6 +22,7 @@ pub const SCANNER = #{
 pub async fn findings() {
     let t = Template::new(include_str!("findings-prompt.md")).await?;
     let runner = AgentRunner::new();
+    let memo_key = (SCANNER.name, SCANNER.generation);
     for s in scan().sessions() {
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
