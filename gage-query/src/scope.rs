@@ -2,24 +2,19 @@
 //! context resolves to rows linked to a single `scan_id` via the
 //! `scan_session` / `scan_note` / `scan_issue` edge tables.
 //!
-//! Two wrapper types apply the scope at the layer that suits each
-//! backend:
+//! [`ScopedTable`] wraps a [`TableProvider`] and prepends an
+//! `id IN (…)` expression to the filter list on every `scan()`
+//! before delegating to the inner provider. For disk-backed
+//! providers (`session` / `entry` / `message`) the inner provider's
+//! `IdFilter` consumes the expression against its cached listing —
+//! no SQL. For sqlite-backed providers the inner provider unparses
+//! the expression into `WHERE id IN (?, ?, …)` bound parameters,
+//! sized under `SQLITE_LIMIT_VARIABLE_NUMBER` (32k+ on modern
+//! builds).
 //!
-//! - [`ScopedTable`] wraps a disk-backed [`TableProvider`] (the
-//!   JSONL-driven `session` / `entry` / `message` providers). The
-//!   wrapper resolves the in-scope id set at `scan()` time and
-//!   prepends an `id IN (…)` expression to the filter list before
-//!   delegating to the inner provider. The inner provider's
-//!   `IdFilter` consumes the expression; no SQL crosses the boundary.
-//!
-//! - [`ScopedSqliteSource`] (see [`crate::scope::sqlite`]) plugs into
-//!   the federation rewrite layer for sqlite-backed providers. Its
-//!   `logical_optimizer` hook injects the same scope filter into the
-//!   logical plan the federation rule unparses into SQL.
-//!
-//! The id set is resolved per query (per `scan()` for [`ScopedTable`],
-//! per logical-optimizer invocation for [`ScopedSqliteSource`]) so
-//! the scope stays live as the scan grows during the agent's run.
+//! The id set is resolved per query (one indexed lookup against the
+//! matching `scan_xxx` table per `scan()` call) so the scope stays
+//! live as the scan grows during the agent's run.
 
 use std::any::Any;
 use std::fmt;
@@ -34,8 +29,6 @@ use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
-
-pub mod sqlite;
 
 /// Which `scan_xxx` edge a [`Scope`] reads. Each variant points at one
 /// table whose `scan_id` column is the predicate and whose paired
@@ -91,7 +84,7 @@ impl Scope {
 }
 
 /// Build `<col> IN (<id1>, <id2>, …)` over Utf8 literals.
-pub(crate) fn in_list_expr(col: Expr, ids: &[String]) -> Expr {
+fn in_list_expr(col: Expr, ids: &[String]) -> Expr {
     let list = ids
         .iter()
         .map(|id| Expr::Literal(ScalarValue::Utf8(Some(id.clone())), None))

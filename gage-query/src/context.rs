@@ -6,17 +6,12 @@ use datafusion::datasource::TableProvider;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::TableReference;
-use datafusion_federation::FederatedTableProviderAdaptor;
-use datafusion_federation::sql::{SQLFederationProvider, SQLTableSource};
 use datafusion_table_providers::sql::db_connection_pool::Mode;
-use datafusion_table_providers::sql::db_connection_pool::dbconnection::get_schema;
 use datafusion_table_providers::sql::db_connection_pool::sqlitepool::SqliteConnectionPoolFactory;
-use datafusion_table_providers::sqlite::DynSqliteConnectionPool;
-use datafusion_table_providers::sqlite::sql_table::SQLiteTable;
+use datafusion_table_providers::sqlite::SqliteTableFactory;
 use gage_index::IndexStore;
 
 use crate::cache::SessionCache;
-use crate::scope::sqlite::ScopedSqliteSource;
 use crate::scope::{Scope, ScopeEdge, ScopedTable};
 use crate::tables::config::ConfigTable;
 use crate::tables::entry::EntryTable;
@@ -101,13 +96,9 @@ async fn build_context(
         .with_information_schema(true)
         .with_extension(Arc::clone(&cache))
         .set_str("datafusion.sql_parser.dialect", "PostgreSQL");
-    // Federation rules + query planner so sqlite-only sub-plans are
-    // rewritten into a single SQL query handed to sqlite.
     let state = SessionStateBuilder::new()
         .with_config(config)
         .with_default_features()
-        .with_optimizer_rules(datafusion_federation::default_optimizer_rules())
-        .with_query_planner(Arc::new(datafusion_federation::FederatedQueryPlanner::new()))
         .build();
     let ctx = SessionContext::new_with_state(state);
     install_udfs(&ctx);
@@ -179,36 +170,15 @@ fn register_disk_table(
 }
 
 /// Register the sqlite-backed tables (`note`, `session_note`, `issue`,
-/// `issue_evidence`) wrapped in `FederatedTableProviderAdaptor` so the
-/// `FederationOptimizerRule` rewrites multi-table sqlite sub-plans
-/// into a single SQL query executed by sqlite. When `agent_scan_id`
-/// is `Some`, each registration uses a [`ScopedSqliteSource`] whose
-/// `logical_optimizer` injects the scope predicate into that single
-/// SQL query.
+/// `issue_evidence`) via `SqliteTableFactory`. Each provider uses the
+/// standard DataFusion pushdown surface — filters, projection, and
+/// limit reach sqlite as `WHERE` / `SELECT col…` / `LIMIT` in the
+/// per-scan SQL. When `agent_scan_id` is `Some`, each provider is
+/// wrapped in [`ScopedTable`] with the matching `scan_xxx` edge; the
+/// wrapper prepends `id IN (…)` to every scan and the sqlite provider
+/// unparses it into the pushed-down SQL alongside any caller filters.
 async fn register_sqlite_tables(ctx: &SessionContext, agent_scan_id: Option<&str>) {
-    let pool = sqlite_pool().await;
-    for (name, id_col, edge) in SCOPED_SQLITE_TABLES {
-        let provider = match agent_scan_id {
-            Some(scan_id) => {
-                scoped_federated_sqlite_table(&pool, name, id_col, Scope::new(scan_id, *edge)).await
-            }
-            None => federated_sqlite_table(&pool, name).await,
-        };
-        ctx.register_table(*name, provider).unwrap();
-    }
-}
-
-/// The sqlite-backed tables, with the column used for scope filtering
-/// and the `scan_xxx` edge that supplies the in-scope id set.
-const SCOPED_SQLITE_TABLES: &[(&str, &'static str, ScopeEdge)] = &[
-    ("note", "id", ScopeEdge::Note),
-    ("session_note", "note_id", ScopeEdge::Note),
-    ("issue", "id", ScopeEdge::Issue),
-    ("issue_evidence", "issue_id", ScopeEdge::Issue),
-];
-
-async fn sqlite_pool() -> Arc<DynSqliteConnectionPool> {
-    Arc::new(
+    let factory = SqliteTableFactory::new(Arc::new(
         SqliteConnectionPoolFactory::new(
             gage_db::db::db_path().to_string_lossy().as_ref(),
             Mode::File,
@@ -217,66 +187,25 @@ async fn sqlite_pool() -> Arc<DynSqliteConnectionPool> {
         .build()
         .await
         .expect("sqlite connection pool"),
-    )
-}
-
-async fn fetch_sqlite_schema(
-    pool: &Arc<DynSqliteConnectionPool>,
-    table_ref: &TableReference,
-) -> datafusion::arrow::datatypes::SchemaRef {
-    let name = table_ref.table();
-    let conn = pool
-        .connect()
-        .await
-        .unwrap_or_else(|e| panic!("sqlite connect for {name}: {e}"));
-    get_schema(conn, table_ref)
-        .await
-        .unwrap_or_else(|e| panic!("sqlite schema for {name}: {e}"))
-}
-
-async fn federated_sqlite_table(
-    pool: &Arc<DynSqliteConnectionPool>,
-    name: &str,
-) -> Arc<dyn TableProvider> {
-    let table_ref = TableReference::bare(name);
-    let schema = fetch_sqlite_schema(pool, &table_ref).await;
-    let read_provider = Arc::new(SQLiteTable::new_with_schema(pool, schema, table_ref));
-    Arc::new(
-        read_provider
-            .create_federated_table_provider()
-            .unwrap_or_else(|e| panic!("federated provider for {name}: {e}")),
-    )
-}
-
-/// Build a federated provider whose `SQLTable` impl injects the
-/// scope predicate at federation rewrite time. Federation produces
-/// the SQL with the scope filter included; the wrapped
-/// [`ScopedTable`] fallback applies the same predicate at `scan()`
-/// time when federation declines to rewrite the sub-plan.
-async fn scoped_federated_sqlite_table(
-    pool: &Arc<DynSqliteConnectionPool>,
-    name: &str,
-    id_col: &'static str,
-    scope: Scope,
-) -> Arc<dyn TableProvider> {
-    let table_ref = TableReference::bare(name);
-    let schema = fetch_sqlite_schema(pool, &table_ref).await;
-    let sqlite_table = Arc::new(SQLiteTable::new_with_schema(
-        pool,
-        schema.clone(),
-        table_ref.clone(),
     ));
-    let fed_provider = Arc::new(SQLFederationProvider::new(sqlite_table.clone()));
-    let scoped_source = Arc::new(ScopedSqliteSource::new(
-        table_ref,
-        schema,
-        id_col,
-        scope.clone(),
-    ));
-    let table_source = Arc::new(SQLTableSource::new_with_table(fed_provider, scoped_source));
-    let fallback: Arc<dyn TableProvider> = Arc::new(ScopedTable::new(sqlite_table, id_col, scope));
-    Arc::new(FederatedTableProviderAdaptor::new_with_provider(
-        table_source,
-        fallback,
-    ))
+    for (name, id_col, edge) in SCOPED_SQLITE_TABLES {
+        let inner = factory
+            .table_provider(TableReference::bare(*name))
+            .await
+            .unwrap_or_else(|e| panic!("sqlite table provider for {name}: {e}"));
+        let provider: Arc<dyn TableProvider> = match agent_scan_id {
+            Some(scan_id) => Arc::new(ScopedTable::new(inner, id_col, Scope::new(scan_id, *edge))),
+            None => inner,
+        };
+        ctx.register_table(*name, provider).unwrap();
+    }
 }
+
+/// The sqlite-backed tables, with the column used for scope filtering
+/// and the `scan_xxx` edge that supplies the in-scope id set.
+const SCOPED_SQLITE_TABLES: &[(&str, &str, ScopeEdge)] = &[
+    ("note", "id", ScopeEdge::Note),
+    ("session_note", "note_id", ScopeEdge::Note),
+    ("issue", "id", ScopeEdge::Issue),
+    ("issue_evidence", "issue_id", ScopeEdge::Issue),
+];

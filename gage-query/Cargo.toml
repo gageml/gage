@@ -8,9 +8,8 @@ arrow = { workspace = true, features = ["prettyprint"] }
 async-trait = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
-datafusion-federation = "0.4"
 datafusion-functions-json = "0.52"
-datafusion-table-providers = { version = "0.10.1", features = ["sqlite", "sqlite-federation"] }
+datafusion-table-providers = { version = "0.10.1", features = ["sqlite"] }
 chrono = { workspace = true }
 futures = { workspace = true }
 gage-core = { path = "../gage-core" }
