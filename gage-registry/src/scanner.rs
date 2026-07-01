@@ -31,6 +31,8 @@ pub fn scanner_home_paths() -> Vec<PathBuf> {
 
 pub fn extract_scanners() -> std::io::Result<()> {
     let dir = scanners_dir();
+    assert!(dir.ends_with("lib/scanners"));
+    gage_core::fs::remove_checked_dir_all(&dir)?;
     for path in Scanners::iter() {
         let file = Scanners::get(&path).expect("embedded key exists");
         let target = dir.join(path.as_ref());
