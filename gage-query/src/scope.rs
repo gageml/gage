@@ -12,9 +12,9 @@
 //! sized under `SQLITE_LIMIT_VARIABLE_NUMBER` (32k+ on modern
 //! builds).
 //!
-//! The id set is resolved per query (one indexed lookup against the
-//! matching `scan_xxx` table per `scan()` call) so the scope stays
-//! live as the scan grows during the agent's run.
+//! `scan_session` is fixed for the run and its id set is resolved
+//! once at [`Scope`] construction. `scan_note` and `scan_issue` grow
+//! as the agent writes; their id sets are resolved per query.
 
 use std::any::Any;
 use std::fmt;
@@ -44,42 +44,61 @@ pub enum ScopeEdge {
     Issue,
 }
 
-/// The set of ids visible to one agent run. Cheap to clone; the id
-/// list is not stored — `load_ids` runs one indexed sqlite SELECT per
-/// call so the scope reflects rows added during the run.
+/// The set of ids visible to one agent run. Cheap to clone. The
+/// `scan_session` set is loaded once at construction; `scan_note` and
+/// `scan_issue` sets are loaded per query.
 #[derive(Clone, Debug)]
 pub struct Scope {
     scan_id: String,
     edge: ScopeEdge,
+    session_ids: Option<Arc<[String]>>,
 }
 
 impl Scope {
-    pub fn new(scan_id: impl Into<String>, edge: ScopeEdge) -> Self {
-        Self {
-            scan_id: scan_id.into(),
+    /// Build a scope for `scan_id` on `edge`. For [`ScopeEdge::Session`]
+    /// this loads the fixed session id set now.
+    pub fn resolve(scan_id: impl Into<String>, edge: ScopeEdge) -> DfResult<Self> {
+        let scan_id = scan_id.into();
+        let session_ids = match edge {
+            ScopeEdge::Session => {
+                let conn = gage_db::db::open_db().map_err(external)?;
+                let ids = gage_db::scan::session_ids_for_scan(&conn, &scan_id).map_err(external)?;
+                Some(Arc::from(ids))
+            }
+            ScopeEdge::Note | ScopeEdge::Issue => None,
+        };
+        Ok(Self {
+            scan_id,
             edge,
-        }
-    }
-
-    pub fn scan_id(&self) -> &str {
-        &self.scan_id
+            session_ids,
+        })
     }
 
     pub fn edge(&self) -> ScopeEdge {
         self.edge
     }
 
-    /// Resolve the in-scope id set against the canonical sqlite. One
-    /// indexed lookup against the matching `scan_xxx` table.
+    /// The in-scope session id set. Valid only for [`ScopeEdge::Session`].
+    pub fn session_ids(&self) -> &[String] {
+        self.session_ids
+            .as_deref()
+            .expect("session_ids requires ScopeEdge::Session")
+    }
+
+    /// Load the in-scope note or issue id set from the matching
+    /// `scan_xxx` table. Not valid for [`ScopeEdge::Session`] — use
+    /// [`Scope::session_ids`].
     pub fn load_ids(&self) -> DfResult<Vec<String>> {
         let conn = gage_db::db::open_db().map_err(external)?;
-        let ids = match self.edge {
-            ScopeEdge::Session => gage_db::scan::session_ids_for_scan(&conn, &self.scan_id),
-            ScopeEdge::Note => gage_db::scan::note_ids_for_scan(&conn, &self.scan_id),
-            ScopeEdge::Issue => gage_db::scan::issue_ids_for_scan(&conn, &self.scan_id),
+        match self.edge {
+            ScopeEdge::Session => unreachable!("use session_ids() for ScopeEdge::Session"),
+            ScopeEdge::Note => {
+                gage_db::scan::note_ids_for_scan(&conn, &self.scan_id).map_err(external)
+            }
+            ScopeEdge::Issue => {
+                gage_db::scan::issue_ids_for_scan(&conn, &self.scan_id).map_err(external)
+            }
         }
-        .map_err(external)?;
-        Ok(ids)
     }
 }
 
@@ -152,8 +171,15 @@ impl TableProvider for ScopedTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let ids = self.scope.load_ids()?;
-        let scope_filter = in_list_expr(Expr::Column(Column::new_unqualified(self.id_col)), &ids);
+        let owned;
+        let ids: &[String] = match self.scope.edge() {
+            ScopeEdge::Session => self.scope.session_ids(),
+            ScopeEdge::Note | ScopeEdge::Issue => {
+                owned = self.scope.load_ids()?;
+                &owned
+            }
+        };
+        let scope_filter = in_list_expr(Expr::Column(Column::new_unqualified(self.id_col)), ids);
         let mut combined = Vec::with_capacity(filters.len() + 1);
         combined.push(scope_filter);
         combined.extend_from_slice(filters);

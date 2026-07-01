@@ -168,7 +168,11 @@ fn register_disk_table(
 ) {
     let inner = make_inner();
     let provider: Arc<dyn TableProvider> = match agent_scan_id {
-        Some(scan_id) => Arc::new(ScopedTable::new(inner, id_col, Scope::new(scan_id, edge))),
+        Some(scan_id) => Arc::new(ScopedTable::new(
+            inner,
+            id_col,
+            Scope::resolve(scan_id, edge).expect("resolve scope"),
+        )),
         None => inner,
     };
     ctx.register_table(name, provider).unwrap();
@@ -199,7 +203,11 @@ async fn register_sqlite_tables(ctx: &SessionContext, agent_scan_id: Option<&str
             .await
             .unwrap_or_else(|e| panic!("sqlite table provider for {name}: {e}"));
         let provider: Arc<dyn TableProvider> = match agent_scan_id {
-            Some(scan_id) => Arc::new(ScopedTable::new(inner, id_col, Scope::new(scan_id, *edge))),
+            Some(scan_id) => Arc::new(ScopedTable::new(
+                inner,
+                id_col,
+                Scope::resolve(scan_id, *edge).expect("resolve scope"),
+            )),
             None => inner,
         };
         ctx.register_table(*name, provider).unwrap();
