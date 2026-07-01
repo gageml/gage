@@ -6,6 +6,7 @@ use cliclack as cli;
 use gage_claude::plugin;
 use gage_claude::proc::find_claude;
 use gage_core::config::plugin_marketplace_dir;
+use gage_db::db::{db_path, open_db};
 use gage_db::import::{ImportReport, import};
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -81,6 +82,16 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
             return Err(DialogError::Canceled);
         }
     }
+
+    let db_spinner = crate::style::spinner("Initializing database");
+    let db_result = open_db();
+    db_spinner.finish_and_clear();
+    db_result.map_err(|e| {
+        DialogError::Other(anyhow::anyhow!(
+            "failed to initialize database at {}: {e}",
+            db_path().display()
+        ))
+    })?;
 
     let gage_bin = std::env::current_exe()?;
     plugin::write_plugin_files_to(&marketplace, &gage_bin)?;
