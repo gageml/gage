@@ -23,16 +23,22 @@ use crate::style;
 pub enum IssueCommand {
     /// List issues
     List(IssueListArgs),
+
     /// Show an issue
     Show(IssueShowArgs),
+
     /// Add an issue
     Add(IssueAddArgs),
+
     /// Delete issues
     Delete(IssueDeleteArgs),
+
     /// Close an issue
     Close(IssueCloseArgs),
+
     /// Reopen a closed issue
     Reopen(IssueReopenArgs),
+
     /// Comment on an issue
     Comment(IssueCommentArgs),
 }

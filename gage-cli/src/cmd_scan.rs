@@ -39,8 +39,10 @@ pub struct ScanArgs {
 pub enum ScanCommand {
     /// List scan runs
     List(ScanListArgs),
+
     /// Show details for a scan run
     Show(ScanShowArgs),
+
     /// Delete scan runs and associated notes
     Delete(ScanDeleteArgs),
 }
@@ -97,7 +99,7 @@ pub struct ScanRunArgs {
     #[arg(short, long)]
     yes: bool,
 
-    /// Maximum concurrent task workers (defaults to number of CPUs)
+    /// Maximum concurrent tasks (defaults to number of CPUs)
     #[arg(short, long, value_name = "N")]
     jobs: Option<usize>,
 

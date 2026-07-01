@@ -13,12 +13,10 @@ use crate::style;
 #[derive(Args)]
 pub struct IndexArgs {
     /// Rebuild the index
-    ///
-    /// Deletes the derived store and text index, then reconciles.
     #[arg(long)]
     rebuild: bool,
 
-    /// Report artifact status without reconciling
+    /// Show index status
     #[arg(long)]
     status: bool,
 }

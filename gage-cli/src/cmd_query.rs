@@ -15,11 +15,11 @@ pub struct QueryArgs {
     #[arg(short, long)]
     quiet: bool,
 
-    /// Start REPL with wall-clock timing enabled
+    /// Enable query timings
     #[arg(long)]
     timing: bool,
 
-    /// Start REPL with per-operator plan metrics enabled
+    /// Enable query stats
     #[arg(long)]
     stats: bool,
 }

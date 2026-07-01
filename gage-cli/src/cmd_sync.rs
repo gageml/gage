@@ -37,17 +37,15 @@ pub struct PushArgs {
     #[arg(short, long, value_name = "NAME")]
     pub remote: Vec<String>,
 
-    /// Push to all remotes
+    /// Push Gage data to all remotes
     ///
     /// Mutually exclusive with `--remote` and `--target`.
     #[arg(short, long, conflicts_with_all = ["remote", "target"])]
     pub all: bool,
 
-    /// Push to a local directory
+    /// Push Gage data to a local directory
     ///
-    /// Copies the payload directly into DIR (created if it does not exist),
-    /// using the same layout as any other remote. Mutually exclusive with
-    /// `--remote` and `--all`.
+    /// Mutually exclusive with `--remote` and `--all`.
     #[arg(short, long, value_name = "DIR", conflicts_with_all = ["remote", "all"])]
     pub target: Option<PathBuf>,
 }
@@ -77,11 +75,7 @@ pub struct PullArgs {
     #[arg(short, long, value_name = "DIR")]
     pub source: Option<PathBuf>,
 
-    /// Destination directory
-    ///
-    /// Where pulled files land locally. Defaults to `~/.gage-pull`. The
-    /// remote tree lands under `<DIR>/gage/...` and `<DIR>/claude/...`,
-    /// so existing files in DIR are not at risk of being overwritten.
+    /// Destination directory (default ~/.gage-pull)
     #[arg(short, long, value_name = "DIR")]
     pub target: Option<PathBuf>,
 }

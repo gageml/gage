@@ -26,14 +26,19 @@ use crate::style;
 pub enum NoteCommand {
     /// List notes
     List(NoteListArgs),
+
     /// Add a note
     Add(NoteAddArgs),
+
     /// Comment on a note
     Comment(NoteCommentArgs),
+
     /// Show a note
     Show(NoteShowArgs),
+
     /// Edit a note
     Edit(NoteEditArgs),
+
     /// Delete notes
     Delete(NoteDeleteArgs),
 }
@@ -54,13 +59,15 @@ pub struct NoteListArgs {
 
 #[derive(Args)]
 pub struct NoteAddArgs {
-    /// Target reference (e.g. <session_id>, <session_id>:<line>)
+    /// Target session with optional line
+    ///
+    /// Use full session ID. Append ':LINE' to specify a session line number.
     #[arg(short, long)]
     target: Option<String>,
 
     /// Note name
     ///
-    /// Note names must be unique for a given target and author. Defaults to
+    /// Names must be unique for a target and author. Defaults to
     /// "comment.<random>"
     #[arg(short, long)]
     name: Option<String>,
@@ -97,7 +104,7 @@ pub struct NoteShowArgs {
     #[arg(short = 't', long = "target")]
     short_target: bool,
 
-    /// Show note docstring
+    /// Show note docs
     #[arg(short, long)]
     doc: bool,
 }

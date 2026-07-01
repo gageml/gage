@@ -5,7 +5,7 @@ use gage_scan::test_runner::{TestOutcome, TestResult};
 
 #[derive(Args)]
 pub struct TestArgs {
-    /// Filter tests by name (substring match, repeatable)
+    /// Filter tests by name (partial match, repeatable)
     #[arg(value_name = "FILTER")]
     filters: Vec<String>,
 

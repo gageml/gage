@@ -25,10 +25,13 @@ use crate::style;
 pub enum SessionCommand {
     /// List available sessions
     List(SessionListArgs),
+
     /// Delete sessions
     Delete(SessionDeleteArgs),
+
     /// View a session
     View(SessionViewArgs),
+
     /// Move a session to a different project directory
     Move(SessionMoveArgs),
 }
@@ -51,9 +54,10 @@ pub struct SessionViewArgs {
     /// Session ID (or prefix)
     pub session: Option<String>,
 
-    /// View options (comma-separated).
+    /// View options (comma-separated)
     ///
-    /// turns - show model turns in outline
+    /// Options:
+    ///   turns - show model turns in outline
     #[arg(short, long, value_delimiter = ',')]
     pub options: Vec<String>,
 }
@@ -87,7 +91,7 @@ pub struct SessionListArgs {
 
     /// Include additional stats columns
     ///
-    /// Added columns: model time, total tokens, turns
+    /// Columns: model time, total tokens, turns
     #[arg(short = 'S', long)]
     stats: bool,
 }

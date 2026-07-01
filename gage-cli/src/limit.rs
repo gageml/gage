@@ -8,7 +8,7 @@ const DEFAULT_LIMIT: usize = 20;
 
 #[derive(Args)]
 pub struct LimitArgs {
-    /// Show more items (repeatable, adds LIMIT per flag)
+    /// Show more items (repeatable, LIMIT more items per use)
     #[arg(short, long, action = clap::ArgAction::Count, conflicts_with = "all")]
     more: u8,
 

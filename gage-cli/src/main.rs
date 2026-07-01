@@ -51,9 +51,7 @@ const VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 #[derive(Parser)]
 #[command(name = "gage", version = VERSION, about = "Gage CLI")]
 struct Cli {
-    /// Log level for gage modules
-    ///
-    /// Levels: trace, debug, info, warn, error. Overrides GAGE_LOG.
+    /// Log level (trace, debug, info, warn, error)
     #[arg(long, value_name = "LEVEL")]
     log: Option<String>,
 
@@ -98,8 +96,6 @@ enum Command {
     /// Manage sessions
     Session {
         /// Operate on agent sessions instead of Claude Code sessions
-        ///
-        /// Agent sessions live under `<gage_home>/claude`.
         #[arg(short = 'A', long)]
         agent: bool,
 
@@ -122,10 +118,10 @@ enum Command {
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
 
-    /// Back up local state to every configured remote
+    /// Push Gage data to every configured remote
     Push(cmd_sync::PushArgs),
 
-    /// Copy a remote's tree into a local inspection directory
+    /// Copy Gage data to a local directory for inspection
     Pull(cmd_sync::PullArgs),
 
     /// Manage Gage configuration
@@ -134,7 +130,7 @@ enum Command {
         command: cmd_config::ConfigCommand,
     },
 
-    /// Reconcile the derived session store and text index
+    /// Update the Gage index
     Index(cmd_index::IndexArgs),
 
     /// Start the MCP server
@@ -143,7 +139,7 @@ enum Command {
         command: Option<McpCommand>,
     },
 
-    /// Run tests in scanner modules
+    /// Run scanner tests
     Test(cmd_test::TestArgs),
 }
 

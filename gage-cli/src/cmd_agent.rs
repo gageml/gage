@@ -45,14 +45,15 @@ pub struct AgentArgs {
     #[arg(short, long)]
     pub prompt: Option<String>,
 
-    /// Model passed to the child `claude` as `--model`
+    /// Agent model
     #[arg(short, long)]
     pub model: Option<String>,
 
     /// Gage tools to expose to the agent (comma-separated list)
     ///
-    /// Mirrors `call_agent.gage_tools(...)`. Use '*' to enable all
-    /// built-in Gage tools.
+    /// Tools: Query, NoteWrite, IssueClose, IssueComment, IssueOpen
+    ///
+    /// Use '*' to enable all tools.
     #[arg(
         short = 't',
         long = "tools",
