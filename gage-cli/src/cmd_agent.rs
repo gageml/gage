@@ -41,10 +41,6 @@ pub struct AgentArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Initial agent prompt
-    #[arg(short, long)]
-    pub prompt: Option<String>,
-
     /// Agent model
     #[arg(short, long)]
     pub model: Option<String>,
@@ -74,8 +70,7 @@ pub async fn run(args: AgentArgs) {
     };
 
     let mut tools = args.gage_tools.clone();
-    let prompt = args.prompt.clone();
-    if !args.yes && args.gage_tools.is_empty() && args.prompt.is_none() {
+    if !args.yes && args.gage_tools.is_empty() {
         let mut tools_out: Vec<String> = Vec::new();
         let mut completed = false;
         dialog::run("Run agent", || {
@@ -154,7 +149,7 @@ pub async fn run(args: AgentArgs) {
         std::process::exit(1);
     }
     spinner.finish_and_clear();
-    match agent.run(prompt) {
+    match agent.run(None) {
         Ok(status) => {
             drop(_service_handle);
             drop(host);
