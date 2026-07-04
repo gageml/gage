@@ -123,6 +123,13 @@ pub async fn run_tests(
             agent_pool: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let stub_db = std::sync::Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
+        // Seed the stub scan row so note/issue writes that link to the
+        // current scan satisfy the scan_note/scan_issue FKs.
+        stub_db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO scan (id, created) VALUES ('test', 0)", [])
+            .unwrap();
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
 
         for (hash, item) in &tests {

@@ -460,6 +460,32 @@ pub fn find(conn: &Connection, filters: &NoteFilters) -> Result<Vec<Note>, NoteE
     Ok(notes)
 }
 
+/// Ids of notes targeting `session_id` whose name matches `name`. A
+/// trailing `.` in `name` selects the whole suffixed family written by
+/// [`Note::new`]'s dot-expansion (prefix match); otherwise the match is
+/// exact.
+pub fn ids_for_session_by_name(
+    conn: &Connection,
+    session_id: &str,
+    name: &str,
+) -> Result<Vec<String>, NoteError> {
+    let name_clause = if name.ends_with('.') {
+        "substr(n.name, 1, length(?2)) = ?2"
+    } else {
+        "n.name = ?2"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT n.id FROM note n
+         JOIN session_note sn ON sn.note_id = n.id
+         WHERE sn.session_id = ?1 AND {name_clause}
+         ORDER BY n.created, n.id"
+    ))?;
+    let ids = stmt
+        .query_map(params![session_id, name], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Total number of notes in the table.
 pub fn count(conn: &Connection) -> Result<u32, NoteError> {
     let n: u32 = conn.query_row("SELECT COUNT(*) FROM note", [], |row| row.get(0))?;
@@ -547,6 +573,37 @@ mod tests {
     fn add_scan(conn: &Connection, id: &str) {
         conn.execute("INSERT INTO scan (id, created) VALUES (?1, 0)", [id])
             .unwrap();
+    }
+
+    #[test]
+    fn ids_for_session_by_name_exact_and_prefix() {
+        let conn = open_db_in_memory().unwrap();
+        for (id, name) in [
+            ("n1", "session.finding.abc1"),
+            ("n2", "session.finding.abc2"),
+            ("n3", "session.finding-summary.abc3"),
+            ("n4", "issues.summary"),
+        ] {
+            insert(&conn, &note_with(id, name, session_target_of(SESSION_A))).unwrap();
+        }
+        // Same family name, different session
+        insert(
+            &conn,
+            &note_with("n5", "session.finding.xyz", session_target_of(SESSION_B)),
+        )
+        .unwrap();
+
+        // Dot-ended name matches the suffixed family, not lookalike prefixes
+        let ids = ids_for_session_by_name(&conn, SESSION_A, "session.finding.").unwrap();
+        assert_eq!(ids, vec!["n1".to_string(), "n2".to_string()]);
+
+        // Exact name
+        let ids = ids_for_session_by_name(&conn, SESSION_A, "issues.summary").unwrap();
+        assert_eq!(ids, vec!["n4".to_string()]);
+
+        // No match
+        let ids = ids_for_session_by_name(&conn, SESSION_A, "nothing.").unwrap();
+        assert!(ids.is_empty());
     }
 
     #[test]

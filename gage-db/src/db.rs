@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -76,6 +76,9 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     if version < 1 {
         migration_1(conn)?;
+    }
+    if version < 2 {
+        migration_2(conn)?;
     }
     set_version(conn, CURRENT_VERSION)
 }
@@ -216,6 +219,17 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+fn migration_2(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE cache (
+            key     TEXT PRIMARY KEY,
+            value   TEXT NOT NULL,
+            expires INTEGER
+        );",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,7 +240,7 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, CURRENT_VERSION);
 
         // note has a single advisory target column
         let n: u32 = conn
@@ -257,6 +271,7 @@ mod tests {
             "project_note",
             "scan_note",
             "scan_issue",
+            "cache",
         ] {
             let n: u32 = conn
                 .query_row(
@@ -288,6 +303,6 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, CURRENT_VERSION);
     }
 }

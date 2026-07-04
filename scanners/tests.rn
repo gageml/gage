@@ -99,3 +99,53 @@ async fn test_template_parse_error() {
         other => panic!("expected Template error, got {:?}", other),
     }
 }
+
+#[test]
+async fn test_split_valid_empty() {
+    // Test run selection is empty: both partitions are empty and
+    // validate rejects a session it did not split as new.
+    let (prev, new, validate) = gage::scan()
+        .sessions()
+        .split_valid(("test-scanner", "task", 1))
+        .await
+        .unwrap();
+    assert_eq!(prev.len(), 0);
+    assert_eq!(new.len(), 0);
+    match validate("11111111-1111-1111-1111-111111111111") {
+        Err(gage::Error::Args(_)) => (),
+        other => panic!("expected Args error, got {:?}", other),
+    }
+}
+
+#[test]
+async fn test_split_valid_key_must_be_composite() {
+    match gage::scan().sessions().split_valid("flat-string").await {
+        Err(gage::Error::Args(_)) => (),
+        other => panic!("expected Args error, got {:?}", other),
+    }
+}
+
+#[test]
+async fn test_carry_forward_notes() {
+    let session = "22222222-2222-2222-2222-222222222222";
+    gage::write_note(
+        #{
+            name: "test.carry.finding.",
+            value: "a finding",
+            target: #{ session: session },
+        },
+    )
+    .await
+    .unwrap();
+
+    // The dot-ended name links the whole suffixed family; an unknown
+    // name links nothing.
+    let n = gage::carry_forward_notes([session], ["test.carry.finding."])
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let n = gage::carry_forward_notes([session], ["test.carry.other."])
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}

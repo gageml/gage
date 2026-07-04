@@ -1,5 +1,6 @@
 pub use rusqlite;
 
+pub mod cache;
 pub mod db;
 pub mod import;
 pub mod issue;

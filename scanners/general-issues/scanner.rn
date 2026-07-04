@@ -1,8 +1,7 @@
-use gage::{AgentRunner, Template, call_agent, scan, write_note};
+use gage::{AgentRunner, Template, call_agent, carry_forward_notes, scan, write_note};
 
 pub const SCANNER = #{
     name: "general-issues",
-    generation: 1,
     description: "Scan sessions for general issues",
     tasks: #{
         findings: #{
@@ -19,11 +18,16 @@ pub const SCANNER = #{
     },
 };
 
+/// Submit each session to an agent to write findings.
+///
+/// Sessions already processed under the current findings key are
+/// skipped; their prior findings are carried forward into this scan.
 pub async fn findings() {
     let t = Template::new(include_str!("findings-prompt.md")).await?;
     let runner = AgentRunner::new();
-    let memo_key = (SCANNER.name, SCANNER.generation);
-    for s in scan().sessions() {
+    let (prev, new, validate) = scan().sessions().split_valid(findings_key()).await?;
+    carry_forward_notes(prev, ["session.finding.", "session.finding-summary."]).await?;
+    for s in new {
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
             call_agent(prompt)
@@ -35,28 +39,12 @@ pub async fn findings() {
         );
     }
     let results = runner.start();
-    write_summaries(results).await?;
-    Ok((()))
+    write_summaries(results, validate).await?;
+    Ok(())
 }
 
-async fn write_summaries(results) {
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ session }))) => {
-                write_note(
-                    #{
-                        name: "session.finding-summary.",
-                        target: #{ session },
-                        value: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                )
-                .await?;
-            }
-            None => break,
-        }
-    }
-    Ok(())
+fn findings_key() {
+    (SCANNER.name, "findings", 1 /* generation */)
 }
 
 fn findings_tools() {
@@ -107,7 +95,41 @@ pub async fn write_finding(inputs) {
     Ok(format!("Wrote note {}", note.id))
 }
 
+/// Write finding-summary notes for agent results and mark each
+/// completed session valid for future scans.
+async fn write_summaries(results, validate) {
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                write_note(
+                    #{
+                        name: "session.finding-summary.",
+                        target: #{ session },
+                        value: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                )
+                .await?;
+                validate(session)?;
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Ask agent to review findings and write issues.
+///
+/// The findings available to the agent are limited to those
+/// written for the current scan.
 pub async fn issues() {
+
+    // TODO - As we are moving toward carry-forward of previously written
+    // findings, the issue writer will need to know what was previsously
+    // written along with updates to those issues (closed status, etc.)
+    // This is a lot to ask the agent to do. Let's consider a single report
+    // that we format as the prompt. Still provide Query and obviously IssueOpen.
+
     let agent = call_agent(include_str!("issues-prompt.md"))
         .name("issue-writer")
         .gage_tools(["Query", "IssueOpen"])

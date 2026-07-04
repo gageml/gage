@@ -28,6 +28,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.implement_trait::<Sessions>(rune::item!(::std::iter::Iterator))?;
     m.implement_trait::<Sessions>(rune::item!(::std::iter::DoubleEndedIterator))?;
 
+    super::cache::register_types(&mut m)?;
     super::datetime::register_types(&mut m)?;
     super::query::register_types(&mut m)?;
     super::error::register_types(&mut m)?;
@@ -77,6 +78,14 @@ pub struct Sessions {
 }
 
 impl Sessions {
+    /// Sessions not yet consumed by iteration.
+    pub(crate) fn remaining(&self) -> Vec<Session> {
+        self.items
+            .get(self.front..self.back)
+            .map(<[Session]>::to_vec)
+            .unwrap_or_default()
+    }
+
     fn new(items: Vec<Session>) -> Self {
         let back = items.len();
         Sessions {

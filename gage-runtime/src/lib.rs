@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod cache;
 pub mod config;
 pub mod datetime;
 pub mod db;
@@ -52,6 +53,7 @@ pub fn gage_module() -> std::result::Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
 
     scan::register(&mut m)?;
+    cache::register(&mut m)?;
     config::register(&mut m)?;
     query::register(&mut m)?;
     db::register(&mut m)?;
