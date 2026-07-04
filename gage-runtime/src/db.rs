@@ -38,7 +38,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 
     m.function_meta(session_notes)?;
     m.function_meta(scan_notes)?;
-    m.function_meta(NotesQuery::with_name)?;
+    m.function_meta(NotesQuery::name)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
         do_fetch_notes(q)
     })?;
@@ -90,7 +90,7 @@ fn scan_notes(scan: Ref<Scan>) -> NotesQuery {
 
 impl NotesQuery {
     #[rune::function(instance)]
-    fn with_name(mut self, name: String) -> Self {
+    fn name(mut self, name: String) -> Self {
         self.name = Some(name);
         self
     }

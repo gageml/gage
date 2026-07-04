@@ -483,7 +483,7 @@ Top-level functions (all async unless noted):
   `.keep_status()`, `.open_on_new_evidence()`, `.open_on_changed_evidence()`.
   `await` to commit.
 - `session_notes(session_id)` / `cohort_notes()` - note queries; chain
-  `.with_name(name)` then `.await?`.
+  `.name(name)` then `.await?`.
 - `call_agent(prompt, #{ ... })` - spawn an isolated `claude` judge process;
   returns an `AgentSession`. Methods: `.wait().await`, `.kill()`, `.id()`,
   `.output()`.
@@ -497,9 +497,9 @@ Sessions and messages:
 for s in scan().sessions() {
     for msg in s.messages().await? {                          // all messages
     }
-    for msg in s.messages().with_type("assistant").await? { } // by role
+    for msg in s.messages().type("assistant").await? { }     // by role
     for msg in s.messages()
-        .with_type(#{ assistant: "tool_use" }).await? { }     // by role+kind
+        .type(#{ assistant: "tool_use" }).await? { }         // by role+kind
     // msg.timestamp is a DateTime; msg.as_object(), msg.model(), msg.to_json()
 }
 ```

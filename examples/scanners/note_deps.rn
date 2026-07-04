@@ -21,7 +21,7 @@ pub async fn a() {
 }
 
 pub async fn b() {
-    let notes = scan().notes().with_name("a").await?;
+    let notes = scan().notes().name("a").await?;
     write_note(
         #{ name: "b", value: notes.len(), target: #{ scan: scan().id } },
     )

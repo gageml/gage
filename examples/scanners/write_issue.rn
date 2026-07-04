@@ -16,7 +16,7 @@ pub async fn note() {
 }
 
 pub async fn issue() {
-    let note = scan().notes().with_name("baz").await?.get(0).ok_or(Ignore)?;
+    let note = scan().notes().name("baz").await?.get(0).ok_or(Ignore)?;
     write_issue(
         #{
             name: "test.baz",

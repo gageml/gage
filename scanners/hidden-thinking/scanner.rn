@@ -32,8 +32,8 @@ pub async fn note() {
     for s in scan().sessions() {
         for msg in s
             .messages()
-            .of_type(#{ "assistant": "thinking" })
-            .reverse() // only check latest thinking block
+            .type(#{ "assistant": "thinking" })
+            .latest_first() // only check latest thinking block
             .await?
         {
             write_note(
@@ -79,7 +79,7 @@ pub async fn issue() {
 }
 
 async fn latest_evidence() {
-    let notes = scan().notes().names(["thinking.empty"]).await?;
+    let notes = scan().notes().name("thinking.empty").await?;
     if notes.is_empty() {
         return Ok(None);
     }
