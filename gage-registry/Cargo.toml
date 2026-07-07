@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 codespan-reporting = "0.13.1"
+fs4 = { workspace = true }
 gage-core = { path = "../gage-core" }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 rust-embed = { workspace = true }

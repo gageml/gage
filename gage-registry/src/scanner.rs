@@ -29,9 +29,32 @@ pub fn scanner_home_paths() -> Vec<PathBuf> {
     vec![scanners_dir()]
 }
 
+/// Extract the embedded scanner bundle to `scanners_dir()`.
+///
+/// Safe under concurrency: extraction serializes on an advisory file
+/// lock (concurrent gage processes and parallel test threads both
+/// reach here), and a digest marker skips the delete/rewrite when the
+/// extracted tree already matches the embedded content.
 pub fn extract_scanners() -> std::io::Result<()> {
     let dir = scanners_dir();
     assert!(dir.ends_with("lib/scanners"));
+    let lib = dir.parent().expect("scanners_dir ends with lib/scanners");
+    std::fs::create_dir_all(lib)?;
+
+    let lock_file = std::fs::File::create(lib.join("scanners.lock"))?;
+    fs4::FileExt::lock(&lock_file)?;
+    // The OS releases the lock when `lock_file` drops.
+
+    let digest = embedded_digest();
+    let marker = lib.join("scanners.digest");
+    if dir.is_dir() && std::fs::read_to_string(&marker).is_ok_and(|prev| prev == digest) {
+        return Ok(());
+    }
+
+    std::fs::remove_file(&marker).or_else(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(e),
+    })?;
     gage_core::fs::remove_checked_dir_all(&dir)?;
     for path in Scanners::iter() {
         let file = Scanners::get(&path).expect("embedded key exists");
@@ -41,7 +64,22 @@ pub fn extract_scanners() -> std::io::Result<()> {
         }
         std::fs::write(&target, &file.data)?;
     }
+    std::fs::write(&marker, digest)?;
     Ok(())
+}
+
+/// Deterministic digest over the embedded bundle's keys and contents.
+fn embedded_digest() -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut keys: Vec<_> = Scanners::iter().collect();
+    keys.sort();
+    let mut h = DefaultHasher::new();
+    for key in keys {
+        let file = Scanners::get(&key).expect("embedded key exists");
+        key.hash(&mut h);
+        file.data.hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
