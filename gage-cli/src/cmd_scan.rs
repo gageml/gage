@@ -43,8 +43,17 @@ pub enum ScanCommand {
     /// Show details for a scan run
     Show(ScanShowArgs),
 
+    /// View a scan run in the scan TUI
+    View(ScanViewArgs),
+
     /// Delete scan runs and associated notes
     Delete(ScanDeleteArgs),
+}
+
+#[derive(Args)]
+pub struct ScanViewArgs {
+    /// Scan ID (or prefix)
+    scan_id: String,
 }
 
 #[derive(Args)]
@@ -120,6 +129,7 @@ pub async fn run(args: ScanArgs) {
     match args.command {
         Some(ScanCommand::List(a)) => list(a),
         Some(ScanCommand::Show(a)) => show(a),
+        Some(ScanCommand::View(a)) => view(a).await,
         Some(ScanCommand::Delete(a)) => delete(a),
         None => run_scan(args.run_args).await,
     }
@@ -228,6 +238,206 @@ fn show(args: ScanShowArgs) {
         .modify(Columns::new(2..3).not(Rows::first()), s::dim())
         .to_string();
     println!("{table}");
+}
+
+async fn view(args: ScanViewArgs) {
+    let conn = db::open_db().unwrap();
+    let model = match load_scan_model(&conn, &args.scan_id) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("gage scan view: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = gage_tui::scan_view::view(model).await {
+        eprintln!("gage scan view: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Assemble a [`ScanModel`] for a completed scan from the db: task
+/// outcomes from `scan_scanner.metadata`, the run summary from
+/// `scan.metadata`, and sessions/notes/issues from the scan's edge
+/// tables. A scan that never completed has no metadata; its tasks
+/// table is empty and the header shows no progress.
+fn load_scan_model(
+    conn: &gage_db::rusqlite::Connection,
+    prefix: &str,
+) -> anyhow::Result<gage_tui::scan_view::ScanModel> {
+    use gage_tui::scan_view::{ScanModel, SessionItem, TaskId, TaskItem, TaskState};
+    use std::collections::HashMap;
+
+    let run = scan::get_scan(conn, prefix)?;
+    let summary: Option<scan::ScanSummary> = run
+        .metadata
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
+
+    let mut tasks: Vec<TaskItem> = Vec::new();
+    for scanner in scan::get_scanners_for_scan(conn, &run.id)? {
+        let Some(meta) = scanner.metadata.as_deref() else {
+            continue;
+        };
+        let recorded: scan::ScannerTasks = serde_json::from_str(meta)?;
+        for t in recorded.tasks {
+            tasks.push(TaskItem {
+                id: TaskId {
+                    scanner: scanner.scanner_name.clone(),
+                    task: t.name,
+                },
+                state: match t.status {
+                    scan::TaskStatus::Completed => TaskState::Completed,
+                    scan::TaskStatus::Failed => TaskState::Error,
+                    scan::TaskStatus::Skipped => TaskState::Skipped,
+                },
+                elapsed: t.elapsed_ms.map(Duration::from_millis),
+                started: None,
+            });
+        }
+    }
+    let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
+
+    let results = load_scan_results(conn, &run.id)?;
+    let counts: HashMap<&str, (usize, usize)> = results
+        .sessions
+        .iter()
+        .map(|c| (c.id.as_str(), (c.notes, c.issues)))
+        .collect();
+
+    let store = gage_query::default_index_store();
+    let paths: HashMap<String, std::path::PathBuf> = session::ls_sessions().into_iter().collect();
+    let mut sessions: Vec<SessionItem> = scan::session_ids_for_scan(conn, &run.id)?
+        .into_iter()
+        .map(|id| {
+            let title = stat_session(&paths, &id)
+                .map(|info| session_title(&store, &info))
+                .unwrap_or_else(|| "(unavailable)".to_string());
+            let (notes, issues) = counts.get(id.as_str()).copied().unwrap_or((0, 0));
+            SessionItem {
+                notes,
+                issues,
+                id,
+                title,
+            }
+        })
+        .collect();
+    sessions.sort_by(|a, b| {
+        b.issues
+            .cmp(&a.issues)
+            .then_with(|| b.notes.cmp(&a.notes))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    Ok(ScanModel {
+        total: summary.as_ref().map(|s| s.total).unwrap_or(0),
+        progress: summary
+            .as_ref()
+            .map(|s| s.completed + s.failed)
+            .unwrap_or(0),
+        notes: results.notes,
+        issues: results.issues,
+        errors,
+        finished: true,
+        elapsed: summary
+            .as_ref()
+            .map(|s| Duration::from_millis(s.elapsed_ms)),
+        tasks,
+        sessions,
+    })
+}
+
+/// Notes, issues, and per-session counts recorded for a scan — shared
+/// between the historical loader and the live view's reconcile poll.
+struct ScanResults {
+    notes: Vec<gage_tui::scan_view::NoteItem>,
+    issues: Vec<gage_tui::scan_view::IssueItem>,
+    sessions: Vec<gage_tui::scan_view::SessionCounts>,
+}
+
+fn load_scan_results(
+    conn: &gage_db::rusqlite::Connection,
+    scan_id: &str,
+) -> anyhow::Result<ScanResults> {
+    use gage_tui::scan_view::{IssueItem, NoteItem, SessionCounts};
+    use std::collections::{HashMap, HashSet};
+
+    let notes = gage_db::note::find(
+        conn,
+        &gage_db::note::NoteFilters {
+            scan: Some(scan_id.to_string()),
+            ..Default::default()
+        },
+    )?;
+    let issue_ids: HashSet<String> = scan::issue_ids_for_scan(conn, scan_id)?
+        .into_iter()
+        .collect();
+    let issues: Vec<gage_db::issue::Issue> = gage_db::issue::find(
+        conn,
+        &gage_db::issue::IssueFilters {
+            status: gage_db::issue::IssueStatusFilter::Any,
+            name: None,
+        },
+    )?
+    .into_iter()
+    .filter(|i| issue_ids.contains(&i.id))
+    .collect();
+
+    let mut counts: HashMap<String, (usize, usize)> = HashMap::new();
+    for note in &notes {
+        if let gage_db::target::NoteTarget::Session(t) = &note.target {
+            counts.entry(t.session_id.clone()).or_default().0 += 1;
+        }
+    }
+    for issue in &issues {
+        // Targets are advisory URIs; non-session and malformed targets
+        // simply don't attribute to a session row.
+        if let Ok(gage_db::target::NoteTarget::Session(t)) =
+            gage_db::target::NoteTarget::from_uri(&issue.target)
+        {
+            counts.entry(t.session_id).or_default().1 += 1;
+        }
+    }
+
+    Ok(ScanResults {
+        notes: notes
+            .iter()
+            .map(|n| NoteItem {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                value: crate::cmd_note::format_value_cell(&n.value),
+                target: n.target.to_uri(),
+            })
+            .collect(),
+        issues: issues
+            .iter()
+            .map(|i| IssueItem {
+                id: i.id.clone(),
+                name: i.name.clone(),
+                title: i.title.lines().next().unwrap_or("").to_string(),
+            })
+            .collect(),
+        sessions: counts
+            .into_iter()
+            .map(|(id, (notes, issues))| SessionCounts { id, notes, issues })
+            .collect(),
+    })
+}
+
+/// Locate and stat a session file for title resolution. None when the
+/// session no longer exists on disk — expected for old scans.
+fn stat_session(
+    paths: &std::collections::HashMap<String, std::path::PathBuf>,
+    id: &str,
+) -> Option<SessionInfo> {
+    let src = paths.get(id)?;
+    let meta = std::fs::metadata(src).ok()?;
+    Some(SessionInfo {
+        id: id.to_string(),
+        src: src.clone(),
+        mtime: meta.modified().unwrap(),
+        size: meta.len(),
+    })
 }
 
 fn delete(args: ScanDeleteArgs) {
@@ -707,18 +917,61 @@ async fn run_scan_tui(
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
+    // The scan id is minted inside the runner and first surfaces on a
+    // Status event; the reconcile poll waits for it here.
+    let (scan_id_tx, scan_id_rx) = tokio::sync::oneshot::channel::<String>();
+
+    // Reconcile notes/issues from the db once a second — the same read
+    // the historical loader uses. Runs until the view closes (the view
+    // lingers after the scan finishes, so results keep converging).
+    let results_poll = {
+        let tx = tx.clone();
+        let db = db.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let Ok(scan_id) = scan_id_rx.await else {
+                // Runner ended before emitting a Status; nothing to poll.
+                return;
+            };
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tick.tick() => {
+                        let results = {
+                            let conn = db.lock().unwrap();
+                            load_scan_results(&conn, &scan_id)
+                        };
+                        let ev = match results {
+                            Ok(r) => scan_view::Event::Results {
+                                notes: r.notes,
+                                issues: r.issues,
+                                sessions: r.sessions,
+                            },
+                            Err(e) => scan_view::Event::Log(format!("results refresh failed: {e}")),
+                        };
+                        if tx.send(ev).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+    };
+
     let mut print_buf = String::new();
+    let mut scan_id_tx = Some(scan_id_tx);
     let event_tx = tx.clone();
     let scan_fut = async {
         let result = gage_scan::runner::run(
-            db,
+            db.clone(),
             scanners,
             selected,
             scan_ctx,
             jobs,
             agent_jobs,
             cancel.clone(),
-            |event| forward_scan_event(event, &event_tx, &mut print_buf),
+            |event| forward_scan_event(event, &event_tx, &mut print_buf, &mut scan_id_tx),
         )
         .await;
         send_view_event(&event_tx, scan_view::Event::Finished);
@@ -727,7 +980,7 @@ async fn run_scan_tui(
 
     let ui_cancel = cancel.clone();
     let ui_fut = async move {
-        let result = scan_view::run(setup, rx).await;
+        let result = scan_view::run(scan_view::ScanModel::new(setup), rx).await;
         // Closing the view mid-scan stops the run; after the scan
         // completes this is a no-op.
         ui_cancel.cancel();
@@ -735,6 +988,11 @@ async fn run_scan_tui(
     };
 
     let (scan_result, ui_result) = tokio::join!(scan_fut, ui_fut);
+    if let Err(e) = results_poll.await
+        && !e.is_cancelled()
+    {
+        panic!("results poll joined cleanly: {e}");
+    }
     ui_result?;
     scan_result
 }
@@ -765,24 +1023,32 @@ fn forward_scan_event(
     event: gage_scan::event::ScanEvent,
     tx: &tokio::sync::mpsc::UnboundedSender<gage_tui::scan_view::Event>,
     print_buf: &mut String,
+    scan_id_tx: &mut Option<tokio::sync::oneshot::Sender<String>>,
 ) {
     use gage_scan::event::ScanEvent;
     use gage_tui::scan_view::{Event, TaskId};
 
     let ev = match event {
-        ScanEvent::Status(s) => Event::Status {
-            total: s.total,
-            progress: s.progress,
-            running: s
-                .workers
-                .iter()
-                .filter_map(|w| w.current.as_ref())
-                .map(|t| TaskId {
-                    scanner: t.scanner.clone(),
-                    task: t.task.clone(),
-                })
-                .collect(),
-        },
+        ScanEvent::Status(s) => {
+            if let Some(sender) = scan_id_tx.take() {
+                // Send fails only if the reconcile poll already exited;
+                // there is nothing left to notify.
+                if sender.send(s.scan_id.clone()).is_err() {}
+            }
+            Event::Status {
+                total: s.total,
+                progress: s.progress,
+                running: s
+                    .workers
+                    .iter()
+                    .filter_map(|w| w.current.as_ref())
+                    .map(|t| TaskId {
+                        scanner: t.scanner.clone(),
+                        task: t.task.clone(),
+                    })
+                    .collect(),
+            }
+        }
         ScanEvent::Print { s } => {
             print_buf.push_str(&s);
             while let Some(i) = print_buf.find('\n') {

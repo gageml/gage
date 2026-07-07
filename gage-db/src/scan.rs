@@ -64,6 +64,73 @@ pub fn insert_scanner(conn: &Connection, scanner: &ScanScanner) -> Result<(), Sc
     Ok(())
 }
 
+/// End-of-run summary persisted to `scan.metadata`. Absent metadata
+/// (NULL column) means the run never completed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScanSummary {
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub elapsed_ms: u64,
+}
+
+/// Per-task outcomes persisted to `scan_scanner.metadata`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScannerTasks {
+    pub tasks: Vec<TaskOutcome>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaskOutcome {
+    pub name: String,
+    pub status: TaskStatus,
+    /// Epoch milliseconds; None when the task never ran (skipped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Terminal task states only — outcomes are written when the run
+/// completes, so no pending/running values exist here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Completed,
+    Failed,
+    Skipped,
+}
+
+pub fn set_scan_summary(
+    conn: &Connection,
+    scan_id: &str,
+    summary: &ScanSummary,
+) -> Result<(), ScanError> {
+    let json = serde_json::to_string(summary).unwrap();
+    conn.execute(
+        "UPDATE scan SET metadata = ?2 WHERE id = ?1",
+        params![scan_id, json],
+    )?;
+    Ok(())
+}
+
+pub fn set_scanner_tasks(
+    conn: &Connection,
+    scan_id: &str,
+    scanner_name: &str,
+    tasks: &ScannerTasks,
+) -> Result<(), ScanError> {
+    let json = serde_json::to_string(tasks).unwrap();
+    conn.execute(
+        "UPDATE scan_scanner SET metadata = ?3 WHERE scan_id = ?1 AND scanner_name = ?2",
+        params![scan_id, scanner_name, json],
+    )?;
+    Ok(())
+}
+
 /// Record that `session_id` was selected for `scan_id`.
 pub fn insert_scan_session(
     conn: &Connection,

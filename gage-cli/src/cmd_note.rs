@@ -412,14 +412,16 @@ fn resolve_display(note: &Note, value: Option<&str>) -> String {
     }
 }
 
-fn format_value(value: &note::NoteValue) -> String {
+pub(crate) fn format_value(value: &note::NoteValue) -> String {
     match &value.0 {
         serde_json::Value::String(s) => s.clone(),
         _ => value.to_json(),
     }
 }
 
-fn format_value_cell(value: &note::NoteValue) -> String {
+/// One-line display form of a note value: bare strings unquoted,
+/// other JSON compact, flattened and truncated for table cells.
+pub(crate) fn format_value_cell(value: &note::NoteValue) -> String {
     let raw = format_value(value);
     let flattened: String = raw
         .split(['\n', '\r'])

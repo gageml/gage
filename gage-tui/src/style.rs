@@ -45,7 +45,7 @@ pub fn scrollbar(active: bool) -> Style {
 /// signals focus with dim-vs-normal; the scan view uses a yellow
 /// border per the progress-ui design.
 pub fn focus_border() -> Style {
-    Style::new().fg(Color::Yellow)
+    Style::new().fg(Color::LightYellow)
 }
 
 pub fn gauge() -> Style {

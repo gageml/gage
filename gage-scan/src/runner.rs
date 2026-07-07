@@ -83,6 +83,8 @@ pub async fn run(
     cancel: CancellationToken,
     on_event: impl FnMut(ScanEvent) + Send,
 ) -> Result<RunSummary, RunError> {
+    let run_started = std::time::Instant::now();
+
     // Init scan + per-scanner records, recording the selected session ids
     let session_ids: Vec<&str> = selected.iter().map(|s| s.id.as_str()).collect();
     let scan_id = {
@@ -193,7 +195,11 @@ pub async fn run(
     let result = scheduler::run_plan(plan, slots, run, jobs, cancel, on_event).await;
 
     match result {
-        Ok(summary) => {
+        Ok((summary, outcomes)) => {
+            {
+                let conn = db.lock().unwrap();
+                persist_run_metadata(&conn, &summary, &outcomes, run_started.elapsed())?;
+            }
             if summary.failed > 0 {
                 Err(RunError::Emitted)
             } else {
@@ -203,6 +209,46 @@ pub async fn run(
         Err(scheduler::RunError::Channel) => Err(RunError::Emitted),
         Err(scheduler::RunError::Canceled) => Err(RunError::Canceled),
     }
+}
+
+/// Persist the run summary to `scan.metadata` and per-task outcomes to
+/// `scan_scanner.metadata`. Written only on normal completion — a
+/// canceled or aborted run leaves both columns NULL, which marks the
+/// scan as incomplete.
+fn persist_run_metadata(
+    conn: &Connection,
+    summary: &RunSummary,
+    outcomes: &[(String, gage_db::scan::TaskOutcome)],
+    elapsed: std::time::Duration,
+) -> Result<(), RunError> {
+    gage_db::scan::set_scan_summary(
+        conn,
+        &summary.scan_id,
+        &gage_db::scan::ScanSummary {
+            total: summary.total,
+            completed: summary.completed,
+            failed: summary.failed,
+            skipped: summary.skipped,
+            elapsed_ms: elapsed.as_millis() as u64,
+        },
+    )?;
+
+    let mut by_scanner: Vec<(&String, gage_db::scan::ScannerTasks)> = Vec::new();
+    for (scanner, outcome) in outcomes {
+        match by_scanner.iter_mut().find(|(name, _)| *name == scanner) {
+            Some((_, tasks)) => tasks.tasks.push(outcome.clone()),
+            None => by_scanner.push((
+                scanner,
+                gage_db::scan::ScannerTasks {
+                    tasks: vec![outcome.clone()],
+                },
+            )),
+        }
+    }
+    for (scanner, tasks) in &by_scanner {
+        gage_db::scan::set_scanner_tasks(conn, &summary.scan_id, scanner, tasks)?;
+    }
+    Ok(())
 }
 
 fn init_run(

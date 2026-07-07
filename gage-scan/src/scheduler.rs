@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 use petgraph::Graph;
 use petgraph::algo::tarjan_scc;
@@ -33,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::event::{RunStatus, RunSummary, ScanEvent, TaskRef, WorkerStatus};
+use gage_db::scan::{TaskOutcome, TaskStatus};
 use gage_registry::scanner::TaskDef;
 use gage_runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
 
@@ -244,7 +246,7 @@ pub(crate) async fn run_plan(
     jobs: usize,
     cancel: CancellationToken,
     mut on_event: impl FnMut(ScanEvent) + Send,
-) -> Result<RunSummary, RunError> {
+) -> Result<(RunSummary, Vec<(String, TaskOutcome)>), RunError> {
     let jobs = jobs.max(1);
     let plan_total = plan.tasks.len();
 
@@ -276,7 +278,7 @@ pub(crate) async fn run_plan(
     on_event(ScanEvent::Status(status.clone()));
 
     debug!(tasks = plan.tasks.len(), "scheduling");
-    run_tasks(
+    let outcomes = run_tasks(
         plan,
         &scanners,
         &run,
@@ -288,13 +290,16 @@ pub(crate) async fn run_plan(
     )
     .await?;
 
-    Ok(RunSummary {
-        scan_id: status.scan_id,
-        total: plan_total,
-        completed: accounting.completed,
-        failed: accounting.failed,
-        skipped: accounting.skipped,
-    })
+    Ok((
+        RunSummary {
+            scan_id: status.scan_id,
+            total: plan_total,
+            completed: accounting.completed,
+            failed: accounting.failed,
+            skipped: accounting.skipped,
+        },
+        outcomes,
+    ))
 }
 
 struct RunAccounting {
@@ -318,7 +323,7 @@ async fn run_tasks(
     status: &mut RunStatus,
     accounting: &mut RunAccounting,
     on_event: &mut (impl FnMut(ScanEvent) + Send),
-) -> Result<(), RunError> {
+) -> Result<Vec<(String, TaskOutcome)>, RunError> {
     let task_count = plan.tasks.len();
     let tasks = Arc::new(plan.tasks);
     let downstream = Arc::new(plan.downstream);
@@ -379,6 +384,12 @@ async fn run_tasks(
     drop(msg_tx);
     drop(out_tx);
 
+    // Per-task dispatch times and terminal outcomes, keyed for the
+    // end-of-run metadata write. Tasks never dispatched (cancellation)
+    // have no outcome.
+    let mut started_at: Vec<Option<(i64, Instant)>> = vec![None; task_count];
+    let mut outcomes: Vec<(String, TaskOutcome)> = Vec::with_capacity(task_count);
+
     let mut completed = 0usize;
     let mut canceled = false;
     while completed < task_count {
@@ -426,6 +437,7 @@ async fn run_tasks(
                     scanner: slot.name.clone(),
                     task: task.task_name.clone(),
                 });
+                started_at[task_idx] = Some((gage_core::datetime::now_ms(), Instant::now()));
                 on_event(ScanEvent::Status(status.clone()));
             }
             WorkerMsg::Completed {
@@ -456,6 +468,29 @@ async fn run_tasks(
                         status.total = status.total.saturating_sub(1);
                     }
                 }
+                let (task_status, error) = match &outcome {
+                    TaskResult::Ok => (TaskStatus::Completed, None),
+                    TaskResult::Error(msg) | TaskResult::VmError(msg) => {
+                        (TaskStatus::Failed, Some(msg.clone()))
+                    }
+                    TaskResult::SkippedByFault => (TaskStatus::Skipped, None),
+                };
+                // Skipped tasks never ran; their dispatch instant is
+                // not a start time.
+                let timing = match task_status {
+                    TaskStatus::Skipped => None,
+                    _ => started_at[task_idx],
+                };
+                outcomes.push((
+                    scanners[task.scanner_idx].name.clone(),
+                    TaskOutcome {
+                        name: task.task_name.clone(),
+                        status: task_status,
+                        started: timing.map(|(ms, _)| ms),
+                        elapsed_ms: timing.map(|(_, t)| t.elapsed().as_millis() as u64),
+                        error,
+                    },
+                ));
                 on_event(ScanEvent::Status(status.clone()));
                 completed += 1;
                 for &down in &downstream[task_idx] {
@@ -486,7 +521,7 @@ async fn run_tasks(
     if canceled {
         return Err(RunError::Canceled);
     }
-    Ok(())
+    Ok(outcomes)
 }
 
 #[allow(clippy::indexing_slicing)]
