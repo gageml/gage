@@ -15,7 +15,6 @@ members = [
     "gage-registry",
     "gage-runtime",
     "gage-scan",
-    "gage-scan-ui",
     "gage-sync",
     "gage-tui",
 ]

@@ -493,7 +493,11 @@ async fn run_dialog(
     let total_sessions = selected.len();
     let scan_ctx = Arc::new(ScanSessionContext::new(&selected));
 
-    let mut progress = if args.no_progress {
+    // SCAN_TUI=1 selects the in-development full-screen scan view.
+    // Temporary gate; removed when the view is promoted.
+    let scan_tui = std::env::var_os("SCAN_TUI").is_some_and(|v| v == "1");
+
+    let mut progress = if args.no_progress || scan_tui {
         None
     } else {
         Some(crate::scan_progress::ProgressUi::new(total_sessions))
@@ -550,52 +554,65 @@ async fn run_dialog(
         )
     };
 
-    let result = gage_scan::runner::run(
-        db.clone(),
-        scanners,
-        selected,
-        scan_ctx,
-        jobs,
-        agent_jobs,
-        cancel.clone(),
-        |event| {
-            if let Some(ui) = progress.as_mut() {
-                ui.handle(event);
-            } else {
-                // --no-progress: route scanner stdout straight through
-                use std::io::Write;
-                match &event {
-                    gage_scan::event::ScanEvent::Print { s } => {
-                        std::io::stdout()
-                            .write_all(s.as_bytes())
-                            .expect("write to stdout");
-                    }
-                    gage_scan::event::ScanEvent::Println { s } => {
-                        println!("{s}");
-                    }
-                    gage_scan::event::ScanEvent::TaskFailed {
-                        scanner,
-                        task,
-                        message,
-                    } => {
-                        eprintln!("error: {scanner}::{task}");
-                        for line in message.lines() {
-                            eprintln!("{line}");
+    let result = if scan_tui {
+        run_scan_tui(
+            db.clone(),
+            scanners,
+            selected,
+            scan_ctx,
+            jobs,
+            agent_jobs,
+            cancel.clone(),
+        )
+        .await
+    } else {
+        gage_scan::runner::run(
+            db.clone(),
+            scanners,
+            selected,
+            scan_ctx,
+            jobs,
+            agent_jobs,
+            cancel.clone(),
+            |event| {
+                if let Some(ui) = progress.as_mut() {
+                    ui.handle(event);
+                } else {
+                    // --no-progress: route scanner stdout straight through
+                    use std::io::Write;
+                    match &event {
+                        gage_scan::event::ScanEvent::Print { s } => {
+                            std::io::stdout()
+                                .write_all(s.as_bytes())
+                                .expect("write to stdout");
                         }
+                        gage_scan::event::ScanEvent::Println { s } => {
+                            println!("{s}");
+                        }
+                        gage_scan::event::ScanEvent::TaskFailed {
+                            scanner,
+                            task,
+                            message,
+                        } => {
+                            eprintln!("error: {scanner}::{task}");
+                            for line in message.lines() {
+                                eprintln!("{line}");
+                            }
+                        }
+                        gage_scan::event::ScanEvent::Warning {
+                            scanner,
+                            task,
+                            message,
+                        } => {
+                            eprintln!("warning: {scanner}::{task}: {message}");
+                        }
+                        gage_scan::event::ScanEvent::Status(_) => {}
                     }
-                    gage_scan::event::ScanEvent::Warning {
-                        scanner,
-                        task,
-                        message,
-                    } => {
-                        eprintln!("warning: {scanner}::{task}: {message}");
-                    }
-                    gage_scan::event::ScanEvent::Status(_) => {}
                 }
-            }
-        },
-    )
-    .await;
+            },
+        )
+        .await
+    };
     let elapsed = started.elapsed();
 
     cancel.cancel();
@@ -645,6 +662,165 @@ async fn run_dialog(
             anyhow::anyhow!("{e}").context("scan runner"),
         )),
     }
+}
+
+/// Run the scan under the full-screen scan view. The runner and the
+/// view run concurrently in this task: runner events are adapted onto
+/// a channel the view consumes. The view lingers after the scan
+/// finishes; closing it mid-scan cancels the run.
+#[allow(clippy::too_many_arguments)]
+async fn run_scan_tui(
+    db: Arc<Mutex<gage_db::rusqlite::Connection>>,
+    scanners: Vec<Scanner<'_>>,
+    selected: Arc<[SessionInfo]>,
+    scan_ctx: Arc<ScanSessionContext>,
+    jobs: usize,
+    agent_jobs: usize,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<gage_scan::event::RunSummary, gage_scan::runner::RunError> {
+    use gage_tui::scan_view::{self, ScanSetup, SessionEntry, TaskId};
+
+    let setup = ScanSetup {
+        tasks: scanners
+            .iter()
+            .flat_map(|s| {
+                let mut names: Vec<String> = s.def.tasks.keys().cloned().collect();
+                names.sort();
+                let scanner = s.def.name.clone();
+                names.into_iter().map(move |task| TaskId {
+                    scanner: scanner.clone(),
+                    task,
+                })
+            })
+            .collect(),
+        sessions: {
+            let store = gage_query::default_index_store();
+            selected
+                .iter()
+                .map(|s| SessionEntry {
+                    id: s.id.clone(),
+                    title: session_title(&store, s),
+                })
+                .collect()
+        },
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut print_buf = String::new();
+    let event_tx = tx.clone();
+    let scan_fut = async {
+        let result = gage_scan::runner::run(
+            db,
+            scanners,
+            selected,
+            scan_ctx,
+            jobs,
+            agent_jobs,
+            cancel.clone(),
+            |event| forward_scan_event(event, &event_tx, &mut print_buf),
+        )
+        .await;
+        send_view_event(&event_tx, scan_view::Event::Finished);
+        result
+    };
+
+    let ui_cancel = cancel.clone();
+    let ui_fut = async move {
+        let result = scan_view::run(setup, rx).await;
+        // Closing the view mid-scan stops the run; after the scan
+        // completes this is a no-op.
+        ui_cancel.cancel();
+        result
+    };
+
+    let (scan_result, ui_result) = tokio::join!(scan_fut, ui_fut);
+    ui_result?;
+    scan_result
+}
+
+/// Resolve a session's display title the same way the `session` query
+/// table does: summary cache first, deriving (and re-caching) on a
+/// miss. Falls back to the project name when the session has no title.
+fn session_title(store: &gage_index::IndexStore, s: &SessionInfo) -> String {
+    let title = match store.session_summary(&s.id, s.mtime) {
+        Some(summary) => summary.title,
+        None => match gage_index::derive_session(&s.id, &s.src) {
+            Ok(d) => {
+                if let Err(e) = store.put_session_summary(&s.id, &d.summary) {
+                    tracing::warn!(session_id = %s.id, "failed to write summary cache: {e}");
+                }
+                d.summary.title
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
+                None
+            }
+        },
+    };
+    title.unwrap_or_else(|| s.project_name().into_owned())
+}
+
+fn forward_scan_event(
+    event: gage_scan::event::ScanEvent,
+    tx: &tokio::sync::mpsc::UnboundedSender<gage_tui::scan_view::Event>,
+    print_buf: &mut String,
+) {
+    use gage_scan::event::ScanEvent;
+    use gage_tui::scan_view::{Event, TaskId};
+
+    let ev = match event {
+        ScanEvent::Status(s) => Event::Status {
+            total: s.total,
+            progress: s.progress,
+            running: s
+                .workers
+                .iter()
+                .filter_map(|w| w.current.as_ref())
+                .map(|t| TaskId {
+                    scanner: t.scanner.clone(),
+                    task: t.task.clone(),
+                })
+                .collect(),
+        },
+        ScanEvent::Print { s } => {
+            print_buf.push_str(&s);
+            while let Some(i) = print_buf.find('\n') {
+                let line: String = print_buf.drain(..=i).collect();
+                send_view_event(tx, Event::Log(line.trim_end_matches('\n').to_string()));
+            }
+            return;
+        }
+        ScanEvent::Println { s } => Event::Log(s),
+        ScanEvent::TaskFailed {
+            scanner,
+            task,
+            message,
+        } => Event::Failed {
+            scanner,
+            task,
+            message,
+        },
+        ScanEvent::Warning {
+            scanner,
+            task,
+            message,
+        } => Event::Warning {
+            scanner,
+            task,
+            message,
+        },
+    };
+    send_view_event(tx, ev);
+}
+
+/// A send failure means the view exited and dropped the receiver; the
+/// run is being cancelled and there is nowhere left to report to.
+fn send_view_event(
+    tx: &tokio::sync::mpsc::UnboundedSender<gage_tui::scan_view::Event>,
+    ev: gage_tui::scan_view::Event,
+) {
+    if tx.send(ev).is_err() {}
 }
 
 fn all_issue_ids(conn: &gage_db::rusqlite::Connection) -> std::collections::HashSet<String> {

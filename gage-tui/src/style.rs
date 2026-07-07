@@ -27,12 +27,37 @@ pub fn selection() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
 }
 
+/// Selected row in an unfocused panel — visible but muted so it does
+/// not read as the active selection.
+pub fn selection_inactive() -> Style {
+    Style::new().bg(Color::DarkGray)
+}
+
 pub fn scrollbar(active: bool) -> Style {
     if active {
         Style::new()
     } else {
         Style::new().add_modifier(Modifier::DIM)
     }
+}
+
+/// Border of the focused block in the scan view. The session viewer
+/// signals focus with dim-vs-normal; the scan view uses a yellow
+/// border per the progress-ui design.
+pub fn focus_border() -> Style {
+    Style::new().fg(Color::Yellow)
+}
+
+pub fn gauge() -> Style {
+    Style::new().fg(Color::Cyan)
+}
+
+pub fn running() -> Style {
+    Style::new().fg(Color::Yellow)
+}
+
+pub fn error() -> Style {
+    Style::new().fg(Color::Red)
 }
 
 pub fn text_dim() -> Style {

@@ -13,7 +13,10 @@ pub const SCANNER = #{
             },
         },
         issues: #{
-            notes: #{ wants: ["session.finding", "session.finding-summary"] },
+            notes: #{
+                wants: ["session.finding", "session.finding-summary"],
+                writes: #{ "issues.summary": "Summary of issue writing" },
+            },
         },
     },
 };

@@ -17,14 +17,14 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
         .build()?;
 
     m.function_meta(messages)?;
-    m.function_meta(MessageQuery::type_)?;
+    m.associated_function("type", MessageQuery::type_)?;
     m.function_meta(MessageQuery::latest_first)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: MessageQuery| async move {
         do_fetch_messages(q).await
     })?;
 
     m.function_meta(entries)?;
-    m.function_meta(EntryQuery::type_)?;
+    m.associated_function("type", EntryQuery::type_)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: EntryQuery| async move {
         do_fetch_entries(q).await
     })?;
@@ -53,7 +53,6 @@ fn messages(session: Ref<Session>) -> MessageQuery {
 }
 
 impl MessageQuery {
-    #[rune::function(instance, path = r#type)]
     fn type_(mut self, t: Value) -> Self {
         self.type_ = Some(t);
         self
@@ -86,7 +85,6 @@ fn entries(session: Ref<Session>) -> EntryQuery {
 }
 
 impl EntryQuery {
-    #[rune::function(instance, path = r#type)]
     fn type_(mut self, t: Value) -> Self {
         self.type_ = Some(t);
         self

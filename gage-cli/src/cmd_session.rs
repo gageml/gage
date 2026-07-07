@@ -512,7 +512,7 @@ pub async fn view(args: SessionViewArgs) {
             std::process::exit(1);
         }
     };
-    if let Err(e) = gage_tui::run(&session_id, options).await {
+    if let Err(e) = gage_tui::session_view::run(&session_id, options).await {
         eprintln!("gage session view: {e}");
         std::process::exit(1);
     }
