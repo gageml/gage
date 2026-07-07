@@ -122,6 +122,10 @@ pub struct NoteFilters {
     pub scan: Option<String>,
     pub author: Option<String>,
     pub name: Option<String>,
+    /// Name filters, ORed. A trailing `.` matches the name's suffixed
+    /// family by prefix (see [`Note::new`]); otherwise the match is
+    /// exact.
+    pub names: Vec<String>,
     /// Scanner name filter; matches `author = scanner:{name}`.
     pub scanner: Option<String>,
 }
@@ -435,6 +439,19 @@ fn find_query(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::To
         clauses.push(format!("n.name = ?{}", values.len() + 1));
         values.push(Box::new(name.clone()));
     }
+    if !filters.names.is_empty() {
+        let mut subs = Vec::new();
+        for name in &filters.names {
+            let idx = values.len() + 1;
+            if name.ends_with('.') {
+                subs.push(format!("substr(n.name, 1, length(?{idx})) = ?{idx}"));
+            } else {
+                subs.push(format!("n.name = ?{idx}"));
+            }
+            values.push(Box::new(name.clone()));
+        }
+        clauses.push(format!("({})", subs.join(" OR ")));
+    }
     if let Some(scanner) = &filters.scanner {
         clauses.push(format!("n.author = ?{}", values.len() + 1));
         values.push(Box::new(format!("scanner:{scanner}")));
@@ -573,6 +590,35 @@ mod tests {
     fn add_scan(conn: &Connection, id: &str) {
         conn.execute("INSERT INTO scan (id, created) VALUES (?1, 0)", [id])
             .unwrap();
+    }
+
+    #[test]
+    fn find_by_names_ors_exact_and_family() {
+        let conn = open_db_in_memory().unwrap();
+        for (id, name) in [
+            ("n1", "session.finding.abc1"),
+            ("n2", "session.finding-summary.abc2"),
+            ("n3", "issues.summary"),
+            ("n4", "other.note"),
+        ] {
+            insert(&conn, &note_with(id, name, session_target_of(SESSION_A))).unwrap();
+        }
+
+        let found = find(
+            &conn,
+            &NoteFilters {
+                names: vec![
+                    "session.finding.".to_string(),
+                    "session.finding-summary.".to_string(),
+                    "issues.summary".to_string(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut ids: Vec<&str> = found.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["n1", "n2", "n3"]);
     }
 
     #[test]

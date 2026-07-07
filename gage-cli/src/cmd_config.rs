@@ -21,6 +21,7 @@ use gage_core::config::{
 pub enum ConfigCommand {
     /// Show effective Gage configuration
     Show,
+
     /// Edit a Gage config file in the system editor
     Edit(EditArgs),
 }

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -79,6 +79,9 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     if version < 2 {
         migration_2(conn)?;
+    }
+    if version < 3 {
+        migration_3(conn)?;
     }
     set_version(conn, CURRENT_VERSION)
 }
@@ -230,6 +233,23 @@ fn migration_2(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+// Replaces the generic cache with schema-defined task validation.
+// `ref` is a prefixed entity reference (`session:<id>`, `note:<id>`);
+// `value` is the optional compared validator (e.g. session size) and
+// is NULL for membership schemes.
+fn migration_3(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "DROP TABLE cache;
+        CREATE TABLE task_validate (
+            key   TEXT NOT NULL,
+            ref   TEXT NOT NULL,
+            value TEXT,
+            PRIMARY KEY (key, ref)
+        );",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,7 +291,7 @@ mod tests {
             "project_note",
             "scan_note",
             "scan_issue",
-            "cache",
+            "task_validate",
         ] {
             let n: u32 = conn
                 .query_row(

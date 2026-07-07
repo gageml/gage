@@ -18,6 +18,8 @@ pub const SCANNER = #{
     },
 };
 
+const FINDINGS_KEY = ("general-issues", "findings", 1);
+
 /// Submit each session to an agent to write findings.
 ///
 /// Sessions already processed under the current findings key are
@@ -25,9 +27,16 @@ pub const SCANNER = #{
 pub async fn findings() {
     let t = Template::new(include_str!("findings-prompt.md")).await?;
     let runner = AgentRunner::new();
-    let (prev, new, validate) = scan().sessions().split_valid(findings_key()).await?;
-    carry_forward_notes(prev, ["session.finding.", "session.finding-summary."]).await?;
-    for s in new {
+    let (prev_sessions, new_sessions, validate) = scan()
+        .sessions()
+        .split_valid(FINDINGS_KEY)
+        .await?;
+    carry_forward_notes(
+        prev_sessions,
+        ["session.finding.", "session.finding-summary."],
+    )
+    .await?;
+    for s in new_sessions {
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
             call_agent(prompt)
@@ -41,10 +50,6 @@ pub async fn findings() {
     let results = runner.start();
     write_summaries(results, validate).await?;
     Ok(())
-}
-
-fn findings_key() {
-    (SCANNER.name, "findings", 1 /* generation */)
 }
 
 fn findings_tools() {
@@ -118,17 +123,23 @@ async fn write_summaries(results, validate) {
     Ok(())
 }
 
+const ISSUES_KEY = ("general-issues", "issues", 1);
+
 /// Ask agent to review findings and write issues.
 ///
-/// The findings available to the agent are limited to those
-/// written for the current scan.
+/// The findings available to the agent are limited to those written
+/// for the current scan. Skips the agent when every finding has
+/// already been analyzed under the current issues key.
 pub async fn issues() {
+    let (_prev_findings, new_findings, validate) = scan()
+        .notes()
+        .names(["session.finding.", "session.finding-summary."])
+        .split_valid(ISSUES_KEY)
+        .await?;
 
-    // TODO - As we are moving toward carry-forward of previously written
-    // findings, the issue writer will need to know what was previsously
-    // written along with updates to those issues (closed status, etc.)
-    // This is a lot to ask the agent to do. Let's consider a single report
-    // that we format as the prompt. Still provide Query and obviously IssueOpen.
+    if new_findings.is_empty() {
+        return Ok(());
+    }
 
     let agent = call_agent(include_str!("issues-prompt.md"))
         .name("issue-writer")
@@ -144,5 +155,7 @@ pub async fn issues() {
             metadata: result.as_metadata(),
         },
     )
-    .await?
+    .await?;
+
+    validate().await
 }

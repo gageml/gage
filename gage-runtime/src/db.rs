@@ -39,8 +39,9 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(session_notes)?;
     m.function_meta(scan_notes)?;
     m.function_meta(NotesQuery::name)?;
+    m.function_meta(NotesQuery::names)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
-        do_fetch_notes(q)
+        fetch_notes(q)
     })?;
 
     Ok(())
@@ -65,6 +66,8 @@ pub(crate) struct NotesQuery {
     scope: NotesScope,
     #[rune(skip)]
     name: Option<String>,
+    #[rune(skip)]
+    names: Vec<String>,
 }
 
 enum NotesScope {
@@ -77,6 +80,7 @@ fn session_notes(session: Ref<Session>) -> NotesQuery {
     NotesQuery {
         scope: NotesScope::Session(session.id.clone()),
         name: None,
+        names: Vec::new(),
     }
 }
 
@@ -85,6 +89,7 @@ fn scan_notes(scan: Ref<Scan>) -> NotesQuery {
     NotesQuery {
         scope: NotesScope::Scan(scan.id.clone()),
         name: None,
+        names: Vec::new(),
     }
 }
 
@@ -94,12 +99,22 @@ impl NotesQuery {
         self.name = Some(name);
         self
     }
+
+    /// Filter to notes matching any of `names`. A dot-ended name
+    /// matches its suffixed family (see `write_note`); other names
+    /// match exactly.
+    #[rune::function(instance)]
+    fn names(mut self, names: Vec<String>) -> Self {
+        self.names = names;
+        self
+    }
 }
 
-fn do_fetch_notes(q: NotesQuery) -> super::Result<Vec<Note>> {
+pub(crate) fn fetch_notes(q: NotesQuery) -> super::Result<Vec<Note>> {
     let ctx = current_scan_ctx();
     let mut filters = NoteFilters {
         name: q.name,
+        names: q.names,
         ..Default::default()
     };
     match q.scope {

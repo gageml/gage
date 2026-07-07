@@ -1,26 +1,33 @@
-//! Session-scan memoization: `split_valid` / `carry_forward_notes`.
+//! Task-run memoization: `split_valid` / `carry_forward_notes`.
 //!
-//! Partitions a scan's sessions by a cached size validator so scanners
-//! can skip sessions already processed under the same key, adopt the
-//! notes a prior scan produced, and record validation state when a
-//! session's work completes. See docs in `.local.design/session-caching.md`.
+//! Partitions a scan's sessions or notes by validation state recorded
+//! in `task_validate` so scanners can skip work already done under the
+//! same key, adopt the notes a prior scan produced, and record
+//! validation state when the work completes. See
+//! `.local.design/session-caching.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use gage_db::cache;
 use gage_db::note;
 use gage_db::scan::insert_scan_note;
+use gage_db::task_validate::{self, note_ref, session_ref};
 use rune::runtime::{Function, Protocol, Ref, Value, Vec as RuneVec};
 use rune::{Any, ContextError, Module};
 
+use crate::db::{Note, NotesQuery, fetch_notes};
 use crate::error::Error;
 use crate::scan::{Session, Sessions};
 use crate::state::current_scan_ctx;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function_meta(split_valid)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: SplitValid| async move {
-        do_split_valid(q)
+    m.function_meta(sessions_split_valid)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsSplitValid| async move {
+        do_sessions_split_valid(q)
+    })?;
+
+    m.function_meta(notes_split_valid)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: NotesSplitValid| async move {
+        do_notes_split_valid(q)
     })?;
 
     m.function("carry_forward_notes", CarryForward::new)
@@ -32,7 +39,8 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 }
 
 pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
-    m.ty::<SplitValid>()?;
+    m.ty::<SessionsSplitValid>()?;
+    m.ty::<NotesSplitValid>()?;
     m.ty::<CarryForward>()?;
     Ok(())
 }
@@ -41,7 +49,7 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
 /// when the value is awaited.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub(crate) struct SplitValid {
+pub(crate) struct SessionsSplitValid {
     #[rune(skip)]
     sessions: Vec<Session>,
     #[rune(skip)]
@@ -49,22 +57,22 @@ pub(crate) struct SplitValid {
 }
 
 #[rune::function(instance, path = split_valid)]
-fn split_valid(sessions: Ref<Sessions>, key: Value) -> SplitValid {
-    SplitValid {
+fn sessions_split_valid(sessions: Ref<Sessions>, key: Value) -> SessionsSplitValid {
+    SessionsSplitValid {
         sessions: sessions.remaining(),
         key,
     }
 }
 
-/// Render a scanner cache key — a tuple/vec of strings and integers —
+/// Render a task validation key — a tuple/vec of strings and integers —
 /// as its colon-joined form, e.g. `("s", "findings", 1)` →
 /// `"s:findings:1"`.
 fn key_string(key: &Value) -> crate::Result<String> {
     let json = crate::value::value_to_json(key)
-        .map_err(|e| Error::Args(format!("cache key could not be serialized: {e}")))?;
+        .map_err(|e| Error::Args(format!("validation key could not be serialized: {e}")))?;
     let parts = match json {
         serde_json::Value::Array(items) => items,
-        _ => return Err(Error::Args("cache key must be a tuple or vec".into())),
+        _ => return Err(Error::Args("validation key must be a tuple or vec".into())),
     };
     let mut out = Vec::with_capacity(parts.len());
     for p in parts {
@@ -73,24 +81,26 @@ fn key_string(key: &Value) -> crate::Result<String> {
             serde_json::Value::Number(n) => out.push(n.to_string()),
             other => {
                 return Err(Error::Args(format!(
-                    "cache key elements must be strings or integers, got {other}"
+                    "validation key elements must be strings or integers, got {other}"
                 )));
             }
         }
     }
     if out.is_empty() {
-        return Err(Error::Args("cache key must not be empty".into()));
+        return Err(Error::Args("validation key must not be empty".into()));
     }
     Ok(out.join(":"))
 }
 
-/// Partition sessions by cached size validator. Returns
+/// Partition sessions by recorded size validator. Returns
 /// `(prev, new, validate)`: `prev` are sessions whose recorded size
-/// matches (cache hit), `new` need scanning, and `validate` is a
-/// function of one session (or session id) that records the session's
+/// matches (already processed), `new` need scanning, and `validate` is
+/// a function of one session (or session id) that records the session's
 /// size under the key — called by the scanner when that session's work
 /// has completed.
-fn do_split_valid(q: SplitValid) -> crate::Result<(Vec<Session>, Vec<Session>, Function)> {
+fn do_sessions_split_valid(
+    q: SessionsSplitValid,
+) -> crate::Result<(Vec<Session>, Vec<Session>, Function)> {
     let key = key_string(&q.key)?;
     let ctx = current_scan_ctx();
     let sizes: HashMap<&str, u64> = ctx
@@ -102,20 +112,20 @@ fn do_split_valid(q: SplitValid) -> crate::Result<(Vec<Session>, Vec<Session>, F
 
     let mut prev = Vec::new();
     let mut new = Vec::new();
-    // session id -> (cache key, size at selection) for `validate`
-    let mut entries: HashMap<String, (String, String)> = HashMap::new();
+    // session id -> size at selection, for `validate`
+    let mut entries: HashMap<String, String> = HashMap::new();
     {
         let db = ctx.db.lock().unwrap();
         for s in q.sessions {
             let size = *sizes
                 .get(s.id.as_str())
                 .ok_or_else(|| Error::Args(format!("session {} not in scan selection", s.id)))?;
-            let cache_key = format!("session-valid:{key}:{}", s.id);
-            let cached = cache::get(&db, &cache_key).map_err(|e| Error::Db(e.to_string()))?;
-            if cached.as_deref() == Some(size.to_string().as_str()) {
+            let recorded = task_validate::value(&db, &key, &session_ref(&s.id))
+                .map_err(|e| Error::Db(e.to_string()))?;
+            if recorded.as_deref() == Some(size.to_string().as_str()) {
                 prev.push(s);
             } else {
-                entries.insert(s.id.clone(), (cache_key, size.to_string()));
+                entries.insert(s.id.clone(), size.to_string());
                 new.push(s);
             }
         }
@@ -123,12 +133,13 @@ fn do_split_valid(q: SplitValid) -> crate::Result<(Vec<Session>, Vec<Session>, F
 
     let validate = Function::new(move |session: Value| -> crate::Result<()> {
         let id = session_id(&session)?;
-        let (cache_key, size) = entries
+        let size = entries
             .get(&id)
             .ok_or_else(|| Error::Args(format!("session {id} was not split as new")))?;
         let ctx = current_scan_ctx();
         let db = ctx.db.lock().unwrap();
-        cache::put(&db, cache_key, size, None).map_err(|e| Error::Db(e.to_string()))
+        task_validate::put(&db, &key, &session_ref(&id), Some(size))
+            .map_err(|e| Error::Db(e.to_string()))
     })
     .unwrap();
 
@@ -146,6 +157,71 @@ fn session_id(v: &Value) -> crate::Result<String> {
             v.type_info()
         ))
     })
+}
+
+/// Builder returned by `notes_query.split_valid(key)`. The partition
+/// runs when the value is awaited.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct NotesSplitValid {
+    #[rune(skip)]
+    query: NotesQuery,
+    #[rune(skip)]
+    key: Value,
+}
+
+#[rune::function(instance, path = split_valid)]
+fn notes_split_valid(query: NotesQuery, key: Value) -> NotesSplitValid {
+    NotesSplitValid { query, key }
+}
+
+/// Partition the query's notes by membership under the key. Returns
+/// `(prev, new, validate)`: `prev` were recorded by a prior
+/// `validate()` call, `new` have never been recorded, and `validate`
+/// is a no-argument function that records the `new` notes — called by
+/// the scanner when the work consuming them has completed.
+fn do_notes_split_valid(q: NotesSplitValid) -> crate::Result<(Vec<Note>, Vec<Note>, Function)> {
+    let key = key_string(&q.key)?;
+    let ctx = current_scan_ctx();
+    let notes = fetch_notes(q.query)?;
+
+    let refs: Vec<String> = notes.iter().map(|n| note_ref(&n.id)).collect();
+    let existing: HashSet<String> = {
+        let db = ctx.db.lock().unwrap();
+        task_validate::existing_refs(&db, &key, &refs)
+            .map_err(|e| Error::Db(e.to_string()))?
+            .into_iter()
+            .collect()
+    };
+
+    let mut prev = Vec::new();
+    let mut new = Vec::new();
+    let mut new_refs = Vec::new();
+    for note in notes {
+        let r = note_ref(&note.id);
+        if existing.contains(&r) {
+            prev.push(note);
+        } else {
+            new_refs.push(r);
+            new.push(note);
+        }
+    }
+
+    let validate = Function::new(move || {
+        let key = key.clone();
+        let new_refs = new_refs.clone();
+        async move {
+            let ctx = current_scan_ctx();
+            let db = ctx.db.lock().unwrap();
+            for r in &new_refs {
+                task_validate::put(&db, &key, r, None).map_err(|e| Error::Db(e.to_string()))?;
+            }
+            Ok::<(), Error>(())
+        }
+    })
+    .unwrap();
+
+    Ok((prev, new, validate))
 }
 
 /// Builder returned by `carry_forward_notes(sessions, names)`. The link

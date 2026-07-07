@@ -149,3 +149,39 @@ async fn test_carry_forward_notes() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+#[test]
+async fn test_notes_split_valid() {
+    let session = "44444444-4444-4444-4444-444444444444";
+    gage::write_note(
+        #{
+            name: "test.split.finding.",
+            value: "a finding",
+            target: #{ session: session },
+        },
+    )
+    .await
+    .unwrap();
+
+    // First pass: the finding has never been recorded
+    let (prev, new, validate) = gage::scan()
+        .notes()
+        .names(["test.split.finding."])
+        .split_valid(("test-scanner", "issues", 1))
+        .await
+        .unwrap();
+    assert_eq!(prev.len(), 0);
+    assert_eq!(new.len(), 1);
+
+    validate().await.unwrap();
+
+    // Second pass: the finding is now recorded
+    let (prev, new, _validate) = gage::scan()
+        .notes()
+        .names(["test.split.finding."])
+        .split_valid(("test-scanner", "issues", 1))
+        .await
+        .unwrap();
+    assert_eq!(prev.len(), 1);
+    assert_eq!(new.len(), 0);
+}
