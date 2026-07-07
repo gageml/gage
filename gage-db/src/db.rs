@@ -50,40 +50,76 @@ pub fn open_db() -> Result<Connection, DbError> {
     open_db_at(&db_path())
 }
 
+/// Ensure the database exists and is migrated to the current schema.
+///
+/// For callers that read the database through something other than
+/// [`open_db`] (e.g. the DataFusion sqlite connection pool), which
+/// would otherwise fail on a fresh gage home.
+pub fn ensure_db() -> Result<(), DbError> {
+    open_db()?;
+    Ok(())
+}
+
 pub fn open_db_at(path: &Path) -> Result<Connection, DbError> {
     std::fs::create_dir_all(path.parent().unwrap())?;
-    let conn = Connection::open(path)?;
+    // Retry on SQLITE_BUSY: concurrent opens contend on the WAL
+    // journal-mode switch, which does not invoke the busy handler
+    // during the transition, so a timeout alone does not cover it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match try_open_db_at(path) {
+            Err(DbError::Sqlite(e)) if is_busy(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn try_open_db_at(path: &Path) -> Result<Connection, DbError> {
+    let mut conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     // synchronous=NORMAL is safe under WAL: durability of the most
     // recent commits depends on a checkpoint, but the database itself
     // can never be corrupted. Cuts fsync overhead by ~10x for
     // write-heavy workloads like scan runs.
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    migrate(&conn)?;
+    migrate(&mut conn)?;
     Ok(conn)
+}
+
+fn is_busy(e: &rusqlite::Error) -> bool {
+    e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
 }
 
 pub fn open_db_in_memory() -> Result<Connection, DbError> {
-    let conn = Connection::open_in_memory()?;
-    migrate(&conn)?;
+    let mut conn = Connection::open_in_memory()?;
+    migrate(&mut conn)?;
     Ok(conn)
 }
 
-fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let version = get_version(conn)?;
+fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
+    // An immediate transaction serializes concurrent migrators (e.g.
+    // parallel query-context creation on a fresh gage home): the
+    // version is re-read under the write lock, so a second connection
+    // sees the first one's completed migration and skips.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version = get_version(&tx)?;
     if version >= CURRENT_VERSION {
         return Ok(());
     }
     if version < 1 {
-        migration_1(conn)?;
+        migration_1(&tx)?;
     }
     if version < 2 {
-        migration_2(conn)?;
+        migration_2(&tx)?;
     }
     if version < 3 {
-        migration_3(conn)?;
+        migration_3(&tx)?;
     }
-    set_version(conn, CURRENT_VERSION)
+    set_version(&tx, CURRENT_VERSION)?;
+    tx.commit()
 }
 
 fn get_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
@@ -318,8 +354,8 @@ mod tests {
 
     #[test]
     fn migrate_is_idempotent() {
-        let conn = open_db_in_memory().unwrap();
-        migrate(&conn).unwrap();
+        let mut conn = open_db_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();

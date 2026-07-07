@@ -91,6 +91,9 @@ async fn build_context(
     cache_dir: &Path,
     agent_scan_id: Option<String>,
 ) -> SessionContext {
+    // The sqlite connection pool below opens the db file directly and
+    // neither creates nor migrates it; a fresh gage home needs both.
+    gage_db::db::ensure_db().expect("ensure gage db");
     let cache = Arc::new(SessionCache::new());
     let config = SessionConfig::new()
         .with_information_schema(true)

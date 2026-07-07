@@ -20,9 +20,6 @@ fn isolate_gage_home() {
         // SAFETY: set_var is unsafe in edition 2024; this runs once via
         // OnceLock before any test reads GAGE_HOME through this fixture.
         unsafe { std::env::set_var("GAGE_HOME", dir.path()) };
-        // The sqlite connection pool opens <GAGE_HOME>/data/gage.db
-        // directly; create and migrate it the way the product does.
-        gage_db::db::open_db().expect("create migrated test db");
     });
 }
 
