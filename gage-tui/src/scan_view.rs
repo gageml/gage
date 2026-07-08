@@ -21,15 +21,15 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Cell, Clear, Gauge, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Table, TableState,
+    Block, Cell, Clear, Gauge, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Table, TableState, Wrap,
 };
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::style;
+use crate::{markdown, style};
 
 /// A scan task identity, `{scanner}::{task}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,9 +111,16 @@ pub struct SessionItem {
 pub struct NoteItem {
     pub id: String,
     pub name: String,
+    /// One-line display form for the notes table
     pub value: String,
+    /// Full value text for the detail view
+    pub value_full: String,
     /// Target URI, e.g. `session:{id}`
     pub target: String,
+    pub author: String,
+    /// Creation time display string
+    pub created: String,
+    pub explanation: Option<String>,
 }
 
 /// An issue opened during the scan.
@@ -375,13 +382,35 @@ fn spawn_input_thread(stop: Arc<AtomicBool>) -> UnboundedReceiver<TermEvent> {
 
 /// Returns true when the view should close.
 fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
-    if state.confirm_quit {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => return true,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => state.confirm_quit = false,
-            _ => {}
+    let page = state.detail_page.max(1);
+    let max_scroll = state.detail_max_scroll;
+    match &mut state.dialog {
+        Dialog::ConfirmQuit => {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => return true,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    state.dialog = Dialog::None;
+                }
+                _ => {}
+            }
+            return false;
         }
-        return false;
+        Dialog::Note { scroll, .. } => {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *scroll = scroll.saturating_add(1).min(max_scroll);
+                }
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(page).min(max_scroll),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(page),
+                KeyCode::Char('g') => *scroll = 0,
+                KeyCode::Char('G') => *scroll = max_scroll,
+                _ => {}
+            }
+            return false;
+        }
+        Dialog::None => {}
     }
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -396,6 +425,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
         KeyCode::PageUp => state.select_by(-(state.page() as isize)),
         KeyCode::Char('g') => state.select_first(),
         KeyCode::Char('G') => state.select_last(),
+        KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
         _ => {}
     }
     false
@@ -444,8 +474,23 @@ struct ViewState {
     issues_viewport: usize,
     log: VecDeque<String>,
     started: Instant,
-    /// Quit confirmation dialog is up (quit requested mid-scan)
-    confirm_quit: bool,
+    dialog: Dialog,
+    /// Scroll geometry of the open detail dialog, recorded at draw
+    /// time so scroll keys know the page size and limit
+    detail_page: u16,
+    detail_max_scroll: u16,
+}
+
+enum Dialog {
+    None,
+    /// Quit requested mid-scan; y stops the scan
+    ConfirmQuit,
+    /// Zoomed note detail. Holds a snapshot of the item so a results
+    /// refresh can't shift what's being read.
+    Note {
+        note: NoteItem,
+        scroll: u16,
+    },
 }
 
 impl ViewState {
@@ -462,8 +507,22 @@ impl ViewState {
             focus: Focus::Tasks,
             log: VecDeque::new(),
             started: Instant::now(),
-            confirm_quit: false,
+            dialog: Dialog::None,
+            detail_page: 0,
+            detail_max_scroll: 0,
             model,
+        }
+    }
+
+    fn open_selected_note(&mut self) {
+        let Some(i) = self.notes_table.selected() else {
+            return;
+        };
+        if let Some(note) = self.model.notes.get(i) {
+            self.dialog = Dialog::Note {
+                note: note.clone(),
+                scroll: 0,
+            };
         }
     }
 
@@ -473,7 +532,7 @@ impl ViewState {
         if self.model.finished {
             return true;
         }
-        self.confirm_quit = true;
+        self.dialog = Dialog::ConfirmQuit;
         false
     }
 
@@ -584,9 +643,93 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     draw_notes(frame, notes, state);
     draw_issues(frame, issues, state);
     draw_footer(frame, footer, state);
-    if state.confirm_quit {
-        draw_confirm_quit(frame);
+    let detail_geometry = match &state.dialog {
+        Dialog::ConfirmQuit => {
+            draw_confirm_quit(frame);
+            None
+        }
+        Dialog::Note { note, scroll } => Some(draw_note_detail(frame, note, *scroll)),
+        Dialog::None => None,
+    };
+    if let Some((page, max_scroll)) = detail_geometry {
+        state.detail_page = page;
+        state.detail_max_scroll = max_scroll;
     }
+}
+
+/// Renders the note detail modal and returns `(page, max_scroll)` for
+/// the scroll keys. Fields lay out as a page: caption above content,
+/// value and explanation rendered as markdown.
+fn draw_note_detail(frame: &mut Frame, note: &NoteItem, scroll: u16) -> (u16, u16) {
+    let area = detail_rect(frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .title(format!(" Note {} ", note.id))
+        .padding(Padding::horizontal(1));
+    let body = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Header attributes as caption/value columns; the caption column
+    // pads to the widest caption
+    let headers = [
+        ("Name", note.name.as_str()),
+        ("Target", note.target.as_str()),
+        ("Author", note.author.as_str()),
+        ("Created", note.created.as_str()),
+    ];
+    let caption_width = headers.iter().map(|(c, _)| c.width()).max().unwrap_or(0);
+    let mut lines: Vec<Line> = headers
+        .iter()
+        .map(|(caption, value)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{caption:<width$}  ", width = caption_width),
+                    style::text_dim(),
+                ),
+                Span::raw((*value).to_string()),
+            ])
+        })
+        .collect();
+    let section =
+        |lines: &mut Vec<Line<'static>>, caption: &'static str, content: Vec<Line<'static>>| {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(caption, style::text_dim())));
+            lines.extend(content);
+        };
+    lines.push(Line::raw(""));
+    lines.extend(markdown::render(&note.value_full));
+    if let Some(explanation) = &note.explanation {
+        section(&mut lines, "Explanation", markdown::render(explanation));
+    }
+
+    let scroll_width = body.width.saturating_sub(1);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = u16::try_from(paragraph.line_count(scroll_width)).unwrap_or(u16::MAX);
+    let max_scroll = total.saturating_sub(body.height);
+    let scroll = scroll.min(max_scroll);
+    frame.render_widget(paragraph.scroll((scroll, 0)), body);
+
+    let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
+    frame.render_stateful_widget(
+        scrollbar(true),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut sb_state,
+    );
+    (body.height, max_scroll)
+}
+
+/// Detail modals cover most of the frame, inset a few cells so the
+/// main view remains visible behind them.
+fn detail_rect(frame: Rect) -> Rect {
+    let margin_x = (frame.width / 10).clamp(2, 8);
+    let margin_y = (frame.height / 10).clamp(1, 3);
+    frame.inner(Margin {
+        horizontal: margin_x,
+        vertical: margin_y,
+    })
 }
 
 fn draw_confirm_quit(frame: &mut Frame) {

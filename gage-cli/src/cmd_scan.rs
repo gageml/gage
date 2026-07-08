@@ -406,7 +406,11 @@ fn load_scan_results(
                 id: n.id.clone(),
                 name: n.name.clone(),
                 value: crate::cmd_note::format_value_cell(&n.value),
+                value_full: crate::cmd_note::format_value(&n.value),
                 target: n.target.to_uri(),
+                author: n.author.clone(),
+                created: gage_core::datetime::ms_to_iso8601(n.created),
+                explanation: n.explanation.clone(),
             })
             .collect(),
         issues: issues
