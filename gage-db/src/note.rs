@@ -596,10 +596,10 @@ mod tests {
     fn find_by_names_ors_exact_and_family() {
         let conn = open_db_in_memory().unwrap();
         for (id, name) in [
-            ("n1", "session.finding.abc1"),
-            ("n2", "session.finding-summary.abc2"),
-            ("n3", "issues.summary"),
-            ("n4", "other.note"),
+            ("n1", "finding.abc1"),
+            ("n2", "finding-summary.abc2"),
+            ("n3", "issue-summary"),
+            ("n4", "other"),
         ] {
             insert(&conn, &note_with(id, name, session_target_of(SESSION_A))).unwrap();
         }
@@ -608,9 +608,9 @@ mod tests {
             &conn,
             &NoteFilters {
                 names: vec![
-                    "session.finding.".to_string(),
-                    "session.finding-summary.".to_string(),
-                    "issues.summary".to_string(),
+                    "finding.".to_string(),
+                    "finding-summary.".to_string(),
+                    "issue-summary".to_string(),
                 ],
                 ..Default::default()
             },
@@ -625,26 +625,26 @@ mod tests {
     fn ids_for_session_by_name_exact_and_prefix() {
         let conn = open_db_in_memory().unwrap();
         for (id, name) in [
-            ("n1", "session.finding.abc1"),
-            ("n2", "session.finding.abc2"),
-            ("n3", "session.finding-summary.abc3"),
-            ("n4", "issues.summary"),
+            ("n1", "finding.abc1"),
+            ("n2", "finding.abc2"),
+            ("n3", "finding-summary.abc3"),
+            ("n4", "issue-summary"),
         ] {
             insert(&conn, &note_with(id, name, session_target_of(SESSION_A))).unwrap();
         }
         // Same family name, different session
         insert(
             &conn,
-            &note_with("n5", "session.finding.xyz", session_target_of(SESSION_B)),
+            &note_with("n5", "finding.xyz", session_target_of(SESSION_B)),
         )
         .unwrap();
 
         // Dot-ended name matches the suffixed family, not lookalike prefixes
-        let ids = ids_for_session_by_name(&conn, SESSION_A, "session.finding.").unwrap();
+        let ids = ids_for_session_by_name(&conn, SESSION_A, "finding.").unwrap();
         assert_eq!(ids, vec!["n1".to_string(), "n2".to_string()]);
 
         // Exact name
-        let ids = ids_for_session_by_name(&conn, SESSION_A, "issues.summary").unwrap();
+        let ids = ids_for_session_by_name(&conn, SESSION_A, "issue-summary").unwrap();
         assert_eq!(ids, vec!["n4".to_string()]);
 
         // No match
