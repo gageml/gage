@@ -1,0 +1,15 @@
+use gage::Progress;
+
+pub const SCANNER = #{
+    name: "progress",
+    description: "Show scan progress",
+    tasks: #{ task: #{} },
+};
+
+pub async fn query() {
+    for i in Progress::new(0..10) {
+        println!("Item {i}");
+        sleep(1000).await;
+    }
+    Ok(())
+}
