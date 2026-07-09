@@ -11,11 +11,6 @@ type = "string"
 required = false
 description = "Markdown body describing the finding and the supporting reasoning"
 
-[parameters.target]
-type = "string"
-required = false
-description = "Optional target URI using the same scheme as note.target (e.g. session:<id>). Leave unset for a global issue."
-
 [parameters.evidence]
 type = "array"
 items = { type = "string" }

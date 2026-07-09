@@ -242,8 +242,7 @@ fn build_accepted_parent_sets(tx: &Transaction) -> Result<(), ImportError> {
          SELECT s.id FROM src.issue s
          WHERE s.id NOT IN (SELECT id FROM issue)
            AND NOT EXISTS (
-             SELECT 1 FROM issue d
-             WHERE d.name = s.name AND d.target = s.target
+             SELECT 1 FROM issue d WHERE d.name = s.name
            );
 
          CREATE TEMP TABLE accepted_scan (id TEXT PRIMARY KEY);
@@ -391,8 +390,8 @@ mod tests {
                 ('n3','quality','sess:c','scanner:y','1',300);
              INSERT INTO session_note (session_id, note_id) VALUES
                 ('sess:a','n1'), ('sess:b','n2'), ('sess:c','n3');
-             INSERT INTO issue (id, name, target, title, status, created, author) VALUES
-                ('i1','dup','sess:a','t','open',100,'u');
+             INSERT INTO issue (id, name, title, status, created, author) VALUES
+                ('i1','dup','t','open',100,'u');
              INSERT INTO issue_event (issue_id, type, author, timestamp) VALUES
                 ('i1','open','u',100);",
         )

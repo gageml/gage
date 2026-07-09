@@ -188,7 +188,6 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE issue (
             id            TEXT PRIMARY KEY,
             name          TEXT NOT NULL,
-            target        TEXT NOT NULL,
             title         TEXT NOT NULL,
             description   TEXT,
             status        TEXT NOT NULL,
@@ -197,8 +196,7 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
             modified      INTEGER,
             author        TEXT NOT NULL
         );
-        CREATE UNIQUE INDEX idx_issue_duplicate_key ON issue(name, target);
-        CREATE INDEX idx_issue_name   ON issue(name);
+        CREATE UNIQUE INDEX idx_issue_duplicate_key ON issue(name);
         CREATE INDEX idx_issue_status ON issue(status);
 
         CREATE TABLE issue_evidence (

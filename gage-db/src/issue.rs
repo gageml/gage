@@ -104,11 +104,8 @@ impl IssueEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
+    /// Issue name, the duplication key.
     pub name: String,
-    /// Advisory target URI the issue refers to, using the same scheme as
-    /// `note.target`. Empty string for a global issue. Part of the
-    /// duplication key `(name, target)`.
-    pub target: String,
     pub title: String,
     pub description: Option<String>,
     pub status: IssueStatus,
@@ -157,8 +154,8 @@ pub struct LoggedEvent {
 pub enum IssueError {
     NotFound(String),
     Ambiguous(String, Vec<String>),
-    /// An issue with the same `(name, target)` already exists. The
-    /// existing issue is returned so the caller can decide what to do.
+    /// An issue with the same `name` already exists. The existing
+    /// issue is returned so the caller can decide what to do.
     Duplicate(Box<Issue>),
     Db(rusqlite::Error),
 }
@@ -181,11 +178,7 @@ impl std::fmt::Display for IssueError {
                 Ok(())
             }
             IssueError::Duplicate(prev) => {
-                write!(
-                    f,
-                    "duplicate issue (name={}, target={})",
-                    prev.name, prev.target
-                )
+                write!(f, "duplicate issue (name={})", prev.name)
             }
             IssueError::Db(e) => write!(f, "database error: {e}"),
         }
@@ -201,13 +194,7 @@ impl Issue {
     /// the generated id, so callers can ask for a unique name (e.g.
     /// `"judge."` → `"judge.abcd1234"`) without threading the id back
     /// through the caller.
-    pub fn new(
-        target: String,
-        name: &str,
-        title: String,
-        description: Option<String>,
-        author: &str,
-    ) -> Self {
+    pub fn new(name: &str, title: String, description: Option<String>, author: &str) -> Self {
         let id = gage_core::uuid::new_uuid();
         let name = if name.ends_with('.') {
             format!("{name}{}", gage_core::uuid::short_uuid(&id))
@@ -217,7 +204,6 @@ impl Issue {
         Issue {
             id,
             name,
-            target,
             title,
             description,
             status: IssueStatus::Open,
@@ -230,24 +216,23 @@ impl Issue {
 }
 
 const ISSUE_COLUMNS: &str =
-    "id, name, target, title, description, status, closed_reason, created, modified, author";
+    "id, name, title, description, status, closed_reason, created, modified, author";
 
 /// Insert an issue.
 ///
 /// Returns `IssueError::Duplicate(prev)` if an issue with the same
-/// `(name, target)` already exists; the existing issue is left
-/// untouched and returned so the caller can decide what to do.
+/// `name` already exists; the existing issue is left untouched and
+/// returned so the caller can decide what to do.
 pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
     let res = tx.execute(
         &format!(
             "INSERT INTO issue ({ISSUE_COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
         ),
         params![
             issue.id,
             issue.name,
-            issue.target,
             issue.title,
             issue.description,
             issue.status.as_str(),
@@ -259,7 +244,7 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
     );
     if let Err(e) = res {
         if is_unique_violation(&e) {
-            let prev = find_by_dup_key(conn, &issue.name, &issue.target)?;
+            let prev = find_by_dup_key(conn, &issue.name)?;
             return Err(IssueError::Duplicate(Box::new(prev)));
         }
         return Err(e.into());
@@ -285,11 +270,9 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
-fn find_by_dup_key(conn: &Connection, name: &str, target: &str) -> Result<Issue, IssueError> {
-    let mut stmt = conn.prepare(&format!(
-        "{ISSUE_SELECT} WHERE i.name = ?1 AND i.target = ?2"
-    ))?;
-    stmt.query_row(params![name, target], row_to_issue)
+fn find_by_dup_key(conn: &Connection, name: &str) -> Result<Issue, IssueError> {
+    let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.name = ?1"))?;
+    stmt.query_row(params![name], row_to_issue)
         .map_err(IssueError::from)
 }
 
@@ -526,7 +509,7 @@ pub struct IssueFilters {
     pub name: Option<String>,
 }
 
-const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.target, i.title, i.description, i.status,
+const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.title, i.description, i.status,
             i.closed_reason, i.created, i.modified, i.author
      FROM issue i";
 
@@ -607,20 +590,20 @@ fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
 }
 
 fn row_to_issue(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
-    let status_str: String = row.get(5)?;
+    let status_str: String = row.get(4)?;
     let status = status_str.parse::<IssueStatus>().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
-            5,
+            4,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::other(e)),
         )
     })?;
-    let closed_reason: Option<String> = row.get(6)?;
+    let closed_reason: Option<String> = row.get(5)?;
     let closed_reason = closed_reason
         .map(|s| {
             s.parse::<ClosedReason>().map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    6,
+                    5,
                     rusqlite::types::Type::Text,
                     Box::new(std::io::Error::other(e)),
                 )
@@ -630,14 +613,13 @@ fn row_to_issue(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
     Ok(Issue {
         id: row.get(0)?,
         name: row.get(1)?,
-        target: row.get(2)?,
-        title: row.get(3)?,
-        description: row.get(4)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
         status,
         closed_reason,
-        created: row.get(7)?,
-        modified: row.get(8)?,
-        author: row.get(9)?,
+        created: row.get(6)?,
+        modified: row.get(7)?,
+        author: row.get(8)?,
     })
 }
 
@@ -651,7 +633,6 @@ mod tests {
         Issue {
             id: id.to_string(),
             name: name.to_string(),
-            target: String::new(),
             title: "Sample title".to_string(),
             description: Some("scanner:description.md".to_string()),
             status: IssueStatus::Open,
@@ -720,7 +701,7 @@ mod tests {
         let a = sample("issue-aaa", "thinking.empty");
         insert(&conn, &a).unwrap();
 
-        // Same (name, target), fresh id and different title
+        // Same name, fresh id and different title
         let mut b = sample("issue-bbb", "thinking.empty");
         b.title = "different".to_string();
         match insert(&conn, &b) {
@@ -732,23 +713,6 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM issue", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
-    }
-
-    #[test]
-    fn same_name_distinct_target_is_not_duplicate() {
-        let conn = open_db_in_memory().unwrap();
-        let mut a = sample("issue-aaa", "thinking.empty");
-        a.target = "session:sess-1".to_string();
-        insert(&conn, &a).unwrap();
-
-        let mut b = sample("issue-bbb", "thinking.empty");
-        b.target = "session:sess-2".to_string();
-        insert(&conn, &b).unwrap();
-
-        let n: u32 = conn
-            .query_row("SELECT COUNT(*) FROM issue", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 2);
     }
 
     #[test]

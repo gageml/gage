@@ -211,7 +211,6 @@ pub fn show(args: IssueShowArgs) {
     let attrs = vec![
         ("id", issue.id.clone()),
         ("name", issue.name.clone()),
-        ("target", issue.target.clone()),
         ("title", issue.title.clone()),
         ("status", issue.status.as_str().to_string()),
         (
@@ -342,7 +341,6 @@ pub fn add(args: IssueAddArgs) {
         let issue = Issue {
             name: format!("user-issue-{}", short_uuid(&id)),
             id,
-            target: String::new(),
             title,
             description,
             status: IssueStatus::Open,

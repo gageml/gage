@@ -34,7 +34,6 @@ fn call(
 async fn handle(params: JsonObject, author: String) -> Result<String, McpError> {
     let title = req_string(&params, "title")?;
     let description = opt_string(&params, "description");
-    let target = opt_string(&params, "target").unwrap_or_default();
     let evidence_ids = opt_string_array(&params, "evidence")?;
 
     let conn = open_db().unwrap();
@@ -53,7 +52,7 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         evidence_notes.push(n);
     }
 
-    let issue_row = Issue::new(target, "issue.", title, description, &author);
+    let issue_row = Issue::new("issue.", title, description, &author);
     let now = issue_row.created;
 
     issue::insert(&conn, &issue_row).map_err(|e| match e {

@@ -372,8 +372,6 @@ pub(crate) struct Issue {
     #[rune(get)]
     pub name: String,
     #[rune(get)]
-    pub target: String,
-    #[rune(get)]
     pub title: String,
     #[rune(get)]
     pub description: Option<String>,
@@ -390,7 +388,6 @@ impl From<DbIssue> for Issue {
         Self {
             id: db.id,
             name: db.name,
-            target: db.target,
             title: db.title,
             description: db.description,
             status: db.status.as_str().to_string(),
@@ -400,7 +397,7 @@ impl From<DbIssue> for Issue {
     }
 }
 
-/// What a duplicate `(name, target)` does at write time.
+/// What a duplicate `name` does at write time.
 enum IssuePolicy {
     /// Surface the conflict as `Err(Error::Duplicate { prev, new })`.
     Error,
@@ -417,7 +414,7 @@ enum IssuePolicy {
 
 /// Builder returned by `write_issue`. The insert runs when the value is
 /// awaited; the policy decides what happens on a duplicate. With no
-/// policy a duplicate `(name, target)` surfaces as
+/// policy a duplicate `name` surfaces as
 /// `Err(Error::Duplicate { prev, new })`.
 #[derive(Any)]
 #[rune(item = ::gage)]
@@ -469,13 +466,6 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
     let title = required_string(t, "title")?;
     let description = optional_string(t, "description")?;
 
-    // Omitted target means a global issue (empty string); otherwise the
-    // target is validated by `target_from_value`.
-    let target = match t.get("target") {
-        Some(v) => target_from_value(v)?.to_uri(),
-        None => String::new(),
-    };
-
     let now = gage_core::datetime::now_ms();
     let evidence = match t.get("evidence") {
         Some(v) => evidence_from_value(v, now)?,
@@ -485,7 +475,6 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
     let db_issue = DbIssue {
         id: gage_core::uuid::new_uuid(),
         name,
-        target,
         title,
         description,
         status: IssueStatus::Open,
@@ -498,7 +487,6 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
     tracing::info!(
         id = db_issue.id,
         name = db_issue.name,
-        target = db_issue.target,
         author = db_issue.author,
         "write_issue",
     );

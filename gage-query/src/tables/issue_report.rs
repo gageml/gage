@@ -154,9 +154,6 @@ fn render(issue: &Issue, related: &[Note], events: &[LoggedEvent]) -> String {
     out.push_str(&format!("- status: {}\n", issue.status.as_str()));
     out.push_str(&format!("- id: {}\n", issue.id));
     out.push_str(&format!("- name: {}\n", issue.name));
-    if !issue.target.is_empty() {
-        out.push_str(&format!("- target: {}\n", issue.target));
-    }
     if let Some(r) = issue.closed_reason {
         out.push_str(&format!("- closed reason: {}\n", r.as_str()));
     }

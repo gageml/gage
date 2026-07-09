@@ -389,13 +389,17 @@ fn load_scan_results(
             counts.entry(t.session_id.clone()).or_default().0 += 1;
         }
     }
+    // An issue attributes to every session its evidence touches, once
+    // per session.
     for issue in &issues {
-        // Targets are advisory URIs; non-session and malformed targets
-        // simply don't attribute to a session row.
-        if let Ok(gage_db::target::NoteTarget::Session(t)) =
-            gage_db::target::NoteTarget::from_uri(&issue.target)
-        {
-            counts.entry(t.session_id).or_default().1 += 1;
+        let mut sessions: HashSet<String> = HashSet::new();
+        for note in gage_db::issue::related_notes(conn, &issue.id)? {
+            if let gage_db::target::NoteTarget::Session(t) = &note.target {
+                sessions.insert(t.session_id.clone());
+            }
+        }
+        for session_id in sessions {
+            counts.entry(session_id).or_default().1 += 1;
         }
     }
 

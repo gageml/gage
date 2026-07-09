@@ -118,10 +118,7 @@ impl std::fmt::Debug for Error {
 /// `Issue`, then `Note`; falls back to the Rune type name.
 fn describe_duplicate(v: &Value) -> String {
     if let Ok(issue) = rune::from_value::<Ref<Issue>>(v.clone()) {
-        format!(
-            "issue name={:?} target={:?} id={:?}",
-            issue.name, issue.target, issue.id
-        )
+        format!("issue name={:?} id={:?}", issue.name, issue.id)
     } else if let Ok(note) = rune::from_value::<Ref<Note>>(v.clone()) {
         format!(
             "note name={:?} target={:?} id={:?}",
