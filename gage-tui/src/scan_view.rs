@@ -21,14 +21,14 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Cell, Clear, Gauge, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, TableState, Wrap,
+    Block, Cell, Clear, Gauge, Padding, Paragraph, Row, ScrollbarState, Table, Wrap,
 };
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::item_table::{ItemTable, scrollbar};
 use crate::{markdown, style};
 
 /// A scan task identity, `{scanner}::{task}`.
@@ -439,12 +439,6 @@ enum Focus {
     Issues,
 }
 
-/// Rows a table panel can display: panel height minus borders and the
-/// header row.
-fn table_viewport(area: Rect) -> usize {
-    area.height.saturating_sub(3) as usize
-}
-
 /// Content-fit column width: widest value (or the header), capped at a
 /// third of the panel so one long value can't starve the fill columns.
 fn fit_col<'a>(header: &str, values: impl Iterator<Item = &'a str>, area: Rect) -> Constraint {
@@ -462,16 +456,10 @@ const LOG_CAP: usize = 500;
 struct ViewState {
     model: ScanModel,
     focus: Focus,
-    tasks_table: TableState,
-    sessions_table: TableState,
-    notes_table: TableState,
-    issues_table: TableState,
-    /// Visible row count per table, recorded at draw time so paging
-    /// keys know the page size before the next frame
-    tasks_viewport: usize,
-    sessions_viewport: usize,
-    notes_viewport: usize,
-    issues_viewport: usize,
+    tasks: ItemTable,
+    sessions: ItemTable,
+    notes: ItemTable,
+    issues: ItemTable,
     log: VecDeque<String>,
     started: Instant,
     dialog: Dialog,
@@ -495,15 +483,11 @@ enum Dialog {
 
 impl ViewState {
     fn new(model: ScanModel) -> Self {
-        Self {
-            tasks_table: initial_selection(model.tasks.len()),
-            sessions_table: initial_selection(model.sessions.len()),
-            notes_table: initial_selection(model.notes.len()),
-            issues_table: initial_selection(model.issues.len()),
-            tasks_viewport: 0,
-            sessions_viewport: 0,
-            notes_viewport: 0,
-            issues_viewport: 0,
+        let mut state = Self {
+            tasks: ItemTable::new(),
+            sessions: ItemTable::new(),
+            notes: ItemTable::new(),
+            issues: ItemTable::new(),
             focus: Focus::Tasks,
             log: VecDeque::new(),
             started: Instant::now(),
@@ -511,11 +495,28 @@ impl ViewState {
             detail_page: 0,
             detail_max_scroll: 0,
             model,
-        }
+        };
+        state.sync_tables();
+        state
+    }
+
+    /// Reconcile every table's selection with the model after a
+    /// change — data replacement or re-sort moves rows under the
+    /// positional table state; the tables re-anchor by item id.
+    fn sync_tables(&mut self) {
+        let task_ids = sorted_task_ids(&self.model);
+        let refs: Vec<&str> = task_ids.iter().map(String::as_str).collect();
+        self.tasks.update(&refs);
+        let ids: Vec<&str> = self.model.sessions.iter().map(|s| s.id.as_str()).collect();
+        self.sessions.update(&ids);
+        let ids: Vec<&str> = self.model.notes.iter().map(|n| n.id.as_str()).collect();
+        self.notes.update(&ids);
+        let ids: Vec<&str> = self.model.issues.iter().map(|i| i.id.as_str()).collect();
+        self.issues.update(&ids);
     }
 
     fn open_selected_note(&mut self) {
-        let Some(i) = self.notes_table.selected() else {
+        let Some(i) = self.notes.selected_index() else {
             return;
         };
         if let Some(note) = self.model.notes.get(i) {
@@ -545,6 +546,7 @@ impl ViewState {
 
     fn apply(&mut self, event: Event) {
         self.model.apply(&event);
+        self.sync_tables();
         match event {
             Event::Log(line) => self.push_log(line),
             Event::Warning {
@@ -585,46 +587,59 @@ impl ViewState {
 
     /// Page size for the focused table — its last drawn viewport
     fn page(&self) -> usize {
-        let viewport = match self.focus {
-            Focus::Tasks => self.tasks_viewport,
-            Focus::Sessions => self.sessions_viewport,
-            Focus::Notes => self.notes_viewport,
-            Focus::Issues => self.issues_viewport,
-        };
-        viewport.max(1)
+        match self.focus {
+            Focus::Tasks => self.tasks.page(),
+            Focus::Sessions => self.sessions.page(),
+            Focus::Notes => self.notes.page(),
+            Focus::Issues => self.issues.page(),
+        }
     }
 
     fn select_by(&mut self, delta: isize) {
-        let (table, len) = self.focused_table();
-        if len == 0 {
-            table.select(None);
-            return;
-        }
-        let next = match table.selected() {
-            Some(current) => (current as isize + delta).clamp(0, len as isize - 1) as usize,
-            None => 0,
-        };
-        table.select(Some(next));
+        self.focused_apply(|table, ids| table.select_by(delta, ids));
     }
 
     fn select_first(&mut self) {
-        let (table, len) = self.focused_table();
-        table.select((len > 0).then_some(0));
+        self.focused_apply(ItemTable::select_first);
     }
 
     fn select_last(&mut self) {
-        let (table, len) = self.focused_table();
-        table.select(len.checked_sub(1));
+        self.focused_apply(ItemTable::select_last);
     }
 
-    fn focused_table(&mut self) -> (&mut TableState, usize) {
+    /// Run a selection operation on the focused table with its
+    /// display-order id list.
+    fn focused_apply(&mut self, op: impl Fn(&mut ItemTable, &[&str])) {
         match self.focus {
-            Focus::Tasks => (&mut self.tasks_table, self.model.tasks.len()),
-            Focus::Sessions => (&mut self.sessions_table, self.model.sessions.len()),
-            Focus::Notes => (&mut self.notes_table, self.model.notes.len()),
-            Focus::Issues => (&mut self.issues_table, self.model.issues.len()),
+            Focus::Tasks => {
+                let ids = sorted_task_ids(&self.model);
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                op(&mut self.tasks, &refs);
+            }
+            Focus::Sessions => {
+                let ids: Vec<&str> = self.model.sessions.iter().map(|s| s.id.as_str()).collect();
+                op(&mut self.sessions, &ids);
+            }
+            Focus::Notes => {
+                let ids: Vec<&str> = self.model.notes.iter().map(|n| n.id.as_str()).collect();
+                op(&mut self.notes, &ids);
+            }
+            Focus::Issues => {
+                let ids: Vec<&str> = self.model.issues.iter().map(|i| i.id.as_str()).collect();
+                op(&mut self.issues, &ids);
+            }
         }
     }
+}
+
+/// Task ids in display (sorted) order — tasks have no single id
+/// column, so identity is the `{scanner}::{task}` pair.
+fn sorted_task_ids(model: &ScanModel) -> Vec<String> {
+    model
+        .sorted_tasks()
+        .iter()
+        .map(|t| format!("{}::{}", t.id.scanner, t.id.task))
+        .collect()
 }
 
 fn draw(frame: &mut Frame, state: &mut ViewState) {
@@ -816,7 +831,7 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
 }
 
 fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
-    let selected = state.tasks_table.selected();
+    let selected = state.tasks.selected_index();
     let rows: Vec<Row> = state
         .model
         .sorted_tasks()
@@ -873,19 +888,13 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         format!(" Tasks ({count}) "),
         state.focus == Focus::Tasks,
     ));
-    state.tasks_viewport = table_viewport(area);
-    frame.render_stateful_widget(table, area, &mut state.tasks_table);
-    draw_table_scrollbar(
-        frame,
-        area,
-        count,
-        &state.tasks_table,
-        state.focus == Focus::Tasks,
-    );
+    state
+        .tasks
+        .render(frame, area, table, count, state.focus == Focus::Tasks);
 }
 
 fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
-    let selected = state.sessions_table.selected();
+    let selected = state.sessions.selected_index();
     let rows: Vec<Row> = state
         .model
         .sessions
@@ -916,19 +925,13 @@ fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         format!(" Sessions ({count}) "),
         state.focus == Focus::Sessions,
     ));
-    state.sessions_viewport = table_viewport(area);
-    frame.render_stateful_widget(table, area, &mut state.sessions_table);
-    draw_table_scrollbar(
-        frame,
-        area,
-        count,
-        &state.sessions_table,
-        state.focus == Focus::Sessions,
-    );
+    state
+        .sessions
+        .render(frame, area, table, count, state.focus == Focus::Sessions);
 }
 
 fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
-    let selected = state.notes_table.selected();
+    let selected = state.notes.selected_index();
     let rows: Vec<Row> = state
         .model
         .notes
@@ -964,19 +967,13 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         format!(" Notes ({count}) "),
         state.focus == Focus::Notes,
     ));
-    state.notes_viewport = table_viewport(area);
-    frame.render_stateful_widget(table, area, &mut state.notes_table);
-    draw_table_scrollbar(
-        frame,
-        area,
-        count,
-        &state.notes_table,
-        state.focus == Focus::Notes,
-    );
+    state
+        .notes
+        .render(frame, area, table, count, state.focus == Focus::Notes);
 }
 
 fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
-    let selected = state.issues_table.selected();
+    let selected = state.issues.selected_index();
     let rows: Vec<Row> = state
         .model
         .issues
@@ -1003,47 +1000,9 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             format!(" Issues ({count}) "),
             state.focus == Focus::Issues,
         ));
-    state.issues_viewport = table_viewport(area);
-    frame.render_stateful_widget(table, area, &mut state.issues_table);
-    draw_table_scrollbar(
-        frame,
-        area,
-        count,
-        &state.issues_table,
-        state.focus == Focus::Issues,
-    );
-}
-
-/// Vertical scrollbar on a table panel's right border, matching the
-/// session viewer's treatment. The viewport excludes the panel borders
-/// and the table header row.
-fn draw_table_scrollbar(
-    frame: &mut Frame,
-    area: Rect,
-    len: usize,
-    table: &TableState,
-    active: bool,
-) {
-    let viewport = area.height.saturating_sub(3) as usize;
-    let max_offset = len.saturating_sub(viewport);
-    let mut sb_state = ScrollbarState::new(max_offset).position(table.offset());
-    frame.render_stateful_widget(
-        scrollbar(active),
-        area.inner(Margin {
-            vertical: 1,
-            horizontal: 0,
-        }),
-        &mut sb_state,
-    );
-}
-
-fn scrollbar(active: bool) -> Scrollbar<'static> {
-    Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(Some("↑"))
-        .end_symbol(Some("↓"))
-        .thumb_symbol("┃")
-        .track_symbol(Some("│"))
-        .style(style::scrollbar(active))
+    state
+        .issues
+        .render(frame, area, table, count, state.focus == Focus::Issues);
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
@@ -1069,14 +1028,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
             log_area,
         );
     }
-}
-
-fn initial_selection(len: usize) -> TableState {
-    let mut state = TableState::default();
-    if len > 0 {
-        state.select(Some(0));
-    }
-    state
 }
 
 fn highlight_style(active: bool) -> ratatui::style::Style {

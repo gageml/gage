@@ -1,5 +1,6 @@
 mod app;
 mod doc;
+mod item_table;
 mod markdown;
 mod message;
 mod options;
