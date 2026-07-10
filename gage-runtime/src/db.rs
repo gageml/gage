@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use gage_db::issue::{
-    self, Issue as DbIssue, IssueError, IssueEvidence as DbIssueEvidence, IssueStatus,
+    self, ClosedReason, Issue as DbIssue, IssueError, IssueEvidence as DbIssueEvidence,
+    IssueFilters, IssueStatus, IssueStatusFilter,
 };
 use gage_db::note::{self, Note as DbNote, NoteError, NoteFilters, NoteValue};
 use gage_db::scan::{insert_scan_issue, insert_scan_note};
@@ -36,6 +37,27 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
         do_write_issue(q)
     })?;
 
+    m.function("issues", IssuesQuery::new).build()?;
+    m.function_meta(IssuesQuery::status)?;
+    m.function_meta(IssuesQuery::name)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: IssuesQuery| async move {
+        fetch_issues(q)
+    })?;
+
+    m.function("promote_issue", |args: Object| async move {
+        do_promote_issue(args)
+    })
+    .build()?;
+    m.function(
+        "close_issue",
+        |args: Object| async move { do_close_issue(args) },
+    )
+    .build()?;
+    m.function("reopen_issue", |args: Object| async move {
+        do_reopen_issue(args)
+    })
+    .build()?;
+
     m.function_meta(session_notes)?;
     m.function_meta(scan_notes)?;
     m.function_meta(NotesQuery::name)?;
@@ -56,7 +78,101 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<NotesQuery>()?;
     m.ty::<Issue>()?;
     m.ty::<IssueInsert>()?;
+    m.ty::<IssuesQuery>()?;
     Ok(())
+}
+
+/// Builder returned by `issues()`. Queries the full issue table —
+/// issues are global, not scan-scoped. Defaults to open issues;
+/// `.status(..)` selects `"pending"`, `"open"`, `"closed"`, or `"any"`.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct IssuesQuery {
+    #[rune(skip)]
+    status: Option<String>,
+    #[rune(skip)]
+    name: Option<String>,
+}
+
+impl IssuesQuery {
+    fn new() -> Self {
+        Self {
+            status: None,
+            name: None,
+        }
+    }
+
+    #[rune::function(instance)]
+    fn status(mut self, status: String) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+}
+
+fn fetch_issues(q: IssuesQuery) -> super::Result<Vec<Issue>> {
+    let ctx = current_scan_ctx();
+    let status = match q.status.as_deref() {
+        None | Some("open") => IssueStatusFilter::Open,
+        Some("pending") => IssueStatusFilter::Pending,
+        Some("closed") => IssueStatusFilter::Closed,
+        Some("any") => IssueStatusFilter::Any,
+        Some(other) => {
+            return Err(Error::Args(format!(
+                "unknown issue status filter '{other}'"
+            )));
+        }
+    };
+    let filters = IssueFilters {
+        status,
+        name: q.name,
+    };
+    let db = ctx.db.lock().unwrap();
+    let db_issues = issue::find(&db, &filters).map_err(|e| Error::Db(e.to_string()))?;
+    Ok(db_issues.into_iter().map(Issue::from).collect())
+}
+
+/// Promote a pending issue to open: `promote_issue(#{ id, message? })`.
+fn do_promote_issue(args: Object) -> super::Result<()> {
+    let ctx = current_scan_ctx();
+    let id = required_string(&args, "id")?;
+    let message = optional_string(&args, "message")?;
+    let author = format!("scanner:{}", ctx.scanner_name);
+    let now = gage_core::datetime::now_ms();
+    let db = ctx.db.lock().unwrap();
+    issue::promote(&db, &id, &author, message.as_deref(), now).map_err(|e| Error::Db(e.to_string()))
+}
+
+/// Close an issue: `close_issue(#{ id, reason, message? })` where
+/// `reason` is `"completed"`, `"skipped"`, or `"duplicate"`.
+fn do_close_issue(args: Object) -> super::Result<()> {
+    let ctx = current_scan_ctx();
+    let id = required_string(&args, "id")?;
+    let reason: ClosedReason = required_string(&args, "reason")?
+        .parse()
+        .map_err(Error::Args)?;
+    let message = optional_string(&args, "message")?;
+    let author = format!("scanner:{}", ctx.scanner_name);
+    let now = gage_core::datetime::now_ms();
+    let db = ctx.db.lock().unwrap();
+    issue::close(&db, &id, reason, &author, message.as_deref(), now)
+        .map_err(|e| Error::Db(e.to_string()))
+}
+
+/// Reopen a closed issue: `reopen_issue(#{ id, message? })`.
+fn do_reopen_issue(args: Object) -> super::Result<()> {
+    let ctx = current_scan_ctx();
+    let id = required_string(&args, "id")?;
+    let message = optional_string(&args, "message")?;
+    let author = format!("scanner:{}", ctx.scanner_name);
+    let now = gage_core::datetime::now_ms();
+    let db = ctx.db.lock().unwrap();
+    issue::reopen(&db, &id, &author, message.as_deref(), now).map_err(|e| Error::Db(e.to_string()))
 }
 
 #[derive(Any)]
