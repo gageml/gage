@@ -29,30 +29,49 @@ pub async fn note() {
         "{{\"showThinkingSummaries\": {}}}",
         user().config().await.get("showThinkingSummaries").unwrap_or("null")
     );
+    // Find the latest thinking block across all sessions. Sessions are
+    // ordered newest-modified first and a session's thinking blocks are
+    // no newer than its modified time, so stop once a session's modified
+    // time can't beat the best candidate.
+    let latest = None;
     for s in scan().sessions() {
+        if let Some((best, _)) = latest {
+            if s.modified.millis() <= best.timestamp.millis() {
+                break;
+            }
+        }
         for msg in s
             .messages()
             .type(#{ "assistant": "thinking" })
             .latest_first() // only check latest thinking block
             .await?
         {
-            write_note(
-                #{
-                    name: "thinking.empty",
-                    value: msg.text == "",
-                    target: #{ session: s.id, line: msg.line },
-                    metadata: #{
-                        msg_timestamp: msg.timestamp.millis(),
-                        model: msg.model(),
-                        config,
-                    },
-                },
-            )
-            .keep_prev() // target is session line so naturally advances
-            .await?;
-            // Stop after the latest block
+            let newer = match latest {
+                Some((best, _)) => msg.timestamp.millis() > best.timestamp.millis(),
+                None => true,
+            };
+            if newer {
+                latest = Some((msg, s.id));
+            }
+            // Stop after the session's latest block
             break;
         }
+    }
+    if let Some((msg, session_id)) = latest {
+        write_note(
+            #{
+                name: "thinking.empty",
+                value: msg.text == "",
+                target: #{ session: session_id, line: msg.line },
+                metadata: #{
+                    msg_timestamp: msg.timestamp.millis(),
+                    model: msg.model(),
+                    config,
+                },
+            },
+        )
+        .keep_prev() // target is session line so naturally advances
+        .await?;
     }
     Ok(())
 }
