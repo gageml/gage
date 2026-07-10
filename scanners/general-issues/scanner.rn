@@ -134,13 +134,18 @@ const NEW_FINDINGS_THRESHOLD = 5;
 /// for the current scan. Skips the agent when every finding has
 /// already been analyzed under the current issues key.
 pub async fn issues() {
-    let (_prev_findings, new_findings, validate) = scan()
+    let (prev_findings, new_findings, validate) = scan()
         .notes()
         .names(["finding", "finding-summary"])
         .split_valid(ISSUES_KEY)
         .await?;
 
-    if new_findings.len() < NEW_FINDINGS_THRESHOLD {
+    let threshold = if prev_findings.is_empty() {
+        1
+    } else {
+        NEW_FINDINGS_THRESHOLD
+    };
+    if new_findings.len() < threshold {
         return Ok(());
     }
 
