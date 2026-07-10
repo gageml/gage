@@ -16,11 +16,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
+use rune::alloc::fmt::TryWrite;
+use rune::runtime::{Formatter, Value, VmError};
+use rune::{Any, ContextError, Module};
 use serde_json::Value as JsonValue;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::RuntimeOutput;
 use crate::state::{RunContext, SCAN_CTX, ScanContext};
+use crate::value::json_to_value;
 
 /// Identifier for a registered scanner module in the dispatcher. The
 /// scanner name is used today; UUIDs or path-derived ids would slot
@@ -35,6 +39,10 @@ pub struct DispatchRequest {
     pub module_id: ModuleId,
     pub fn_name: String,
     pub args: JsonValue,
+    /// The MCP request's `_meta` object, verbatim. Wrapped in a
+    /// [`ToolMeta`] and passed to the Rune tool fn as its second
+    /// argument.
+    pub meta: JsonValue,
     pub reply: oneshot::Sender<Result<JsonValue, String>>,
 }
 
@@ -172,6 +180,7 @@ async fn handle_one(req: DispatchRequest, registry: Registry, run: Weak<RunConte
         module_id,
         fn_name,
         args,
+        meta,
         reply,
     } = req;
 
@@ -203,7 +212,9 @@ async fn handle_one(req: DispatchRequest, registry: Registry, run: Weak<RunConte
         sources: module.sources.clone(),
     });
 
-    let result = SCAN_CTX.scope(ctx, run_one(module, fn_name, args)).await;
+    let result = SCAN_CTX
+        .scope(ctx, run_one(module, fn_name, args, meta))
+        .await;
     drop(reply.send(result));
 }
 
@@ -211,13 +222,15 @@ async fn run_one(
     module: ModuleHandle,
     fn_name: String,
     args: JsonValue,
+    meta: JsonValue,
 ) -> Result<JsonValue, String> {
     let args_obj = match &args {
         JsonValue::Object(_) => crate::value::json_to_object(&args),
         _ => rune::runtime::Object::new(),
     };
+    let tool_meta = ToolMeta::new(meta, module.scanner_name.clone());
     let mut vm = rune::Vm::new(module.rt, module.unit);
-    let mut execution = match vm.execute([fn_name.as_str()], (args_obj,)) {
+    let mut execution = match vm.execute([fn_name.as_str()], (args_obj, tool_meta)) {
         Ok(e) => e,
         Err(e) => return Err(format!("vm execute '{fn_name}': {e}")),
     };
@@ -260,4 +273,146 @@ fn interpret_return(val: &rune::runtime::Value) -> Result<JsonValue, String> {
 /// success result is enough.
 fn value_to_json_lossy(v: &rune::runtime::Value) -> JsonValue {
     crate::value::value_to_json(v).unwrap_or_else(|_| JsonValue::String("ok".into()))
+}
+
+/// The second argument to a Rune tool fn: the MCP request's `_meta`
+/// object, read-only, with standard object semantics (`meta[key]`,
+/// `get`, `keys`, `values`, `len`, `contains_key`, iteration over
+/// `(key, value)` pairs). `to_author()` derives the author of the
+/// call from the wire data itself.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct ToolMeta {
+    #[rune(skip)]
+    entries: serde_json::Map<String, JsonValue>,
+    #[rune(skip)]
+    scanner_name: String,
+}
+
+/// `_meta` key carrying the calling tool-use block id — the id of the
+/// `tool_use` entry in the agent's session transcript that made this
+/// call.
+const TOOL_USE_ID_KEY: &str = "claudecode/toolUseId";
+
+impl ToolMeta {
+    /// Wrap a request's `_meta` value. Anything but a JSON object
+    /// (including absent meta, passed as `Null`) wraps as empty.
+    pub(crate) fn new(meta: JsonValue, scanner_name: String) -> Self {
+        let entries = match meta {
+            JsonValue::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        ToolMeta {
+            entries,
+            scanner_name,
+        }
+    }
+
+    /// Author of this tool call: `agent:{scanner}?call={toolUseId}`.
+    /// The author is the authoring call — the tool-use id ties the
+    /// written item to the exact transcript entry that wrote it.
+    /// Errors when the client sent no tool-use id.
+    #[rune::function(instance)]
+    fn to_author(&self) -> Result<String, VmError> {
+        match self.entries.get(TOOL_USE_ID_KEY).and_then(|v| v.as_str()) {
+            Some(id) => Ok(format!("agent:{}?call={id}", self.scanner_name)),
+            None => Err(VmError::panic(format!(
+                "meta has no `{TOOL_USE_ID_KEY}`; cannot derive an author"
+            ))),
+        }
+    }
+
+    #[rune::function(instance, protocol = INDEX_GET)]
+    fn index_get(&self, key: &str) -> Result<Value, VmError> {
+        match self.entries.get(key) {
+            Some(v) => Ok(json_to_value(v)),
+            None => Err(VmError::panic(format!("missing field `{key}` in meta"))),
+        }
+    }
+
+    #[rune::function(instance)]
+    fn get(&self, key: &str) -> Option<Value> {
+        self.entries.get(key).map(json_to_value)
+    }
+
+    #[rune::function(instance)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    #[rune::function(instance)]
+    fn keys(&self) -> Vec<String> {
+        self.entries.keys().cloned().collect()
+    }
+
+    #[rune::function(instance)]
+    fn values(&self) -> Vec<Value> {
+        self.entries.values().map(json_to_value).collect()
+    }
+
+    #[rune::function(instance)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[rune::function(instance, protocol = LEN)]
+    fn len_protocol(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[rune::function(instance, protocol = INTO_ITER)]
+    fn into_iter(&self) -> ToolMetaIter {
+        ToolMetaIter {
+            items: self
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    #[rune::function(instance, protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "ToolMeta({})", JsonValue::Object(self.entries.clone()))?;
+        Ok(())
+    }
+}
+
+/// Iterator over a [`ToolMeta`]'s `(key, value)` pairs.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct ToolMetaIter {
+    #[rune(skip)]
+    items: std::vec::IntoIter<(String, Value)>,
+}
+
+impl ToolMetaIter {
+    #[rune::function(instance, protocol = NEXT)]
+    fn next(&mut self) -> Option<(String, Value)> {
+        self.items.next()
+    }
+
+    #[rune::function(instance, protocol = SIZE_HINT)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.items.size_hint()
+    }
+}
+
+pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
+    m.ty::<ToolMeta>()?;
+    m.function_meta(ToolMeta::to_author)?;
+    m.function_meta(ToolMeta::index_get)?;
+    m.function_meta(ToolMeta::get)?;
+    m.function_meta(ToolMeta::contains_key)?;
+    m.function_meta(ToolMeta::keys)?;
+    m.function_meta(ToolMeta::values)?;
+    m.function_meta(ToolMeta::len)?;
+    m.function_meta(ToolMeta::len_protocol)?;
+    m.function_meta(ToolMeta::into_iter)?;
+    m.function_meta(ToolMeta::debug)?;
+    m.ty::<ToolMetaIter>()?;
+    m.function_meta(ToolMetaIter::next)?;
+    m.function_meta(ToolMetaIter::size_hint)?;
+    Ok(())
 }

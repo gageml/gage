@@ -37,6 +37,11 @@ pub struct ToolSpec {
     /// names exist.
     pub gage_tools: Vec<String>,
     pub custom_tools: Vec<CustomToolDef>,
+    /// Author base for writes made through this service's built-in
+    /// tools (e.g. `agent:{scanner}`); each request appends its own
+    /// `?call={toolUseId}`. `None` for services not fronting a single
+    /// agent invocation.
+    pub author: Option<String>,
 }
 
 /// One externally-supplied MCP tool: the wire-visible metadata plus a
@@ -53,11 +58,15 @@ pub struct CustomToolDef {
 }
 
 /// Async closure invoked when the model calls a [`CustomToolDef`].
-/// Receives the tool's argument object as a JSON value; returns either
-/// a success value (rendered as JSON text in the tool result) or an
-/// error string (returned to the model as a tool error).
-pub type CustomToolCallback =
-    Arc<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>> + Send + Sync>;
+/// Receives the tool's argument object and the request's `_meta`
+/// object as JSON values; returns either a success value (rendered as
+/// JSON text in the tool result) or an error string (returned to the
+/// model as a tool error).
+pub type CustomToolCallback = Arc<
+    dyn Fn(Value, Value) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Construct a streamable-HTTP MCP service exposing every tool the
 /// spec declares. The returned service plugs into an
@@ -88,7 +97,7 @@ fn build_server(spec: &ToolSpec) -> GageServer {
     for def in &spec.custom_tools {
         router = router.with_route(custom_route(def));
     }
-    GageServer::with_router(router)
+    GageServer::with_router(router).with_author(spec.author.clone())
 }
 
 fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
@@ -110,9 +119,13 @@ fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
             .clone()
             .map(Value::Object)
             .unwrap_or(Value::Null);
+        // rmcp moves the request's `_meta` into the request context
+        // before dispatch (the params-level `meta` field arrives
+        // emptied).
+        let meta = Value::Object(ctx.request_context.meta.0.clone());
         let callback = Arc::clone(&callback);
         Box::pin(async move {
-            match (callback)(args).await {
+            match (callback)(args, meta).await {
                 Ok(out) => Ok(CallToolResult::success(vec![Content::text(render_output(
                     &out,
                 ))])),
@@ -161,8 +174,9 @@ mod tests {
                 name: "secret".into(),
                 description: "Returns the secret.".into(),
                 input_schema: empty_object_schema(),
-                callback: Arc::new(|_args| Box::pin(async { Ok(json!("abc123")) })),
+                callback: Arc::new(|_args, _meta| Box::pin(async { Ok(json!("abc123")) })),
             }],
+            author: None,
         };
         let svc = build_mcp_service(spec);
         drop(svc);

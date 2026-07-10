@@ -34,7 +34,7 @@ pub async fn findings() {
         .sessions()
         .split_valid(FINDINGS_KEY)
         .await?;
-    carry_forward_notes(prev_sessions, ["finding.", "finding-summary."]).await?;
+    carry_forward_notes(prev_sessions, ["finding", "finding-summary"]).await?;
     for s in new_sessions {
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
@@ -78,7 +78,7 @@ fn findings_tools() {
 
 }
 
-pub async fn write_finding(inputs) {
+pub async fn write_finding(inputs, meta) {
     let metadata = #{};
     if let Some(lines) = inputs.get("lines") {
         metadata.insert("lines", lines)
@@ -88,8 +88,8 @@ pub async fn write_finding(inputs) {
     }
     let note = write_note(
         #{
-            name: "finding.",
-            author: "agent", // TODO want meta.agent or tool_use().xxx
+            name: "finding",
+            author: meta.to_author(),
             value: inputs.description,
             target: #{ session: inputs.session },
             metadata,
@@ -105,14 +105,17 @@ async fn write_summaries(results, validate) {
     loop {
         match results.next().await {
             Some(Ok((result, #{ session }))) => {
+                // A re-scan of the same session supersedes its prior
+                // summary rather than accumulating one per scan
                 write_note(
                     #{
-                        name: "finding-summary.",
+                        name: "finding-summary",
                         target: #{ session },
                         value: result.text,
                         metadata: result.as_metadata(),
                     },
                 )
+                .replace_prev()
                 .await?;
                 validate(session)?;
             }
@@ -133,7 +136,7 @@ const NEW_FINDINGS_THRESHOLD = 5;
 pub async fn issues() {
     let (_prev_findings, new_findings, validate) = scan()
         .notes()
-        .names(["finding.", "finding-summary."])
+        .names(["finding", "finding-summary"])
         .split_valid(ISSUES_KEY)
         .await?;
 

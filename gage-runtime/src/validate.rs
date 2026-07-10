@@ -241,10 +241,10 @@ impl CarryForward {
     }
 }
 
-/// Link each session's prior notes matching `names` into the current
-/// scan's `scan_note` rows, making them visible to downstream tasks as
-/// if written by this scan. A dot-ended name selects its suffixed
-/// family (see `write_note`). Returns the number of notes linked.
+/// Link each session's prior notes matching `names` (exactly) into the
+/// current scan's `scan_note` rows, making them visible to downstream
+/// tasks as if written by this scan. Returns the number of notes
+/// linked.
 fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
     let items: RuneVec = rune::from_value(q.sessions)
         .map_err(|e| Error::Args(format!("'sessions' must be a list: {e}")))?;

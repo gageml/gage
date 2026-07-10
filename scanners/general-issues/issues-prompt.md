@@ -1,9 +1,9 @@
 Issues
 
 Use `mcp__gage__Query` to read finding summaries, which are `note` table rows
-with `name` values `finding-summary.<random>`
+with `name` value `finding-summary`
 
-`SELECT * FROM note WHERE name LIKE 'finding-summary.%'`
+`SELECT * FROM note WHERE name = 'finding-summary'`
 
 Use row pading (`LIMIT` AND `OFFSET`) as needed to manage size limits.
 
@@ -20,11 +20,11 @@ a single finding may be sufficient to establish an issue with high confidence.
 The trigger for an issue should be confidence based on the quality, quantity and
 veracity of the supporting evidence.
 
-You can investigage further by by reading the findings themselves. These are
+You can investigate further by reading the findings themselves. These are
 either identified by note ID in the summary or they may be read as `note` rows
-with `name` values `finding.<random>`
+with `name` value `finding`
 
-`SELECT * FROM note WHERE name LIKE 'finding.%' AND target = 'session:${session_id}'`
+`SELECT * FROM note WHERE name = 'finding' AND target = 'session:${session_id}'`
 
 When you have enough solid information to identify an issue, use the
 `mcp__gage__IssueWrite` tool to write an issue. Include the applicable note IDs

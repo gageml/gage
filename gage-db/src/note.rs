@@ -122,9 +122,7 @@ pub struct NoteFilters {
     pub scan: Option<String>,
     pub author: Option<String>,
     pub name: Option<String>,
-    /// Name filters, ORed. A trailing `.` matches the name's suffixed
-    /// family by prefix (see [`Note::new`]); otherwise the match is
-    /// exact.
+    /// Name filters, ORed; each match is exact.
     pub names: Vec<String>,
     /// Scanner name filter; matches `author = scanner:{name}`.
     pub scanner: Option<String>,
@@ -181,26 +179,18 @@ impl std::fmt::Display for NoteError {
 impl std::error::Error for NoteError {}
 
 impl Note {
-    /// Build a new note.
-    ///
-    /// A trailing `.` in `name` is expanded to an 8-char suffix derived from
-    /// the generated id, so callers can ask for a unique name (e.g.
-    /// `"comment."` → `"comment.abcd1234"`) without threading the id back
-    /// through the caller.
+    /// Build a new note. The name is used as provided; uniqueness
+    /// within the `(name, target, author)` duplicate key is the
+    /// caller's concern (see the author scheme in docs/notes.md).
     pub fn new(target: NoteTarget, name: &str, value: impl Into<NoteValue>, author: &str) -> Self {
         let id = gage_core::uuid::new_uuid();
-        let name = if name.ends_with('.') {
-            format!("{name}{}", gage_core::uuid::short_uuid(&id))
-        } else {
-            name.to_string()
-        };
         Note {
             id,
             author: author.to_string(),
             created: gage_core::datetime::now_ms(),
             modified: None,
             target,
-            name,
+            name: name.to_string(),
             value: value.into(),
             explanation: None,
             metadata: None,
@@ -443,11 +433,7 @@ fn find_query(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::To
         let mut subs = Vec::new();
         for name in &filters.names {
             let idx = values.len() + 1;
-            if name.ends_with('.') {
-                subs.push(format!("substr(n.name, 1, length(?{idx})) = ?{idx}"));
-            } else {
-                subs.push(format!("n.name = ?{idx}"));
-            }
+            subs.push(format!("n.name = ?{idx}"));
             values.push(Box::new(name.clone()));
         }
         clauses.push(format!("({})", subs.join(" OR ")));
@@ -477,26 +463,19 @@ pub fn find(conn: &Connection, filters: &NoteFilters) -> Result<Vec<Note>, NoteE
     Ok(notes)
 }
 
-/// Ids of notes targeting `session_id` whose name matches `name`. A
-/// trailing `.` in `name` selects the whole suffixed family written by
-/// [`Note::new`]'s dot-expansion (prefix match); otherwise the match is
-/// exact.
+/// Ids of notes targeting `session_id` whose name matches `name`
+/// exactly.
 pub fn ids_for_session_by_name(
     conn: &Connection,
     session_id: &str,
     name: &str,
 ) -> Result<Vec<String>, NoteError> {
-    let name_clause = if name.ends_with('.') {
-        "substr(n.name, 1, length(?2)) = ?2"
-    } else {
-        "n.name = ?2"
-    };
-    let mut stmt = conn.prepare(&format!(
+    let mut stmt = conn.prepare(
         "SELECT n.id FROM note n
          JOIN session_note sn ON sn.note_id = n.id
-         WHERE sn.session_id = ?1 AND {name_clause}
-         ORDER BY n.created, n.id"
-    ))?;
+         WHERE sn.session_id = ?1 AND n.name = ?2
+         ORDER BY n.created, n.id",
+    )?;
     let ids = stmt
         .query_map(params![session_id, name], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -593,11 +572,11 @@ mod tests {
     }
 
     #[test]
-    fn find_by_names_ors_exact_and_family() {
+    fn find_by_names_ors_exact() {
         let conn = open_db_in_memory().unwrap();
         for (id, name) in [
-            ("n1", "finding.abc1"),
-            ("n2", "finding-summary.abc2"),
+            ("n1", "finding"),
+            ("n2", "finding-summary"),
             ("n3", "issue-summary"),
             ("n4", "other"),
         ] {
@@ -608,8 +587,8 @@ mod tests {
             &conn,
             &NoteFilters {
                 names: vec![
-                    "finding.".to_string(),
-                    "finding-summary.".to_string(),
+                    "finding".to_string(),
+                    "finding-summary".to_string(),
                     "issue-summary".to_string(),
                 ],
                 ..Default::default()
@@ -622,33 +601,31 @@ mod tests {
     }
 
     #[test]
-    fn ids_for_session_by_name_exact_and_prefix() {
+    fn ids_for_session_by_name_exact() {
         let conn = open_db_in_memory().unwrap();
         for (id, name) in [
-            ("n1", "finding.abc1"),
-            ("n2", "finding.abc2"),
-            ("n3", "finding-summary.abc3"),
-            ("n4", "issue-summary"),
+            ("n1", "finding"),
+            ("n2", "finding-summary"),
+            ("n3", "issue-summary"),
         ] {
             insert(&conn, &note_with(id, name, session_target_of(SESSION_A))).unwrap();
         }
-        // Same family name, different session
+        // Same name, different session
         insert(
             &conn,
-            &note_with("n5", "finding.xyz", session_target_of(SESSION_B)),
+            &note_with("n5", "finding", session_target_of(SESSION_B)),
         )
         .unwrap();
 
-        // Dot-ended name matches the suffixed family, not lookalike prefixes
-        let ids = ids_for_session_by_name(&conn, SESSION_A, "finding.").unwrap();
-        assert_eq!(ids, vec!["n1".to_string(), "n2".to_string()]);
+        // Exact name, scoped to the session; no prefix matching
+        let ids = ids_for_session_by_name(&conn, SESSION_A, "finding").unwrap();
+        assert_eq!(ids, vec!["n1".to_string()]);
 
-        // Exact name
         let ids = ids_for_session_by_name(&conn, SESSION_A, "issue-summary").unwrap();
-        assert_eq!(ids, vec!["n4".to_string()]);
+        assert_eq!(ids, vec!["n3".to_string()]);
 
         // No match
-        let ids = ids_for_session_by_name(&conn, SESSION_A, "nothing.").unwrap();
+        let ids = ids_for_session_by_name(&conn, SESSION_A, "nothing").unwrap();
         assert!(ids.is_empty());
     }
 

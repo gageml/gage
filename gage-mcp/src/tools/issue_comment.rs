@@ -20,11 +20,11 @@ fn route() -> ToolRoute<GageServer> {
 }
 
 fn call(
-    _server: &GageServer,
+    server: &GageServer,
     ctx: RequestContext<RoleServer>,
     params: JsonObject,
 ) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
-    let author = agent_author(&ctx);
+    let author = agent_author(server, &ctx);
     Box::pin(handle(params, author))
 }
 

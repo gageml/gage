@@ -28,8 +28,15 @@ pub async fn scanner_tool() {
     println!("## scanner-tool # {out:?}");
 }
 
-pub async fn comment(#{ text }) {
-    write_note(#{ name: "comment", value: text, target: #{ scan: scan().id } })
-        .replace_prev()
-        .await
+pub async fn comment(#{ text }, meta) {
+    write_note(
+        #{
+            name: "comment",
+            value: text,
+            target: #{ scan: scan().id },
+            author: meta.to_author(),
+        },
+    )
+    .replace_prev()
+    .await
 }

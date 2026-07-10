@@ -23,11 +23,11 @@ fn route() -> ToolRoute<GageServer> {
 }
 
 fn call(
-    _server: &GageServer,
+    server: &GageServer,
     ctx: RequestContext<RoleServer>,
     params: JsonObject,
 ) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
-    let author = agent_author(&ctx);
+    let author = agent_author(server, &ctx);
     Box::pin(handle(params, author))
 }
 
@@ -54,20 +54,27 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
 
     // Model-written issues are staged as pending; only the reconcile
     // step promotes an issue to open.
-    let mut issue_row = Issue::new("general.", title, description, &author);
+    let mut issue_row = Issue::new("general", title, description, &author);
     issue_row.status = IssueStatus::Pending;
     let now = issue_row.created;
 
     issue::insert(&conn, &issue_row).map_err(|e| match e {
-        issue::IssueError::Duplicate(prev) => McpError::internal_error(
-            format!(
-                "issue id collision against existing issue {} ({}); \
-                 inspect the judge sandbox db and report",
-                short_uuid(&prev.id),
-                prev.title
-            ),
-            None,
-        ),
+        issue::IssueError::Duplicate(prev) => {
+            tracing::error!(
+                name = issue_row.name,
+                author = issue_row.author,
+                prev_id = prev.id,
+                "duplicate issue write rejected — same writer and name"
+            );
+            McpError::internal_error(
+                format!(
+                    "duplicate issue: this writer already wrote issue {} ({})",
+                    short_uuid(&prev.id),
+                    prev.title
+                ),
+                None,
+            )
+        }
         _ => McpError::internal_error(format!("insert issue: {e}"), None),
     })?;
 

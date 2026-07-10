@@ -42,3 +42,12 @@ installed with the Gage plugin.
 
 Claude has several Gage tools for resolving issues, which will require your
 permission to use.
+
+## Authors and duplicate detection
+
+Like notes, every issue records an `author`, and the issue duplicate key is
+`(name, author)` — the same writer opening the same issue twice is detected
+at write time. Author values follow the scheme described in
+[Notes](notes.md): `scanner:<name>` for deterministic writers,
+`agent:...` values carrying per-run instance identity for model writers,
+and `user:<username>` for people.

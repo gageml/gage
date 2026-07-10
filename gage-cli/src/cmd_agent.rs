@@ -105,9 +105,13 @@ pub async fn run(args: AgentArgs) {
             std::process::exit(1);
         }
     };
+    // No instance author: writes fall back to the per-request derived
+    // author (client info + tool_use id), so ad-hoc agent writes
+    // accumulate rather than conflict.
     let spec = ToolSpec {
         gage_tools: resolved_tools.clone(),
         custom_tools: Vec::new(),
+        author: None,
     };
     let _service_handle = host.register(build_mcp_service(spec));
     let mcp_url = _service_handle.url().to_string();

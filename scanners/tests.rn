@@ -130,7 +130,7 @@ async fn test_carry_forward_notes() {
     let session = "22222222-2222-2222-2222-222222222222";
     gage::write_note(
         #{
-            name: "test.carry.finding.",
+            name: "test.carry.finding",
             value: "a finding",
             target: #{ session: session },
         },
@@ -138,13 +138,12 @@ async fn test_carry_forward_notes() {
     .await
     .unwrap();
 
-    // The dot-ended name links the whole suffixed family; an unknown
-    // name links nothing.
-    let n = gage::carry_forward_notes([session], ["test.carry.finding."])
+    // A matching name links the note; an unknown name links nothing
+    let n = gage::carry_forward_notes([session], ["test.carry.finding"])
         .await
         .unwrap();
     assert_eq!(n, 1);
-    let n = gage::carry_forward_notes([session], ["test.carry.other."])
+    let n = gage::carry_forward_notes([session], ["test.carry.other"])
         .await
         .unwrap();
     assert_eq!(n, 0);
@@ -155,7 +154,7 @@ async fn test_notes_split_valid() {
     let session = "44444444-4444-4444-4444-444444444444";
     gage::write_note(
         #{
-            name: "test.split.finding.",
+            name: "test.split.finding",
             value: "a finding",
             target: #{ session: session },
         },
@@ -166,7 +165,7 @@ async fn test_notes_split_valid() {
     // First pass: the finding has never been recorded
     let (prev, new, validate) = gage::scan()
         .notes()
-        .names(["test.split.finding."])
+        .names(["test.split.finding"])
         .split_valid(("test-scanner", "issues", 1))
         .await
         .unwrap();
@@ -178,7 +177,7 @@ async fn test_notes_split_valid() {
     // Second pass: the finding is now recorded
     let (prev, new, _validate) = gage::scan()
         .notes()
-        .names(["test.split.finding."])
+        .names(["test.split.finding"])
         .split_valid(("test-scanner", "issues", 1))
         .await
         .unwrap();

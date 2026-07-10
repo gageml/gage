@@ -344,8 +344,16 @@ pub fn add(args: IssueAddArgs) {
         };
 
         let id = gage_core::uuid::new_uuid();
+        // Each created issue is its own writing event: the author
+        // carries a per-call instance so `(name, author)` never
+        // collides across creations by the same user.
+        let author = format!(
+            "{}?call={}",
+            crate::author::resolve_author(None),
+            short_uuid(&id)
+        );
         let issue = Issue {
-            name: format!("user-issue-{}", short_uuid(&id)),
+            name: "general".to_string(),
             id,
             title,
             description,
@@ -353,7 +361,7 @@ pub fn add(args: IssueAddArgs) {
             closed_reason: None,
             created: gage_core::datetime::now_ms(),
             modified: None,
-            author: crate::author::resolve_author(None),
+            author,
         };
         let conn = db::open_db().unwrap();
         issue::insert(&conn, &issue)

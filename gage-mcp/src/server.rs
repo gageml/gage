@@ -29,6 +29,12 @@ pub(crate) const TOOLS: &[ToolDef] = &[
 pub struct GageServer {
     tool_router: ToolRouter<Self>,
     ctx: Arc<OnceCell<SessionContext>>,
+    /// Author base for writes made through this server's tools (e.g.
+    /// `agent:{scanner}`); each request appends its own
+    /// `?call={toolUseId}`. Set when the server fronts a single agent
+    /// invocation; `None` for ad-hoc servers (e.g. the stdio server),
+    /// where the base is derived from the client's initialize info.
+    agent_author: Option<String>,
 }
 
 impl Default for GageServer {
@@ -49,7 +55,19 @@ impl GageServer {
         GageServer {
             tool_router,
             ctx: Arc::new(OnceCell::new()),
+            agent_author: None,
         }
+    }
+
+    /// Set the agent-instance author for writes made through this
+    /// server (see the `agent_author` field).
+    pub fn with_author(mut self, author: Option<String>) -> Self {
+        self.agent_author = author;
+        self
+    }
+
+    pub(crate) fn agent_author(&self) -> Option<&str> {
+        self.agent_author.as_deref()
     }
 
     /// The DataFusion context that the `Query` MCP tool runs against.

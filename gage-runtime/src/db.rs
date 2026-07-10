@@ -11,7 +11,7 @@ use rune::Any;
 use rune::alloc;
 use rune::runtime::{FromValue, Object, Protocol, Ref, Value, Vec as RuneVec};
 use rune::{ContextError, Module};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::error::Error;
 use crate::scan::{Scan, Session};
@@ -100,9 +100,7 @@ impl NotesQuery {
         self
     }
 
-    /// Filter to notes matching any of `names`. A dot-ended name
-    /// matches its suffixed family (see `write_note`); other names
-    /// match exactly.
+    /// Filter to notes matching any of `names` exactly.
     #[rune::function(instance)]
     fn names(mut self, names: Vec<String>) -> Self {
         self.names = names;
@@ -286,16 +284,13 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
     };
     let explanation = optional_string(n, "explanation")?;
     let metadata_raw = optional_object_json(n, "metadata")?;
+    let author =
+        optional_string(n, "author")?.unwrap_or_else(|| format!("scanner:{}", ctx.scanner_name));
 
     let db_note = DbNote {
         explanation,
         metadata: metadata_raw,
-        ..DbNote::new(
-            target,
-            &name,
-            value_db,
-            &format!("scanner:{}", ctx.scanner_name),
-        )
+        ..DbNote::new(target, &name, value_db, &author)
     };
 
     tracing::info!(
@@ -325,6 +320,13 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
             }
             DuplicatePolicy::Ignore => Ok((*prev).into()),
             DuplicatePolicy::Error => {
+                error!(
+                    name = db_note.name,
+                    target = ?db_note.target,
+                    author = db_note.author,
+                    prev_id = prev.id,
+                    "duplicate note write rejected — same writer, name, and target"
+                );
                 // `new` carries prev's id so `new.replace()` targets the
                 // existing row, per the duplicate-key contract.
                 let mut new_db = db_note;
@@ -466,6 +468,8 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
     let title = required_string(t, "title")?;
     let description = optional_string(t, "description")?;
     let pending = optional_bool(t, "pending")?.unwrap_or(false);
+    let author =
+        optional_string(t, "author")?.unwrap_or_else(|| format!("scanner:{}", ctx.scanner_name));
 
     let now = gage_core::datetime::now_ms();
     let evidence = match t.get("evidence") {
@@ -486,7 +490,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         closed_reason: None,
         created: now,
         modified: None,
-        author: format!("scanner:{}", ctx.scanner_name),
+        author,
     };
 
     tracing::info!(
@@ -507,6 +511,12 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
             Ok(db_issue.into())
         }
         Err(IssueError::Duplicate(prev)) if matches!(q.policy, IssuePolicy::Error) => {
+            error!(
+                name = db_issue.name,
+                author = db_issue.author,
+                prev_id = prev.id,
+                "duplicate issue write rejected — same writer and name"
+            );
             // `new` carries prev's id so it identifies the existing row,
             // per the duplicate-key contract.
             let mut new_db = db_issue;

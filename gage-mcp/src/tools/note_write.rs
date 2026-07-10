@@ -26,11 +26,11 @@ fn route() -> ToolRoute<GageServer> {
 }
 
 fn call(
-    _server: &GageServer,
+    server: &GageServer,
     ctx: RequestContext<RoleServer>,
     params: JsonObject,
 ) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
-    let author = agent_author(&ctx);
+    let author = agent_author(server, &ctx);
     Box::pin(handle(params, author))
 }
 
@@ -75,16 +75,20 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         }
     };
 
-    let note = Note::new(
-        target,
-        &format!("{note_type}."),
-        NoteValue::from(value),
-        &author,
-    );
+    let note = Note::new(target, &note_type, NoteValue::from(value), &author);
 
     let conn = open_db().unwrap();
-    note::insert(&conn, &note)
-        .map_err(|e| McpError::internal_error(format!("insert note: {e}"), None))?;
+    note::insert(&conn, &note).map_err(|e| {
+        if let note::NoteError::Duplicate(prev) = &e {
+            tracing::error!(
+                name = note.name,
+                author = note.author,
+                prev_id = prev.id,
+                "duplicate note write rejected — same writer, name, and target"
+            );
+        }
+        McpError::internal_error(format!("insert note: {e}"), None)
+    })?;
 
     if let Some(scan_id) = &scan_id {
         insert_scan_note(&conn, scan_id, &note.id)

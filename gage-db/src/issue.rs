@@ -117,7 +117,7 @@ impl IssueEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
-    /// Issue name, the duplication key.
+    /// Issue name; with `author`, forms the duplication key.
     pub name: String,
     pub title: String,
     pub description: Option<String>,
@@ -128,9 +128,10 @@ pub struct Issue {
     pub created: i64,
     /// Epoch milliseconds. `None` until the issue is updated.
     pub modified: Option<i64>,
-    /// Issue identity: `scanner:{name}` for scanner-written issues,
-    /// `user:{name}` for issues added by a person. Used to resolve
-    /// `scanner:{path}` URIs in issue fields. Not part of the
+    /// Writer identity: `scanner:{name}` for scanner-written issues,
+    /// `user:{name}` for issues added by a person, `agent:...` for
+    /// model writers (see docs/issues.md). Used to resolve
+    /// `scanner:{path}` URIs in issue fields. With `name`, forms the
     /// duplication key.
     pub author: String,
 }
@@ -169,8 +170,8 @@ pub enum IssueError {
     /// A pending-only transition was applied to a non-pending issue.
     NotPending(String),
     Ambiguous(String, Vec<String>),
-    /// An issue with the same `name` already exists. The existing
-    /// issue is returned so the caller can decide what to do.
+    /// An issue with the same `(name, author)` already exists. The
+    /// existing issue is returned so the caller can decide what to do.
     Duplicate(Box<Issue>),
     Db(rusqlite::Error),
 }
@@ -194,7 +195,11 @@ impl std::fmt::Display for IssueError {
                 Ok(())
             }
             IssueError::Duplicate(prev) => {
-                write!(f, "duplicate issue (name={})", prev.name)
+                write!(
+                    f,
+                    "duplicate issue (name={}, author={})",
+                    prev.name, prev.author
+                )
             }
             IssueError::Db(e) => write!(f, "database error: {e}"),
         }
@@ -204,22 +209,14 @@ impl std::fmt::Display for IssueError {
 impl std::error::Error for IssueError {}
 
 impl Issue {
-    /// Build a new open issue.
-    ///
-    /// A trailing `.` in `name` is expanded to an 8-char suffix derived from
-    /// the generated id, so callers can ask for a unique name (e.g.
-    /// `"judge."` → `"judge.abcd1234"`) without threading the id back
-    /// through the caller.
+    /// Build a new open issue. The name is used as provided; uniqueness
+    /// within the `(name, author)` duplicate key is the caller's concern
+    /// (see the author scheme in docs/issues.md).
     pub fn new(name: &str, title: String, description: Option<String>, author: &str) -> Self {
         let id = gage_core::uuid::new_uuid();
-        let name = if name.ends_with('.') {
-            format!("{name}{}", gage_core::uuid::short_uuid(&id))
-        } else {
-            name.to_string()
-        };
         Issue {
             id,
-            name,
+            name: name.to_string(),
             title,
             description,
             status: IssueStatus::Open,
@@ -237,8 +234,8 @@ const ISSUE_COLUMNS: &str =
 /// Insert an issue.
 ///
 /// Returns `IssueError::Duplicate(prev)` if an issue with the same
-/// `name` already exists; the existing issue is left untouched and
-/// returned so the caller can decide what to do.
+/// `(name, author)` already exists; the existing issue is left
+/// untouched and returned so the caller can decide what to do.
 pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
     let res = tx.execute(
@@ -260,7 +257,7 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
     );
     if let Err(e) = res {
         if is_unique_violation(&e) {
-            let prev = find_by_dup_key(conn, &issue.name)?;
+            let prev = find_by_dup_key(conn, &issue.name, &issue.author)?;
             return Err(IssueError::Duplicate(Box::new(prev)));
         }
         return Err(e.into());
@@ -286,9 +283,11 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
-fn find_by_dup_key(conn: &Connection, name: &str) -> Result<Issue, IssueError> {
-    let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.name = ?1"))?;
-    stmt.query_row(params![name], row_to_issue)
+fn find_by_dup_key(conn: &Connection, name: &str, author: &str) -> Result<Issue, IssueError> {
+    let mut stmt = conn.prepare(&format!(
+        "{ISSUE_SELECT} WHERE i.name = ?1 AND i.author = ?2"
+    ))?;
+    stmt.query_row(params![name, author], row_to_issue)
         .map_err(IssueError::from)
 }
 

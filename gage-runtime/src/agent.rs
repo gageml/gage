@@ -1192,9 +1192,13 @@ fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
             ),
         })
         .collect();
+    // Base author for built-in tool writes; each request appends its
+    // own `?call={toolUseId}` so the author is the authoring call.
+    // See the author scheme in docs/notes.md.
     ToolSpec {
         gage_tools,
         custom_tools,
+        author: Some(format!("agent:{module_id}")),
     }
 }
 
@@ -1223,13 +1227,15 @@ fn render_input_schema(inputs: &[InputDecl]) -> rmcp_json::JsonObject {
 
 /// Build the MCP callback for a scanner-defined tool. The closure
 /// sends a JSON-only [`DispatchRequest`] to the dispatcher and waits
-/// for the reply — no Rune state crosses the channel.
+/// for the reply — no Rune state crosses the channel. The `_meta`
+/// object passes through verbatim; the Rune tool fn derives the
+/// calling author from it via `meta.to_author()`.
 fn dispatcher_callback(
     module_id: String,
     fn_name: String,
     sender: Option<tokio::sync::mpsc::UnboundedSender<crate::dispatcher::DispatchRequest>>,
 ) -> CustomToolCallback {
-    Arc::new(move |args| {
+    Arc::new(move |args, meta| {
         let module_id = module_id.clone();
         let fn_name = fn_name.clone();
         let sender = sender.clone();
@@ -1243,6 +1249,7 @@ fn dispatcher_callback(
                     module_id,
                     fn_name,
                     args,
+                    meta,
                     reply: reply_tx,
                 })
                 .map_err(|_send_err| "tool dispatcher channel closed".to_string())?;

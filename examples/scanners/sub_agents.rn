@@ -20,6 +20,6 @@ pub async fn sub_agents() {
     println!("## sub-agents # {result:?}");
 }
 
-pub async fn value_tool(#{}) {
+pub async fn value_tool(#{}, _meta) {
     return Ok(DateTime::now().to_rfc2822())
 }
