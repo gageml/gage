@@ -38,7 +38,8 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
         do_write_issue(q)
     })?;
 
-    m.function("issues", IssuesQuery::new).build()?;
+    m.function("global", || Global).build()?;
+    m.function_meta(Global::issues)?;
     m.function_meta(IssuesQuery::status)?;
     m.function_meta(IssuesQuery::name)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: IssuesQuery| async move {
@@ -81,11 +82,27 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Issue>()?;
     m.function_meta(Issue::debug)?;
     m.ty::<IssueInsert>()?;
+    m.ty::<Global>()?;
     m.ty::<IssuesQuery>()?;
     Ok(())
 }
 
-/// Builder returned by `issues()`. Queries the full issue table —
+/// Unscoped query surface over everything Gage has recorded — the
+/// counterpart to `scan()`, whose builders are bound to the current
+/// scan. Returned by `global()`.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct Global;
+
+impl Global {
+    /// Query issues: `global().issues().status("pending").await?`
+    #[rune::function(instance)]
+    fn issues(&self) -> IssuesQuery {
+        IssuesQuery::new()
+    }
+}
+
+/// Builder returned by `Global::issues`. Queries the full issue table —
 /// issues are global, not scan-scoped. Defaults to open issues;
 /// `.status(..)` selects `"pending"`, `"open"`, `"closed"`, or `"any"`.
 #[derive(Any)]

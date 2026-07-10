@@ -1,4 +1,4 @@
-use gage::issues;
+use gage::global;
 
 pub const SCANNER = #{
     name: "reconcile",
@@ -7,7 +7,7 @@ pub const SCANNER = #{
 };
 
 pub async fn reconcile() {
-    for issue in issues().status("pending").await? {
+    for issue in global().issues().status("pending").await? {
         println!("{:?}", issue);
     }
 

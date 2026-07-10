@@ -197,30 +197,30 @@ async fn test_pending_issue_lifecycle() {
     .await
     .unwrap();
 
-    let pending = gage::issues().status("pending").name("test.pending").await.unwrap();
+    let pending = gage::global().issues().status("pending").name("test.pending").await.unwrap();
     assert_eq!(pending.len(), 1);
     let issue = pending.get(0).unwrap();
     assert_eq!(issue.status, "pending");
 
     // Not visible as open until promoted
-    let open = gage::issues().name("test.pending").await.unwrap();
+    let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 0);
 
     gage::promote_issue(#{ id: issue.id, message: "novel" })
         .await
         .unwrap();
-    let open = gage::issues().name("test.pending").await.unwrap();
+    let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 1);
 
     gage::close_issue(#{ id: issue.id, reason: "duplicate", message: "dup of x" })
         .await
         .unwrap();
-    let closed = gage::issues().status("closed").name("test.pending").await.unwrap();
+    let closed = gage::global().issues().status("closed").name("test.pending").await.unwrap();
     assert_eq!(closed.len(), 1);
     assert_eq!(closed.get(0).unwrap().closed_reason, Some("duplicate"));
 
     gage::reopen_issue(#{ id: issue.id }).await.unwrap();
-    let open = gage::issues().name("test.pending").await.unwrap();
+    let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 1);
 
     // Promote is pending-only; an open issue errors
@@ -245,7 +245,7 @@ async fn test_note_issue_debug_fmt() {
     gage::write_issue(#{ name: "test.debug-issue", title: "T", pending: true })
         .await
         .unwrap();
-    let issue = gage::issues().status("pending").name("test.debug-issue").await.unwrap().get(0).unwrap();
+    let issue = gage::global().issues().status("pending").name("test.debug-issue").await.unwrap().get(0).unwrap();
     let s = format!("{:?}", issue);
     assert!(s.contains("Issue {"));
     assert!(s.contains("status: \"pending\""));
