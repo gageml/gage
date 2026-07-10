@@ -1,21 +1,25 @@
-//! `gage agent` — UI surface over the `gage-agent` crate.
+//! `gage agent` — run an agent def declared in a scanner manifest.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use std::sync::Arc;
-
 use clap::Args;
-use cliclack as cli;
-use gage_agent::{AgentBuilder, TOOL_NAMES, ToolPolicy};
-use gage_claude::session::{self, SessionListBuilder};
-use gage_db::scan::{Scan, insert_scan, insert_scan_session};
-use gage_mcp::{GageTool, McpHost, ToolSpec, build_mcp_service};
+use gage_agent::AgentBuilder;
+use gage_claude::session::{self, SessionInfo, SessionListBuilder};
+use gage_registry::scanner::{Scanner, ScannerRegistry};
+use gage_scan::agent_def::{AgentDefOutcome, run_agent_def};
 use indicatif::{ProgressBar, ProgressStyle};
-
-use crate::dialog::{self, DialogError, DialogResult};
+use tabled::{
+    Table,
+    settings::{Color, Style, Width, object::Rows, peaker::Priority},
+};
 
 #[derive(Args)]
 pub struct AgentArgs {
+    /// Agent to run, as <scanner>::<fn>
+    #[arg(value_name = "AGENT", required_unless_present = "list")]
+    pub agent: Option<String>,
+
     /// Scope agent to specified session IDs only (or prefix)
     ///
     /// If omitted, all available sessions are available to the agent.
@@ -34,166 +38,147 @@ pub struct AgentArgs {
     #[arg(short, long)]
     pub all: bool,
 
-    /// Agent name
-    ///
-    /// This value is used as the session project name in listings to
-    /// differentiate agent session types. Defaults to "default".
-    #[arg(long)]
-    pub name: Option<String>,
-
-    /// Agent model
+    /// Run interactively in a Claude Code session
     #[arg(short, long)]
-    pub model: Option<String>,
+    pub interactive: bool,
 
-    /// Gage tools to expose to the agent (comma-separated list)
-    ///
-    /// Tools: Query, NoteWrite, IssueClose, IssueComment, IssueWrite
-    ///
-    /// Use '*' to enable all tools.
-    #[arg(
-        short = 't',
-        long = "tools",
-        value_name = "LIST",
-        value_delimiter = ','
-    )]
-    pub gage_tools: Vec<String>,
-
-    /// Skip confirmation prompt
+    /// List available agents
     #[arg(short, long)]
-    pub yes: bool,
+    pub list: bool,
 }
 
 pub async fn run(args: AgentArgs) {
-    let sessions = match resolve_sessions(&args) {
-        Ok(s) => s,
+    let registry = ScannerRegistry::load();
+
+    if args.list {
+        list_agents(&registry);
+        return;
+    }
+
+    let agent_ref = args.agent.as_deref().expect("clap requires AGENT");
+    let Some((scanner_name, fn_name)) = agent_ref.split_once("::") else {
+        eprintln!("gage agent: expected <scanner>::<fn>, got '{agent_ref}'");
+        std::process::exit(1);
+    };
+    let Some(def) = registry.get_def(scanner_name) else {
+        eprintln!("gage agent: no scanner named '{scanner_name}'");
+        std::process::exit(1);
+    };
+    if !def.agents.contains_key(fn_name) {
+        eprintln!("gage agent: scanner '{scanner_name}' declares no agent '{fn_name}'");
+        match def.agents.keys().collect::<Vec<_>>() {
+            keys if keys.is_empty() => eprintln!("(no agents declared)"),
+            keys => {
+                eprintln!("declared agents:");
+                for k in keys {
+                    eprintln!("  {scanner_name}::{k}");
+                }
+            }
+        }
+        std::process::exit(1);
+    }
+
+    let selected = match resolve_sessions(&args) {
+        Ok(s) => Arc::from(s.into_boxed_slice()),
         Err(()) => std::process::exit(1),
     };
 
-    let mut tools = args.gage_tools.clone();
-    if !args.yes && args.gage_tools.is_empty() {
-        let mut tools_out: Vec<String> = Vec::new();
-        let mut completed = false;
-        dialog::run("Run agent", || {
-            let r = collect_dialog(&mut tools_out);
-            if r.is_ok() {
-                completed = true;
-            }
-            r
-        });
-        if !completed {
-            std::process::exit(1);
-        }
-        tools = tools_out;
-    }
+    let db = Arc::new(Mutex::new(gage_db::db::open_db().unwrap()));
+    let scanner = Scanner { def, params: None };
 
-    let resolved_tools = match ToolPolicy::tools(tools, vec![]) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("gage agent: --tools: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // Record a scan row keyed to this invocation and populate
-    // `scan_session` with the ids the agent can read. The scan id
-    // scopes the agent's `Query` context and links any notes / issues
-    // the agent writes, via each tool's config below. No `scan_scanner`
-    // row is inserted, so `gage scan list` filters this scan out of the
-    // scanner-scan listing.
-    let scan_id = match register_scan(sessions) {
-        Ok(id) => id,
+    let outcome = match run_agent_def(db, scanner, fn_name, selected, args.interactive).await {
+        Ok(o) => o,
         Err(e) => {
             eprintln!("gage agent: {e}");
             std::process::exit(1);
         }
     };
 
-    // Start the in-process MCP host and register a per-call service
-    // exposing the resolved Gage tool set. The child claude connects to
-    // this URL via `--mcp-config`. Holding the handle for the duration
-    // of the run keeps the registration alive.
-    let host = match McpHost::start().await {
-        Ok(h) => Arc::new(h),
-        Err(e) => {
-            eprintln!("gage agent: start mcp host: {e}");
-            std::process::exit(1);
-        }
-    };
-    // No instance author: writes fall back to the per-request derived
-    // author (client info + tool_use id), so ad-hoc agent writes
-    // accumulate rather than conflict.
-    let spec = ToolSpec {
-        tools: resolved_tools
-            .iter()
-            .map(|name| scoped_tool(name, &scan_id))
-            .collect(),
-        custom_tools: Vec::new(),
-        author: None,
-    };
-    let _service_handle = host.register(build_mcp_service(spec));
-    let mcp_url = _service_handle.url().to_string();
-
-    let mut builder = AgentBuilder::new().tools(resolved_tools).mcp_url(mcp_url);
-    if let Some(name) = args.name {
-        builder = builder.name(name);
-    }
-    if let Some(model) = args.model {
-        builder = builder.model(model);
-    }
-    let mut agent = builder.build();
-    let spinner = start_spinner("Starting agent");
-    if let Err(e) = agent.init() {
-        spinner.finish_and_clear();
-        eprintln!("gage agent: {e}");
-        std::process::exit(1);
-    }
-    spinner.finish_and_clear();
-    match agent.run() {
-        Ok(status) => {
-            drop(_service_handle);
-            drop(host);
-            if !status.success() {
-                std::process::exit(status.code().unwrap_or(1));
+    match outcome {
+        AgentDefOutcome::Headless(result) => {
+            println!("{}", result.text);
+            if result.is_error || result.exit_code != 0 {
+                if !result.stderr.is_empty() {
+                    eprintln!("{}", result.stderr);
+                }
+                std::process::exit(1);
             }
         }
-        Err(e) => {
-            eprintln!("gage agent: {e}");
-            std::process::exit(1);
+        AgentDefOutcome::Interactive(run) => {
+            let spec = &run.spec;
+            let mut builder = AgentBuilder::new()
+                .tools(spec.tools.clone())
+                .prompt(spec.prompt.clone());
+            if let Some(name) = &spec.name {
+                builder = builder.name(name.clone());
+            }
+            if let Some(model) = &spec.model {
+                builder = builder.model(model.clone());
+            }
+            if let Some(url) = &spec.mcp_url {
+                builder = builder.mcp_url(url.clone());
+            }
+            let mut agent = builder.build();
+            let spinner = start_spinner("Starting agent");
+            if let Err(e) = agent.init() {
+                spinner.finish_and_clear();
+                eprintln!("gage agent: {e}");
+                std::process::exit(1);
+            }
+            spinner.finish_and_clear();
+            match agent.run() {
+                Ok(status) => {
+                    // `run` (MCP service, dispatcher, run context) must
+                    // outlive the interactive session.
+                    drop(run);
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("gage agent: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
 
-/// Tool for `name` scoped to this invocation's scan: Query reads are
-/// limited to the scan's rows and writes link back to it.
-fn scoped_tool(name: &str, scan_id: &str) -> GageTool {
-    let mut tool = GageTool::from_name(name).expect("ToolPolicy resolved names are known tools");
-    match &mut tool {
-        GageTool::Query(c) => c.scan = Some(scan_id.to_string()),
-        GageTool::IssueWrite(c) => c.scan = Some(scan_id.to_string()),
-        GageTool::NoteWrite(c) => c.scan = Some(scan_id.to_string()),
-        GageTool::IssueClose | GageTool::IssueComment => {}
-    }
-    tool
-}
-
-fn collect_dialog(tools: &mut Vec<String>) -> Result<DialogResult, DialogError> {
-    let names: Vec<&'static str> = TOOL_NAMES.to_vec();
-    let mut ms = cli::multiselect("Tools").required(false);
-    for (i, name) in names.iter().enumerate() {
-        ms = ms.item(i, *name, "");
-    }
-    let picks: Vec<usize> = ms.interact()?;
-    *tools = picks
+fn list_agents(registry: &ScannerRegistry) {
+    let rows: Vec<Vec<String>> = registry
+        .list()
         .iter()
-        .map(|&i| {
-            names
-                .get(i)
-                .expect("selected holds positions in names")
-                .to_string()
+        .flat_map(|def| {
+            def.agents.iter().map(|(fn_name, description)| {
+                vec![
+                    console::style(format!("{}::{fn_name}", def.name))
+                        .yellow()
+                        .to_string(),
+                    console::style(description).dim().to_string(),
+                ]
+            })
         })
         .collect();
+    if rows.is_empty() {
+        println!("No agents declared");
+        return;
+    }
 
-    Ok("Starting agent".into())
+    let header: Vec<String> = ["Agent", "Description"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let term_width = console::Term::stdout().size().1 as usize;
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .with(
+            Width::wrap(term_width)
+                .keep_words(true)
+                .priority(Priority::max(true)),
+        )
+        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
+        .to_string();
+    println!("{table}");
 }
 
 fn start_spinner(message: &str) -> ProgressBar {
@@ -204,39 +189,18 @@ fn start_spinner(message: &str) -> ProgressBar {
     bar
 }
 
-/// Insert a fresh `scan` row and populate `scan_session` with the ids
-/// the agent has access to.
-fn register_scan(ids: Vec<String>) -> Result<String, String> {
-    let conn = gage_db::db::open_db().map_err(|e| format!("open db: {e}"))?;
-    let scan_id = gage_core::uuid::new_uuid();
-    insert_scan(
-        &conn,
-        &Scan {
-            id: scan_id.clone(),
-            created: gage_core::datetime::now_ms(),
-            metadata: None,
-        },
-    )
-    .map_err(|e| format!("insert scan: {e}"))?;
-    for sid in &ids {
-        insert_scan_session(&conn, &scan_id, sid)
-            .map_err(|e| format!("insert scan_session: {e}"))?;
-    }
-    Ok(scan_id)
-}
-
-/// Resolve session scope to a concrete list of ids. Explicit prefixes
-/// take precedence; otherwise falls back to `--limit` / `--days` /
-/// `--all`, defaulting to sessions modified in the past 30 days.
-/// Diagnostics for each unresolved prefix are written to stderr; any
-/// failure yields `Err(())`.
-fn resolve_sessions(args: &AgentArgs) -> Result<Vec<String>, ()> {
+/// Resolve session scope to concrete sessions. Explicit prefixes take
+/// precedence; otherwise falls back to `--limit` / `--days` / `--all`,
+/// defaulting to sessions modified in the past 30 days. Diagnostics
+/// for each unresolved prefix are written to stderr; any failure
+/// yields `Err(())`.
+fn resolve_sessions(args: &AgentArgs) -> Result<Vec<SessionInfo>, ()> {
     if !args.sessions.is_empty() {
-        let mut ids = Vec::new();
+        let mut out = Vec::new();
         let mut failed = false;
         for prefix in &args.sessions {
             match session::one_session(prefix) {
-                Ok(s) => ids.push(s.id),
+                Ok(s) => out.push(s),
                 Err(e) => {
                     eprintln!("{e}");
                     failed = true;
@@ -246,7 +210,7 @@ fn resolve_sessions(args: &AgentArgs) -> Result<Vec<String>, ()> {
         if failed {
             return Err(());
         }
-        return Ok(ids);
+        return Ok(out);
     }
 
     let days = if args.all || args.limit.is_some() {
@@ -262,5 +226,5 @@ fn resolve_sessions(args: &AgentArgs) -> Result<Vec<String>, ()> {
     if let Some(n) = args.limit {
         builder = builder.limit(n);
     }
-    Ok(builder.build().into_iter().map(|s| s.id).collect())
+    Ok(builder.build().into_iter().collect())
 }

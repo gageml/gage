@@ -135,6 +135,7 @@ pub struct AgentBuilder {
     max_turns: Option<u32>,
     timeout: Option<usize>,
     tools: Vec<String>,
+    prompt: Option<String>,
     /// Streamable-HTTP MCP endpoint to wire as the child claude's MCP
     /// server. When `Some`, the plugin-install path is skipped and
     /// claude is launched with `--mcp-config` + `--strict-mcp-config`
@@ -182,6 +183,14 @@ impl AgentBuilder {
         self
     }
 
+    /// Initial prompt passed to the interactive child claude as its
+    /// first user message. Ignored by the streaming path, which sends
+    /// its prompt over stdin.
+    pub fn prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = Some(prompt.into());
+        self
+    }
+
     /// Streamable-HTTP MCP URL the child claude should connect to.
     /// When set, the plugin-install path is replaced with a direct
     /// `--mcp-config` injection pointing at this URL.
@@ -197,6 +206,7 @@ impl AgentBuilder {
             max_turns: self.max_turns,
             timeout: self.timeout,
             tools: self.tools,
+            prompt: self.prompt,
             mcp_url: self.mcp_url,
             prep: None,
         }
@@ -215,6 +225,7 @@ pub struct Agent {
     max_turns: Option<u32>,
     timeout: Option<usize>,
     tools: Vec<String>,
+    prompt: Option<String>,
     mcp_url: Option<String>,
     prep: Option<PreparedRun>,
 }
@@ -238,7 +249,7 @@ impl Agent {
     pub fn run(mut self) -> io::Result<ExitStatus> {
         self.init()?;
         let prep = self.prep.take().unwrap();
-        run_interactive(prep, self.model, self.mcp_url)
+        run_interactive(prep, self.model, self.mcp_url, self.prompt)
     }
 
     /// Spawn the child claude non-interactively with stream-json input
@@ -277,6 +288,7 @@ fn run_interactive(
     prep: PreparedRun,
     model: Option<String>,
     mcp_url: Option<String>,
+    prompt: Option<String>,
 ) -> io::Result<ExitStatus> {
     let projects_dir = prep.claude_home.join("projects");
 
@@ -313,6 +325,9 @@ fn run_interactive(
     }
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
+    }
+    if let Some(prompt) = &prompt {
+        cmd.arg(prompt);
     }
     let status = cmd.status();
 

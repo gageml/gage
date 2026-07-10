@@ -1,19 +1,21 @@
-use gage::global;
+use gage::{call_agent, global, tools::Query};
 
 pub const SCANNER = #{
     name: "reconcile",
     description: "Reconcile pending issues",
-    tasks: #{ reconcile: #{ issues: #{ wants: ["*"] } } },
+    tasks: #{ main: #{ issues: #{ wants: ["*"] } } },
+    agents: #{ reconcile: "Reconcile agent" },
 };
 
-pub async fn reconcile() {
+pub async fn main() {
     for issue in global().issues().status("pending").await? {
         println!("{:?}", issue);
     }
+    let agent = reconcile().await?;
+    let result = agent.wait().await?;
+    println!("{result:?}");
+}
 
-    // let agent = call_agent(include_str!("reconcile-prompt.md"))
-    //     .gage_tools(["Query"])
-    //     .await?;
-    // let result = agent.wait().await?;
-    // println!("{result:?}");
+pub fn reconcile() {
+    call_agent(include_str!("reconcile-prompt.md")).gage_tools([Query::new()])
 }

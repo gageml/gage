@@ -104,6 +104,10 @@ pub struct ScannerDef {
     pub version: String,
     pub hidden: bool,
     pub tasks: BTreeMap<String, TaskDef>,
+    /// Agent defs declared via `SCANNER.agents`: fn name → description.
+    /// Each names a public function returning an un-awaited `CallAgent`
+    /// builder, runnable via `gage agent <scanner>::<fn>`.
+    pub agents: BTreeMap<String, String>,
     ast: ast::File,
     source: String,
     pub embed_key: String,
@@ -596,6 +600,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
     let mut version = String::new();
     let mut hidden = false;
     let mut tasks_obj: Option<&ast::ExprObject> = None;
+    let mut agents_obj: Option<&ast::ExprObject> = None;
 
     for (item, _) in &file.items {
         let ast::Item::Const(item_const) = item else {
@@ -640,6 +645,11 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
                             tasks_obj = Some(obj);
                         }
                     }
+                    Some("agents") => {
+                        if let ast::Expr::Object(obj) = expr {
+                            agents_obj = Some(obj);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -655,17 +665,41 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
         None => BTreeMap::new(),
     };
 
+    let agents = match agents_obj {
+        Some(obj) => parse_agents(source, obj),
+        None => BTreeMap::new(),
+    };
+
     Ok(ScannerDef {
         name: scanner_name.ok_or(ParseError::MissingName)?,
         description: description.unwrap_or_default(),
         version,
         hidden,
         tasks,
+        agents,
         ast: file,
         source: source.to_string(),
         embed_key: embed_key.to_string(),
         from_file: false,
     })
+}
+
+/// Parse `SCANNER.agents`: fn name → description. Non-string values
+/// are skipped.
+fn parse_agents(source: &str, obj: &ast::ExprObject) -> BTreeMap<String, String> {
+    let mut agents = BTreeMap::new();
+    for (field, _) in &obj.assignments {
+        let Some(key) = field_key(source, &field.key) else {
+            continue;
+        };
+        let Some((_, expr)) = &field.assign else {
+            continue;
+        };
+        if let Some(description) = expr_str(source, expr) {
+            agents.insert(key, description);
+        }
+    }
+    agents
 }
 
 fn parse_tasks(
@@ -1011,6 +1045,18 @@ fn walk_rn_files_rec(dir: &Path, result: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_agents_field() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    agents: #{ agent: "Says hello" },
+};
+"#;
+        let def = parse_scanner(source, "demo").unwrap();
+        assert_eq!(def.agents.get("agent").unwrap(), "Says hello");
+    }
 
     #[test]
     fn parse_task_note_and_issue_deps() {

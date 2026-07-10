@@ -90,7 +90,7 @@ enum Command {
     /// Run scanners on sessions
     Scan(cmd_scan::ScanArgs),
 
-    /// Run Claude to perform Gage tasks
+    /// Run an agent declared by a scanner
     Agent(cmd_agent::AgentArgs),
 
     /// Manage sessions

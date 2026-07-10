@@ -27,6 +27,7 @@ pub enum RunError {
     Compile(String),
     MissingTask { scanner: String, task: String },
     Plan(String),
+    Agent(String),
     Emitted,
     Canceled,
 }
@@ -42,6 +43,7 @@ impl fmt::Display for RunError {
                 "scanner '{scanner}' declares task '{task}' but defines no matching function"
             ),
             RunError::Plan(msg) => write!(f, "plan error: {msg}"),
+            RunError::Agent(msg) => write!(f, "{msg}"),
             RunError::Emitted => Ok(()),
             RunError::Canceled => write!(f, "scan canceled"),
         }
@@ -278,7 +280,7 @@ fn init_run(
     Ok(scan_id)
 }
 
-fn compile_scanner(
+pub(crate) fn compile_scanner(
     scanner: &Scanner<'_>,
     db: Arc<Mutex<Connection>>,
 ) -> Result<ScannerSlot, RunError> {

@@ -188,7 +188,7 @@ struct AgentInner {
 /// about the inner shape.
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
-pub(crate) struct AgentResult {
+pub struct AgentResult {
     /// Final assistant text from the SDK `result.result` field. Empty
     /// if the child exited without emitting one.
     #[rune(get)]
@@ -409,7 +409,10 @@ async fn poll(this: Mut<Agent>) -> super::Result<Event> {
 /// cached `AgentResult` immediately.
 #[rune::function(instance)]
 async fn wait(this: Mut<Agent>) -> super::Result<AgentResult> {
-    let inner = Arc::clone(&this.inner);
+    wait_inner(Arc::clone(&this.inner)).await
+}
+
+async fn wait_inner(inner: Arc<Mutex<AgentInner>>) -> super::Result<AgentResult> {
     let mut auto_stopped = false;
     loop {
         let ev = do_poll(Arc::clone(&inner)).await?;
@@ -1078,7 +1081,8 @@ fn call_agent(prompt: String) -> CallAgent {
     }
 }
 
-async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
+/// Resolve a `CallAgent`'s deferred parses into a [`CallSpec`].
+fn resolve_spec(c: CallAgent) -> super::Result<Arc<CallSpec>> {
     let CallAgent {
         prompt,
         model,
@@ -1098,7 +1102,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         Some(r) => r?,
         None => Vec::new(),
     };
-    let spec = Arc::new(CallSpec {
+    Ok(Arc::new(CallSpec {
         prompt,
         model,
         max_turns,
@@ -1108,25 +1112,27 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         gage_tools,
         custom_tools,
         name,
-    });
+    }))
+}
 
-    // Acquire a slot from the run-wide agent pool BEFORE doing any
-    // expensive setup (MCP register, sandbox materialization, child
-    // spawn). If the pool is saturated this awaits until a previously
-    // running agent finishes; resource use stays bounded by the user's
-    // `--agent-jobs`.
-    let pool = current_scan_ctx().run.agent_pool.clone();
-    let permit = pool
-        .acquire_owned()
-        .await
-        .expect("agent_pool is closed only at process shutdown");
-
-    let tool_spec = build_tool_spec(&spec);
-    let gage_tools_resolved: Vec<String> = tool_spec
+/// Register the spec's MCP service on the run's host. Returns the
+/// service URL and handle (`None` for a pure text call) plus the tool
+/// allowlist for the child claude's `settings.json` — built-in Gage
+/// tools and scanner-defined custom tools; without the allowlist
+/// claude prompts on every tool call, which in `-p` headless mode
+/// means the call is rejected.
+fn register_service(
+    spec: &CallSpec,
+) -> super::Result<(Option<String>, Option<ServiceHandle>, Vec<String>)> {
+    let tool_spec = build_tool_spec(spec);
+    let mut auto_allow: Vec<String> = tool_spec
         .tools
         .iter()
         .map(|t| t.name().to_string())
         .collect();
+    for def in &spec.custom_tools {
+        auto_allow.push(def.mcp_name.clone());
+    }
     let (mcp_url, service) = if tool_spec.tools.is_empty() && tool_spec.custom_tools.is_empty() {
         // Pure text-in/text-out call — no need to register an MCP
         // service or even reach the host.
@@ -1143,15 +1149,24 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         let svc = host.register(gage_mcp::build_mcp_service(tool_spec));
         (Some(svc.url().to_string()), Some(svc))
     };
+    Ok((mcp_url, service, auto_allow))
+}
 
-    // `settings.json` permissions.allow must include both built-in
-    // Gage tools and scanner-defined custom tools — otherwise claude
-    // prompts the user on every custom-tool call, which in `-p`
-    // headless mode means the call is rejected.
-    let mut auto_allow = gage_tools_resolved;
-    for def in &spec.custom_tools {
-        auto_allow.push(def.mcp_name.clone());
-    }
+async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
+    let spec = resolve_spec(c)?;
+
+    // Acquire a slot from the run-wide agent pool BEFORE doing any
+    // expensive setup (MCP register, sandbox materialization, child
+    // spawn). If the pool is saturated this awaits until a previously
+    // running agent finishes; resource use stays bounded by the user's
+    // `--agent-jobs`.
+    let pool = current_scan_ctx().run.agent_pool.clone();
+    let permit = pool
+        .acquire_owned()
+        .await
+        .expect("agent_pool is closed only at process shutdown");
+
+    let (mcp_url, service, auto_allow) = register_service(&spec)?;
     let mut builder = GageAgentBuilder::new().tools(auto_allow);
     if let Some(n) = &spec.name {
         builder = builder.name(n.clone());
@@ -1446,6 +1461,60 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     })?;
 
     Ok(())
+}
+
+/// Downcast an agent-def return value to its `CallAgent` builder.
+fn call_from_value(v: rune::Value) -> Result<CallAgent, Error> {
+    rune::from_value(v).map_err(|e| {
+        Error::Agent(format!(
+            "agent def must return an un-awaited call_agent(..) builder: {e}"
+        ))
+    })
+}
+
+/// Run an agent-def value headless to completion: start the agent
+/// (`claude -p`) and wait for its terminal result. Must run inside a
+/// scan context scope (`SCAN_CTX`).
+pub async fn run_def_headless(v: rune::Value) -> Result<AgentResult, Error> {
+    let agent = do_call_agent(call_from_value(v)?).await?;
+    wait_inner(Arc::clone(&agent.inner)).await
+}
+
+/// Everything a caller needs to launch an interactive claude session
+/// for an agent-def value: the initial prompt, resolved model, tool
+/// allowlist, and the registered MCP service. Must be built inside a
+/// scan context scope (`SCAN_CTX`); the caller launches claude itself
+/// and must keep this value (and the run context) alive for the
+/// session's lifetime.
+pub struct InteractiveSpec {
+    pub prompt: String,
+    pub model: Option<String>,
+    /// Sandbox/archive name from `.name(..)`.
+    pub name: Option<String>,
+    /// Tool allowlist for the child's `settings.json` (built-in Gage
+    /// tools plus scanner-defined custom tools).
+    pub tools: Vec<String>,
+    pub mcp_url: Option<String>,
+    /// Per-call MCP service registration; drop unregisters.
+    pub service: Option<ServiceHandle>,
+}
+
+/// Resolve an agent-def value into an [`InteractiveSpec`], registering
+/// its MCP service on the run's host.
+pub fn interactive_spec(v: rune::Value) -> Result<InteractiveSpec, Error> {
+    let spec = resolve_spec(call_from_value(v)?)?;
+    let (mcp_url, service, tools) = register_service(&spec)?;
+    Ok(InteractiveSpec {
+        prompt: spec.prompt.clone(),
+        model: spec
+            .model
+            .as_deref()
+            .map(|m| crate::model::resolve_model(m).to_string()),
+        name: spec.name.clone(),
+        tools,
+        mcp_url,
+        service,
+    })
 }
 
 #[cfg(test)]
