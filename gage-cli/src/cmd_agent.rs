@@ -9,7 +9,7 @@ use cliclack as cli;
 use gage_agent::{AgentBuilder, TOOL_NAMES, ToolPolicy};
 use gage_claude::session::{self, SessionListBuilder};
 use gage_db::scan::{Scan, insert_scan, insert_scan_session};
-use gage_mcp::{McpHost, ToolSpec, build_mcp_service};
+use gage_mcp::{GageTool, McpHost, ToolSpec, build_mcp_service};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -94,6 +94,20 @@ pub async fn run(args: AgentArgs) {
         }
     };
 
+    // Record a scan row keyed to this invocation and populate
+    // `scan_session` with the ids the agent can read. The scan id
+    // scopes the agent's `Query` context and links any notes / issues
+    // the agent writes, via each tool's config below. No `scan_scanner`
+    // row is inserted, so `gage scan list` filters this scan out of the
+    // scanner-scan listing.
+    let scan_id = match register_scan(sessions) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage agent: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // Start the in-process MCP host and register a per-call service
     // exposing the resolved Gage tool set. The child claude connects to
     // this URL via `--mcp-config`. Holding the handle for the duration
@@ -109,36 +123,17 @@ pub async fn run(args: AgentArgs) {
     // author (client info + tool_use id), so ad-hoc agent writes
     // accumulate rather than conflict.
     let spec = ToolSpec {
-        gage_tools: resolved_tools.clone(),
+        tools: resolved_tools
+            .iter()
+            .map(|name| scoped_tool(name, &scan_id))
+            .collect(),
         custom_tools: Vec::new(),
         author: None,
     };
     let _service_handle = host.register(build_mcp_service(spec));
     let mcp_url = _service_handle.url().to_string();
 
-    // Record a scan row keyed to this invocation and populate
-    // `scan_session` with the ids the agent can read. The gage MCP
-    // server reads `GAGE_SCAN_ID` from the process env to scope the
-    // agent's `Query` context and to auto-link any notes / issues
-    // the agent writes. No `scan_scanner` row is inserted, so `gage
-    // scan list` filters this scan out of the scanner-scan listing.
-    let scan_id = match register_scan(sessions) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage agent: {e}");
-            std::process::exit(1);
-        }
-    };
-    // SAFETY: fresh scan id for this process; nothing else reads it
-    // yet, and the process ends when the agent exits.
-    unsafe {
-        std::env::set_var("GAGE_SCAN_ID", &scan_id);
-    }
-
-    let mut builder = AgentBuilder::new()
-        .tools(resolved_tools)
-        .mcp_url(mcp_url)
-        .scan_id(&scan_id);
+    let mut builder = AgentBuilder::new().tools(resolved_tools).mcp_url(mcp_url);
     if let Some(name) = args.name {
         builder = builder.name(name);
     }
@@ -166,6 +161,19 @@ pub async fn run(args: AgentArgs) {
             std::process::exit(1);
         }
     }
+}
+
+/// Tool for `name` scoped to this invocation's scan: Query reads are
+/// limited to the scan's rows and writes link back to it.
+fn scoped_tool(name: &str, scan_id: &str) -> GageTool {
+    let mut tool = GageTool::from_name(name).expect("ToolPolicy resolved names are known tools");
+    match &mut tool {
+        GageTool::Query(c) => c.scan = Some(scan_id.to_string()),
+        GageTool::IssueWrite(c) => c.scan = Some(scan_id.to_string()),
+        GageTool::NoteWrite(c) => c.scan = Some(scan_id.to_string()),
+        GageTool::IssueClose | GageTool::IssueComment => {}
+    }
+    tool
 }
 
 fn collect_dialog(tools: &mut Vec<String>) -> Result<DialogResult, DialogError> {

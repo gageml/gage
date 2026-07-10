@@ -17,8 +17,7 @@
 //! `CLAUDE_PROJECTS_DIR` inside it. Corpus access is MCP-mediated:
 //! the child issues `Query` calls to the in-process gage MCP server,
 //! which reads the canonical db through a per-agent DataFusion
-//! context scoped to the active `GAGE_SCAN_ID` (see
-//! [`gage_query::create_agent_context`]).
+//! context configured per tool (see `gage_mcp::ToolSpec`).
 //!
 //! The session JSONL Claude writes is hardlinked into a caller-supplied
 //! archive dir under `~/.gage/claude/<name>/` (`default` for the
@@ -136,7 +135,6 @@ pub struct AgentBuilder {
     max_turns: Option<u32>,
     timeout: Option<usize>,
     tools: Vec<String>,
-    scan_id: Option<String>,
     /// Streamable-HTTP MCP endpoint to wire as the child claude's MCP
     /// server. When `Some`, the plugin-install path is skipped and
     /// claude is launched with `--mcp-config` + `--strict-mcp-config`
@@ -184,15 +182,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Scan id to expose to the child as `GAGE_SCAN_ID`. Read by the
-    /// gage MCP server both to scope the agent's `Query` context (see
-    /// [`gage_query::create_agent_context`]) and to auto-link any notes
-    /// or issues the agent writes via `scan_note` / `scan_issue`.
-    pub fn scan_id(mut self, scan_id: impl Into<String>) -> Self {
-        self.scan_id = Some(scan_id.into());
-        self
-    }
-
     /// Streamable-HTTP MCP URL the child claude should connect to.
     /// When set, the plugin-install path is replaced with a direct
     /// `--mcp-config` injection pointing at this URL.
@@ -208,7 +197,6 @@ impl AgentBuilder {
             max_turns: self.max_turns,
             timeout: self.timeout,
             tools: self.tools,
-            scan_id: self.scan_id,
             mcp_url: self.mcp_url,
             prep: None,
         }
@@ -227,7 +215,6 @@ pub struct Agent {
     max_turns: Option<u32>,
     timeout: Option<usize>,
     tools: Vec<String>,
-    scan_id: Option<String>,
     mcp_url: Option<String>,
     prep: Option<PreparedRun>,
 }
@@ -251,7 +238,7 @@ impl Agent {
     pub fn run(mut self) -> io::Result<ExitStatus> {
         self.init()?;
         let prep = self.prep.take().unwrap();
-        run_interactive(prep, self.model, self.scan_id, self.mcp_url)
+        run_interactive(prep, self.model, self.mcp_url)
     }
 
     /// Spawn the child claude non-interactively with stream-json input
@@ -279,7 +266,6 @@ impl Agent {
             self.model,
             self.max_turns,
             self.timeout,
-            self.scan_id,
             self.mcp_url,
             prompt,
         )
@@ -290,7 +276,6 @@ impl Agent {
 fn run_interactive(
     prep: PreparedRun,
     model: Option<String>,
-    scan_id: Option<String>,
     mcp_url: Option<String>,
 ) -> io::Result<ExitStatus> {
     let projects_dir = prep.claude_home.join("projects");
@@ -325,9 +310,6 @@ fn run_interactive(
         // Skip `project` / `local` so we don't pick up settings from
         // the cwd directory.
         cmd.arg("--setting-sources").arg("user");
-    }
-    if let Some(id) = &scan_id {
-        cmd.env("GAGE_SCAN_ID", id);
     }
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
@@ -423,7 +405,6 @@ async fn start_streaming_session_inner(
     model: Option<String>,
     max_turns: Option<u32>,
     timeout: Option<usize>,
-    scan_id: Option<String>,
     mcp_url: Option<String>,
     prompt: &str,
 ) -> io::Result<StreamingAgentSession> {
@@ -463,9 +444,6 @@ async fn start_streaming_session_inner(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(id) = &scan_id {
-        cmd.env("GAGE_SCAN_ID", id);
-    }
 
     tracing::debug!(
         claude = %prep.claude_bin.display(),

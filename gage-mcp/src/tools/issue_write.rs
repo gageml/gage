@@ -12,7 +12,8 @@ use rmcp::{
 };
 
 use crate::server::GageServer;
-use crate::tool::{ToolDef, agent_author, build_tool_meta, scan_id_from_env};
+use crate::service::IssueWriteConfig;
+use crate::tool::{ToolDef, agent_author, build_tool_meta};
 
 pub const TOOL: ToolDef = route;
 
@@ -28,10 +29,15 @@ fn call(
     params: JsonObject,
 ) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
     let author = agent_author(server, &ctx);
-    Box::pin(handle(params, author))
+    let config = server.tools_config().issue_write.clone();
+    Box::pin(handle(params, author, config))
 }
 
-async fn handle(params: JsonObject, author: String) -> Result<String, McpError> {
+async fn handle(
+    params: JsonObject,
+    author: String,
+    config: IssueWriteConfig,
+) -> Result<String, McpError> {
     let title = req_string(&params, "title")?;
     let description = opt_string(&params, "description");
     let evidence_ids = opt_string_array(&params, "evidence")?;
@@ -54,7 +60,7 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
 
     // Model-written issues are staged as pending; only the reconcile
     // step promotes an issue to open.
-    let mut issue_row = Issue::new("general", title, description, &author);
+    let mut issue_row = Issue::new(&config.name, title, description, &author);
     issue_row.status = IssueStatus::Pending;
     let now = issue_row.created;
 
@@ -78,8 +84,8 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         _ => McpError::internal_error(format!("insert issue: {e}"), None),
     })?;
 
-    if let Some(scan_id) = scan_id_from_env() {
-        insert_scan_issue(&conn, &scan_id, &issue_row.id)
+    if let Some(scan_id) = &config.scan {
+        insert_scan_issue(&conn, scan_id, &issue_row.id)
             .map_err(|e| McpError::internal_error(format!("link issue to scan: {e}"), None))?;
     }
 

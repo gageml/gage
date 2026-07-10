@@ -55,6 +55,7 @@ pub async fn run_tests(
     context.install(runtime::types_module().unwrap()).unwrap();
     context.install(runtime::macros_module().unwrap()).unwrap();
     context.install(runtime::gage_module().unwrap()).unwrap();
+    context.install(runtime::tools_module().unwrap()).unwrap();
     context.install(runtime::log_module().unwrap()).unwrap();
     context.install(runtime::stats_module().unwrap()).unwrap();
     context.install(runtime::json_module().unwrap()).unwrap();

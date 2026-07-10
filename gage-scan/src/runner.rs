@@ -128,17 +128,6 @@ pub async fn run(
             None
         }
     };
-    // HTTP-path MCP tools run in this process and read `GAGE_SCAN_ID`
-    // from env to link writes to the active scan. The plugin-path
-    // (stdio) tools pick it up the same way after gage-agent sets it
-    // on the child claude command. Setting it here lets both paths
-    // share the same lookup. Process-wide env is fine — scan_id is
-    // constant for the duration of the run.
-    // SAFETY: scan_id is fresh for this run; no other thread relies on
-    // it being unset.
-    unsafe {
-        std::env::set_var("GAGE_SCAN_ID", &scan_id);
-    }
     let run = Arc::new(RunContext {
         scan_id: scan_id.clone(),
         selected,
@@ -303,6 +292,7 @@ fn compile_scanner(
     context.install(runtime::types_module().unwrap()).unwrap();
     context.install(runtime::macros_module().unwrap()).unwrap();
     context.install(runtime::gage_module().unwrap()).unwrap();
+    context.install(runtime::tools_module().unwrap()).unwrap();
     context.install(runtime::log_module().unwrap()).unwrap();
     context.install(runtime::stats_module().unwrap()).unwrap();
     context.install(runtime::json_module().unwrap()).unwrap();
@@ -378,6 +368,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
         context.install(runtime::types_module().unwrap()).unwrap();
         context.install(runtime::macros_module().unwrap()).unwrap();
         context.install(runtime::gage_module().unwrap()).unwrap();
+        context.install(runtime::tools_module().unwrap()).unwrap();
         context.install(runtime::log_module().unwrap()).unwrap();
         context.install(runtime::stats_module().unwrap()).unwrap();
         context.install(runtime::json_module().unwrap()).unwrap();

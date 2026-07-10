@@ -1,3 +1,4 @@
+use gage::tools::{IssueWrite, Query};
 use gage::{AgentRunner, Template, call_agent, carry_forward_notes, scan, write_note};
 
 pub const SCANNER = #{
@@ -43,7 +44,7 @@ pub async fn findings() {
         runner.add(
             call_agent(prompt)
                 .name("session-finding")
-                .gage_tools(["Query"])
+                .gage_tools([Query::new().scan(scan().id)])
                 .tools(findings_tools())
                 .model("small"),
             #{ session: s.id },
@@ -154,7 +155,10 @@ pub async fn issues() {
 
     let agent = call_agent(include_str!("issues-prompt.md"))
         .name("issue-writer")
-        .gage_tools(["Query", "IssueWrite"])
+        .gage_tools([
+            Query::new().scan(scan().id),
+            IssueWrite::new().scan(scan().id),
+        ])
         .model("large")
         .await?;
     let result = agent.wait().await?;

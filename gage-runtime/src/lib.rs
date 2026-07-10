@@ -16,6 +16,7 @@ pub mod scan;
 pub mod state;
 pub mod stats;
 pub mod template;
+pub mod tools;
 pub mod validate;
 pub mod value;
 
@@ -41,6 +42,7 @@ pub fn lsp_context() -> std::result::Result<Context, ContextError> {
     context.install(types_module()?)?;
     context.install(macros_module()?)?;
     context.install(gage_module()?)?;
+    context.install(tools_module()?)?;
     context.install(log_module()?)?;
     context.install(stats_module()?)?;
     context.install(json_module()?)?;
@@ -64,6 +66,10 @@ pub fn gage_module() -> std::result::Result<Module, ContextError> {
     template::register(&mut m)?;
 
     Ok(m)
+}
+
+pub fn tools_module() -> std::result::Result<Module, ContextError> {
+    tools::module()
 }
 
 pub fn io_module() -> std::result::Result<Module, ContextError> {

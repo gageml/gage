@@ -13,6 +13,7 @@ use rmcp::{
 };
 use tokio::sync::OnceCell;
 
+use crate::service::ToolsConfig;
 use crate::tool::ToolDef;
 use crate::tools;
 
@@ -35,6 +36,9 @@ pub struct GageServer {
     /// invocation; `None` for ad-hoc servers (e.g. the stdio server),
     /// where the base is derived from the client's initialize info.
     agent_author: Option<String>,
+    /// Per-service settings for the built-in tools. Defaults (unscoped
+    /// Query, no write linking) for ad-hoc servers like stdio.
+    tools_config: ToolsConfig,
 }
 
 impl Default for GageServer {
@@ -56,6 +60,7 @@ impl GageServer {
             tool_router,
             ctx: Arc::new(OnceCell::new()),
             agent_author: None,
+            tools_config: ToolsConfig::default(),
         }
     }
 
@@ -66,23 +71,31 @@ impl GageServer {
         self
     }
 
+    /// Set the per-service tool settings (see the `tools_config`
+    /// field).
+    pub fn with_tools_config(mut self, config: ToolsConfig) -> Self {
+        self.tools_config = config;
+        self
+    }
+
     pub(crate) fn agent_author(&self) -> Option<&str> {
         self.agent_author.as_deref()
     }
 
+    pub(crate) fn tools_config(&self) -> &ToolsConfig {
+        &self.tools_config
+    }
+
     /// The DataFusion context that the `Query` MCP tool runs against.
-    /// When the calling process has a `GAGE_SCAN_ID` in its
-    /// environment (set by `gage scan` and `gage agent` for the
-    /// duration of a run), the context is scoped to that scan via
-    /// [`gage_query::create_agent_context`]; reads return only rows
-    /// linked through `scan_session` / `scan_note` / `scan_issue`.
-    /// Absent the env var (e.g. ad-hoc MCP clients), the default
-    /// unscoped context is built.
+    /// Scoped to the scan id in the tool's config when set
+    /// ([`gage_query::create_agent_context`]; reads return only rows
+    /// linked through `scan_session` / `scan_note` / `scan_issue`),
+    /// otherwise the default unscoped context.
     pub(crate) async fn ctx(&self) -> &SessionContext {
         self.ctx
             .get_or_init(|| async {
-                match crate::tool::scan_id_from_env() {
-                    Some(scan_id) => gage_query::create_agent_context(scan_id).await,
+                match &self.tools_config.query.scan {
+                    Some(scan_id) => gage_query::create_agent_context(scan_id.clone()).await,
                     None => gage_query::create_context_default().await,
                 }
             })

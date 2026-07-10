@@ -27,15 +27,95 @@ use tower::util::BoxCloneSyncService;
 use crate::host::RegisteredService;
 use crate::server::{GageServer, TOOLS};
 
+/// One built-in Gage tool selected for a service, with its per-service
+/// configuration. The variant selects the tool; the payload configures
+/// it. Isolation is per tool and explicit — there is no ambient scan
+/// scope.
+#[derive(Clone, Debug)]
+pub enum GageTool {
+    Query(QueryConfig),
+    IssueWrite(IssueWriteConfig),
+    NoteWrite(NoteWriteConfig),
+    IssueClose,
+    IssueComment,
+}
+
+impl GageTool {
+    /// Wire-visible tool name for this variant.
+    pub fn name(&self) -> &'static str {
+        match self {
+            GageTool::Query(_) => "Query",
+            GageTool::IssueWrite(_) => "IssueWrite",
+            GageTool::NoteWrite(_) => "NoteWrite",
+            GageTool::IssueClose => "IssueClose",
+            GageTool::IssueComment => "IssueComment",
+        }
+    }
+
+    /// Tool for `name` with default (unscoped) configuration. `None`
+    /// for unknown names.
+    pub fn from_name(name: &str) -> Option<GageTool> {
+        match name {
+            "Query" => Some(GageTool::Query(QueryConfig::default())),
+            "IssueWrite" => Some(GageTool::IssueWrite(IssueWriteConfig::default())),
+            "NoteWrite" => Some(GageTool::NoteWrite(NoteWriteConfig::default())),
+            "IssueClose" => Some(GageTool::IssueClose),
+            "IssueComment" => Some(GageTool::IssueComment),
+            _ => None,
+        }
+    }
+}
+
+/// `Query` tool settings.
+#[derive(Clone, Debug, Default)]
+pub struct QueryConfig {
+    /// Scope the tool's query context to this scan id
+    /// ([`gage_query::create_agent_context`]). `None` → unscoped.
+    pub scan: Option<String>,
+}
+
+/// `IssueWrite` tool settings.
+#[derive(Clone, Debug)]
+pub struct IssueWriteConfig {
+    /// Name every issue is written under. The model has no name input.
+    pub name: String,
+    /// Scan to link writes to via `scan_issue`. `None` → no link.
+    pub scan: Option<String>,
+}
+
+impl Default for IssueWriteConfig {
+    fn default() -> Self {
+        IssueWriteConfig {
+            name: "general".to_string(),
+            scan: None,
+        }
+    }
+}
+
+/// `NoteWrite` tool settings.
+#[derive(Clone, Debug, Default)]
+pub struct NoteWriteConfig {
+    /// Scan to link writes to via `scan_note`, and the fallback note
+    /// target when the model supplies no session. `None` → no link.
+    pub scan: Option<String>,
+}
+
+/// Per-service configuration each built-in tool handler reads through
+/// [`GageServer`]. Built from the [`ToolSpec`]'s tool list; tools not
+/// in the list keep defaults (their routes aren't installed).
+#[derive(Clone, Debug, Default)]
+pub struct ToolsConfig {
+    pub query: QueryConfig,
+    pub issue_write: IssueWriteConfig,
+    pub note_write: NoteWriteConfig,
+}
+
 /// What an MCP service exposes: a subset of the built-in Gage tools
-/// plus zero or more externally-supplied tool definitions.
+/// (each with per-service config) plus zero or more externally-supplied
+/// tool definitions.
 #[derive(Default)]
 pub struct ToolSpec {
-    /// Built-in Gage tool names to include (e.g. `"Query"`,
-    /// `"IssueWrite"`). Names not recognized by the built-in router are
-    /// silently ignored — the caller is the source of truth for which
-    /// names exist.
-    pub gage_tools: Vec<String>,
+    pub tools: Vec<GageTool>,
     pub custom_tools: Vec<CustomToolDef>,
     /// Author base for writes made through this service's built-in
     /// tools (e.g. `agent:{scanner}`); each request appends its own
@@ -85,7 +165,16 @@ pub fn build_mcp_service(spec: ToolSpec) -> RegisteredService {
 }
 
 fn build_server(spec: &ToolSpec) -> GageServer {
-    let allowed: HashSet<&str> = spec.gage_tools.iter().map(String::as_str).collect();
+    let allowed: HashSet<&str> = spec.tools.iter().map(GageTool::name).collect();
+    let mut config = ToolsConfig::default();
+    for tool in &spec.tools {
+        match tool {
+            GageTool::Query(c) => config.query = c.clone(),
+            GageTool::IssueWrite(c) => config.issue_write = c.clone(),
+            GageTool::NoteWrite(c) => config.note_write = c.clone(),
+            GageTool::IssueClose | GageTool::IssueComment => {}
+        }
+    }
     let mut router = rmcp::handler::server::router::tool::ToolRouter::<GageServer>::new();
     for route in TOOLS {
         let r = route();
@@ -97,7 +186,9 @@ fn build_server(spec: &ToolSpec) -> GageServer {
     for def in &spec.custom_tools {
         router = router.with_route(custom_route(def));
     }
-    GageServer::with_router(router).with_author(spec.author.clone())
+    GageServer::with_router(router)
+        .with_author(spec.author.clone())
+        .with_tools_config(config)
 }
 
 fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
@@ -169,7 +260,12 @@ mod tests {
     #[test]
     fn builds_with_gage_and_custom_tools() {
         let spec = ToolSpec {
-            gage_tools: vec!["Query".into(), "IssueWrite".into()],
+            tools: vec![
+                GageTool::Query(QueryConfig {
+                    scan: Some("scan-1".into()),
+                }),
+                GageTool::IssueWrite(IssueWriteConfig::default()),
+            ],
             custom_tools: vec![CustomToolDef {
                 name: "secret".into(),
                 description: "Returns the secret.".into(),

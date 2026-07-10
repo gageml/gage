@@ -13,7 +13,8 @@ use rmcp::{
 use serde_json::Value;
 
 use crate::server::GageServer;
-use crate::tool::{ToolDef, agent_author, build_tool_meta, scan_id_from_env};
+use crate::service::NoteWriteConfig;
+use crate::tool::{ToolDef, agent_author, build_tool_meta};
 
 pub const TOOL: ToolDef = route;
 
@@ -31,10 +32,15 @@ fn call(
     params: JsonObject,
 ) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
     let author = agent_author(server, &ctx);
-    Box::pin(handle(params, author))
+    let config = server.tools_config().note_write.clone();
+    Box::pin(handle(params, author, config))
 }
 
-async fn handle(params: JsonObject, author: String) -> Result<String, McpError> {
+async fn handle(
+    params: JsonObject,
+    author: String,
+    config: NoteWriteConfig,
+) -> Result<String, McpError> {
     let note_type = req_string(&params, "type")?;
     if !TYPES.contains(&note_type.as_str()) {
         return Ok(format!(
@@ -45,7 +51,7 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
     let value = req_string(&params, "value")?;
     let session_id = opt_string(&params, "session_id");
     let session_line = opt_u32(&params, "session_line")?;
-    let scan_id = scan_id_from_env();
+    let scan_id = config.scan;
 
     if let Some(id) = &session_id
         && !is_session_id_shape(id)

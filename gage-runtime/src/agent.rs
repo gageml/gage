@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use gage_agent::{AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgentSession};
-use gage_mcp::{CustomToolCallback, ServiceHandle, ToolSpec};
+use gage_mcp::{CustomToolCallback, GageTool, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, FromValue, Mut, Object, Protocol, Value, VmError};
@@ -73,9 +73,9 @@ pub(crate) struct CallSpec {
 pub(crate) enum GageTools {
     /// Caller omitted `.gage_tools(...)` entirely.
     None,
-    /// Explicit list of tool names.
-    Some(Vec<String>),
-    /// `["*"]` — every built-in tool the host exposes.
+    /// Explicit list of configured tools.
+    Some(Vec<GageTool>),
+    /// `["*"]` — every built-in tool the host exposes, defaults.
     All,
 }
 
@@ -907,16 +907,28 @@ impl CallAgent {
 }
 
 fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
-    let items: rune::runtime::Vec = FromValue::from_value(v)
-        .map_err(|e| Error::Agent(format!("'gage_tools' must be a list of strings: {e}")))?;
+    let items: rune::runtime::Vec = FromValue::from_value(v).map_err(|e| {
+        Error::Agent(format!(
+            "'gage_tools' must be a list of tool names or gage::tools values: {e}"
+        ))
+    })?;
     let mut out = Vec::with_capacity(items.len());
+    let mut star = false;
     for item in items.iter() {
-        let s: String = FromValue::from_value(item.clone())
-            .map_err(|e| Error::Agent(format!("'gage_tools' must be a list of strings: {e}")))?;
-        out.push(s);
+        if let Ok(s) = String::from_value(item.clone()) {
+            if s == "*" {
+                star = true;
+                continue;
+            }
+            let tool = GageTool::from_name(&s)
+                .ok_or_else(|| Error::Agent(format!("'gage_tools': unknown tool '{s}'")))?;
+            out.push(tool);
+            continue;
+        }
+        out.push(parse_tool_def(item)?);
     }
-    if out.iter().any(|s| s == "*") {
-        if out.len() != 1 {
+    if star {
+        if !out.is_empty() {
             return Err(Error::Agent(
                 "'gage_tools': \"*\" must be the only entry".into(),
             ));
@@ -924,6 +936,29 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
         return Ok(GageTools::All);
     }
     Ok(GageTools::Some(out))
+}
+
+/// Downcast one `gage_tools` entry to a `gage::tools` builder value.
+fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
+    if let Ok(t) = rune::from_value::<crate::tools::Query>(item.clone()) {
+        return Ok(t.into());
+    }
+    if let Ok(t) = rune::from_value::<crate::tools::IssueWrite>(item.clone()) {
+        return Ok(t.into());
+    }
+    if let Ok(t) = rune::from_value::<crate::tools::NoteWrite>(item.clone()) {
+        return Ok(t.into());
+    }
+    if rune::from_value::<crate::tools::IssueClose>(item.clone()).is_ok() {
+        return Ok(GageTool::IssueClose);
+    }
+    if rune::from_value::<crate::tools::IssueComment>(item.clone()).is_ok() {
+        return Ok(GageTool::IssueComment);
+    }
+    Err(Error::Agent(format!(
+        "'gage_tools': entries must be tool names or gage::tools values, got {:?}",
+        item.type_info()
+    )))
 }
 
 fn parse_custom_tools(v: Value) -> super::Result<Vec<CustomToolDef>> {
@@ -1087,9 +1122,12 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         .expect("agent_pool is closed only at process shutdown");
 
     let tool_spec = build_tool_spec(&spec);
-    let gage_tools_resolved = tool_spec.gage_tools.clone();
-    let (mcp_url, service) = if tool_spec.gage_tools.is_empty() && tool_spec.custom_tools.is_empty()
-    {
+    let gage_tools_resolved: Vec<String> = tool_spec
+        .tools
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    let (mcp_url, service) = if tool_spec.tools.is_empty() && tool_spec.custom_tools.is_empty() {
         // Pure text-in/text-out call — no need to register an MCP
         // service or even reach the host.
         (None, None)
@@ -1106,7 +1144,6 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         (Some(svc.url().to_string()), Some(svc))
     };
 
-    let scan_id = current_scan_ctx().run.scan_id.clone();
     // `settings.json` permissions.allow must include both built-in
     // Gage tools and scanner-defined custom tools — otherwise claude
     // prompts the user on every custom-tool call, which in `-p`
@@ -1115,7 +1152,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     for def in &spec.custom_tools {
         auto_allow.push(def.mcp_name.clone());
     }
-    let mut builder = GageAgentBuilder::new().tools(auto_allow).scan_id(&scan_id);
+    let mut builder = GageAgentBuilder::new().tools(auto_allow);
     if let Some(n) = &spec.name {
         builder = builder.name(n.clone());
     }
@@ -1167,12 +1204,12 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
 /// same `ScanContext` — see "Scanner-tool callback execution" in the
 /// design doc.
 fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
-    let gage_tools = match &spec.gage_tools {
+    let tools = match &spec.gage_tools {
         GageTools::None => Vec::new(),
         GageTools::Some(list) => list.clone(),
         GageTools::All => gage_agent::TOOL_NAMES
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| GageTool::from_name(s).expect("TOOL_NAMES entries are known tools"))
             .collect(),
     };
     let ctx = current_scan_ctx();
@@ -1196,7 +1233,7 @@ fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
     // own `?call={toolUseId}` so the author is the authoring call.
     // See the author scheme in docs/notes.md.
     ToolSpec {
-        gage_tools,
+        tools,
         custom_tools,
         author: Some(format!("agent:{module_id}")),
     }

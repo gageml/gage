@@ -49,16 +49,6 @@ pub fn agent_author(server: &GageServer, ctx: &RequestContext<RoleServer>) -> St
     }
 }
 
-/// Scan id propagated from gage-scan when the MCP server runs inside an
-/// agent step. `Some(id)` means notes and issues created by tools in
-/// this process should be linked to that scan via `scan_note` /
-/// `scan_issue`; `None` means no active scan.
-pub fn scan_id_from_env() -> Option<String> {
-    std::env::var_os("GAGE_SCAN_ID")
-        .and_then(|v| v.into_string().ok())
-        .filter(|s| !s.is_empty())
-}
-
 /// A `tools/<name>.rs` module exports `pub const TOOL: ToolDef = route;`,
 /// and `server.rs` collects them into the router. Distinct from
 /// [`rmcp::model::Tool`], which is the wire-format metadata built from
