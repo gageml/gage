@@ -1,0 +1,19 @@
+use gage::issues;
+
+pub const SCANNER = #{
+    name: "reconcile",
+    description: "Reconcile pending issues",
+    tasks: #{ reconcile: #{ issues: #{ wants: ["*"] } } },
+};
+
+pub async fn reconcile() {
+    for issue in issues().status("pending").await? {
+        println!("{:?}", issue);
+    }
+
+    // let agent = call_agent(include_str!("reconcile-prompt.md"))
+    //     .gage_tools(["Query"])
+    //     .await?;
+    // let result = agent.wait().await?;
+    // println!("{result:?}");
+}

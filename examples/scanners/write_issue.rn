@@ -5,7 +5,13 @@ pub const SCANNER = #{
     description: "Test issue writing with note dep",
     tasks: #{
         note: #{ notes: #{ writes: #{ "baz": "Sample note" } } },
-        issue: #{ notes: #{ wants: ["baz"] } },
+        issue_keep_status: #{
+            notes: #{ wants: ["baz"] },
+            issues: #{ writes: #{ "test.baz": "A non-issue" } },
+        },
+        issue_pending: #{
+            issues: #{ writes: #{ "test.bam": "A non-issue" } },
+        },
     },
 };
 
@@ -15,7 +21,7 @@ pub async fn note() {
         .await?
 }
 
-pub async fn issue() {
+pub async fn issue_keep_status() {
     let note = scan().notes().name("baz").await?.get(0).ok_or(Ignore)?;
     write_issue(
         #{
@@ -25,5 +31,17 @@ pub async fn issue() {
         },
     )
     .keep_status()
-    .await?;
+    .await?
+}
+
+pub async fn issue_pending() {
+    write_issue(
+        #{
+            name: "test.bam",
+            title: "Sample issues written as pending",
+            pending: true,
+        },
+    )
+    .keep_status()
+    .await?
 }

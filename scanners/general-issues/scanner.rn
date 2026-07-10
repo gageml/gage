@@ -17,6 +17,9 @@ pub const SCANNER = #{
                 wants: ["finding", "finding-summary"],
                 writes: #{ "issue-summary": "Summary of issue writing" },
             },
+            issues: #{
+                writes: #{ "general": "General issue derived from session findings" },
+            },
         },
     },
 };

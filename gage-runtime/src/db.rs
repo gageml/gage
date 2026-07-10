@@ -10,7 +10,8 @@ use gage_db::scan::{insert_scan_issue, insert_scan_note};
 use gage_db::target::{NoteTarget, ProjectTarget, ScanTarget, SessionTarget};
 use rune::Any;
 use rune::alloc;
-use rune::runtime::{FromValue, Object, Protocol, Ref, Value, Vec as RuneVec};
+use rune::alloc::fmt::TryWrite;
+use rune::runtime::{Formatter, FromValue, Object, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{ContextError, Module};
 use tracing::{error, warn};
 
@@ -73,10 +74,12 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Note>()?;
     m.field_function(&Protocol::GET, "metadata", Note::get_metadata)?;
     m.field_function(&Protocol::GET, "target", Note::get_target)?;
+    m.function_meta(Note::debug)?;
     m.ty::<NoteInsert>()?;
     m.ty::<RuneNoteTarget>()?;
     m.ty::<NotesQuery>()?;
     m.ty::<Issue>()?;
+    m.function_meta(Issue::debug)?;
     m.ty::<IssueInsert>()?;
     m.ty::<IssuesQuery>()?;
     Ok(())
@@ -268,6 +271,25 @@ pub(crate) struct Note {
 }
 
 impl Note {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(
+            f,
+            "Note {{ id: {:?}, name: {:?}, author: {:?}, target: {:?}, value: ",
+            self.id,
+            self.name,
+            self.author,
+            self.target_uri(),
+        )?;
+        self.value.debug_fmt(f)?;
+        write!(
+            f,
+            ", explanation: {:?}, created: {} }}",
+            self.explanation, self.created
+        )?;
+        Ok(())
+    }
+
     // Metadata is always an object; a NULL column (no metadata) reads
     // back as an empty `#{}`, never None.
     fn get_metadata(&self) -> Value {
@@ -499,6 +521,25 @@ pub(crate) struct Issue {
     pub closed_reason: Option<String>,
     #[rune(get)]
     pub created: i64,
+}
+
+impl Issue {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(
+            f,
+            "Issue {{ id: {:?}, name: {:?}, title: {:?}, status: {:?}, \
+             closed_reason: {:?}, description: {:?}, created: {} }}",
+            self.id,
+            self.name,
+            self.title,
+            self.status,
+            self.closed_reason,
+            self.description,
+            self.created,
+        )?;
+        Ok(())
+    }
 }
 
 impl From<DbIssue> for Issue {
