@@ -303,6 +303,7 @@ fn compile_scanner(
     context.install(runtime::types_module().unwrap()).unwrap();
     context.install(runtime::macros_module().unwrap()).unwrap();
     context.install(runtime::gage_module().unwrap()).unwrap();
+    context.install(runtime::log_module().unwrap()).unwrap();
     context.install(runtime::stats_module().unwrap()).unwrap();
     context.install(runtime::json_module().unwrap()).unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
@@ -377,6 +378,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
         context.install(runtime::types_module().unwrap()).unwrap();
         context.install(runtime::macros_module().unwrap()).unwrap();
         context.install(runtime::gage_module().unwrap()).unwrap();
+        context.install(runtime::log_module().unwrap()).unwrap();
         context.install(runtime::stats_module().unwrap()).unwrap();
         context.install(runtime::json_module().unwrap()).unwrap();
         let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();

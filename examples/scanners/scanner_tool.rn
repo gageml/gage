@@ -29,6 +29,7 @@ pub async fn scanner_tool() {
 }
 
 pub async fn comment(#{ text }, meta) {
+    log::info!("{meta:?}");
     write_note(
         #{
             name: "comment",

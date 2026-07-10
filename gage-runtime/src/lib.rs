@@ -7,6 +7,7 @@ pub mod error;
 pub mod ignore;
 pub mod io;
 pub mod json;
+pub mod log;
 pub mod macros;
 pub(crate) mod model;
 pub mod query;
@@ -40,6 +41,7 @@ pub fn lsp_context() -> std::result::Result<Context, ContextError> {
     context.install(types_module()?)?;
     context.install(macros_module()?)?;
     context.install(gage_module()?)?;
+    context.install(log_module()?)?;
     context.install(stats_module()?)?;
     context.install(json_module()?)?;
     Ok(context)
@@ -66,6 +68,10 @@ pub fn gage_module() -> std::result::Result<Module, ContextError> {
 
 pub fn io_module() -> std::result::Result<Module, ContextError> {
     io::module()
+}
+
+pub fn log_module() -> std::result::Result<Module, ContextError> {
+    log::module()
 }
 
 pub fn stats_module() -> std::result::Result<Module, ContextError> {
