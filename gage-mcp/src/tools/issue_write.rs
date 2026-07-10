@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use gage_core::uuid::short_uuid;
 use gage_db::db::open_db;
-use gage_db::issue::{self, Issue, IssueEvidence};
+use gage_db::issue::{self, Issue, IssueEvidence, IssueStatus};
 use gage_db::note;
 use gage_db::scan::insert_scan_issue;
 use rmcp::{
@@ -16,7 +16,7 @@ use crate::tool::{ToolDef, agent_author, build_tool_meta, scan_id_from_env};
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/IssueOpen.md");
+const MD: &str = include_str!("../../config/tools/IssueWrite.md");
 
 fn route() -> ToolRoute<GageServer> {
     ToolRoute::new(build_tool_meta(MD), call)
@@ -52,7 +52,10 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         evidence_notes.push(n);
     }
 
-    let issue_row = Issue::new("issue.", title, description, &author);
+    // Model-written issues are staged as pending; only the reconcile
+    // step promotes an issue to open.
+    let mut issue_row = Issue::new("general.", title, description, &author);
+    issue_row.status = IssueStatus::Pending;
     let now = issue_row.created;
 
     issue::insert(&conn, &issue_row).map_err(|e| match e {
@@ -88,7 +91,7 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
     }
 
     Ok(format!(
-        "Opened issue {} ({}) with {} evidence note(s).",
+        "Wrote pending issue {} ({}) with {} evidence note(s).",
         short_uuid(&issue_row.id),
         issue_row.title,
         evidence_notes.len()

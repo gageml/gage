@@ -1,5 +1,5 @@
 +++
-name = "IssueOpen"
+name = "IssueWrite"
 
 [parameters.title]
 type = "string"
@@ -22,9 +22,12 @@ read_only_hint = false
 idempotent_hint = false
 +++
 
-Use to open a new issue for a finding you have judged from the evidence.
+Use to write a new issue for a finding you have judged from the evidence.
 
-Open one issue per distinct finding. Include the note IDs that support the
+Write one issue per distinct finding. Include the note IDs that support the
 finding in `evidence` so the judgment links back to the evidence it rests on.
+
+Issues are written as pending and reviewed by a later reconciliation step,
+which opens them or resolves them against existing issues.
 
 ---eof-789---

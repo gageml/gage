@@ -47,7 +47,7 @@ pub struct AgentArgs {
 
     /// Gage tools to expose to the agent (comma-separated list)
     ///
-    /// Tools: Query, NoteWrite, IssueClose, IssueComment, IssueOpen
+    /// Tools: Query, NoteWrite, IssueClose, IssueComment, IssueWrite
     ///
     /// Use '*' to enable all tools.
     #[arg(

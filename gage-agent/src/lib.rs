@@ -55,7 +55,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "Query",
     "IssueClose",
     "IssueComment",
-    "IssueOpen",
+    "IssueWrite",
     "NoteWrite",
 ];
 
@@ -1179,8 +1179,8 @@ mod tests {
 
     #[test]
     fn tool_policy_allow_lists_listed_only() {
-        let got = ToolPolicy::tools(s(&["IssueOpen"]), vec![]).unwrap();
-        assert_eq!(got, s(&["IssueOpen"]));
+        let got = ToolPolicy::tools(s(&["IssueWrite"]), vec![]).unwrap();
+        assert_eq!(got, s(&["IssueWrite"]));
     }
 
     #[test]
@@ -1194,9 +1194,9 @@ mod tests {
 
     #[test]
     fn tool_policy_star_minus_one() {
-        let got = ToolPolicy::tools(s(&["*"]), s(&["IssueOpen"])).unwrap();
+        let got = ToolPolicy::tools(s(&["*"]), s(&["IssueWrite"])).unwrap();
         assert_eq!(got.len(), TOOL_NAMES.len() - 1);
-        assert!(!got.iter().any(|g| g == "IssueOpen"));
+        assert!(!got.iter().any(|g| g == "IssueWrite"));
     }
 
     #[test]

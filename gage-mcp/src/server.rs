@@ -22,7 +22,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
     tools::query::TOOL,
     tools::issue_close::TOOL,
     tools::issue_comment::TOOL,
-    tools::issue_open::TOOL,
+    tools::issue_write::TOOL,
     tools::note_write::TOOL,
 ];
 

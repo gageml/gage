@@ -143,7 +143,7 @@ pub async fn issues() {
 
     let agent = call_agent(include_str!("issues-prompt.md"))
         .name("issue-writer")
-        .gage_tools(["Query", "IssueOpen"])
+        .gage_tools(["Query", "IssueWrite"])
         .model("large")
         .await?;
     let result = agent.wait().await?;

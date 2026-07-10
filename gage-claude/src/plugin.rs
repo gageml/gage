@@ -165,14 +165,14 @@ mod tests {
         write_plugin_files_to(dir.path(), Path::new("/bin/gage")).unwrap();
         let path = dir.path().join("skills/tools/SKILL.md");
         let before = fs::read_to_string(&path).unwrap();
-        assert!(before.contains("mcp__plugin_gage_gage__IssueOpen"));
+        assert!(before.contains("mcp__plugin_gage_gage__IssueWrite"));
         assert!(before.contains("mcp__plugin_gage_gage__Query"));
 
-        filter_tools_skill(dir.path(), &["Query".to_string(), "IssueOpen".to_string()]).unwrap();
+        filter_tools_skill(dir.path(), &["Query".to_string(), "IssueWrite".to_string()]).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();
         assert!(after.contains("mcp__plugin_gage_gage__Query"));
-        assert!(after.contains("mcp__plugin_gage_gage__IssueOpen"));
+        assert!(after.contains("mcp__plugin_gage_gage__IssueWrite"));
         assert!(!after.contains("mcp__plugin_gage_gage__IssueClose"));
         assert!(!after.contains("mcp__plugin_gage_gage__IssueComment"));
         // Non-FQN lines (frontmatter, prose) remain.

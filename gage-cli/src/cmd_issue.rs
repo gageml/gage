@@ -132,13 +132,19 @@ pub struct IssueListArgs {
     /// Include closed issues
     #[arg(short, long)]
     closed: bool,
+
+    /// List pending issues only
+    #[arg(short, long)]
+    pending: bool,
 }
 
 pub fn list(args: IssueListArgs) {
     let conn = db::open_db().unwrap();
     let filters = IssueFilters {
-        status: if args.closed {
-            IssueStatusFilter::Any
+        status: if args.pending {
+            IssueStatusFilter::Pending
+        } else if args.closed {
+            IssueStatusFilter::Reconciled
         } else {
             IssueStatusFilter::Open
         },

@@ -5,6 +5,8 @@ use crate::note::{Note, target_from_column};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueStatus {
+    /// Staged by a model writer; not a docket entry until reconciled.
+    Pending,
     Open,
     Closed,
 }
@@ -12,6 +14,7 @@ pub enum IssueStatus {
 impl IssueStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            IssueStatus::Pending => "pending",
             IssueStatus::Open => "open",
             IssueStatus::Closed => "closed",
         }
@@ -22,6 +25,7 @@ impl std::str::FromStr for IssueStatus {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "pending" => Ok(IssueStatus::Pending),
             "open" => Ok(IssueStatus::Open),
             "closed" => Ok(IssueStatus::Closed),
             other => Err(format!("unknown issue status '{other}'")),
@@ -33,6 +37,8 @@ impl std::str::FromStr for IssueStatus {
 pub enum ClosedReason {
     Completed,
     Skipped,
+    /// Closed by reconciliation as a duplicate of a surviving issue.
+    Duplicate,
 }
 
 impl ClosedReason {
@@ -40,6 +46,7 @@ impl ClosedReason {
         match self {
             ClosedReason::Completed => "completed",
             ClosedReason::Skipped => "skipped",
+            ClosedReason::Duplicate => "duplicate",
         }
     }
 }
@@ -50,6 +57,7 @@ impl std::str::FromStr for ClosedReason {
         match s {
             "completed" => Ok(ClosedReason::Completed),
             "skipped" => Ok(ClosedReason::Skipped),
+            "duplicate" => Ok(ClosedReason::Duplicate),
             other => Err(format!("unknown closed_reason '{other}'")),
         }
     }
@@ -63,6 +71,7 @@ pub enum IssueEvent {
     Create,
     Close { message: Option<String> },
     Reopen { message: Option<String> },
+    Promote { message: Option<String> },
     Comment { message: String },
 }
 
@@ -73,6 +82,7 @@ impl IssueEvent {
             IssueEvent::Create => "create",
             IssueEvent::Close { .. } => "close",
             IssueEvent::Reopen { .. } => "reopen",
+            IssueEvent::Promote { .. } => "promote",
             IssueEvent::Comment { .. } => "comment",
         }
     }
@@ -82,7 +92,9 @@ impl IssueEvent {
     pub fn message(&self) -> Option<&str> {
         match self {
             IssueEvent::Create => None,
-            IssueEvent::Close { message } | IssueEvent::Reopen { message } => message.as_deref(),
+            IssueEvent::Close { message }
+            | IssueEvent::Reopen { message }
+            | IssueEvent::Promote { message } => message.as_deref(),
             IssueEvent::Comment { message } => Some(message),
         }
     }
@@ -93,6 +105,7 @@ impl IssueEvent {
             "create" => Ok(IssueEvent::Create),
             "close" => Ok(IssueEvent::Close { message: value }),
             "reopen" => Ok(IssueEvent::Reopen { message: value }),
+            "promote" => Ok(IssueEvent::Promote { message: value }),
             "comment" => Ok(IssueEvent::Comment {
                 message: value.unwrap_or_default(),
             }),
@@ -153,6 +166,8 @@ pub struct LoggedEvent {
 #[derive(Debug)]
 pub enum IssueError {
     NotFound(String),
+    /// A pending-only transition was applied to a non-pending issue.
+    NotPending(String),
     Ambiguous(String, Vec<String>),
     /// An issue with the same `name` already exists. The existing
     /// issue is returned so the caller can decide what to do.
@@ -170,6 +185,7 @@ impl std::fmt::Display for IssueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IssueError::NotFound(prefix) => write!(f, "no issue matching '{prefix}'"),
+            IssueError::NotPending(id) => write!(f, "issue '{id}' is not pending"),
             IssueError::Ambiguous(prefix, ids) => {
                 write!(f, "Found more than one issue matching {prefix}")?;
                 for id in ids {
@@ -274,6 +290,51 @@ fn find_by_dup_key(conn: &Connection, name: &str) -> Result<Issue, IssueError> {
     let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.name = ?1"))?;
     stmt.query_row(params![name], row_to_issue)
         .map_err(IssueError::from)
+}
+
+/// Promote a pending issue to open. Bumps `modified` and logs a
+/// `Promote` event carrying the optional message. The update and event
+/// insert share a transaction. Returns `NotPending` when the issue
+/// exists but is not pending.
+pub fn promote(
+    conn: &Connection,
+    issue_id: &str,
+    author: &str,
+    message: Option<&str>,
+    timestamp: i64,
+) -> Result<(), IssueError> {
+    let tx = conn.unchecked_transaction()?;
+    let rows = tx.execute(
+        "UPDATE issue
+         SET status = 'open', modified = ?1
+         WHERE id = ?2 AND status = 'pending'",
+        params![timestamp, issue_id],
+    )?;
+    if rows == 0 {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue WHERE id = ?1)",
+            [issue_id],
+            |r| r.get(0),
+        )?;
+        return Err(if exists {
+            IssueError::NotPending(issue_id.to_string())
+        } else {
+            IssueError::NotFound(issue_id.to_string())
+        });
+    }
+    insert_event(
+        &tx,
+        &LoggedEvent {
+            issue_id: issue_id.to_string(),
+            author: author.to_string(),
+            timestamp,
+            event: IssueEvent::Promote {
+                message: message.map(str::to_string),
+            },
+        },
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Reopen a closed issue: clears `closed_reason` and sets status back
@@ -499,6 +560,10 @@ pub enum IssueStatusFilter {
     Open,
     /// Only `closed` issues.
     Closed,
+    /// Only `pending` issues.
+    Pending,
+    /// Open and closed issues; excludes pending.
+    Reconciled,
     /// All issues regardless of status.
     Any,
 }
@@ -520,6 +585,8 @@ pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, Iss
     match filters.status {
         IssueStatusFilter::Open => clauses.push("i.status = 'open'".to_string()),
         IssueStatusFilter::Closed => clauses.push("i.status = 'closed'".to_string()),
+        IssueStatusFilter::Pending => clauses.push("i.status = 'pending'".to_string()),
+        IssueStatusFilter::Reconciled => clauses.push("i.status IN ('open', 'closed')".to_string()),
         IssueStatusFilter::Any => {}
     }
     if let Some(name) = &filters.name {
@@ -757,6 +824,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn promote_pending_issue_opens_and_logs_event() {
+        let conn = open_db_in_memory().unwrap();
+        let mut issue = sample("issue-aaa", "thinking.empty");
+        issue.status = IssueStatus::Pending;
+        insert(&conn, &issue).unwrap();
+
+        promote(
+            &conn,
+            "issue-aaa",
+            "scanner:reconcile",
+            Some("novel"),
+            issue.created + 100,
+        )
+        .unwrap();
+
+        let fetched = get(&conn, "issue-aaa").unwrap();
+        assert_eq!(fetched.status, IssueStatus::Open);
+        assert_eq!(fetched.modified, Some(issue.created + 100));
+
+        let events = issue_events_for(&conn, "issue-aaa").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[1].event,
+            IssueEvent::Promote {
+                message: Some("novel".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn promote_non_pending_issue_errors() {
+        let conn = open_db_in_memory().unwrap();
+        let issue = sample("issue-aaa", "thinking.empty");
+        insert(&conn, &issue).unwrap();
+
+        assert!(matches!(
+            promote(&conn, "issue-aaa", "scanner:reconcile", None, 1),
+            Err(IssueError::NotPending(_))
+        ));
+        assert!(matches!(
+            promote(&conn, "nope", "scanner:reconcile", None, 1),
+            Err(IssueError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn pending_issues_filtered_from_open_and_reconciled() {
+        let conn = open_db_in_memory().unwrap();
+        let open_issue = sample("issue-aaa", "n1");
+        let mut pending_issue = sample("issue-bbb", "n2");
+        pending_issue.status = IssueStatus::Pending;
+        insert(&conn, &open_issue).unwrap();
+        insert(&conn, &pending_issue).unwrap();
+
+        let open = find(&conn, &IssueFilters::default()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, "issue-aaa");
+
+        let pending = find(
+            &conn,
+            &IssueFilters {
+                status: IssueStatusFilter::Pending,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "issue-bbb");
+
+        let reconciled = find(
+            &conn,
+            &IssueFilters {
+                status: IssueStatusFilter::Reconciled,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].id, "issue-aaa");
+
+        let all = find(
+            &conn,
+            &IssueFilters {
+                status: IssueStatusFilter::Any,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[test]

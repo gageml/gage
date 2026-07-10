@@ -2,6 +2,6 @@
 
 - IssueClose
 - IssueComment
-- IssueOpen
+- IssueWrite
 - NoteWrite
 - Query

@@ -32,7 +32,7 @@ use crate::server::{GageServer, TOOLS};
 #[derive(Default)]
 pub struct ToolSpec {
     /// Built-in Gage tool names to include (e.g. `"Query"`,
-    /// `"IssueOpen"`). Names not recognized by the built-in router are
+    /// `"IssueWrite"`). Names not recognized by the built-in router are
     /// silently ignored — the caller is the source of truth for which
     /// names exist.
     pub gage_tools: Vec<String>,
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn builds_with_gage_and_custom_tools() {
         let spec = ToolSpec {
-            gage_tools: vec!["Query".into(), "IssueOpen".into()],
+            gage_tools: vec!["Query".into(), "IssueWrite".into()],
             custom_tools: vec![CustomToolDef {
                 name: "secret".into(),
                 description: "Returns the secret.".into(),

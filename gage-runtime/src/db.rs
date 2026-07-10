@@ -465,6 +465,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
     let name = required_string(t, "name")?;
     let title = required_string(t, "title")?;
     let description = optional_string(t, "description")?;
+    let pending = optional_bool(t, "pending")?.unwrap_or(false);
 
     let now = gage_core::datetime::now_ms();
     let evidence = match t.get("evidence") {
@@ -477,7 +478,11 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         name,
         title,
         description,
-        status: IssueStatus::Open,
+        status: if pending {
+            IssueStatus::Pending
+        } else {
+            IssueStatus::Open
+        },
         closed_reason: None,
         created: now,
         modified: None,
@@ -747,6 +752,15 @@ fn optional_string(obj: &Object, key: &str) -> super::Result<Option<String>> {
             .borrow_string_ref()
             .map(|s| Some(s.to_string()))
             .map_err(|e| Error::Args(format!("field '{key}' must be a string: {e}"))),
+    }
+}
+
+fn optional_bool(obj: &Object, key: &str) -> super::Result<Option<bool>> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(v) => bool::from_value(v.clone())
+            .map(Some)
+            .map_err(|e| Error::Args(format!("field '{key}' must be a bool: {e}"))),
     }
 }
 

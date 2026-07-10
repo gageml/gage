@@ -27,5 +27,5 @@ with `name` values `finding.<random>`
 `SELECT * FROM note WHERE name LIKE 'finding.%' AND target = 'session:${session_id}'`
 
 When you have enough solid information to identify an issue, use the
-`mcp__gage__IssueOpen` tool to open an issue. Include the applicable note IDs as
-evidence in the tool use.
+`mcp__gage__IssueWrite` tool to write an issue. Include the applicable note IDs
+as evidence in the tool use.
