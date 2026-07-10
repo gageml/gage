@@ -2,10 +2,12 @@
 //!
 //! Each entry point that wants logs calls [`init`] once with its role name
 //! (`"mcp"`, `"scan"`, `"lsp"`). Logs are written to `~/.gage/log/` in
-//! per-process files named `<role>.<pid>.<date>`. On init a background
-//! thread sweeps the directory: closed files (any non-`.gz` file whose
-//! date is before today) are gzipped, and anything with mtime older than
-//! 30 days is removed.
+//! per-process files named `<role>.<pid>.<date>`. The file is created
+//! lazily on the first log write, so a process that logs nothing leaves
+//! no file behind. On init a background thread sweeps the directory:
+//! closed files (any non-`.gz` file whose date is before today and whose
+//! pid is no longer running) are gzipped, and anything with mtime older
+//! than 30 days is removed.
 
 use std::fs;
 use std::io::{self, Write};
@@ -18,17 +20,11 @@ use chrono::Utc;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-struct PanicTarget {
-    dir: PathBuf,
-    prefix: String,
-}
-
-static PANIC_TARGET: OnceLock<PanicTarget> = OnceLock::new();
+static PANIC_TARGET: OnceLock<PathBuf> = OnceLock::new();
 
 /// Installs the tracing subscriber for `role` and spawns a one-shot sweep
 /// of `~/.gage/log/`. The returned guard flushes the non-blocking writer
@@ -37,13 +33,9 @@ pub fn init(role: &str) -> io::Result<WorkerGuard> {
     let log_dir = gage_core::config::gage_home().join("log");
     fs::create_dir_all(&log_dir)?;
 
-    let prefix = format!("{role}.{}", std::process::id());
-    let appender = RollingFileAppender::builder()
-        .rotation(Rotation::DAILY)
-        .filename_prefix(&prefix)
-        .build(&log_dir)
-        .map_err(io::Error::other)?;
-    let (writer, guard) = tracing_appender::non_blocking(appender);
+    let today = Utc::now().format("%Y-%m-%d");
+    let path = log_dir.join(format!("{role}.{}.{today}", std::process::id()));
+    let (writer, guard) = tracing_appender::non_blocking(LazyFile::new(path.clone()));
 
     let filter = EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
     tracing_subscriber::fmt()
@@ -52,7 +44,7 @@ pub fn init(role: &str) -> io::Result<WorkerGuard> {
         .with_env_filter(filter)
         .init();
 
-    install_panic_hook(log_dir.clone(), prefix);
+    install_panic_hook(path);
 
     let dir = log_dir;
     thread::spawn(move || {
@@ -64,12 +56,46 @@ pub fn init(role: &str) -> io::Result<WorkerGuard> {
     Ok(guard)
 }
 
-/// Chains a panic hook that writes the panic synchronously to today's
-/// log file before invoking whatever hook was previously installed.
-/// Synchronous because `panic = "abort"` (release profile) skips drops,
-/// which means the non-blocking tracing writer never flushes.
-fn install_panic_hook(dir: PathBuf, prefix: String) {
-    if PANIC_TARGET.set(PanicTarget { dir, prefix }).is_err() {
+/// File writer that defers creating the log file until the first write,
+/// so a process that never logs leaves no empty file behind.
+struct LazyFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl LazyFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path, file: None }
+    }
+}
+
+impl Write for LazyFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.file.is_none() {
+            let f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            self.file = Some(f);
+        }
+        self.file.as_mut().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.file {
+            Some(f) => f.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Chains a panic hook that writes the panic synchronously to this
+/// process's log file before invoking whatever hook was previously
+/// installed. Synchronous because `panic = "abort"` (release profile)
+/// skips drops, which means the non-blocking tracing writer never
+/// flushes.
+fn install_panic_hook(path: PathBuf) {
+    if PANIC_TARGET.set(path).is_err() {
         return;
     }
     let previous = std::panic::take_hook();
@@ -80,15 +106,13 @@ fn install_panic_hook(dir: PathBuf, prefix: String) {
 }
 
 fn write_panic(info: &std::panic::PanicHookInfo<'_>) {
-    let Some(target) = PANIC_TARGET.get() else {
+    let Some(path) = PANIC_TARGET.get() else {
         return;
     };
-    let today = Utc::now().format("%Y-%m-%d");
-    let path = target.dir.join(format!("{}.{today}", target.prefix));
     let backtrace = std::backtrace::Backtrace::force_capture();
     let now = Utc::now().to_rfc3339();
     let msg = format!("{now} PANIC {info}\n{backtrace}\n");
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path)
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path)
         && let Err(e) = f.write_all(msg.as_bytes())
     {
         eprintln!("gage-log: failed to write panic: {e}");
@@ -130,6 +154,13 @@ fn sweep_entry(entry: &fs::DirEntry, today: &str, cutoff: SystemTime) -> io::Res
         return Ok(());
     };
 
+    // An uncompressed file whose process is still running is an active
+    // log (possibly spanning midnight); gzipping or removing it would
+    // orphan the writer's open handle and lose subsequent writes.
+    if !parsed.compressed && pid_alive(parsed.pid) {
+        return Ok(());
+    }
+
     if let Ok(mtime) = meta.modified()
         && mtime < cutoff
     {
@@ -143,7 +174,15 @@ fn sweep_entry(entry: &fs::DirEntry, today: &str, cutoff: SystemTime) -> io::Res
     gzip_in_place(&path)
 }
 
+/// True when a process with this pid is currently running. Uses `/proc`,
+/// so on non-Linux hosts this returns false and the sweep behaves as if
+/// the process has exited.
+fn pid_alive(pid: &str) -> bool {
+    Path::new("/proc").join(pid).is_dir()
+}
+
 struct ParsedName<'a> {
+    pid: &'a str,
     date: &'a str,
     compressed: bool,
     tmp: bool,
@@ -178,6 +217,7 @@ fn parse_log_name(name: &str) -> Option<ParsedName<'_>> {
         return None;
     }
     Some(ParsedName {
+        pid,
         date,
         compressed,
         tmp,
@@ -235,6 +275,7 @@ mod tests {
     #[test]
     fn matches_active_log() {
         let p = parse_log_name("mcp.12345.2026-06-22").unwrap();
+        assert_eq!(p.pid, "12345");
         assert_eq!(p.date, "2026-06-22");
         assert!(!p.compressed);
         assert!(!p.tmp);
