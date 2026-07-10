@@ -77,6 +77,7 @@ impl From<gage_db::scan::ScanError> for RunError {
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     db: Arc<Mutex<Connection>>,
+    scan_id: String,
     scanners: Vec<Scanner<'_>>,
     selected: Arc<[SessionInfo]>,
     scan_ctx: Arc<ScanSessionContext>,
@@ -89,10 +90,10 @@ pub async fn run(
 
     // Init scan + per-scanner records, recording the selected session ids
     let session_ids: Vec<&str> = selected.iter().map(|s| s.id.as_str()).collect();
-    let scan_id = {
+    {
         let conn = db.lock().unwrap();
-        init_run(&scanners, &session_ids, &conn)?
-    };
+        init_run(&scan_id, &scanners, &session_ids, &conn)?;
+    }
 
     // Resolve distinct projects from `~/.claude.json`. Sessions key
     // off the encoded directory name they were stored under; that
@@ -243,22 +244,22 @@ fn persist_run_metadata(
 }
 
 fn init_run(
+    scan_id: &str,
     scanners: &[Scanner<'_>],
     session_ids: &[&str],
     db: &Connection,
-) -> Result<String, RunError> {
-    let scan_id = gage_core::uuid::new_uuid();
+) -> Result<(), RunError> {
     insert_scan(
         db,
         &Scan {
-            id: scan_id.clone(),
+            id: scan_id.to_string(),
             created: gage_core::datetime::now_ms(),
             metadata: None,
         },
     )?;
 
     for sid in session_ids {
-        insert_scan_session(db, &scan_id, sid)?;
+        insert_scan_session(db, scan_id, sid)?;
     }
 
     // `scan_scanner` records which scanners ran in this scan (name +
@@ -269,7 +270,7 @@ fn init_run(
             db,
             &ScanScanner {
                 id: gage_core::uuid::new_uuid(),
-                scan_id: scan_id.clone(),
+                scan_id: scan_id.to_string(),
                 scanner_name: scanner.def.name.clone(),
                 scanner_version: scanner.def.version.clone(),
                 metadata: None,
@@ -277,7 +278,7 @@ fn init_run(
         )?;
     }
 
-    Ok(scan_id)
+    Ok(())
 }
 
 pub(crate) fn compile_scanner(

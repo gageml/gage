@@ -330,6 +330,7 @@ fn load_scan_model(
     });
 
     Ok(ScanModel {
+        out_path: Some(ScanStreams::out_path(&run.id)),
         total: summary.as_ref().map(|s| s.total).unwrap_or(0),
         progress: summary
             .as_ref()
@@ -495,6 +496,7 @@ fn delete(args: ScanDeleteArgs) {
                 eprintln!("warning: failed to delete {}: {e}", short_uuid(&run.id));
             } else {
                 deleted += 1;
+                remove_scan_logs(&run.id);
             }
         }
 
@@ -566,16 +568,99 @@ async fn run_scan(mut args: ScanRunArgs) {
         Some(resolved)
     };
 
+    // The scan id is minted here — before the runner — so the log
+    // files and the db rows share one key from the start.
+    let scan_id = gage_core::uuid::new_uuid();
+    let _log_guard = match gage_log::init_named("scan", &scan_id) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("error initializing scan log: {e}");
+            std::process::exit(1);
+        }
+    };
+
     dialog::run_async("Scan sessions", || {
-        run_dialog(args, registry, explicit_sessions)
+        run_dialog(args, registry, explicit_sessions, scan_id)
     })
     .await;
+}
+
+/// Capture files for the scan's output streams:
+/// `~/.gage/log/scan/{scan_id}.out` (scanner stdout) and `.err`
+/// (warnings and task failures). Creation failure disables capture
+/// for the run; the scan itself proceeds.
+struct ScanStreams {
+    out: Option<std::fs::File>,
+    err: Option<std::fs::File>,
+}
+
+impl ScanStreams {
+    fn with_scan(scan_id: &str) -> Self {
+        let dir = gage_log::role_dir("scan");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!("creating scan log dir {}: {e}", dir.display());
+            return Self {
+                out: None,
+                err: None,
+            };
+        }
+        let open = |ext: &str| {
+            let path = dir.join(format!("{scan_id}.{ext}"));
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    tracing::warn!("opening {}: {e}", path.display());
+                    None
+                }
+            }
+        };
+        Self {
+            out: open("out"),
+            err: open("err"),
+        }
+    }
+
+    fn out(&mut self, s: &str) {
+        write_stream(&mut self.out, s);
+    }
+
+    fn out_line(&mut self, s: &str) {
+        write_stream(&mut self.out, s);
+        write_stream(&mut self.out, "\n");
+    }
+
+    fn err_line(&mut self, s: &str) {
+        write_stream(&mut self.err, s);
+        write_stream(&mut self.err, "\n");
+    }
+
+    /// Path of the `.out` capture, for the scan view's log dialog.
+    fn out_path(scan_id: &str) -> std::path::PathBuf {
+        gage_log::role_dir("scan").join(format!("{scan_id}.out"))
+    }
+}
+
+fn write_stream(file: &mut Option<std::fs::File>, s: &str) {
+    use std::io::Write;
+    if let Some(f) = file
+        && let Err(e) = f.write_all(s.as_bytes())
+    {
+        // Disable capture after a write failure rather than logging
+        // once per line
+        tracing::warn!("scan stream write failed, disabling capture: {e}");
+        *file = None;
+    }
 }
 
 async fn run_dialog(
     args: ScanRunArgs,
     registry: ScannerRegistry,
     explicit_sessions: Option<Vec<(String, std::path::PathBuf)>>,
+    scan_id: String,
 ) -> Result<DialogResult, DialogError> {
     // Scanner selection — default set excludes disabled scanners.
     // Explicit `-s name` (handled below) still runs disabled scanners.
@@ -772,20 +857,24 @@ async fn run_dialog(
         )
     };
 
+    let mut streams = ScanStreams::with_scan(&scan_id);
     let result = if scan_tui {
         run_scan_tui(
             db.clone(),
+            scan_id,
             scanners,
             selected,
             scan_ctx,
             jobs,
             agent_jobs,
             cancel.clone(),
+            streams,
         )
         .await
     } else {
         gage_scan::runner::run(
             db.clone(),
+            scan_id,
             scanners,
             selected,
             scan_ctx,
@@ -793,6 +882,7 @@ async fn run_dialog(
             agent_jobs,
             cancel.clone(),
             |event| {
+                capture_event(&mut streams, &event);
                 if let Some(ui) = progress.as_mut() {
                     ui.handle(event);
                 } else {
@@ -889,12 +979,14 @@ async fn run_dialog(
 #[allow(clippy::too_many_arguments)]
 async fn run_scan_tui(
     db: Arc<Mutex<gage_db::rusqlite::Connection>>,
+    scan_id: String,
     scanners: Vec<Scanner<'_>>,
     selected: Arc<[SessionInfo]>,
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
     agent_jobs: usize,
     cancel: tokio_util::sync::CancellationToken,
+    mut streams: ScanStreams,
 ) -> Result<gage_scan::event::RunSummary, gage_scan::runner::RunError> {
     use gage_tui::scan_view::{self, ScanSetup, SessionEntry, TaskId};
 
@@ -925,10 +1017,6 @@ async fn run_scan_tui(
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // The scan id is minted inside the runner and first surfaces on a
-    // Status event; the reconcile poll waits for it here.
-    let (scan_id_tx, scan_id_rx) = tokio::sync::oneshot::channel::<String>();
-
     // Reconcile notes/issues from the db once a second — the same read
     // the historical loader uses. Runs until the view closes (the view
     // lingers after the scan finishes, so results keep converging).
@@ -936,11 +1024,8 @@ async fn run_scan_tui(
         let tx = tx.clone();
         let db = db.clone();
         let cancel = cancel.clone();
+        let scan_id = scan_id.clone();
         tokio::spawn(async move {
-            let Ok(scan_id) = scan_id_rx.await else {
-                // Runner ended before emitting a Status; nothing to poll.
-                return;
-            };
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
@@ -968,27 +1053,32 @@ async fn run_scan_tui(
     };
 
     let mut print_buf = String::new();
-    let mut scan_id_tx = Some(scan_id_tx);
     let event_tx = tx.clone();
     let scan_fut = async {
         let result = gage_scan::runner::run(
             db.clone(),
+            scan_id.clone(),
             scanners,
             selected,
             scan_ctx,
             jobs,
             agent_jobs,
             cancel.clone(),
-            |event| forward_scan_event(event, &event_tx, &mut print_buf, &mut scan_id_tx),
+            |event| {
+                capture_event(&mut streams, &event);
+                forward_scan_event(event, &event_tx, &mut print_buf);
+            },
         )
         .await;
         send_view_event(&event_tx, scan_view::Event::Finished);
         result
     };
 
+    let mut model = scan_view::ScanModel::new(setup);
+    model.out_path = Some(ScanStreams::out_path(&scan_id));
     let ui_cancel = cancel.clone();
     let ui_fut = async move {
-        let result = scan_view::run(scan_view::ScanModel::new(setup), rx).await;
+        let result = scan_view::run(model, rx).await;
         // Closing the view mid-scan stops the run; after the scan
         // completes this is a no-op.
         ui_cancel.cancel();
@@ -1027,36 +1117,51 @@ fn session_title(store: &gage_index::IndexStore, s: &SessionInfo) -> String {
     title.unwrap_or_else(|| s.project_name().into_owned())
 }
 
+/// Tee a runner event into the scan's capture streams.
+fn capture_event(streams: &mut ScanStreams, event: &gage_scan::event::ScanEvent) {
+    use gage_scan::event::ScanEvent;
+    match event {
+        ScanEvent::Print { s } => streams.out(s),
+        ScanEvent::Println { s } => streams.out_line(s),
+        ScanEvent::Warning {
+            scanner,
+            task,
+            message,
+        } => streams.err_line(&format!("warning: {scanner}::{task}: {message}")),
+        ScanEvent::TaskFailed {
+            scanner,
+            task,
+            message,
+        } => {
+            streams.err_line(&format!("error: {scanner}::{task}"));
+            streams.err_line(message);
+        }
+        ScanEvent::Status(_) => {}
+    }
+}
+
 fn forward_scan_event(
     event: gage_scan::event::ScanEvent,
     tx: &tokio::sync::mpsc::UnboundedSender<gage_tui::scan_view::Event>,
     print_buf: &mut String,
-    scan_id_tx: &mut Option<tokio::sync::oneshot::Sender<String>>,
 ) {
     use gage_scan::event::ScanEvent;
     use gage_tui::scan_view::{Event, TaskId};
 
     let ev = match event {
-        ScanEvent::Status(s) => {
-            if let Some(sender) = scan_id_tx.take() {
-                // Send fails only if the reconcile poll already exited;
-                // there is nothing left to notify.
-                if sender.send(s.scan_id.clone()).is_err() {}
-            }
-            Event::Status {
-                total: s.total,
-                progress: s.progress,
-                running: s
-                    .workers
-                    .iter()
-                    .filter_map(|w| w.current.as_ref())
-                    .map(|t| TaskId {
-                        scanner: t.scanner.clone(),
-                        task: t.task.clone(),
-                    })
-                    .collect(),
-            }
-        }
+        ScanEvent::Status(s) => Event::Status {
+            total: s.total,
+            progress: s.progress,
+            running: s
+                .workers
+                .iter()
+                .filter_map(|w| w.current.as_ref())
+                .map(|t| TaskId {
+                    scanner: t.scanner.clone(),
+                    task: t.task.clone(),
+                })
+                .collect(),
+        },
         ScanEvent::Print { s } => {
             print_buf.push_str(&s);
             while let Some(i) = print_buf.find('\n') {
@@ -1095,6 +1200,21 @@ fn send_view_event(
     ev: gage_tui::scan_view::Event,
 ) {
     if tx.send(ev).is_err() {}
+}
+
+/// Remove a deleted scan's log files (all streams, compressed or not).
+/// Absent files are the normal case for scans predating log capture.
+fn remove_scan_logs(scan_id: &str) {
+    let dir = gage_log::role_dir("scan");
+    for ext in ["log", "out", "err"] {
+        for name in [format!("{scan_id}.{ext}"), format!("{scan_id}.{ext}.gz")] {
+            match std::fs::remove_file(dir.join(&name)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("warning: failed to remove log {name}: {e}"),
+            }
+        }
+    }
 }
 
 fn all_issue_ids(conn: &gage_db::rusqlite::Connection) -> std::collections::HashSet<String> {

@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -67,6 +68,9 @@ pub struct ScanModel {
     pub finished: bool,
     /// Scan duration; None while a live scan is running.
     pub elapsed: Option<Duration>,
+    /// The scan's captured stdout stream (`{scan_id}.out`), shown by
+    /// the log dialog. None disables the dialog.
+    pub out_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -347,7 +351,7 @@ async fn event_loop(
                     _ => {}
                 }
             }
-            _ = tick.tick() => {}
+            _ = tick.tick() => state.refresh_log(),
         }
     }
     stop_input.store(true, Ordering::Relaxed);
@@ -395,7 +399,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
             }
             return false;
         }
-        Dialog::Note { scroll, .. } => {
+        Dialog::Note { scroll, .. } | Dialog::Log { scroll, .. } => {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -426,6 +430,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
         KeyCode::Char('g') => state.select_first(),
         KeyCode::Char('G') => state.select_last(),
         KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
+        KeyCode::Char('l') => state.open_log(),
         _ => {}
     }
     false
@@ -479,6 +484,13 @@ enum Dialog {
         note: NoteItem,
         scroll: u16,
     },
+    /// Captured scan output (`{scan_id}.out`), reloaded from the file
+    /// while a live scan runs.
+    Log {
+        content: String,
+        scroll: u16,
+        loaded: Instant,
+    },
 }
 
 impl ViewState {
@@ -524,6 +536,56 @@ impl ViewState {
                 note: note.clone(),
                 scroll: 0,
             };
+        }
+    }
+
+    fn open_log(&mut self) {
+        if self.model.out_path.is_none() {
+            return;
+        }
+        self.dialog = Dialog::Log {
+            content: self.read_log(),
+            scroll: 0,
+            loaded: Instant::now(),
+        };
+    }
+
+    /// Reload the log dialog's content while the scan is live, at most
+    /// once a second. The scroll position is preserved.
+    fn refresh_log(&mut self) {
+        if self.model.finished {
+            return;
+        }
+        let due = match &self.dialog {
+            Dialog::Log { loaded, .. } => loaded.elapsed() >= Duration::from_secs(1),
+            _ => false,
+        };
+        if !due {
+            return;
+        }
+        let content = self.read_log();
+        if let Dialog::Log {
+            content: current,
+            loaded,
+            ..
+        } = &mut self.dialog
+        {
+            *current = content;
+            *loaded = Instant::now();
+        }
+    }
+
+    /// Read the captured output; absence or unreadability renders as a
+    /// message rather than an error, since a scan may simply have
+    /// produced no output (the file is created lazily).
+    fn read_log(&self) -> String {
+        let Some(path) = &self.model.out_path else {
+            return String::new();
+        };
+        match std::fs::read_to_string(path) {
+            Ok(s) if s.is_empty() => "(no output)".to_string(),
+            Ok(s) => s,
+            Err(_) => "(no output captured)".to_string(),
         }
     }
 
@@ -664,6 +726,9 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
             None
         }
         Dialog::Note { note, scroll } => Some(draw_note_detail(frame, note, *scroll)),
+        Dialog::Log {
+            content, scroll, ..
+        } => Some(draw_log_dialog(frame, content, *scroll)),
         Dialog::None => None,
     };
     if let Some((page, max_scroll)) = detail_geometry {
@@ -719,6 +784,36 @@ fn draw_note_detail(frame: &mut Frame, note: &NoteItem, scroll: u16) -> (u16, u1
 
     let scroll_width = body.width.saturating_sub(1);
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = u16::try_from(paragraph.line_count(scroll_width)).unwrap_or(u16::MAX);
+    let max_scroll = total.saturating_sub(body.height);
+    let scroll = scroll.min(max_scroll);
+    frame.render_widget(paragraph.scroll((scroll, 0)), body);
+
+    let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
+    frame.render_stateful_widget(
+        scrollbar(true),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut sb_state,
+    );
+    (body.height, max_scroll)
+}
+
+/// Renders the scan output dialog and returns `(page, max_scroll)`
+/// for the scroll keys.
+fn draw_log_dialog(frame: &mut Frame, content: &str, scroll: u16) -> (u16, u16) {
+    let area = detail_rect(frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .title(" Output ")
+        .padding(Padding::horizontal(1));
+    let body = block.inner(area);
+    frame.render_widget(block, area);
+
+    let paragraph = Paragraph::new(content.to_string()).wrap(Wrap { trim: false });
+    let scroll_width = body.width.saturating_sub(1);
     let total = u16::try_from(paragraph.line_count(scroll_width)).unwrap_or(u16::MAX);
     let max_scroll = total.saturating_sub(body.height);
     let scroll = scroll.min(max_scroll);
@@ -1007,9 +1102,9 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     let help = if state.model.finished {
-        "scan complete · q quit · Tab cycle · ↑/↓ select"
+        "scan complete · q quit · Tab cycle · ↑/↓ select · l log"
     } else {
-        "q quit · Tab cycle · ↑/↓ select"
+        "q quit · Tab cycle · ↑/↓ select · l log"
     };
     let help_width = help.width() as u16;
     let [log_area, help_area, _] = Layout::horizontal([
