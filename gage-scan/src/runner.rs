@@ -67,7 +67,7 @@ impl From<gage_db::scan::ScanError> for RunError {
 /// Mutex. Combined with the scheduler's DAG gating (a downstream task
 /// is only enqueued after the upstream task's worker returns from
 /// dispatch_task, which has already released this Mutex), this is what
-/// makes a `notes.wants` entry mean "sees every note of that name written
+/// makes a `notes.wants` pattern mean "sees every matching note written
 /// by an upstream task." Callers are expected to hold the same Arc so
 /// they can query the resulting notes after the run completes — do not
 /// open a second connection for that, since separate WAL connections

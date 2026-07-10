@@ -82,8 +82,11 @@ fn embedded_digest() -> String {
     format!("{:016x}", h.finish())
 }
 
+/// A task's declared dependencies for one item kind (notes or issues):
+/// `wants` lists `*`-glob patterns over item names the task consumes;
+/// `writes` maps each item name the task produces to its docstring.
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct TaskNotesDef {
+pub struct TaskDepsDef {
     pub wants: Vec<String>,
     pub writes: BTreeMap<String, String>,
 }
@@ -91,7 +94,8 @@ pub struct TaskNotesDef {
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDef {
     pub name: String,
-    pub notes: TaskNotesDef,
+    pub notes: TaskDepsDef,
+    pub issues: TaskDepsDef,
 }
 
 pub struct ScannerDef {
@@ -689,7 +693,8 @@ fn parse_tasks(
             return Err(ParseError::DuplicateTask(name));
         }
 
-        let mut notes = TaskNotesDef::default();
+        let mut notes = TaskDepsDef::default();
+        let mut issues = TaskDepsDef::default();
 
         for (tf, _) in &task_obj.assignments {
             let Some(tkey) = field_key(source, &tf.key) else {
@@ -698,30 +703,72 @@ fn parse_tasks(
             let Some((_, texpr)) = &tf.assign else {
                 continue;
             };
-            if tkey.as_str() == "notes" {
-                let ast::Expr::Object(notes_obj) = texpr else {
-                    return Err(ParseError::TaskFieldType {
-                        task: name.clone(),
-                        field: "notes",
-                    });
-                };
-                notes = parse_task_notes(source, notes_obj, &name, embed_key)?;
-            }
+            let (dest, kind) = match tkey.as_str() {
+                "notes" => (&mut notes, DepsKind::Notes),
+                "issues" => (&mut issues, DepsKind::Issues),
+                _ => continue,
+            };
+            let ast::Expr::Object(deps_obj) = texpr else {
+                return Err(ParseError::TaskFieldType {
+                    task: name.clone(),
+                    field: kind.field(),
+                });
+            };
+            *dest = parse_task_deps(source, deps_obj, &name, embed_key, kind)?;
         }
 
-        tasks.insert(name.clone(), TaskDef { name, notes });
+        tasks.insert(
+            name.clone(),
+            TaskDef {
+                name,
+                notes,
+                issues,
+            },
+        );
     }
 
     Ok(tasks)
 }
 
-fn parse_task_notes(
+/// Which task-dependency block is being parsed; selects the field
+/// labels used in errors.
+#[derive(Clone, Copy)]
+enum DepsKind {
+    Notes,
+    Issues,
+}
+
+impl DepsKind {
+    fn field(self) -> &'static str {
+        match self {
+            DepsKind::Notes => "notes",
+            DepsKind::Issues => "issues",
+        }
+    }
+
+    fn wants_field(self) -> &'static str {
+        match self {
+            DepsKind::Notes => "notes.wants",
+            DepsKind::Issues => "issues.wants",
+        }
+    }
+
+    fn writes_field(self) -> &'static str {
+        match self {
+            DepsKind::Notes => "notes.writes",
+            DepsKind::Issues => "issues.writes",
+        }
+    }
+}
+
+fn parse_task_deps(
     source: &str,
     obj: &ast::ExprObject,
     task: &str,
     embed_key: &str,
-) -> Result<TaskNotesDef, ParseError> {
-    let mut notes = TaskNotesDef::default();
+    kind: DepsKind,
+) -> Result<TaskDepsDef, ParseError> {
+    let mut deps = TaskDepsDef::default();
     for (field, _) in &obj.assignments {
         let Some(key) = field_key(source, &field.key) else {
             continue;
@@ -734,30 +781,30 @@ fn parse_task_notes(
                 let ast::Expr::Vec(vec_expr) = expr else {
                     return Err(ParseError::TaskFieldType {
                         task: task.to_string(),
-                        field: "notes.wants",
+                        field: kind.wants_field(),
                     });
                 };
                 for (item_expr, _) in &vec_expr.items {
                     let s = expr_str(source, item_expr).ok_or(ParseError::TaskFieldType {
                         task: task.to_string(),
-                        field: "notes.wants",
+                        field: kind.wants_field(),
                     })?;
-                    notes.wants.push(s);
+                    deps.wants.push(s);
                 }
             }
             "writes" => {
                 let ast::Expr::Object(writes_obj) = expr else {
                     return Err(ParseError::TaskFieldType {
                         task: task.to_string(),
-                        field: "notes.writes",
+                        field: kind.writes_field(),
                     });
                 };
-                notes.writes = parse_notes(source, writes_obj, task, embed_key)?;
+                deps.writes = parse_notes(source, writes_obj, task, embed_key)?;
             }
             _ => {}
         }
     }
-    Ok(notes)
+    Ok(deps)
 }
 
 fn parse_notes(
@@ -964,6 +1011,34 @@ fn walk_rn_files_rec(dir: &Path, result: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_task_note_and_issue_deps() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    tasks: #{
+        write: #{
+            notes: #{ writes: #{ "finding": "A finding" } },
+            issues: #{ writes: #{ "general": "A general issue" } },
+        },
+        reconcile: #{
+            issues: #{ wants: ["*"] },
+        },
+    },
+};
+"#;
+        let def = parse_scanner(source, "demo").unwrap();
+        let write = def.tasks.get("write").unwrap();
+        assert_eq!(write.notes.writes.get("finding").unwrap(), "A finding");
+        assert_eq!(
+            write.issues.writes.get("general").unwrap(),
+            "A general issue"
+        );
+        let reconcile = def.tasks.get("reconcile").unwrap();
+        assert_eq!(reconcile.issues.wants, vec!["*"]);
+        assert!(reconcile.notes.wants.is_empty());
+    }
 
     fn display(path: &str, name: &str, home: Option<&str>) -> String {
         display_path_impl(Path::new(path), name, home)

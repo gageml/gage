@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::glob::glob_match;
+
 /// Returns the gage home directory.
 ///
 /// If `GAGE_HOME` is set, uses that value. Otherwise uses `$HOME/.gage`.
@@ -194,35 +196,6 @@ impl Config {
     }
 }
 
-/// Matches `name` against `pattern`, where `*` matches any run of
-/// characters (including empty). All other characters match literally.
-fn glob_match(pattern: &str, name: &str) -> bool {
-    if !pattern.contains('*') {
-        return pattern == name;
-    }
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let last = parts.len() - 1;
-    let mut rest = name;
-    for (i, part) in parts.iter().enumerate() {
-        if i == 0 {
-            match rest.strip_prefix(part) {
-                Some(r) => rest = r,
-                None => return false,
-            }
-        } else if i == last {
-            return rest.ends_with(part);
-        } else if part.is_empty() {
-            continue;
-        } else {
-            match rest.find(part) {
-                Some(idx) => rest = rest.split_at(idx + part.len()).1,
-                None => return false,
-            }
-        }
-    }
-    true
-}
-
 /// A loaded config file along with the path it came from.
 #[derive(Debug, Clone)]
 pub struct ConfigSource {
@@ -345,24 +318,13 @@ pub fn find_project_gage_dir(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::glob_match;
+    use super::Config;
 
     #[test]
-    fn glob_literal() {
-        assert!(glob_match("foo", "foo"));
-        assert!(!glob_match("foo", "foobar"));
-    }
-
-    #[test]
-    fn glob_wildcards() {
-        assert!(glob_match("*", "anything"));
-        assert!(glob_match("foo*", "foobar"));
-        assert!(glob_match("*bar", "foobar"));
-        assert!(glob_match("foo*bar", "foo-mid-bar"));
-        assert!(glob_match("a*b*c", "a-b-c"));
-        assert!(glob_match("a*b*c", "axxbyyc"));
-        assert!(!glob_match("foo*", "fo"));
-        assert!(!glob_match("*bar", "barx"));
-        assert!(!glob_match("a*b*c", "abx"));
+    fn scanner_enable_disable_globs() {
+        let mut config = Config::default();
+        config.scanners.disable.push("hidden-*".to_string());
+        assert!(!config.is_scanner_enabled("hidden-thinking"));
+        assert!(config.is_scanner_enabled("general-issues"));
     }
 }

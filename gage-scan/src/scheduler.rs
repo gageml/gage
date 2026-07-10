@@ -3,15 +3,17 @@
 //!
 //! - One DAG covering every (scanner, task) declaration. There are no
 //!   phase barriers; tasks declare their inter-task dependencies through
-//!   `notes.wants` / `notes.writes`.
+//!   `notes.wants` / `notes.writes` and `issues.wants` / `issues.writes`.
 //! - Nodes are `Task` values (immutable plan units): one per declared
 //!   scanner task, dispatched once per run.
-//! - Edges come from `notes.wants`/`notes.writes`: a task's
-//!   `notes.wants` lists *note names* it consumes; the planner
-//!   reverse-looks-up every task across the full plan whose `notes.writes`
-//!   contains that note name and adds an edge.
-//! - Unsatisfied `notes.wants` (no task in the plan writes the note) is a
-//!   planner *warning*, not an error. The task still runs.
+//! - Edges come from `wants`/`writes` per item kind: a task's `wants`
+//!   lists `*`-glob patterns over item names it consumes; the planner
+//!   matches each pattern against every task's `writes` names across the
+//!   full plan (`glob_match`) and adds an edge per producer. Notes and
+//!   issues are matched independently — a note pattern never matches an
+//!   issue name.
+//! - An unsatisfied `wants` (no task in the plan writes a matching item)
+//!   is a planner *warning*, not an error. The task still runs.
 //! - Cycle detection runs at plan time over the full graph.
 //! - Worker pool: N tokio tasks pulling from an unbounded ready queue.
 //!   Per-scanner concurrency is unrestricted — each task builds a
@@ -34,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::event::{RunStatus, RunSummary, ScanEvent, TaskRef, WorkerStatus};
+use gage_core::glob::glob_match;
 use gage_db::scan::{TaskOutcome, TaskStatus};
 use gage_registry::scanner::TaskDef;
 use gage_runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
@@ -147,15 +150,23 @@ pub(crate) fn plan(
         node_index.insert((scanner_idx, task_name.clone()), node);
     }
 
-    // Build a plan-wide `note_name -> [(scanner_idx, task_name)]` index from
-    // `notes.writes`. Dependency resolution spans all scanners — a consumer
-    // in scanner A can depend on a producer in scanner B.
-    let mut writes_index: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    // Build plan-wide `item_name -> [(scanner_idx, task_name)]` indexes
+    // from `writes`, one per item kind. Dependency resolution spans all
+    // scanners — a consumer in scanner A can depend on a producer in
+    // scanner B.
+    let mut note_writes: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    let mut issue_writes: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for (scanner_idx, defs) in scanner_tasks.iter().enumerate() {
         for (task_name, def) in defs {
-            for note_name in def.notes.writes.keys() {
-                writes_index
-                    .entry(note_name.clone())
+            for name in def.notes.writes.keys() {
+                note_writes
+                    .entry(name.clone())
+                    .or_default()
+                    .push((scanner_idx, task_name.clone()));
+            }
+            for name in def.issues.writes.keys() {
+                issue_writes
+                    .entry(name.clone())
                     .or_default()
                     .push((scanner_idx, task_name.clone()));
             }
@@ -164,34 +175,45 @@ pub(crate) fn plan(
 
     // Wire dependencies.
     //
-    // Each name in `notes.wants` is a *note name*. For every wanted note,
-    // find all tasks in the plan whose `notes.writes` includes that name,
-    // and add an edge from each producer to the consumer.
+    // Each `wants` entry is a `*`-glob pattern over item names. For every
+    // pattern, find all tasks in the plan whose `writes` includes a
+    // matching name, and add an edge from each producer to the consumer.
     //
-    // An unsatisfied `notes.wants` (no task in the plan writes the note)
+    // An unsatisfied `wants` (no task in the plan writes a matching item)
     // is recorded as a warning, not an error — the consumer still runs.
     for &(scanner_idx, task_name, def) in &planned {
-        for want in &def.notes.wants {
-            let producers = writes_index.get(want);
-            let Some(producers) = producers else {
-                warnings.push(PlanWarning {
-                    scanner: scanners[scanner_idx].name.clone(),
-                    task: task_name.clone(),
-                    message: format!("wants note '{want}' but no task writes it"),
-                });
-                continue;
-            };
-            for (producer_scanner, producer_task) in producers {
-                if *producer_scanner == scanner_idx && producer_task == task_name {
-                    // A task wanting a note it writes itself is a no-op
-                    // dependency — would create a self-loop. Skip.
-                    continue;
+        for (wants, writes_index, kind) in [
+            (&def.notes.wants, &note_writes, "note"),
+            (&def.issues.wants, &issue_writes, "issue"),
+        ] {
+            for want in wants {
+                let mut matched = false;
+                for (written_name, producers) in writes_index {
+                    if !glob_match(want, written_name) {
+                        continue;
+                    }
+                    matched = true;
+                    for (producer_scanner, producer_task) in producers {
+                        if *producer_scanner == scanner_idx && producer_task == task_name {
+                            // A task wanting an item it writes itself is a
+                            // no-op dependency — would create a self-loop.
+                            // Skip.
+                            continue;
+                        }
+                        let from = *node_index
+                            .get(&(*producer_scanner, producer_task.clone()))
+                            .unwrap();
+                        let to = *node_index.get(&(scanner_idx, task_name.clone())).unwrap();
+                        graph.update_edge(from, to, ());
+                    }
                 }
-                let from = *node_index
-                    .get(&(*producer_scanner, producer_task.clone()))
-                    .unwrap();
-                let to = *node_index.get(&(scanner_idx, task_name.clone())).unwrap();
-                graph.update_edge(from, to, ());
+                if !matched {
+                    warnings.push(PlanWarning {
+                        scanner: scanners[scanner_idx].name.clone(),
+                        task: task_name.clone(),
+                        message: format!("wants {kind} '{want}' but no task writes it"),
+                    });
+                }
             }
         }
     }
