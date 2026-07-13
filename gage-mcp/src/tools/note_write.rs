@@ -20,8 +20,6 @@ pub const TOOL: ToolDef = route;
 
 const MD: &str = include_str!("../../config/tools/NoteWrite.md");
 
-const TYPES: &[&str] = &["comment", "finding"];
-
 fn route() -> ToolRoute<GageServer> {
     ToolRoute::new(build_tool_meta(MD), call)
 }
@@ -41,11 +39,16 @@ async fn handle(
     author: String,
     config: NoteWriteConfig,
 ) -> Result<String, McpError> {
-    let note_type = req_string(&params, "type")?;
-    if !TYPES.contains(&note_type.as_str()) {
+    let name = req_string(&params, "name")?;
+    if !config.names.contains_key(&name) {
+        let allowed: Vec<String> = config
+            .names
+            .iter()
+            .map(|(n, doc)| format!("`{n}` ({doc})"))
+            .collect();
         return Ok(format!(
-            "error: `type` must be one of {}; got `{note_type}`.",
-            TYPES.join(", ")
+            "error: `name` must be one of {}; got `{name}`.",
+            allowed.join(", ")
         ));
     }
     let value = req_string(&params, "value")?;
@@ -81,7 +84,7 @@ async fn handle(
         }
     };
 
-    let note = Note::new(target, &note_type, NoteValue::from(value), &author);
+    let note = Note::new(target, &name, NoteValue::from(value), &author);
 
     let conn = open_db().unwrap();
     note::insert(&conn, &note).map_err(|e| {
@@ -101,7 +104,7 @@ async fn handle(
             .map_err(|e| McpError::internal_error(format!("link note to scan: {e}"), None))?;
     }
 
-    Ok(format!("Added {note_type} {}.", short_uuid(&note.id)))
+    Ok(format!("Added {name} {}.", short_uuid(&note.id)))
 }
 
 fn is_session_id_shape(id: &str) -> bool {

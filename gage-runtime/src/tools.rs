@@ -5,7 +5,10 @@
 //! self` setters configure. Bare string names in `gage_tools` dispatch
 //! to the corresponding builder's defaults.
 
+use std::collections::BTreeMap;
+
 use gage_mcp::{GageTool, IssueWriteConfig, NoteWriteConfig, QueryConfig};
+use rune::runtime::Object;
 use rune::{Any, ContextError, Module};
 
 pub fn module() -> Result<Module, ContextError> {
@@ -19,6 +22,7 @@ pub fn module() -> Result<Module, ContextError> {
     m.function_meta(IssueWrite::scan)?;
     m.ty::<NoteWrite>()?;
     m.function_meta(NoteWrite::new)?;
+    m.function_meta(NoteWrite::names)?;
     m.function_meta(NoteWrite::scan)?;
     m.ty::<IssueClose>()?;
     m.function_meta(IssueClose::new)?;
@@ -76,11 +80,15 @@ impl IssueWrite {
     }
 }
 
-/// Write notes. `scan(id)` links writes to that scan and serves as the
-/// fallback note target.
+/// Write notes. `names(#{ name: doc })` sets the allowed note names
+/// with their docstrings (default `comment` only); `scan(id)` links
+/// writes to that scan and serves as the fallback note target.
 #[derive(Any, Debug, Clone, Default)]
 #[rune(item = ::gage::tools)]
 pub struct NoteWrite {
+    /// Parsed `names(..)` argument. The parse error is deferred so the
+    /// builder chain stays fluent; `gage_tools` parsing surfaces it.
+    names: Option<Result<BTreeMap<String, String>, String>>,
     scan: Option<String>,
 }
 
@@ -91,10 +99,29 @@ impl NoteWrite {
     }
 
     #[rune::function(instance)]
+    fn names(mut self, names: Object) -> Self {
+        self.names = Some(parse_names(&names));
+        self
+    }
+
+    #[rune::function(instance)]
     fn scan(mut self, id: String) -> Self {
         self.scan = Some(id);
         self
     }
+}
+
+fn parse_names(names: &Object) -> Result<BTreeMap<String, String>, String> {
+    if names.is_empty() {
+        return Err("NoteWrite names must not be empty".to_string());
+    }
+    let mut out = BTreeMap::new();
+    for (name, doc) in names.iter() {
+        let doc: String = rune::from_value(doc.clone())
+            .map_err(|e| format!("NoteWrite names['{name}'] must be a doc string: {e}"))?;
+        out.insert(name.to_string(), doc);
+    }
+    Ok(out)
 }
 
 /// Close issues. No settings.
@@ -138,8 +165,15 @@ impl From<IssueWrite> for GageTool {
     }
 }
 
-impl From<NoteWrite> for GageTool {
-    fn from(t: NoteWrite) -> Self {
-        GageTool::NoteWrite(NoteWriteConfig { scan: t.scan })
+impl TryFrom<NoteWrite> for GageTool {
+    type Error = String;
+
+    fn try_from(t: NoteWrite) -> Result<Self, String> {
+        let mut config = NoteWriteConfig::default();
+        if let Some(names) = t.names {
+            config.names = names?;
+        }
+        config.scan = t.scan;
+        Ok(GageTool::NoteWrite(config))
     }
 }

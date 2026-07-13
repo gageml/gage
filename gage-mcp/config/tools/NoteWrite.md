@@ -1,10 +1,10 @@
 +++
 name = "NoteWrite"
 
-[parameters.type]
+[parameters.name]
 type = "string"
 required = true
-description = "Note type: `comment` or `finding`"
+description = "Note name; must be one of the names this tool allows (error output lists them)"
 
 [parameters.value]
 type = "string"
@@ -28,9 +28,9 @@ idempotent_hint = false
 
 Use to record a note about the current scan or a session.
 
-`type` selects the kind of note: `comment` for free-form remarks, `finding`
-for an observation worth surfacing. The note name is `{type}.{short_id}`
-where `short_id` is derived from the new note's ID.
+`name` selects the kind of note being written. The allowed names are
+task-defined; a wrong name returns an error listing the allowed names and
+what each is for.
 
 Provide `session_id` and optionally `session_line` to attach the note to a
 specific session or line. Otherwise omit these inputs and the note attaches

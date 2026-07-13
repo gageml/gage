@@ -1,19 +1,45 @@
-use gage::call_agent;
+use gage::{call_agent, scan, tools::NoteWrite};
 
 pub const SCANNER = #{
     name: "gage-tool",
     description: "Sample use of Gage tool",
-    tasks: #{ gage_tool: #{} },
+    tasks: #{ comment: #{}, named: #{} },
 };
 
-/// Writes a comment using Gage NoteWrite tool.
-pub async fn gage_tool() {
+/// Write a comment using Gage NoteWrite tool.
+pub async fn comment() {
     let agent = call_agent(
         "Write a comment 'Hello, Joe' with the NoteWrite tool.",
     )
-    .gage_tools(["NoteWrite"])
+    .gage_tools([NoteWrite::new().scan(scan().id)])
     .model("medium")
     .await?;
-    let out = agent.wait().await?;
-    println!("## gage-tool # {out:?}");
+    let result = agent.wait().await?;
+    log::info!("write comment result: {result:?}");
+}
+
+/// Write a note named based on prompt
+pub async fn named() {
+    let choice = if rand::rng().random::<f64>() > 0.5 {
+        "Sam the dog"
+    } else {
+        "the color red"
+    };
+    let prompt = format!("Write a haiku for {choice}");
+    let agent = call_agent(prompt)
+        .gage_tools(
+            [
+                NoteWrite::new()
+                    .scan(scan().id)
+                    .names(
+                        #{
+                            "color": "Note about a color",
+                            "animal": "Note about an animal",
+                        },
+                    ),
+            ],
+        )
+        .await?;
+    let result = agent.wait().await?;
+    log::info!("write named note result: {result:?}");
 }

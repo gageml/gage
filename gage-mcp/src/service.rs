@@ -9,7 +9,7 @@
 //! [`build_mcp_service`] returns the [`crate::host::RegisteredService`]
 //! shape an [`crate::host::McpHost`] expects.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
@@ -93,11 +93,23 @@ impl Default for IssueWriteConfig {
 }
 
 /// `NoteWrite` tool settings.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct NoteWriteConfig {
+    /// Allowed note names, mapped to their docstrings. The model must
+    /// pass one of these as `name`; anything else is an error.
+    pub names: BTreeMap<String, String>,
     /// Scan to link writes to via `scan_note`, and the fallback note
     /// target when the model supplies no session. `None` → no link.
     pub scan: Option<String>,
+}
+
+impl Default for NoteWriteConfig {
+    fn default() -> Self {
+        NoteWriteConfig {
+            names: BTreeMap::from([("comment".to_string(), "Write a comment".to_string())]),
+            scan: None,
+        }
+    }
 }
 
 /// Per-service configuration each built-in tool handler reads through
