@@ -29,7 +29,7 @@ use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::session;
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
-use crate::{message, style};
+use crate::{message, styles};
 
 pub fn run(
     terminal: &mut DefaultTerminal,
@@ -615,13 +615,14 @@ fn draw(frame: &mut Frame, state: &mut AppState, turns: Option<&[Option<usize>]>
         Some(t) if !t.is_empty() => format!("{short_id} · {t}"),
         _ => short_id.to_string(),
     };
-    let header = Paragraph::new(Line::from(header_text).centered()).style(style::header());
+    let header = Paragraph::new(Line::from(header_text).centered()).style(styles::Panel::header());
     frame.render_widget(header, header_area);
 
     draw_outline(frame, state, outline_area, turns);
     draw_body(frame, state, body_area);
 
-    let footer = Paragraph::new(Line::from(footer_hint(state)).centered()).style(style::footer());
+    let footer =
+        Paragraph::new(Line::from(footer_hint(state)).centered()).style(styles::Panel::footer());
     frame.render_widget(footer, footer_area);
 
     draw_dialog(frame, &mut state.dialog);
@@ -670,10 +671,10 @@ fn draw_outline(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(style::panel_border(active))
+                .border_style(styles::Panel::border(active))
                 .title("Entries"),
         )
-        .highlight_style(style::selection());
+        .highlight_style(styles::Panel::selection(true));
     frame.render_stateful_widget(list, area, &mut state.list_state);
 
     let max_offset = state
@@ -715,7 +716,7 @@ fn row_to_item(
             let number_style = if is_selected {
                 Style::new()
             } else {
-                style::text_dim()
+                styles::Text::dim()
             };
             let turn = turns.and_then(|t| t.get(*index).copied().flatten());
             let mut spans = vec![
@@ -753,7 +754,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(style::panel_border(active))
+        .border_style(styles::Panel::border(active))
         .title(body_title(&state.doc, row_kind.as_ref()));
     let inner = outer.inner(area);
     state.body_viewport = inner.height;
@@ -828,7 +829,7 @@ fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
             format_ms(note.created),
             modified_suffix
         ),
-        style::text_dim(),
+        styles::Text::dim(),
     ));
     let mut lines: Vec<Line> = Vec::new();
     lines.push(header);
@@ -889,7 +890,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             .block(Block::default().padding(Padding::uniform(1)));
         sections.push(Section::from_paragraph(panel, area.width));
         sections.push(Section::from_paragraph(
-            Paragraph::new(Line::from(Span::styled("--- raw ---", style::text_dim()))),
+            Paragraph::new(Line::from(Span::styled("--- raw ---", styles::Text::dim()))),
             area.width,
         ));
     }
@@ -1127,8 +1128,8 @@ fn draw_dialog_block(frame: &mut Frame, area: Rect, title: &str) -> (Rect, Rect)
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(title.to_string(), style::text_dim()))
-        .border_style(style::text_dim())
+        .title(Span::styled(title.to_string(), styles::Text::dim()))
+        .border_style(styles::Text::dim())
         .padding(Padding::new(1, 1, 1, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1144,7 +1145,7 @@ fn draw_dialog_block(frame: &mut Frame, area: Rect, title: &str) -> (Rect, Rect)
 fn draw_hint(frame: &mut Frame, area: Rect, hint: &str) {
     let p = Paragraph::new(Line::from(Span::styled(
         hint.to_string(),
-        style::text_dim(),
+        styles::Text::dim(),
     )))
     .alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(p, area);
@@ -1164,5 +1165,5 @@ fn scrollbar(active: bool) -> Scrollbar<'static> {
         .end_symbol(Some("↓"))
         .thumb_symbol("┃")
         .track_symbol(Some("│"))
-        .style(style::scrollbar(active))
+        .style(styles::Panel::scrollbar(active))
 }

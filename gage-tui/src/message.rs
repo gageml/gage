@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::markdown;
-use crate::style;
+use crate::styles;
 
 pub fn render(message: &Value) -> Vec<Line<'static>> {
     let mut out = Vec::new();
@@ -40,15 +40,15 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
             }
         }
         "thinking" => {
-            push_header(out, "[thinking]", style::text_dim());
+            push_header(out, "[thinking]", styles::Text::dim());
             let text = block.get("thinking").and_then(Value::as_str).unwrap_or("");
             if !text.is_empty() {
-                append_plain(out, text, style::text_dim());
+                append_plain(out, text, styles::Text::dim());
             }
         }
         "tool_use" => {
             let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-            push_header(out, &format!("[tool_use: {name}]"), style::text_dim());
+            push_header(out, &format!("[tool_use: {name}]"), styles::Text::dim());
             if let Some(input) = block.get("input") {
                 let pretty =
                     serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
@@ -57,7 +57,7 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
         }
         "tool_reference" => {
             let name = block.get("tool_name").and_then(Value::as_str).unwrap_or("");
-            push_header(out, &format!("- tool_name: {name}"), style::text_dim());
+            push_header(out, &format!("- tool_name: {name}"), styles::Text::dim());
         }
         "tool_result" => {
             let is_error = block
@@ -67,7 +67,7 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
             let (label, style) = if is_error {
                 ("[tool_result error]", Style::new().fg(Color::Red))
             } else {
-                ("[tool_result]", style::text_dim())
+                ("[tool_result]", styles::Text::dim())
             };
             push_header(out, label, style);
             match block.get("content") {
@@ -86,7 +86,7 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
             } else {
                 format!("[{other}]")
             };
-            push_header(out, &label, style::text_dim());
+            push_header(out, &label, styles::Text::dim());
         }
     }
 }

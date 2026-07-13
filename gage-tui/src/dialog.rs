@@ -11,7 +11,7 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::style;
+use crate::styles;
 
 /// Draw a centered one-line message with a key hint below it.
 pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
@@ -26,7 +26,7 @@ pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
         height,
     };
     frame.render_widget(Clear, area);
-    let block = Block::bordered().style(style::dialog());
+    let block = Block::bordered().style(styles::Dialog::surface());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [_, msg, _, hint_row] = Layout::vertical([
@@ -38,7 +38,7 @@ pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
     .areas(inner);
     frame.render_widget(Paragraph::new(message.to_string()).centered(), msg);
     frame.render_widget(
-        Paragraph::new(Span::styled(hint.to_string(), style::text_dim())).centered(),
+        Paragraph::new(Span::styled(hint.to_string(), styles::Text::dim())).centered(),
         hint_row,
     );
 }

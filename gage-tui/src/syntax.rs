@@ -9,7 +9,7 @@ use syntect::easy::ScopeRegionIterator;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-use crate::style;
+use crate::styles;
 
 pub struct Highlighter {
     syntax_set: SyntaxSet,
@@ -59,19 +59,19 @@ fn style_for_scope(stack: &ScopeStack) -> ratatui::style::Style {
     for scope in stack.as_slice().iter().rev() {
         let s = scope.build_string();
         if s.starts_with("string.unquoted.plain.out") {
-            return style::syntax_key();
+            return styles::Syntax::key();
         }
         if s.starts_with("comment") {
-            return style::syntax_comment();
+            return styles::Syntax::comment();
         }
         if s.starts_with("constant.language") {
-            return style::syntax_const();
+            return styles::Syntax::constant();
         }
         if s.starts_with("constant.numeric") {
-            return style::syntax_number();
+            return styles::Syntax::number();
         }
         if s.starts_with("string.quoted") {
-            return style::syntax_string();
+            return styles::Syntax::string();
         }
     }
     ratatui::style::Style::new()

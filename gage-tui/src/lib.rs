@@ -9,7 +9,7 @@ mod outline;
 pub mod scan_view;
 mod session;
 pub mod session_view;
-mod style;
+mod styles;
 mod syntax;
 mod textarea;
 

@@ -21,11 +21,13 @@ pub async fn comment() {
 /// Write a note named based on prompt
 pub async fn named() {
     let choice = if rand::rng().random::<f64>() > 0.5 {
-        "Sam the dog"
+        "Mike"
     } else {
-        "the color red"
+        "Robert"
     };
-    let prompt = format!("Write a haiku for {choice}");
+    let prompt = format!(
+        "Say hello to {choice} using the NoteWrite tool."
+    );
     let agent = call_agent(prompt)
         .gage_tools(
             [
@@ -33,8 +35,8 @@ pub async fn named() {
                     .scan(scan().id)
                     .names(
                         #{
-                            "color": "Note about a color",
-                            "animal": "Note about an animal",
+                            "msg.mike": "Message to Mike",
+                            "msg.robert": "Message to Robert",
                         },
                     ),
             ],

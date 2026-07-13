@@ -31,7 +31,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::dialog;
 use crate::item_table::{ItemTable, scrollbar};
-use crate::{markdown, style};
+use crate::{markdown, styles};
 
 /// A scan task identity, `{scanner}::{task}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,13 +650,13 @@ impl ViewState {
                 lines.push(Line::raw(""));
             }
             lines.extend(content.lines().map(|l| match ext {
-                "err" => Line::from(Span::styled(l.to_string(), style::error())),
+                "err" => Line::from(Span::styled(l.to_string(), styles::LogLevel::error())),
                 "log" => log_line(l),
                 _ => Line::raw(l.to_string()),
             }));
         }
         if lines.is_empty() {
-            lines.push(Line::from(Span::styled("(no output)", style::text_dim())));
+            lines.push(Line::from(Span::styled("(no output)", styles::Text::dim())));
         }
         lines
     }
@@ -864,12 +864,12 @@ fn draw_issue_detail(frame: &mut Frame, issue: &IssueItem, scroll: u16) -> (u16,
             }
             content.push(Line::from(Span::styled(
                 format!("{} · {} · {}", ev.id, ev.name, ev.target),
-                style::text_dim(),
+                styles::Text::dim(),
             )));
             content.extend(
                 ev.value
                     .lines()
-                    .map(|l| Line::from(Span::styled(l.to_string(), style::evidence()))),
+                    .map(|l| Line::from(Span::styled(l.to_string(), styles::Text::accent()))),
             );
         }
         section(&mut lines, "Evidence", content);
@@ -883,7 +883,7 @@ fn draw_issue_detail(frame: &mut Frame, issue: &IssueItem, scroll: u16) -> (u16,
             }
             content.push(Line::from(Span::styled(
                 format!("{} · {} · {}", ev.kind, ev.author, ev.timestamp),
-                style::text_dim(),
+                styles::Text::dim(),
             )));
             if let Some(message) = &ev.message {
                 content.extend(message.lines().map(|l| Line::raw(l.to_string())));
@@ -905,7 +905,7 @@ fn header_lines(headers: &[(&'static str, &str)]) -> Vec<Line<'static>> {
             Line::from(vec![
                 Span::styled(
                     format!("{caption:<width$}  ", width = caption_width),
-                    style::text_dim(),
+                    styles::Text::dim(),
                 ),
                 Span::raw((*value).to_string()),
             ])
@@ -917,7 +917,7 @@ fn header_lines(headers: &[(&'static str, &str)]) -> Vec<Line<'static>> {
 /// blank line.
 fn section(lines: &mut Vec<Line<'static>>, caption: &'static str, content: Vec<Line<'static>>) {
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(caption, style::text_dim())));
+    lines.push(Line::from(Span::styled(caption, styles::Text::dim())));
     lines.extend(content);
 }
 
@@ -956,23 +956,69 @@ fn draw_detail(
     (body.height, max_scroll)
 }
 
-/// Style a tracing log line by its level. The files are written
-/// without ANSI codes; color is applied here by classifying the level
-/// token, which the default fmt layout places second (after the
-/// timestamp). Panics from the gage-log hook use the same slot.
-/// Unrecognized lines (e.g. backtrace continuations) render plain.
+/// Style a tracing log line per field. The files are written without
+/// ANSI codes; color is applied here against the default fmt layout
+/// `{timestamp} {LEVEL} {target}: {body}`: dim timestamp, the level in
+/// its status color, dim target, plain body. Panics from the gage-log
+/// hook fit the same shape without a target. Lines that don't open
+/// with a level in the second slot (e.g. backtrace continuations)
+/// render plain.
 fn log_line(line: &str) -> Line<'static> {
-    let level = line.split_whitespace().nth(1);
-    let level_style = match level {
-        Some("ERROR" | "PANIC") => Some(style::error()),
-        Some("WARN") => Some(style::running()),
-        Some("DEBUG" | "TRACE") => Some(style::text_dim()),
-        _ => None,
+    let tokens = token_ranges(line, 3);
+    let Some(&(level_start, level_end)) = tokens.get(1) else {
+        return Line::raw(line.to_string());
     };
-    match level_style {
-        Some(st) => Line::from(Span::styled(line.to_string(), st)),
-        None => Line::raw(line.to_string()),
+    let level = &line[level_start..level_end];
+    let level_style = match level {
+        "ERROR" | "PANIC" => Some(styles::LogLevel::error()),
+        "WARN" => Some(styles::LogLevel::warn()),
+        "INFO" => Some(styles::LogLevel::info()),
+        "DEBUG" | "TRACE" => Some(styles::LogLevel::debug()),
+        _ => return Line::raw(line.to_string()),
+    };
+
+    let mut spans = vec![
+        Span::styled(line[..level_start].to_string(), styles::Text::dim()),
+        match level_style {
+            Some(st) => Span::styled(level.to_string(), st),
+            None => Span::raw(level.to_string()),
+        },
+    ];
+    // The target field is `:`-terminated; without one (e.g. a PANIC
+    // line) everything after the level is body
+    match tokens.get(2) {
+        Some(&(_, target_end)) if line[..target_end].ends_with(':') => {
+            spans.push(Span::styled(
+                line[level_end..target_end].to_string(),
+                styles::Text::dim(),
+            ));
+            spans.push(Span::raw(line[target_end..].to_string()));
+        }
+        _ => spans.push(Span::raw(line[level_end..].to_string())),
     }
+    Line::from(spans)
+}
+
+/// Byte ranges of the first `n` whitespace-delimited tokens.
+fn token_ranges(line: &str, n: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, c) in line.char_indices() {
+        if c.is_whitespace() {
+            if let Some(s) = start.take() {
+                out.push((s, i));
+                if out.len() == n {
+                    return out;
+                }
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, line.len()));
+    }
+    out
 }
 
 /// Renders the scan output dialog and returns `(page, max_scroll)`
@@ -1007,13 +1053,13 @@ fn draw_scan_done(frame: &mut Frame, elapsed: Option<Duration>) {
 fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     let model = &state.model;
     let counts = Line::from(vec![
-        Span::styled("  Notes ", style::text_dim()),
+        Span::styled("  Notes ", styles::Text::dim()),
         Span::raw(model.notes.len().to_string()),
-        Span::styled("  Issues ", style::text_dim()),
+        Span::styled("  Issues ", styles::Text::dim()),
         Span::raw(model.issues.len().to_string()),
-        Span::styled("  Errors ", style::text_dim()),
+        Span::styled("  Errors ", styles::Text::dim()),
         if model.errors > 0 {
-            Span::styled(model.errors.to_string(), style::error())
+            Span::styled(model.errors.to_string(), styles::RunStatus::error())
         } else {
             Span::raw("0")
         },
@@ -1048,7 +1094,7 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     };
     frame.render_widget(
         Gauge::default()
-            .gauge_style(style::gauge())
+            .gauge_style(styles::Panel::gauge())
             .ratio(ratio)
             .label(label),
         tasks,
@@ -1066,11 +1112,11 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .enumerate()
         .map(|(i, t)| {
             let (label, label_style) = match t.state {
-                TaskState::Pending => ("pending", style::text_dim()),
-                TaskState::Running => ("running", style::running()),
-                TaskState::Completed => ("done", style::text_dim()),
-                TaskState::Error => ("error", style::error()),
-                TaskState::Skipped => ("skipped", style::text_dim()),
+                TaskState::Pending => ("pending", styles::RunStatus::pending()),
+                TaskState::Running => ("running", styles::RunStatus::running()),
+                TaskState::Completed => ("done", styles::RunStatus::completed()),
+                TaskState::Error => ("error", styles::RunStatus::error()),
+                TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
             };
             // Colored/dim cells on the selected row would invert into
             // per-cell backgrounds under the REVERSED highlight
@@ -1110,7 +1156,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         ],
     )
     .header(header_row(["Scanner", "Task", "Status", "Time"]))
-    .row_highlight_style(highlight_style(state.focus == Focus::Tasks))
+    .row_highlight_style(styles::Panel::selection(state.focus == Focus::Tasks))
     .block(panel_block(
         format!(" Tasks ({count}) "),
         state.focus == Focus::Tasks,
@@ -1147,7 +1193,7 @@ fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         ],
     )
     .header(header_row(["Id", "Title", "Notes", "Issues"]))
-    .row_highlight_style(highlight_style(state.focus == Focus::Sessions))
+    .row_highlight_style(styles::Panel::selection(state.focus == Focus::Sessions))
     .block(panel_block(
         format!(" Sessions ({count}) "),
         state.focus == Focus::Sessions,
@@ -1189,7 +1235,7 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         ],
     )
     .header(header_row(["Id", "Name", "Value", "Target"]))
-    .row_highlight_style(highlight_style(state.focus == Focus::Notes))
+    .row_highlight_style(styles::Panel::selection(state.focus == Focus::Notes))
     .block(panel_block(
         format!(" Notes ({count}) "),
         state.focus == Focus::Notes,
@@ -1222,7 +1268,7 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     );
     let table = Table::new(rows, [Constraint::Length(8), name_col, Constraint::Fill(1)])
         .header(header_row(["Id", "Name", "Title"]))
-        .row_highlight_style(highlight_style(state.focus == Focus::Issues))
+        .row_highlight_style(styles::Panel::selection(state.focus == Focus::Issues))
         .block(panel_block(
             format!(" Issues ({count}) "),
             state.focus == Focus::Issues,
@@ -1246,36 +1292,25 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new(Span::styled(help, style::footer())),
+        Paragraph::new(Span::styled(help, styles::Panel::footer())),
         help_area,
     );
     if let Some(last) = state.log.back() {
         frame.render_widget(
-            Paragraph::new(Span::styled(last.clone(), style::text_dim())),
+            Paragraph::new(Span::styled(last.clone(), styles::Text::dim())),
             log_area,
         );
     }
 }
 
-fn highlight_style(active: bool) -> ratatui::style::Style {
-    if active {
-        style::selection()
-    } else {
-        style::selection_inactive()
-    }
-}
-
 fn panel_block(title: String, active: bool) -> Block<'static> {
-    let border = if active {
-        style::focus_border()
-    } else {
-        style::panel_border(false)
-    };
-    Block::bordered().title(title).border_style(border)
+    Block::bordered()
+        .title(title)
+        .border_style(styles::Panel::border(active))
 }
 
 fn header_row<const N: usize>(names: [&'static str; N]) -> Row<'static> {
-    Row::new(names.map(|n| Cell::from(Span::styled(n, style::text_dim()))))
+    Row::new(names.map(|n| Cell::from(Span::styled(n, styles::Text::dim()))))
 }
 
 fn short_id(id: &str) -> String {
@@ -1288,7 +1323,7 @@ fn id_span(id: &str, selected: bool) -> Span<'static> {
     if selected {
         Span::raw(short_id(id))
     } else {
-        Span::styled(short_id(id), style::text_dim())
+        Span::styled(short_id(id), styles::Text::dim())
     }
 }
 

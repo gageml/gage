@@ -13,7 +13,7 @@ use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState};
 
-use crate::style;
+use crate::styles;
 
 #[derive(Default)]
 pub(crate) struct ItemTable {
@@ -118,5 +118,5 @@ pub(crate) fn scrollbar(active: bool) -> Scrollbar<'static> {
         .end_symbol(Some("↓"))
         .thumb_symbol("┃")
         .track_symbol(Some("│"))
-        .style(style::scrollbar(active))
+        .style(styles::Panel::scrollbar(active))
 }

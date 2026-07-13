@@ -9,7 +9,7 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::style;
+use crate::styles;
 
 pub fn render(input: &str) -> Vec<Line<'static>> {
     let parser = Parser::new_ext(
@@ -46,7 +46,7 @@ impl Renderer {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(t) => self.text(&t),
-            Event::Code(t) => self.push_span(Span::styled(t.to_string(), style::md_code())),
+            Event::Code(t) => self.push_span(Span::styled(t.to_string(), styles::Markdown::code())),
             Event::SoftBreak => self.push_span(Span::raw(" ")),
             Event::HardBreak => self.flush_line(),
             Event::Rule => self.rule(),
@@ -64,8 +64,11 @@ impl Renderer {
             Tag::Heading { level, .. } => {
                 self.block_break();
                 let hashes = "#".repeat(heading_level(level));
-                self.push_span(Span::styled(format!("{hashes} "), style::md_heading()));
-                self.style_stack.push(style::md_heading());
+                self.push_span(Span::styled(
+                    format!("{hashes} "),
+                    styles::Markdown::heading(),
+                ));
+                self.style_stack.push(styles::Markdown::heading());
             }
             Tag::BlockQuote(_) => {
                 self.block_break();
@@ -109,7 +112,7 @@ impl Renderer {
             Tag::Strikethrough => self
                 .style_stack
                 .push(Style::new().add_modifier(Modifier::CROSSED_OUT)),
-            Tag::Link { .. } => self.style_stack.push(style::md_link()),
+            Tag::Link { .. } => self.style_stack.push(styles::Markdown::link()),
             _ => {}
         }
     }
@@ -154,7 +157,7 @@ impl Renderer {
                     self.flush_line();
                 }
                 if !line.is_empty() {
-                    self.push_span(Span::styled(line.to_string(), style::md_code()));
+                    self.push_span(Span::styled(line.to_string(), styles::Markdown::code()));
                 }
             }
         } else {
@@ -188,7 +191,7 @@ impl Renderer {
         if self.blockquote_depth > 0 {
             self.cur.push(Span::styled(
                 "│ ".repeat(self.blockquote_depth),
-                style::md_blockquote(),
+                styles::Markdown::blockquote(),
             ));
         }
     }
@@ -216,7 +219,7 @@ impl Renderer {
 
     fn rule(&mut self) {
         self.block_break();
-        self.push_span(Span::styled("─".repeat(20), style::text_dim()));
+        self.push_span(Span::styled("─".repeat(20), styles::Text::dim()));
         self.flush_line();
     }
 
