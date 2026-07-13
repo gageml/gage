@@ -491,10 +491,10 @@ enum Dialog {
         note: NoteItem,
         scroll: u16,
     },
-    /// Captured scan output (`{scan_id}.out`), reloaded from the file
-    /// while a live scan runs.
+    /// Captured scan streams (`{scan_id}.{err,out,log}`), reloaded
+    /// from the files while a live scan runs.
     Log {
-        content: String,
+        content: Vec<Line<'static>>,
         scroll: u16,
         loaded: Instant,
     },
@@ -584,18 +584,35 @@ impl ViewState {
         }
     }
 
-    /// Read the captured output; absence or unreadability renders as a
-    /// message rather than an error, since a scan may simply have
-    /// produced no output (the file is created lazily).
-    fn read_log(&self) -> String {
-        let Some(path) = &self.model.out_path else {
-            return String::new();
+    /// Read the scan's captured streams — `.err` (in red), `.out`,
+    /// then `.log`, separated by a blank line. Absent or empty files
+    /// are skipped; the files are created lazily, so a scan may simply
+    /// have produced nothing.
+    fn read_log(&self) -> Vec<Line<'static>> {
+        let Some(out_path) = &self.model.out_path else {
+            return Vec::new();
         };
-        match std::fs::read_to_string(path) {
-            Ok(s) if s.is_empty() => "(no output)".to_string(),
-            Ok(s) => s,
-            Err(_) => "(no output captured)".to_string(),
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for ext in ["err", "out", "log"] {
+            let Ok(content) = std::fs::read_to_string(out_path.with_extension(ext)) else {
+                continue;
+            };
+            if content.is_empty() {
+                continue;
+            }
+            if !lines.is_empty() {
+                lines.push(Line::raw(""));
+            }
+            lines.extend(content.lines().map(|l| match ext {
+                "err" => Line::from(Span::styled(l.to_string(), style::error())),
+                "log" => log_line(l),
+                _ => Line::raw(l.to_string()),
+            }));
         }
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled("(no output)", style::text_dim())));
+        }
+        lines
     }
 
     /// Quitting a finished view is immediate; quitting mid-scan stops
@@ -822,18 +839,37 @@ fn draw_note_detail(frame: &mut Frame, note: &NoteItem, scroll: u16) -> (u16, u1
     (body.height, max_scroll)
 }
 
+/// Style a tracing log line by its level. The files are written
+/// without ANSI codes; color is applied here by classifying the level
+/// token, which the default fmt layout places second (after the
+/// timestamp). Panics from the gage-log hook use the same slot.
+/// Unrecognized lines (e.g. backtrace continuations) render plain.
+fn log_line(line: &str) -> Line<'static> {
+    let level = line.split_whitespace().nth(1);
+    let level_style = match level {
+        Some("ERROR" | "PANIC") => Some(style::error()),
+        Some("WARN") => Some(style::running()),
+        Some("DEBUG" | "TRACE") => Some(style::text_dim()),
+        _ => None,
+    };
+    match level_style {
+        Some(st) => Line::from(Span::styled(line.to_string(), st)),
+        None => Line::raw(line.to_string()),
+    }
+}
+
 /// Renders the scan output dialog and returns `(page, max_scroll)`
 /// for the scroll keys.
-fn draw_log_dialog(frame: &mut Frame, content: &str, scroll: u16) -> (u16, u16) {
+fn draw_log_dialog(frame: &mut Frame, content: &[Line<'static>], scroll: u16) -> (u16, u16) {
     let area = detail_rect(frame.area());
     frame.render_widget(Clear, area);
     let block = Block::bordered()
-        .title(" Output ")
+        .title(" Log ")
         .padding(Padding::horizontal(1));
     let body = block.inner(area);
     frame.render_widget(block, area);
 
-    let paragraph = Paragraph::new(content.to_string()).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(content.to_vec()).wrap(Wrap { trim: false });
     let scroll_width = body.width.saturating_sub(1);
     let total = u16::try_from(paragraph.line_count(scroll_width)).unwrap_or(u16::MAX);
     let max_scroll = total.saturating_sub(body.height);
