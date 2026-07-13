@@ -2,7 +2,7 @@ use gage::{DateTime, call_agent};
 
 pub const SCANNER = #{
     name: "sub-agents",
-    description: "Test use of sub-agents",
+    description: "Demonstrate sub-agents",
     tasks: #{ sub_agents: #{} },
 };
 

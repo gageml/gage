@@ -2,7 +2,7 @@ use gage::{call_agent, scan, write_note};
 
 pub const SCANNER = #{
     name: "scanner-tool",
-    description: "Test use of scanner defined tool",
+    description: "Demonstrate scanner defined tool",
     tasks: #{ scanner_tool: #{} },
 };
 

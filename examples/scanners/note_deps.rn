@@ -2,7 +2,7 @@ use gage::{DateTime, scan, write_note};
 
 pub const SCANNER = #{
     name: "note-deps",
-    description: "Test note writing with deps",
+    description: "Show note writing with deps",
     tasks: #{
         a: #{ notes: #{ writes: #{ "a": "Test note a" } } },
         b: #{ notes: #{ writes: #{ "b": "Test note b" }, wants: ["a"] } },

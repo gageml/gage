@@ -2,7 +2,7 @@ use gage::call_agent;
 
 pub const SCANNER = #{
     name: "agent-loop",
-    description: "Test non-interactive agent loop",
+    description: "Demonstrate non-interactive agent loop",
     tasks: #{ agent_loop: #{} },
 };
 

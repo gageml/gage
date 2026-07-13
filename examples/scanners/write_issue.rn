@@ -2,7 +2,7 @@ use gage::{Ignore, scan, write_issue, write_note};
 
 pub const SCANNER = #{
     name: "write-issue",
-    description: "Test issue writing with note dep",
+    description: "Demonstrate issue writing with note dep",
     tasks: #{
         note: #{ notes: #{ writes: #{ "baz": "Sample note" } } },
         issue_keep_status: #{
