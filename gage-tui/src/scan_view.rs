@@ -355,7 +355,7 @@ async fn event_loop(
     let mut state = ViewState::new(model);
     let stop_input = Arc::new(AtomicBool::new(false));
     let mut input = spawn_input_thread(Arc::clone(&stop_input));
-    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut events_closed = false;
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -1183,7 +1183,12 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     frame.render_widget(Paragraph::new(counts), badges);
 }
 
+/// Indicatif-style braille spinner; one frame per 100ms redraw tick
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
+    let frame_idx = (state.started.elapsed().as_millis() / 100) as usize % SPINNER.len();
+    let spinner = *SPINNER.get(frame_idx).expect("mod len is in bounds");
     let selected = state.tasks.selected_index();
     let rows: Vec<Row> = state
         .model
@@ -1191,6 +1196,13 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .iter()
         .enumerate()
         .map(|(i, t)| {
+            let glyph = match t.state {
+                TaskState::Pending => "□",
+                TaskState::Running => spinner,
+                TaskState::Completed => "✓",
+                TaskState::Error => "✗",
+                TaskState::Skipped => "⊘",
+            };
             let (label, label_style) = match t.state {
                 TaskState::Pending => ("pending", styles::RunStatus::pending()),
                 TaskState::Running => ("running", styles::RunStatus::running()),
@@ -1213,7 +1225,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
             };
             Row::new(vec![
-                Cell::from(t.id.scanner.clone()),
+                Cell::from(format!("{glyph} {}", t.id.scanner)),
                 Cell::from(t.id.task.clone()),
                 Cell::from(status),
                 Cell::from(time),
@@ -1221,11 +1233,15 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         })
         .collect();
     let count = rows.len();
-    let scanner_col = fit_col(
+    // Widen for the "<glyph> " prefix on each scanner cell
+    let scanner_col = match fit_col(
         "Scanner",
         state.model.tasks.iter().map(|t| t.id.scanner.as_str()),
         area,
-    );
+    ) {
+        Constraint::Length(w) => Constraint::Length(w + 2),
+        c => c,
+    };
     let table = Table::new(
         rows,
         [
