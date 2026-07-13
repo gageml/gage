@@ -1,0 +1,13 @@
+pub const SCANNER = #{
+    name: "log",
+    description: "Demonstrate logging",
+    tasks: #{ log: #{} },
+};
+
+pub async fn log() {
+    println!("Standard output message");
+    log::debug!("Debug message");
+    log::info!("Informational message");
+    log::warn!("Warning message");
+    log::error!("Error message");
+}
