@@ -218,13 +218,12 @@ pub fn show(args: IssueShowArgs) {
         ("id", issue.id.clone()),
         ("name", issue.name.clone()),
         ("title", issue.title.clone()),
-        ("status", issue.status.as_str().to_string()),
         (
-            "closed_reason",
-            issue
-                .closed_reason
-                .map(|r| r.as_str().to_string())
-                .unwrap_or_default(),
+            "status",
+            match issue.closed_reason {
+                Some(r) => format!("{} ({})", issue.status.as_str(), r.as_str()),
+                None => issue.status.as_str().to_string(),
+            },
         ),
         ("description", description_display),
         ("author", issue.author.clone()),
