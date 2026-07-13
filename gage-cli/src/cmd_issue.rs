@@ -36,8 +36,8 @@ pub enum IssueCommand {
     /// Close an issue
     Close(IssueCloseArgs),
 
-    /// Reopen a closed issue
-    Reopen(IssueReopenArgs),
+    /// Open a pending or closed issue
+    Open(IssueOpenArgs),
 
     /// Comment on an issue
     Comment(IssueCommentArgs),
@@ -75,11 +75,11 @@ pub struct IssueDeleteArgs {
 }
 
 #[derive(Args)]
-pub struct IssueReopenArgs {
+pub struct IssueOpenArgs {
     /// Issue ID (or prefix)
     id: String,
 
-    /// Message explaining issue re-open
+    /// Message explaining issue open
     #[arg(short, long)]
     message: Option<String>,
 
@@ -464,7 +464,7 @@ pub fn close(args: IssueCloseArgs) {
     });
 }
 
-pub fn reopen(args: IssueReopenArgs) {
+pub fn open(args: IssueOpenArgs) {
     let conn = db::open_db().unwrap();
     let target_issue = match issue::get(&conn, &args.id) {
         Ok(i) => i,
@@ -479,7 +479,7 @@ pub fn reopen(args: IssueReopenArgs) {
         std::process::exit(1);
     }
 
-    dialog::run("Reopen issue", || {
+    dialog::run("Open issue", || {
         cli::log::step(format!(
             "Issue\n{} {}",
             console::style(short_uuid(&target_issue.id)).dim(),
@@ -487,7 +487,7 @@ pub fn reopen(args: IssueReopenArgs) {
         ))?;
 
         if !args.yes {
-            let confirmed = cli::confirm("Reopen this issue?")
+            let confirmed = cli::confirm("Open this issue?")
                 .initial_value(true)
                 .interact()?;
             if !confirmed {
@@ -506,7 +506,7 @@ pub fn reopen(args: IssueReopenArgs) {
         )
         .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
-        Ok(format!("Reopened issue {}", short_uuid(&target_issue.id)).into())
+        Ok(format!("Opened issue {}", short_uuid(&target_issue.id)).into())
     });
 }
 

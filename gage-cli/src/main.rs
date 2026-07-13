@@ -242,7 +242,7 @@ async fn main() {
                 cmd_issue::IssueCommand::Add(args) => cmd_issue::add(args),
                 cmd_issue::IssueCommand::Delete(args) => cmd_issue::delete(args),
                 cmd_issue::IssueCommand::Close(args) => cmd_issue::close(args),
-                cmd_issue::IssueCommand::Reopen(args) => cmd_issue::reopen(args),
+                cmd_issue::IssueCommand::Open(args) => cmd_issue::open(args),
                 cmd_issue::IssueCommand::Comment(args) => cmd_issue::comment(args),
             },
             Command::Test(args) => cmd_test::run(args).await,
