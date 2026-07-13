@@ -49,19 +49,21 @@ pub fn role_dir(role: &str) -> PathBuf {
 pub fn init(role: &str) -> io::Result<WorkerGuard> {
     let ts = Utc::now().format("%Y-%m-%dT%H-%M-%S");
     let name = format!("{ts}-{}", std::process::id());
-    init_named(role, &name)
+    init_named(role, &name, "warn")
 }
 
 /// Installs the tracing subscriber for `role`, logging to
 /// `~/.gage/log/{role}/{name}.log`. Use when the process has a domain
 /// identity (e.g. a scan id) that should key its logs.
-pub fn init_named(role: &str, name: &str) -> io::Result<WorkerGuard> {
+/// `default_filter` applies when the `GAGE_LOG` env var is unset.
+pub fn init_named(role: &str, name: &str, default_filter: &str) -> io::Result<WorkerGuard> {
     let dir = role_dir(role);
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{name}.log"));
     let (writer, guard) = tracing_appender::non_blocking(LazyFile::new(path.clone()));
 
-    let filter = EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter =
+        EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new(default_filter));
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_ansi(false)

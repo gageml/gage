@@ -591,7 +591,7 @@ async fn run_scan(mut args: ScanRunArgs) {
     // The scan id is minted here — before the runner — so the log
     // files and the db rows share one key from the start.
     let scan_id = gage_core::uuid::new_uuid();
-    let _log_guard = match gage_log::init_named("scan", &scan_id) {
+    let _log_guard = match gage_log::init_named("scan", &scan_id, "warn,gage_runtime=info") {
         Ok(g) => g,
         Err(e) => {
             eprintln!("error initializing scan log: {e}");
