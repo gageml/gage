@@ -23,6 +23,12 @@ pub fn panel_border(active: bool) -> Style {
     }
 }
 
+/// Message dialogs render in reverse video so they stand out against
+/// the view beneath them.
+pub fn dialog() -> Style {
+    Style::new().add_modifier(Modifier::REVERSED)
+}
+
 pub fn selection() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
 }

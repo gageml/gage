@@ -348,6 +348,26 @@ fn load_scan_model(
     })
 }
 
+/// One reconcile pass for the live view: load the scan's results from
+/// the db as a Results event, or a Log event when the read fails.
+fn reconcile_results(
+    db: &Arc<Mutex<gage_db::rusqlite::Connection>>,
+    scan_id: &str,
+) -> gage_tui::scan_view::Event {
+    let results = {
+        let conn = db.lock().unwrap();
+        load_scan_results(&conn, scan_id)
+    };
+    match results {
+        Ok(r) => gage_tui::scan_view::Event::Results {
+            notes: r.notes,
+            issues: r.issues,
+            sessions: r.sessions,
+        },
+        Err(e) => gage_tui::scan_view::Event::Log(format!("results refresh failed: {e}")),
+    }
+}
+
 /// Notes, issues, and per-session counts recorded for a scan — shared
 /// between the historical loader and the live view's reconcile poll.
 struct ScanResults {
@@ -1017,33 +1037,29 @@ async fn run_scan_tui(
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // Reconcile notes/issues from the db once a second — the same read
-    // the historical loader uses. Runs until the view closes (the view
-    // lingers after the scan finishes, so results keep converging).
+    // Set when the runner returns; the reconcile poll exits on its
+    // next tick without re-polling — the finish handler has already
+    // sent the final reconcile.
+    let scan_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Reconcile notes/issues from the db once a second while the scan
+    // runs — the same read the historical loader uses.
     let results_poll = {
         let tx = tx.clone();
         let db = db.clone();
         let cancel = cancel.clone();
         let scan_id = scan_id.clone();
+        let scan_done = Arc::clone(&scan_done);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = tick.tick() => {
-                        let results = {
-                            let conn = db.lock().unwrap();
-                            load_scan_results(&conn, &scan_id)
-                        };
-                        let ev = match results {
-                            Ok(r) => scan_view::Event::Results {
-                                notes: r.notes,
-                                issues: r.issues,
-                                sessions: r.sessions,
-                            },
-                            Err(e) => scan_view::Event::Log(format!("results refresh failed: {e}")),
-                        };
-                        if tx.send(ev).is_err() {
+                        if scan_done.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        if tx.send(reconcile_results(&db, &scan_id)).is_err() {
                             break;
                         }
                     }
@@ -1070,6 +1086,10 @@ async fn run_scan_tui(
             },
         )
         .await;
+        // Finish handling: stop the poll, send one final reconcile so
+        // the UI is current, then announce completion.
+        scan_done.store(true, std::sync::atomic::Ordering::Relaxed);
+        send_view_event(&event_tx, reconcile_results(&db, &scan_id));
         send_view_event(&event_tx, scan_view::Event::Finished);
         result
     };

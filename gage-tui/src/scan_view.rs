@@ -29,6 +29,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::dialog;
 use crate::item_table::{ItemTable, scrollbar};
 use crate::{markdown, style};
 
@@ -399,6 +400,12 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
             }
             return false;
         }
+        Dialog::ScanDone => {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
+                state.dialog = Dialog::None;
+            }
+            return false;
+        }
         Dialog::Note { scroll, .. } | Dialog::Log { scroll, .. } => {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
@@ -491,6 +498,8 @@ enum Dialog {
         scroll: u16,
         loaded: Instant,
     },
+    /// A live scan just finished
+    ScanDone,
 }
 
 impl ViewState {
@@ -599,10 +608,18 @@ impl ViewState {
         false
     }
 
+    /// Record completion and announce it. The caller sends a final db
+    /// reconcile ahead of the Finished event, so the results on screen
+    /// are current when the dialog appears. Historical views start
+    /// finished and never transition. Skipped when another dialog is
+    /// up — completion still shows in the header and footer.
     fn mark_finished(&mut self) {
         if !self.model.finished {
             self.model.finished = true;
             self.model.elapsed = Some(self.started.elapsed());
+            if matches!(self.dialog, Dialog::None) {
+                self.dialog = Dialog::ScanDone;
+            }
         }
     }
 
@@ -729,6 +746,10 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         Dialog::Log {
             content, scroll, ..
         } => Some(draw_log_dialog(frame, content, *scroll)),
+        Dialog::ScanDone => {
+            draw_scan_done(frame, state.model.elapsed);
+            None
+        }
         Dialog::None => None,
     };
     if let Some((page, max_scroll)) = detail_geometry {
@@ -843,33 +864,15 @@ fn detail_rect(frame: Rect) -> Rect {
 }
 
 fn draw_confirm_quit(frame: &mut Frame) {
-    let frame_area = frame.area();
-    let width = 30u16.min(frame_area.width.saturating_sub(2));
-    let height = 6u16.min(frame_area.height.saturating_sub(2));
-    let area = Rect {
-        x: frame_area.x + (frame_area.width.saturating_sub(width)) / 2,
-        y: frame_area.y + (frame_area.height.saturating_sub(height)) / 2,
-        width,
-        height,
+    dialog::draw_message(frame, "Stop the current scan?", "y / n");
+}
+
+fn draw_scan_done(frame: &mut Frame, elapsed: Option<Duration>) {
+    let message = match elapsed {
+        Some(e) => format!("Scan completed in {}", fmt_duration(e)),
+        None => "Scan completed".to_string(),
     };
-    frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .title(Span::styled("Confirm", style::text_dim()))
-        .border_style(style::text_dim());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [_, msg, _, hint] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    frame.render_widget(Paragraph::new("Stop the current scan?").centered(), msg);
-    frame.render_widget(
-        Paragraph::new(Span::styled("y / n", style::text_dim())).centered(),
-        hint,
-    );
+    dialog::draw_message(frame, &message, "Close");
 }
 
 fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
