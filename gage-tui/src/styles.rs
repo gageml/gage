@@ -128,6 +128,18 @@ impl Text {
     pub fn accent() -> Style {
         Style::new().fg(Color::LightCyan)
     }
+
+    /// Full-width section header, e.g. message sections in the session
+    /// dialog. DarkGray is the one palette slot themes map to a
+    /// with-the-theme gray; no relative lighten/darken exists in ANSI.
+    pub fn header() -> Style {
+        Style::new().bg(Color::DarkGray)
+    }
+
+    /// Secondary text within a section header (e.g. the line number)
+    pub fn header_dim() -> Style {
+        Style::new().bg(Color::DarkGray).add_modifier(Modifier::DIM)
+    }
 }
 
 /// JSON syntax highlighting (see `syntax.rs`).

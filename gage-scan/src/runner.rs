@@ -544,8 +544,11 @@ fn emit_vm_error_with_message(e: &rune::runtime::VmError, sources: &Sources, msg
     write_vm_error(&mut writer, e, sources, msg);
 }
 
+/// Render a VM error as plain text. No ANSI: the string lands in the
+/// `.err` capture file, the persisted task outcome, and the TUI — all
+/// of which need it formatting-free.
 pub(crate) fn render_vm_error(e: &rune::runtime::VmError, sources: &Sources, msg: &str) -> String {
-    let mut buf = rune::termcolor::Buffer::ansi();
+    let mut buf = rune::termcolor::Buffer::no_color();
     write_vm_error(&mut buf, e, sources, msg);
     String::from_utf8(buf.into_inner()).unwrap()
 }

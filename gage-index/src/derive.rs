@@ -328,7 +328,10 @@ impl RowBuilders {
 /// Whether an entry qualifies as a `message` table row: a user or
 /// assistant entry whose `message.content` is an array or a string.
 /// Malformed content shapes are entry rows but not message rows.
-fn is_message_row(entry: &serde_json::Value) -> bool {
+/// True when an entry is a message row — the same predicate the query
+/// layer's `message` table uses: `type IN ('user','assistant')` with a
+/// well-formed `message.content`.
+pub fn is_message_row(entry: &serde_json::Value) -> bool {
     matches!(
         entry.get("type").and_then(|v| v.as_str()),
         Some("user" | "assistant")

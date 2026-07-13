@@ -2871,6 +2871,7 @@ dependencies = [
  "datafusion",
  "gage-claude",
  "gage-db",
+ "gage-index",
  "gage-query",
  "pulldown-cmark",
  "ratatui",

@@ -4,21 +4,37 @@ pub const SCANNER = #{
     name: "write-issue",
     description: "Demonstrate issue writing with note dep",
     tasks: #{
-        note: #{ notes: #{ writes: #{ "baz": "Sample note" } } },
+        scan_note: #{ notes: #{ writes: #{ "foo": "Sample note" } } },
+        session_note: #{ notes: #{ writes: #{ "bar": "Sample note" } } },
         issue_keep_status: #{
-            notes: #{ wants: ["baz"] },
-            issues: #{ writes: #{ "test.baz": "A non-issue" } },
+            notes: #{ wants: ["bar"] },
+            issues: #{ writes: #{ "baz": "A non-issue" } },
         },
-        issue_pending: #{
-            issues: #{ writes: #{ "test.bam": "A non-issue" } },
-        },
+        issue_pending: #{ issues: #{ writes: #{ "bam": "A non-issue" } } },
     },
 };
 
-pub async fn note() {
-    write_note(#{ name: "baz", value: "Hi baz", target: #{ scan: scan().id } })
+pub async fn scan_note() {
+    write_note(#{ name: "foo", value: "Hi foo", target: #{ scan: scan().id } })
         .replace_prev()
         .await?
+}
+
+pub async fn session_note() {
+    if let Some(s) = scan().sessions().next() {
+        if let Some(m) = s.messages().await?.iter().next() {
+            write_note(
+                #{
+                    name: "bar",
+                    value: "Hi bar",
+                    target: #{ session: s.id, line: m.line },
+                },
+            )
+            .replace_prev()
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn issue_keep_status() {

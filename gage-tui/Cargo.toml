@@ -7,6 +7,7 @@ edition.workspace = true
 datafusion = { workspace = true }
 gage-claude = { path = "../gage-claude" }
 gage-db = { path = "../gage-db" }
+gage-index = { path = "../gage-index" }
 gage-query = { path = "../gage-query" }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 serde_json = { workspace = true }

@@ -953,22 +953,7 @@ fn draw_stack(frame: &mut Frame, state: &mut AppState, sections: Vec<Section>, a
         y = y.saturating_add(section.height);
     }
 
-    let dst = frame.buffer_mut();
-    let scroll = state.body_scroll;
-    for row in 0..area.height {
-        let src_y = scroll.saturating_add(row);
-        if src_y >= total {
-            break;
-        }
-        for col in 0..area.width {
-            if let (Some(src_cell), Some(dst_cell)) = (
-                virt.cell(ratatui::layout::Position::new(col, src_y)),
-                dst.cell_mut(ratatui::layout::Position::new(area.x + col, area.y + row)),
-            ) {
-                *dst_cell = src_cell.clone();
-            }
-        }
-    }
+    crate::stack::blit(frame, area, &virt, state.body_scroll);
 }
 
 fn draw_scrollable(frame: &mut Frame, state: &mut AppState, lines: Vec<Line<'static>>, area: Rect) {

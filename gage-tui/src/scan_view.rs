@@ -19,19 +19,18 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Cell, Clear, Gauge, Padding, Paragraph, Row, ScrollbarState, Table, Wrap,
-};
+use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::dialog;
-use crate::item_table::{ItemTable, scrollbar};
-use crate::{markdown, styles};
+use crate::item_table::ItemTable;
+use crate::scroll::ScrollView;
+use crate::{markdown, message, styles};
 
 /// A scan task identity, `{scanner}::{task}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +44,8 @@ pub struct TaskId {
 pub struct SessionEntry {
     pub id: String,
     pub title: String,
+    /// The session's JSONL source, read by the session dialog
+    pub path: PathBuf,
 }
 
 /// Everything known before a live scan starts.
@@ -107,6 +108,8 @@ impl TaskState {
 pub struct SessionItem {
     pub id: String,
     pub title: String,
+    /// JSONL source; None when the session is no longer on disk
+    pub path: Option<PathBuf>,
     pub notes: usize,
     pub issues: usize,
 }
@@ -122,6 +125,8 @@ pub struct NoteItem {
     pub value_full: String,
     /// Target URI, e.g. `session:{id}`
     pub target: String,
+    /// Short display form of the target for the notes table
+    pub target_cell: String,
     pub author: String,
     /// Creation time display string
     pub created: String,
@@ -183,6 +188,7 @@ impl ScanModel {
             .map(|s| SessionItem {
                 id: s.id,
                 title: s.title,
+                path: Some(s.path),
                 notes: 0,
                 issues: 0,
             })
@@ -415,9 +421,7 @@ fn spawn_input_thread(stop: Arc<AtomicBool>) -> UnboundedReceiver<TermEvent> {
 
 /// Returns true when the view should close.
 fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
-    let page = state.detail_page.max(1);
-    let max_scroll = state.detail_max_scroll;
-    match &mut state.dialog {
+    match &state.dialog {
         Dialog::ConfirmQuit => {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => return true,
@@ -434,17 +438,19 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
             }
             return false;
         }
-        Dialog::Note { scroll, .. } | Dialog::Issue { scroll, .. } | Dialog::Log { scroll, .. } => {
+        Dialog::Note { .. }
+        | Dialog::Issue { .. }
+        | Dialog::Session { .. }
+        | Dialog::Log { .. } => {
+            let page = state.scroll_view.page() as isize;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *scroll = scroll.saturating_add(1).min(max_scroll);
-                }
-                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-                KeyCode::PageDown => *scroll = scroll.saturating_add(page).min(max_scroll),
-                KeyCode::PageUp => *scroll = scroll.saturating_sub(page),
-                KeyCode::Char('g') => *scroll = 0,
-                KeyCode::Char('G') => *scroll = max_scroll,
+                KeyCode::Down | KeyCode::Char('j') => state.scroll_view.scroll_by(1),
+                KeyCode::Up | KeyCode::Char('k') => state.scroll_view.scroll_by(-1),
+                KeyCode::PageDown => state.scroll_view.scroll_by(page),
+                KeyCode::PageUp => state.scroll_view.scroll_by(-page),
+                KeyCode::Char('g') => state.scroll_view.scroll_to_top(),
+                KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
                 _ => {}
             }
             return false;
@@ -466,6 +472,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
         KeyCode::Char('G') => state.select_last(),
         KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
         KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
+        KeyCode::Enter if state.focus == Focus::Sessions => state.open_selected_session(),
         KeyCode::Char('l') => state.open_log(),
         _ => {}
     }
@@ -504,10 +511,8 @@ struct ViewState {
     log: VecDeque<String>,
     started: Instant,
     dialog: Dialog,
-    /// Scroll geometry of the open detail dialog, recorded at draw
-    /// time so scroll keys know the page size and limit
-    detail_page: u16,
-    detail_max_scroll: u16,
+    /// Scroll state and layout cache for the open content dialog
+    scroll_view: ScrollView,
 }
 
 enum Dialog {
@@ -518,18 +523,22 @@ enum Dialog {
     /// refresh can't shift what's being read.
     Note {
         note: NoteItem,
-        scroll: u16,
     },
     /// Zoomed issue detail; a snapshot, like Note
     Issue {
         issue: Box<IssueItem>,
-        scroll: u16,
+    },
+    /// Zoomed session contents, read from the JSONL at open. Section
+    /// headers are padded to the dialog width at draw time, so the
+    /// content is kept structured rather than pre-flattened.
+    Session {
+        id: String,
+        content: SessionContent,
     },
     /// Captured scan streams (`{scan_id}.{err,out,log}`), reloaded
     /// from the files while a live scan runs.
     Log {
         content: Vec<Line<'static>>,
-        scroll: u16,
         loaded: Instant,
     },
     /// A live scan just finished
@@ -547,8 +556,7 @@ impl ViewState {
             log: VecDeque::new(),
             started: Instant::now(),
             dialog: Dialog::None,
-            detail_page: 0,
-            detail_max_scroll: 0,
+            scroll_view: ScrollView::new(),
             model,
         };
         state.sync_tables();
@@ -575,10 +583,8 @@ impl ViewState {
             return;
         };
         if let Some(note) = self.model.notes.get(i) {
-            self.dialog = Dialog::Note {
-                note: note.clone(),
-                scroll: 0,
-            };
+            self.scroll_view.reset();
+            self.dialog = Dialog::Note { note: note.clone() };
         }
     }
 
@@ -587,20 +593,34 @@ impl ViewState {
             return;
         };
         if let Some(issue) = self.model.issues.get(i) {
+            self.scroll_view.reset();
             self.dialog = Dialog::Issue {
                 issue: Box::new(issue.clone()),
-                scroll: 0,
             };
         }
+    }
+
+    fn open_selected_session(&mut self) {
+        let Some(i) = self.sessions.selected_index() else {
+            return;
+        };
+        let Some(session) = self.model.sessions.get(i) else {
+            return;
+        };
+        self.scroll_view.reset();
+        self.dialog = Dialog::Session {
+            id: session.id.clone(),
+            content: session_content(session),
+        };
     }
 
     fn open_log(&mut self) {
         if self.model.out_path.is_none() {
             return;
         }
+        self.scroll_view.reset();
         self.dialog = Dialog::Log {
             content: self.read_log(),
-            scroll: 0,
             loaded: Instant::now(),
         };
     }
@@ -622,11 +642,11 @@ impl ViewState {
         if let Dialog::Log {
             content: current,
             loaded,
-            ..
         } = &mut self.dialog
         {
             *current = content;
             *loaded = Instant::now();
+            self.scroll_view.invalidate();
         }
     }
 
@@ -800,32 +820,42 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     draw_notes(frame, notes, state);
     draw_issues(frame, issues, state);
     draw_footer(frame, footer, state);
-    let detail_geometry = match &state.dialog {
-        Dialog::ConfirmQuit => {
-            draw_confirm_quit(frame);
-            None
+    // Split borrows: the dialog holds the content, the scroll view
+    // holds position and layout cache
+    let ViewState {
+        dialog,
+        scroll_view,
+        model,
+        ..
+    } = state;
+    match dialog {
+        Dialog::ConfirmQuit => draw_confirm_quit(frame),
+        Dialog::Note { note } => {
+            scroll_view.render_modal(frame, format!(" Note {} ", note.id), |_| {
+                vec![note_lines(note)]
+            })
         }
-        Dialog::Note { note, scroll } => Some(draw_note_detail(frame, note, *scroll)),
-        Dialog::Issue { issue, scroll } => Some(draw_issue_detail(frame, issue, *scroll)),
-        Dialog::Log {
-            content, scroll, ..
-        } => Some(draw_log_dialog(frame, content, *scroll)),
-        Dialog::ScanDone => {
-            draw_scan_done(frame, state.model.elapsed);
-            None
+        Dialog::Issue { issue } => {
+            scroll_view.render_modal(frame, format!(" Issue {} ", issue.id), |_| {
+                vec![issue_lines(issue)]
+            })
         }
-        Dialog::None => None,
-    };
-    if let Some((page, max_scroll)) = detail_geometry {
-        state.detail_page = page;
-        state.detail_max_scroll = max_scroll;
+        Dialog::Session { id, content } => {
+            scroll_view.render_modal(frame, format!(" Session {id} "), |width| {
+                session_sections(content, width as usize)
+            })
+        }
+        Dialog::Log { content, .. } => {
+            scroll_view.render_modal(frame, " Log ".to_string(), |_| vec![content.clone()]);
+        }
+        Dialog::ScanDone => draw_scan_done(frame, model.elapsed),
+        Dialog::None => {}
     }
 }
 
-/// Renders the note detail modal and returns `(page, max_scroll)` for
-/// the scroll keys. Fields lay out as a page: caption above content,
-/// value and explanation rendered as markdown.
-fn draw_note_detail(frame: &mut Frame, note: &NoteItem, scroll: u16) -> (u16, u16) {
+/// Note detail content: caption/value header columns, then the value
+/// and explanation rendered as markdown.
+fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
     let mut lines = header_lines(&[
         ("Name", &note.name),
         ("Target", &note.target),
@@ -837,12 +867,11 @@ fn draw_note_detail(frame: &mut Frame, note: &NoteItem, scroll: u16) -> (u16, u1
     if let Some(explanation) = &note.explanation {
         section(&mut lines, "Explanation", markdown::render(explanation));
     }
-    draw_detail(frame, format!(" Note {} ", note.id), lines, scroll)
+    lines
 }
 
-/// Renders the issue detail modal and returns `(page, max_scroll)`
-/// for the scroll keys.
-fn draw_issue_detail(frame: &mut Frame, issue: &IssueItem, scroll: u16) -> (u16, u16) {
+/// Issue detail content, mirroring `gage issue show`.
+fn issue_lines(issue: &IssueItem) -> Vec<Line<'static>> {
     let mut lines = header_lines(&[
         ("Name", &issue.name),
         ("Status", &issue.status),
@@ -892,7 +921,110 @@ fn draw_issue_detail(frame: &mut Frame, issue: &IssueItem, scroll: u16) -> (u16,
         section(&mut lines, "Events", content);
     }
 
-    draw_detail(frame, format!(" Issue {} ", issue.id), lines, scroll)
+    lines
+}
+
+/// Session dialog content: intro lines (header attributes and any
+/// availability notice), message sections, and an optional trailing
+/// notice (truncation or read error).
+struct SessionContent {
+    intro: Vec<Line<'static>>,
+    sections: Vec<SessionSection>,
+    notice: Option<String>,
+}
+
+/// One message section: `{line} {label}` header over the rendered body.
+struct SessionSection {
+    line_num: u32,
+    label: String,
+    body: Vec<Line<'static>>,
+}
+
+/// Read a session's contents for the dialog: header attributes, then
+/// one section per message — the data layer's message predicate
+/// (`is_message_row`). Section labels use the same function as the
+/// session viewer's outline ([`crate::doc::Entry::label`]).
+fn session_content(session: &SessionItem) -> SessionContent {
+    let notes = session.notes.to_string();
+    let issues = session.issues.to_string();
+    let mut content = SessionContent {
+        intro: header_lines(&[
+            ("Title", &session.title),
+            ("Notes", &notes),
+            ("Issues", &issues),
+        ]),
+        sections: Vec::new(),
+        notice: None,
+    };
+
+    let Some(path) = &session.path else {
+        content.notice = Some("(session file unavailable)".to_string());
+        return content;
+    };
+    let reader = match gage_claude::session_reader::SessionReader::open(path) {
+        Ok(r) => r,
+        Err(e) => {
+            content.notice = Some(format!("(cannot read session: {e})"));
+            return content;
+        }
+    };
+
+    for result in reader {
+        let (line_num, value) = match result {
+            Ok(pair) => pair,
+            Err(e) => {
+                content.notice = Some(format!("(read error: {e})"));
+                break;
+            }
+        };
+        if !gage_index::is_message_row(&value) {
+            continue;
+        }
+        let entry = crate::doc::Entry {
+            line: line_num,
+            value,
+        };
+        let body = entry.message().map(message::render).unwrap_or_default();
+        content.sections.push(SessionSection {
+            line_num,
+            label: entry.label().to_string(),
+            body,
+        });
+    }
+    content
+}
+
+/// Session dialog sections: intro (header attributes), one section
+/// per message — a full-width header bar (dim line number, label, one
+/// column of inner padding each side) over a blank line and the
+/// rendered body — and any trailing notice.
+fn session_sections(content: &SessionContent, width: usize) -> Vec<Vec<Line<'static>>> {
+    let mut out = Vec::with_capacity(content.sections.len() + 2);
+    out.push(content.intro.clone());
+    for section in &content.sections {
+        let number = format!(" {} ", section.line_num);
+        let label_width = width.saturating_sub(number.width());
+        let mut lines = vec![
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled(number, styles::Text::header_dim()),
+                Span::styled(
+                    format!("{:<label_width$}", section.label),
+                    styles::Text::header(),
+                ),
+            ]),
+            Line::raw(""),
+        ];
+        lines.extend(section.body.iter().cloned());
+        out.push(lines);
+    }
+    if let Some(notice) = &content.notice {
+        out.push(vec![
+            Line::raw(""),
+            Line::from(Span::styled(notice.clone(), styles::Text::dim())),
+        ]);
+    }
+    out
 }
 
 /// Header attributes as caption/value columns; the caption column pads
@@ -919,41 +1051,6 @@ fn section(lines: &mut Vec<Line<'static>>, caption: &'static str, content: Vec<L
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(caption, styles::Text::dim())));
     lines.extend(content);
-}
-
-/// Renders a scrollable detail modal and returns `(page, max_scroll)`
-/// for the scroll keys.
-fn draw_detail(
-    frame: &mut Frame,
-    title: String,
-    lines: Vec<Line<'static>>,
-    scroll: u16,
-) -> (u16, u16) {
-    let area = detail_rect(frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .title(title)
-        .padding(Padding::horizontal(1));
-    let body = block.inner(area);
-    frame.render_widget(block, area);
-
-    let scroll_width = body.width.saturating_sub(1);
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let total = u16::try_from(paragraph.line_count(scroll_width)).unwrap_or(u16::MAX);
-    let max_scroll = total.saturating_sub(body.height);
-    let scroll = scroll.min(max_scroll);
-    frame.render_widget(paragraph.scroll((scroll, 0)), body);
-
-    let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
-    frame.render_stateful_widget(
-        scrollbar(true),
-        area.inner(Margin {
-            vertical: 1,
-            horizontal: 0,
-        }),
-        &mut sb_state,
-    );
-    (body.height, max_scroll)
 }
 
 /// Style a tracing log line per field. The files are written without
@@ -1019,23 +1116,6 @@ fn token_ranges(line: &str, n: usize) -> Vec<(usize, usize)> {
         out.push((s, line.len()));
     }
     out
-}
-
-/// Renders the scan output dialog and returns `(page, max_scroll)`
-/// for the scroll keys.
-fn draw_log_dialog(frame: &mut Frame, content: &[Line<'static>], scroll: u16) -> (u16, u16) {
-    draw_detail(frame, " Log ".to_string(), content.to_vec(), scroll)
-}
-
-/// Detail modals cover most of the frame, inset a few cells so the
-/// main view remains visible behind them.
-fn detail_rect(frame: Rect) -> Rect {
-    let margin_x = (frame.width / 10).clamp(2, 8);
-    let margin_y = (frame.height / 10).clamp(1, 3);
-    frame.inner(Margin {
-        horizontal: margin_x,
-        vertical: margin_y,
-    })
 }
 
 fn draw_confirm_quit(frame: &mut Frame) {
@@ -1215,7 +1295,7 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 Cell::from(id_span(&n.id, selected == Some(i))),
                 Cell::from(n.name.clone()),
                 Cell::from(n.value.clone()),
-                Cell::from(n.target.clone()),
+                Cell::from(n.target_cell.clone()),
             ])
         })
         .collect();
@@ -1225,13 +1305,18 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         state.model.notes.iter().map(|n| n.name.as_str()),
         area,
     );
+    let target_col = fit_col(
+        "Target",
+        state.model.notes.iter().map(|n| n.target_cell.as_str()),
+        area,
+    );
     let table = Table::new(
         rows,
         [
             Constraint::Length(8),
             name_col,
-            Constraint::Fill(2),
             Constraint::Fill(1),
+            target_col,
         ],
     )
     .header(header_row(["Id", "Name", "Value", "Target"]))

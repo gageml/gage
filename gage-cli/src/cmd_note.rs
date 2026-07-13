@@ -543,12 +543,16 @@ fn resolve_target(input: &str) -> Result<NoteTarget, String> {
         .map_err(|e| e.to_string())
 }
 
-fn shorten_target(target: &NoteTarget) -> String {
+/// Glyph-prefixed short display form of a note target: ids reduced to
+/// their 8-char short form. Shared with the scan view's notes table.
+pub(crate) fn shorten_target(target: &NoteTarget) -> String {
     let (glyph, s) = match target {
         NoteTarget::Session(t) => ("▪", t.to_uri()),
-        NoteTarget::Scan(t) => ("≡", t.scan_id.clone()),
+        NoteTarget::Scan(t) => ("≡", short_uuid(&t.scan_id).to_string()),
         NoteTarget::Project(t) => ("⊡", t.project_path.clone()),
     };
+    // Session uris open with a 36-char uuid, optionally followed by a
+    // line ref; keep the short id plus the suffix
     let shortened = if s.len() >= 36 {
         format!("{}{}", &s[..8], &s[36..])
     } else {
