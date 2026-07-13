@@ -380,7 +380,7 @@ fn load_scan_results(
     conn: &gage_db::rusqlite::Connection,
     scan_id: &str,
 ) -> anyhow::Result<ScanResults> {
-    use gage_tui::scan_view::{IssueItem, NoteItem, SessionCounts};
+    use gage_tui::scan_view::{EventItem, EvidenceItem, IssueItem, NoteItem, SessionCounts};
     use std::collections::{HashMap, HashSet};
 
     let notes = gage_db::note::find(
@@ -424,7 +424,44 @@ fn load_scan_results(
         }
     }
 
+    let mut issue_items: Vec<IssueItem> = Vec::with_capacity(issues.len());
+    for i in &issues {
+        let evidence = gage_db::issue::related_notes(conn, &i.id)?
+            .iter()
+            .map(|n| EvidenceItem {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                target: n.target.to_uri(),
+                value: crate::cmd_note::format_value(&n.value),
+            })
+            .collect();
+        let events = gage_db::issue::issue_events_for(conn, &i.id)?
+            .iter()
+            .map(|ev| EventItem {
+                kind: ev.event.type_str().to_string(),
+                author: ev.author.clone(),
+                timestamp: gage_core::datetime::ms_to_iso8601(ev.timestamp),
+                message: ev.event.message().map(str::to_string),
+            })
+            .collect();
+        issue_items.push(IssueItem {
+            id: i.id.clone(),
+            name: i.name.clone(),
+            title: i.title.lines().next().unwrap_or("").to_string(),
+            status: match i.closed_reason {
+                Some(r) => format!("{} ({})", i.status.as_str(), r.as_str()),
+                None => i.status.as_str().to_string(),
+            },
+            author: i.author.clone(),
+            created: gage_core::datetime::ms_to_iso8601(i.created),
+            description: i.description.clone(),
+            evidence,
+            events,
+        });
+    }
+
     Ok(ScanResults {
+        issues: issue_items,
         notes: notes
             .iter()
             .map(|n| NoteItem {
@@ -436,14 +473,6 @@ fn load_scan_results(
                 author: n.author.clone(),
                 created: gage_core::datetime::ms_to_iso8601(n.created),
                 explanation: n.explanation.clone(),
-            })
-            .collect(),
-        issues: issues
-            .iter()
-            .map(|i| IssueItem {
-                id: i.id.clone(),
-                name: i.name.clone(),
-                title: i.title.lines().next().unwrap_or("").to_string(),
             })
             .collect(),
         sessions: counts

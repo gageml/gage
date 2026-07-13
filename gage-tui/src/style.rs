@@ -62,6 +62,12 @@ pub fn running() -> Style {
     Style::new().fg(Color::Yellow)
 }
 
+/// Evidence note values in the issue detail, matching the bright cyan
+/// `gage issue show` uses.
+pub fn evidence() -> Style {
+    Style::new().fg(Color::LightCyan)
+}
+
 pub fn error() -> Style {
     Style::new().fg(Color::Red)
 }

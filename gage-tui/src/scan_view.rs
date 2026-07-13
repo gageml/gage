@@ -134,6 +134,34 @@ pub struct IssueItem {
     pub id: String,
     pub name: String,
     pub title: String,
+    /// Status display string, e.g. `open` or `closed (resolved)`
+    pub status: String,
+    pub author: String,
+    /// Creation time display string
+    pub created: String,
+    pub description: Option<String>,
+    pub evidence: Vec<EvidenceItem>,
+    pub events: Vec<EventItem>,
+}
+
+/// A note recorded as evidence for an issue.
+#[derive(Debug, Clone)]
+pub struct EvidenceItem {
+    pub id: String,
+    pub name: String,
+    pub target: String,
+    pub value: String,
+}
+
+/// One entry from an issue's event log.
+#[derive(Debug, Clone)]
+pub struct EventItem {
+    /// Event type, e.g. `open`, `close`, `comment`
+    pub kind: String,
+    pub author: String,
+    /// Timestamp display string
+    pub timestamp: String,
+    pub message: Option<String>,
 }
 
 impl ScanModel {
@@ -406,7 +434,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
             }
             return false;
         }
-        Dialog::Note { scroll, .. } | Dialog::Log { scroll, .. } => {
+        Dialog::Note { scroll, .. } | Dialog::Issue { scroll, .. } | Dialog::Log { scroll, .. } => {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -437,6 +465,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
         KeyCode::Char('g') => state.select_first(),
         KeyCode::Char('G') => state.select_last(),
         KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
+        KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
         KeyCode::Char('l') => state.open_log(),
         _ => {}
     }
@@ -491,6 +520,11 @@ enum Dialog {
         note: NoteItem,
         scroll: u16,
     },
+    /// Zoomed issue detail; a snapshot, like Note
+    Issue {
+        issue: Box<IssueItem>,
+        scroll: u16,
+    },
     /// Captured scan streams (`{scan_id}.{err,out,log}`), reloaded
     /// from the files while a live scan runs.
     Log {
@@ -543,6 +577,18 @@ impl ViewState {
         if let Some(note) = self.model.notes.get(i) {
             self.dialog = Dialog::Note {
                 note: note.clone(),
+                scroll: 0,
+            };
+        }
+    }
+
+    fn open_selected_issue(&mut self) {
+        let Some(i) = self.issues.selected_index() else {
+            return;
+        };
+        if let Some(issue) = self.model.issues.get(i) {
+            self.dialog = Dialog::Issue {
+                issue: Box::new(issue.clone()),
                 scroll: 0,
             };
         }
@@ -760,6 +806,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
             None
         }
         Dialog::Note { note, scroll } => Some(draw_note_detail(frame, note, *scroll)),
+        Dialog::Issue { issue, scroll } => Some(draw_issue_detail(frame, issue, *scroll)),
         Dialog::Log {
             content, scroll, ..
         } => Some(draw_log_dialog(frame, content, *scroll)),
@@ -779,24 +826,80 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
 /// the scroll keys. Fields lay out as a page: caption above content,
 /// value and explanation rendered as markdown.
 fn draw_note_detail(frame: &mut Frame, note: &NoteItem, scroll: u16) -> (u16, u16) {
-    let area = detail_rect(frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .title(format!(" Note {} ", note.id))
-        .padding(Padding::horizontal(1));
-    let body = block.inner(area);
-    frame.render_widget(block, area);
+    let mut lines = header_lines(&[
+        ("Name", &note.name),
+        ("Target", &note.target),
+        ("Author", &note.author),
+        ("Created", &note.created),
+    ]);
+    lines.push(Line::raw(""));
+    lines.extend(markdown::render(&note.value_full));
+    if let Some(explanation) = &note.explanation {
+        section(&mut lines, "Explanation", markdown::render(explanation));
+    }
+    draw_detail(frame, format!(" Note {} ", note.id), lines, scroll)
+}
 
-    // Header attributes as caption/value columns; the caption column
-    // pads to the widest caption
-    let headers = [
-        ("Name", note.name.as_str()),
-        ("Target", note.target.as_str()),
-        ("Author", note.author.as_str()),
-        ("Created", note.created.as_str()),
-    ];
+/// Renders the issue detail modal and returns `(page, max_scroll)`
+/// for the scroll keys.
+fn draw_issue_detail(frame: &mut Frame, issue: &IssueItem, scroll: u16) -> (u16, u16) {
+    let mut lines = header_lines(&[
+        ("Name", &issue.name),
+        ("Status", &issue.status),
+        ("Author", &issue.author),
+        ("Created", &issue.created),
+    ]);
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(issue.title.clone()));
+    if let Some(description) = &issue.description {
+        lines.push(Line::raw(""));
+        lines.extend(markdown::render(description));
+    }
+
+    if !issue.evidence.is_empty() {
+        let mut content: Vec<Line<'static>> = Vec::new();
+        for (i, ev) in issue.evidence.iter().enumerate() {
+            if i > 0 {
+                content.push(Line::raw(""));
+            }
+            content.push(Line::from(Span::styled(
+                format!("{} · {} · {}", ev.id, ev.name, ev.target),
+                style::text_dim(),
+            )));
+            content.extend(
+                ev.value
+                    .lines()
+                    .map(|l| Line::from(Span::styled(l.to_string(), style::evidence()))),
+            );
+        }
+        section(&mut lines, "Evidence", content);
+    }
+
+    if !issue.events.is_empty() {
+        let mut content: Vec<Line<'static>> = Vec::new();
+        for (i, ev) in issue.events.iter().enumerate() {
+            if i > 0 {
+                content.push(Line::raw(""));
+            }
+            content.push(Line::from(Span::styled(
+                format!("{} · {} · {}", ev.kind, ev.author, ev.timestamp),
+                style::text_dim(),
+            )));
+            if let Some(message) = &ev.message {
+                content.extend(message.lines().map(|l| Line::raw(l.to_string())));
+            }
+        }
+        section(&mut lines, "Events", content);
+    }
+
+    draw_detail(frame, format!(" Issue {} ", issue.id), lines, scroll)
+}
+
+/// Header attributes as caption/value columns; the caption column pads
+/// to the widest caption.
+fn header_lines(headers: &[(&'static str, &str)]) -> Vec<Line<'static>> {
     let caption_width = headers.iter().map(|(c, _)| c.width()).max().unwrap_or(0);
-    let mut lines: Vec<Line> = headers
+    headers
         .iter()
         .map(|(caption, value)| {
             Line::from(vec![
@@ -807,18 +910,32 @@ fn draw_note_detail(frame: &mut Frame, note: &NoteItem, scroll: u16) -> (u16, u1
                 Span::raw((*value).to_string()),
             ])
         })
-        .collect();
-    let section =
-        |lines: &mut Vec<Line<'static>>, caption: &'static str, content: Vec<Line<'static>>| {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(caption, style::text_dim())));
-            lines.extend(content);
-        };
+        .collect()
+}
+
+/// A captioned page section separated from what precedes it by a
+/// blank line.
+fn section(lines: &mut Vec<Line<'static>>, caption: &'static str, content: Vec<Line<'static>>) {
     lines.push(Line::raw(""));
-    lines.extend(markdown::render(&note.value_full));
-    if let Some(explanation) = &note.explanation {
-        section(&mut lines, "Explanation", markdown::render(explanation));
-    }
+    lines.push(Line::from(Span::styled(caption, style::text_dim())));
+    lines.extend(content);
+}
+
+/// Renders a scrollable detail modal and returns `(page, max_scroll)`
+/// for the scroll keys.
+fn draw_detail(
+    frame: &mut Frame,
+    title: String,
+    lines: Vec<Line<'static>>,
+    scroll: u16,
+) -> (u16, u16) {
+    let area = detail_rect(frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .title(title)
+        .padding(Padding::horizontal(1));
+    let body = block.inner(area);
+    frame.render_widget(block, area);
 
     let scroll_width = body.width.saturating_sub(1);
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -861,31 +978,7 @@ fn log_line(line: &str) -> Line<'static> {
 /// Renders the scan output dialog and returns `(page, max_scroll)`
 /// for the scroll keys.
 fn draw_log_dialog(frame: &mut Frame, content: &[Line<'static>], scroll: u16) -> (u16, u16) {
-    let area = detail_rect(frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .title(" Log ")
-        .padding(Padding::horizontal(1));
-    let body = block.inner(area);
-    frame.render_widget(block, area);
-
-    let paragraph = Paragraph::new(content.to_vec()).wrap(Wrap { trim: false });
-    let scroll_width = body.width.saturating_sub(1);
-    let total = u16::try_from(paragraph.line_count(scroll_width)).unwrap_or(u16::MAX);
-    let max_scroll = total.saturating_sub(body.height);
-    let scroll = scroll.min(max_scroll);
-    frame.render_widget(paragraph.scroll((scroll, 0)), body);
-
-    let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
-    frame.render_stateful_widget(
-        scrollbar(true),
-        area.inner(Margin {
-            vertical: 1,
-            horizontal: 0,
-        }),
-        &mut sb_state,
-    );
-    (body.height, max_scroll)
+    draw_detail(frame, " Log ".to_string(), content.to_vec(), scroll)
 }
 
 /// Detail modals cover most of the frame, inset a few cells so the
