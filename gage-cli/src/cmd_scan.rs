@@ -795,9 +795,8 @@ async fn run_dialog(
     let jobs = args.jobs.unwrap_or_else(num_cpus::get).max(1);
     let agent_jobs = args.agent_jobs.unwrap_or(DEFAULT_AGENT_JOBS).max(1);
 
-    // Enrich (id, path) → SessionInfo; the DataFusion-side context
-    // built next is keyed off this set and exposes a `cached_session_count()`
-    // counter the CLI polls for progress.
+    // Enrich (id, path) → SessionInfo for the DataFusion-side context
+    // built next.
     let selected: Arc<[SessionInfo]> = {
         let mut out: Vec<SessionInfo> = Vec::with_capacity(sessions.len());
         for (id, src) in sessions {
@@ -813,18 +812,8 @@ async fn run_dialog(
         }
         Arc::from(out.into_boxed_slice())
     };
-    let total_sessions = selected.len();
     let scan_ctx = Arc::new(ScanSessionContext::new(&selected));
 
-    // SCAN_TUI=1 selects the in-development full-screen scan view.
-    // Temporary gate; removed when the view is promoted.
-    let scan_tui = std::env::var_os("SCAN_TUI").is_some_and(|v| v == "1");
-
-    let mut progress = if args.no_progress || scan_tui {
-        None
-    } else {
-        Some(crate::scan_progress::ProgressUi::new(total_sessions))
-    };
     let cancel = crate::panic_token().child_token();
     let signal_task = {
         let cancel = cancel.clone();
@@ -834,32 +823,6 @@ async fn run_dialog(
                 _ = cancel.cancelled() => {}
             }
         })
-    };
-
-    // Poll the session cache and drive the "Sessions read" bar. The
-    // bar finishes itself once the count reaches total; the task then
-    // exits. Cancellation (Ctrl-C, panic) also exits cleanly.
-    let poll_task = if let Some(ui) = progress.as_ref() {
-        let setter = ui.sessions_setter();
-        let scan_ctx = Arc::clone(&scan_ctx);
-        let cancel = cancel.clone();
-        Some(tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(100));
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tick.tick() => {
-                        let n = scan_ctx.cached_session_count() as u64;
-                        setter.set(n);
-                        if n >= total_sessions as u64 {
-                            break;
-                        }
-                    }
-                }
-            }
-        }))
-    } else {
-        None
     };
 
     let db = Arc::new(Mutex::new(db::open_db().unwrap()));
@@ -878,7 +841,53 @@ async fn run_dialog(
     };
 
     let mut streams = ScanStreams::with_scan(&scan_id);
-    let result = if scan_tui {
+    let result = if args.no_progress {
+        // Headless: no TUI, scanner output and diagnostics stream to
+        // the terminal
+        gage_scan::runner::run(
+            db.clone(),
+            scan_id,
+            scanners,
+            selected,
+            scan_ctx,
+            jobs,
+            agent_jobs,
+            cancel.clone(),
+            |event| {
+                capture_event(&mut streams, &event);
+                use std::io::Write;
+                match &event {
+                    gage_scan::event::ScanEvent::Print { s } => {
+                        std::io::stdout()
+                            .write_all(s.as_bytes())
+                            .expect("write to stdout");
+                    }
+                    gage_scan::event::ScanEvent::Println { s } => {
+                        println!("{s}");
+                    }
+                    gage_scan::event::ScanEvent::TaskFailed {
+                        scanner,
+                        task,
+                        message,
+                    } => {
+                        eprintln!("error: {scanner}::{task}");
+                        for line in message.lines() {
+                            eprintln!("{line}");
+                        }
+                    }
+                    gage_scan::event::ScanEvent::Warning {
+                        scanner,
+                        task,
+                        message,
+                    } => {
+                        eprintln!("warning: {scanner}::{task}: {message}");
+                    }
+                    gage_scan::event::ScanEvent::Status(_) => {}
+                }
+            },
+        )
+        .await
+    } else {
         run_scan_tui(
             db.clone(),
             scan_id,
@@ -891,55 +900,6 @@ async fn run_dialog(
             streams,
         )
         .await
-    } else {
-        gage_scan::runner::run(
-            db.clone(),
-            scan_id,
-            scanners,
-            selected,
-            scan_ctx,
-            jobs,
-            agent_jobs,
-            cancel.clone(),
-            |event| {
-                capture_event(&mut streams, &event);
-                if let Some(ui) = progress.as_mut() {
-                    ui.handle(event);
-                } else {
-                    // --no-progress: route scanner stdout straight through
-                    use std::io::Write;
-                    match &event {
-                        gage_scan::event::ScanEvent::Print { s } => {
-                            std::io::stdout()
-                                .write_all(s.as_bytes())
-                                .expect("write to stdout");
-                        }
-                        gage_scan::event::ScanEvent::Println { s } => {
-                            println!("{s}");
-                        }
-                        gage_scan::event::ScanEvent::TaskFailed {
-                            scanner,
-                            task,
-                            message,
-                        } => {
-                            eprintln!("error: {scanner}::{task}");
-                            for line in message.lines() {
-                                eprintln!("{line}");
-                            }
-                        }
-                        gage_scan::event::ScanEvent::Warning {
-                            scanner,
-                            task,
-                            message,
-                        } => {
-                            eprintln!("warning: {scanner}::{task}: {message}");
-                        }
-                        gage_scan::event::ScanEvent::Status(_) => {}
-                    }
-                }
-            },
-        )
-        .await
     };
     let elapsed = started.elapsed();
 
@@ -948,16 +908,6 @@ async fn run_dialog(
         && !e.is_cancelled()
     {
         panic!("signal task joined cleanly: {e}");
-    }
-    if let Some(task) = poll_task
-        && let Err(e) = task.await
-        && !e.is_cancelled()
-    {
-        panic!("poll task joined cleanly: {e}");
-    }
-
-    if let Some(ui) = progress {
-        ui.finish();
     }
 
     match result {
