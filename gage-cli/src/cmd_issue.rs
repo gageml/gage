@@ -2,8 +2,8 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
+use gage_db::db;
 use gage_db::issue::{self, ClosedReason, Issue, IssueFilters, IssueStatus, IssueStatusFilter};
-use gage_db::{db, target::NoteTarget};
 use gage_registry::scanner::ScannerRegistry;
 use gage_registry::scheme::{ErrorScheme, ScannerScheme};
 
@@ -283,14 +283,13 @@ pub fn show(args: IssueShowArgs) {
         let entries: Vec<String> = related
             .iter()
             .map(|n| {
-                let line = format!(
-                    "{} ({}) {} - {}",
-                    n.name,
-                    short_uuid(&n.id),
-                    shorten_target(&n.target),
-                    n.value.to_json(),
-                );
-                textwrap::fill(&line, value_width)
+                let header =
+                    console::style(format!("{} · {} · {}", n.id, n.name, n.target.to_uri(),)).dim();
+                let value_str = crate::cmd_note::format_value(&n.value);
+                let value = console::style(textwrap::fill(&value_str, value_width))
+                    .cyan()
+                    .bright();
+                format!("{header}\n{value}")
             })
             .collect();
         rows.push(vec![evidence_label.to_string(), entries.join("\n\n")]);
@@ -572,18 +571,4 @@ fn issue_text_resolver(issue: &Issue) -> TextResolver {
         },
         None => r.with_scheme("scanner", ScannerScheme::absolute_only()),
     }
-}
-
-fn shorten_target(target: &NoteTarget) -> String {
-    let (glyph, s) = match target {
-        NoteTarget::Session(t) => ("▪", t.to_uri()),
-        NoteTarget::Scan(t) => ("≡", t.scan_id.clone()),
-        NoteTarget::Project(t) => ("⊡", t.project_path.clone()),
-    };
-    let shortened = if s.len() >= 36 {
-        format!("{}{}", &s[..8], &s[36..])
-    } else {
-        s
-    };
-    format!("{glyph} {shortened}")
 }
