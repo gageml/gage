@@ -358,6 +358,7 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut events_closed = false;
     loop {
+        state.promote_pending_dialog();
         terminal.draw(|frame| draw(frame, &mut state))?;
         tokio::select! {
             ev = events.recv(), if !events_closed => {
@@ -513,6 +514,9 @@ struct ViewState {
     log: VecDeque<String>,
     started: Instant,
     dialog: Dialog,
+    /// A live scan finished while another dialog was open; ScanDone
+    /// shows once that dialog closes
+    scan_done_pending: bool,
     /// Scroll state and layout cache for the open content dialog
     scroll_view: ScrollView,
 }
@@ -558,6 +562,7 @@ impl ViewState {
             log: VecDeque::new(),
             started: Instant::now(),
             dialog: Dialog::None,
+            scan_done_pending: false,
             scroll_view: ScrollView::new(),
             model,
         };
@@ -720,15 +725,27 @@ impl ViewState {
     /// Record completion and announce it. The caller sends a final db
     /// reconcile ahead of the Finished event, so the results on screen
     /// are current when the dialog appears. Historical views start
-    /// finished and never transition. Skipped when another dialog is
-    /// up — completion still shows in the header and footer.
+    /// finished and never transition. When another dialog is up the
+    /// announcement is deferred until it closes — completion still
+    /// shows in the header and footer meanwhile.
     fn mark_finished(&mut self) {
         if !self.model.finished {
             self.model.finished = true;
             self.model.elapsed = Some(self.started.elapsed());
             if matches!(self.dialog, Dialog::None) {
                 self.dialog = Dialog::ScanDone;
+            } else {
+                self.scan_done_pending = true;
             }
+        }
+    }
+
+    /// Show a deferred ScanDone once no other dialog is open. Run each
+    /// loop iteration before drawing.
+    fn promote_pending_dialog(&mut self) {
+        if self.scan_done_pending && matches!(self.dialog, Dialog::None) {
+            self.scan_done_pending = false;
+            self.dialog = Dialog::ScanDone;
         }
     }
 
