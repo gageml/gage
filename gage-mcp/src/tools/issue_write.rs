@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use gage_core::uuid::short_uuid;
 use gage_db::db::open_db;
-use gage_db::issue::{self, Issue, IssueEvidence, IssueStatus};
+use gage_db::issue::{self, Issue, IssueEvidence};
 use gage_db::note;
 use gage_db::scan::insert_scan_issue;
 use rmcp::{
@@ -58,10 +58,8 @@ async fn handle(
         evidence_notes.push(n);
     }
 
-    // Model-written issues are staged as pending; only the reconcile
-    // step promotes an issue to open.
     let mut issue_row = Issue::new(&config.name, title, description, &author);
-    issue_row.status = IssueStatus::Pending;
+    issue_row.status = config.status;
     let now = issue_row.created;
 
     issue::insert(&conn, &issue_row).map_err(|e| match e {
@@ -104,7 +102,8 @@ async fn handle(
     }
 
     Ok(format!(
-        "Wrote pending issue {} ({}) with {} evidence note(s).",
+        "Wrote {} issue {} ({}) with {} evidence note(s).",
+        issue_row.status.as_str(),
         short_uuid(&issue_row.id),
         issue_row.title,
         evidence_notes.len()

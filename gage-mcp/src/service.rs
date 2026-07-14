@@ -15,6 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use gage_db::issue::IssueStatus;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta};
@@ -81,6 +82,9 @@ pub struct IssueWriteConfig {
     pub name: String,
     /// Scan to link writes to via `scan_issue`. `None` → no link.
     pub scan: Option<String>,
+    /// Status new issues are written with. Only `Pending` and `Open`
+    /// are meaningful here.
+    pub status: IssueStatus,
 }
 
 impl Default for IssueWriteConfig {
@@ -88,6 +92,7 @@ impl Default for IssueWriteConfig {
         IssueWriteConfig {
             name: "general".to_string(),
             scan: None,
+            status: IssueStatus::Pending,
         }
     }
 }

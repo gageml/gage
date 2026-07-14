@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use gage_db::issue::IssueStatus;
 use gage_mcp::{GageTool, IssueWriteConfig, NoteWriteConfig, QueryConfig};
 use rune::runtime::Object;
 use rune::{Any, ContextError, Module};
@@ -20,6 +21,7 @@ pub fn module() -> Result<Module, ContextError> {
     m.function_meta(IssueWrite::new)?;
     m.function_meta(IssueWrite::name)?;
     m.function_meta(IssueWrite::scan)?;
+    m.function_meta(IssueWrite::status)?;
     m.ty::<NoteWrite>()?;
     m.function_meta(NoteWrite::new)?;
     m.function_meta(NoteWrite::names)?;
@@ -52,13 +54,19 @@ impl Query {
     }
 }
 
-/// Write pending issues. `name(..)` sets the issue name for every
-/// write (default `"general"`); `scan(id)` links writes to that scan.
+/// Write issues. `name(..)` sets the issue name for every write
+/// (default `"general"`); `scan(id)` links writes to that scan;
+/// `status(..)` sets the initial status, `"open"` or `"pending"`
+/// (default `"pending"`).
 #[derive(Any, Debug, Clone, Default)]
 #[rune(item = ::gage::tools)]
 pub struct IssueWrite {
     name: Option<String>,
     scan: Option<String>,
+    /// Parsed `status(..)` argument. The parse error is deferred so
+    /// the builder chain stays fluent; `gage_tools` parsing surfaces
+    /// it.
+    status: Option<Result<IssueStatus, String>>,
 }
 
 impl IssueWrite {
@@ -77,6 +85,22 @@ impl IssueWrite {
     fn scan(mut self, id: String) -> Self {
         self.scan = Some(id);
         self
+    }
+
+    #[rune::function(instance)]
+    fn status(mut self, status: String) -> Self {
+        self.status = Some(parse_status(&status));
+        self
+    }
+}
+
+fn parse_status(status: &str) -> Result<IssueStatus, String> {
+    match status {
+        "open" => Ok(IssueStatus::Open),
+        "pending" => Ok(IssueStatus::Pending),
+        other => Err(format!(
+            "IssueWrite status must be \"open\" or \"pending\", got \"{other}\""
+        )),
     }
 }
 
@@ -154,14 +178,19 @@ impl From<Query> for GageTool {
     }
 }
 
-impl From<IssueWrite> for GageTool {
-    fn from(t: IssueWrite) -> Self {
+impl TryFrom<IssueWrite> for GageTool {
+    type Error = String;
+
+    fn try_from(t: IssueWrite) -> Result<Self, String> {
         let mut config = IssueWriteConfig::default();
         if let Some(name) = t.name {
             config.name = name;
         }
         config.scan = t.scan;
-        GageTool::IssueWrite(config)
+        if let Some(status) = t.status {
+            config.status = status?;
+        }
+        Ok(GageTool::IssueWrite(config))
     }
 }
 
