@@ -91,7 +91,7 @@ pub struct SessionListArgs {
 
     /// Include additional stats columns
     ///
-    /// Columns: model time, total tokens, turns
+    /// Columns: model time, tokens (in / out / cached), turns
     #[arg(short = 'S', long)]
     stats: bool,
 }
@@ -319,18 +319,23 @@ pub async fn list(args: SessionListArgs) {
             };
             let mut row = vec![id_display, project, modified, size, title, model, count];
             if args.stats {
-                let (time, tokens, turns) = match gage_claude::stats::compute_session_stats(
-                    std::path::Path::new(paths.value(i)),
-                ) {
-                    Ok(s) => (
-                        format_model_time(s.model_time_ms),
-                        format_tokens(s.total_tokens),
-                        s.turn_count.to_string(),
-                    ),
-                    Err(_) => ("?".into(), "?".into(), "?".into()),
-                };
+                let (time, tin, tout, tcache, turns) =
+                    match gage_claude::stats::compute_session_stats(std::path::Path::new(
+                        paths.value(i),
+                    )) {
+                        Ok(s) => (
+                            format_model_time(s.model_time_ms),
+                            format_tokens(s.input_tokens),
+                            format_tokens(s.output_tokens),
+                            format_tokens(s.cached_tokens),
+                            s.turn_count.to_string(),
+                        ),
+                        Err(_) => ("?".into(), "?".into(), "?".into(), "?".into(), "?".into()),
+                    };
                 row.push(time);
-                row.push(tokens);
+                row.push(tin);
+                row.push(tout);
+                row.push(tcache);
                 row.push(turns);
             }
             table_rows.push(row);
@@ -345,7 +350,9 @@ pub async fn list(args: SessionListArgs) {
     .collect();
     if args.stats {
         header.push("Model time".into());
-        header.push("Tokens".into());
+        header.push("Tk in".into());
+        header.push("Tk out".into());
+        header.push("Tk cache".into());
         header.push("Turns".into());
     }
 
