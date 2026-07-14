@@ -455,7 +455,8 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         }
 
         if is_message_row(&entry) {
-            match message_subtype(&entry) {
+            let msg_subtype = message_subtype(&entry);
+            match msg_subtype {
                 Some(v) => b.message_subtypes.append_value(v),
                 None => b.message_subtypes.append_null(),
             }
@@ -478,7 +479,13 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             }
 
             let joined = entry_text(&entry).unwrap_or_default();
-            let (text, ide_tags) = split_ide_tags(&joined);
+            // Out-of-band tags are prepended to user prompts only. A
+            // tool result or assistant turn that opens with a
+            // tag-shaped pair (e.g. <tool_use_error>) is content.
+            let (text, ide_tags) = match (entry_type, msg_subtype) {
+                (Some("user"), Some("text" | "meta")) => split_ide_tags(&joined),
+                _ => (joined, None),
+            };
 
             b.texts.append_value(&text);
             match attachments.is_empty() {

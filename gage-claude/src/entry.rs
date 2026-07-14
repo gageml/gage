@@ -139,12 +139,31 @@ pub fn entry_attachment_blocks(entry: &Value) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
+/// Tag names [`split_ide_tags`] recognizes as out-of-band data
+/// prepended by the client, harness, or slash-command machinery.
+/// Restricting the split to known names keeps tag-shaped content —
+/// a `<tool_use_error>` tool result, pasted XML — in the body.
+const IDE_TAG_NAMES: &[&str] = &[
+    "system-reminder",
+    "ide_opened_file",
+    "ide_selection",
+    "command-name",
+    "command-message",
+    "command-args",
+    "command-contents",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+    "task-notification",
+];
+
 /// Split a message text into `(body, ide_tags)`. `ide_tags` captures
 /// any leading `<tag>...</tag>` pairs prepended by the client or IDE
 /// (e.g. `<ide_opened_file>`, `<system-reminder>`,
 /// `<local-command-caveat>`); the body is the remaining text with
-/// leading whitespace consumed. Returns `(input.to_string(), None)`
-/// when no leading tag pair is present.
+/// leading whitespace consumed. Only tag names in [`IDE_TAG_NAMES`]
+/// are split. Returns `(input.to_string(), None)` when no leading
+/// recognized tag pair is present.
 ///
 /// "IDE" understates the source — these tags also come from the
 /// harness and slash-command machinery — but in every case they are
@@ -165,11 +184,7 @@ pub fn split_ide_tags(input: &str) -> (String, Option<String>) {
             .find(|c: char| c == '>' || c == '/' || c.is_whitespace())
             .unwrap_or(after_lt.len());
         let tag_name = &after_lt[..name_end];
-        if tag_name.is_empty()
-            || !tag_name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+        if !IDE_TAG_NAMES.contains(&tag_name) {
             break;
         }
         let close = format!("</{}>", tag_name);
