@@ -37,6 +37,7 @@ gage-scan = { path = "../gage-scan" }
 gage-sync = { path = "../gage-sync" }
 indicatif = "0.18"
 num_cpus = "1"
+rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml.workspace = true

@@ -19,6 +19,7 @@ use gage_core::uuid::short_uuid;
 use gage_db::{db, scan};
 use gage_query::ScanSessionContext;
 use gage_registry::scanner::{Scanner, ScannerRegistry};
+use rand::seq::SliceRandom;
 
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::style as s;
@@ -81,7 +82,7 @@ pub struct ScanDeleteArgs {
 #[derive(Args)]
 pub struct ScanRunArgs {
     /// Session IDs to scan (or prefix)
-    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "all"])]
+    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "all", "sample"])]
     sessions: Vec<String>,
 
     /// Scanner to run (repeatable)
@@ -93,8 +94,15 @@ pub struct ScanRunArgs {
     files: Vec<String>,
 
     /// Scan most recent N sessions
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "all"])]
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "all", "sample"])]
     limit: Option<usize>,
+
+    /// Scan N sessions selected at random
+    ///
+    /// Samples from sessions modified in the past 30 days, or the
+    /// window given with --days.
+    #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
+    sample: Option<usize>,
 
     /// Scan sessions modified in past N days (default 30)
     #[arg(short, long, value_name = "N", conflicts_with = "all")]
@@ -797,7 +805,11 @@ async fn run_dialog(
             format!("{n} most recent")
         } else {
             let d = days.unwrap();
-            format!("last {d} day{}", if d == 1 { "" } else { "s" })
+            let window = format!("last {d} day{}", if d == 1 { "" } else { "s" });
+            match args.sample {
+                Some(n) => format!("{n} sampled from {window}"),
+                None => window,
+            }
         };
         cli::log::step(format!("Sessions\n{}", style(label).dim()))?;
 
@@ -808,7 +820,13 @@ async fn run_dialog(
         if let Some(n) = args.limit {
             builder = builder.limit(n);
         }
-        builder.build().into_iter().map(|s| (s.id, s.src)).collect()
+        let mut sessions: Vec<(String, std::path::PathBuf)> =
+            builder.build().into_iter().map(|s| (s.id, s.src)).collect();
+        if let Some(n) = args.sample {
+            sessions.shuffle(&mut rand::rng());
+            sessions.truncate(n);
+        }
+        sessions
     };
 
     // Confirmation
