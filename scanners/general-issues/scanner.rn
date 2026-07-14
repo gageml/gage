@@ -15,7 +15,7 @@ pub const SCANNER = #{
         },
         issues: #{
             notes: #{
-                wants: ["finding.general", "finding-summary"],
+                wants: ["finding.general"],
                 writes: #{
                     "issue-summary.general": "Summary of issue writing",
                 },
@@ -29,7 +29,7 @@ pub const SCANNER = #{
     },
 };
 
-const FINDINGS_KEY = ("general-issues", "findings", 1);
+const FINDINGS_KEY = ("general-issues", "findings", 2);
 
 /// Submit each session to an agent to write findings.
 ///
@@ -54,7 +54,7 @@ pub async fn findings() {
                 .name("session-finding")
                 .gage_tools([Query::new().scan(scan().id)])
                 .tools(findings_tools())
-                .model("small"),
+                .model("medium"),
             #{ session: s.id },
         );
     }
@@ -79,11 +79,6 @@ fn findings_tools() {
                     description: "Session line numbers associated with the finding",
                     required: false,
                 },
-                fix: #{
-                    type: "string",
-                    description: "Suggested fix or fix strategy where applicable",
-                    required: false,
-                },
             },
         },
     }
@@ -94,9 +89,6 @@ pub async fn write_finding(inputs, meta) {
     let metadata = #{};
     if let Some(lines) = inputs.get("lines") {
         metadata.insert("lines", lines)
-    }
-    if let Some(fix) = inputs.get("fix") {
-        metadata.insert("fix", fix);
     }
     let note = write_note(
         #{
@@ -138,6 +130,7 @@ async fn write_summaries(results, validate) {
 }
 
 const ISSUES_KEY = ("general-issues", "issues", 1);
+
 const NEW_FINDINGS_THRESHOLD = 5;
 
 /// Ask agent to review findings and write issues.
@@ -148,7 +141,7 @@ const NEW_FINDINGS_THRESHOLD = 5;
 pub async fn issues() {
     let (prev_findings, new_findings, validate) = scan()
         .notes()
-        .names(["finding.general", "finding-summary.general"])
+        .names(["finding.general"])
         .split_valid(ISSUES_KEY)
         .await?;
 
@@ -166,7 +159,7 @@ pub async fn issues() {
         .gage_tools(
             [
                 Query::new().scan(scan().id),
-                IssueWrite::new().scan(scan().id),
+                IssueWrite::new().scan(scan().id).status("open"),
             ],
         )
         .model("large")
