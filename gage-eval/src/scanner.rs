@@ -170,6 +170,9 @@ fn try_sample(ctx: &SampleContext, sample: u32) -> io::Result<SampleOutcome> {
             return Ok(SampleOutcome::Error(format!("judge output unusable: {e}")));
         }
     };
+    if let Err(e) = check_verdict_coverage(&verdict, expect_entries(expect).count()) {
+        return Ok(SampleOutcome::Error(format!("judge output unusable: {e}")));
+    }
     write_json(&dir.join("verdict.json"), &verdict)?;
 
     let db_rows = check_db_rows(&db_path, &expect.db_rows)?;
@@ -383,6 +386,29 @@ fn parse_verdict(output: &str) -> Result<Verdict, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Require exactly one verdict entry per expectation index. A reply
+/// that skips an expectation would otherwise score it as "not met",
+/// misattributing a judge failure to the scanner under test.
+fn check_verdict_coverage(verdict: &Verdict, expectations: usize) -> Result<(), String> {
+    let mut seen = vec![false; expectations];
+    for e in &verdict.expected {
+        match seen.get_mut(e.index) {
+            Some(s) if !*s => *s = true,
+            Some(_) => return Err(format!("duplicate verdict for expectation {}", e.index)),
+            None => {
+                return Err(format!(
+                    "verdict index {} out of range ({expectations} expectations)",
+                    e.index
+                ));
+            }
+        }
+    }
+    match seen.iter().position(|s| !s) {
+        Some(i) => Err(format!("no verdict for expectation {i}")),
+        None => Ok(()),
+    }
+}
+
 /// Fold sample outcomes into the standard `Score` shape: one match row per
 /// expectation (and `db_rows` query) carrying its sample rate, plus rows
 /// asserting no unexpected items and full sample completion.
@@ -514,6 +540,30 @@ mod tests {
         assert!(v.expected.first().unwrap().matched);
         assert!(v.unexpected.is_empty());
         assert!(parse_verdict("no json here").is_err());
+    }
+
+    #[test]
+    fn verdict_coverage_requires_every_expectation() {
+        let v = |indices: &[usize]| Verdict {
+            expected: indices
+                .iter()
+                .map(|&index| ExpectedVerdict {
+                    index,
+                    matched: true,
+                    evidence: None,
+                    reason: None,
+                })
+                .collect(),
+            unexpected: vec![],
+        };
+        assert!(check_verdict_coverage(&v(&[0, 1]), 2).is_ok());
+        assert!(check_verdict_coverage(&v(&[]), 0).is_ok());
+        assert!(
+            check_verdict_coverage(&v(&[]), 1)
+                .is_err_and(|e| e.contains("no verdict for expectation 0"))
+        );
+        assert!(check_verdict_coverage(&v(&[0, 0]), 2).is_err_and(|e| e.contains("duplicate")));
+        assert!(check_verdict_coverage(&v(&[2]), 2).is_err_and(|e| e.contains("out of range")));
     }
 
     #[test]
