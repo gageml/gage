@@ -112,6 +112,17 @@ pub struct ScanRunArgs {
     #[arg(short, long)]
     all: bool,
 
+    /// Re-run a scan's scanners on its sessions
+    ///
+    /// SCAN is a scan ID or prefix. Use 'gage scan list' to show scan
+    /// runs.
+    #[arg(
+        long,
+        value_name = "SCAN",
+        conflicts_with_all = ["sessions", "scanners", "files", "limit", "days", "all", "sample"]
+    )]
+    rerun: Option<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -576,6 +587,22 @@ async fn run_scan(mut args: ScanRunArgs) {
         return;
     }
 
+    // --rerun expands into the explicit scanner and session lists, then
+    // flows through the normal run path below.
+    if let Some(prefix) = &args.rerun {
+        let conn = db::open_db().unwrap();
+        match rerun_args(&conn, prefix) {
+            Ok((scanners, sessions)) => {
+                args.scanners = scanners;
+                args.sessions = sessions;
+            }
+            Err(e) => {
+                eprintln!("gage scan: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Register `-f` files into the registry and append their composite
     // names to the explicit scanner list. Any `#{...}` config override
     // suffix on the path is split off first and re-appended to the
@@ -642,6 +669,30 @@ async fn run_scan(mut args: ScanRunArgs) {
         run_dialog(args, registry, explicit_sessions, scan_id)
     })
     .await;
+}
+
+/// Resolve a prior scan into the scanner names and session IDs to run
+/// again. Session paths are re-resolved downstream, so sessions that no
+/// longer exist on disk fail there with the standard message.
+fn rerun_args(
+    conn: &gage_db::rusqlite::Connection,
+    prefix: &str,
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let run = scan::get_scan(conn, prefix)?;
+    let mut scanners: Vec<String> = scan::get_scanners_for_scan(conn, &run.id)?
+        .into_iter()
+        .map(|s| s.scanner_name)
+        .collect();
+    scanners.sort();
+    scanners.dedup();
+    if scanners.is_empty() {
+        anyhow::bail!("scan {} has no scanners", short_uuid(&run.id));
+    }
+    let sessions = scan::session_ids_for_scan(conn, &run.id)?;
+    if sessions.is_empty() {
+        anyhow::bail!("scan {} has no sessions", short_uuid(&run.id));
+    }
+    Ok((scanners, sessions))
 }
 
 /// Capture files for the scan's output streams:
