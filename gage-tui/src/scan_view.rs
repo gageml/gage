@@ -451,6 +451,8 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
                 KeyCode::PageUp => state.scroll_view.scroll_by(-page),
                 KeyCode::Char('g') => state.scroll_view.scroll_to_top(),
                 KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
+                KeyCode::Right => state.step_dialog_item(1),
+                KeyCode::Left => state.step_dialog_item(-1),
                 _ => {}
             }
             return false;
@@ -597,6 +599,30 @@ impl ViewState {
             self.dialog = Dialog::Issue {
                 issue: Box::new(issue.clone()),
             };
+        }
+    }
+
+    /// Move the source table's selection while an item dialog is open
+    /// and reload the dialog with the newly selected item. The log
+    /// dialog has no backing table and is unaffected.
+    fn step_dialog_item(&mut self, delta: isize) {
+        match self.dialog {
+            Dialog::Note { .. } => {
+                let ids: Vec<&str> = self.model.notes.iter().map(|n| n.id.as_str()).collect();
+                self.notes.select_by(delta, &ids);
+                self.open_selected_note();
+            }
+            Dialog::Issue { .. } => {
+                let ids: Vec<&str> = self.model.issues.iter().map(|i| i.id.as_str()).collect();
+                self.issues.select_by(delta, &ids);
+                self.open_selected_issue();
+            }
+            Dialog::Session { .. } => {
+                let ids: Vec<&str> = self.model.sessions.iter().map(|s| s.id.as_str()).collect();
+                self.sessions.select_by(delta, &ids);
+                self.open_selected_session();
+            }
+            _ => {}
         }
     }
 
@@ -1386,7 +1412,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         "q quit · Tab cycle · ↑/↓ select · l log"
     };
     let help_width = help.width() as u16;
-    let [log_area, help_area, _] = Layout::horizontal([
+    let [_, help_area, _] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(help_width),
         Constraint::Fill(1),
@@ -1396,12 +1422,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         Paragraph::new(Span::styled(help, styles::Panel::footer())),
         help_area,
     );
-    if let Some(last) = state.log.back() {
-        frame.render_widget(
-            Paragraph::new(Span::styled(last.clone(), styles::Text::dim())),
-            log_area,
-        );
-    }
 }
 
 fn panel_block(title: String, active: bool) -> Block<'static> {
