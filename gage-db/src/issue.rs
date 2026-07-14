@@ -34,31 +34,31 @@ impl std::str::FromStr for IssueStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClosedReason {
+pub enum StatusReason {
     Completed,
     Skipped,
     /// Closed by reconciliation as a duplicate of a surviving issue.
     Duplicate,
 }
 
-impl ClosedReason {
+impl StatusReason {
     pub fn as_str(self) -> &'static str {
         match self {
-            ClosedReason::Completed => "completed",
-            ClosedReason::Skipped => "skipped",
-            ClosedReason::Duplicate => "duplicate",
+            StatusReason::Completed => "completed",
+            StatusReason::Skipped => "skipped",
+            StatusReason::Duplicate => "duplicate",
         }
     }
 }
 
-impl std::str::FromStr for ClosedReason {
+impl std::str::FromStr for StatusReason {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "completed" => Ok(ClosedReason::Completed),
-            "skipped" => Ok(ClosedReason::Skipped),
-            "duplicate" => Ok(ClosedReason::Duplicate),
-            other => Err(format!("unknown closed_reason '{other}'")),
+            "completed" => Ok(StatusReason::Completed),
+            "skipped" => Ok(StatusReason::Skipped),
+            "duplicate" => Ok(StatusReason::Duplicate),
+            other => Err(format!("unknown status_reason '{other}'")),
         }
     }
 }
@@ -123,7 +123,7 @@ pub struct Issue {
     pub description: Option<String>,
     pub status: IssueStatus,
     /// `Some` when `status == Closed`; `None` while `Open`.
-    pub closed_reason: Option<ClosedReason>,
+    pub status_reason: Option<StatusReason>,
     /// Epoch milliseconds.
     pub created: i64,
     /// Epoch milliseconds. `None` until the issue is updated.
@@ -220,7 +220,7 @@ impl Issue {
             title,
             description,
             status: IssueStatus::Open,
-            closed_reason: None,
+            status_reason: None,
             created: gage_core::datetime::now_ms(),
             modified: None,
             author: author.to_string(),
@@ -229,7 +229,7 @@ impl Issue {
 }
 
 const ISSUE_COLUMNS: &str =
-    "id, name, title, description, status, closed_reason, created, modified, author";
+    "id, name, title, description, status, status_reason, created, modified, author";
 
 /// Insert an issue.
 ///
@@ -249,7 +249,7 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
             issue.title,
             issue.description,
             issue.status.as_str(),
-            issue.closed_reason.map(ClosedReason::as_str),
+            issue.status_reason.map(StatusReason::as_str),
             issue.created,
             issue.modified,
             issue.author,
@@ -336,7 +336,7 @@ pub fn promote(
     Ok(())
 }
 
-/// Reopen a closed issue: clears `closed_reason` and sets status back
+/// Reopen a closed issue: clears `status_reason` and sets status back
 /// to `open`. Bumps `modified` and logs a `Reopen` event carrying the
 /// optional message. The update and event insert share a transaction.
 pub fn reopen(
@@ -349,7 +349,7 @@ pub fn reopen(
     let tx = conn.unchecked_transaction()?;
     let rows = tx.execute(
         "UPDATE issue
-         SET status = 'open', closed_reason = NULL, modified = ?1
+         SET status = 'open', status_reason = NULL, modified = ?1
          WHERE id = ?2",
         params![timestamp, issue_id],
     )?;
@@ -372,13 +372,13 @@ pub fn reopen(
 }
 
 /// Mark an issue as closed with the given reason. Idempotent: a
-/// repeat close overwrites `closed_reason` and bumps `modified`. Logs a
+/// repeat close overwrites `status_reason` and bumps `modified`. Logs a
 /// `Close` event carrying the optional message. The update and event
 /// insert share a transaction.
 pub fn close(
     conn: &Connection,
     issue_id: &str,
-    reason: ClosedReason,
+    reason: StatusReason,
     author: &str,
     message: Option<&str>,
     timestamp: i64,
@@ -386,7 +386,7 @@ pub fn close(
     let tx = conn.unchecked_transaction()?;
     let rows = tx.execute(
         "UPDATE issue
-         SET status = 'closed', closed_reason = ?1, modified = ?2
+         SET status = 'closed', status_reason = ?1, modified = ?2
          WHERE id = ?3",
         params![reason.as_str(), timestamp, issue_id],
     )?;
@@ -574,7 +574,7 @@ pub struct IssueFilters {
 }
 
 const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.title, i.description, i.status,
-            i.closed_reason, i.created, i.modified, i.author
+            i.status_reason, i.created, i.modified, i.author
      FROM issue i";
 
 pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, IssueError> {
@@ -664,10 +664,10 @@ fn row_to_issue(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
             Box::new(std::io::Error::other(e)),
         )
     })?;
-    let closed_reason: Option<String> = row.get(5)?;
-    let closed_reason = closed_reason
+    let status_reason: Option<String> = row.get(5)?;
+    let status_reason = status_reason
         .map(|s| {
-            s.parse::<ClosedReason>().map_err(|e| {
+            s.parse::<StatusReason>().map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     5,
                     rusqlite::types::Type::Text,
@@ -682,7 +682,7 @@ fn row_to_issue(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
         title: row.get(2)?,
         description: row.get(3)?,
         status,
-        closed_reason,
+        status_reason,
         created: row.get(6)?,
         modified: row.get(7)?,
         author: row.get(8)?,
@@ -702,7 +702,7 @@ mod tests {
             title: "Sample title".to_string(),
             description: Some("scanner:description.md".to_string()),
             status: IssueStatus::Open,
-            closed_reason: None,
+            status_reason: None,
             created: 1_742_428_800_000,
             modified: None,
             author: "scanner:test".to_string(),
@@ -729,7 +729,7 @@ mod tests {
         let i1 = sample("issue-aaa", "n1");
         let mut i2 = sample("issue-bbb", "n2");
         i2.status = IssueStatus::Closed;
-        i2.closed_reason = Some(ClosedReason::Completed);
+        i2.status_reason = Some(StatusReason::Completed);
         i2.created = i1.created + 1;
         insert(&conn, &i1).unwrap();
         insert(&conn, &i2).unwrap();
@@ -758,7 +758,7 @@ mod tests {
         .unwrap();
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].id, "issue-bbb");
-        assert_eq!(closed[0].closed_reason, Some(ClosedReason::Completed));
+        assert_eq!(closed[0].status_reason, Some(StatusReason::Completed));
     }
 
     #[test]
@@ -926,7 +926,7 @@ mod tests {
         close(
             &conn,
             "issue-aaa",
-            ClosedReason::Completed,
+            StatusReason::Completed,
             "user:tester",
             Some("done in PR 42"),
             1_742_428_900_000,
@@ -959,7 +959,7 @@ mod tests {
         close(
             &conn,
             "issue-aaa",
-            ClosedReason::Skipped,
+            StatusReason::Skipped,
             "user:tester",
             None,
             created + 100,
@@ -987,7 +987,7 @@ mod tests {
 
         let fetched = get(&conn, "issue-aaa").unwrap();
         assert_eq!(fetched.status, IssueStatus::Open);
-        assert_eq!(fetched.closed_reason, None);
+        assert_eq!(fetched.status_reason, None);
     }
 
     #[test]
@@ -1038,7 +1038,7 @@ mod tests {
         close(
             &conn,
             "issue-aaa",
-            ClosedReason::Completed,
+            StatusReason::Completed,
             "user:tester",
             Some("done"),
             issue.created + 100,

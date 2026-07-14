@@ -3,7 +3,7 @@ use cliclack as cli;
 use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
-use gage_db::issue::{self, ClosedReason, Issue, IssueFilters, IssueStatus, IssueStatusFilter};
+use gage_db::issue::{self, Issue, IssueFilters, IssueStatus, IssueStatusFilter, StatusReason};
 use gage_registry::scanner::ScannerRegistry;
 use gage_registry::scheme::{ErrorScheme, ScannerScheme};
 
@@ -220,7 +220,7 @@ pub fn show(args: IssueShowArgs) {
         ("title", issue.title.clone()),
         (
             "status",
-            match issue.closed_reason {
+            match issue.status_reason {
                 Some(r) => format!("{} ({})", issue.status.as_str(), r.as_str()),
                 None => issue.status.as_str().to_string(),
             },
@@ -356,7 +356,7 @@ pub fn add(args: IssueAddArgs) {
             title,
             description,
             status: IssueStatus::Open,
-            closed_reason: None,
+            status_reason: None,
             created: gage_core::datetime::now_ms(),
             modified: None,
             author,
@@ -419,9 +419,9 @@ pub fn close(args: IssueCloseArgs) {
     }
 
     let reason = if args.skipped {
-        ClosedReason::Skipped
+        StatusReason::Skipped
     } else {
-        ClosedReason::Completed
+        StatusReason::Completed
     };
 
     dialog::run("Close issue", || {

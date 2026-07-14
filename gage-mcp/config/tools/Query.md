@@ -36,7 +36,7 @@ Tables:
   notes whose `target` is `session:<id>[:<line>[-<end>]]`. Use to join `note` to
   `session` / `message` / `entry` without parsing `target`
 
-- issue (id, name, title, description, status, closed_reason, created, modified,
+- issue (id, name, title, description, status, status_reason, created, modified,
   author) - issues raised from notes
 
 - issue_evidence (issue_id, note_id, name, timestamp, digest) - link table from

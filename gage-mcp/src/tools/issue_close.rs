@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use gage_db::db::open_db;
-use gage_db::issue::{self, ClosedReason, IssueFilters, IssueStatusFilter};
+use gage_db::issue::{self, IssueFilters, IssueStatusFilter, StatusReason};
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
     service::RequestContext,
@@ -34,8 +34,8 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
     let message = opt_string(&params, "message");
 
     let reason = match reason_str.as_str() {
-        "completed" => ClosedReason::Completed,
-        "skipped" => ClosedReason::Skipped,
+        "completed" => StatusReason::Completed,
+        "skipped" => StatusReason::Skipped,
         other => {
             return Err(McpError::invalid_params(
                 format!("reason must be 'completed' or 'skipped' (got '{other}')"),

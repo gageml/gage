@@ -449,7 +449,7 @@ fn load_scan_results(
             id: i.id.clone(),
             name: i.name.clone(),
             title: i.title.lines().next().unwrap_or("").to_string(),
-            status: match i.closed_reason {
+            status: match i.status_reason {
                 Some(r) => format!("{} ({})", i.status.as_str(), r.as_str()),
                 None => i.status.as_str().to_string(),
             },

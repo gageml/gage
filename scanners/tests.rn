@@ -217,7 +217,7 @@ async fn test_pending_issue_lifecycle() {
         .unwrap();
     let closed = gage::global().issues().status("closed").name("test.pending").await.unwrap();
     assert_eq!(closed.len(), 1);
-    assert_eq!(closed.get(0).unwrap().closed_reason, Some("duplicate"));
+    assert_eq!(closed.get(0).unwrap().status_reason, Some("duplicate"));
 
     gage::reopen_issue(#{ id: issue.id }).await.unwrap();
     let open = gage::global().issues().name("test.pending").await.unwrap();

@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use gage_db::issue::{
-    self, ClosedReason, Issue as DbIssue, IssueError, IssueEvidence as DbIssueEvidence,
-    IssueFilters, IssueStatus, IssueStatusFilter,
+    self, Issue as DbIssue, IssueError, IssueEvidence as DbIssueEvidence, IssueFilters,
+    IssueStatus, IssueStatusFilter, StatusReason,
 };
 use gage_db::note::{self, Note as DbNote, NoteError, NoteFilters, NoteValue};
 use gage_db::scan::{insert_scan_issue, insert_scan_note};
@@ -173,7 +173,7 @@ fn do_promote_issue(args: Object) -> super::Result<()> {
 fn do_close_issue(args: Object) -> super::Result<()> {
     let ctx = current_scan_ctx();
     let id = required_string(&args, "id")?;
-    let reason: ClosedReason = required_string(&args, "reason")?
+    let reason: StatusReason = required_string(&args, "reason")?
         .parse()
         .map_err(Error::Args)?;
     let message = optional_string(&args, "message")?;
@@ -535,7 +535,7 @@ pub(crate) struct Issue {
     #[rune(get)]
     pub status: String,
     #[rune(get)]
-    pub closed_reason: Option<String>,
+    pub status_reason: Option<String>,
     #[rune(get)]
     pub created: i64,
 }
@@ -546,12 +546,12 @@ impl Issue {
         write!(
             f,
             "Issue {{ id: {:?}, name: {:?}, title: {:?}, status: {:?}, \
-             closed_reason: {:?}, description: {:?}, created: {} }}",
+             status_reason: {:?}, description: {:?}, created: {} }}",
             self.id,
             self.name,
             self.title,
             self.status,
-            self.closed_reason,
+            self.status_reason,
             self.description,
             self.created,
         )?;
@@ -567,7 +567,7 @@ impl From<DbIssue> for Issue {
             title: db.title,
             description: db.description,
             status: db.status.as_str().to_string(),
-            closed_reason: db.closed_reason.map(|r| r.as_str().to_string()),
+            status_reason: db.status_reason.map(|r| r.as_str().to_string()),
             created: db.created,
         }
     }
@@ -661,7 +661,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         } else {
             IssueStatus::Open
         },
-        closed_reason: None,
+        status_reason: None,
         created: now,
         modified: None,
         author,
@@ -740,7 +740,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
             let mut result: Issue = (*prev).into();
             if reopen {
                 result.status = IssueStatus::Open.as_str().to_string();
-                result.closed_reason = None;
+                result.status_reason = None;
             }
             Ok(result)
         }

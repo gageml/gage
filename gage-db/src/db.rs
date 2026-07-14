@@ -192,7 +192,7 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
             title         TEXT NOT NULL,
             description   TEXT,
             status        TEXT NOT NULL,
-            closed_reason TEXT,
+            status_reason TEXT,
             created       INTEGER NOT NULL,
             modified      INTEGER
         );
