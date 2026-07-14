@@ -13,6 +13,7 @@ use tabled::{
 mod eval;
 mod limit;
 mod run;
+mod scanner;
 mod score;
 mod storage;
 mod style;
@@ -74,6 +75,8 @@ struct ViewArgs {
 
 const DEFAULT_MODEL: &str = "sonnet";
 const DEFAULT_EFFORT: &str = "low";
+const DEFAULT_JUDGE_MODEL: &str = "sonnet";
+const DEFAULT_JOBS: usize = 4;
 
 #[derive(Args)]
 struct RunArgs {
@@ -83,7 +86,7 @@ struct RunArgs {
     /// token matches that test-id in any eval, or every test in an eval
     /// of that name. `*` does not cross `/`. Prefix any spec with `!` to
     /// exclude.
-    specs: Vec<String>,
+    tests: Vec<String>,
 
     /// Print selected tests and exit
     #[arg(short, long = "list-tests")]
@@ -103,6 +106,22 @@ struct RunArgs {
     /// labeling what you were varying.
     #[arg(short, long)]
     note: Option<String>,
+
+    /// Load evals from a directory instead of the repo's evals
+    ///
+    /// The directory holds eval `*.toml` files and a `fixtures/` subdir.
+    /// Use for ad hoc tests staged outside source control (e.g. under
+    /// ~/.gage/tmp/evals).
+    #[arg(short = 'd', long, value_name = "DIR")]
+    evals_dir: Option<std::path::PathBuf>,
+
+    /// Concurrent samples within a scanner test
+    #[arg(short, long, value_name = "N", default_value_t = DEFAULT_JOBS)]
+    jobs: usize,
+
+    /// Judge model for scanner tests
+    #[arg(long, value_name = "MODEL", default_value = DEFAULT_JUDGE_MODEL)]
+    judge_model: String,
 
     /// Run without being prompted
     #[arg(short, long)]
@@ -220,14 +239,18 @@ fn delete_runs(runs: &[storage::RunSummary]) -> usize {
 }
 
 fn cmd_run(args: RunArgs) {
-    let all = match eval::load_all() {
+    let root = match &args.evals_dir {
+        Some(dir) => eval::Root::at(dir),
+        None => eval::Root::repo(),
+    };
+    let all = match eval::load_all(&root) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("failed to load evals: {e}");
             std::process::exit(2);
         }
     };
-    let tests = match eval::select(&all, &args.specs) {
+    let tests = match eval::select(&all, &args.tests) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -240,7 +263,7 @@ fn cmd_run(args: RunArgs) {
         std::process::exit(1);
     }
 
-    if let Err(missing) = eval::validate(&tests) {
+    if let Err(missing) = eval::validate(&root, &tests) {
         eprintln!("missing fixtures:");
         for (test_id, fixture) in &missing {
             eprintln!("  {test_id}: fixture `{fixture}` not found");
@@ -256,12 +279,13 @@ fn cmd_run(args: RunArgs) {
         return;
     }
 
-    if std::env::var("ANTHROPIC_API_KEY").is_err() {
+    let has_prompt_tests = tests.iter().any(|t| !t.is_scanner());
+    if has_prompt_tests && std::env::var("ANTHROPIC_API_KEY").is_err() {
         eprintln!("ANTHROPIC_API_KEY is required");
         std::process::exit(1);
     }
 
-    if let Err(e) = show_run_intro(&tests, &args.model, &args.effort) {
+    if let Err(e) = show_run_intro(&tests, &args) {
         eprintln!("{e}");
         std::process::exit(2);
     }
@@ -296,44 +320,47 @@ fn cmd_run(args: RunArgs) {
     let mut error_count: u32 = 0;
     let mut passed: u32 = 0;
     let mut failed: u32 = 0;
-    let result = match run::run_batch(
-        &tests,
-        &args.model,
-        &args.effort,
-        args.note.as_deref(),
-        |evt| match evt {
-            run::Event::Started(name) => pb.set_message(name.to_string()),
-            run::Event::TestFinished {
-                name,
-                exit_code,
-                score,
-            } => {
-                pb.inc(1);
-                let bar = console::style("│").bright().black();
-                if exit_code != 0 {
-                    error_count += 1;
-                    let msg = console::style(format!("  {name}  exit={exit_code}")).red();
-                    pb.println(format!("{bar} {msg}"));
-                }
-                if let Some(s) = score {
-                    if s.passed {
-                        passed += 1;
-                        pb.println(format!("{bar}   ✓ {name}"));
-                    } else {
-                        failed += 1;
-                        let missed: Vec<&str> = s
-                            .matches
-                            .iter()
-                            .filter(|m| !m.matched)
-                            .map(|m| m.pattern.as_str())
-                            .collect();
-                        let msg = console::style(format!("✗ {name}  missed: {missed:?}")).red();
-                        pb.println(format!("{bar}   {msg}"));
-                    }
+    let config = run::BatchConfig {
+        model: &args.model,
+        effort: &args.effort,
+        note: args.note.as_deref(),
+        root: &root,
+        evals_dir: args.evals_dir.as_deref(),
+        jobs: args.jobs,
+        judge_model: &args.judge_model,
+    };
+    let result = match run::run_batch(&tests, &config, |evt| match evt {
+        run::Event::Started(name) => pb.set_message(name.to_string()),
+        run::Event::TestFinished {
+            name,
+            exit_code,
+            score,
+        } => {
+            pb.inc(1);
+            let bar = console::style("│").bright().black();
+            if exit_code != 0 {
+                error_count += 1;
+                let msg = console::style(format!("  {name}  exit={exit_code}")).red();
+                pb.println(format!("{bar} {msg}"));
+            }
+            if let Some(s) = score {
+                if s.passed {
+                    passed += 1;
+                    pb.println(format!("{bar}   ✓ {name}"));
+                } else {
+                    failed += 1;
+                    let missed: Vec<&str> = s
+                        .matches
+                        .iter()
+                        .filter(|m| !m.matched)
+                        .map(|m| m.pattern.as_str())
+                        .collect();
+                    let msg = console::style(format!("✗ {name}  missed: {missed:?}")).red();
+                    pb.println(format!("{bar}   {msg}"));
                 }
             }
-        },
-    ) {
+        }
+    }) {
         Ok(o) => {
             pb.finish_and_clear();
             o
@@ -369,7 +396,7 @@ fn cmd_run(args: RunArgs) {
     }
 }
 
-fn show_run_intro(tests: &[&eval::Test], model: &str, effort: &str) -> std::io::Result<()> {
+fn show_run_intro(tests: &[&eval::Test], args: &RunArgs) -> std::io::Result<()> {
     cliclack::intro(console::style("Run eval").bold())?;
 
     let mut by_eval: std::collections::BTreeMap<&str, Vec<String>> =
@@ -395,19 +422,31 @@ fn show_run_intro(tests: &[&eval::Test], model: &str, effort: &str) -> std::io::
     }
     cliclack::log::remark(evals_line.trim_end())?;
 
-    let model_suffix = if model == DEFAULT_MODEL {
-        " (default)"
-    } else {
-        ""
-    };
-    cliclack::log::remark(format!("Model: {model}{model_suffix}"))?;
+    if let Some(dir) = &args.evals_dir {
+        cliclack::log::remark(format!("Evals dir: {}", dir.display()))?;
+    }
 
-    let effort_suffix = if effort == DEFAULT_EFFORT {
-        " (default)"
-    } else {
-        ""
-    };
-    cliclack::log::remark(format!("Effort: {effort}{effort_suffix}"))?;
+    if tests.iter().any(|t| !t.is_scanner()) {
+        let model = &args.model;
+        let model_suffix = if model == DEFAULT_MODEL {
+            " (default)"
+        } else {
+            ""
+        };
+        cliclack::log::remark(format!("Model: {model}{model_suffix}"))?;
+
+        let effort = &args.effort;
+        let effort_suffix = if effort == DEFAULT_EFFORT {
+            " (default)"
+        } else {
+            ""
+        };
+        cliclack::log::remark(format!("Effort: {effort}{effort_suffix}"))?;
+    }
+
+    if tests.iter().any(|t| t.is_scanner()) {
+        cliclack::log::remark(format!("Judge: {}", args.judge_model))?;
+    }
     Ok(())
 }
 

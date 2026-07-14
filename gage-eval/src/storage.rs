@@ -1,5 +1,13 @@
 //! On-disk layout for eval runs.
 //!
+//! A run executes in a short-pathed workspace under the system temp dir
+//! (`/tmp/gage-eval-{run-prefix}/`) and is copied to its archival home
+//! under `~/.gage/evals/{run-uuid}/` when it finishes. The short
+//! workspace path matters: claude silently skips session persistence
+//! when an agent's cwd path gets too long (observed cutoff ~143 chars),
+//! and agent cwds nest under the per-test gage-home. A run that dies
+//! mid-flight leaves its workspace in place for inspection.
+//!
 //! ```text
 //! ~/.gage/evals/
 //! └── {run-uuid}/
@@ -21,67 +29,107 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use gage_core::config::gage_home;
+use gage_core::uuid::short_uuid;
 
 pub fn evals_root() -> PathBuf {
     gage_home().join("evals")
 }
 
+/// Archival home of a finished run.
 pub fn run_dir(run_id: &str) -> PathBuf {
     evals_root().join(run_id)
 }
 
-pub fn test_dir(run_id: &str, test_name: &str) -> PathBuf {
-    run_dir(run_id).join("results").join(test_name)
+/// Short-pathed working dir a run executes in before archival.
+pub fn workspace_dir(run_id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("gage-eval-{}", short_uuid(run_id)))
 }
 
-pub fn test_cwd(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("cwd")
+/// Copy the finished workspace to its archival home and remove the
+/// workspace. Symlinks are recreated, not followed.
+pub fn archive_run(workspace: &Path, run_id: &str) -> io::Result<PathBuf> {
+    let dest = run_dir(run_id);
+    copy_tree(workspace, &dest)?;
+    fs::remove_dir_all(workspace)?;
+    Ok(dest)
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let meta = fs::symlink_metadata(&from)?;
+        if meta.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if meta.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn test_dir(run: &Path, test_name: &str) -> PathBuf {
+    run.join("results").join(test_name)
+}
+
+pub fn test_cwd(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("cwd")
+}
+
+/// Per-sample dir for a scanner test: sandbox `gage-home/`, scan streams,
+/// dump, judge artifacts.
+pub fn sample_dir(run: &Path, test_name: &str, sample: u32) -> PathBuf {
+    test_dir(run, test_name).join(format!("sample{sample}"))
 }
 
 /// Per-test `GAGE_HOME`. Empty dir; gage tools populate it on demand.
-pub fn test_gage_home(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("gage-home")
+pub fn test_gage_home(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("gage-home")
 }
 
 /// Per-test empty `projects/` dir used as `CLAUDE_PROJECTS_DIR` when a
 /// test specifies no fixture.
-pub fn test_empty_projects(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("projects")
+pub fn test_empty_projects(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("projects")
 }
 
 /// Shared across every test in a run. Holds settings.json, the
 /// installed-plugins index, sessions, etc.
-pub fn claude_home(run_id: &str) -> PathBuf {
-    run_dir(run_id).join("claude-home")
+pub fn claude_home(run: &Path) -> PathBuf {
+    run.join("claude-home")
 }
 
 /// Marketplace dir for the staged Gage plugin (per-run).
-pub fn plugin_marketplace_dir(run_id: &str) -> PathBuf {
-    run_dir(run_id).join("plugin-marketplace")
+pub fn plugin_marketplace_dir(run: &Path) -> PathBuf {
+    run.join("plugin-marketplace")
 }
 
-pub fn manifest_path(run_id: &str) -> PathBuf {
-    run_dir(run_id).join("manifest.json")
+pub fn manifest_path(run: &Path) -> PathBuf {
+    run.join("manifest.json")
 }
 
-pub fn test_json_path(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("test.json")
+pub fn test_json_path(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("test.json")
 }
 
-pub fn stdout_path(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("output.txt")
+pub fn stdout_path(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("output.txt")
 }
 
-pub fn stderr_path(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("error.txt")
+pub fn stderr_path(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("error.txt")
 }
 
-pub fn score_path(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("score.json")
+pub fn score_path(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("score.json")
 }
 
-pub fn error_exit_code_path(run_id: &str, test_name: &str) -> PathBuf {
-    test_dir(run_id, test_name).join("ERROR_EXIT_CODE")
+pub fn error_exit_code_path(run: &Path, test_name: &str) -> PathBuf {
+    test_dir(run, test_name).join("ERROR_EXIT_CODE")
 }
 
 /// Locate the session JSONL claude wrote for this test. Each test runs
@@ -89,9 +137,9 @@ pub fn error_exit_code_path(run_id: &str, test_name: &str) -> PathBuf {
 /// subdir containing exactly one `.jsonl` whose `cwd` field matches
 /// `test_cwd(run_id, test_name)`. Returns `None` if no matching session
 /// exists (e.g. claude failed before writing anything).
-pub fn session_path(run_id: &str, test_name: &str) -> Option<PathBuf> {
-    let projects = claude_home(run_id).join("projects");
-    let expected_cwd = test_cwd(run_id, test_name);
+pub fn session_path(run: &Path, test_name: &str) -> Option<PathBuf> {
+    let projects = claude_home(run).join("projects");
+    let expected_cwd = test_cwd(run, test_name);
     let projects_iter = fs::read_dir(&projects).ok()?;
     for entry in projects_iter.flatten() {
         let subdir = entry.path();
@@ -126,16 +174,16 @@ fn first_entry_cwd(jsonl: &Path) -> Option<String> {
 }
 
 /// Create the per-test directory layout and return the empty cwd path.
-pub fn prepare_test(run_id: &str, test_name: &str) -> io::Result<PathBuf> {
-    let cwd = test_cwd(run_id, test_name);
+pub fn prepare_test(run: &Path, test_name: &str) -> io::Result<PathBuf> {
+    let cwd = test_cwd(run, test_name);
     fs::create_dir_all(&cwd)?;
     Ok(cwd)
 }
 
 /// Create the shared claude-home and seed `settings.json` with the
 /// model + effort + thinking config every spawn uses.
-pub fn prepare_claude_home(run_id: &str, model: &str, effort: &str) -> io::Result<PathBuf> {
-    let home = claude_home(run_id);
+pub fn prepare_claude_home(run: &Path, model: &str, effort: &str) -> io::Result<PathBuf> {
+    let home = claude_home(run);
     fs::create_dir_all(&home)?;
     let settings = serde_json::json!({
         "model": model,
@@ -169,8 +217,7 @@ pub fn list_runs() -> io::Result<Vec<RunSummary>> {
                 return None;
             }
             let id = path.file_name()?.to_string_lossy().into_owned();
-            let manifest = manifest_path(&id);
-            let manifest = read_manifest(&manifest).ok()?;
+            let manifest = read_manifest(&manifest_path(&path)).ok()?;
             let started_at_ms = chrono::DateTime::parse_from_rfc3339(&manifest.started_at)
                 .ok()?
                 .timestamp_millis();
@@ -180,7 +227,7 @@ pub fn list_runs() -> io::Result<Vec<RunSummary>> {
                     .iter()
                     .fold(
                         (0usize, 0usize),
-                        |(scored, passed), n| match read_score_result(&id, n) {
+                        |(scored, passed), n| match read_score_result(&path, n) {
                             None => (scored, passed),
                             Some(true) => (scored + 1, passed + 1),
                             Some(false) => (scored + 1, passed),
@@ -193,7 +240,7 @@ pub fn list_runs() -> io::Result<Vec<RunSummary>> {
             });
             let mut tokens = crate::tokens::Tokens::default();
             for n in &manifest.test_names {
-                if let Some(p) = session_path(&id, n) {
+                if let Some(p) = session_path(&path, n) {
                     tokens += crate::tokens::session_tokens(&p);
                 }
             }
@@ -236,8 +283,8 @@ pub struct RunSummary {
 
 /// `None` if the test was not scored (no `expect` → no `score.json`).
 /// `Some(true)` if scored and passed; `Some(false)` if scored and failed.
-fn read_score_result(run_id: &str, test_name: &str) -> Option<bool> {
-    let path = score_path(run_id, test_name);
+fn read_score_result(run: &Path, test_name: &str) -> Option<bool> {
+    let path = score_path(run, test_name);
     let bytes = fs::read(&path).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     value.get("passed").and_then(serde_json::Value::as_bool)

@@ -1,0 +1,14 @@
+[[test]] # --------------------------------------------------------
+
+# Resolved-in-session failure mode. The user hit `.iter().first()` on
+# the Sessions iterator, got an opaque missing-method error, and the
+# assistant diagnosed and fixed it within the same short session. A
+# problem resolved in-session is not a reportable issue, so the scan
+# should write nothing of substance. Captured from the 2026-07-13 scan
+# review, where this session produced a bogus API-ergonomics issue.
+
+name = "rune-iter-error"
+scanners = ["general-issues"]
+fixture = "rune-iter-error"
+expect.empty = true
+samples = 3

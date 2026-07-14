@@ -82,7 +82,8 @@ struct Manifest {
 }
 
 fn render(run: &RunSummary) -> io::Result<String> {
-    let manifest_bytes = fs::read(storage::manifest_path(&run.run_id))?;
+    let run_dir = storage::run_dir(&run.run_id);
+    let manifest_bytes = fs::read(storage::manifest_path(&run_dir))?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(io::Error::other)?;
 
     let mut body = String::new();
@@ -90,15 +91,15 @@ fn render(run: &RunSummary) -> io::Result<String> {
     let mut passed: u32 = 0;
     let mut failed: u32 = 0;
     for name in &manifest.test_names {
-        let score = score::read_score(&run.run_id, name)?;
+        let score = score::read_score(&run_dir, name)?;
         let glyph = match &score {
             Some(s) if s.passed => "✓ ",
             Some(_) => "✗ ",
             None => "",
         };
         body.push_str(&format!("## {glyph}{name}\n\n"));
-        match read_test_json(&run.run_id, name) {
-            Ok(test) => run_tokens += render_test(&mut body, &run.run_id, name, &test),
+        match read_test_json(&run_dir, name) {
+            Ok(test) => run_tokens += render_test(&mut body, &run_dir, name, &test),
             Err(e) => body.push_str(&format!("_Failed to read test.json: {e}_\n\n")),
         }
         if let Some(s) = score {
@@ -145,8 +146,8 @@ fn render(run: &RunSummary) -> io::Result<String> {
     Ok(out)
 }
 
-fn render_test(out: &mut String, run_id: &str, test_name: &str, test: &Test) -> Tokens {
-    let session = storage::session_path(run_id, test_name);
+fn render_test(out: &mut String, run: &Path, test_name: &str, test: &Test) -> Tokens {
+    let session = storage::session_path(run, test_name);
     let (session_body, test_tokens) = match &session {
         Some(p) => match render_session(p) {
             Ok((body, tokens)) => (Some(body), tokens),
@@ -175,13 +176,13 @@ fn render_test(out: &mut String, run_id: &str, test_name: &str, test: &Test) -> 
             Err(e) => out.push_str(&format!("- Turns: _count failed: {e}_\n")),
         }
     }
-    let exit_code_path = storage::error_exit_code_path(run_id, test_name);
+    let exit_code_path = storage::error_exit_code_path(run, test_name);
     match fs::read_to_string(&exit_code_path) {
         Ok(code) => out.push_str(&format!("- Exit code: `{}`\n", code.trim())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => out.push_str(&format!("- Exit code: _read failed: {e}_\n")),
     }
-    match score::read_score(run_id, test_name) {
+    match score::read_score(run, test_name) {
         Ok(Some(s)) => {
             if s.passed {
                 out.push_str("- Result: ✓ pass\n");
@@ -202,10 +203,18 @@ fn render_test(out: &mut String, run_id: &str, test_name: &str, test: &Test) -> 
 
     out.push_str("### Summary\n\n");
     out.push_str("**Input**\n\n");
-    out.push_str(test.prompt.trim());
+    match &test.prompt {
+        Some(p) => out.push_str(p.trim()),
+        None => out.push_str(&format!(
+            "scanners: {}\nfixture: {}\nsamples: {}",
+            test.scanners.join(", "),
+            test.fixture.as_deref().unwrap_or("?"),
+            test.samples
+        )),
+    }
     out.push_str("\n\n");
 
-    let stdout = fs::read_to_string(storage::stdout_path(run_id, test_name)).unwrap_or_default();
+    let stdout = fs::read_to_string(storage::stdout_path(run, test_name)).unwrap_or_default();
     let stdout_trimmed = stdout.trim();
     if !stdout_trimmed.is_empty() {
         out.push_str("**Output**\n\n");
@@ -214,7 +223,7 @@ fn render_test(out: &mut String, run_id: &str, test_name: &str, test: &Test) -> 
     }
 
     out.push_str("**Score**\n\n");
-    match score::read_score(run_id, test_name) {
+    match score::read_score(run, test_name) {
         Ok(Some(s)) => {
             let verdict = if s.passed { "✓ pass" } else { "✗ fail" };
             out.push_str(&format!("{verdict}\n\n"));
@@ -230,7 +239,7 @@ fn render_test(out: &mut String, run_id: &str, test_name: &str, test: &Test) -> 
         Err(e) => out.push_str(&format!("_Failed to read score.json: {e}_\n\n")),
     }
 
-    let stderr = fs::read_to_string(storage::stderr_path(run_id, test_name)).unwrap_or_default();
+    let stderr = fs::read_to_string(storage::stderr_path(run, test_name)).unwrap_or_default();
     let stderr_trimmed = stderr.trim();
     if !stderr_trimmed.is_empty() {
         out.push_str("**Error**\n\n");
@@ -238,11 +247,118 @@ fn render_test(out: &mut String, run_id: &str, test_name: &str, test: &Test) -> 
         out.push_str("\n\n");
     }
 
+    if test.is_scanner() {
+        render_scanner_reps(out, run, test_name, test);
+    }
+
     if let Some(body) = session_body {
         out.push_str(&body);
     }
 
     test_tokens
+}
+
+/// Per-sample detail for a scanner test: the judge's verdict (with its
+/// evidence and reasons), what the scan actually wrote, and where the
+/// sample's artifacts live.
+fn render_scanner_reps(out: &mut String, run: &Path, test_name: &str, test: &Test) {
+    let labels: Vec<String> = test
+        .expect
+        .iter()
+        .flat_map(|e| {
+            e.notes
+                .iter()
+                .map(|n| format!("note {}", n.name))
+                .chain(e.issues.iter().map(|i| format!("issue {}", i.name)))
+        })
+        .collect();
+
+    for sample in 1..=test.samples {
+        let dir = storage::sample_dir(run, test_name, sample);
+        out.push_str(&format!("### Sample {sample}\n\n"));
+        out.push_str(&format!("- Artifacts: `{}`\n", dir.display()));
+        out.push_str(&format!(
+            "- Sandbox db: `{}`\n\n",
+            dir.join("gage-home/data/gage.db").display()
+        ));
+
+        if let Ok(msg) = fs::read_to_string(dir.join("ERROR")) {
+            out.push_str(&format!("**Error**\n\n{}\n\n", msg.trim()));
+            continue;
+        }
+
+        match read_json::<crate::scanner::Verdict>(&dir.join("verdict.json")) {
+            Ok(v) => {
+                out.push_str("**Judge verdict**\n\n");
+                for e in &v.expected {
+                    let g = if e.matched { "✓" } else { "✗" };
+                    let label = labels
+                        .get(e.index)
+                        .map(String::as_str)
+                        .unwrap_or("(unknown expectation)");
+                    out.push_str(&format!("- {g} expected {label}"));
+                    if let Some(ev) = e.evidence.as_deref().filter(|s| !s.is_empty()) {
+                        out.push_str(&format!(" — “{ev}”"));
+                    }
+                    if let Some(r) = e.reason.as_deref().filter(|s| !s.is_empty()) {
+                        out.push_str(&format!(" ({r})"));
+                    }
+                    out.push('\n');
+                }
+                for u in &v.unexpected {
+                    out.push_str(&format!("- ✗ unexpected {} {}", u.kind, u.name));
+                    if let Some(ex) = u.excerpt.as_deref().filter(|s| !s.is_empty()) {
+                        out.push_str(&format!(" — “{ex}”"));
+                    }
+                    if let Some(r) = u.reason.as_deref().filter(|s| !s.is_empty()) {
+                        out.push_str(&format!(" ({r})"));
+                    }
+                    out.push('\n');
+                }
+                if v.expected.is_empty() && v.unexpected.is_empty() {
+                    out.push_str("- nothing expected, nothing unsanctioned written\n");
+                }
+                out.push('\n');
+            }
+            Err(e) => out.push_str(&format!("_Failed to read verdict.json: {e}_\n\n")),
+        }
+
+        match read_json::<crate::scanner::Dump>(&dir.join("dump.json")) {
+            Ok(d) => {
+                out.push_str("**Written**\n\n");
+                if d.notes.is_empty() && d.issues.is_empty() {
+                    out.push_str("(nothing)\n");
+                }
+                for n in &d.notes {
+                    out.push_str(&format!(
+                        "- note {} ({}): {}\n",
+                        n.name,
+                        n.author,
+                        excerpt(&n.value, 160)
+                    ));
+                }
+                for i in &d.issues {
+                    out.push_str(&format!("- issue {}: {}\n", i.name, excerpt(&i.title, 160)));
+                }
+                out.push('\n');
+            }
+            Err(e) => out.push_str(&format!("_Failed to read dump.json: {e}_\n\n")),
+        }
+    }
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
+}
+
+fn excerpt(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let cut: String = flat.chars().take(max).collect();
+    format!("{cut}…")
 }
 
 fn format_duration_ms(ms: i64) -> String {
@@ -483,8 +599,8 @@ fn render_tool_results(value: &Value) -> Option<String> {
     }
 }
 
-fn read_test_json(run_id: &str, test_name: &str) -> io::Result<Test> {
-    let bytes = fs::read(storage::test_json_path(run_id, test_name))?;
+fn read_test_json(run: &Path, test_name: &str) -> io::Result<Test> {
+    let bytes = fs::read(storage::test_json_path(run, test_name))?;
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 

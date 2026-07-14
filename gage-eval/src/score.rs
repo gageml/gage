@@ -35,7 +35,7 @@ pub struct MatchResult {
 /// `None` if the test has no `expect`. Otherwise writes `score.json`
 /// and returns the `Score`. Errors if `expect` is present but yields
 /// no patterns, or if any pattern fails to compile.
-pub fn score_test(run_id: &str, test: &Test) -> io::Result<Option<Score>> {
+pub fn score_test(run: &Path, test: &Test) -> io::Result<Option<Score>> {
     let expect = match &test.expect {
         Some(e) => e,
         None => return Ok(None),
@@ -47,7 +47,7 @@ pub fn score_test(run_id: &str, test: &Test) -> io::Result<Option<Score>> {
             test.id()
         )));
     }
-    let output = fs::read_to_string(storage::stdout_path(run_id, &test.id())).unwrap_or_default();
+    let output = fs::read_to_string(storage::stdout_path(run, &test.id())).unwrap_or_default();
 
     let mut matches = Vec::with_capacity(patterns.len() + 2);
     for pat in patterns {
@@ -59,7 +59,7 @@ pub fn score_test(run_id: &str, test: &Test) -> io::Result<Option<Score>> {
     }
 
     for sql in &expect.db_rows {
-        let (rows, label) = match run_db_rows(run_id, &test.id(), sql) {
+        let (rows, label) = match run_db_rows(run, &test.id(), sql) {
             Ok(n) => (n, format!("db: returned {n} rows")),
             Err(e) => (0, format!("db: {e}")),
         };
@@ -69,7 +69,7 @@ pub fn score_test(run_id: &str, test: &Test) -> io::Result<Option<Score>> {
         });
     }
 
-    let turns = match storage::session_path(run_id, &test.id()) {
+    let turns = match storage::session_path(run, &test.id()) {
         Some(p) => Some(count_turns(&p)?),
         None => None,
     };
@@ -84,7 +84,7 @@ pub fn score_test(run_id: &str, test: &Test) -> io::Result<Option<Score>> {
     // The run is only a success if `claude` exited cleanly. A non-zero
     // exit (e.g. `Reached max turns`) means the run did not complete as
     // intended, so the test fails regardless of the other checks.
-    let exit_code = read_exit_code(run_id, &test.id());
+    let exit_code = read_exit_code(run, &test.id());
     matches.push(MatchResult {
         pattern: format!("exit code == 0 (was {exit_code})"),
         matched: exit_code == 0,
@@ -96,15 +96,15 @@ pub fn score_test(run_id: &str, test: &Test) -> io::Result<Option<Score>> {
         turns,
     };
     let bytes = serde_json::to_vec_pretty(&score).map_err(io::Error::other)?;
-    fs::write(storage::score_path(run_id, &test.id()), bytes)?;
+    fs::write(storage::score_path(run, &test.id()), bytes)?;
     Ok(Some(score))
 }
 
 /// Read the recorded claude exit code for a test. `run_one` writes the
 /// `ERROR_EXIT_CODE` file only on a non-zero exit, so an absent or
 /// unparseable file means a clean exit (`0`).
-fn read_exit_code(run_id: &str, test_id: &str) -> i32 {
-    fs::read_to_string(storage::error_exit_code_path(run_id, test_id))
+fn read_exit_code(run: &Path, test_id: &str) -> i32 {
+    fs::read_to_string(storage::error_exit_code_path(run, test_id))
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
@@ -112,8 +112,8 @@ fn read_exit_code(run_id: &str, test_id: &str) -> i32 {
 
 /// Run `sql` against the test's `gage.db` and return the row count.
 /// Errors when the db file is missing or the query is invalid.
-fn run_db_rows(run_id: &str, test_id: &str, sql: &str) -> io::Result<u32> {
-    let db_path = storage::test_gage_home(run_id, test_id)
+fn run_db_rows(run: &Path, test_id: &str, sql: &str) -> io::Result<u32> {
+    let db_path = storage::test_gage_home(run, test_id)
         .join("data")
         .join("gage.db");
     if !db_path.exists() {
@@ -151,8 +151,8 @@ pub fn count_turns(path: &Path) -> io::Result<u32> {
 }
 
 /// Read a previously-written `score.json`. Returns `None` if absent.
-pub fn read_score(run_id: &str, test_name: &str) -> io::Result<Option<Score>> {
-    let path = storage::score_path(run_id, test_name);
+pub fn read_score(run: &Path, test_name: &str) -> io::Result<Option<Score>> {
+    let path = storage::score_path(run, test_name);
     if !path.exists() {
         return Ok(None);
     }

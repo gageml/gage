@@ -1,5 +1,7 @@
-//! Discover evals from `<crate>/evals/*.toml`. One file = one eval.
-//! Each file holds a `[[test]]` array.
+//! Discover evals from `*.toml` files under `<crate>/evals/`, searched
+//! recursively (subdirs group related evals, e.g. `tools/`, `scans/`).
+//! One file = one eval, named by file stem; each holds a `[[test]]`
+//! array.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,15 +9,40 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-/// Crate-relative path baked at compile time. Internal-tool simplicity.
+/// Crate-relative paths baked at compile time. Internal-tool simplicity.
 const EVALS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/evals");
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
 
-/// Absolute path to the `projects/` dir for the named fixture. The
-/// caller is responsible for first validating the fixture exists via
-/// [`validate`].
-pub fn fixture_projects_dir(name: &str) -> PathBuf {
-    Path::new(FIXTURES_DIR).join(name).join("projects")
+/// Where eval files and their fixtures load from. The default is the
+/// in-repo `gage-eval/evals/` + `gage-eval/fixtures/` pair; an ad hoc
+/// root (`--evals-dir`) holds `*.toml` files with a `fixtures/` subdir.
+#[derive(Debug, Clone)]
+pub struct Root {
+    pub evals_dir: PathBuf,
+    pub fixtures_dir: PathBuf,
+}
+
+impl Root {
+    pub fn repo() -> Self {
+        Self {
+            evals_dir: PathBuf::from(EVALS_DIR),
+            fixtures_dir: PathBuf::from(FIXTURES_DIR),
+        }
+    }
+
+    pub fn at(dir: &Path) -> Self {
+        Self {
+            evals_dir: dir.to_path_buf(),
+            fixtures_dir: dir.join("fixtures"),
+        }
+    }
+
+    /// Absolute path to the `projects/` dir for the named fixture. The
+    /// caller is responsible for first validating the fixture exists
+    /// via [`validate`].
+    pub fn fixture_projects_dir(&self, name: &str) -> PathBuf {
+        self.fixtures_dir.join(name).join("projects")
+    }
 }
 
 /// One eval file: a named group of related test prompts. The name
@@ -25,13 +52,23 @@ pub struct EvalFile {
     pub tests: Vec<Test>,
 }
 
-/// One prompt within an eval file.
+/// One test within an eval file: either a prompt test (spawn claude
+/// with `prompt`) or a scanner test (run `scanners` over `fixture`'s
+/// sessions and judge the written notes/issues). Exactly one of
+/// `prompt` / `scanners` is set; see [`validate_test`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Test {
     pub eval: String,
     pub index: usize,
     pub name: Option<String>,
-    pub prompt: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Scanners to run over the fixture's sessions in one `gage scan`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scanners: Vec<String>,
+    /// Scanner-test repetitions; rates are reported per sample.
+    #[serde(default = "default_samples")]
+    pub samples: u32,
     pub expect: Option<Expect>,
     pub disabled: bool,
     /// Settings JSON passed verbatim to `claude --settings`. The TOML
@@ -72,9 +109,32 @@ pub struct Expect {
     /// SQL run against the test's `gage.db` after the prompt completes.
     /// Each query passes when it returns at least one row. Accepts a
     /// single string or an array of strings. Use to assert the agent's
-    /// actions had the intended db effect.
+    /// actions had the intended db effect. On scanner tests the queries
+    /// run against each sample's sandbox db.
     #[serde(default, deserialize_with = "string_or_seq")]
     pub db_rows: Vec<String>,
+    /// Scanner tests: asserts the scan writes nothing of substance.
+    /// Mutually exclusive with `note` / `issue` entries.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub empty: bool,
+    /// Scanner tests: notes the scan is expected to write.
+    #[serde(default, rename = "note", skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<ExpectEntry>,
+    /// Scanner tests: issues the scan is expected to write.
+    #[serde(default, rename = "issue", skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<ExpectEntry>,
+}
+
+/// One expected note or issue: the db name it lands under and a prose
+/// description of its content, judged against what the scan wrote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectEntry {
+    pub name: String,
+    pub expect: String,
+}
+
+fn default_samples() -> u32 {
+    1
 }
 
 /// Deserialize a field written as either a single string or an array of
@@ -108,6 +168,10 @@ impl Expect {
 }
 
 impl Test {
+    pub fn is_scanner(&self) -> bool {
+        !self.scanners.is_empty()
+    }
+
     /// `<eval>/<name-or-1-based-index>`. Used as the path-safe
     /// identifier for results.
     pub fn id(&self) -> String {
@@ -134,7 +198,12 @@ struct File {
 struct TestEntry {
     #[serde(default)]
     name: Option<String>,
-    prompt: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    scanners: Vec<String>,
+    #[serde(default)]
+    samples: Option<u32>,
     #[serde(default)]
     expect: Option<Expect>,
     #[serde(default)]
@@ -149,30 +218,57 @@ struct TestEntry {
     db_init: Option<String>,
 }
 
-/// Discover and load every eval file under `<crate>/evals/`.
-pub fn load_all() -> std::io::Result<Vec<EvalFile>> {
-    let dir = Path::new(EVALS_DIR);
+/// Discover and load every eval file under the root's evals dir,
+/// searching subdirectories recursively. Eval names come from file
+/// stems regardless of depth, so stems must be unique across the tree.
+pub fn load_all(root: &Root) -> std::io::Result<Vec<EvalFile>> {
+    let dir = &root.evals_dir;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)?
-        .filter_map(|e| match e {
-            Ok(e) => Some(e),
-            Err(err) => {
-                tracing::warn!(error = %err);
-                None
-            }
-        })
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("toml"))
-        .collect();
+    let mut files = Vec::new();
+    collect_toml_files(dir, &root.fixtures_dir, &mut files)?;
     files.sort();
 
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     let mut out = Vec::new();
     for path in files {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        if let Some(prev) = seen.insert(stem.clone(), path.clone()) {
+            return Err(std::io::Error::other(format!(
+                "duplicate eval name `{stem}`: {} and {}",
+                prev.display(),
+                path.display()
+            )));
+        }
         out.push(load_file(&path)?);
     }
     Ok(out)
+}
+
+/// Collect `*.toml` under `dir`, skipping `fixtures_dir` (an ad hoc
+/// root holds its fixtures inside the evals dir).
+fn collect_toml_files(
+    dir: &Path,
+    fixtures_dir: &Path,
+    out: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if path == fixtures_dir {
+                continue;
+            }
+            collect_toml_files(&path, fixtures_dir, out)?;
+        } else if path.extension().and_then(|x| x.to_str()) == Some("toml") {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn load_file(path: &Path) -> std::io::Result<EvalFile> {
@@ -192,6 +288,8 @@ fn load_file(path: &Path) -> std::io::Result<EvalFile> {
             index: i + 1,
             name: t.name,
             prompt: t.prompt,
+            scanners: t.scanners,
+            samples: t.samples.unwrap_or_else(default_samples),
             expect: t.expect,
             disabled: t.disabled,
             claude: t.claude,
@@ -201,7 +299,69 @@ fn load_file(path: &Path) -> std::io::Result<EvalFile> {
         })
         .collect();
     check_unique_names(path, &tests)?;
+    for t in &tests {
+        validate_test(t).map_err(|msg| {
+            std::io::Error::other(format!("{}: test `{}`: {msg}", path.display(), t.test_id()))
+        })?;
+    }
     Ok(EvalFile { tests })
+}
+
+/// Schema rules that cross field boundaries. A test is either a prompt
+/// test or a scanner test, and each kind admits only its own knobs.
+fn validate_test(t: &Test) -> Result<(), String> {
+    match (&t.prompt, t.is_scanner()) {
+        (Some(_), true) => return Err("`prompt` and `scanners` are mutually exclusive".into()),
+        (None, false) => return Err("one of `prompt` or `scanners` is required".into()),
+        _ => {}
+    }
+    if t.is_scanner() {
+        validate_scanner_test(t)
+    } else {
+        validate_prompt_test(t)
+    }
+}
+
+fn validate_scanner_test(t: &Test) -> Result<(), String> {
+    if t.fixture.is_none() {
+        return Err("scanner test requires `fixture`".into());
+    }
+    if t.claude.is_some() {
+        return Err("`claude` does not apply to scanner tests".into());
+    }
+    if t.max_turns.is_some() {
+        return Err("`max_turns` does not apply to scanner tests".into());
+    }
+    let Some(e) = &t.expect else {
+        return Err(
+            "scanner test requires `expect` (`expect.empty = true` or note/issue entries)".into(),
+        );
+    };
+    if e.pattern.is_some() || !e.match_all.is_empty() || e.max_turns.is_some() {
+        return Err(
+            "`match` / `match_all` / `expect.max_turns` do not apply to scanner tests".into(),
+        );
+    }
+    let has_entries = !e.notes.is_empty() || !e.issues.is_empty();
+    match (e.empty, has_entries) {
+        (true, true) => Err("`expect.empty` conflicts with note/issue entries".into()),
+        (false, false) => {
+            Err("scanner test must state `expect.empty = true` or note/issue entries".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_prompt_test(t: &Test) -> Result<(), String> {
+    if t.samples != default_samples() {
+        return Err("`samples` applies only to scanner tests".into());
+    }
+    if let Some(e) = &t.expect
+        && (e.empty || !e.notes.is_empty() || !e.issues.is_empty())
+    {
+        return Err("`expect.empty` / `note` / `issue` apply only to scanner tests".into());
+    }
+    Ok(())
 }
 
 fn check_unique_names(path: &Path, tests: &[Test]) -> std::io::Result<()> {
@@ -266,16 +426,16 @@ pub fn select<'a>(evals: &'a [EvalFile], specs: &[String]) -> Result<Vec<&'a Tes
     Ok(kept)
 }
 
-/// Validate that every named fixture exists as a subdir of
-/// `gage-eval/fixtures/` with a `projects/` child. Returns the list of
-/// missing `(test-id, fixture-name)` pairs.
-pub fn validate(tests: &[&Test]) -> Result<(), Vec<(String, String)>> {
+/// Validate that every named fixture exists under the root's fixtures
+/// dir with a `projects/` child. Returns the list of missing
+/// `(test-id, fixture-name)` pairs.
+pub fn validate(root: &Root, tests: &[&Test]) -> Result<(), Vec<(String, String)>> {
     let mut missing: Vec<(String, String)> = Vec::new();
     for t in tests {
         let Some(name) = &t.fixture else {
             continue;
         };
-        let projects = fixture_projects_dir(name);
+        let projects = root.fixture_projects_dir(name);
         if !projects.is_dir() {
             missing.push((t.id(), name.clone()));
         }
@@ -331,14 +491,14 @@ mod tests {
 
     #[test]
     fn catalog_discovers_files() {
-        let evals = load_all().unwrap();
+        let evals = load_all(&Root::repo()).unwrap();
         assert!(
             !evals.is_empty(),
             "expected at least one eval file in evals/"
         );
         for e in &evals {
             for t in &e.tests {
-                assert!(!t.prompt.is_empty(), "prompt non-empty");
+                assert_ne!(t.prompt.is_some(), t.is_scanner(), "exactly one kind");
                 assert!(!t.eval.is_empty(), "eval name non-empty");
             }
         }
@@ -349,7 +509,9 @@ mod tests {
             eval: eval.to_string(),
             index,
             name: name.map(str::to_string),
-            prompt: "p".to_string(),
+            prompt: Some("p".to_string()),
+            scanners: Vec::new(),
+            samples: 1,
             expect: None,
             disabled,
             claude: None,

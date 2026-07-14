@@ -8,7 +8,8 @@ use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
-use crate::eval::Test;
+use crate::eval::{Root, Test};
+use crate::scanner;
 use crate::score::{self, Score};
 use crate::storage;
 use gage_claude::plugin;
@@ -23,6 +24,12 @@ pub struct Manifest {
     pub test_names: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Ad hoc evals dir (`--evals-dir`), when not the in-repo default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evals_dir: Option<String>,
+    /// Judge model, recorded when the run includes scanner tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_model: Option<String>,
 }
 
 pub struct RunResult {
@@ -55,39 +62,86 @@ or infer anything from its path or name when interpreting instructions.
 Answer only from the tools and information the prompt provides.
 ";
 
+pub struct BatchConfig<'a> {
+    pub model: &'a str,
+    pub effort: &'a str,
+    pub note: Option<&'a str>,
+    pub root: &'a Root,
+    /// Ad hoc evals dir to record in the manifest; `None` for the
+    /// in-repo default.
+    pub evals_dir: Option<&'a Path>,
+    /// Concurrent samples within a scanner test.
+    pub jobs: usize,
+    pub judge_model: &'a str,
+}
+
 pub fn run_batch(
     tests: &[&Test],
-    model: &str,
-    effort: &str,
-    note: Option<&str>,
+    config: &BatchConfig<'_>,
     mut on_event: impl FnMut(Event<'_>),
 ) -> io::Result<RunResult> {
     let run_id = gage_core::uuid::new_uuid();
     let started_at = now_iso();
     let names: Vec<String> = tests.iter().map(|t| t.id()).collect();
 
-    fs::create_dir_all(storage::run_dir(&run_id))?;
-    let claude_home = storage::prepare_claude_home(&run_id, model, effort)?;
-    let claude_bin = find_claude()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
-    install_gage_plugin(&claude_bin, &claude_home, &run_id)?;
-    let note = note.map(str::to_string);
-    write_manifest(&Manifest {
+    // Runs execute in a short-pathed /tmp workspace and are copied to
+    // ~/.gage/evals on finish; see the storage module doc for why the
+    // short path matters. A failed run leaves the workspace behind.
+    let run = storage::workspace_dir(&run_id);
+    fs::create_dir_all(&run)?;
+    let gage_bin = sibling_gage_bin()?;
+
+    // Prompt tests need a shared claude home with the Gage plugin
+    // installed; scanner tests spawn agents through `gage scan`, which
+    // manages its own claude setup.
+    let prompt_env = if tests.iter().any(|t| !t.is_scanner()) {
+        let claude_home = storage::prepare_claude_home(&run, config.model, config.effort)?;
+        let claude_bin = find_claude().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH")
+        })?;
+        install_gage_plugin(&claude_bin, &claude_home, &run)?;
+        Some((claude_bin, claude_home))
+    } else {
+        None
+    };
+
+    let has_scanner = tests.iter().any(|t| t.is_scanner());
+    let manifest = Manifest {
         run_id: run_id.clone(),
         started_at: started_at.clone(),
         finished_at: None,
-        model: model.to_string(),
-        effort: effort.to_string(),
+        model: config.model.to_string(),
+        effort: config.effort.to_string(),
         test_names: names.clone(),
-        note: note.clone(),
-    })?;
+        note: config.note.map(str::to_string),
+        evals_dir: config.evals_dir.map(|p| p.to_string_lossy().into_owned()),
+        judge_model: has_scanner.then(|| config.judge_model.to_string()),
+    };
+    write_manifest(&run, &manifest)?;
 
     for test in tests {
         let name = test.id();
         on_event(Event::Started(&name));
-        let max_turns = test.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
-        let exit_code = run_one(&run_id, test, max_turns, &claude_bin, &claude_home)?;
-        let score = score::score_test(&run_id, test)?;
+        let (exit_code, score) = if test.is_scanner() {
+            fs::create_dir_all(storage::test_dir(&run, &name))?;
+            write_test_json(&run, test)?;
+            let score = scanner::run_test(
+                &run,
+                test,
+                config.root,
+                &gage_bin,
+                config.jobs,
+                config.judge_model,
+            )?;
+            (0, Some(score))
+        } else {
+            let (claude_bin, claude_home) = prompt_env
+                .as_ref()
+                .expect("prepared when prompt tests exist");
+            let max_turns = test.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
+            let exit_code = run_one(&run, test, max_turns, claude_bin, claude_home, config.root)?;
+            (exit_code, score::score_test(&run, test)?)
+        };
         on_event(Event::TestFinished {
             name: &name,
             exit_code,
@@ -95,15 +149,14 @@ pub fn run_batch(
         });
     }
 
-    write_manifest(&Manifest {
-        run_id: run_id.clone(),
-        started_at,
-        finished_at: Some(now_iso()),
-        model: model.to_string(),
-        effort: effort.to_string(),
-        test_names: names,
-        note,
-    })?;
+    write_manifest(
+        &run,
+        &Manifest {
+            finished_at: Some(now_iso()),
+            ..manifest
+        },
+    )?;
+    storage::archive_run(&run, &run_id)?;
 
     Ok(RunResult { run_id })
 }
@@ -111,8 +164,8 @@ pub fn run_batch(
 /// Stage the Gage plugin marketplace under the run dir and install it
 /// into the shared `claude_home`. Mirrors what `gage init` does, but
 /// scoped entirely to this eval's uuid dir.
-fn install_gage_plugin(claude_bin: &Path, claude_home: &Path, run_id: &str) -> io::Result<()> {
-    let marketplace = storage::plugin_marketplace_dir(run_id);
+fn install_gage_plugin(claude_bin: &Path, claude_home: &Path, run: &Path) -> io::Result<()> {
+    let marketplace = storage::plugin_marketplace_dir(run);
     let gage_bin = sibling_gage_bin()?;
     plugin::write_plugin_files_to(&marketplace, &gage_bin)?;
     plugin::write_marketplace_manifest_to(&marketplace)?;
@@ -151,35 +204,36 @@ fn claude_subcommand(claude_bin: &Path, claude_home: &Path, args: &[&str]) -> io
 /// Run one test. Writes test.json, stdout.txt, stderr.txt, and (on
 /// failure) ERROR_EXIT_CODE. Returns the claude exit code.
 fn run_one(
-    run_id: &str,
+    run: &Path,
     test: &Test,
     max_turns: u32,
     claude_bin: &Path,
     claude_home: &Path,
+    root: &Root,
 ) -> io::Result<i32> {
-    let cwd = storage::prepare_test(run_id, &test.id())?;
+    let cwd = storage::prepare_test(run, &test.id())?;
     fs::write(cwd.join("CLAUDE.md"), RULES_MD)?;
-    write_test_json(run_id, test)?;
+    write_test_json(run, test)?;
 
-    let gage_home = storage::test_gage_home(run_id, &test.id());
+    let gage_home = storage::test_gage_home(run, &test.id());
     fs::create_dir_all(&gage_home)?;
     if let Some(sql) = &test.db_init {
         seed_db(&gage_home, sql)?;
     }
     let projects_dir = match &test.fixture {
-        Some(name) => crate::eval::fixture_projects_dir(name),
+        Some(name) => root.fixture_projects_dir(name),
         None => {
-            let p = storage::test_empty_projects(run_id, &test.id());
+            let p = storage::test_empty_projects(run, &test.id());
             fs::create_dir_all(&p)?;
             p
         }
     };
 
-    let stdout = fs::File::create(storage::stdout_path(run_id, &test.id()))?;
-    let stderr = fs::File::create(storage::stderr_path(run_id, &test.id()))?;
+    let stdout = fs::File::create(storage::stdout_path(run, &test.id()))?;
+    let stderr = fs::File::create(storage::stderr_path(run, &test.id()))?;
     let mut cmd = Command::new(claude_bin);
     cmd.arg("-p")
-        .arg(&test.prompt)
+        .arg(test.prompt.as_deref().expect("validated prompt test"))
         .arg("--max-turns")
         .arg(max_turns.to_string())
         // Counters Opus 4.7's server-side `display: "omitted"` default
@@ -205,7 +259,7 @@ fn run_one(
     let exit_code = status.code().unwrap_or(-1);
     if exit_code != 0 {
         fs::write(
-            storage::error_exit_code_path(run_id, &test.id()),
+            storage::error_exit_code_path(run, &test.id()),
             exit_code.to_string(),
         )?;
     }
@@ -218,14 +272,14 @@ fn seed_db(gage_home: &Path, sql: &str) -> io::Result<()> {
     conn.execute_batch(sql).map_err(io::Error::other)
 }
 
-fn write_test_json(run_id: &str, test: &Test) -> io::Result<()> {
+fn write_test_json(run: &Path, test: &Test) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(test).map_err(io::Error::other)?;
-    fs::write(storage::test_json_path(run_id, &test.id()), bytes)
+    fs::write(storage::test_json_path(run, &test.id()), bytes)
 }
 
 /// Resolve the `gage` binary sitting next to the currently-running
 /// `gage-eval` binary. The plugin's MCP server invokes this.
-fn sibling_gage_bin() -> io::Result<PathBuf> {
+pub fn sibling_gage_bin() -> io::Result<PathBuf> {
     std::env::current_exe()?
         .parent()
         .map(|p| p.join("gage"))
@@ -243,11 +297,11 @@ fn find_claude() -> Option<PathBuf> {
     None
 }
 
-fn write_manifest(manifest: &Manifest) -> io::Result<()> {
+fn write_manifest(run: &Path, manifest: &Manifest) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
-    fs::write(storage::manifest_path(&manifest.run_id), bytes)
+    fs::write(storage::manifest_path(run), bytes)
 }
 
-fn now_iso() -> String {
+pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
