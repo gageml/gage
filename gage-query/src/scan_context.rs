@@ -10,10 +10,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use datafusion::prelude::{SessionConfig, SessionContext};
+use gage_claude::home::ClaudeHome;
 use gage_claude::session::SessionInfo;
+use tracing::warn;
 
 use crate::cache::SessionCache;
-use crate::tables::{EntryTable, MessageTable};
+use crate::tables::{ConfigTable, EntryTable, MessageTable};
 
 pub struct ScanSessionContext {
     inner: SessionContext,
@@ -41,6 +43,17 @@ impl ScanSessionContext {
         inner
             .register_table("message", Arc::new(MessageTable::with_lookup(sessions)))
             .unwrap();
+        // `from_env` fails only when neither CLAUDE_CONFIG_DIR nor HOME
+        // is set; without a home there is no config corpus, so the
+        // table is simply absent and queries against it error.
+        match ClaudeHome::from_env() {
+            Ok(home) => {
+                inner
+                    .register_table("config", Arc::new(ConfigTable::new(home)))
+                    .unwrap();
+            }
+            Err(e) => warn!(error = %e, "config table not registered"),
+        }
         Self { inner, cache }
     }
 

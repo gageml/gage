@@ -11,6 +11,7 @@ use std::sync::Arc;
 use common::col_strings;
 use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::prelude::{SessionConfig, SessionContext};
+use gage_claude::home::ClaudeHome;
 use gage_claude::session::encode_project_dir;
 use gage_query::tables::ConfigTable;
 
@@ -58,8 +59,11 @@ fn fixture() -> (tempfile::TempDir, SessionContext) {
 
     let cfg = SessionConfig::new().with_information_schema(true);
     let ctx = SessionContext::new_with_config(cfg);
-    ctx.register_table("config", Arc::new(ConfigTable::new(claude)))
-        .unwrap();
+    ctx.register_table(
+        "config",
+        Arc::new(ConfigTable::new(ClaudeHome::new(claude.to_path_buf()))),
+    )
+    .unwrap();
     (tmp, ctx)
 }
 
@@ -204,8 +208,11 @@ fn fixture_with_broken_commands() -> (tempfile::TempDir, SessionContext) {
 
     let cfg = SessionConfig::new().with_information_schema(true);
     let ctx = SessionContext::new_with_config(cfg);
-    ctx.register_table("config", Arc::new(ConfigTable::new(claude)))
-        .unwrap();
+    ctx.register_table(
+        "config",
+        Arc::new(ConfigTable::new(ClaudeHome::new(claude.to_path_buf()))),
+    )
+    .unwrap();
     (tmp, ctx)
 }
 

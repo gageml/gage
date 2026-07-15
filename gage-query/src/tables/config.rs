@@ -2,7 +2,6 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::fmt::{self, Formatter};
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -49,14 +48,14 @@ const COL_TEXT: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct ConfigTable {
-    home: PathBuf,
+    home: ClaudeHome,
     schema: SchemaRef,
 }
 
 impl ConfigTable {
-    pub fn new(home: impl Into<PathBuf>) -> Self {
+    pub fn new(home: ClaudeHome) -> Self {
         Self {
-            home: home.into(),
+            home,
             schema: config_schema(),
         }
     }
@@ -188,7 +187,7 @@ fn extract_string_set(filters: &[Expr], col_name: &str) -> Option<HashSet<String
 
 #[derive(Debug, Clone)]
 struct ConfigExec {
-    home: PathBuf,
+    home: ClaudeHome,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -203,7 +202,7 @@ struct ConfigExec {
 impl ConfigExec {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        home: PathBuf,
+        home: ClaudeHome,
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
@@ -281,7 +280,7 @@ impl ExecutionPlan for ConfigExec {
         let dirs_listed = MetricBuilder::new(&self.metrics).counter("dirs_listed", partition);
 
         let rows = collect_rows(
-            ClaudeHome::new(self.home.clone()),
+            self.home.clone(),
             self.scope_filter.as_ref(),
             self.project_filter.as_ref(),
             self.type_filter.as_ref(),

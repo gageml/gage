@@ -9,6 +9,7 @@ use datafusion::sql::TableReference;
 use datafusion_table_providers::sql::db_connection_pool::Mode;
 use datafusion_table_providers::sql::db_connection_pool::sqlitepool::SqliteConnectionPoolFactory;
 use datafusion_table_providers::sqlite::SqliteTableFactory;
+use gage_claude::home::ClaudeHome;
 use gage_index::IndexStore;
 
 use crate::cache::SessionCache;
@@ -147,10 +148,19 @@ async fn build_context(
     // for the `config` table. Tests that pass a non-standard `root`
     // (e.g. a bare `testdata/` dir) get an unrelated home — fine as
     // long as they don't query `config`.
-    let claude_home = root
+    let claude_home_dir = root
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.to_path_buf());
+    // Prefer the env-resolved home when it matches: it carries the real
+    // `.claude.json` registry location ($HOME/.claude.json, a sibling of
+    // $HOME/.claude), which `ClaudeHome::new`'s fixture layout
+    // (`<home>/.claude.json`) does not. Non-matching roots (agent
+    // corpus, tests) keep the fixture layout.
+    let claude_home = match ClaudeHome::from_env() {
+        Ok(h) if h.path() == claude_home_dir => h,
+        Ok(_) | Err(_) => ClaudeHome::new(claude_home_dir),
+    };
     ctx.register_table("config", Arc::new(ConfigTable::new(claude_home)))
         .unwrap();
     ctx.register_table("note_doc", note_doc_table().unwrap())

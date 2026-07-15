@@ -55,7 +55,7 @@ impl DateTime {
     }
 
     #[rune::function(keep, instance)]
-    fn to_rfc3339(&self) -> String {
+    pub(crate) fn to_rfc3339(&self) -> String {
         self.inner.to_rfc3339()
     }
 

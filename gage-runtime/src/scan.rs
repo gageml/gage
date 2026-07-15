@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use rune::runtime::{Object, Value};
 use rune::{Any, ContextError, Module};
 
@@ -45,6 +47,10 @@ pub struct Session {
     pub id: String,
     #[rune(get)]
     pub modified: DateTime,
+    /// Path of the session's JSONL on disk; carried so config
+    /// accessors can resolve the session's project.
+    #[rune(skip)]
+    pub src: PathBuf,
 }
 
 #[derive(Any, Clone)]
@@ -149,6 +155,7 @@ fn scan() -> Scan {
             .map(|s| Session {
                 id: s.id.clone(),
                 modified: DateTime::from_system_time(s.mtime),
+                src: s.src.clone(),
             })
             .collect(),
     }
