@@ -522,10 +522,9 @@ fn commit_note(state: &mut AppState, db: &Connection) {
             if let Ok(()) = note::insert(db, &note) {
                 let id = note.id.clone();
                 state.doc.add_note(note);
-                if let Some(row) = state.outline.add_note(entry_index, id) {
-                    state.list_state.select(Some(row));
-                    state.body_scroll = 0;
-                }
+                // Selection stays on the row that opened the dialog; the new
+                // note rows are appended after it, so the index is unaffected.
+                state.outline.add_note(entry_index, id);
             }
         }
         Dialog::EditNote {
