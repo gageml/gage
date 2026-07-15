@@ -1421,9 +1421,18 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 Span::styled(label, label_style)
             };
             let time = match t.state {
+                // Read a stable "0s" during the first second rather than
+                // showing the sub-second ramp up on each refresh
                 TaskState::Running => t
                     .started
-                    .map(|s| fmt_duration(s.elapsed()))
+                    .map(|s| {
+                        let e = s.elapsed();
+                        if e < Duration::from_secs(1) {
+                            "0s".to_string()
+                        } else {
+                            fmt_duration(e)
+                        }
+                    })
                     .unwrap_or_default(),
                 _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
             };
