@@ -16,12 +16,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use gage_db::target::NoteTarget;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table, Widget, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -641,7 +644,7 @@ impl ViewState {
         self.scroll_view.reset();
         self.dialog = Dialog::Session {
             id: session.id.clone(),
-            content: session_content(session),
+            content: session_content(session, &self.model.notes, &self.model.issues),
         };
     }
 
@@ -968,26 +971,72 @@ fn issue_lines(issue: &IssueItem) -> Vec<Line<'static>> {
 }
 
 /// Session dialog content: intro lines (header attributes and any
-/// availability notice), message sections, and an optional trailing
-/// notice (truncation or read error).
+/// availability notice), message sections, the session's issues,
+/// session-level notes (targets with no line number), and an optional
+/// trailing notice (truncation or read error).
 struct SessionContent {
     intro: Vec<Line<'static>>,
     sections: Vec<SessionSection>,
+    issues: Vec<IssueItem>,
+    notes: Vec<NoteItem>,
     notice: Option<String>,
 }
 
-/// One message section: `{line} {label}` header over the rendered body.
+/// One message section: `{line} {label}` header over the rendered
+/// body, followed by any notes targeting the section's line.
 struct SessionSection {
     line_num: u32,
     label: String,
     body: Vec<Line<'static>>,
+    notes: Vec<NoteItem>,
 }
 
 /// Read a session's contents for the dialog: header attributes, then
 /// one section per message — the data layer's message predicate
 /// (`is_message_row`). Section labels use the same function as the
 /// session viewer's outline ([`crate::doc::Entry::label`]).
-fn session_content(session: &SessionItem) -> SessionContent {
+///
+/// Notes from `all_notes` targeting this session are attached: a note
+/// with a line number goes to the last section at or before that line
+/// (session-level if none precedes it), a note without one goes to
+/// the session. Issues from `all_issues` attach when any of their
+/// evidence targets this session — the same attribution rule as the
+/// sessions table's issue counts.
+fn session_content(
+    session: &SessionItem,
+    all_notes: &[NoteItem],
+    all_issues: &[IssueItem],
+) -> SessionContent {
+    let session_issues: Vec<IssueItem> = all_issues
+        .iter()
+        .filter(|issue| {
+            issue.evidence.iter().any(|ev| {
+                matches!(
+                    NoteTarget::from_uri(&ev.target),
+                    Ok(NoteTarget::Session(t)) if t.session_id == session.id
+                )
+            })
+        })
+        .cloned()
+        .collect();
+
+    let mut session_notes: Vec<NoteItem> = Vec::new();
+    let mut line_notes: Vec<(u32, NoteItem)> = Vec::new();
+    for note in all_notes {
+        // Non-session and malformed targets have no place in this
+        // dialog; both parse as Err or another variant and are skipped
+        let Ok(NoteTarget::Session(target)) = NoteTarget::from_uri(&note.target) else {
+            continue;
+        };
+        if target.session_id != session.id {
+            continue;
+        }
+        match target.line {
+            Some(line) => line_notes.push((line, note.clone())),
+            None => session_notes.push(note.clone()),
+        }
+    }
+
     let notes = session.notes.to_string();
     let issues = session.issues.to_string();
     let mut content = SessionContent {
@@ -997,6 +1046,8 @@ fn session_content(session: &SessionItem) -> SessionContent {
             ("Issues", &issues),
         ]),
         sections: Vec::new(),
+        issues: session_issues,
+        notes: session_notes,
         notice: None,
     };
 
@@ -1032,18 +1083,55 @@ fn session_content(session: &SessionItem) -> SessionContent {
             line_num,
             label: entry.label().to_string(),
             body,
+            notes: Vec::new(),
         });
+    }
+    for (line, note) in line_notes {
+        match content
+            .sections
+            .iter_mut()
+            .rev()
+            .find(|s| s.line_num <= line)
+        {
+            Some(section) => section.notes.push(note),
+            None => content.notes.push(note),
+        }
     }
     content
 }
 
-/// Session dialog sections: intro (header attributes), one section
-/// per message — a full-width header bar (dim line number, label, one
-/// column of inner padding each side) over a blank line and the
-/// rendered body — and any trailing notice.
+/// Session dialog sections: intro (header attributes), the session's
+/// issues, the session-level notes, one section per message — a
+/// full-width header bar (dim line number, label, one column of inner
+/// padding each side) over a blank line, the rendered body, and the
+/// section's notes — and any trailing notice. Consecutive boxes stack
+/// border-to-border; a blank line only separates a run of boxes from
+/// what precedes it.
 fn session_sections(content: &SessionContent, width: usize) -> Vec<Vec<Line<'static>>> {
     let mut out = Vec::with_capacity(content.sections.len() + 2);
     out.push(content.intro.clone());
+    for (i, issue) in content.issues.iter().enumerate() {
+        let mut lines = if i == 0 { vec![Line::raw("")] } else { vec![] };
+        lines.extend(content_box(
+            issue_lines(issue),
+            styles::Text::issue_border(),
+            width,
+        ));
+        out.push(lines);
+    }
+    for (i, note) in content.notes.iter().enumerate() {
+        let mut lines = if i == 0 && content.issues.is_empty() {
+            vec![Line::raw("")]
+        } else {
+            vec![]
+        };
+        lines.extend(content_box(
+            note_lines(note),
+            styles::Text::note_border(),
+            width,
+        ));
+        out.push(lines);
+    }
     for section in &content.sections {
         let number = format!(" {} ", section.line_num);
         let label_width = width.saturating_sub(number.width());
@@ -1059,6 +1147,16 @@ fn session_sections(content: &SessionContent, width: usize) -> Vec<Vec<Line<'sta
             Line::raw(""),
         ];
         lines.extend(section.body.iter().cloned());
+        for (i, note) in section.notes.iter().enumerate() {
+            if i == 0 {
+                lines.push(Line::raw(""));
+            }
+            lines.extend(content_box(
+                note_lines(note),
+                styles::Text::note_border(),
+                width,
+            ));
+        }
         out.push(lines);
     }
     if let Some(notice) = &content.notice {
@@ -1068,6 +1166,68 @@ fn session_sections(content: &SessionContent, width: usize) -> Vec<Vec<Line<'sta
         ]);
     }
     out
+}
+
+/// Content embedded in the session dialog — a note's or issue's
+/// detail-dialog lines inside a full border, wrapped to fit the
+/// dialog width.
+fn content_box(content: Vec<Line<'static>>, border: Style, width: usize) -> Vec<Line<'static>> {
+    // Border plus one column of inner padding each side
+    let inner = width.saturating_sub(4);
+    if inner == 0 {
+        return Vec::new();
+    }
+    let rule = "─".repeat(width - 2);
+    let mut out = vec![Line::from(Span::styled(format!("┌{rule}┐"), border))];
+    for line in wrap_lines(content, inner as u16) {
+        let pad = inner.saturating_sub(line.width());
+        let mut spans = vec![Span::styled("│ ", border)];
+        spans.extend(line.spans);
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(" │", border));
+        out.push(Line::from(spans));
+    }
+    out.push(Line::from(Span::styled(format!("└{rule}┘"), border)));
+    out
+}
+
+/// Wrap styled lines to `width` columns. The scroll view leaves
+/// wrapping to `Paragraph` at draw time, but bordered content must be
+/// wrapped before the border is applied or long lines break the right
+/// edge — so the same `Paragraph` wrapping runs here, into a scratch
+/// buffer, and the wrapped rows are read back as owned lines.
+fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let height = u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX);
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    let mut buf = Buffer::empty(area);
+    paragraph.render(area, &mut buf);
+    (0..height)
+        .map(|y| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut x = 0;
+            while x < width {
+                let Some(cell) = buf.cell((x, y)) else {
+                    break;
+                };
+                let symbol = cell.symbol();
+                match spans.last_mut() {
+                    Some(last) if last.style == cell.style() => {
+                        last.content.to_mut().push_str(symbol);
+                    }
+                    _ => spans.push(Span::styled(symbol.to_string(), cell.style())),
+                }
+                // A wide grapheme owns its continuation cells; skip them
+                x += symbol.width().max(1) as u16;
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// Header attributes as caption/value columns; the caption column pads
@@ -1256,9 +1416,9 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             // Colored/dim cells on the selected row would invert into
             // per-cell backgrounds under the REVERSED highlight
             let status = if selected == Some(i) {
-                Span::raw(label)
+                Span::raw(format!("{glyph} {label}"))
             } else {
-                Span::styled(label, label_style)
+                Span::styled(format!("{glyph} {label}"), label_style)
             };
             let time = match t.state {
                 TaskState::Running => t
@@ -1268,7 +1428,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
             };
             Row::new(vec![
-                Cell::from(format!("{glyph} {}", t.id.scanner)),
+                Cell::from(t.id.scanner.clone()),
                 Cell::from(t.id.task.clone()),
                 Cell::from(status),
                 Cell::from(time),
@@ -1276,21 +1436,17 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         })
         .collect();
     let count = rows.len();
-    // Widen for the "<glyph> " prefix on each scanner cell
-    let scanner_col = match fit_col(
+    let scanner_col = fit_col(
         "Scanner",
         state.model.tasks.iter().map(|t| t.id.scanner.as_str()),
         area,
-    ) {
-        Constraint::Length(w) => Constraint::Length(w + 2),
-        c => c,
-    };
+    );
     let table = Table::new(
         rows,
         [
             scanner_col,
             Constraint::Fill(1),
-            Constraint::Length(8),
+            Constraint::Length(9),
             Constraint::Length(7),
         ],
     )
