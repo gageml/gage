@@ -64,8 +64,37 @@ pub fn insert_scanner(conn: &Connection, scanner: &ScanScanner) -> Result<(), Sc
     Ok(())
 }
 
-/// End-of-run summary persisted to `scan.metadata`. Absent metadata
-/// (NULL column) means the run never completed.
+/// Payload persisted to `scan.metadata` when a run completes. A scan
+/// writes its task summary; an agent run writes agent-run information.
+/// Absent metadata (NULL column) means the run never completed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum ScanMetadata {
+    Scan(ScanSummary),
+    Agent(AgentRunSummary),
+}
+
+impl ScanMetadata {
+    pub fn elapsed_ms(&self) -> u64 {
+        match self {
+            ScanMetadata::Scan(s) => s.elapsed_ms,
+            ScanMetadata::Agent(a) => a.elapsed_ms,
+        }
+    }
+}
+
+impl Scan {
+    /// Parse `metadata` into its payload. None when the run never
+    /// completed.
+    pub fn parse_metadata(&self) -> Result<Option<ScanMetadata>, serde_json::Error> {
+        self.metadata
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+    }
+}
+
+/// End-of-run summary for a scan run.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScanSummary {
     pub total: usize,
@@ -102,6 +131,28 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Skipped,
+}
+
+/// End-of-run information for an agent run's proxy scan.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentRunSummary {
+    /// Agent reference as `<scanner>::<fn>`.
+    pub agent: String,
+    pub elapsed_ms: u64,
+    pub is_error: bool,
+}
+
+pub fn set_agent_summary(
+    conn: &Connection,
+    scan_id: &str,
+    summary: &AgentRunSummary,
+) -> Result<(), ScanError> {
+    let json = serde_json::to_string(summary).unwrap();
+    conn.execute(
+        "UPDATE scan SET metadata = ?2 WHERE id = ?1",
+        params![scan_id, json],
+    )?;
+    Ok(())
 }
 
 pub fn set_scan_summary(
@@ -308,6 +359,40 @@ mod tests {
             scanner_name: "user_friction".to_string(),
             scanner_version: "1".to_string(),
             metadata: None,
+        }
+    }
+
+    #[test]
+    fn parse_metadata_variants() {
+        let mut scan = test_scan();
+        assert!(scan.parse_metadata().unwrap().is_none());
+
+        scan.metadata = Some(
+            serde_json::to_string(&ScanSummary {
+                total: 3,
+                completed: 2,
+                failed: 1,
+                skipped: 0,
+                elapsed_ms: 1500,
+            })
+            .unwrap(),
+        );
+        match scan.parse_metadata().unwrap() {
+            Some(ScanMetadata::Scan(s)) => assert_eq!(s.elapsed_ms, 1500),
+            other => panic!("expected Scan variant, got {other:?}"),
+        }
+
+        scan.metadata = Some(
+            serde_json::to_string(&AgentRunSummary {
+                agent: "reconcile::reconcile".to_string(),
+                elapsed_ms: 2500,
+                is_error: false,
+            })
+            .unwrap(),
+        );
+        match scan.parse_metadata().unwrap() {
+            Some(ScanMetadata::Agent(a)) => assert_eq!(a.elapsed_ms, 2500),
+            other => panic!("expected Agent variant, got {other:?}"),
         }
     }
 

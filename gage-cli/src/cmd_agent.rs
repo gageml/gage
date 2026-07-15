@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Args;
+use cliclack as cli;
+use console::style;
 use gage_agent::AgentBuilder;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry};
@@ -13,6 +15,8 @@ use tabled::{
     Table,
     settings::{Color, Style, Width, object::Rows, peaker::Priority},
 };
+
+use crate::dialog::{self, DialogError, DialogResult};
 
 #[derive(Args)]
 pub struct AgentArgs {
@@ -44,6 +48,10 @@ pub struct AgentArgs {
     #[arg(short, long)]
     pub interactive: bool,
 
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
+
     /// List available agents
     #[arg(short, long)]
     pub list: bool,
@@ -66,10 +74,43 @@ pub async fn run(args: AgentArgs) {
         }
     };
 
-    let selected = match resolve_sessions(&args) {
+    let selected: Arc<[SessionInfo]> = match resolve_sessions(&args) {
         Ok(s) => Arc::from(s.into_boxed_slice()),
         Err(()) => std::process::exit(1),
     };
+
+    let mut output = None;
+    dialog::run_async("Run agent", || {
+        run_dialog(&args, def, fn_name, selected, &mut output)
+    })
+    .await;
+    if let Some(text) = output {
+        println!("{text}");
+    }
+}
+
+async fn run_dialog(
+    args: &AgentArgs,
+    def: &ScannerDef,
+    fn_name: &str,
+    selected: Arc<[SessionInfo]>,
+    output: &mut Option<String>,
+) -> Result<DialogResult, DialogError> {
+    let agent_name = format!("{}::{fn_name}", def.name);
+    cli::log::step(format!("Agent\n{}", style(&agent_name).dim()))?;
+    cli::log::step(format!(
+        "Sessions\n{}",
+        style(sessions_label(args, &selected)).dim()
+    ))?;
+
+    if !args.yes {
+        let confirmed = cli::confirm("Run this agent?")
+            .initial_value(true)
+            .interact()?;
+        if !confirmed {
+            return Err(DialogError::Canceled);
+        }
+    }
 
     let db = Arc::new(Mutex::new(gage_db::db::open_db().unwrap()));
     let scanner = Scanner { def, params: None };
@@ -77,34 +118,29 @@ pub async fn run(args: AgentArgs) {
     let spinner = if args.interactive {
         None
     } else {
-        Some(start_run_spinner(agent_ref))
+        Some(start_run_spinner(&agent_name))
     };
     let result = run_agent_def(db, scanner, fn_name, selected, args.interactive).await;
     let elapsed = spinner.as_ref().map(|s| s.elapsed());
     if let Some(spinner) = spinner {
         spinner.finish_and_clear();
     }
-    let outcome = match result {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage agent: {e}");
-            std::process::exit(1);
-        }
-    };
+    let outcome = result.map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
 
     match outcome {
         AgentDefOutcome::Headless(result) => {
-            println!("{}", result.text);
-            if let Some(elapsed) = elapsed {
-                let note = format!("{agent_ref} ran for {}", fmt_elapsed_secs(elapsed));
-                println!("{}", console::style(note).dim());
-            }
             if result.is_error || result.exit_code != 0 {
+                // A failed dialog exits the process, so the failure
+                // output prints here, before the outro.
+                println!("{}", result.text);
                 if !result.stderr.is_empty() {
                     eprintln!("{}", result.stderr);
                 }
-                std::process::exit(1);
+                return Err(DialogError::Failed(format!("{agent_name} failed")));
             }
+            *output = Some(result.text);
+            let elapsed = elapsed.map(fmt_elapsed_secs).unwrap_or_default();
+            Ok(DialogResult::from(format!("Agent completed in {elapsed}")))
         }
         AgentDefOutcome::Interactive(run) => {
             let spec = &run.spec;
@@ -122,27 +158,45 @@ pub async fn run(args: AgentArgs) {
             }
             let mut agent = builder.build();
             let spinner = start_spinner("Starting agent");
-            if let Err(e) = agent.init() {
-                spinner.finish_and_clear();
-                eprintln!("gage agent: {e}");
-                std::process::exit(1);
-            }
+            let init_result = agent.init();
             spinner.finish_and_clear();
-            match agent.run() {
-                Ok(status) => {
-                    // `run` (MCP service, dispatcher, run context) must
-                    // outlive the interactive session.
-                    drop(run);
-                    if !status.success() {
-                        std::process::exit(status.code().unwrap_or(1));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("gage agent: {e}");
-                    std::process::exit(1);
-                }
+            init_result.map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
+            let status = agent
+                .run()
+                .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
+            // `run` (MCP service, dispatcher, run context) must
+            // outlive the interactive session; `finish` consumes it
+            // and records the run summary on the proxy scan.
+            run.finish(!status.success())
+                .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
+            if !status.success() {
+                return Err(DialogError::Failed(format!(
+                    "{agent_name} exited with status {}",
+                    status.code().unwrap_or(1)
+                )));
             }
+            Ok(DialogResult::from(format!("{agent_name} session ended")))
         }
+    }
+}
+
+/// Session-scope description mirroring the scan dialog's label
+/// conventions.
+fn sessions_label(args: &AgentArgs, selected: &[SessionInfo]) -> String {
+    if !args.sessions.is_empty() {
+        return selected
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if args.all {
+        "all".to_string()
+    } else if let Some(n) = args.limit {
+        format!("{n} most recent")
+    } else {
+        let d = args.days.unwrap_or(30);
+        format!("last {d} day{}", if d == 1 { "" } else { "s" })
     }
 }
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
-use gage_db::scan::{Scan, insert_scan, insert_scan_session};
+use gage_db::scan::{AgentRunSummary, Scan, insert_scan, insert_scan_session, set_agent_summary};
 use gage_query::ScanSessionContext;
 use gage_registry::scanner::Scanner;
 use gage_runtime as runtime;
@@ -28,16 +28,36 @@ pub enum AgentDefOutcome {
 /// custom-tool callbacks.
 pub struct InteractiveRun {
     pub spec: InteractiveSpec,
+    db: Arc<Mutex<Connection>>,
+    scan_id: String,
+    agent: String,
+    started: std::time::Instant,
     _run: Arc<RunContext>,
     _slot: Arc<ScannerSlot>,
 }
 
+impl InteractiveRun {
+    /// Record the run's summary on its proxy scan once the session
+    /// ends. Consumes the run, releasing the state held for the
+    /// session's lifetime.
+    pub fn finish(self, is_error: bool) -> Result<(), gage_db::scan::ScanError> {
+        let summary = AgentRunSummary {
+            agent: self.agent.clone(),
+            elapsed_ms: self.started.elapsed().as_millis() as u64,
+            is_error,
+        };
+        let conn = self.db.lock().unwrap();
+        set_agent_summary(&conn, &self.scan_id, &summary)
+    }
+}
+
 /// Evaluate and run `fn_name` from `scanner`.
 ///
-/// Registers a scan over `selected` (scan row + `scan_session` edges,
-/// no `scan_scanner` row, so scan listings filter it out) and executes
-/// the def inside a scan context scoped to it — `scan().id` resolves,
-/// and the def opts tools into the scan explicitly via `.scan(..)`.
+/// Registers a proxy scan over `selected` (scan row + `scan_session`
+/// edges, no `scan_scanner` row) and executes the def inside a scan
+/// context scoped to it — `scan().id` resolves, and the def opts tools
+/// into the scan explicitly via `.scan(..)`. When the run completes an
+/// [`AgentRunSummary`] is written to the proxy scan's metadata.
 pub async fn run_agent_def(
     db: Arc<Mutex<Connection>>,
     scanner: Scanner<'_>,
@@ -69,7 +89,7 @@ pub async fn run_agent_def(
         .ok()
         .expect("dispatcher should only be set once on a fresh RunContext");
 
-    let slot = Arc::new(compile_scanner(&scanner, db)?);
+    let slot = Arc::new(compile_scanner(&scanner, db.clone())?);
     if let Some(dispatcher) = run.dispatcher.get() {
         dispatcher.register(
             slot.name.clone(),
@@ -113,9 +133,13 @@ pub async fn run_agent_def(
         sources: slot.sources.clone(),
     });
 
+    let agent = format!("{}::{fn_name}", slot.name);
+    let started = std::time::Instant::now();
     let fn_name = fn_name.to_string();
     let slot_scope = slot.clone();
     let run_scope = run.clone();
+    let agent_scope = agent.clone();
+    let db_scope = db.clone();
     let outcome = SCAN_CTX
         .scope(ctx, async move {
             let vm = rune::Vm::new(slot_scope.rt.clone(), slot_scope.unit.clone());
@@ -131,6 +155,10 @@ pub async fn run_agent_def(
                     .map_err(|e| RunError::Agent(e.to_string()))?;
                 Ok(AgentDefOutcome::Interactive(InteractiveRun {
                     spec,
+                    db: db_scope,
+                    scan_id: run_scope.scan_id.clone(),
+                    agent: agent_scope,
+                    started,
                     _run: run_scope,
                     _slot: slot_scope,
                 }))
@@ -144,6 +172,19 @@ pub async fn run_agent_def(
         .await;
 
     printer.abort();
+
+    // Headless runs are over here, so the summary is written now.
+    // Interactive runs outlive this call; the summary is written by
+    // `InteractiveRun::finish` when the session ends.
+    if let Ok(AgentDefOutcome::Headless(result)) = &outcome {
+        let summary = AgentRunSummary {
+            agent,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            is_error: result.is_error || result.exit_code != 0,
+        };
+        let conn = db.lock().unwrap();
+        set_agent_summary(&conn, &run.scan_id, &summary)?;
+    }
     outcome
 }
 

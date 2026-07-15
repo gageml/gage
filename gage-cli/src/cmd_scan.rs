@@ -233,8 +233,9 @@ fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::R
     let sessions = scan::session_ids_for_scan(conn, &run.id)?.len();
     let notes = scan::note_ids_for_scan(conn, &run.id)?.len();
     let issues = scan::issue_ids_for_scan(conn, &run.id)?.len();
-    let duration = scan_summary(run)?
-        .map(|s| crate::human::format_duration(Duration::from_millis(s.elapsed_ms)))
+    let duration = run
+        .parse_metadata()?
+        .map(|m| crate::human::format_duration(Duration::from_millis(m.elapsed_ms())))
         .unwrap_or_default();
     Ok(vec![
         short_uuid(&run.id).to_string(),
@@ -271,14 +272,13 @@ fn scanner_task_outcomes(
     Ok(outcomes)
 }
 
-/// Run summary from `scan.metadata`. None when the scan never
-/// completed.
+/// Scan-run summary from `scan.metadata`. None when the run never
+/// completed or is an agent run.
 fn scan_summary(run: &scan::Scan) -> anyhow::Result<Option<scan::ScanSummary>> {
-    Ok(run
-        .metadata
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()?)
+    Ok(match run.parse_metadata()? {
+        Some(scan::ScanMetadata::Scan(s)) => Some(s),
+        Some(scan::ScanMetadata::Agent(_)) | None => None,
+    })
 }
 
 async fn view(args: ScanViewArgs) {
@@ -372,9 +372,9 @@ fn load_scan_model(
         issues: results.issues,
         errors,
         finished: true,
-        elapsed: summary
-            .as_ref()
-            .map(|s| Duration::from_millis(s.elapsed_ms)),
+        elapsed: run
+            .parse_metadata()?
+            .map(|m| Duration::from_millis(m.elapsed_ms())),
         tasks,
         sessions,
     })
