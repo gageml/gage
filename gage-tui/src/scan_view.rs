@@ -1416,9 +1416,9 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             // Colored/dim cells on the selected row would invert into
             // per-cell backgrounds under the REVERSED highlight
             let status = if selected == Some(i) {
-                Span::raw(format!("{glyph} {label}"))
+                Span::raw(label)
             } else {
-                Span::styled(format!("{glyph} {label}"), label_style)
+                Span::styled(label, label_style)
             };
             let time = match t.state {
                 TaskState::Running => t
@@ -1428,7 +1428,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
             };
             Row::new(vec![
-                Cell::from(t.id.scanner.clone()),
+                Cell::from(format!("{glyph} {}", t.id.scanner)),
                 Cell::from(t.id.task.clone()),
                 Cell::from(status),
                 Cell::from(time),
@@ -1436,17 +1436,21 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         })
         .collect();
     let count = rows.len();
-    let scanner_col = fit_col(
+    // Widen for the "<glyph> " prefix on each scanner cell
+    let scanner_col = match fit_col(
         "Scanner",
         state.model.tasks.iter().map(|t| t.id.scanner.as_str()),
         area,
-    );
+    ) {
+        Constraint::Length(w) => Constraint::Length(w + 2),
+        c => c,
+    };
     let table = Table::new(
         rows,
         [
             scanner_col,
             Constraint::Fill(1),
-            Constraint::Length(9),
+            Constraint::Length(8),
             Constraint::Length(7),
         ],
     )
