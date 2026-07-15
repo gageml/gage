@@ -229,10 +229,10 @@ fn string_in_list(
     Ok(placeholders.join(", "))
 }
 
-async fn do_query(sql: String) -> Vec<Value> {
+async fn do_query(sql: String) -> super::Result<Vec<Value>> {
     tracing::debug!(sql = %sql, "select");
-    let batches = run_query(&sql).await;
-    rows_from_batches(batches)
+    let batches = run_query(&sql).await?;
+    Ok(rows_from_batches(batches))
 }
 
 pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
@@ -279,11 +279,14 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     Ok(())
 }
 
-async fn run_query(sql: &str) -> Vec<RecordBatch> {
+async fn run_query(sql: &str) -> super::Result<Vec<RecordBatch>> {
     let ctx = current_scan_ctx();
     let df_ctx = &ctx.run.scan_ctx;
-    let df = df_ctx.sql(sql).await.unwrap();
-    df.collect().await.unwrap()
+    let df = df_ctx
+        .sql(sql)
+        .await
+        .map_err(|e| Error::Db(e.to_string()))?;
+    df.collect().await.map_err(|e| Error::Db(e.to_string()))
 }
 
 fn key(s: &str) -> alloc::String {
