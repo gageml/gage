@@ -46,6 +46,11 @@ pub enum ScanCommand {
 
     /// Delete scan runs and associated notes
     Delete(ScanDeleteArgs),
+
+    /// Invalidate task validation state
+    ///
+    /// Invalidated tasks are re-run on the next applicable scan.
+    Invalidate(ScanInvalidateArgs),
 }
 
 #[derive(Args)]
@@ -64,6 +69,26 @@ pub struct ScanListArgs {
 pub struct ScanDeleteArgs {
     /// Scan run IDs (or prefix)
     ids: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+#[command(group = clap::ArgGroup::new("target").required(true).multiple(true))]
+pub struct ScanInvalidateArgs {
+    /// Invalidate tasks for a session (ID or prefix, repeatable)
+    #[arg(short, long = "session", value_name = "ID", group = "target")]
+    sessions: Vec<String>,
+
+    /// Invalidate tasks for a note (ID or prefix, repeatable)
+    #[arg(short, long = "note", value_name = "ID", group = "target")]
+    notes: Vec<String>,
+
+    /// Invalidate tasks by name (or prefix, repeatable)
+    #[arg(short, long = "task", value_name = "NAME", group = "target")]
+    tasks: Vec<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -140,6 +165,7 @@ pub async fn run(args: ScanArgs) {
         Some(ScanCommand::List(a)) => list(a),
         Some(ScanCommand::View(a)) => view(a).await,
         Some(ScanCommand::Delete(a)) => delete(a),
+        Some(ScanCommand::Invalidate(a)) => invalidate(a),
         None => run_scan(args.run_args).await,
     }
 }
@@ -516,6 +542,79 @@ fn delete(args: ScanDeleteArgs) {
         };
         Ok(DialogResult::from(format!("Deleted {deleted} {plural}")))
     });
+}
+
+fn invalidate(args: ScanInvalidateArgs) {
+    let conn = db::open_db().unwrap();
+    dialog::run("Invalidate scan tasks", || {
+        let selectors = [
+            ("Sessions", like_filter("ref", "session:", &args.sessions)),
+            ("Notes", like_filter("ref", "note:", &args.notes)),
+            ("Tasks", like_filter("key", "", &args.tasks)),
+        ];
+
+        let mut counts = String::new();
+        let mut clauses: Vec<String> = Vec::new();
+        let mut patterns: Vec<String> = Vec::new();
+        for (label, selector) in selectors {
+            let Some((clause, pats)) = selector else {
+                continue;
+            };
+            let n = count_matching_tasks(&conn, &clause, &pats)?;
+            counts.push_str(&format!("\n{}", style(format!("{label}: {n}")).dim()));
+            clauses.push(clause);
+            patterns.extend(pats);
+        }
+        cli::log::remark(format!("Matching tasks{counts}"))?;
+
+        let clause = clauses.join(" OR ");
+        let count = count_matching_tasks(&conn, &clause, &patterns)?;
+        if count == 0 {
+            return Ok(DialogResult::from("No matching tasks"));
+        }
+
+        if !args.yes {
+            let prompt = format!("You are about to invalidate {count} tasks. Continue?");
+            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        let n = conn
+            .execute(
+                &format!("DELETE FROM task_validate WHERE {clause}"),
+                gage_db::rusqlite::params_from_iter(&patterns),
+            )
+            .context("deleting task validation rows")?;
+        Ok(DialogResult::from(format!("{n} tasks invalidated")))
+    });
+}
+
+/// LIKE clause and patterns prefix-matching `column` against each id,
+/// or None when no ids were given for this selector.
+fn like_filter(column: &str, prefix: &str, ids: &[String]) -> Option<(String, Vec<String>)> {
+    if ids.is_empty() {
+        return None;
+    }
+    let clause: Vec<String> = ids.iter().map(|_| format!("{column} LIKE ?")).collect();
+    let patterns = ids.iter().map(|id| format!("{prefix}{id}%")).collect();
+    Some((format!("({})", clause.join(" OR ")), patterns))
+}
+
+fn count_matching_tasks(
+    conn: &gage_db::rusqlite::Connection,
+    clause: &str,
+    patterns: &[String],
+) -> Result<usize, DialogError> {
+    let count: usize = conn
+        .query_row(
+            &format!("SELECT count(*) FROM task_validate WHERE {clause}"),
+            gage_db::rusqlite::params_from_iter(patterns),
+            |row| row.get(0),
+        )
+        .context("counting task validation rows")?;
+    Ok(count)
 }
 
 async fn run_scan(mut args: ScanRunArgs) {
