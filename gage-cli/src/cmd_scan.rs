@@ -41,9 +41,6 @@ pub enum ScanCommand {
     /// List scan runs
     List(ScanListArgs),
 
-    /// Show details for a scan run
-    Show(ScanShowArgs),
-
     /// View a scan run in the scan TUI
     View(ScanViewArgs),
 
@@ -61,12 +58,6 @@ pub struct ScanViewArgs {
 pub struct ScanListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
-}
-
-#[derive(Args)]
-pub struct ScanShowArgs {
-    /// Scan ID (or prefix)
-    scan_id: String,
 }
 
 #[derive(Args)]
@@ -147,7 +138,6 @@ pub struct ScanRunArgs {
 pub async fn run(args: ScanArgs) {
     match args.command {
         Some(ScanCommand::List(a)) => list(a),
-        Some(ScanCommand::Show(a)) => show(a),
         Some(ScanCommand::View(a)) => view(a).await,
         Some(ScanCommand::Delete(a)) => delete(a),
         None => run_scan(args.run_args).await,
@@ -206,57 +196,6 @@ fn list(args: ScanListArgs) {
     println!("{table}");
 
     args.limit.print_summary(show, total, "scan run");
-}
-
-fn show(args: ScanShowArgs) {
-    let conn = db::open_db().unwrap();
-    let run = match scan::get_scan(&conn, &args.scan_id) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let scans = scan::get_scanners_for_scan(&conn, &run.id).unwrap_or_default();
-
-    println!(
-        "{} {}",
-        style("Run").bold(),
-        style(short_uuid(&run.id)).yellow(),
-    );
-    println!(
-        "  created: {}",
-        gage_core::datetime::ms_to_iso8601(run.created)
-    );
-
-    if scans.is_empty() {
-        println!("  (no scanners)");
-        return;
-    }
-
-    let header: Vec<String> = ["Id", "Scanner", "Version"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let rows: Vec<Vec<String>> = scans
-        .iter()
-        .map(|s| {
-            vec![
-                short_uuid(&s.id).to_string(),
-                s.scanner_name.clone(),
-                s.scanner_version.clone(),
-            ]
-        })
-        .collect();
-
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::new(2..3).not(Rows::first()), s::dim())
-        .to_string();
-    println!("{table}");
 }
 
 async fn view(args: ScanViewArgs) {

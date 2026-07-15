@@ -263,7 +263,7 @@ fn init_run(
     }
 
     // `scan_scanner` records which scanners ran in this scan (name +
-    // version), surfaced by `gage scan show`. The row id is metadata
+    // version), surfaced by `gage scan view`. The row id is metadata
     // only; nothing resolves through it.
     for scanner in scanners {
         insert_scanner(
