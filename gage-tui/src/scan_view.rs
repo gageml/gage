@@ -1330,7 +1330,7 @@ fn draw_scan_done(frame: &mut Frame, elapsed: Option<Duration>) {
         Some(e) => format!("Scan completed in {}", fmt_duration(e)),
         None => "Scan completed".to_string(),
     };
-    dialog::draw_message(frame, &message, "Close");
+    dialog::draw_message(frame, &message, "Dismiss");
 }
 
 fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
@@ -1628,7 +1628,10 @@ fn id_span(id: &str, selected: bool) -> Span<'static> {
 fn fmt_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs == 0 {
-        format!("{}ms", d.as_millis())
+        match d.as_millis() {
+            0 => "<1ms".to_string(),
+            ms => format!("{ms}ms"),
+        }
     } else if secs < 60 {
         format!("{secs}s")
     } else {
