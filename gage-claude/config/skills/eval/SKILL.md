@@ -3,16 +3,16 @@ description: Author and run scanner eval tests from reviewed sessions.
 disable-model-invocation: true
 ---
 
-Your task is to help the user maintain and run scanner eval tests. This skill
-is typically run after `gage:review`, while the review's judgments about
-scanner output are fresh.
+Your task is to help the user maintain and run scanner eval tests. This skill is
+typically run after `gage:review`, while the review's judgments about scanner
+output are fresh.
 
 ## Background
 
 A scanner test runs the real scanner pipeline over captured sessions in a
 sandbox and judges the written notes and issues against stated expectations.
-Tests are defined in eval TOML files and run with `gage-eval run`, which
-reports per-item match rates across samples.
+Tests are defined in eval TOML files and run with `gage-eval run`, which reports
+per-item match rates across samples.
 
 Ad hoc tests live outside source control under `~/.gage/tmp/evals/`:
 
@@ -37,7 +37,7 @@ or, when specific output is expected:
 
 ```toml
 [[test.expect.note]]
-name = "finding.general"
+name = "finding"
 expect = "identifies the .iter() misuse on the Sessions iterator; fix is .next()"
 
 [[test.expect.issue]]
@@ -45,9 +45,9 @@ name = "general"
 expect = "the Rune API's missing-method errors report opaque hashes"
 ```
 
-Every scanner test states its expectation explicitly: `expect.empty = true`
-or one or more note/issue entries — never neither. A comment above each test
-should record the policy the label encodes and where the case came from.
+Every scanner test states its expectation explicitly: `expect.empty = true` or
+one or more note/issue entries — never neither. A comment above each test should
+record the policy the label encodes and where the case came from.
 
 ## Authoring tests
 
@@ -65,11 +65,11 @@ Join through `issue_evidence` and `session_note` to find the source sessions.
 For each candidate, propose a test to the user: a short kebab-case name, the
 session(s) to include, and the draft expectation. Expectations are the ground
 truth the eval measures against, and writing them is a policy decision, not a
-transcription. A finding that faithfully reads the session may still be
-unwanted output (for example, mining a user's stated intent as an issue).
-Present the draft and what it commits the scanner to, and get the user's
-explicit confirmation before writing anything. Keep expect prose short and
-specific: name the concrete content the item must state, not the theme.
+transcription. A finding that faithfully reads the session may still be unwanted
+output (for example, mining a user's stated intent as an issue). Present the
+draft and what it commits the scanner to, and get the user's explicit
+confirmation before writing anything. Keep expect prose short and specific: name
+the concrete content the item must state, not the theme.
 
 To materialize a confirmed test:
 
@@ -79,10 +79,10 @@ To materialize a confirmed test:
    directory name
 3. Add the `[[test]]` entry to a TOML file under `~/.gage/tmp/evals/`
 
-Promoting a test to source code means copying the `[[test]]` entry into a
-repo eval file (`gage-eval/evals/`) and the fixture dir into
-`gage-eval/fixtures/`. Whoever promotes is responsible for scrubbing the
-session content for suitability as source, like any checked-in code.
+Promoting a test to source code means copying the `[[test]]` entry into a repo
+eval file (`gage-eval/evals/`) and the fixture dir into `gage-eval/fixtures/`.
+Whoever promotes is responsible for scrubbing the session content for
+suitability as source, like any checked-in code.
 
 ## Running
 
@@ -104,9 +104,8 @@ gage-eval run -d ~/.gage/tmp/evals [SPEC...] [-j JOBS] [--judge-model MODEL] [--
 When reporting results, lead with what changed or failed. For a failed item,
 read the sample's `verdict.json` and `dump.json` and show the user the specific
 mismatch: what was expected, what the scan actually wrote, and the judge's
-reason. When a failure looks like a label problem rather than a scanner
-problem, say so — the remedy is editing the test's expectation, not the
-scanner.
+reason. When a failure looks like a label problem rather than a scanner problem,
+say so — the remedy is editing the test's expectation, not the scanner.
 
 Interpret rates against the test's purpose: for a test capturing an
 over-reporting failure (`expect.empty`), unexpected items are the signal to
