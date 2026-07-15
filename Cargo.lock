@@ -2677,6 +2677,7 @@ dependencies = [
  "gage-db",
  "humantime",
  "indicatif",
+ "minijinja",
  "regex",
  "serde",
  "serde_json",

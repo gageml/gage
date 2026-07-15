@@ -17,13 +17,13 @@
 //! ```
 
 use std::collections::VecDeque;
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{Expect, ExpectEntry, Root, Test};
@@ -160,7 +160,7 @@ fn try_sample(ctx: &SampleContext, sample: u32) -> io::Result<SampleOutcome> {
     write_json(&dir.join("dump.json"), &dump)?;
 
     let expect = ctx.test.expect.as_ref().expect("validated scanner test");
-    let prompt = judge_prompt(expect, &dump);
+    let prompt = judge_prompt(expect, &dump)?;
     fs::write(dir.join("judge-prompt.md"), &prompt)?;
     let output = run_judge(&prompt, &ctx.judge_model)?;
     fs::write(dir.join("judge-output.txt"), &output)?;
@@ -258,70 +258,36 @@ fn check_db_rows(db_path: &Path, queries: &[String]) -> io::Result<Vec<bool>> {
     Ok(out)
 }
 
-fn judge_prompt(expect: &Expect, dump: &Dump) -> String {
-    let mut p = String::new();
-    p.push_str(
-        "You are scoring the output of a session-scanning pipeline against a \
-         test's expectations.\n\n## Expectations\n\n",
-    );
-    if expect.empty {
-        p.push_str("The test expects the scan to write no substantive output.\n");
-    } else {
-        p.push_str(
-            "The test expects the scan to have written the following items. \
-             Each has an index, a kind, the item's db name, and a prose \
-             description of the expected content.\n\n",
-        );
-        for (i, (kind, entry)) in expect_entries(expect).enumerate() {
-            writeln!(p, "{i}. [{kind} {}] {}", entry.name, entry.expect).unwrap();
-        }
+/// Render the sidecar `judge-prompt.md.j2` template with the test's
+/// expectations and the scan's dumped output.
+fn judge_prompt(expect: &Expect, dump: &Dump) -> io::Result<String> {
+    #[derive(Serialize)]
+    struct Expectation<'a> {
+        kind: &'static str,
+        name: &'a str,
+        expect: &'a str,
     }
+    let expectations: Vec<Expectation> = expect_entries(expect)
+        .map(|(kind, e)| Expectation {
+            kind,
+            name: &e.name,
+            expect: &e.expect,
+        })
+        .collect();
 
-    p.push_str("\n## Scan output\n\n### Notes\n\n");
-    if dump.notes.is_empty() {
-        p.push_str("(none)\n");
-    }
-    for (i, n) in dump.notes.iter().enumerate() {
-        writeln!(p, "note {i}: name={} author={}", n.name, n.author).unwrap();
-        writeln!(p, "value: {}", n.value).unwrap();
-        if let Some(m) = &n.metadata {
-            writeln!(p, "metadata: {m}").unwrap();
-        }
-        p.push('\n');
-    }
-    p.push_str("### Issues\n\n");
-    if dump.issues.is_empty() {
-        p.push_str("(none)\n");
-    }
-    for (i, iss) in dump.issues.iter().enumerate() {
-        writeln!(p, "issue {i}: name={}", iss.name).unwrap();
-        writeln!(p, "title: {}", iss.title).unwrap();
-        writeln!(p, "description: {}", iss.description).unwrap();
-        p.push('\n');
-    }
-
-    p.push_str(
-        "\n## Instructions\n\n\
-         - For each expectation, decide whether some written item matches it. \
-         Match strictly: the item must state the specific content described, \
-         not merely touch the same theme.\n\
-         - Then look for written items whose substantive claims are NOT \
-         sanctioned by any expectation, and list those as unexpected. \
-         Scanners also write summary and bookkeeping items describing their \
-         own work (e.g. a summary of the findings pass); these are context. \
-         Omit them from the output entirely unless they assert a substantive \
-         result that no expectation sanctions. An empty \"unexpected\" array \
-         is the normal result when the scan wrote only what was expected.\n\
-         - Reply with only a JSON object, no code fence, in this shape:\n\n\
-         {\"expected\": [{\"index\": 0, \"matched\": true, \
-         \"evidence\": \"<short quote from the matching item>\", \
-         \"reason\": \"<one sentence>\"}],\n \
-         \"unexpected\": [{\"kind\": \"note\", \"name\": \"finding.general\", \
-         \"excerpt\": \"<short quote>\", \"reason\": \"<one sentence>\"}]}\n\n\
-         Include one entry in \"expected\" for every expectation index. If \
-         there are no expectations, \"expected\" is an empty array.\n",
-    );
-    p
+    let mut env = Environment::empty();
+    env.set_trim_blocks(true);
+    env.set_lstrip_blocks(true);
+    env.render_str(
+        include_str!("judge-prompt.md.j2"),
+        context! {
+            empty => expect.empty,
+            expectations,
+            notes => dump.notes,
+            issues => dump.issues,
+        },
+    )
+    .map_err(io::Error::other)
 }
 
 /// Expectation entries in judge index order: notes then issues.
@@ -333,12 +299,15 @@ fn expect_entries(expect: &Expect) -> impl Iterator<Item = (&'static str, &Expec
         .chain(expect.issues.iter().map(|e| ("issue", e)))
 }
 
-fn run_judge(prompt: &str, model: &str) -> io::Result<String> {
-    let out = Command::new("claude")
-        .args(["-p", prompt, "--tools", "", "--model", model])
-        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
-        .stdin(Stdio::null())
-        .output()?;
+/// Run the judge claude in an isolated agent home and archive its
+/// session JSONL under `<sample_dir>/judge-sessions/`.
+fn run_judge(prompt: &str, model: &str, sample_dir: &Path) -> io::Result<String> {
+    let agent = AgentBuilder::new()
+        .name("eval-judge")
+        .model(model)
+        .archive_dir(sample_dir.join("judge-sessions"))
+        .build();
+    let out = agent.run_print(prompt)?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
             "judge claude exited {}: {}",
@@ -640,12 +609,12 @@ mod tests {
             }],
             issues: vec![],
         };
-        let p = judge_prompt(&expect, &dump);
+        let p = judge_prompt(&expect, &dump).unwrap();
         assert!(p.contains("0. [note finding.general] iterator misuse"));
         assert!(p.contains("note 0: name=finding.general"));
         assert!(p.contains("### Issues"));
 
-        let p = judge_prompt(&expect_with(vec![], true), &dump);
+        let p = judge_prompt(&expect_with(vec![], true), &dump).unwrap();
         assert!(p.contains("no substantive output"));
     }
 }

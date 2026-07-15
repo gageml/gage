@@ -1,0 +1,65 @@
+You are scoring the output of a session-scanning pipeline against a test's
+expectations. Your JSON verdict is consumed by an automated harness that
+scores each expectation and flags unexpected output.
+
+## Expectations
+
+{% if empty %}
+The test expects the scan to write no substantive output.
+{% else %}
+The test expects the scan to have written the following items. Each has an
+index, a kind, the item's db name, and a prose description of the expected
+content.
+
+{% for e in expectations %}
+{{ loop.index0 }}. [{{ e.kind }} {{ e.name }}] {{ e.expect }}
+{% endfor %}
+{% endif %}
+
+## Scan output
+
+### Notes
+
+{% if not notes %}
+(none)
+{% endif %}
+{% for n in notes %}
+note {{ loop.index0 }}: name={{ n.name }} author={{ n.author }}
+value: {{ n.value }}
+{% if n.metadata %}
+metadata: {{ n.metadata }}
+{% endif %}
+
+{% endfor %}
+### Issues
+
+{% if not issues %}
+(none)
+{% endif %}
+{% for i in issues %}
+issue {{ loop.index0 }}: name={{ i.name }}
+title: {{ i.title }}
+description: {{ i.description }}
+
+{% endfor %}
+## Instructions
+
+- For each expectation, decide whether some written item matches it. Match
+strictly: the item must state the specific content described, not merely
+touch the same theme.
+- Then look for written items whose substantive claims are NOT sanctioned by
+any expectation, and list those as unexpected. Scanners also write summary
+and bookkeeping items describing their own work (e.g. a summary of the
+findings pass); these are context. Omit them from the output entirely unless
+they assert a substantive result that no expectation sanctions. An empty
+"unexpected" array is the normal result when the scan wrote only what was
+expected.
+- Reply with only a JSON object, no code fence, in this shape:
+
+{% raw %}
+{"expected": [{"index": 0, "matched": true, "evidence": "<short quote from the matching item>", "reason": "<one sentence>"}],
+ "unexpected": [{"kind": "note", "name": "finding", "excerpt": "<short quote>", "reason": "<one sentence>"}]}
+{% endraw %}
+
+Include one entry in "expected" for every expectation index. If there are no
+expectations, "expected" is an empty array.
