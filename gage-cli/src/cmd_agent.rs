@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::Args;
 use gage_agent::AgentBuilder;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
-use gage_registry::scanner::{Scanner, ScannerRegistry};
+use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry};
 use gage_scan::agent_def::{AgentDefOutcome, run_agent_def};
 use indicatif::{ProgressBar, ProgressStyle};
 use tabled::{
@@ -16,7 +16,9 @@ use tabled::{
 
 #[derive(Args)]
 pub struct AgentArgs {
-    /// Agent to run, as <scanner>::<fn>
+    /// Agent to run, as <scanner>::<fn> or bare <fn>
+    ///
+    /// A bare fn name must match exactly one declared agent.
     #[arg(value_name = "AGENT", required_unless_present = "list")]
     pub agent: Option<String>,
 
@@ -56,27 +58,13 @@ pub async fn run(args: AgentArgs) {
     }
 
     let agent_ref = args.agent.as_deref().expect("clap requires AGENT");
-    let Some((scanner_name, fn_name)) = agent_ref.split_once("::") else {
-        eprintln!("gage agent: expected <scanner>::<fn>, got '{agent_ref}'");
-        std::process::exit(1);
-    };
-    let Some(def) = registry.get_def(scanner_name) else {
-        eprintln!("gage agent: no scanner named '{scanner_name}'");
-        std::process::exit(1);
-    };
-    if !def.agents.contains_key(fn_name) {
-        eprintln!("gage agent: scanner '{scanner_name}' declares no agent '{fn_name}'");
-        match def.agents.keys().collect::<Vec<_>>() {
-            keys if keys.is_empty() => eprintln!("(no agents declared)"),
-            keys => {
-                eprintln!("declared agents:");
-                for k in keys {
-                    eprintln!("  {scanner_name}::{k}");
-                }
-            }
+    let (def, fn_name) = match resolve_agent(&registry, agent_ref) {
+        Ok(resolved) => resolved,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(1);
         }
-        std::process::exit(1);
-    }
+    };
 
     let selected = match resolve_sessions(&args) {
         Ok(s) => Arc::from(s.into_boxed_slice()),
@@ -86,7 +74,17 @@ pub async fn run(args: AgentArgs) {
     let db = Arc::new(Mutex::new(gage_db::db::open_db().unwrap()));
     let scanner = Scanner { def, params: None };
 
-    let outcome = match run_agent_def(db, scanner, fn_name, selected, args.interactive).await {
+    let spinner = if args.interactive {
+        None
+    } else {
+        Some(start_run_spinner(agent_ref))
+    };
+    let result = run_agent_def(db, scanner, fn_name, selected, args.interactive).await;
+    let elapsed = spinner.as_ref().map(|s| s.elapsed());
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+    let outcome = match result {
         Ok(o) => o,
         Err(e) => {
             eprintln!("gage agent: {e}");
@@ -97,6 +95,10 @@ pub async fn run(args: AgentArgs) {
     match outcome {
         AgentDefOutcome::Headless(result) => {
             println!("{}", result.text);
+            if let Some(elapsed) = elapsed {
+                let note = format!("{agent_ref} ran for {}", fmt_elapsed_secs(elapsed));
+                println!("{}", console::style(note).dim());
+            }
             if result.is_error || result.exit_code != 0 {
                 if !result.stderr.is_empty() {
                     eprintln!("{}", result.stderr);
@@ -179,6 +181,79 @@ fn list_agents(registry: &ScannerRegistry) {
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .to_string();
     println!("{table}");
+}
+
+/// Resolve an agent reference to its scanner def and fn name. Accepts
+/// the full `<scanner>::<fn>` form or a bare fn name; a bare name must
+/// match exactly one declared agent across all scanners.
+fn resolve_agent<'a>(
+    registry: &'a ScannerRegistry,
+    agent_ref: &'a str,
+) -> Result<(&'a ScannerDef, &'a str), String> {
+    if let Some((scanner_name, fn_name)) = agent_ref.split_once("::") {
+        let Some(def) = registry.get_def(scanner_name) else {
+            return Err(format!("gage agent: no scanner named '{scanner_name}'"));
+        };
+        if !def.agents.contains_key(fn_name) {
+            let mut msg =
+                format!("gage agent: scanner '{scanner_name}' declares no agent '{fn_name}'");
+            match def.agents.keys().collect::<Vec<_>>() {
+                keys if keys.is_empty() => msg.push_str("\n(no agents declared)"),
+                keys => {
+                    msg.push_str("\ndeclared agents:");
+                    for k in keys {
+                        msg.push_str(&format!("\n  {scanner_name}::{k}"));
+                    }
+                }
+            }
+            return Err(msg);
+        }
+        return Ok((def, fn_name));
+    }
+
+    let matches: Vec<&ScannerDef> = registry
+        .list()
+        .into_iter()
+        .filter(|def| def.agents.contains_key(agent_ref))
+        .collect();
+    match matches.as_slice() {
+        [] => Err(format!("gage agent: no agent named '{agent_ref}'")),
+        [def] => Ok((def, agent_ref)),
+        defs => {
+            let mut msg = format!("gage agent: '{agent_ref}' matches multiple agents:");
+            for def in defs {
+                msg.push_str(&format!("\n  {}::{agent_ref}", def.name));
+            }
+            Err(msg)
+        }
+    }
+}
+
+fn start_run_spinner(agent_name: &str) -> ProgressBar {
+    let bar = ProgressBar::new_spinner();
+    let style = ProgressStyle::with_template("{spinner:.magenta} Running {msg} {gage_elapsed}")
+        .unwrap()
+        .with_key(
+            "gage_elapsed",
+            |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                w.write_str(&fmt_elapsed_secs(state.elapsed())).unwrap();
+            },
+        );
+    bar.set_style(style);
+    bar.enable_steady_tick(Duration::from_millis(120));
+    bar.set_message(agent_name.to_string());
+    bar
+}
+
+/// Whole-second resolution; agent runs take seconds, so millisecond
+/// values are noise.
+fn fmt_elapsed_secs(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
 }
 
 fn start_spinner(message: &str) -> ProgressBar {
