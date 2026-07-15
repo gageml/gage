@@ -40,6 +40,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 
     m.function_meta(project)?;
     m.function_meta(config)?;
+    m.associated_function("type", SessionConfigQuery::type_)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionConfigQuery| async move {
         fetch_session_config(q).await
     })?;
@@ -63,7 +64,7 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.field_function(&Protocol::GET, "path", |c: &Config| {
         c.path.to_string_lossy().into_owned()
     })?;
-    m.function_meta(Config::read)?;
+    m.function_meta(read)?;
     m.function_meta(Config::debug)?;
     Ok(())
 }
@@ -218,6 +219,7 @@ fn project(session: Ref<Session>) -> crate::Result<Project> {
 fn config(session: Ref<Session>) -> SessionConfigQuery {
     SessionConfigQuery {
         src: session.src.clone(),
+        type_: None,
     }
 }
 
@@ -242,6 +244,15 @@ fn resolve_project(src: &Path) -> crate::Result<Project> {
 pub struct SessionConfigQuery {
     #[rune(skip)]
     src: PathBuf,
+    #[rune(skip)]
+    type_: Option<Value>,
+}
+
+impl SessionConfigQuery {
+    fn type_(mut self, t: Value) -> Self {
+        self.type_ = Some(t);
+        self
+    }
 }
 
 // `text` is deliberately not selected: the `config` table only reads
@@ -252,19 +263,48 @@ async fn fetch_session_config(q: SessionConfigQuery) -> crate::Result<Vec<Config
     let ctx = current_scan_ctx();
     let df_ctx = &ctx.run.scan_ctx;
 
-    let sql = "SELECT scope, project, \"type\", name, path, size, mtime \
-               FROM config WHERE project = $1 ORDER BY path";
+    let mut params = vec![ScalarValue::Utf8(Some(
+        project.path.to_string_lossy().into_owned(),
+    ))];
+    let mut clauses = vec!["project = $1".to_string()];
+    if let Some(t) = q.type_ {
+        let spec = serde_json::to_value(&t)
+            .map_err(|e| Error::Args(format!("`.type()` value could not be read: {e}")))?;
+        clauses.push(type_clause(&spec, &mut params)?);
+    }
+
+    let sql = format!(
+        "SELECT scope, project, \"type\", name, path, size, mtime \
+         FROM config WHERE {} ORDER BY path",
+        clauses.join(" AND ")
+    );
     let df = df_ctx
-        .sql(sql)
+        .sql(&sql)
         .await
         .map_err(|e| Error::Db(e.to_string()))?;
     let df = df
-        .with_param_values(vec![ScalarValue::Utf8(Some(
-            project.path.to_string_lossy().into_owned(),
-        ))])
+        .with_param_values(params)
         .map_err(|e| Error::Db(e.to_string()))?;
     let batches = df.collect().await.map_err(|e| Error::Db(e.to_string()))?;
     Ok(configs_from_batches(batches))
+}
+
+/// `.type()` clause for the `config` table: a string or array of
+/// strings.
+fn type_clause(spec: &json::Value, params: &mut Vec<ScalarValue>) -> crate::Result<String> {
+    match spec {
+        json::Value::String(s) => {
+            params.push(ScalarValue::Utf8(Some(s.clone())));
+            Ok(format!("\"type\" = ${}", params.len()))
+        }
+        json::Value::Array(items) => {
+            let placeholders = crate::query::string_in_list(items, params, "type")?;
+            Ok(format!("\"type\" IN ({placeholders})"))
+        }
+        _ => Err(Error::Args(
+            "`.type()` expects a string or array of strings".into(),
+        )),
+    }
 }
 
 /// One `config` table row, minus `text`.
@@ -287,14 +327,16 @@ pub struct Config {
     pub mtime: DateTime,
 }
 
-impl Config {
-    /// Read the config file's contents.
-    #[rune::function(instance)]
-    fn read(&self) -> crate::Result<String> {
-        std::fs::read_to_string(&self.path)
-            .map_err(|e| Error::Config(format!("read {}: {e}", self.path.display())))
-    }
+/// Read the config file's contents.
+#[rune::function(instance)]
+async fn read(this: Ref<Config>) -> crate::Result<String> {
+    let path = this.path.clone();
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| Error::Config(format!("read {}: {e}", path.display())))
+}
 
+impl Config {
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> rune::alloc::Result<()> {
         write!(

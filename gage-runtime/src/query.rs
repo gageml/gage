@@ -208,7 +208,7 @@ fn type_clause(spec: &serde_json::Value, params: &mut Vec<ScalarValue>) -> super
     }
 }
 
-fn string_in_list(
+pub(crate) fn string_in_list(
     items: &[serde_json::Value],
     params: &mut Vec<ScalarValue>,
     field: &str,
