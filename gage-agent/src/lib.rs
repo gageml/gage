@@ -11,6 +11,9 @@
 //!   `--output-format stream-json` and a per-call HTTP MCP server.
 //!   Returns a [`StreamingAgentSession`] the caller drives
 //!   event-by-event via `recv_event`.
+//! - [`Agent::run_print`] is the one-shot path: `claude -p` with no
+//!   MCP server and no tools, output captured and returned (e.g. the
+//!   eval judge).
 //!
 //! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` and
 //! point the child `claude` at an isolated `CLAUDE_CONFIG_DIR` /
@@ -31,7 +34,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -136,6 +139,7 @@ pub struct AgentBuilder {
     timeout: Option<usize>,
     tools: Vec<String>,
     prompt: Option<String>,
+    archive_dir: Option<PathBuf>,
     /// Streamable-HTTP MCP endpoint to wire as the child claude's MCP
     /// server. When `Some`, the plugin-install path is skipped and
     /// claude is launched with `--mcp-config` + `--strict-mcp-config`
@@ -152,6 +156,13 @@ impl AgentBuilder {
     /// JSONL hardlinks. Defaults to `"default"`.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Explicit session archive dir, overriding the
+    /// `~/.gage/claude/<name>/` default derived from `name`.
+    pub fn archive_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.archive_dir = Some(dir.into());
         self
     }
 
@@ -208,6 +219,7 @@ impl AgentBuilder {
             tools: self.tools,
             prompt: self.prompt,
             mcp_url: self.mcp_url,
+            archive_dir: self.archive_dir,
             prep: None,
         }
     }
@@ -227,6 +239,7 @@ pub struct Agent {
     tools: Vec<String>,
     prompt: Option<String>,
     mcp_url: Option<String>,
+    archive_dir: Option<PathBuf>,
     prep: Option<PreparedRun>,
 }
 
@@ -238,10 +251,15 @@ impl Agent {
         if self.prep.is_some() {
             return Ok(());
         }
-        let archive_dir = agent_archive_dir(&self.name);
-        let prep = prepare_run(archive_dir, &self.tools, self.mcp_url.is_some())?;
+        let prep = prepare_run(self.archive_dir(), &self.tools, self.mcp_url.is_some())?;
         self.prep = Some(prep);
         Ok(())
+    }
+
+    fn archive_dir(&self) -> PathBuf {
+        self.archive_dir
+            .clone()
+            .unwrap_or_else(|| agent_archive_dir(&self.name))
     }
 
     /// Spawn the child claude interactively (inherits stdio) and block
@@ -250,6 +268,18 @@ impl Agent {
         self.init()?;
         let prep = self.prep.take().unwrap();
         run_interactive(prep, self.model, self.mcp_url, self.prompt)
+    }
+
+    /// Spawn the child claude in print mode (`claude -p`) with no MCP
+    /// server and no tools, block until it exits, and archive the session
+    /// JSONL it wrote. Returns the captured output. Skips the plugin
+    /// install regardless of `mcp_url`.
+    pub fn run_print(mut self, prompt: &str) -> io::Result<Output> {
+        if self.prep.is_none() {
+            self.prep = Some(prepare_run(self.archive_dir(), &self.tools, true)?);
+        }
+        let prep = self.prep.take().unwrap();
+        run_print(prep, self.model, prompt)
     }
 
     /// Spawn the child claude non-interactively with stream-json input
@@ -351,6 +381,29 @@ fn run_interactive(
 
     cleanup_run_dir(&prep.run_dir, &prep.cwd);
     Ok(status)
+}
+
+fn run_print(prep: PreparedRun, model: Option<String>, prompt: &str) -> io::Result<Output> {
+    let projects_dir = prep.claude_home.join("projects");
+    let mut cmd = Command::new(&prep.claude_bin);
+    cmd.args(["-p", prompt, "--tools", ""]);
+    if let Some(model) = &model {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.current_dir(&prep.cwd)
+        .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
+        .env("CLAUDE_PROJECTS_DIR", &projects_dir)
+        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
+        .stdin(Stdio::null());
+    let output = cmd.output();
+
+    // Archive and clean up even when the spawn failed, so a partial
+    // session is still preserved for inspection.
+    let archived = archive_sessions(&prep.claude_home, &prep.archive_dir);
+    cleanup_run_dir(&prep.run_dir, &prep.cwd);
+    let output = output?;
+    archived?;
+    Ok(output)
 }
 
 /// A spawned `claude -p --input-format stream-json --output-format

@@ -13,6 +13,7 @@
 //!     ├── dump.json           # notes + issues written by the scan
 //!     ├── judge-prompt.md
 //!     ├── judge-output.txt
+//!     ├── judge-sessions/     # session JSONL the judge claude wrote
 //!     └── verdict.json
 //! ```
 
@@ -23,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use gage_agent::AgentBuilder;
 use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
 
@@ -162,7 +164,7 @@ fn try_sample(ctx: &SampleContext, sample: u32) -> io::Result<SampleOutcome> {
     let expect = ctx.test.expect.as_ref().expect("validated scanner test");
     let prompt = judge_prompt(expect, &dump)?;
     fs::write(dir.join("judge-prompt.md"), &prompt)?;
-    let output = run_judge(&prompt, &ctx.judge_model)?;
+    let output = run_judge(&prompt, &ctx.judge_model, &dir)?;
     fs::write(dir.join("judge-output.txt"), &output)?;
     let verdict = match parse_verdict(&output) {
         Ok(v) => v,

@@ -12,6 +12,7 @@ chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["wrap_help"] }
 cliclack = { workspace = true }
 console = { workspace = true }
+gage-agent = { path = "../gage-agent" }
 gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }

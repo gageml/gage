@@ -2672,6 +2672,7 @@ dependencies = [
  "clap",
  "cliclack",
  "console 0.16.3",
+ "gage-agent",
  "gage-claude",
  "gage-core",
  "gage-db",
