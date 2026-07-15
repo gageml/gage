@@ -24,7 +24,7 @@ use gage_runtime::state::{RunContext, ScanContext, ScannerSlot};
 pub enum RunError {
     Io(io::Error),
     Db(gage_db::scan::ScanError),
-    Compile(String),
+    Compile { name: String, diagnostics: String },
     MissingTask { scanner: String, task: String },
     Plan(String),
     Agent(String),
@@ -37,7 +37,9 @@ impl fmt::Display for RunError {
         match self {
             RunError::Io(e) => write!(f, "{e}"),
             RunError::Db(e) => write!(f, "{e}"),
-            RunError::Compile(name) => write!(f, "scanner '{name}' failed to compile"),
+            RunError::Compile { name, diagnostics } => {
+                write!(f, "scanner '{name}' failed to compile\n{diagnostics}")
+            }
             RunError::MissingTask { scanner, task } => write!(
                 f,
                 "scanner '{scanner}' declares task '{task}' but defines no matching function"
@@ -79,6 +81,7 @@ pub async fn run(
     db: Arc<Mutex<Connection>>,
     scan_id: String,
     scanners: Vec<Scanner<'_>>,
+    slots: Vec<ScannerSlot>,
     selected: Arc<[SessionInfo]>,
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
@@ -150,16 +153,14 @@ pub async fn run(
         .ok()
         .expect("dispatcher should only be set once on a fresh RunContext");
 
-    // Build per-scanner compilation artifacts
-    let mut slots: Vec<ScannerSlot> = Vec::new();
+    // Slots are compiled by the caller (see `compile_scanners`) so a
+    // broken scanner is a full stop before any scan state exists.
+    // Register each compiled module with the dispatcher so MCP
+    // tool-call requests for a scanner can resolve to its
+    // rt/unit/scanner-name without crossing rune state through the
+    // channel.
     let mut scanner_tasks: Vec<HashMap<String, gage_registry::scanner::TaskDef>> = Vec::new();
-    for s in scanners {
-        let slot = compile_scanner(&s, db.clone())?;
-        verify_tasks(&slot, s.def)?;
-        // Register the compiled module with the dispatcher so MCP
-        // tool-call requests for this scanner can resolve to its
-        // rt/unit/scanner-name without crossing rune state through
-        // the channel.
+    for (s, slot) in scanners.iter().zip(&slots) {
         if let Some(dispatcher) = run.dispatcher.get() {
             dispatcher.register(
                 slot.name.clone(),
@@ -176,7 +177,6 @@ pub async fn run(
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        slots.push(slot);
         scanner_tasks.push(tasks);
     }
 
@@ -281,6 +281,23 @@ fn init_run(
     Ok(())
 }
 
+/// Compile every scanner and verify its declared tasks, in the order
+/// given. Called before `run` so a scanner that fails to compile is a
+/// full stop: no scan record is created and no UI is started. The
+/// returned slots pair positionally with the input scanners.
+pub fn compile_scanners(
+    scanners: &[Scanner<'_>],
+    db: Arc<Mutex<Connection>>,
+) -> Result<Vec<ScannerSlot>, RunError> {
+    let mut slots = Vec::with_capacity(scanners.len());
+    for s in scanners {
+        let slot = compile_scanner(s, db.clone())?;
+        verify_tasks(&slot, s.def)?;
+        slots.push(slot);
+    }
+    Ok(slots)
+}
+
 pub(crate) fn compile_scanner(
     scanner: &Scanner<'_>,
     db: Arc<Mutex<Connection>>,
@@ -312,15 +329,30 @@ pub(crate) fn compile_scanner(
         .with_diagnostics(&mut diagnostics)
         .build();
 
-    if !diagnostics.is_empty() {
-        let mut writer =
-            rune::termcolor::StandardStream::stderr(rune::termcolor::ColorChoice::Auto);
-        diagnostics.emit(&mut writer, &sources).unwrap();
-    }
+    // Render diagnostics to a plain-text buffer rather than stderr:
+    // on failure they travel in the error so the caller controls
+    // presentation (the CLI dialog owns the terminal at that point).
+    let rendered = if diagnostics.is_empty() {
+        String::new()
+    } else {
+        let mut buf = rune::termcolor::Buffer::no_color();
+        diagnostics.emit(&mut buf, &sources).unwrap();
+        String::from_utf8(buf.into_inner()).unwrap()
+    };
 
     let unit = match result {
-        Ok(unit) => RuneArc::try_new(unit).unwrap(),
-        Err(_) => return Err(RunError::Compile(scanner.def.name.clone())),
+        Ok(unit) => {
+            if !rendered.is_empty() {
+                eprint!("{rendered}");
+            }
+            RuneArc::try_new(unit).unwrap()
+        }
+        Err(_) => {
+            return Err(RunError::Compile {
+                name: scanner.def.name.clone(),
+                diagnostics: rendered,
+            });
+        }
     };
 
     Ok(ScannerSlot {

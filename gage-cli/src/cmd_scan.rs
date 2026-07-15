@@ -920,6 +920,21 @@ async fn run_dialog(
         out
     };
 
+    // Compile all scanners up front. A scanner that does not compile
+    // (or declares a task with no matching function) is a full stop:
+    // the error is shown here and the scan never starts — no scan
+    // record, no UI.
+    let db = Arc::new(Mutex::new(db::open_db().unwrap()));
+    let slots = match gage_scan::runner::compile_scanners(&scanners, db.clone()) {
+        Ok(slots) => slots,
+        Err(e) => {
+            cli::log::error(format!("{e}"))?;
+            return Err(DialogError::Failed(
+                "Scan not started due to scanner errors".to_string(),
+            ));
+        }
+    };
+
     // Session selection
     let sessions = if let Some(resolved) = explicit_sessions {
         let session_lines: String = resolved
@@ -1017,8 +1032,6 @@ async fn run_dialog(
         })
     };
 
-    let db = Arc::new(Mutex::new(db::open_db().unwrap()));
-
     // Notes and issues are no longer tied to a scan, so "what this scan
     // produced" is derived by diffing before/after: a note count for the
     // summary, and the set of issue ids so the new issues can be listed.
@@ -1040,6 +1053,7 @@ async fn run_dialog(
             db.clone(),
             scan_id,
             scanners,
+            slots,
             selected,
             scan_ctx,
             jobs,
@@ -1084,6 +1098,7 @@ async fn run_dialog(
             db.clone(),
             scan_id,
             scanners,
+            slots,
             selected,
             scan_ctx,
             jobs,
@@ -1158,6 +1173,7 @@ async fn run_scan_tui(
     db: Arc<Mutex<gage_db::rusqlite::Connection>>,
     scan_id: String,
     scanners: Vec<Scanner<'_>>,
+    slots: Vec<gage_scan::ScannerSlot>,
     selected: Arc<[SessionInfo]>,
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
@@ -1233,6 +1249,7 @@ async fn run_scan_tui(
             db.clone(),
             scan_id.clone(),
             scanners,
+            slots,
             selected,
             scan_ctx,
             jobs,
