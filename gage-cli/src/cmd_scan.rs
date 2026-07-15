@@ -98,7 +98,7 @@ pub struct ScanInvalidateArgs {
 #[derive(Args)]
 pub struct ScanRunArgs {
     /// Session IDs to scan (or prefix)
-    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "all", "sample"])]
+    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "today", "all", "sample"])]
     sessions: Vec<String>,
 
     /// Scanner to run (repeatable)
@@ -110,19 +110,25 @@ pub struct ScanRunArgs {
     files: Vec<String>,
 
     /// Scan most recent N sessions
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "all", "sample"])]
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "today", "all", "sample"])]
     limit: Option<usize>,
 
     /// Scan N sessions selected at random
     ///
     /// Samples from sessions modified in the past 30 days, or the
-    /// window given with --days.
+    /// window given with --days or --today.
     #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     sample: Option<usize>,
 
     /// Scan sessions modified in past N days (default 30)
     #[arg(short, long, value_name = "N", conflicts_with = "all")]
     days: Option<u32>,
+
+    /// Scan sessions modified today
+    ///
+    /// Selects sessions modified since midnight local time.
+    #[arg(short, long, conflicts_with_all = ["days", "all"])]
+    today: bool,
 
     /// Scan all sessions
     #[arg(short, long)]
@@ -135,7 +141,7 @@ pub struct ScanRunArgs {
     #[arg(
         long,
         value_name = "SCAN",
-        conflicts_with_all = ["sessions", "scanners", "files", "limit", "days", "all", "sample"]
+        conflicts_with_all = ["sessions", "scanners", "files", "limit", "days", "today", "all", "sample"]
     )]
     rerun: Option<String>,
 
@@ -923,10 +929,13 @@ async fn run_dialog(
         cli::log::step(format!("Sessions{session_lines}"))?;
         resolved
     } else {
-        let days = if args.all || args.limit.is_some() {
+        let since = if args.all || args.limit.is_some() {
             None
+        } else if args.today {
+            Some(since_local_midnight())
         } else {
-            Some(args.days.unwrap_or(30))
+            let d = args.days.unwrap_or(30);
+            Some(Duration::from_secs(u64::from(d) * 86_400))
         };
 
         let label = if args.all {
@@ -934,8 +943,12 @@ async fn run_dialog(
         } else if let Some(n) = args.limit {
             format!("{n} most recent")
         } else {
-            let d = days.unwrap();
-            let window = format!("last {d} day{}", if d == 1 { "" } else { "s" });
+            let window = if args.today {
+                "today".to_string()
+            } else {
+                let d = args.days.unwrap_or(30);
+                format!("last {d} day{}", if d == 1 { "" } else { "s" })
+            };
             match args.sample {
                 Some(n) => format!("{n} sampled from {window}"),
                 None => window,
@@ -944,8 +957,8 @@ async fn run_dialog(
         cli::log::step(format!("Sessions\n{}", style(label).dim()))?;
 
         let mut builder = SessionListBuilder::new();
-        if let Some(d) = days {
-            builder = builder.since(Duration::from_secs(u64::from(d) * 86_400));
+        if let Some(d) = since {
+            builder = builder.since(d);
         }
         if let Some(n) = args.limit {
             builder = builder.limit(n);
@@ -1119,6 +1132,21 @@ async fn run_dialog(
             anyhow::anyhow!("{e}").context("scan runner"),
         )),
     }
+}
+
+/// Elapsed time since midnight local time, for the --today window.
+/// `SessionListBuilder::since` takes a duration back from now, so the
+/// local-midnight cutoff is expressed as that offset.
+fn since_local_midnight() -> Duration {
+    use chrono::{Local, NaiveTime};
+    let now = Local::now();
+    let midnight = now
+        .with_time(NaiveTime::MIN)
+        .earliest()
+        .expect("midnight should map to a local time");
+    (now - midnight)
+        .to_std()
+        .expect("now should not precede midnight")
 }
 
 /// Run the scan under the full-screen scan view. The runner and the

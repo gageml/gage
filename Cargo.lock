@@ -2608,6 +2608,7 @@ name = "gage-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "cliclack",
  "console 0.16.3",
