@@ -1,0 +1,99 @@
+use gage::{
+    AgentRunner,
+    Template,
+    tools::NoteWrite,
+    tools::Query,
+    call_agent,
+    carry_forward_notes,
+    scan,
+};
+
+pub const SCANNER = #{
+    name: "project-rules",
+    description: "Scan session for project rule compliance",
+    tasks: #{
+        review: #{
+            notes: #{ writes: #{ "rule-violation": "A rule violation" } },
+        },
+        issues: #{
+            notes: #{ wants: ["rule-violation"] },
+            issues: #{ writes: #{ "rule": "Rule related issue" } },
+        },
+    },
+};
+
+const FINDINGS_KEY = ("project-rules", "review", 1);
+
+pub async fn review() {
+    let (prev_sessions, new_sessions, validate) = scan()
+        .sessions()
+        .split_valid(FINDINGS_KEY)
+        .await?;
+    carry_forward_notes(prev_sessions, ["finding"]).await?;
+
+    let t = Template::new(include_str!("review-prompt.md.j2")).await?;
+
+    // Use runner to run agents concurrently
+    let runner = AgentRunner::new();
+    for s in new_sessions {
+        // Lookup project memory files to apply (skip session if none exist)
+        match s.config().type("memory").await?.get(0) {
+            Some(memory) => {
+                let prompt = t
+                    .render(#{ session_id: s.id, rules: memory.read().await? })
+                    .await?;
+                runner.add(
+                    call_agent(prompt)
+                        .name("session-review")
+                        .gage_tools(review_tools())
+                        .model("medium"),
+                    #{ session: s.id },
+                );
+            }
+            None => {
+                log::info!(
+                    "No memory file for session {}, skipping",
+                    s.id
+                );
+            }
+        }
+    }
+
+    // Run agents
+    let results = runner.start();
+
+    // Collect results
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!(
+                    "session-review: {:?}",
+                    #{
+                        session,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                // Ensure valid sessions aren't re-scanned
+                validate(session)?;
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+fn review_tools() {
+    [
+        Query::new().scan(scan().id),
+        NoteWrite::new()
+            .scan(scan().id)
+            .names(#{ "rule-violation": "Rule violation description" }),
+    ]
+
+}
+
+pub async fn issues() {
+    // TODO issue writing agent
+    Ok(())
+}

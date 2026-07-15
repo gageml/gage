@@ -1,5 +1,13 @@
 use gage::tools::{IssueWrite, Query};
-use gage::{AgentRunner, Template, call_agent, carry_forward_notes, scan, write_note};
+use gage::{
+    AgentRunner,
+    Template,
+    call_agent,
+    carry_forward_notes,
+    query,
+    scan,
+    write_note,
+};
 
 pub const SCANNER = #{
     name: "general-issues",
@@ -7,19 +15,11 @@ pub const SCANNER = #{
     tasks: #{
         findings: #{
             notes: #{
-                writes: #{
-                    "finding.general": "Noteworthy finding in a session",
-                    "finding-summary.general": "Summary of session findings",
-                },
+                writes: #{ "finding": "Noteworthy finding in a session" },
             },
         },
         issues: #{
-            notes: #{
-                wants: ["finding.general"],
-                writes: #{
-                    "issue-summary.general": "Summary of issue writing",
-                },
-            },
+            notes: #{ wants: ["finding"] },
             issues: #{
                 writes: #{
                     "general": "General issue derived from session findings",
@@ -29,25 +29,33 @@ pub const SCANNER = #{
     },
 };
 
-const FINDINGS_KEY = ("general-issues", "findings", 2);
+const FINDINGS_KEY = ("general-issues", "findings", 3);
 
 /// Submit each session to an agent to write findings.
 ///
 /// Sessions already processed under the current findings key are
 /// skipped; their prior findings are carried forward into this scan.
 pub async fn findings() {
-    let t = Template::new(include_str!("findings-prompt.md")).await?;
-    let runner = AgentRunner::new();
+    // Skip previously scanned sessions per key
     let (prev_sessions, new_sessions, validate) = scan()
         .sessions()
         .split_valid(FINDINGS_KEY)
         .await?;
-    carry_forward_notes(
-        prev_sessions,
-        ["finding.general", "finding-summary.general"],
-    )
-    .await?;
+    carry_forward_notes(prev_sessions, ["finding"]).await?;
+
+    // Init template for agent prompts
+    let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
+
+    // Use agent runner to scan sessions concurrently
+    let runner = AgentRunner::new();
     for s in new_sessions {
+        // Skip sessions that not likely to have scannable content
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            validate(s)?;
+            continue
+        }
+        // Queue agent
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
             call_agent(prompt)
@@ -58,9 +66,58 @@ pub async fn findings() {
             #{ session: s.id },
         );
     }
+
+    // Run agents
     let results = runner.start();
-    write_summaries(results, validate).await?;
+
+    // Collect results
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!(
+                    "findings: {:?}",
+                    #{
+                        session,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                // Ensure that valid sessions aren't re-scanned
+                validate(session)?;
+            }
+            None => break,
+        }
+    }
+
     Ok(())
+}
+
+/// Min total text length to scan session
+const SESSION_MIN_TEXT_LEN = 200;
+
+async fn skip_session(s) {
+    // Use query instead of iterating over messages to keep scanner
+    // memory use down for this test. Limit sum to 50 messages for
+    // same reason.
+    let result = query(
+        format!(
+            "SELECT sum(length(text)) AS text_len FROM \
+            (SELECT text FROM message WHERE session_id = '{}' LIMIT 50)",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ text_len } = result.get(0).expect("should return one row");
+    match text_len {
+        () => Ok(Some("empty session")),
+        text_len if text_len < SESSION_MIN_TEXT_LEN => {
+            let reason = format!(
+                "text len {text_len} < min {SESSION_MIN_TEXT_LEN}"
+            );
+            Ok(Some(reason))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn findings_tools() {
@@ -92,7 +149,7 @@ pub async fn write_finding(inputs, meta) {
     }
     let note = write_note(
         #{
-            name: "finding.general",
+            name: "finding",
             author: meta.to_author(),
             value: inputs.description,
             target: #{ session: inputs.session },
@@ -100,33 +157,7 @@ pub async fn write_finding(inputs, meta) {
         },
     )
     .await?;
-    Ok(format!("Wrote note {}", note.id))
-}
-
-/// Write finding-summary notes for agent results and mark each
-/// completed session valid for future scans.
-async fn write_summaries(results, validate) {
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ session }))) => {
-                // A re-scan of the same session supersedes its prior
-                // summary rather than accumulating one per scan
-                write_note(
-                    #{
-                        name: "finding-summary.general",
-                        target: #{ session },
-                        value: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                )
-                .replace_prev()
-                .await?;
-                validate(session)?;
-            }
-            None => break,
-        }
-    }
-    Ok(())
+    Ok(format!("Wrote finding {}", note.id))
 }
 
 const ISSUES_KEY = ("general-issues", "issues", 1);
@@ -141,7 +172,7 @@ const NEW_FINDINGS_THRESHOLD = 5;
 pub async fn issues() {
     let (prev_findings, new_findings, validate) = scan()
         .notes()
-        .names(["finding.general"])
+        .names(["finding"])
         .split_valid(ISSUES_KEY)
         .await?;
 
@@ -165,15 +196,12 @@ pub async fn issues() {
         .model("large")
         .await?;
     let result = agent.wait().await?;
-    write_note(
+    log::info!(
+        "issues: {:?}",
         #{
-            name: "issue-summary.general",
-            value: result.text,
-            target: #{ scan: scan().id },
+            result: result.text,
             metadata: result.as_metadata(),
         },
-    )
-    .await?;
-
+    );
     validate().await
 }

@@ -21,13 +21,31 @@ session itself diagnoses, fixes, or answers.
 Many sessions do not contain issues. Do not force issues onto a session.
 
 Read the conversation by querying the `message` table via `mcp__gage__Query`,
-filtering by `session_id = '{{ session_id }}'`.
-
-`message` table columns: (session_id, line, uuid, type, subtype, text,
-timestamp, attachments, ide_tags, raw)
+filtering by `session_id = '{{ session_id }}'`. `message` table columns:
+(session_id, line, uuid, type, subtype, text, timestamp, attachments, ide_tags,
+raw)
 
 Write found issues using the `mcp__gage__Finding` tool using a single request
 rather than one tool use per finding. This saves time and tokens.
 
 If you did not find issues for the session, do not use `mcp__gage__Finding` to
 report "no issues found". Only use the tool to report found issues.
+
+In your reply, simply state how many findings you wrote. If you didn't write any
+findings, say so. Do not re-state the findings in your reply.
+
+## User interrupts
+
+User interrupts are sometimes useful for identifying issues. A user interrupt
+occurs when the user presses the Escape key during an assistant turn. This may
+indicate that the user is unhappy with something. It may indicate the user wants
+to revise their last message (e.g. mis-typed, missing content, etc.). Not all
+user interrupts indicate underlying issues worth reporting. Use your best
+judgement.
+
+## Tool errors
+
+A tool use error may imply that the assistant has bad instructions or has made a
+mistake. It may imply that the tool itself has issues.
+
+Note that it's common to see

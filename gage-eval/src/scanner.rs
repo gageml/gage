@@ -539,10 +539,7 @@ mod tests {
 
     #[test]
     fn aggregate_rates_and_pass() {
-        let test = scanner_test(
-            expect_with(vec![entry("finding.general", "the thing")], false),
-            2,
-        );
+        let test = scanner_test(expect_with(vec![entry("finding", "the thing")], false), 2);
         let judged = |matched: bool, extras: bool| SampleOutcome::Judged {
             verdict: Verdict {
                 expected: vec![ExpectedVerdict {
@@ -601,10 +598,10 @@ mod tests {
 
     #[test]
     fn judge_prompt_covers_expectations_and_dump() {
-        let expect = expect_with(vec![entry("finding.general", "iterator misuse")], false);
+        let expect = expect_with(vec![entry("finding", "iterator misuse")], false);
         let dump = Dump {
             notes: vec![NoteRow {
-                name: "finding.general".to_string(),
+                name: "finding".to_string(),
                 author: "agent:x".to_string(),
                 value: "v".to_string(),
                 metadata: None,
@@ -612,8 +609,8 @@ mod tests {
             issues: vec![],
         };
         let p = judge_prompt(&expect, &dump).unwrap();
-        assert!(p.contains("0. [note finding.general] iterator misuse"));
-        assert!(p.contains("note 0: name=finding.general"));
+        assert!(p.contains("0. [note finding] iterator misuse"));
+        assert!(p.contains("note 0: name=finding"));
         assert!(p.contains("### Issues"));
 
         let p = judge_prompt(&expect_with(vec![], true), &dump).unwrap();
