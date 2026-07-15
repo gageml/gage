@@ -8,7 +8,7 @@ use console::style;
 use tabled::{
     Table,
     settings::{
-        Color, Style, Width,
+        Alignment, Color, Style, Width,
         object::{Columns, Object, Rows},
         peaker::Priority,
     },
@@ -188,40 +188,91 @@ fn list(args: ScanListArgs) {
 
     let show = args.limit.show_count(total);
 
-    let header: Vec<String> = ["Id", "Scanners", "Created"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let header: Vec<String> = [
+        "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Duration", "Created",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
 
-    let rows: Vec<Vec<String>> = runs
-        .iter()
-        .take(show)
-        .map(|run| {
-            let mut scanners = scan::get_scanners_for_scan(&conn, &run.id)
-                .unwrap_or_default()
-                .iter()
-                .map(|s| s.scanner_name.clone())
-                .collect::<Vec<_>>();
-            scanners.sort();
-            let scanners = scanners.join(", ");
-
-            vec![
-                short_uuid(&run.id).to_string(),
-                scanners,
-                crate::human::format_elapsed_ms(run.created),
-            ]
-        })
-        .collect();
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(show);
+    for run in runs.iter().take(show) {
+        match list_row(&conn, run) {
+            Ok(row) => rows.push(row),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::new(2..3).not(Rows::first()), s::dim())
+        .modify(Columns::new(1..6), Alignment::right())
+        .modify(Columns::last().not(Rows::first()), s::dim())
         .to_string();
     println!("{table}");
 
     args.limit.print_summary(show, total, "scan run");
+}
+
+fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::Result<Vec<String>> {
+    let tasks = scanner_task_outcomes(conn, &run.id)?;
+    let errors = tasks
+        .iter()
+        .filter(|(_, t)| t.status == scan::TaskStatus::Failed)
+        .count();
+    let sessions = scan::session_ids_for_scan(conn, &run.id)?.len();
+    let notes = scan::note_ids_for_scan(conn, &run.id)?.len();
+    let issues = scan::issue_ids_for_scan(conn, &run.id)?.len();
+    let duration = scan_summary(run)?
+        .map(|s| crate::human::format_duration(Duration::from_millis(s.elapsed_ms)))
+        .unwrap_or_default();
+    Ok(vec![
+        short_uuid(&run.id).to_string(),
+        tasks.len().to_string(),
+        sessions.to_string(),
+        notes.to_string(),
+        issues.to_string(),
+        errors.to_string(),
+        duration,
+        crate::human::format_elapsed_ms(run.created),
+    ])
+}
+
+/// Task outcomes recorded for a scan, paired with the scanner that ran
+/// them. A scanner that never recorded metadata (interrupted scan)
+/// contributes no tasks.
+fn scanner_task_outcomes(
+    conn: &gage_db::rusqlite::Connection,
+    scan_id: &str,
+) -> anyhow::Result<Vec<(String, scan::TaskOutcome)>> {
+    let mut outcomes = Vec::new();
+    for scanner in scan::get_scanners_for_scan(conn, scan_id)? {
+        let Some(meta) = scanner.metadata.as_deref() else {
+            continue;
+        };
+        let recorded: scan::ScannerTasks = serde_json::from_str(meta)?;
+        outcomes.extend(
+            recorded
+                .tasks
+                .into_iter()
+                .map(|t| (scanner.scanner_name.clone(), t)),
+        );
+    }
+    Ok(outcomes)
+}
+
+/// Run summary from `scan.metadata`. None when the scan never
+/// completed.
+fn scan_summary(run: &scan::Scan) -> anyhow::Result<Option<scan::ScanSummary>> {
+    Ok(run
+        .metadata
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?)
 }
 
 async fn view(args: ScanViewArgs) {
@@ -252,34 +303,24 @@ fn load_scan_model(
     use std::collections::HashMap;
 
     let run = scan::get_scan(conn, prefix)?;
-    let summary: Option<scan::ScanSummary> = run
-        .metadata
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()?;
+    let summary = scan_summary(&run)?;
 
-    let mut tasks: Vec<TaskItem> = Vec::new();
-    for scanner in scan::get_scanners_for_scan(conn, &run.id)? {
-        let Some(meta) = scanner.metadata.as_deref() else {
-            continue;
-        };
-        let recorded: scan::ScannerTasks = serde_json::from_str(meta)?;
-        for t in recorded.tasks {
-            tasks.push(TaskItem {
-                id: TaskId {
-                    scanner: scanner.scanner_name.clone(),
-                    task: t.name,
-                },
-                state: match t.status {
-                    scan::TaskStatus::Completed => TaskState::Completed,
-                    scan::TaskStatus::Failed => TaskState::Error,
-                    scan::TaskStatus::Skipped => TaskState::Skipped,
-                },
-                elapsed: t.elapsed_ms.map(Duration::from_millis),
-                started: None,
-            });
-        }
-    }
+    let tasks: Vec<TaskItem> = scanner_task_outcomes(conn, &run.id)?
+        .into_iter()
+        .map(|(scanner, t)| TaskItem {
+            id: TaskId {
+                scanner,
+                task: t.name,
+            },
+            state: match t.status {
+                scan::TaskStatus::Completed => TaskState::Completed,
+                scan::TaskStatus::Failed => TaskState::Error,
+                scan::TaskStatus::Skipped => TaskState::Skipped,
+            },
+            elapsed: t.elapsed_ms.map(Duration::from_millis),
+            started: None,
+        })
+        .collect();
     let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
 
     let results = load_scan_results(conn, &run.id)?;
