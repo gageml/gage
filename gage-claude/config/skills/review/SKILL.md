@@ -95,7 +95,7 @@ this.
 
 Always verify (or ask the user to verify) fixes before closing the issue.
 
-Use `mcp__gage__gage_IssueClose` to close an issue that's been verified as
+Use `mcp__plugin_gage_gage__IssueClose` to close an issue that's been verified as
 fixed.
 
 If the user decides to not fix the issue, close the issue with the
