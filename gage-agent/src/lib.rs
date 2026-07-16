@@ -4,8 +4,7 @@
 //!
 //! - [`Agent::run`] is the interactive `gage agent` command: spawns
 //!   `claude`, inherits the terminal, and mirrors session JSONLs live
-//!   so a SIGKILL'd run still leaves a viewable session. Uses the
-//!   plugin-install path (stdio MCP).
+//!   so a SIGKILL'd run still leaves a viewable session.
 //! - [`Agent::start_streaming_session`] is the scanner-driven path,
 //!   spawning `claude -p` with `--input-format stream-json` /
 //!   `--output-format stream-json` and a per-call HTTP MCP server.
@@ -30,7 +29,6 @@
 //! copy step.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,7 +37,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use gage_claude::plugin;
 use gage_core::config::gage_home;
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -63,9 +60,8 @@ pub const TOOL_NAMES: &[&str] = &[
 
 /// Stateless helpers that produce resolved MCP-tool allowlists for an
 /// [`AgentBuilder`]. Every function returns the final `Vec<String>` of
-/// short names that gets written verbatim (with the
-/// `mcp__plugin_gage_gage__` prefix) into the child claude's
-/// `settings.json` `permissions.allow`.
+/// short names that gets written verbatim (with the `mcp__gage__`
+/// prefix) into the child claude's `settings.json` `permissions.allow`.
 pub struct ToolPolicy;
 
 impl ToolPolicy {
@@ -103,17 +99,13 @@ fn resolve(patterns: &[String]) -> Result<HashSet<&'static str>, String> {
     Ok(out)
 }
 
-/// Render the `--mcp-config` argument for the HTTP-MCP path. Names
-/// the server `gage`, producing the `mcp__gage__<Tool>` wire prefix.
+/// Render the `--mcp-config` argument. Names the server `gage`,
+/// producing the `mcp__gage__<Tool>` wire prefix.
 ///
-/// This deliberately differs from the plugin-install path
-/// (`mcp__plugin_gage_gage__<Tool>`): claude treats any MCP server
-/// whose name starts with `plugin_` as plugin-installed and attaches
+/// The name must not start with `plugin_`: claude treats any MCP
+/// server whose name has that prefix as plugin-installed and attaches
 /// plugin-identity context (ambient skills get attributed to the
-/// "gage plugin", etc.). Spoofing that name to align FQNs caused
-/// worse behavior than the FQN divergence itself. Prompts and skills
-/// that hard-code an FQN must use the prefix matching their entry
-/// path — see [`call_agent`-targeted prompts using `mcp__gage__`].
+/// "gage plugin", etc.).
 fn mcp_config_json(url: &str) -> String {
     format!(
         r#"{{"mcpServers":{{"gage":{{"type":"http","url":"{}"}}}}}}"#,
@@ -141,9 +133,8 @@ pub struct AgentBuilder {
     prompt: Option<String>,
     archive_dir: Option<PathBuf>,
     /// Streamable-HTTP MCP endpoint to wire as the child claude's MCP
-    /// server. When `Some`, the plugin-install path is skipped and
-    /// claude is launched with `--mcp-config` + `--strict-mcp-config`
-    /// pointing at this URL.
+    /// server via `--mcp-config`. When `None` the child runs with no
+    /// MCP servers at all.
     mcp_url: Option<String>,
 }
 
@@ -185,7 +176,7 @@ impl AgentBuilder {
     }
 
     /// MCP tool allowlist (short names without the
-    /// `mcp__plugin_gage_gage__` prefix). Replaces the default. Build
+    /// `mcp__gage__` prefix). Replaces the default. Build
     /// the argument with [`ToolPolicy::tools`] for allow/deny semantics.
     /// There is no implicit baseline — every tool to expose must be
     /// listed.
@@ -203,8 +194,6 @@ impl AgentBuilder {
     }
 
     /// Streamable-HTTP MCP URL the child claude should connect to.
-    /// When set, the plugin-install path is replaced with a direct
-    /// `--mcp-config` injection pointing at this URL.
     pub fn mcp_url(mut self, url: impl Into<String>) -> Self {
         self.mcp_url = Some(url.into());
         self
@@ -227,8 +216,8 @@ impl AgentBuilder {
 
 /// A configured but not-yet-running agent. Construct via [`AgentBuilder`].
 ///
-/// The slow pre-spawn setup (plugin install + sandbox materialization)
-/// runs inside [`Agent::init`]. Callers that want to wrap setup with a
+/// The slow pre-spawn setup (sandbox materialization) runs inside
+/// [`Agent::init`]. Callers that want to wrap setup with a
 /// progress indicator call `init` explicitly; [`Agent::run`] and
 /// [`Agent::start_session`] call it themselves if it has not been run.
 pub struct Agent {
@@ -244,14 +233,13 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Run the slow pre-spawn setup: assemble the run dir, seed the
-    /// isolated claude home, and (plugin path only) install the gage
-    /// plugin. Idempotent: a second call is a no-op.
+    /// Run the slow pre-spawn setup: assemble the run dir and seed the
+    /// isolated claude home. Idempotent: a second call is a no-op.
     pub fn init(&mut self) -> io::Result<()> {
         if self.prep.is_some() {
             return Ok(());
         }
-        let prep = prepare_run(self.archive_dir(), &self.tools, self.mcp_url.is_some())?;
+        let prep = prepare_run(self.archive_dir(), &self.tools)?;
         self.prep = Some(prep);
         Ok(())
     }
@@ -272,11 +260,10 @@ impl Agent {
 
     /// Spawn the child claude in print mode (`claude -p`) with no MCP
     /// server and no tools, block until it exits, and archive the session
-    /// JSONL it wrote. Returns the captured output. Skips the plugin
-    /// install regardless of `mcp_url`.
+    /// JSONL it wrote. Returns the captured output.
     pub fn run_print(mut self, prompt: &str) -> io::Result<Output> {
         if self.prep.is_none() {
-            self.prep = Some(prepare_run(self.archive_dir(), &self.tools, true)?);
+            self.prep = Some(prepare_run(self.archive_dir(), &self.tools)?);
         }
         let prep = self.prep.take().unwrap();
         run_print(prep, self.model, prompt)
@@ -346,13 +333,15 @@ fn run_interactive(
         .env("ENABLE_TOOL_SEARCH", "false");
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
-        cmd.arg("--strict-mcp-config");
-        // `user` = our seeded settings.json in CLAUDE_CONFIG_DIR
-        // (theme, tui, showThinkingSummaries, permissions.allow).
-        // Skip `project` / `local` so we don't pick up settings from
-        // the cwd directory.
-        cmd.arg("--setting-sources").arg("user");
     }
+    // Only the --mcp-config server (if any) — never plugin-installed
+    // servers or account-level claude.ai connectors.
+    cmd.arg("--strict-mcp-config");
+    // `user` = our seeded settings.json in CLAUDE_CONFIG_DIR
+    // (theme, tui, showThinkingSummaries, permissions.allow).
+    // Skip `project` / `local` so we don't pick up settings from
+    // the cwd directory.
+    cmd.arg("--setting-sources").arg("user");
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
@@ -387,6 +376,9 @@ fn run_print(prep: PreparedRun, model: Option<String>, prompt: &str) -> io::Resu
     let projects_dir = prep.claude_home.join("projects");
     let mut cmd = Command::new(&prep.claude_bin);
     cmd.args(["-p", prompt, "--tools", ""]);
+    // No --mcp-config: strict mode alone shuts out plugin-installed
+    // servers and account-level claude.ai connectors.
+    cmd.arg("--strict-mcp-config");
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
@@ -490,12 +482,14 @@ async fn start_streaming_session_inner(
     cmd.arg("--disable-slash-commands");
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
-        cmd.arg("--strict-mcp-config");
-        // `user` loads our seeded `settings.json` (permissions.allow),
-        // which is required for headless tool calls to avoid prompts.
-        // `project` / `local` are skipped so cwd settings don't leak in.
-        cmd.arg("--setting-sources").arg("user");
     }
+    // Only the --mcp-config server (if any) — never plugin-installed
+    // servers or account-level claude.ai connectors.
+    cmd.arg("--strict-mcp-config");
+    // `user` loads our seeded `settings.json` (permissions.allow),
+    // which is required for headless tool calls to avoid prompts.
+    // `project` / `local` are skipped so cwd settings don't leak in.
+    cmd.arg("--setting-sources").arg("user");
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
@@ -826,30 +820,21 @@ struct PreparedRun {
 
 /// Assemble the throwaway run dir, seed the isolated home, and install the
 /// gage plugin. `archive_dir` is where session JSONLs get hardlinked.
-fn prepare_run(
-    archive_dir: PathBuf,
-    tools: &[String],
-    use_http_mcp: bool,
-) -> io::Result<PreparedRun> {
+fn prepare_run(archive_dir: PathBuf, tools: &[String]) -> io::Result<PreparedRun> {
     let run_id = Uuid::new_v4().to_string();
     let run_dir = tmp_run_dir(&run_id);
     let cwd = run_dir.join("cwd");
     let claude_home = run_dir.join("claude");
-    let marketplace = claude_home.join(".plugin-marketplace");
 
     let projects_dir = claude_home.join("projects");
     fs::create_dir_all(&claude_home)?;
     fs::create_dir_all(&cwd)?;
     fs::create_dir_all(&archive_dir)?;
     fs::create_dir_all(&projects_dir)?;
-    seed_claude_home(&claude_home, &cwd, tools, use_http_mcp)?;
+    seed_claude_home(&claude_home, &cwd, tools)?;
 
     let claude_bin = find_claude()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
-    if !use_http_mcp {
-        let gage_bin = sibling_gage_bin()?;
-        install_gage_plugin(&claude_bin, &claude_home, &marketplace, &gage_bin, tools)?;
-    }
 
     Ok(PreparedRun {
         run_dir,
@@ -1007,72 +992,19 @@ fn restore_signal(sig: libc::c_int, prev: libc::sighandler_t) {
     }
 }
 
-fn install_gage_plugin(
-    claude_bin: &Path,
-    claude_home: &Path,
-    marketplace: &Path,
-    gage_bin: &Path,
-    tools: &[String],
-) -> io::Result<()> {
-    plugin::write_plugin_files_to(marketplace, gage_bin)?;
-    plugin::filter_tools_skill(marketplace, tools)?;
-    plugin::write_marketplace_manifest_to(marketplace)?;
-    claude_subcommand(
-        claude_bin,
-        claude_home,
-        &[
-            OsStr::new("plugin"),
-            OsStr::new("marketplace"),
-            OsStr::new("add"),
-            marketplace.as_os_str(),
-        ],
-    )?;
-    claude_subcommand(
-        claude_bin,
-        claude_home,
-        &[
-            OsStr::new("plugin"),
-            OsStr::new("install"),
-            OsStr::new("gage@gage"),
-        ],
-    )
-}
-
-fn claude_subcommand(claude_bin: &Path, claude_home: &Path, args: &[&OsStr]) -> io::Result<()> {
-    let status = Command::new(claude_bin)
-        .args(args)
-        .env("CLAUDE_CONFIG_DIR", claude_home)
-        .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "claude plugin setup failed with status {status}"
-        )));
-    }
-    Ok(())
-}
-
 /// Populate the isolated home with the minimum needed to skip onboarding
 /// and present a familiar UI, without inheriting any setting that could
 /// shift model behavior or what lands in the transcript. `tools` is the
 /// MCP-tool allowlist verbatim — no entry is implicit.
 ///
-/// Does not seed `skills/` into the home. The plugin path ships a
-/// `tools` skill whose description eagerly loads MCP tool FQNs into
-/// the model's context, sparing it from guessing names or burning
+/// Does not seed `skills/` into the home. The user-facing gage plugin
+/// ships a `tools` skill whose description eagerly loads MCP tool FQNs
+/// into the model's context, sparing it from guessing names or burning
 /// `ToolSearch` calls — that hack is intentionally not replicated
 /// here. Callers of `call_agent` and `gage agent` who want similar
 /// guidance compose it explicitly via `.append_system_prompt(...)`
 /// or the prompt itself.
-fn seed_claude_home(
-    claude_home: &Path,
-    cwd: &Path,
-    tools: &[String],
-    use_http_mcp: bool,
-) -> io::Result<()> {
+fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &[String]) -> io::Result<()> {
     let user_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("HOME not set"))?;
@@ -1095,22 +1027,11 @@ fn seed_claude_home(
             settings.insert(key.into(), v.clone());
         }
     }
-    // The two entry paths produce different FQN prefixes:
-    // - Plugin path: claude prefixes plugin-installed MCP tools as
-    //   `mcp__plugin_<marketplace>_<server>__<Tool>` — for our gage
-    //   marketplace + gage server, that's `mcp__plugin_gage_gage__`.
-    // - HTTP path: server name in `--mcp-config` is plain `gage`,
-    //   yielding `mcp__gage__`. We deliberately avoid the `plugin_`
-    //   prefix here so claude doesn't mistake the server for a
-    //   plugin-installed one (see `mcp_config_json`).
-    let prefix = if use_http_mcp {
-        "mcp__gage__"
-    } else {
-        "mcp__plugin_gage_gage__"
-    };
+    // Server name in `--mcp-config` is plain `gage`, yielding the
+    // `mcp__gage__` FQN prefix (see `mcp_config_json`).
     let mut allow_set: Vec<String> = Vec::with_capacity(tools.len());
     for t in tools {
-        let prefixed = format!("{prefix}{t}");
+        let prefixed = format!("mcp__gage__{t}");
         if !allow_set.contains(&prefixed) {
             allow_set.push(prefixed);
         }
@@ -1188,13 +1109,6 @@ fn tmp_run_dir(run_id: &str) -> PathBuf {
 
 fn agent_archive_dir(name: &str) -> PathBuf {
     gage_home().join("claude").join(name)
-}
-
-fn sibling_gage_bin() -> io::Result<PathBuf> {
-    std::env::current_exe()?
-        .parent()
-        .map(|p| p.join("gage"))
-        .ok_or_else(|| io::Error::other("can't locate sibling `gage` binary"))
 }
 
 fn find_claude() -> Option<PathBuf> {

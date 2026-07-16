@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,40 +56,6 @@ pub fn write_plugin_files_to(root: &Path, gage_bin: &Path) -> io::Result<()> {
 /// [`write_plugin_files_to`] with the same `root`.
 pub fn write_marketplace_manifest_to(root: &Path) -> io::Result<()> {
     write_embedded(MARKETPLACE_PATH, root, Path::new(""))
-}
-
-/// Rewrite `root/skills/tools/SKILL.md`, dropping every line that
-/// references an `mcp__plugin_gage_gage__<Name>` FQN whose `<Name>` is
-/// not in `allowed`. Lines without an FQN are kept as-is. Tool names
-/// are matched exactly against the substring immediately following the
-/// prefix up to the first non-`[A-Za-z0-9]` byte.
-///
-/// Call this after [`write_plugin_files_to`] and before `claude plugin
-/// install` runs, so the installed plugin's tools skill reflects what
-/// the session's MCP server actually exposes.
-pub fn filter_tools_skill(root: &Path, allowed: &[String]) -> io::Result<()> {
-    const PREFIX: &str = "mcp__plugin_gage_gage__";
-    let path = root.join("skills/tools/SKILL.md");
-    let content = fs::read_to_string(&path)?;
-    let allowed: HashSet<&str> = allowed.iter().map(String::as_str).collect();
-    let kept: Vec<&str> = content
-        .lines()
-        .filter(|line| match line.find(PREFIX) {
-            None => true,
-            Some(idx) => {
-                let after = &line[idx + PREFIX.len()..];
-                let end = after
-                    .find(|c: char| !c.is_ascii_alphanumeric())
-                    .unwrap_or(after.len());
-                allowed.contains(&after[..end])
-            }
-        })
-        .collect();
-    let mut out = kept.join("\n");
-    if content.ends_with('\n') {
-        out.push('\n');
-    }
-    fs::write(path, out)
 }
 
 fn write_embedded(rel_path: &str, root: &Path, gage_bin: &Path) -> io::Result<()> {
@@ -157,26 +122,6 @@ mod tests {
 
         assert!(!root.join("commands").exists());
         assert!(root.join(".claude-plugin").join("plugin.json").exists());
-    }
-
-    #[test]
-    fn filter_tools_skill_drops_disallowed_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        write_plugin_files_to(dir.path(), Path::new("/bin/gage")).unwrap();
-        let path = dir.path().join("skills/tools/SKILL.md");
-        let before = fs::read_to_string(&path).unwrap();
-        assert!(before.contains("mcp__plugin_gage_gage__IssueWrite"));
-        assert!(before.contains("mcp__plugin_gage_gage__Query"));
-
-        filter_tools_skill(dir.path(), &["Query".to_string(), "IssueWrite".to_string()]).unwrap();
-
-        let after = fs::read_to_string(&path).unwrap();
-        assert!(after.contains("mcp__plugin_gage_gage__Query"));
-        assert!(after.contains("mcp__plugin_gage_gage__IssueWrite"));
-        assert!(!after.contains("mcp__plugin_gage_gage__IssueClose"));
-        assert!(!after.contains("mcp__plugin_gage_gage__IssueComment"));
-        // Non-FQN lines (frontmatter, prose) remain.
-        assert!(after.contains("user-invocable: false"));
     }
 
     #[test]
