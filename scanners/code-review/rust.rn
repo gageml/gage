@@ -1,0 +1,64 @@
+use gage::{AgentRunner, Template, tools::Query, call_agent, scan, write_issue};
+
+pub const SCANNER = #{
+    name: "rust-code-review",
+    description: "Review Rust code quality",
+    tasks: #{ issues: #{} },
+};
+
+const REVIEW_KEY = ("rust-code-review", "issues", 1);
+
+pub async fn issues() {
+    let t = Template::new(include_str!("rust-prompt.md.j2")).await?;
+    let runner = AgentRunner::new();
+    let (_, sessions, validate) = scan()
+        .sessions()
+        .split_valid(REVIEW_KEY)
+        .await?;
+    for s in sessions {
+        let prompt = t.render(#{ session_id: s.id }).await?;
+        runner.add(
+            call_agent(prompt)
+                .gage_tools([Query::new()])
+                .tools(#{ issue: issue_tooldef() }),
+            #{ session: s.id },
+        );
+    }
+    let results = runner.start();
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!("{result:?}");
+                validate(session).await?;
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+fn issue_tooldef() {
+    #{
+        name: "Issue",
+        description: "Write an issue",
+        inputs: #{
+            title: #{ type: "string", description: "Issue title" },
+            description: #{ type: "string", description: "Issue description" },
+            session: #{ type: "string", description: "Session ID" },
+        },
+    }
+}
+
+pub async fn issue(#{ title, description, session }, meta) {
+    let issue = write_issue(
+        #{
+            name: "code-review",
+            author: meta.agent_tool_use(),
+            title,
+            description,
+            sessions: [session],
+        },
+    )
+    .await?;
+    Ok(format!("Wrote issue {}", issue.id))
+}
