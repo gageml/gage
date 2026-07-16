@@ -1,11 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
-use gage_core::config::Remote;
+use gage_core::config::{Remote, gage_home};
 use gage_db::db::{DbError, db_path, open_db_at};
+use gage_db::rusqlite::Connection;
 
 use crate::backend::{SyncError, open_backend};
 use crate::observer::Observer;
@@ -31,11 +32,12 @@ pub async fn push(
     let snapshot_dir = TempDir::new()?;
     let snapshot = snapshot_dir.path().join("gage.db");
     snapshot_db(&snapshot)?;
+    let slow_snapshot = snapshot_slow_db(snapshot_dir.path())?;
     if cancel.is_cancelled() {
         return Err(SyncError::Interrupted);
     }
 
-    let items = build_payload(&snapshot);
+    let items = build_payload(&snapshot, slow_snapshot.as_deref())?;
 
     let mut failures: Vec<String> = Vec::new();
     let mut interrupted = false;
@@ -93,6 +95,25 @@ fn snapshot_db(dest: &Path) -> Result<(), SyncError> {
         )));
     }
     let conn = open_db_at(&src).map_err(|e: DbError| SyncError::Sqlite(e.to_string()))?;
+    vacuum_into(&conn, dest)
+}
+
+/// Snapshots `log/slow.db` into `dir` when a slow query log exists.
+///
+/// Opened directly rather than through `open_db_at`, which would run the
+/// gage schema migrations against it.
+fn snapshot_slow_db(dir: &Path) -> Result<Option<PathBuf>, SyncError> {
+    let src = gage_home().join("log").join("slow.db");
+    if !src.is_file() {
+        return Ok(None);
+    }
+    let conn = Connection::open(&src).map_err(|e| SyncError::Sqlite(e.to_string()))?;
+    let dest = dir.join("slow.db");
+    vacuum_into(&conn, &dest)?;
+    Ok(Some(dest))
+}
+
+fn vacuum_into(conn: &Connection, dest: &Path) -> Result<(), SyncError> {
     let dest_str = dest.to_string_lossy();
     let escaped = dest_str.replace('\'', "''");
     let sql = format!("VACUUM INTO '{escaped}'");

@@ -1,3 +1,5 @@
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use gage_core::config::gage_home;
@@ -14,7 +16,12 @@ pub struct TransferItem {
 ///
 /// `db_snapshot` is a path to a consistent copy of `gage.db` produced via
 /// `VACUUM INTO` before the call. The original live db is never read here.
-pub fn build_payload(db_snapshot: &Path) -> Vec<TransferItem> {
+/// `slow_db_snapshot` is the same for `log/slow.db`, or `None` when there
+/// is no slow query log.
+pub fn build_payload(
+    db_snapshot: &Path,
+    slow_db_snapshot: Option<&Path>,
+) -> io::Result<Vec<TransferItem>> {
     let gh = gage_home();
     let mut items = Vec::new();
 
@@ -47,6 +54,30 @@ pub fn build_payload(db_snapshot: &Path) -> Vec<TransferItem> {
         });
     }
 
+    if let Some(snap) = slow_db_snapshot {
+        items.push(TransferItem {
+            local: snap.to_path_buf(),
+            remote: "gage/log/slow.db".to_string(),
+        });
+    }
+
+    let log = gh.join("log");
+    if log.is_dir() {
+        for entry in fs::read_dir(&log)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Live sqlite files; the consistent snapshot above covers them
+            if name.starts_with("slow.db") {
+                continue;
+            }
+            items.push(TransferItem {
+                local: entry.path(),
+                remote: format!("gage/log/{name}"),
+            });
+        }
+    }
+
     if let Some(claude_projects) = gage_claude::session::projects_dir()
         && claude_projects.is_dir()
     {
@@ -56,5 +87,5 @@ pub fn build_payload(db_snapshot: &Path) -> Vec<TransferItem> {
         });
     }
 
-    items
+    Ok(items)
 }
