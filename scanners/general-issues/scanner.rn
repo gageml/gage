@@ -61,7 +61,7 @@ pub async fn findings() {
             call_agent(prompt)
                 .name("session-finding")
                 .gage_tools([Query::new()])
-                .tools(findings_tools())
+                .tools(#{ write_finding: write_finding_tooldef() })
                 .model("medium"),
             #{ session: s.id },
         );
@@ -120,26 +120,23 @@ async fn skip_session(s) {
     }
 }
 
-fn findings_tools() {
+fn write_finding_tooldef() {
     #{
-        write_finding: #{
-            name: "Finding",
-            description: "Write a finding about the session",
-            inputs: #{
-                description: #{
-                    type: "string",
-                    description: "Finding description",
-                },
-                session: #{ type: "string", description: "Session ID" },
-                lines: #{
-                    type: "string",
-                    description: "Session line numbers associated with the finding",
-                    required: false,
-                },
+        name: "Finding",
+        description: "Write a finding about the session",
+        inputs: #{
+            description: #{
+                type: "string",
+                description: "Finding description",
+            },
+            session: #{ type: "string", description: "Session ID" },
+            lines: #{
+                type: "string",
+                description: "Session line numbers associated with the finding",
+                required: false,
             },
         },
     }
-
 }
 
 pub async fn write_finding(inputs, meta) {
@@ -157,7 +154,7 @@ pub async fn write_finding(inputs, meta) {
         },
     )
     .await?;
-    Ok(format!("Wrote finding {}", note.id))
+    Ok(format!("Wrote finding note {}", note.id))
 }
 
 const ISSUES_KEY = ("general-issues", "issues", 1);
