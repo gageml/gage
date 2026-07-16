@@ -453,6 +453,9 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
             let page = state.scroll_view.page() as isize;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
+                KeyCode::Char('l') if matches!(state.dialog, Dialog::Log { .. }) => {
+                    state.dialog = Dialog::None
+                }
                 KeyCode::Down | KeyCode::Char('j') => state.scroll_view.scroll_by(1),
                 KeyCode::Up | KeyCode::Char('k') => state.scroll_view.scroll_by(-1),
                 KeyCode::PageDown => state.scroll_view.scroll_by(page),
