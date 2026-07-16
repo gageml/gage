@@ -1284,7 +1284,7 @@ fn render_input_schema(inputs: &[InputDecl]) -> rmcp_json::JsonObject {
 /// sends a JSON-only [`DispatchRequest`] to the dispatcher and waits
 /// for the reply — no Rune state crosses the channel. The `_meta`
 /// object passes through verbatim; the Rune tool fn derives the
-/// calling author from it via `meta.to_author()`.
+/// calling author from it via `meta.agent_tool_use()`.
 fn dispatcher_callback(
     module_id: String,
     fn_name: String,

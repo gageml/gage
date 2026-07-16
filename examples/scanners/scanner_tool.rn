@@ -35,7 +35,7 @@ pub async fn comment(#{ text }, meta) {
             name: "comment",
             value: text,
             target: #{ scan: scan().id },
-            author: meta.to_author(),
+            author: meta.agent_tool_use(),
         },
     )
     .replace_prev()

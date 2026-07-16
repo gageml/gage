@@ -147,7 +147,7 @@ pub async fn write_finding(inputs, meta) {
     let note = write_note(
         #{
             name: "finding",
-            author: meta.to_author(),
+            author: meta.agent_tool_use(),
             value: inputs.description,
             target: #{ session: inputs.session },
             metadata,

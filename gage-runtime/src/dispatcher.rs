@@ -278,7 +278,7 @@ fn value_to_json_lossy(v: &rune::runtime::Value) -> JsonValue {
 /// The second argument to a Rune tool fn: the MCP request's `_meta`
 /// object, read-only, with standard object semantics (`meta[key]`,
 /// `get`, `keys`, `values`, `len`, `contains_key`, iteration over
-/// `(key, value)` pairs). `to_author()` derives the author of the
+/// `(key, value)` pairs). `agent_tool_use()` derives the author of the
 /// call from the wire data itself.
 #[derive(Any)]
 #[rune(item = ::gage)]
@@ -313,7 +313,7 @@ impl ToolMeta {
     /// written item to the exact transcript entry that wrote it.
     /// Errors when the client sent no tool-use id.
     #[rune::function(instance)]
-    fn to_author(&self) -> Result<String, VmError> {
+    fn agent_tool_use(&self) -> Result<String, VmError> {
         match self.entries.get(TOOL_USE_ID_KEY).and_then(|v| v.as_str()) {
             Some(id) => Ok(format!("agent:{}?call={id}", self.scanner_name)),
             None => Err(VmError::panic(format!(
@@ -401,7 +401,7 @@ impl ToolMetaIter {
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<ToolMeta>()?;
-    m.function_meta(ToolMeta::to_author)?;
+    m.function_meta(ToolMeta::agent_tool_use)?;
     m.function_meta(ToolMeta::index_get)?;
     m.function_meta(ToolMeta::get)?;
     m.function_meta(ToolMeta::contains_key)?;
