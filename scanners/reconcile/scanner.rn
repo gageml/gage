@@ -17,5 +17,5 @@ pub async fn main() {
 }
 
 pub fn reconcile() {
-    call_agent(include_str!("reconcile-prompt.md")).gage_tools([Query::new()])
+    call_agent(include_str!("reconcile-prompt.md")).gage_tools([Query::new().global()])
 }

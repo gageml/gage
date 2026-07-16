@@ -85,10 +85,8 @@ pub async fn review() {
 
 fn review_tools() {
     [
-        Query::new().scan(scan().id),
-        NoteWrite::new()
-            .scan(scan().id)
-            .names(#{ "rule-violation": "Rule violation description" }),
+        Query::new(),
+        NoteWrite::new().names(#{ "rule-violation": "Rule violation description" }),
     ]
 
 }

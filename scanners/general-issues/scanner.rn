@@ -60,7 +60,7 @@ pub async fn findings() {
         runner.add(
             call_agent(prompt)
                 .name("session-finding")
-                .gage_tools([Query::new().scan(scan().id)])
+                .gage_tools([Query::new()])
                 .tools(findings_tools())
                 .model("medium"),
             #{ session: s.id },
@@ -187,12 +187,7 @@ pub async fn issues() {
 
     let agent = call_agent(include_str!("issues-prompt.md"))
         .name("issue-writer")
-        .gage_tools(
-            [
-                Query::new().scan(scan().id),
-                IssueWrite::new().scan(scan().id).status("open"),
-            ],
-        )
+        .gage_tools([Query::new(), IssueWrite::new().status("open")])
         .model("large")
         .await?;
     let result = agent.wait().await?;

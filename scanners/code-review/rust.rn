@@ -17,6 +17,7 @@ pub async fn issues() {
         .await?;
     for s in sessions {
         let prompt = t.render(#{ session_id: s.id }).await?;
+        prompt = "How many issues are still opened?";
         runner.add(
             call_agent(prompt)
                 .gage_tools([Query::new()])

@@ -12,20 +12,25 @@ use gage_mcp::{GageTool, IssueWriteConfig, NoteWriteConfig, QueryConfig};
 use rune::runtime::Object;
 use rune::{Any, ContextError, Module};
 
+use crate::state::current_scan_ctx;
+
 pub fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate_item("gage", ["tools"])?;
     m.ty::<Query>()?;
     m.function_meta(Query::new)?;
     m.function_meta(Query::scan)?;
+    m.function_meta(Query::global)?;
     m.ty::<IssueWrite>()?;
     m.function_meta(IssueWrite::new)?;
     m.function_meta(IssueWrite::name)?;
     m.function_meta(IssueWrite::scan)?;
+    m.function_meta(IssueWrite::global)?;
     m.function_meta(IssueWrite::status)?;
     m.ty::<NoteWrite>()?;
     m.function_meta(NoteWrite::new)?;
     m.function_meta(NoteWrite::names)?;
     m.function_meta(NoteWrite::scan)?;
+    m.function_meta(NoteWrite::global)?;
     m.ty::<IssueClose>()?;
     m.function_meta(IssueClose::new)?;
     m.ty::<IssueComment>()?;
@@ -33,12 +38,34 @@ pub fn module() -> Result<Module, ContextError> {
     Ok(m)
 }
 
-/// SQL query surface over Gage data. Unscoped by default; `scan(id)`
-/// limits the context to rows linked to that scan.
+/// Scan scoping shared by the tool builders. Defaults to the current
+/// scan; `scan(id)` targets a specific scan; `global()` removes the
+/// scoping entirely.
+#[derive(Debug, Clone, Default)]
+enum ScanScope {
+    #[default]
+    Current,
+    Id(String),
+    Global,
+}
+
+impl ScanScope {
+    fn resolve(self) -> Option<String> {
+        match self {
+            ScanScope::Current => Some(current_scan_ctx().run.scan_id.clone()),
+            ScanScope::Id(id) => Some(id),
+            ScanScope::Global => None,
+        }
+    }
+}
+
+/// SQL query surface over Gage data. Scoped to the current scan by
+/// default; `scan(id)` targets another scan; `global()` removes the
+/// scoping so the context spans all scans.
 #[derive(Any, Debug, Clone, Default)]
 #[rune(item = ::gage::tools)]
 pub struct Query {
-    scan: Option<String>,
+    scan: ScanScope,
 }
 
 impl Query {
@@ -49,20 +76,27 @@ impl Query {
 
     #[rune::function(instance)]
     fn scan(mut self, id: String) -> Self {
-        self.scan = Some(id);
+        self.scan = ScanScope::Id(id);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn global(mut self) -> Self {
+        self.scan = ScanScope::Global;
         self
     }
 }
 
 /// Write issues. `name(..)` sets the issue name for every write
-/// (default `"general"`); `scan(id)` links writes to that scan;
+/// (default `"general"`); writes link to the current scan by default —
+/// `scan(id)` links to another scan, `global()` removes the link;
 /// `status(..)` sets the initial status, `"open"` or `"pending"`
 /// (default `"pending"`).
 #[derive(Any, Debug, Clone, Default)]
 #[rune(item = ::gage::tools)]
 pub struct IssueWrite {
     name: Option<String>,
-    scan: Option<String>,
+    scan: ScanScope,
     /// Parsed `status(..)` argument. The parse error is deferred so
     /// the builder chain stays fluent; `gage_tools` parsing surfaces
     /// it.
@@ -83,7 +117,13 @@ impl IssueWrite {
 
     #[rune::function(instance)]
     fn scan(mut self, id: String) -> Self {
-        self.scan = Some(id);
+        self.scan = ScanScope::Id(id);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn global(mut self) -> Self {
+        self.scan = ScanScope::Global;
         self
     }
 
@@ -105,15 +145,17 @@ fn parse_status(status: &str) -> Result<IssueStatus, String> {
 }
 
 /// Write notes. `names(#{ name: doc })` sets the allowed note names
-/// with their docstrings (default `comment` only); `scan(id)` links
-/// writes to that scan and serves as the fallback note target.
+/// with their docstrings (default `comment` only); writes link to the
+/// current scan by default, which also serves as the fallback note
+/// target — `scan(id)` links to another scan, `global()` removes the
+/// link.
 #[derive(Any, Debug, Clone, Default)]
 #[rune(item = ::gage::tools)]
 pub struct NoteWrite {
     /// Parsed `names(..)` argument. The parse error is deferred so the
     /// builder chain stays fluent; `gage_tools` parsing surfaces it.
     names: Option<Result<BTreeMap<String, String>, String>>,
-    scan: Option<String>,
+    scan: ScanScope,
 }
 
 impl NoteWrite {
@@ -130,7 +172,13 @@ impl NoteWrite {
 
     #[rune::function(instance)]
     fn scan(mut self, id: String) -> Self {
-        self.scan = Some(id);
+        self.scan = ScanScope::Id(id);
+        self
+    }
+
+    #[rune::function(instance)]
+    fn global(mut self) -> Self {
+        self.scan = ScanScope::Global;
         self
     }
 }
@@ -174,7 +222,9 @@ impl IssueComment {
 
 impl From<Query> for GageTool {
     fn from(t: Query) -> Self {
-        GageTool::Query(QueryConfig { scan: t.scan })
+        GageTool::Query(QueryConfig {
+            scan: t.scan.resolve(),
+        })
     }
 }
 
@@ -186,7 +236,7 @@ impl TryFrom<IssueWrite> for GageTool {
         if let Some(name) = t.name {
             config.name = name;
         }
-        config.scan = t.scan;
+        config.scan = t.scan.resolve();
         if let Some(status) = t.status {
             config.status = status?;
         }
@@ -202,7 +252,29 @@ impl TryFrom<NoteWrite> for GageTool {
         if let Some(names) = t.names {
             config.names = names?;
         }
-        config.scan = t.scan;
+        config.scan = t.scan.resolve();
         Ok(GageTool::NoteWrite(config))
+    }
+}
+
+/// Apply the default scan scoping to a tool built from a bare name
+/// (or the `"*"` expansion): every tool that accepts a scan id gets
+/// the current scan's.
+pub(crate) fn apply_default_scan(tool: GageTool) -> GageTool {
+    let scan_id = || Some(current_scan_ctx().run.scan_id.clone());
+    match tool {
+        GageTool::Query(mut c) => {
+            c.scan = scan_id();
+            GageTool::Query(c)
+        }
+        GageTool::IssueWrite(mut c) => {
+            c.scan = scan_id();
+            GageTool::IssueWrite(c)
+        }
+        GageTool::NoteWrite(mut c) => {
+            c.scan = scan_id();
+            GageTool::NoteWrite(c)
+        }
+        other => other,
     }
 }

@@ -925,7 +925,7 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
             }
             let tool = GageTool::from_name(&s)
                 .ok_or_else(|| Error::Agent(format!("'gage_tools': unknown tool '{s}'")))?;
-            out.push(tool);
+            out.push(crate::tools::apply_default_scan(tool));
             continue;
         }
         out.push(parse_tool_def(item)?);
@@ -1224,7 +1224,10 @@ fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
         GageTools::Some(list) => list.clone(),
         GageTools::All => gage_agent::TOOL_NAMES
             .iter()
-            .map(|s| GageTool::from_name(s).expect("TOOL_NAMES entries are known tools"))
+            .map(|s| {
+                let tool = GageTool::from_name(s).expect("TOOL_NAMES entries are known tools");
+                crate::tools::apply_default_scan(tool)
+            })
             .collect(),
     };
     let ctx = current_scan_ctx();
