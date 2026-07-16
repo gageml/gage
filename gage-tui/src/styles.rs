@@ -72,6 +72,12 @@ impl Dialog {
     pub fn dim() -> Style {
         Style::new().bg(Color::DarkGray)
     }
+
+    /// Error text on the reversed surface; the bg color renders as
+    /// the text color, as with [`Dialog::dim`].
+    pub fn error() -> Style {
+        Style::new().bg(Color::Red)
+    }
 }
 
 /// Tracing log levels, as rendered in the scan log dialog. The `.err`

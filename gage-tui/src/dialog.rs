@@ -18,8 +18,8 @@ pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
     draw_lines(frame, vec![Line::raw(message.to_string())], hint);
 }
 
-/// Draw centered content lines with a key-hint footer below them.
-/// The dialog is sized to fit the widest line.
+/// Draw centered content lines with a key-hint footer below the
+/// dialog border. The dialog is sized to fit the widest line.
 pub(crate) fn draw_lines(frame: &mut Frame, lines: Vec<Line>, hint: &str) {
     let frame_area = frame.area();
     let content_width = lines
@@ -38,13 +38,17 @@ pub(crate) fn draw_lines(frame: &mut Frame, lines: Vec<Line>, hint: &str) {
         height,
     };
     frame.render_widget(Clear, area);
-    let block = Block::bordered().style(styles::Dialog::surface());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [_, content, _, hint_row] = Layout::vertical([
+    // The full area is the dialog surface; the border stops one row
+    // short so the hint sits on the surface below it.
+    frame.render_widget(Block::new().style(styles::Dialog::surface()), area);
+    let [border_area, hint_row] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+    let block = Block::bordered();
+    let inner = block.inner(border_area);
+    frame.render_widget(block, border_area);
+    let [_, content, _] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(lines.len() as u16),
-        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);

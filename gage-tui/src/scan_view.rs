@@ -1334,11 +1334,21 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
         Some(e) => format!("Scan completed in {}", fmt_duration(e)),
         None => "Scan completed".to_string(),
     };
-    let mut lines = vec![Line::raw(title), Line::raw("")];
+    let mut lines = vec![
+        Line::raw(format!("  {title}")).left_aligned(),
+        Line::raw(""),
+    ];
     if model.errors > 0 && model.out_path.is_some() {
-        lines.push(Line::raw(
-            "There were errors during this scan. Press `l` to view the log.",
-        ));
+        lines.push(
+            Line::styled(
+                "  There were errors during this scan.",
+                styles::Dialog::error(),
+            )
+            .left_aligned(),
+        );
+        lines.push(
+            Line::styled("  Press `l` to view the log.", styles::Dialog::error()).left_aligned(),
+        );
         lines.push(Line::raw(""));
     }
     let counts = [
@@ -1353,7 +1363,7 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
         .max()
         .unwrap();
     for (label, n) in counts {
-        lines.push(Line::raw(format!("{label:<9} {n:>value_width$}")));
+        lines.push(Line::raw(format!("  {label:<9} {n:>value_width$}")).left_aligned());
     }
     let hint = if model.out_path.is_some() {
         "q/Enter dismiss · l log"
