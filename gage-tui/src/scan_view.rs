@@ -437,8 +437,12 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
             return false;
         }
         Dialog::ScanDone => {
-            if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
-                state.dialog = Dialog::None;
+            match key.code {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                    state.dialog = Dialog::None;
+                }
+                KeyCode::Char('l') => state.open_log(),
+                _ => {}
             }
             return false;
         }
@@ -894,7 +898,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         Dialog::Log { content, .. } => {
             scroll_view.render_modal(frame, " Log ".to_string(), |_| vec![content.clone()]);
         }
-        Dialog::ScanDone => draw_scan_done(frame, model.elapsed),
+        Dialog::ScanDone => draw_scan_done(frame, model),
         Dialog::None => {}
     }
 }
@@ -1325,12 +1329,38 @@ fn draw_confirm_quit(frame: &mut Frame) {
     dialog::draw_message(frame, "Stop the current scan?", "y / n");
 }
 
-fn draw_scan_done(frame: &mut Frame, elapsed: Option<Duration>) {
-    let message = match elapsed {
+fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
+    let title = match model.elapsed {
         Some(e) => format!("Scan completed in {}", fmt_duration(e)),
         None => "Scan completed".to_string(),
     };
-    dialog::draw_message(frame, &message, "Dismiss");
+    let mut lines = vec![Line::raw(title), Line::raw("")];
+    if model.errors > 0 && model.out_path.is_some() {
+        lines.push(Line::raw(
+            "There were errors during this scan. Press `l` to view the log.",
+        ));
+        lines.push(Line::raw(""));
+    }
+    let counts = [
+        ("Sessions:", model.sessions.len()),
+        ("Notes:", model.notes.len()),
+        ("Issues:", model.issues.len()),
+        ("Errors:", model.errors),
+    ];
+    let value_width = counts
+        .iter()
+        .map(|(_, n)| n.to_string().len())
+        .max()
+        .unwrap();
+    for (label, n) in counts {
+        lines.push(Line::raw(format!("{label:<9} {n:>value_width$}")));
+    }
+    let hint = if model.out_path.is_some() {
+        "q/Enter dismiss · l log"
+    } else {
+        "q/Enter dismiss"
+    };
+    dialog::draw_lines(frame, lines, hint);
 }
 
 fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {

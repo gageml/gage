@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
@@ -15,10 +15,22 @@ use crate::styles;
 
 /// Draw a centered one-line message with a key hint below it.
 pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
+    draw_lines(frame, vec![Line::raw(message.to_string())], hint);
+}
+
+/// Draw centered content lines with a key-hint footer below them.
+/// The dialog is sized to fit the widest line.
+pub(crate) fn draw_lines(frame: &mut Frame, lines: Vec<Line>, hint: &str) {
     let frame_area = frame.area();
-    let content_width = message.width().max(hint.width()) + 6;
+    let content_width = lines
+        .iter()
+        .map(|l| l.width())
+        .max()
+        .unwrap_or(0)
+        .max(hint.width())
+        + 6;
     let width = (content_width as u16).min(frame_area.width.saturating_sub(2));
-    let height = 6u16.min(frame_area.height.saturating_sub(2));
+    let height = (lines.len() as u16 + 5).min(frame_area.height.saturating_sub(2));
     let area = Rect {
         x: frame_area.x + (frame_area.width.saturating_sub(width)) / 2,
         y: frame_area.y + (frame_area.height.saturating_sub(height)) / 2,
@@ -29,16 +41,16 @@ pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
     let block = Block::bordered().style(styles::Dialog::surface());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [_, msg, _, hint_row] = Layout::vertical([
+    let [_, content, _, hint_row] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(lines.len() as u16),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
-    frame.render_widget(Paragraph::new(message.to_string()).centered(), msg);
+    frame.render_widget(Paragraph::new(lines).centered(), content);
     frame.render_widget(
-        Paragraph::new(Span::styled(hint.to_string(), styles::Text::dim())).centered(),
+        Paragraph::new(Span::styled(hint.to_string(), styles::Dialog::dim())).centered(),
         hint_row,
     );
 }

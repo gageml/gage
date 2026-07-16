@@ -64,6 +64,14 @@ impl Dialog {
     pub fn surface() -> Style {
         Style::new().add_modifier(Modifier::REVERSED)
     }
+
+    /// Secondary text on the reversed surface. Reverse video swaps
+    /// fg/bg at render, so `Modifier::DIM` would dim the displayed
+    /// background instead of the text; setting the bg color is what
+    /// yields dim-looking text here.
+    pub fn dim() -> Style {
+        Style::new().bg(Color::DarkGray)
+    }
 }
 
 /// Tracing log levels, as rendered in the scan log dialog. The `.err`
