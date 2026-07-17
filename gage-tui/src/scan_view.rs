@@ -1360,14 +1360,12 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
     if model.errors > 0 && model.out_path.is_some() {
         lines.push(
             Line::styled(
-                "  There were errors during this scan.",
+                "  There were errors during this scan. Press 'l'",
                 styles::Dialog::error(),
             )
             .left_aligned(),
         );
-        lines.push(
-            Line::styled("  Press `l` to view the log.", styles::Dialog::error()).left_aligned(),
-        );
+        lines.push(Line::styled("  to view the log.", styles::Dialog::error()).left_aligned());
         lines.push(Line::raw(""));
     }
     let counts = [
