@@ -56,7 +56,7 @@ pub enum ScanCommand {
 #[derive(Args)]
 pub struct ScanViewArgs {
     /// Scan ID (or prefix)
-    scan_id: String,
+    scan_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -283,7 +283,18 @@ fn scan_summary(run: &scan::Scan) -> anyhow::Result<Option<scan::ScanSummary>> {
 
 async fn view(args: ScanViewArgs) {
     let conn = db::open_db().unwrap();
-    let model = match load_scan_model(&conn, &args.scan_id) {
+    let scan_id = match args.scan_id {
+        Some(id) => id,
+        None => match pick_scan(&conn) {
+            Ok(Some(id)) => id,
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("gage scan view: {e}");
+                std::process::exit(1);
+            }
+        },
+    };
+    let model = match load_scan_model(&conn, &scan_id) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("gage scan view: {e}");
@@ -293,6 +304,51 @@ async fn view(args: ScanViewArgs) {
     if let Err(e) = gage_tui::scan_view::view(model).await {
         eprintln!("gage scan view: {e}");
         std::process::exit(1);
+    }
+}
+
+fn pick_scan(conn: &gage_db::rusqlite::Connection) -> std::io::Result<Option<String>> {
+    let runs = match scan::all(conn) {
+        Ok(r) => r,
+        Err(e) => return Err(std::io::Error::other(e)),
+    };
+    if runs.is_empty() {
+        println!("No scan runs found");
+        return Ok(None);
+    }
+
+    let items: Vec<(String, String, String)> = runs
+        .iter()
+        .take(30)
+        .map(|run| {
+            // Best-effort enrichment: unparsable metadata renders the
+            // same as a run that never completed (no duration)
+            let duration = if let Ok(Some(m)) = run.parse_metadata() {
+                crate::human::format_duration(Duration::from_millis(m.elapsed_ms()))
+            } else {
+                String::new()
+            };
+            let label = format!(
+                "{}  {} {}",
+                short_uuid(&run.id),
+                duration,
+                crate::human::format_elapsed_ms(run.created)
+            );
+            (run.id.clone(), label, String::new())
+        })
+        .collect();
+
+    dialog::install_theme();
+    let _sigint = dialog::SigintGuard::new();
+    match cli::select("Select a scan")
+        .items(&items)
+        .max_rows(15)
+        .filter_mode()
+        .interact()
+    {
+        Ok(id) => Ok(Some(id)),
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
