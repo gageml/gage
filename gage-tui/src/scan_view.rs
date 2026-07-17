@@ -445,7 +445,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
         Dialog::ConfirmQuit => {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => return true,
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
                     state.dialog = Dialog::None;
                 }
                 _ => {}
