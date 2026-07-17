@@ -131,15 +131,19 @@ fn do_sessions_split_valid(
         }
     }
 
-    let validate = Function::new(move |session: Value| -> crate::Result<()> {
-        let id = session_id(&session)?;
-        let size = entries
-            .get(&id)
-            .ok_or_else(|| Error::Args(format!("session {id} was not split as new")))?;
-        let ctx = current_scan_ctx();
-        let db = ctx.db.lock().unwrap();
-        task_validate::put(&db, &key, &session_ref(&id), Some(size))
-            .map_err(|e| Error::Db(e.to_string()))
+    let validate = Function::new(move |session: Value| {
+        let key = key.clone();
+        let entries = entries.clone();
+        async move {
+            let id = session_id(&session)?;
+            let size = entries
+                .get(&id)
+                .ok_or_else(|| Error::Args(format!("session {id} was not split as new")))?;
+            let ctx = current_scan_ctx();
+            let db = ctx.db.lock().unwrap();
+            task_validate::put(&db, &key, &session_ref(&id), Some(size))
+                .map_err(|e| Error::Db(e.to_string()))
+        }
     })
     .unwrap();
 

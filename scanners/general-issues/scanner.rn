@@ -52,7 +52,7 @@ pub async fn findings() {
         // Skip sessions that not likely to have scannable content
         if let Some(reason) = skip_session(s).await? {
             log::info!("Skipping session {}: {}", s.id, reason);
-            validate(s)?;
+            validate(s).await?;
             continue
         }
         // Queue agent
@@ -83,7 +83,7 @@ pub async fn findings() {
                     },
                 );
                 // Ensure that valid sessions aren't re-scanned
-                validate(session)?;
+                validate(session).await?;
             }
             None => break,
         }

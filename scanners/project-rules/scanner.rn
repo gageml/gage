@@ -75,7 +75,7 @@ pub async fn review() {
                     },
                 );
                 // Ensure valid sessions aren't re-scanned
-                validate(session)?;
+                validate(session).await?;
             }
             None => break,
         }
