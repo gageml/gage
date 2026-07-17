@@ -287,15 +287,6 @@ const TABLES: &[TableSpec] = &[
                                    WHERE d.project_path = s.project_path AND d.note_id = s.note_id)",
     },
     TableSpec {
-        name: "note_relation",
-        accepted: "s.note_id IN (SELECT id FROM accepted_note) \
-                   AND s.related_to IN (SELECT id FROM accepted_note) \
-                   AND NOT EXISTS (SELECT 1 FROM note_relation d \
-                                   WHERE d.note_id = s.note_id \
-                                     AND d.related_to = s.related_to \
-                                     AND d.relation = s.relation)",
-    },
-    TableSpec {
         name: "issue_evidence",
         accepted: "s.issue_id IN (SELECT id FROM accepted_issue) \
                    AND s.note_id IN (SELECT id FROM accepted_note) \

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 3;
+pub const CURRENT_VERSION: u32 = 4;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -118,6 +118,9 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if version < 3 {
         migration_3(&tx)?;
     }
+    if version < 4 {
+        migration_4(&tx)?;
+    }
     set_version(&tx, CURRENT_VERSION)?;
     tx.commit()
 }
@@ -175,15 +178,6 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
             note_id      TEXT NOT NULL REFERENCES note(id),
             PRIMARY KEY (project_path, note_id)
         );
-
-        CREATE TABLE note_relation (
-            note_id    TEXT NOT NULL REFERENCES note(id),
-            related_to TEXT NOT NULL REFERENCES note(id),
-            relation   TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (note_id, related_to, relation)
-        );
-        CREATE INDEX idx_note_relation_related_to ON note_relation (related_to);
-        CREATE INDEX idx_note_relation_relation   ON note_relation (relation);
 
         CREATE TABLE issue (
             id            TEXT PRIMARY KEY,
@@ -291,6 +285,13 @@ fn migration_3(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+// Removes note-to-note relations; the feature (note comments) was
+// unused. `IF EXISTS` because migration_1 no longer creates the table.
+fn migration_4(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch("DROP TABLE IF EXISTS note_relation;")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,7 +325,7 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "missing unique dedup index");
 
-        // scan-related and note relation tables exist
+        // scan-related and note target tables exist
         for tname in &[
             "scan_session",
             "scan",

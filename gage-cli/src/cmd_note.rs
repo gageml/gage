@@ -5,7 +5,6 @@ use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
 use gage_db::note::{self, Note, NoteFilters};
-use gage_db::note_relation::insert_relation;
 use gage_db::target::{NoteTarget, SessionTarget};
 use gage_registry::scanner::ScannerRegistry;
 use gage_registry::scheme::{ErrorScheme, ScannerScheme};
@@ -29,9 +28,6 @@ pub enum NoteCommand {
 
     /// Add a note
     Add(NoteAddArgs),
-
-    /// Comment on a note
-    Comment(NoteCommentArgs),
 
     /// Show a note
     Show(NoteShowArgs),
@@ -79,20 +75,6 @@ pub struct NoteAddArgs {
     /// Author username (default: $USER)
     #[arg(short, long)]
     user: Option<String>,
-}
-
-#[derive(Args)]
-pub struct NoteCommentArgs {
-    /// Target note ID (or prefix)
-    id: String,
-
-    /// Comment message (prompted if omitted)
-    #[arg(short)]
-    msg: Option<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
 }
 
 #[derive(Args)]
@@ -234,52 +216,6 @@ pub fn add(args: NoteAddArgs) {
     });
 }
 
-pub fn comment(args: NoteCommentArgs) {
-    let conn = db::open_db().unwrap();
-    let target_note = match note::get(&conn, &args.id) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    dialog::run("Comment on note", || {
-        cli::log::step(format!(
-            "Note\n{}",
-            console::style(short_uuid(&target_note.id)).dim()
-        ))?;
-
-        let msg: String = match args.msg {
-            Some(ref m) => {
-                cli::log::step(format!("Message\n{}", console::style(m).dim()))?;
-                m.clone()
-            }
-            None => cli::input("Message").interact()?,
-        };
-
-        let author = resolve_author(None);
-        let new_note = Note::new(target_note.target.clone(), "comment", msg.as_str(), &author);
-
-        if !args.yes {
-            let confirmed = cli::confirm("Add this comment?")
-                .initial_value(true)
-                .interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-
-        note::insert(&conn, &new_note)
-            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
-        insert_relation(&conn, &new_note.id, &target_note.id, "")
-            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
-
-        cli::log::remark(format!("id: {}", new_note.id))?;
-        Ok("Comment added".into())
-    });
-}
-
 pub async fn show(args: NoteShowArgs) {
     let conn = db::open_db().unwrap();
     let note = match note::get(&conn, &args.id) {
@@ -317,20 +253,7 @@ pub async fn show(args: NoteShowArgs) {
         attrs.push(("doc", doc));
     }
 
-    let related = match note::related(&conn, &note.id) {
-        Ok(rs) => rs,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let label_width = attrs
-        .iter()
-        .map(|(k, _)| k.len())
-        .chain(std::iter::once("related".len()))
-        .max()
-        .unwrap_or(0);
+    let label_width = attrs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     let (_, term_width) = console::Term::stdout().size();
     // Borders + padding: "│ " + " │ " + " │" = 8 chars
     let value_width = (term_width as usize)
@@ -350,7 +273,7 @@ pub async fn show(args: NoteShowArgs) {
         None
     };
 
-    let mut rows: Vec<Vec<String>> = attrs
+    let rows: Vec<Vec<String>> = attrs
         .into_iter()
         .map(|(k, v)| {
             let value = if k == "target" {
@@ -367,19 +290,6 @@ pub async fn show(args: NoteShowArgs) {
             vec![k.to_string(), value]
         })
         .collect();
-
-    if !related.is_empty() {
-        let entries: Vec<String> = related
-            .iter()
-            .map(|r| {
-                let header = format!("{} ({})", r.name, short_uuid(&r.id));
-                let value_str = format_value(&r.value);
-                let value = textwrap::fill(&value_str, value_width);
-                format!("{header}\n{value}")
-            })
-            .collect();
-        rows.push(vec!["related".to_string(), entries.join("\n\n")]);
-    }
 
     let table = Table::from_iter(rows)
         .with(Style::rounded())

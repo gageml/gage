@@ -335,10 +335,6 @@ pub fn update(
 
 pub fn delete(conn: &Connection, id: &str) -> Result<(), NoteError> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM note_relation WHERE note_id = ?1 OR related_to = ?1",
-        [id],
-    )?;
     tx.execute("DELETE FROM session_note WHERE note_id = ?1", [id])?;
     tx.execute("DELETE FROM project_note WHERE note_id = ?1", [id])?;
     let rows = tx.execute("DELETE FROM note WHERE id = ?1", [id])?;
@@ -368,23 +364,6 @@ pub fn get(conn: &Connection, id_prefix: &str) -> Result<Note, NoteError> {
             Err(NoteError::Ambiguous(id_prefix.to_string(), ids))
         }
     }
-}
-
-pub fn related(conn: &Connection, note_id: &str) -> Result<Vec<Note>, NoteError> {
-    let sql = format!(
-        "{NOTE_SELECT}
-         WHERE n.id IN (
-             SELECT related_to FROM note_relation WHERE note_id = ?1
-             UNION
-             SELECT note_id FROM note_relation WHERE related_to = ?1
-         )
-         ORDER BY n.created ASC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let notes = stmt
-        .query_map([note_id], row_to_note)?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(notes)
 }
 
 fn find_query(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
