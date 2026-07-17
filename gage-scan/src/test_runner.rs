@@ -153,6 +153,7 @@ pub async fn run_tests(
             let stub_sources = std::sync::Arc::new(rune::Sources::new());
             let ctx = std::sync::Arc::new(ScanContext {
                 scanner_name: module_name.clone(),
+                task_name: item.to_string(),
                 params: None,
                 run: stub_run.clone(),
                 db: stub_db.clone(),

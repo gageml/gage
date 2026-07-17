@@ -4,10 +4,15 @@
 //! implement an event sink. Each `Status` event is a self-contained
 //! snapshot — never reassemble state from partial deltas.
 
+/// The task a worker is currently running, with any task-reported
+/// progress.
 #[derive(Debug, Clone)]
-pub struct TaskRef {
+pub struct ActiveTask {
     pub scanner: String,
     pub task: String,
+    /// Latest task-reported `(pos, total)`; `None` means the task has
+    /// not reported and renders as indeterminate.
+    pub progress: Option<(u64, u64)>,
 }
 
 /// One worker slot. `current` reflects what that worker is doing right
@@ -15,7 +20,7 @@ pub struct TaskRef {
 #[derive(Debug, Clone)]
 pub struct WorkerStatus {
     pub id: usize,
-    pub current: Option<TaskRef>,
+    pub current: Option<ActiveTask>,
 }
 
 /// Full live state of a scan run. Self-contained — every emission is a

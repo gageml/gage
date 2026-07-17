@@ -468,6 +468,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             let mut vm = Vm::new(rt.clone(), unit.clone());
             let ctx = Arc::new(ScanContext {
                 scanner_name: name.clone(),
+                task_name: item.to_string(),
                 params: scanner.params.clone(),
                 run: stub_run.clone(),
                 db: stub_db.clone(),
@@ -681,6 +682,7 @@ impl TestRuntime {
         let stub_sources = Arc::new(rune::Sources::new());
         let ctx = Arc::new(ScanContext {
             scanner_name: "test".to_string(),
+            task_name: "test".to_string(),
             params: None,
             run,
             db: Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap())),

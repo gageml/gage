@@ -10,6 +10,7 @@ pub mod json;
 pub mod log;
 pub mod macros;
 pub(crate) mod model;
+pub mod progress;
 pub mod query;
 mod result;
 pub mod scan;
@@ -31,6 +32,15 @@ use rune::{Context, ContextError, Module};
 pub enum RuntimeOutput {
     Print(String),
     Println(String),
+    /// Task-reported progress, absolute position and total. Sent by
+    /// the Rune `Progress` API; identity comes from the sending task's
+    /// [`state::ScanContext`].
+    Progress {
+        scanner: String,
+        task: String,
+        pos: u64,
+        total: u64,
+    },
 }
 
 /// Build a Rune context for the language server: the same native modules the

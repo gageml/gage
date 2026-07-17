@@ -52,6 +52,9 @@ pub struct RunContext {
 /// instance is constructed for every task invocation.
 pub struct ScanContext {
     pub scanner_name: String,
+    /// Name of the running task function. Identifies the sender on
+    /// progress messages.
+    pub task_name: String,
     pub params: Option<json::Value>,
     pub run: Arc<RunContext>,
     pub db: Arc<Mutex<Connection>>,

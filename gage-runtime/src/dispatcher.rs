@@ -198,11 +198,12 @@ async fn handle_one(req: DispatchRequest, registry: Registry, run: Weak<RunConte
     // Per-call ScanContext. params is None — tool fns shouldn't
     // depend on the calling task's per-task params. The runtime
     // output channel is local to the dispatcher; we discard the
-    // receiver since print/println from a tool body has no obvious
-    // consumer in this path.
+    // receiver since print/println (and Progress reports) from a tool
+    // body have no consumer in this path.
     let (out_tx, _out_rx) = mpsc::unbounded_channel::<RuntimeOutput>();
     let ctx = Arc::new(ScanContext {
         scanner_name: module.scanner_name.clone(),
+        task_name: fn_name.clone(),
         params: None,
         run,
         db: module.db.clone(),

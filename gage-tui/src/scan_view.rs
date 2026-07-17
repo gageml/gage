@@ -28,7 +28,7 @@ use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table, Widget, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::dialog;
 use crate::item_table::ItemTable;
@@ -85,6 +85,9 @@ pub struct TaskItem {
     pub elapsed: Option<Duration>,
     /// Live-scan dispatch time; drives the ticking elapsed display.
     pub started: Option<Instant>,
+    /// Latest task-reported `(pos, total)` while running; None renders
+    /// as indeterminate.
+    pub progress: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +186,7 @@ impl ScanModel {
                 state: TaskState::Pending,
                 started: None,
                 elapsed: None,
+                progress: None,
             })
             .collect();
         let sessions = setup
@@ -214,20 +218,24 @@ impl ScanModel {
                 self.total = *total;
                 self.progress = *progress;
                 for item in &mut self.tasks {
-                    let is_running = running.contains(&item.id);
+                    let entry = running.iter().find(|r| r.id == item.id);
                     match item.state {
-                        TaskState::Pending if is_running => {
+                        TaskState::Pending if entry.is_some() => {
                             item.state = TaskState::Running;
                             item.started = Some(Instant::now());
                         }
                         // No explicit completion event yet: a task that
                         // leaves the worker set without a Failed event
                         // is inferred completed.
-                        TaskState::Running if !is_running => {
+                        TaskState::Running if entry.is_none() => {
                             item.state = TaskState::Completed;
                             item.elapsed = item.started.map(|t| t.elapsed());
+                            item.progress = None;
                         }
                         _ => {}
+                    }
+                    if let Some(entry) = entry {
+                        item.progress = entry.progress;
                     }
                 }
             }
@@ -295,6 +303,14 @@ pub struct SessionCounts {
     pub issues: usize,
 }
 
+/// A task currently assigned to a worker, with any task-reported
+/// progress.
+#[derive(Debug, Clone)]
+pub struct RunningTask {
+    pub id: TaskId,
+    pub progress: Option<(u64, u64)>,
+}
+
 /// Events the view consumes while a live scan runs.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -303,7 +319,7 @@ pub enum Event {
     Status {
         total: usize,
         progress: usize,
-        running: Vec<TaskId>,
+        running: Vec<RunningTask>,
     },
     /// One scanner output line.
     Log(String),
@@ -1436,32 +1452,21 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let frame_idx = (state.started.elapsed().as_millis() / 100) as usize % SPINNER.len();
     let spinner = *SPINNER.get(frame_idx).expect("mod len is in bounds");
     let selected = state.tasks.selected_index();
-    let rows: Vec<Row> = state
+
+    // Status cell contents are computed up front: the column sizes to
+    // the widest `{label} {time}` value, and the progress fill needs
+    // that final width before the spans are built.
+    let labels: Vec<(&'static str, Style, String)> = state
         .model
         .sorted_tasks()
         .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let glyph = match t.state {
-                TaskState::Pending => "□",
-                TaskState::Running => spinner,
-                TaskState::Completed => "✓",
-                TaskState::Error => "✗",
-                TaskState::Skipped => "⊘",
-            };
-            let (label, label_style) = match t.state {
+        .map(|t| {
+            let (label, style) = match t.state {
                 TaskState::Pending => ("pending", styles::RunStatus::pending()),
                 TaskState::Running => ("running", styles::RunStatus::running()),
                 TaskState::Completed => ("done", styles::RunStatus::completed()),
                 TaskState::Error => ("error", styles::RunStatus::error()),
                 TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
-            };
-            // Colored/dim cells on the selected row would invert into
-            // per-cell backgrounds under the REVERSED highlight
-            let status = if selected == Some(i) {
-                Span::raw(label)
-            } else {
-                Span::styled(label, label_style)
             };
             let time = match t.state {
                 // Read a stable "0s" during the first second rather than
@@ -1479,11 +1484,73 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                     .unwrap_or_default(),
                 _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
             };
+            (label, style, time)
+        })
+        .collect();
+    // The label field sizes to the widest possible status label, not
+    // the labels on screen, so the column doesn't jitter as states
+    // change. One space each side: the label aligns under the padded
+    // header and the time doesn't touch the panel border.
+    let label_width = ["pending", "running", "done", "error", "skipped"]
+        .iter()
+        .map(|l| l.width())
+        .max()
+        .unwrap();
+    // Time field floor: room for sub-hour durations ("59m59s") so the
+    // column doesn't widen as times tick up; longer runs still grow it
+    let min_time_width = "59m59s".width();
+    let status_width = labels
+        .iter()
+        .map(|(_, _, time)| label_width + 1 + time.width().max(min_time_width))
+        .max()
+        .unwrap_or(label_width + 1 + min_time_width)
+        .max("Status".width())
+        + 2;
+
+    let rows: Vec<Row> = state
+        .model
+        .sorted_tasks()
+        .iter()
+        .zip(&labels)
+        .enumerate()
+        .map(|(i, (t, (label, label_style, time)))| {
+            let glyph = match t.state {
+                TaskState::Pending => "□",
+                TaskState::Running => spinner,
+                TaskState::Completed => "✓",
+                TaskState::Error => "✗",
+                TaskState::Skipped => "⊘",
+            };
+            let pad = status_width - 2 - label.width();
+            let text = format!(" {label}{time:>pad$} ");
+            let status = if let Some((pos, total)) = t.progress {
+                let ratio = if total > 0 {
+                    (pos as f64 / total as f64).min(1.0)
+                } else {
+                    0.0
+                };
+                // The selected-row variant compensates for the REVERSED
+                // highlight, which only the focused panel uses; under
+                // the unfocused gray highlight the normal fill styling
+                // composes correctly
+                let reversed = selected == Some(i) && state.focus == Focus::Tasks;
+                Cell::from(gauge_line(&text, ratio, status_width, reversed))
+            } else if selected == Some(i) {
+                // Colored/dim cells on the selected row would invert
+                // into per-cell backgrounds under the REVERSED
+                // highlight, so the label renders plain
+                Cell::from(text)
+            } else {
+                let (head, rest) = text.split_at(1 + label.len());
+                Cell::from(Line::from(vec![
+                    Span::styled(head.to_string(), *label_style),
+                    Span::raw(rest.to_string()),
+                ]))
+            };
             Row::new(vec![
                 Cell::from(format!("{glyph} {}", t.id.scanner)),
                 Cell::from(t.id.task.clone()),
-                Cell::from(status),
-                Cell::from(time),
+                status,
             ])
         })
         .collect();
@@ -1502,11 +1569,12 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         [
             scanner_col,
             Constraint::Fill(1),
-            Constraint::Length(8),
-            Constraint::Length(7),
+            Constraint::Length(status_width as u16),
         ],
     )
-    .header(header_row(["Scanner", "Task", "Status", "Time"]))
+    .header(header_row([
+        "Scanner", "Task", " Status", // Left pad Status to align with values
+    ]))
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Tasks))
     .block(panel_block(
         format!(" Tasks ({count}) "),
@@ -1515,6 +1583,44 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     state
         .tasks
         .render(frame, area, table, count, state.focus == Focus::Tasks);
+}
+
+/// The `Gauge` technique in a table cell: the leading `ratio` share of
+/// the cell renders as fill (reverse-video gauge color) with the text
+/// over it, the remainder as plain gauge color — the same look as the
+/// overall progress bar's label.
+///
+/// On the selected row the highlight patches REVERSED onto every cell,
+/// under which an explicitly-reversed fill is indistinguishable from
+/// the rest of the row. There the filled share carries the plain gauge
+/// color instead — the highlight inverts it into a visible fill — and
+/// the remainder is left for the highlight alone.
+fn gauge_line(text: &str, ratio: f64, width: usize, selected: bool) -> Line<'static> {
+    let fill = (ratio * width as f64).round() as usize;
+    let (head, rest) = split_at_width(text, fill);
+    let (head_style, rest_style) = if selected {
+        (styles::Panel::gauge(), Style::new())
+    } else {
+        (styles::Panel::gauge_fill(), styles::Panel::gauge())
+    };
+    Line::from(vec![
+        Span::styled(head.to_string(), head_style),
+        Span::styled(rest.to_string(), rest_style),
+    ])
+}
+
+/// Split at a display-column offset. A wide grapheme straddling the
+/// boundary stays in the tail.
+fn split_at_width(s: &str, cols: usize) -> (&str, &str) {
+    let mut w = 0;
+    for (i, c) in s.char_indices() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw > cols {
+            return s.split_at(i);
+        }
+        w += cw;
+    }
+    (s, "")
 }
 
 fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {

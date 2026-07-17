@@ -51,6 +51,26 @@ fn test_vec_combine() {
 }
 
 #[test]
+fn test_progress_counter() {
+    use gage::Progress;
+
+    let p = Progress::new(3);
+    p.tick();
+    p.inc(2);
+    p.set(1);
+    p.reset(10);
+}
+
+#[test]
+fn test_progress_iter() {
+    let total = 0;
+    for n in gage::Progress::iter([1, 2, 3].iter()) {
+        total += n;
+    }
+    assert_eq!(total, 6);
+}
+
+#[test]
 async fn test_template() {
     use gage::Template;
 

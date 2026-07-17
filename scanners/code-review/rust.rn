@@ -1,4 +1,4 @@
-use gage::{AgentRunner, Template, tools::Query, call_agent, scan, write_issue};
+use gage::{AgentRunner, Progress, Template, tools::Query, call_agent, scan, write_issue};
 
 pub const SCANNER = #{
     name: "rust-code-review",
@@ -24,12 +24,14 @@ pub async fn issues() {
             #{ session: s.id },
         );
     }
+    let p = Progress::new(sessions.len());
     let results = runner.start();
     loop {
         match results.next().await {
             Some(Ok((result, #{ session }))) => {
                 log::info!("{result:?}");
                 validate(session).await?;
+                p.tick();
             }
             None => break,
         }

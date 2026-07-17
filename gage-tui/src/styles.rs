@@ -54,6 +54,15 @@ impl Panel {
     pub fn gauge() -> Style {
         Style::new().fg(Color::Cyan)
     }
+
+    /// Filled region of an in-cell progress bar. Reverse video renders
+    /// the cell text over the fill the same way `Gauge` renders its
+    /// label over the bar.
+    pub fn gauge_fill() -> Style {
+        Style::new()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::REVERSED)
+    }
 }
 
 /// Message dialog surface — reverse video so it stands out against

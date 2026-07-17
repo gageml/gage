@@ -30,6 +30,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.implement_trait::<Sessions>(rune::item!(::std::iter::Iterator))?;
     m.implement_trait::<Sessions>(rune::item!(::std::iter::DoubleEndedIterator))?;
 
+    super::progress::register_types(&mut m)?;
     super::validate::register_types(&mut m)?;
     super::datetime::register_types(&mut m)?;
     super::query::register_types(&mut m)?;

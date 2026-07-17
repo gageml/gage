@@ -118,12 +118,15 @@ pub async fn run_agent_def(
             match out {
                 runtime::RuntimeOutput::Print(s) => print!("{s}"),
                 runtime::RuntimeOutput::Println(s) => println!("{s}"),
+                // Agent defs run without a progress consumer
+                runtime::RuntimeOutput::Progress { .. } => {}
             }
         }
     });
 
     let ctx = Arc::new(ScanContext {
         scanner_name: slot.name.clone(),
+        task_name: fn_name.to_string(),
         params: slot.params.clone(),
         run: run.clone(),
         db: slot.db.clone(),

@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::event::{RunStatus, RunSummary, ScanEvent, TaskRef, WorkerStatus};
+use crate::event::{ActiveTask, RunStatus, RunSummary, ScanEvent, WorkerStatus};
 use gage_core::glob::glob_match;
 use gage_db::scan::{TaskOutcome, TaskStatus};
 use gage_registry::scanner::TaskDef;
@@ -436,6 +436,27 @@ async fn run_tasks(
                 match out {
                     gage_runtime::RuntimeOutput::Print(s) => on_event(ScanEvent::Print { s }),
                     gage_runtime::RuntimeOutput::Println(s) => on_event(ScanEvent::Println { s }),
+                    gage_runtime::RuntimeOutput::Progress {
+                        scanner,
+                        task,
+                        pos,
+                        total,
+                    } => {
+                        // Fold into the worker slot running this task
+                        // — (scanner, task) is unique in the plan — and
+                        // re-emit the full snapshot. A report from a
+                        // task no longer on a worker (completed while
+                        // the message was in flight) is stale; drop it.
+                        let slot = status.workers.iter_mut().find_map(|w| {
+                            w.current
+                                .as_mut()
+                                .filter(|c| c.scanner == scanner && c.task == task)
+                        });
+                        if let Some(current) = slot {
+                            current.progress = Some((pos, total));
+                            on_event(ScanEvent::Status(status.clone()));
+                        }
+                    }
                 }
                 continue;
             }
@@ -455,9 +476,10 @@ async fn run_tasks(
             } => {
                 let task = &tasks[task_idx];
                 let slot = &scanners[task.scanner_idx];
-                status.workers[worker_id].current = Some(TaskRef {
+                status.workers[worker_id].current = Some(ActiveTask {
                     scanner: slot.name.clone(),
                     task: task.task_name.clone(),
+                    progress: None,
                 });
                 started_at[task_idx] = Some((gage_core::datetime::now_ms(), Instant::now()));
                 on_event(ScanEvent::Status(status.clone()));
@@ -529,6 +551,8 @@ async fn run_tasks(
         match out {
             gage_runtime::RuntimeOutput::Print(s) => on_event(ScanEvent::Print { s }),
             gage_runtime::RuntimeOutput::Println(s) => on_event(ScanEvent::Println { s }),
+            // Every task is terminal at this point; progress is stale
+            gage_runtime::RuntimeOutput::Progress { .. } => {}
         }
     }
     drop(ready_tx);
@@ -565,6 +589,7 @@ async fn dispatch_task(
     let sources = slot.sources.clone();
     let ctx = Arc::new(ScanContext {
         scanner_name: slot.name.clone(),
+        task_name: task_name.clone(),
         params: slot.params.clone(),
         run: run.clone(),
         db: slot.db.clone(),

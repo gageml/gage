@@ -325,6 +325,7 @@ fn load_scan_model(
             },
             elapsed: t.elapsed_ms.map(Duration::from_millis),
             started: None,
+            progress: None,
         })
         .collect();
     let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
@@ -1336,7 +1337,7 @@ fn forward_scan_event(
     print_buf: &mut String,
 ) {
     use gage_scan::event::ScanEvent;
-    use gage_tui::scan_view::{Event, TaskId};
+    use gage_tui::scan_view::{Event, RunningTask, TaskId};
 
     let ev = match event {
         ScanEvent::Status(s) => Event::Status {
@@ -1346,9 +1347,12 @@ fn forward_scan_event(
                 .workers
                 .iter()
                 .filter_map(|w| w.current.as_ref())
-                .map(|t| TaskId {
-                    scanner: t.scanner.clone(),
-                    task: t.task.clone(),
+                .map(|t| RunningTask {
+                    id: TaskId {
+                        scanner: t.scanner.clone(),
+                        task: t.task.clone(),
+                    },
+                    progress: t.progress,
                 })
                 .collect(),
         },
