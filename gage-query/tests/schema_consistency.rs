@@ -30,6 +30,7 @@ const TABLES: &[&str] = &[
     "note",
     "note_doc",
     "session",
+    "session_issue",
     "session_note",
 ];
 

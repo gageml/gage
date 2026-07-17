@@ -61,7 +61,7 @@ pub async fn create_context_default() -> SessionContext {
 
 /// Per-agent context scoped to one `scan_id`. Every readable table
 /// (`session`, `entry`, `message`, `note`, `session_note`, `issue`,
-/// `issue_evidence`) returns only rows reachable from that scan's
+/// `issue_evidence`, `session_issue`) returns only rows reachable from that scan's
 /// `scan_session` / `scan_note` / `scan_issue` edges. The unscoped
 /// metadata tables (`config`, `note_doc`) and TVFs are exposed as
 /// they are in the default context.
@@ -192,7 +192,7 @@ fn register_disk_table(
 }
 
 /// Register the sqlite-backed tables (`note`, `session_note`, `issue`,
-/// `issue_evidence`) via `SqliteTableFactory`. Each provider uses the
+/// `issue_evidence`, `session_issue`) via `SqliteTableFactory`. Each provider uses the
 /// standard DataFusion pushdown surface — filters, projection, and
 /// limit reach sqlite as `WHERE` / `SELECT col…` / `LIMIT` in the
 /// per-scan SQL. When `agent_scan_id` is `Some`, each provider is
@@ -234,4 +234,5 @@ const SCOPED_SQLITE_TABLES: &[(&str, &str, ScopeEdge)] = &[
     ("session_note", "note_id", ScopeEdge::Note),
     ("issue", "id", ScopeEdge::Issue),
     ("issue_evidence", "issue_id", ScopeEdge::Issue),
+    ("session_issue", "issue_id", ScopeEdge::Issue),
 ];

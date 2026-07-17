@@ -6,6 +6,7 @@ use gage_db::db::open_db;
 use gage_db::issue::{self, Issue, IssueEvidence};
 use gage_db::note;
 use gage_db::scan::insert_scan_issue;
+use gage_db::target::NoteTarget;
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
     service::RequestContext,
@@ -41,6 +42,7 @@ async fn handle(
     let title = req_string(&params, "title")?;
     let description = opt_string(&params, "description");
     let evidence_ids = opt_string_array(&params, "evidence")?;
+    let sessions = opt_string_array(&params, "sessions")?;
 
     let conn = open_db().unwrap();
 
@@ -99,6 +101,18 @@ async fn handle(
             },
         )
         .map_err(|e| McpError::internal_error(format!("link evidence: {e}"), None))?;
+    }
+
+    // Related sessions: the explicit `sessions` list plus the session
+    // each evidence note targets. The insert is idempotent, so
+    // duplicates across the two sources are harmless.
+    let evidence_sessions = evidence_notes.iter().filter_map(|n| match &n.target {
+        NoteTarget::Session(t) => Some(t.session_id.as_str()),
+        _ => None,
+    });
+    for session_id in sessions.iter().map(String::as_str).chain(evidence_sessions) {
+        issue::insert_session_issue(&conn, session_id, &issue_row.id)
+            .map_err(|e| McpError::internal_error(format!("link session: {e}"), None))?;
     }
 
     Ok(format!(

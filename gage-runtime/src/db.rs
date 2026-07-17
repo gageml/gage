@@ -337,6 +337,14 @@ impl Note {
     pub(crate) fn target_uri(&self) -> String {
         self.target_db.to_uri()
     }
+
+    /// Session ID the note targets, when it targets a session.
+    fn target_session(&self) -> Option<String> {
+        match &self.target_db {
+            NoteTarget::Session(t) => Some(t.session_id.clone()),
+            _ => None,
+        }
+    }
 }
 
 // Mirrors gage_db's NoteTarget so scanners can `match note.target`
@@ -650,6 +658,8 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         Some(v) => evidence_from_value(v, now)?,
         None => Vec::new(),
     };
+    let sessions = optional_string_array(t, "sessions")?;
+    let session_ids = related_sessions(&sessions, &evidence);
 
     let db_issue = DbIssue {
         id: gage_core::uuid::new_uuid(),
@@ -678,6 +688,10 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         Ok(()) => {
             for ev in &evidence {
                 issue::insert_issue_evidence(&db, &ev.row(&db_issue.id))
+                    .map_err(|e| Error::Db(e.to_string()))?;
+            }
+            for session_id in &session_ids {
+                issue::insert_session_issue(&db, session_id, &db_issue.id)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
             insert_scan_issue(&db, &ctx.run.scan_id, &db_issue.id)
@@ -727,12 +741,21 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
                 }
             }
 
+            let mut added_session = false;
+            for session_id in &session_ids {
+                if issue::insert_session_issue(&db, session_id, &prev.id)
+                    .map_err(|e| Error::Db(e.to_string()))?
+                {
+                    added_session = true;
+                }
+            }
+
             if reopen {
                 issue::reopen(&db, &prev.id, &prev.author, None, now)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
 
-            if added_evidence || reopen {
+            if added_evidence || added_session || reopen {
                 insert_scan_issue(&db, &ctx.run.scan_id, &prev.id)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
@@ -748,12 +771,26 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
     }
 }
 
+/// Sessions related to an issue write: the explicit `sessions` list plus
+/// the session each evidence note targets, deduplicated in order.
+fn related_sessions(explicit: &[String], evidence: &[EvidenceSpec]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    explicit
+        .iter()
+        .cloned()
+        .chain(evidence.iter().filter_map(|ev| ev.session_id.clone()))
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
 /// One evidence entry parsed from `write_issue`'s `evidence` list.
 struct EvidenceSpec {
     note_id: String,
     name: String,
     timestamp: i64,
     digest: Option<String>,
+    /// Session the evidence note targets, when it targets one.
+    session_id: Option<String>,
 }
 
 impl EvidenceSpec {
@@ -820,6 +857,7 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
             name: note.name.clone(),
             timestamp: now,
             digest: None,
+            session_id: note.target_session(),
         });
     }
     let obj: Object = rune::from_value(item.clone()).map_err(|e| {
@@ -837,6 +875,7 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
         name: optional_string(&obj, "name")?.unwrap_or_else(|| note.name.clone()),
         timestamp: optional_i64(&obj, "timestamp")?.unwrap_or(now),
         digest: optional_string(&obj, "digest")?,
+        session_id: note.target_session(),
     })
 }
 
@@ -939,6 +978,22 @@ fn optional_string(obj: &Object, key: &str) -> super::Result<Option<String>> {
     }
 }
 
+fn optional_string_array(obj: &Object, key: &str) -> super::Result<Vec<String>> {
+    let Some(v) = obj.get(key) else {
+        return Ok(Vec::new());
+    };
+    let items: RuneVec = rune::from_value(v.clone())
+        .map_err(|e| Error::Args(format!("field '{key}' must be a list: {e}")))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let s = item
+            .borrow_string_ref()
+            .map_err(|e| Error::Args(format!("'{key}' entries must be strings: {e}")))?;
+        out.push(s.to_string());
+    }
+    Ok(out)
+}
+
 fn optional_bool(obj: &Object, key: &str) -> super::Result<Option<bool>> {
     match obj.get(key) {
         None => Ok(None),
@@ -1017,6 +1072,7 @@ mod tests {
             name: name.to_string(),
             timestamp,
             digest: digest.map(str::to_string),
+            session_id: None,
         }
     }
 

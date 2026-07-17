@@ -442,16 +442,11 @@ fn load_scan_results(
             counts.entry(t.session_id.clone()).or_default().0 += 1;
         }
     }
-    // An issue attributes to every session its evidence touches, once
-    // per session.
+    // An issue attributes to every session it is linked to. The links
+    // are recorded at write time from the writer's explicit sessions
+    // and the sessions its evidence notes target.
     for issue in &issues {
-        let mut sessions: HashSet<String> = HashSet::new();
-        for note in gage_db::issue::related_notes(conn, &issue.id)? {
-            if let gage_db::target::NoteTarget::Session(t) = &note.target {
-                sessions.insert(t.session_id.clone());
-            }
-        }
-        for session_id in sessions {
+        for session_id in gage_db::issue::issue_sessions(conn, &issue.id)? {
             counts.entry(session_id).or_default().1 += 1;
         }
     }

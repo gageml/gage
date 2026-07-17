@@ -17,6 +17,12 @@ items = { type = "string" }
 required = false
 description = "Note IDs that support this issue. Each becomes a linked evidence row."
 
+[parameters.sessions]
+type = "array"
+items = { type = "string" }
+required = false
+description = "Session IDs to associate with this issue. Sessions targeted by evidence notes are associated automatically."
+
 [annotations]
 read_only_hint = false
 idempotent_hint = false

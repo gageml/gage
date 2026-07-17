@@ -498,6 +498,7 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<LoggedEvent> {
 pub fn delete(conn: &Connection, issue_id: &str) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM issue_evidence WHERE issue_id = ?1", [issue_id])?;
+    tx.execute("DELETE FROM session_issue WHERE issue_id = ?1", [issue_id])?;
     tx.execute("DELETE FROM issue_event WHERE issue_id = ?1", [issue_id])?;
     tx.execute("DELETE FROM scan_issue WHERE issue_id = ?1", [issue_id])?;
     let rows = tx.execute("DELETE FROM issue WHERE id = ?1", [issue_id])?;
@@ -515,6 +516,30 @@ pub fn insert_issue_evidence(conn: &Connection, ev: &IssueEvidence) -> Result<()
         params![ev.issue_id, ev.note_id, ev.name, ev.timestamp, ev.digest],
     )?;
     Ok(())
+}
+
+/// Links `issue_id` to `session_id`. Returns true when the link is new,
+/// false when it was already recorded.
+pub fn insert_session_issue(
+    conn: &Connection,
+    session_id: &str,
+    issue_id: &str,
+) -> Result<bool, IssueError> {
+    let rows = conn.execute(
+        "INSERT OR IGNORE INTO session_issue (session_id, issue_id) VALUES (?1, ?2)",
+        params![session_id, issue_id],
+    )?;
+    Ok(rows > 0)
+}
+
+/// Session IDs linked to `issue_id` via `session_issue`.
+pub fn issue_sessions(conn: &Connection, issue_id: &str) -> Result<Vec<String>, IssueError> {
+    let mut stmt = conn
+        .prepare("SELECT session_id FROM session_issue WHERE issue_id = ?1 ORDER BY session_id")?;
+    let rows = stmt
+        .query_map([issue_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 pub fn list_issue_evidence(conn: &Connection) -> Result<Vec<IssueEvidence>, IssueError> {

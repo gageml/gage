@@ -208,6 +208,13 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
             PRIMARY KEY (issue_id, note_id)
         );
 
+        CREATE TABLE session_issue (
+            session_id TEXT NOT NULL,
+            issue_id   TEXT NOT NULL REFERENCES issue(id),
+            PRIMARY KEY (session_id, issue_id)
+        );
+        CREATE INDEX idx_session_issue_issue_id ON session_issue(issue_id);
+
         CREATE TABLE issue_event (
             issue_id  TEXT NOT NULL REFERENCES issue(id),
             type      TEXT NOT NULL,
@@ -338,7 +345,7 @@ mod tests {
         }
 
         // issue and issue_evidence tables exist
-        for tname in &["issue", "issue_evidence", "issue_event"] {
+        for tname in &["issue", "issue_evidence", "issue_event", "session_issue"] {
             let n: u32 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
