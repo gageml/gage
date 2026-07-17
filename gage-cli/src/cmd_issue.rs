@@ -66,8 +66,8 @@ pub struct IssueAddArgs {
 
 #[derive(Args)]
 pub struct IssueDeleteArgs {
-    /// Issue ID (or prefix)
-    id: String,
+    /// Issue IDs (or prefix)
+    ids: Vec<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -371,35 +371,62 @@ pub fn add(args: IssueAddArgs) {
 }
 
 pub fn delete(args: IssueDeleteArgs) {
-    let conn = db::open_db().unwrap();
-    let target_issue = match issue::get(&conn, &args.id) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
+    if args.ids.is_empty() {
+        eprintln!(
+            "gage issue delete: provide one or more issue IDs\n\n\
+             Use 'gage issue list' to show issues"
+        );
+        std::process::exit(1);
+    }
 
-    dialog::run("Delete issue", || {
-        cli::log::step(format!(
-            "Issue\n{} {}",
-            console::style(short_uuid(&target_issue.id)).dim(),
-            target_issue.title,
-        ))?;
+    let conn = db::open_db().unwrap();
+
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match issue::get(&conn, prefix) {
+            Ok(i) => issues.push(i),
+            Err(e) => {
+                eprintln!("{e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let count = issues.len();
+
+    dialog::run("Delete issues", || {
+        let listing = issues
+            .iter()
+            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let label = if count == 1 { "Issue" } else { "Issues" };
+        cli::log::step(format!("{label}\n{listing}"))?;
 
         if !args.yes {
-            let confirmed = cli::confirm("Permanently delete this issue? This cannot be undone.")
-                .initial_value(false)
-                .interact()?;
+            let plural = if count == 1 { "issue" } else { "issues" };
+            let prompt = format!("Permanently delete {count} {plural}? This cannot be undone.");
+            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
         }
 
-        issue::delete(&conn, &target_issue.id)
-            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+        let mut deleted = 0;
+        for issue in &issues {
+            if let Err(e) = issue::delete(&conn, &issue.id) {
+                eprintln!("warning: failed to delete {}: {e}", short_uuid(&issue.id));
+            } else {
+                deleted += 1;
+            }
+        }
 
-        Ok(format!("Deleted issue {}", short_uuid(&target_issue.id)).into())
+        let plural = if deleted == 1 { "issue" } else { "issues" };
+        Ok(format!("Deleted {deleted} {plural}").into())
     });
 }
 
