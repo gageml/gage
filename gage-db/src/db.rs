@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 4;
+pub const CURRENT_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -109,18 +109,7 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if version >= CURRENT_VERSION {
         return Ok(());
     }
-    if version < 1 {
-        migration_1(&tx)?;
-    }
-    if version < 2 {
-        migration_2(&tx)?;
-    }
-    if version < 3 {
-        migration_3(&tx)?;
-    }
-    if version < 4 {
-        migration_4(&tx)?;
-    }
+    init_schema(&tx)?;
     set_version(&tx, CURRENT_VERSION)?;
     tx.commit()
 }
@@ -147,7 +136,10 @@ fn set_version(conn: &Connection, version: u32) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
+// `ref` in task_validate is a prefixed entity reference
+// (`session:<id>`, `note:<id>`); `value` is the optional compared
+// validator (e.g. session size) and is NULL for membership schemes.
+fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE note (
             id          TEXT PRIMARY KEY,
@@ -252,43 +244,15 @@ fn migration_1(conn: &Connection) -> Result<(), rusqlite::Error> {
             PRIMARY KEY (scan_id, issue_id)
         );
         CREATE INDEX idx_scan_issue_issue_id ON scan_issue(issue_id);
-",
-    )?;
-    Ok(())
-}
 
-fn migration_2(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "CREATE TABLE cache (
-            key     TEXT PRIMARY KEY,
-            value   TEXT NOT NULL,
-            expires INTEGER
-        );",
-    )?;
-    Ok(())
-}
-
-// Replaces the generic cache with schema-defined task validation.
-// `ref` is a prefixed entity reference (`session:<id>`, `note:<id>`);
-// `value` is the optional compared validator (e.g. session size) and
-// is NULL for membership schemes.
-fn migration_3(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "DROP TABLE cache;
         CREATE TABLE task_validate (
             key   TEXT NOT NULL,
             ref   TEXT NOT NULL,
             value TEXT,
             PRIMARY KEY (key, ref)
-        );",
+        );
+",
     )?;
-    Ok(())
-}
-
-// Removes note-to-note relations; the feature (note comments) was
-// unused. `IF EXISTS` because migration_1 no longer creates the table.
-fn migration_4(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch("DROP TABLE IF EXISTS note_relation;")?;
     Ok(())
 }
 
