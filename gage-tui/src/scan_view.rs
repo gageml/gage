@@ -1739,11 +1739,10 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
-    let help = if state.model.finished {
-        "scan complete · q quit · Tab cycle · ↑/↓ select · l log"
-    } else {
-        "q quit · Tab cycle · ↑/↓ select · l log"
-    };
+    let help = footer_help(state);
+    if help.is_empty() {
+        return;
+    }
     let help_width = help.width() as u16;
     let [_, help_area, _] = Layout::horizontal([
         Constraint::Fill(1),
@@ -1755,6 +1754,26 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         Paragraph::new(Span::styled(help, styles::Panel::footer())),
         help_area,
     );
+}
+
+/// Help text for the keys active in the current dialog state. Dialogs
+/// that show their key options inline (confirm, scan-done) get an
+/// empty footer.
+fn footer_help(state: &ViewState) -> &'static str {
+    match state.dialog {
+        Dialog::ConfirmQuit | Dialog::ScanDone => "",
+        Dialog::Note { .. } | Dialog::Issue { .. } | Dialog::Session { .. } => {
+            "q close · ↑/↓ scroll · ←/→ next/prev item"
+        }
+        Dialog::Log { .. } => "q close · ↑/↓ scroll",
+        Dialog::None => {
+            if state.model.finished {
+                "scan complete · q quit · Tab cycle · ↑/↓ select · l log"
+            } else {
+                "q quit · Tab cycle · ↑/↓ select · l log"
+            }
+        }
+    }
 }
 
 fn panel_block(title: String, active: bool) -> Block<'static> {
