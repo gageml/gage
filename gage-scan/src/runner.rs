@@ -7,7 +7,7 @@ use gage_claude::home::ClaudeHome;
 use gage_claude::project::{Project, project_for_session_name};
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
-use gage_db::scan::{Scan, ScanScanner, insert_scan, insert_scan_session, insert_scanner};
+use gage_db::scan::{Scan, ScanTask, TaskStatus, insert_scan, insert_scan_session, insert_task};
 use gage_query::ScanSessionContext;
 use rune::alloc::prelude::TryToOwned;
 use rune::runtime::Vm;
@@ -95,7 +95,7 @@ pub async fn run(
     let session_ids: Vec<&str> = selected.iter().map(|s| s.id.as_str()).collect();
     {
         let conn = db.lock().unwrap();
-        init_run(&scan_id, &scanners, &session_ids, &conn)?;
+        init_run(&scan_id, &session_ids, &conn)?;
     }
 
     // Resolve distinct projects from `~/.claude.json`. Sessions key
@@ -183,14 +183,22 @@ pub async fn run(
     let plan =
         scheduler::plan(&slots, &scanner_tasks, &run).map_err(|e| RunError::Plan(e.to_string()))?;
 
+    // Every planned task gets its row up front (status `pending`), so
+    // the plan is on record even if the run dies before dispatch. The
+    // scheduler updates each row on dispatch and completion.
+    {
+        let conn = db.lock().unwrap();
+        insert_plan_tasks(&conn, &scan_id, &plan, &scanners)?;
+    }
+
     let slots = Arc::new(slots);
     let result = scheduler::run_plan(plan, slots, run, jobs, cancel, on_event).await;
 
     match result {
-        Ok((summary, outcomes)) => {
+        Ok(summary) => {
             {
                 let conn = db.lock().unwrap();
-                persist_run_metadata(&conn, &summary, &outcomes, run_started.elapsed())?;
+                persist_run_summary(&conn, &summary, run_started.elapsed())?;
             }
             if summary.failed > 0 {
                 Err(RunError::Emitted)
@@ -200,17 +208,45 @@ pub async fn run(
         }
         Err(scheduler::RunError::Channel) => Err(RunError::Emitted),
         Err(scheduler::RunError::Canceled) => Err(RunError::Canceled),
+        Err(scheduler::RunError::Db(e)) => Err(RunError::Db(e)),
     }
 }
 
-/// Persist the run summary to `scan.metadata` and per-task outcomes to
-/// `scan_scanner.metadata`. Written only on normal completion — a
-/// canceled or aborted run leaves both columns NULL, which marks the
-/// scan as incomplete.
-fn persist_run_metadata(
+/// Insert one `scan_task` row per planned task, status `pending`.
+fn insert_plan_tasks(
+    conn: &Connection,
+    scan_id: &str,
+    plan: &scheduler::Plan,
+    scanners: &[Scanner<'_>],
+) -> Result<(), RunError> {
+    for task in &plan.tasks {
+        let def = scanners
+            .get(task.scanner_idx)
+            .map(|s| s.def)
+            .expect("plan task indexes the scanner list it was built from");
+        insert_task(
+            conn,
+            &ScanTask {
+                scan_id: scan_id.to_string(),
+                scanner_name: def.name.clone(),
+                scanner_version: def.version.clone(),
+                task_name: task.task_name.clone(),
+                status: TaskStatus::Pending,
+                started: None,
+                stopped: None,
+                error: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Persist the run summary to `scan.metadata`. Written only on normal
+/// completion — a canceled or aborted run leaves the column NULL,
+/// which marks the scan as incomplete.
+fn persist_run_summary(
     conn: &Connection,
     summary: &RunSummary,
-    outcomes: &[(String, gage_db::scan::TaskOutcome)],
     elapsed: std::time::Duration,
 ) -> Result<(), RunError> {
     gage_db::scan::set_scan_summary(
@@ -224,31 +260,10 @@ fn persist_run_metadata(
             elapsed_ms: elapsed.as_millis() as u64,
         },
     )?;
-
-    let mut by_scanner: Vec<(&String, gage_db::scan::ScannerTasks)> = Vec::new();
-    for (scanner, outcome) in outcomes {
-        match by_scanner.iter_mut().find(|(name, _)| *name == scanner) {
-            Some((_, tasks)) => tasks.tasks.push(outcome.clone()),
-            None => by_scanner.push((
-                scanner,
-                gage_db::scan::ScannerTasks {
-                    tasks: vec![outcome.clone()],
-                },
-            )),
-        }
-    }
-    for (scanner, tasks) in &by_scanner {
-        gage_db::scan::set_scanner_tasks(conn, &summary.scan_id, scanner, tasks)?;
-    }
     Ok(())
 }
 
-fn init_run(
-    scan_id: &str,
-    scanners: &[Scanner<'_>],
-    session_ids: &[&str],
-    db: &Connection,
-) -> Result<(), RunError> {
+fn init_run(scan_id: &str, session_ids: &[&str], db: &Connection) -> Result<(), RunError> {
     insert_scan(
         db,
         &Scan {
@@ -260,22 +275,6 @@ fn init_run(
 
     for sid in session_ids {
         insert_scan_session(db, scan_id, sid)?;
-    }
-
-    // `scan_scanner` records which scanners ran in this scan (name +
-    // version), surfaced by `gage scan view`. The row id is metadata
-    // only; nothing resolves through it.
-    for scanner in scanners {
-        insert_scanner(
-            db,
-            &ScanScanner {
-                id: gage_core::uuid::new_uuid(),
-                scan_id: scan_id.to_string(),
-                scanner_name: scanner.def.name.clone(),
-                scanner_version: scanner.def.version.clone(),
-                metadata: None,
-            },
-        )?;
     }
 
     Ok(())

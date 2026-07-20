@@ -8,13 +8,37 @@ pub struct Scan {
     pub metadata: Option<String>,
 }
 
+/// One planned task invocation within a scan. Inserted when the plan
+/// is built (`pending`), updated on dispatch (`started`) and again on
+/// completion. A non-terminal status is the last known state: a scan
+/// that died leaves its rows at `pending`/`started`.
 #[derive(Debug, Clone)]
-pub struct ScanScanner {
-    pub id: String,
+pub struct ScanTask {
     pub scan_id: String,
     pub scanner_name: String,
     pub scanner_version: String,
-    pub metadata: Option<String>,
+    pub task_name: String,
+    pub status: TaskStatus,
+    /// Epoch milliseconds; None when the task never ran.
+    pub started: Option<i64>,
+    /// Epoch milliseconds; None when the task never finished.
+    pub stopped: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// One `call_agent` invocation made by a task. Inserted when the
+/// claude process reports its session id, finalized when the process
+/// exits. `result` is claude's terminal `result` message verbatim;
+/// NULL with a non-NULL `exit_code` marks an abnormal termination.
+#[derive(Debug, Clone)]
+pub struct TaskAgent {
+    pub session_id: String,
+    pub scan_id: String,
+    pub scanner_name: String,
+    pub task_name: String,
+    pub exit_code: Option<i64>,
+    pub stderr: Option<String>,
+    pub result: Option<String>,
 }
 
 #[derive(Debug)]
@@ -56,10 +80,112 @@ pub fn insert_scan(conn: &Connection, scan: &Scan) -> Result<(), ScanError> {
     Ok(())
 }
 
-pub fn insert_scanner(conn: &Connection, scanner: &ScanScanner) -> Result<(), ScanError> {
+pub fn insert_task(conn: &Connection, task: &ScanTask) -> Result<(), ScanError> {
     conn.execute(
-        "INSERT INTO scan_scanner (id, scan_id, scanner_name, scanner_version, metadata) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![scanner.id, scanner.scan_id, scanner.scanner_name, scanner.scanner_version, scanner.metadata],
+        "INSERT INTO scan_task (scan_id, scanner_name, scanner_version, task_name, \
+                                status, started, stopped, error) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            task.scan_id,
+            task.scanner_name,
+            task.scanner_version,
+            task.task_name,
+            task.status.as_str(),
+            task.started,
+            task.stopped,
+            task.error,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Mark a task dispatched.
+pub fn start_task(
+    conn: &Connection,
+    scan_id: &str,
+    scanner_name: &str,
+    task_name: &str,
+    started_ms: i64,
+) -> Result<(), ScanError> {
+    conn.execute(
+        "UPDATE scan_task SET status = ?4, started = ?5 \
+         WHERE scan_id = ?1 AND scanner_name = ?2 AND task_name = ?3",
+        params![
+            scan_id,
+            scanner_name,
+            task_name,
+            TaskStatus::Started.as_str(),
+            started_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record a task's terminal outcome. A skipped task never ran, so its
+/// `started` is cleared along with `stopped` staying NULL.
+pub fn finish_task(
+    conn: &Connection,
+    scan_id: &str,
+    scanner_name: &str,
+    task_name: &str,
+    status: TaskStatus,
+    stopped_ms: Option<i64>,
+    error: Option<&str>,
+) -> Result<(), ScanError> {
+    if status == TaskStatus::Skipped {
+        conn.execute(
+            "UPDATE scan_task SET status = ?4, started = NULL, stopped = NULL, error = NULL \
+             WHERE scan_id = ?1 AND scanner_name = ?2 AND task_name = ?3",
+            params![scan_id, scanner_name, task_name, status.as_str()],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE scan_task SET status = ?4, stopped = ?5, error = ?6 \
+             WHERE scan_id = ?1 AND scanner_name = ?2 AND task_name = ?3",
+            params![
+                scan_id,
+                scanner_name,
+                task_name,
+                status.as_str(),
+                stopped_ms,
+                error,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Record an agent session spawned by a task. Called when the claude
+/// process reports its session id; `exit_code`/`stderr`/`result` are
+/// filled in by [`finish_task_agent`] when the process exits.
+pub fn insert_task_agent(conn: &Connection, agent: &TaskAgent) -> Result<(), ScanError> {
+    conn.execute(
+        "INSERT INTO task_agent (session_id, scan_id, scanner_name, task_name, \
+                                 exit_code, stderr, result) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            agent.session_id,
+            agent.scan_id,
+            agent.scanner_name,
+            agent.task_name,
+            agent.exit_code,
+            agent.stderr,
+            agent.result,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn finish_task_agent(
+    conn: &Connection,
+    session_id: &str,
+    exit_code: i64,
+    stderr: &str,
+    result: Option<&str>,
+) -> Result<(), ScanError> {
+    conn.execute(
+        "UPDATE task_agent SET exit_code = ?2, stderr = ?3, result = ?4 WHERE session_id = ?1",
+        params![session_id, exit_code, stderr, result],
     )?;
     Ok(())
 }
@@ -104,33 +230,39 @@ pub struct ScanSummary {
     pub elapsed_ms: u64,
 }
 
-/// Per-task outcomes persisted to `scan_scanner.metadata`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ScannerTasks {
-    pub tasks: Vec<TaskOutcome>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaskOutcome {
-    pub name: String,
-    pub status: TaskStatus,
-    /// Epoch milliseconds; None when the task never ran (skipped).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Terminal task states only — outcomes are written when the run
-/// completes, so no pending/running values exist here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Task state as recorded in `scan_task.status`. `Pending` and
+/// `Started` are last-known states, not liveness claims: a scan that
+/// died leaves its rows there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
+    Pending,
+    Started,
     Completed,
     Failed,
     Skipped,
+}
+
+impl TaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskStatus::Pending => "pending",
+            TaskStatus::Started => "started",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Skipped => "skipped",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "pending" => TaskStatus::Pending,
+            "started" => TaskStatus::Started,
+            "completed" => TaskStatus::Completed,
+            "failed" => TaskStatus::Failed,
+            "skipped" => TaskStatus::Skipped,
+            _ => return None,
+        })
+    }
 }
 
 /// End-of-run information for an agent run's proxy scan.
@@ -164,20 +296,6 @@ pub fn set_scan_summary(
     conn.execute(
         "UPDATE scan SET metadata = ?2 WHERE id = ?1",
         params![scan_id, json],
-    )?;
-    Ok(())
-}
-
-pub fn set_scanner_tasks(
-    conn: &Connection,
-    scan_id: &str,
-    scanner_name: &str,
-    tasks: &ScannerTasks,
-) -> Result<(), ScanError> {
-    let json = serde_json::to_string(tasks).unwrap();
-    conn.execute(
-        "UPDATE scan_scanner SET metadata = ?3 WHERE scan_id = ?1 AND scanner_name = ?2",
-        params![scan_id, scanner_name, json],
     )?;
     Ok(())
 }
@@ -258,30 +376,51 @@ pub fn all(conn: &Connection) -> Result<Vec<Scan>, ScanError> {
     Ok(scans)
 }
 
-pub fn get_scanners_for_scan(
-    conn: &Connection,
-    scan_id: &str,
-) -> Result<Vec<ScanScanner>, ScanError> {
+/// Tasks recorded for a scan, in (scanner_name, task_name) order.
+pub fn tasks_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<ScanTask>, ScanError> {
     let mut stmt = conn.prepare(
-        "SELECT id, scan_id, scanner_name, scanner_version, metadata FROM scan_scanner WHERE scan_id = ?1",
+        "SELECT scan_id, scanner_name, scanner_version, task_name, status, started, stopped, error \
+         FROM scan_task WHERE scan_id = ?1 ORDER BY scanner_name, task_name",
     )?;
-    let scanners = stmt
+    let tasks = stmt
         .query_map(params![scan_id], |row| {
-            Ok(ScanScanner {
-                id: row.get(0)?,
-                scan_id: row.get(1)?,
-                scanner_name: row.get(2)?,
-                scanner_version: row.get(3)?,
-                metadata: row.get(4)?,
+            let status: String = row.get(4)?;
+            Ok(ScanTask {
+                scan_id: row.get(0)?,
+                scanner_name: row.get(1)?,
+                scanner_version: row.get(2)?,
+                task_name: row.get(3)?,
+                status: TaskStatus::from_str(&status).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        format!("unknown task status '{status}'").into(),
+                    )
+                })?,
+                started: row.get(5)?,
+                stopped: row.get(6)?,
+                error: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(scanners)
+    Ok(tasks)
 }
 
-/// Delete a scan's run metadata: the `scan` row plus its `scan_scanner`
-/// and `scan_session` rows. Notes and issues are refreshed across scans
-/// and are not owned by any one scan, so they are never deleted here.
+/// Distinct scanner names recorded for a scan, ascending.
+pub fn scanner_names_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT scanner_name FROM scan_task WHERE scan_id = ?1 ORDER BY scanner_name",
+    )?;
+    let names = stmt
+        .query_map(params![scan_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names)
+}
+
+/// Delete a scan's run metadata: the `scan` row plus its `scan_task`,
+/// `task_agent`, and `scan_session` rows. Notes and issues are
+/// refreshed across scans and are not owned by any one scan, so they
+/// are never deleted here.
 pub fn delete_scan(conn: &Connection, scan_id: &str) -> Result<(), ScanError> {
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM scan WHERE id = ?1",
@@ -294,9 +433,10 @@ pub fn delete_scan(conn: &Connection, scan_id: &str) -> Result<(), ScanError> {
 
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "DELETE FROM scan_scanner WHERE scan_id = ?1",
+        "DELETE FROM task_agent WHERE scan_id = ?1",
         params![scan_id],
     )?;
+    tx.execute("DELETE FROM scan_task WHERE scan_id = ?1", params![scan_id])?;
     tx.execute(
         "DELETE FROM scan_session WHERE scan_id = ?1",
         params![scan_id],
@@ -352,13 +492,16 @@ mod tests {
         }
     }
 
-    fn test_scanner(scan_id: &str) -> ScanScanner {
-        ScanScanner {
-            id: "scanner-001".to_string(),
+    fn test_task(scan_id: &str) -> ScanTask {
+        ScanTask {
             scan_id: scan_id.to_string(),
             scanner_name: "user_friction".to_string(),
             scanner_version: "1".to_string(),
-            metadata: None,
+            task_name: "friction".to_string(),
+            status: TaskStatus::Pending,
+            started: None,
+            stopped: None,
+            error: None,
         }
     }
 
@@ -408,18 +551,101 @@ mod tests {
     }
 
     #[test]
-    fn insert_and_get_scanners() {
+    fn task_lifecycle() {
         let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
 
-        let scanner = test_scanner(&scan.id);
-        insert_scanner(&conn, &scanner).unwrap();
+        insert_task(&conn, &test_task(&scan.id)).unwrap();
+        start_task(&conn, &scan.id, "user_friction", "friction", 1000).unwrap();
+        finish_task(
+            &conn,
+            &scan.id,
+            "user_friction",
+            "friction",
+            TaskStatus::Completed,
+            Some(2500),
+            None,
+        )
+        .unwrap();
 
-        let scanners = get_scanners_for_scan(&conn, &scan.id).unwrap();
-        assert_eq!(scanners.len(), 1);
-        assert_eq!(scanners[0].scanner_name, "user_friction");
-        assert_eq!(scanners[0].scanner_version, "1");
+        let tasks = tasks_for_scan(&conn, &scan.id).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].scanner_name, "user_friction");
+        assert_eq!(tasks[0].scanner_version, "1");
+        assert_eq!(tasks[0].status, TaskStatus::Completed);
+        assert_eq!(tasks[0].started, Some(1000));
+        assert_eq!(tasks[0].stopped, Some(2500));
+
+        assert_eq!(
+            scanner_names_for_scan(&conn, &scan.id).unwrap(),
+            vec!["user_friction".to_string()]
+        );
+    }
+
+    #[test]
+    fn skipped_task_clears_timing() {
+        let conn = open_db_in_memory().unwrap();
+        let scan = test_scan();
+        insert_scan(&conn, &scan).unwrap();
+
+        insert_task(&conn, &test_task(&scan.id)).unwrap();
+        start_task(&conn, &scan.id, "user_friction", "friction", 1000).unwrap();
+        finish_task(
+            &conn,
+            &scan.id,
+            "user_friction",
+            "friction",
+            TaskStatus::Skipped,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let tasks = tasks_for_scan(&conn, &scan.id).unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Skipped);
+        assert_eq!(tasks[0].started, None);
+        assert_eq!(tasks[0].stopped, None);
+    }
+
+    #[test]
+    fn task_agent_lifecycle() {
+        let conn = open_db_in_memory().unwrap();
+        let scan = test_scan();
+        insert_scan(&conn, &scan).unwrap();
+        insert_task(&conn, &test_task(&scan.id)).unwrap();
+
+        insert_task_agent(
+            &conn,
+            &TaskAgent {
+                session_id: "cccccccc-cccc-cccc-cccc-cccccccccccc".to_string(),
+                scan_id: scan.id.clone(),
+                scanner_name: "user_friction".to_string(),
+                task_name: "friction".to_string(),
+                exit_code: None,
+                stderr: None,
+                result: None,
+            },
+        )
+        .unwrap();
+        finish_task_agent(
+            &conn,
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            0,
+            "",
+            Some(r#"{"type":"result","total_cost_usd":0.42}"#),
+        )
+        .unwrap();
+
+        let (exit_code, result): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT exit_code, result FROM task_agent WHERE session_id = ?1",
+                params!["cccccccc-cccc-cccc-cccc-cccccccccccc"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(exit_code, Some(0));
+        assert!(result.unwrap().contains("total_cost_usd"));
     }
 
     #[test]
@@ -429,8 +655,7 @@ mod tests {
         insert_scan(&conn, &scan).unwrap();
         insert_scan_session(&conn, &scan.id, "11111111-1111-1111-1111-111111111111").unwrap();
 
-        let scanner = test_scanner(&scan.id);
-        insert_scanner(&conn, &scanner).unwrap();
+        insert_task(&conn, &test_task(&scan.id)).unwrap();
 
         let note = Note::new(
             NoteTarget::Session(
@@ -446,7 +671,7 @@ mod tests {
 
         // Run metadata is gone
         assert_eq!(all(&conn).unwrap().len(), 0);
-        assert_eq!(get_scanners_for_scan(&conn, &scan.id).unwrap().len(), 0);
+        assert_eq!(tasks_for_scan(&conn, &scan.id).unwrap().len(), 0);
         assert_eq!(session_ids_for_scan(&conn, &scan.id).unwrap().len(), 0);
 
         // Notes are not owned by a scan and survive

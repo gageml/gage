@@ -26,7 +26,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
 
 use petgraph::Graph;
 use petgraph::algo::tarjan_scc;
@@ -37,7 +36,7 @@ use tracing::debug;
 
 use crate::event::{ActiveTask, RunStatus, RunSummary, ScanEvent, WorkerStatus};
 use gage_core::glob::glob_match;
-use gage_db::scan::{TaskOutcome, TaskStatus};
+use gage_db::scan::{ScanError, TaskStatus, finish_task, start_task};
 use gage_registry::scanner::TaskDef;
 use gage_runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
 
@@ -268,7 +267,7 @@ pub(crate) async fn run_plan(
     jobs: usize,
     cancel: CancellationToken,
     mut on_event: impl FnMut(ScanEvent) + Send,
-) -> Result<(RunSummary, Vec<(String, TaskOutcome)>), RunError> {
+) -> Result<RunSummary, RunError> {
     let jobs = jobs.max(1);
     let plan_total = plan.tasks.len();
 
@@ -300,7 +299,7 @@ pub(crate) async fn run_plan(
     on_event(ScanEvent::Status(status.clone()));
 
     debug!(tasks = plan.tasks.len(), "scheduling");
-    let outcomes = run_tasks(
+    run_tasks(
         plan,
         &scanners,
         &run,
@@ -312,16 +311,13 @@ pub(crate) async fn run_plan(
     )
     .await?;
 
-    Ok((
-        RunSummary {
-            scan_id: status.scan_id,
-            total: plan_total,
-            completed: accounting.completed,
-            failed: accounting.failed,
-            skipped: accounting.skipped,
-        },
-        outcomes,
-    ))
+    Ok(RunSummary {
+        scan_id: status.scan_id,
+        total: plan_total,
+        completed: accounting.completed,
+        failed: accounting.failed,
+        skipped: accounting.skipped,
+    })
 }
 
 struct RunAccounting {
@@ -333,6 +329,7 @@ struct RunAccounting {
 pub enum RunError {
     Channel,
     Canceled,
+    Db(ScanError),
 }
 
 #[allow(clippy::indexing_slicing, clippy::too_many_arguments)]
@@ -345,7 +342,7 @@ async fn run_tasks(
     status: &mut RunStatus,
     accounting: &mut RunAccounting,
     on_event: &mut (impl FnMut(ScanEvent) + Send),
-) -> Result<Vec<(String, TaskOutcome)>, RunError> {
+) -> Result<(), RunError> {
     let task_count = plan.tasks.len();
     let tasks = Arc::new(plan.tasks);
     let downstream = Arc::new(plan.downstream);
@@ -405,12 +402,6 @@ async fn run_tasks(
     }
     drop(msg_tx);
     drop(out_tx);
-
-    // Per-task dispatch times and terminal outcomes, keyed for the
-    // end-of-run metadata write. Tasks never dispatched (cancellation)
-    // have no outcome.
-    let mut started_at: Vec<Option<(i64, Instant)>> = vec![None; task_count];
-    let mut outcomes: Vec<(String, TaskOutcome)> = Vec::with_capacity(task_count);
 
     let mut completed = 0usize;
     let mut canceled = false;
@@ -481,7 +472,12 @@ async fn run_tasks(
                     task: task.task_name.clone(),
                     progress: None,
                 });
-                started_at[task_idx] = Some((gage_core::datetime::now_ms(), Instant::now()));
+                let now_ms = gage_core::datetime::now_ms();
+                {
+                    let conn = slot.db.lock().unwrap();
+                    start_task(&conn, &run.scan_id, &slot.name, &task.task_name, now_ms)
+                        .map_err(RunError::Db)?;
+                }
                 on_event(ScanEvent::Status(status.clone()));
             }
             WorkerMsg::Completed {
@@ -515,26 +511,30 @@ async fn run_tasks(
                 let (task_status, error) = match &outcome {
                     TaskResult::Ok => (TaskStatus::Completed, None),
                     TaskResult::Error(msg) | TaskResult::VmError(msg) => {
-                        (TaskStatus::Failed, Some(msg.clone()))
+                        (TaskStatus::Failed, Some(msg.as_str()))
                     }
                     TaskResult::SkippedByFault => (TaskStatus::Skipped, None),
                 };
-                // Skipped tasks never ran; their dispatch instant is
-                // not a start time.
-                let timing = match task_status {
+                // Skipped tasks never ran; `finish_task` clears their
+                // dispatch timestamp.
+                let stopped_ms = match task_status {
                     TaskStatus::Skipped => None,
-                    _ => started_at[task_idx],
+                    _ => Some(gage_core::datetime::now_ms()),
                 };
-                outcomes.push((
-                    scanners[task.scanner_idx].name.clone(),
-                    TaskOutcome {
-                        name: task.task_name.clone(),
-                        status: task_status,
-                        started: timing.map(|(ms, _)| ms),
-                        elapsed_ms: timing.map(|(_, t)| t.elapsed().as_millis() as u64),
+                {
+                    let slot = &scanners[task.scanner_idx];
+                    let conn = slot.db.lock().unwrap();
+                    finish_task(
+                        &conn,
+                        &run.scan_id,
+                        &slot.name,
+                        &task.task_name,
+                        task_status,
+                        stopped_ms,
                         error,
-                    },
-                ));
+                    )
+                    .map_err(RunError::Db)?;
+                }
                 on_event(ScanEvent::Status(status.clone()));
                 completed += 1;
                 for &down in &downstream[task_idx] {
@@ -567,7 +567,7 @@ async fn run_tasks(
     if canceled {
         return Err(RunError::Canceled);
     }
-    Ok(outcomes)
+    Ok(())
 }
 
 #[allow(clippy::indexing_slicing)]

@@ -212,8 +212,12 @@ impl Peaker for IdAwarePriority {
     }
 }
 
-pub async fn list(args: SessionListArgs) {
+pub async fn list(args: SessionListArgs, agent: bool) {
     let ctx = gage_query::create_context_default().await;
+
+    // Agent sessions live in their own corpus, surfaced by the
+    // `agent_session` table.
+    let table = if agent { "agent_session" } else { "session" };
 
     let clauses = filter_clauses(&args.filter);
     let where_clause = if clauses.is_empty() {
@@ -222,7 +226,7 @@ pub async fn list(args: SessionListArgs) {
         format!(" WHERE {}", clauses.join(" AND "))
     };
 
-    let count_sql = format!("SELECT COUNT(*) FROM session{where_clause}");
+    let count_sql = format!("SELECT COUNT(*) FROM {table}{where_clause}");
     let count_batches = run_query(&ctx, &count_sql).await;
     let total = count_batches
         .first()
@@ -243,7 +247,7 @@ pub async fn list(args: SessionListArgs) {
 
     let sql = format!(
         "SELECT id, project, mtime, size, title, model, message_count, path \
-         FROM session{where_clause} ORDER BY mtime DESC LIMIT {show}"
+         FROM {table}{where_clause} ORDER BY mtime DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 

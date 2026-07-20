@@ -223,13 +223,31 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         );
         CREATE INDEX idx_scan_session_session_id ON scan_session(session_id);
 
-        CREATE TABLE scan_scanner (
-            id                   TEXT PRIMARY KEY,
-            scan_id              TEXT NOT NULL REFERENCES scan(id),
-            scanner_name         TEXT NOT NULL,
-            scanner_version      TEXT NOT NULL,
-            metadata             TEXT
+        CREATE TABLE scan_task (
+            scan_id         TEXT NOT NULL REFERENCES scan(id),
+            scanner_name    TEXT NOT NULL,
+            scanner_version TEXT NOT NULL,
+            task_name       TEXT NOT NULL,
+            status          TEXT NOT NULL,
+            started         INTEGER,
+            stopped         INTEGER,
+            error           TEXT,
+            PRIMARY KEY (scan_id, scanner_name, task_name)
         );
+
+        CREATE TABLE task_agent (
+            session_id   TEXT PRIMARY KEY,
+            scan_id      TEXT NOT NULL,
+            scanner_name TEXT NOT NULL,
+            task_name    TEXT NOT NULL,
+            exit_code    INTEGER,
+            stderr       TEXT,
+            result       TEXT,
+            FOREIGN KEY (scan_id, scanner_name, task_name)
+                REFERENCES scan_task(scan_id, scanner_name, task_name)
+        );
+        CREATE INDEX idx_task_agent_task
+            ON task_agent(scan_id, scanner_name, task_name);
 
         CREATE TABLE scan_note (
             scan_id TEXT NOT NULL REFERENCES scan(id),

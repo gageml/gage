@@ -177,6 +177,63 @@ struct AgentInner {
     /// turn when each notification arrives, so we must keep reading the
     /// stream rather than interrupting the child.
     pending_tasks: HashSet<String>,
+    /// `task_agent` bookkeeping for this call.
+    record: AgentRecord,
+}
+
+/// DB handle plus task identity for this call's `task_agent` row.
+/// Captured from the scan context when the call awaits. The row is
+/// inserted when the child's `system`/`init` message reports the
+/// session id and finalized when the child exits — no session id
+/// observed means no session started, and nothing is recorded.
+struct AgentRecord {
+    db: Arc<Mutex<gage_db::rusqlite::Connection>>,
+    scan_id: String,
+    scanner_name: String,
+    task_name: String,
+    /// Set once the row has been inserted.
+    session_id: Option<String>,
+}
+
+impl AgentRecord {
+    fn insert(&mut self, session_id: String) -> super::Result<()> {
+        let conn = self.db.lock().unwrap();
+        gage_db::scan::insert_task_agent(
+            &conn,
+            &gage_db::scan::TaskAgent {
+                session_id: session_id.clone(),
+                scan_id: self.scan_id.clone(),
+                scanner_name: self.scanner_name.clone(),
+                task_name: self.task_name.clone(),
+                exit_code: None,
+                stderr: None,
+                result: None,
+            },
+        )
+        .map_err(|e| Error::Agent(format!("call_agent: record session: {e}")))?;
+        self.session_id = Some(session_id);
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        exit_code: i64,
+        stderr: &str,
+        result: Option<&JsonValue>,
+    ) -> super::Result<()> {
+        let Some(session_id) = &self.session_id else {
+            return Ok(());
+        };
+        let conn = self.db.lock().unwrap();
+        gage_db::scan::finish_task_agent(
+            &conn,
+            session_id,
+            exit_code,
+            stderr,
+            result.map(|v| v.to_string()).as_deref(),
+        )
+        .map_err(|e| Error::Agent(format!("call_agent: record result: {e}")))
+    }
 }
 
 /// What `wait()` returns and what `result()` carries once the session
@@ -505,6 +562,12 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
                 Some(other) => {
                     if let StreamMessage::System(v) = &other {
                         track_task_event(v, &mut g.pending_tasks);
+                        if g.record.session_id.is_none()
+                            && v.get("subtype").and_then(|s| s.as_str()) == Some("init")
+                            && let Some(sid) = v.get("session_id").and_then(|s| s.as_str())
+                        {
+                            g.record.insert(sid.to_string())?;
+                        }
                     }
                     expand_to_events(other, &mut g.event_buf);
                     false
@@ -575,12 +638,24 @@ async fn do_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()> {
     if g.stop_reason.is_empty() {
         g.stop_reason = "eof".to_string();
     }
-    let result = build_agent_result(
-        g.terminal_json.as_ref(),
-        &g.stop_reason,
-        status.code().map(i64::from).unwrap_or(-1),
-        String::from_utf8_lossy(&stderr_bytes).into_owned(),
-    );
+    let exit_code = status.code().map(i64::from).unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    // Late session-id fallback: the init message should have recorded
+    // the row, but if the id only surfaced on the terminal result
+    // (init lost mid-stream), insert before finalizing.
+    if g.record.session_id.is_none()
+        && let Some(sid) = g
+            .terminal_json
+            .as_ref()
+            .and_then(|v| v.get("session_id"))
+            .and_then(|s| s.as_str())
+    {
+        let sid = sid.to_string();
+        g.record.insert(sid)?;
+    }
+    g.record
+        .finish(exit_code, &stderr, g.terminal_json.as_ref())?;
+    let result = build_agent_result(g.terminal_json.as_ref(), &g.stop_reason, exit_code, stderr);
     g.final_result = Some(result);
     g.stop_seen = true;
     let reason = g.stop_reason.clone();
@@ -1192,6 +1267,15 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         .await
         .map_err(|e| Error::Agent(format!("call_agent: start_streaming_session: {e}")))?;
 
+    let ctx = current_scan_ctx();
+    let record = AgentRecord {
+        db: ctx.db.clone(),
+        scan_id: ctx.run.scan_id.clone(),
+        scanner_name: ctx.scanner_name.clone(),
+        task_name: ctx.task_name.clone(),
+        session_id: None,
+    };
+
     Ok(Agent {
         spec,
         mcp_url,
@@ -1205,6 +1289,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
             terminal_json: None,
             final_result: None,
             pending_tasks: HashSet::new(),
+            record,
         })),
     })
 }

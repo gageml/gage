@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
-use gage_db::scan::{AgentRunSummary, Scan, insert_scan, insert_scan_session, set_agent_summary};
+use gage_db::scan::{
+    AgentRunSummary, Scan, ScanTask, TaskStatus, finish_task, insert_scan, insert_scan_session,
+    insert_task, set_agent_summary,
+};
 use gage_query::ScanSessionContext;
 use gage_registry::scanner::Scanner;
 use gage_runtime as runtime;
@@ -31,6 +34,8 @@ pub struct InteractiveRun {
     db: Arc<Mutex<Connection>>,
     scan_id: String,
     agent: String,
+    scanner_name: String,
+    task_name: String,
     started: std::time::Instant,
     _run: Arc<RunContext>,
     _slot: Arc<ScannerSlot>,
@@ -47,6 +52,19 @@ impl InteractiveRun {
             is_error,
         };
         let conn = self.db.lock().unwrap();
+        finish_task(
+            &conn,
+            &self.scan_id,
+            &self.scanner_name,
+            &self.task_name,
+            if is_error {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Completed
+            },
+            Some(gage_core::datetime::now_ms()),
+            None,
+        )?;
         set_agent_summary(&conn, &self.scan_id, &summary)
     }
 }
@@ -54,7 +72,7 @@ impl InteractiveRun {
 /// Evaluate and run `fn_name` from `scanner`.
 ///
 /// Registers a proxy scan over `selected` (scan row + `scan_session`
-/// edges, no `scan_scanner` row) and executes the def inside a scan
+/// edges) and executes the def inside a scan
 /// context scoped to it — `scan().id` resolves, and the def opts tools
 /// into the scan explicitly via `.scan(..)`. When the run completes an
 /// [`AgentRunSummary`] is written to the proxy scan's metadata.
@@ -124,9 +142,31 @@ pub async fn run_agent_def(
         }
     });
 
+    // The proxy scan's single task, named `agent:<fn>` to mark it as
+    // an agent run rather than a scanner task. `ScanContext.task_name`
+    // uses the same string so the `task_agent` rows written by
+    // `call_agent` reference this row.
+    let task_name = format!("agent:{fn_name}");
+    {
+        let conn = db.lock().unwrap();
+        insert_task(
+            &conn,
+            &ScanTask {
+                scan_id: run.scan_id.clone(),
+                scanner_name: slot.name.clone(),
+                scanner_version: scanner.def.version.clone(),
+                task_name: task_name.clone(),
+                status: TaskStatus::Started,
+                started: Some(gage_core::datetime::now_ms()),
+                stopped: None,
+                error: None,
+            },
+        )?;
+    }
+
     let ctx = Arc::new(ScanContext {
         scanner_name: slot.name.clone(),
-        task_name: fn_name.to_string(),
+        task_name: task_name.clone(),
         params: slot.params.clone(),
         run: run.clone(),
         db: slot.db.clone(),
@@ -139,6 +179,7 @@ pub async fn run_agent_def(
     let agent = format!("{}::{fn_name}", slot.name);
     let started = std::time::Instant::now();
     let fn_name = fn_name.to_string();
+    let task_name_scope = task_name.clone();
     let slot_scope = slot.clone();
     let run_scope = run.clone();
     let agent_scope = agent.clone();
@@ -161,6 +202,8 @@ pub async fn run_agent_def(
                     db: db_scope,
                     scan_id: run_scope.scan_id.clone(),
                     agent: agent_scope,
+                    scanner_name: slot_scope.name.clone(),
+                    task_name: task_name_scope,
                     started,
                     _run: run_scope,
                     _slot: slot_scope,
@@ -180,12 +223,26 @@ pub async fn run_agent_def(
     // Interactive runs outlive this call; the summary is written by
     // `InteractiveRun::finish` when the session ends.
     if let Ok(AgentDefOutcome::Headless(result)) = &outcome {
+        let is_error = result.is_error || result.exit_code != 0;
         let summary = AgentRunSummary {
             agent,
             elapsed_ms: started.elapsed().as_millis() as u64,
-            is_error: result.is_error || result.exit_code != 0,
+            is_error,
         };
         let conn = db.lock().unwrap();
+        finish_task(
+            &conn,
+            &run.scan_id,
+            &slot.name,
+            &task_name,
+            if is_error {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Completed
+            },
+            Some(gage_core::datetime::now_ms()),
+            None,
+        )?;
         set_agent_summary(&conn, &run.scan_id, &summary)?;
     }
     outcome

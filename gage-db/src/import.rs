@@ -307,9 +307,17 @@ const TABLES: &[TableSpec] = &[
                                    WHERE d.scan_id = s.scan_id AND d.session_id = s.session_id)",
     },
     TableSpec {
-        name: "scan_scanner",
+        name: "scan_task",
         accepted: "s.scan_id IN (SELECT id FROM accepted_scan) \
-                   AND s.id NOT IN (SELECT id FROM scan_scanner)",
+                   AND NOT EXISTS (SELECT 1 FROM scan_task d \
+                                   WHERE d.scan_id = s.scan_id \
+                                     AND d.scanner_name = s.scanner_name \
+                                     AND d.task_name = s.task_name)",
+    },
+    TableSpec {
+        name: "task_agent",
+        accepted: "s.scan_id IN (SELECT id FROM accepted_scan) \
+                   AND s.session_id NOT IN (SELECT session_id FROM task_agent)",
     },
 ];
 

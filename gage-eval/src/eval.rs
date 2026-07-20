@@ -87,7 +87,7 @@ pub struct Test {
     /// SQL executed against this test's fresh `gage.db` before the
     /// prompt runs. The schema is whatever the current `gage-db`
     /// migration produces — insert directly into `note`, `issue`,
-    /// `scan_scanner`, etc.
+    /// `scan_task`, etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db_init: Option<String>,
 }

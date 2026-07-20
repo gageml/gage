@@ -228,7 +228,7 @@ async fn main() {
                     unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &dir) };
                 }
                 match command {
-                    cmd_session::SessionCommand::List(args) => cmd_session::list(args).await,
+                    cmd_session::SessionCommand::List(args) => cmd_session::list(args, agent).await,
                     cmd_session::SessionCommand::Delete(args) => cmd_session::delete(args).await,
                     cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
                     cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),

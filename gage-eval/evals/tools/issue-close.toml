@@ -16,8 +16,8 @@ completed with message 'Set thinking display to summarized'.
 
 db_init = """
 INSERT INTO scan (id, created) VALUES ('s1', 0);
-INSERT INTO scan_scanner (id, scan_id, scanner_name, scanner_version)
-  VALUES ('sc1', 's1', 'hidden-thinking', '1');
+INSERT INTO scan_task (scan_id, scanner_name, scanner_version, task_name, status)
+  VALUES ('s1', 'hidden-thinking', '1', 'find', 'completed');
 INSERT INTO issue (id, name, target, title, status, created, author)
   VALUES ('i-open-1', 'thinking.empty', '',
           'Thinking blocks hidden in recent session',
@@ -62,8 +62,8 @@ List the open issues and skip the thinking-blocks issue with message
 
 db_init = """
 INSERT INTO scan (id, created) VALUES ('s1', 0);
-INSERT INTO scan_scanner (id, scan_id, scanner_name, scanner_version)
-  VALUES ('sc1', 's1', 'hidden-thinking', '1');
+INSERT INTO scan_task (scan_id, scanner_name, scanner_version, task_name, status)
+  VALUES ('s1', 'hidden-thinking', '1', 'find', 'completed');
 INSERT INTO issue (id, name, target, title, status, created, author)
   VALUES ('i-open-1', 'thinking.empty', '',
           'Thinking blocks hidden in recent session',

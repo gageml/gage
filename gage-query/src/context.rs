@@ -165,6 +165,27 @@ async fn build_context(
         .unwrap();
     ctx.register_table("note_doc", note_doc_table().unwrap())
         .unwrap();
+
+    // Agent sessions — `call_agent` transcripts under
+    // `<gage_home>/claude/`. Same directory layout as the Claude
+    // projects dir, so the session provider works unchanged; the
+    // `project` column carries the agent name and `task_agent.
+    // session_id` joins on `id`. Own store + cache origin so the two
+    // corpora never share an index (see `default_cache_dir`). When the
+    // context is already rooted at the agent corpus (`gage session
+    // --agent`), reuse the existing store.
+    let agent_root = gage_core::config::gage_home().join("claude");
+    let agent_store = if agent_root == root {
+        store
+    } else {
+        Arc::new(IndexStore::new(
+            agent_root.clone(),
+            default_cache_dir(&agent_root),
+        ))
+    };
+    ctx.register_table("agent_session", Arc::new(SessionTable::new(agent_store)))
+        .unwrap();
+
     ctx
 }
 

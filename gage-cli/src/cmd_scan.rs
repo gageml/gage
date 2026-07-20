@@ -225,10 +225,10 @@ fn list(args: ScanListArgs) {
 }
 
 fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::Result<Vec<String>> {
-    let tasks = scanner_task_outcomes(conn, &run.id)?;
+    let tasks = scan::tasks_for_scan(conn, &run.id)?;
     let errors = tasks
         .iter()
-        .filter(|(_, t)| t.status == scan::TaskStatus::Failed)
+        .filter(|t| t.status == scan::TaskStatus::Failed)
         .count();
     let sessions = scan::session_ids_for_scan(conn, &run.id)?.len();
     let notes = scan::note_ids_for_scan(conn, &run.id)?.len();
@@ -247,29 +247,6 @@ fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::R
         duration,
         crate::human::format_elapsed_ms(run.created),
     ])
-}
-
-/// Task outcomes recorded for a scan, paired with the scanner that ran
-/// them. A scanner that never recorded metadata (interrupted scan)
-/// contributes no tasks.
-fn scanner_task_outcomes(
-    conn: &gage_db::rusqlite::Connection,
-    scan_id: &str,
-) -> anyhow::Result<Vec<(String, scan::TaskOutcome)>> {
-    let mut outcomes = Vec::new();
-    for scanner in scan::get_scanners_for_scan(conn, scan_id)? {
-        let Some(meta) = scanner.metadata.as_deref() else {
-            continue;
-        };
-        let recorded: scan::ScannerTasks = serde_json::from_str(meta)?;
-        outcomes.extend(
-            recorded
-                .tasks
-                .into_iter()
-                .map(|t| (scanner.scanner_name.clone(), t)),
-        );
-    }
-    Ok(outcomes)
 }
 
 /// Scan-run summary from `scan.metadata`. None when the run never
@@ -352,11 +329,11 @@ fn pick_scan(conn: &gage_db::rusqlite::Connection) -> std::io::Result<Option<Str
     }
 }
 
-/// Assemble a [`ScanModel`] for a completed scan from the db: task
-/// outcomes from `scan_scanner.metadata`, the run summary from
-/// `scan.metadata`, and sessions/notes/issues from the scan's edge
-/// tables. A scan that never completed has no metadata; its tasks
-/// table is empty and the header shows no progress.
+/// Assemble a [`ScanModel`] for a completed scan from the db: tasks
+/// from `scan_task`, the run summary from `scan.metadata`, and
+/// sessions/notes/issues from the scan's edge tables. A scan that
+/// never completed has no summary metadata; the header shows no
+/// progress and non-terminal tasks render in their last known state.
 fn load_scan_model(
     conn: &gage_db::rusqlite::Connection,
     prefix: &str,
@@ -367,19 +344,24 @@ fn load_scan_model(
     let run = scan::get_scan(conn, prefix)?;
     let summary = scan_summary(&run)?;
 
-    let tasks: Vec<TaskItem> = scanner_task_outcomes(conn, &run.id)?
+    let tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
         .into_iter()
-        .map(|(scanner, t)| TaskItem {
+        .map(|t| TaskItem {
             id: TaskId {
-                scanner,
-                task: t.name,
+                scanner: t.scanner_name,
+                task: t.task_name,
             },
             state: match t.status {
+                scan::TaskStatus::Pending => TaskState::Pending,
+                scan::TaskStatus::Started => TaskState::Running,
                 scan::TaskStatus::Completed => TaskState::Completed,
                 scan::TaskStatus::Failed => TaskState::Error,
                 scan::TaskStatus::Skipped => TaskState::Skipped,
             },
-            elapsed: t.elapsed_ms.map(Duration::from_millis),
+            elapsed: match (t.started, t.stopped) {
+                (Some(a), Some(b)) => Some(Duration::from_millis(b.saturating_sub(a) as u64)),
+                _ => None,
+            },
             started: None,
             progress: None,
         })
@@ -816,12 +798,7 @@ fn rerun_args(
     prefix: &str,
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
     let run = scan::get_scan(conn, prefix)?;
-    let mut scanners: Vec<String> = scan::get_scanners_for_scan(conn, &run.id)?
-        .into_iter()
-        .map(|s| s.scanner_name)
-        .collect();
-    scanners.sort();
-    scanners.dedup();
+    let scanners = scan::scanner_names_for_scan(conn, &run.id)?;
     if scanners.is_empty() {
         anyhow::bail!("scan {} has no scanners", short_uuid(&run.id));
     }
