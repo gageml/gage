@@ -151,6 +151,8 @@ pub struct IssueItem {
     /// Creation time display string
     pub created: String,
     pub description: Option<String>,
+    /// Ids of sessions linked to the issue
+    pub sessions: Vec<String>,
     pub evidence: Vec<EvidenceItem>,
     pub events: Vec<EventItem>,
 }
@@ -1716,16 +1718,37 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 
 fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let selected = state.issues.selected_index();
+    // Wide enough for one short id plus half of a second — a clue that
+    // more sessions are linked without ceding width to the full list
+    const SESSIONS_CAP: usize = 13;
+    let session_cells: Vec<String> = state
+        .model
+        .issues
+        .iter()
+        .map(|i| {
+            let ids: Vec<String> = i.sessions.iter().map(|s| short_id(s)).collect();
+            ids.join(" ")
+        })
+        .collect();
+    let sessions_width = session_cells
+        .iter()
+        .map(|c| c.width())
+        .max()
+        .unwrap_or(0)
+        .max("Sessions".width())
+        .min(SESSIONS_CAP);
     let rows: Vec<Row> = state
         .model
         .issues
         .iter()
+        .zip(&session_cells)
         .enumerate()
-        .map(|(idx, i)| {
+        .map(|(idx, (i, sessions))| {
             Row::new(vec![
                 Cell::from(id_span(&i.id, selected == Some(idx))),
                 Cell::from(i.name.clone()),
                 Cell::from(i.title.clone()),
+                Cell::from(ellipsize(sessions, sessions_width)),
             ])
         })
         .collect();
@@ -1735,13 +1758,21 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         state.model.issues.iter().map(|i| i.name.as_str()),
         area,
     );
-    let table = Table::new(rows, [Constraint::Length(8), name_col, Constraint::Fill(1)])
-        .header(header_row(["Id", "Name", "Title"]))
-        .row_highlight_style(styles::Panel::selection(state.focus == Focus::Issues))
-        .block(panel_block(
-            format!(" Issues ({count}) "),
-            state.focus == Focus::Issues,
-        ));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            name_col,
+            Constraint::Fill(1),
+            Constraint::Length(sessions_width as u16),
+        ],
+    )
+    .header(header_row(["Id", "Name", "Title", "Sessions"]))
+    .row_highlight_style(styles::Panel::selection(state.focus == Focus::Issues))
+    .block(panel_block(
+        format!(" Issues ({count}) "),
+        state.focus == Focus::Issues,
+    ));
     state
         .issues
         .render(frame, area, table, count, state.focus == Focus::Issues);
@@ -1793,6 +1824,22 @@ fn panel_block(title: String, active: bool) -> Block<'static> {
 
 fn header_row<const N: usize>(names: [&'static str; N]) -> Row<'static> {
     Row::new(names.map(|n| Cell::from(Span::styled(n, styles::Text::dim()))))
+}
+
+/// Truncate to `width` cells, marking the cut with a trailing ellipsis.
+fn ellipsize(s: &str, width: usize) -> String {
+    if s.width() <= width {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        if out.width() + c.width().unwrap_or(0) > width.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
 }
 
 fn short_id(id: &str) -> String {

@@ -521,6 +521,7 @@ fn load_scan_results(
             author: i.author.clone(),
             created: gage_core::datetime::ms_to_iso8601(i.created),
             description: i.description.clone(),
+            sessions: gage_db::issue::issue_sessions(conn, &i.id)?,
             evidence,
             events,
         });
