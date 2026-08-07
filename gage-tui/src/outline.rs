@@ -7,7 +7,6 @@
 use std::collections::HashSet;
 
 pub struct Outline {
-    session_expanded: bool,
     entry_expanded: HashSet<usize>,
     /// `entry_note_ids[i]` is the ordered list of note ids attached to entry
     /// `i`'s line. Mutated when notes are added or removed; outline rebuilds
@@ -39,7 +38,6 @@ pub enum CollapseOutcome {
 impl Outline {
     pub fn new(entry_note_ids: Vec<Vec<String>>) -> Self {
         let mut o = Self {
-            session_expanded: true,
             entry_expanded: HashSet::new(),
             entry_note_ids,
             visible: Vec::new(),
@@ -141,9 +139,7 @@ impl Outline {
             return;
         };
         match &row.kind {
-            RowKind::Session => {
-                self.session_expanded = expanded;
-            }
+            RowKind::Session => return,
             RowKind::Entry { index } => {
                 let index = *index;
                 if expanded {
@@ -177,32 +173,30 @@ impl Outline {
         let mut rows = Vec::with_capacity(1 + entry_count);
         rows.push(Row {
             level: 1,
-            has_children: entry_count > 0,
-            expanded: self.session_expanded,
+            has_children: false,
+            expanded: false,
             kind: RowKind::Session,
         });
-        if self.session_expanded {
-            for (i, notes) in self.entry_note_ids.iter().enumerate() {
-                let has_children = !notes.is_empty();
-                let expanded = has_children && self.entry_expanded.contains(&i);
-                rows.push(Row {
-                    level: 2,
-                    has_children,
-                    expanded,
-                    kind: RowKind::Entry { index: i },
-                });
-                if expanded {
-                    for id in notes {
-                        rows.push(Row {
-                            level: 3,
-                            has_children: false,
-                            expanded: false,
-                            kind: RowKind::Note {
-                                entry_index: i,
-                                note_id: id.clone(),
-                            },
-                        });
-                    }
+        for (i, notes) in self.entry_note_ids.iter().enumerate() {
+            let has_children = !notes.is_empty();
+            let expanded = has_children && self.entry_expanded.contains(&i);
+            rows.push(Row {
+                level: 1,
+                has_children,
+                expanded,
+                kind: RowKind::Entry { index: i },
+            });
+            if expanded {
+                for id in notes {
+                    rows.push(Row {
+                        level: 2,
+                        has_children: false,
+                        expanded: false,
+                        kind: RowKind::Note {
+                            entry_index: i,
+                            note_id: id.clone(),
+                        },
+                    });
                 }
             }
         }

@@ -1,4 +1,4 @@
-use gage::{AgentRunner, Progress, Template, tools::Query, call_agent, scan, write_issue};
+use gage::{AgentRunner, Progress, Template, tools::Query, call_agent, query, scan, write_issue};
 
 pub const SCANNER = #{
     name: "rust-code-review",
@@ -15,7 +15,14 @@ pub async fn issues() {
         .sessions()
         .split_valid(REVIEW_KEY)
         .await?;
+    let queued = 0;
     for s in sessions {
+        // Skip sessions where the assistant wrote no Rust code
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            validate(s).await?;
+            continue
+        }
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
             call_agent(prompt)
@@ -23,8 +30,9 @@ pub async fn issues() {
                 .tools(#{ issue: issue_tooldef() }),
             #{ session: s.id },
         );
+        queued += 1;
     }
-    let p = Progress::new(sessions.len());
+    let p = Progress::new(queued);
     let results = runner.start();
     loop {
         match results.next().await {
@@ -37,6 +45,29 @@ pub async fn issues() {
         }
     }
     Ok(())
+}
+
+async fn skip_session(s) {
+    // Use query instead of iterating over messages to keep scanner
+    // memory use down. Rust code written by the assistant shows up as
+    // Edit/Write tool calls with a .rs file_path.
+    let result = query(
+        format!(
+            "SELECT count(*) AS n FROM message \
+            WHERE session_id = '{}' \
+            AND type = 'assistant' AND subtype = 'tool_use' \
+            AND regexp_like(raw, '\"file_path\"\\s*:\\s*\"[^\"]*\\.rs\"') \
+            AND regexp_like(raw, '\"name\"\\s*:\\s*\"(Edit|Write|MultiEdit)\"')",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ n } = result.get(0).expect("should return one row");
+    if n == 0 {
+        Ok(Some("no Rust code written"))
+    } else {
+        Ok(None)
+    }
 }
 
 fn issue_tooldef() {

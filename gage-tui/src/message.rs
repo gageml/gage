@@ -9,6 +9,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
+use crate::attrs::attr_lines;
 use crate::markdown;
 use crate::styles;
 
@@ -21,6 +22,9 @@ pub fn render(message: &Value) -> Vec<Line<'static>> {
         Value::String(text) => append_plain(&mut out, text, Style::new()),
         Value::Array(blocks) => {
             for block in blocks {
+                if !out.is_empty() {
+                    out.push(Line::raw(""));
+                }
                 append_block(&mut out, block);
             }
         }
@@ -40,7 +44,6 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
             }
         }
         "thinking" => {
-            push_header(out, "[thinking]", styles::Text::dim());
             let text = block.get("thinking").and_then(Value::as_str).unwrap_or("");
             if !text.is_empty() {
                 append_plain(out, text, styles::Text::dim());
@@ -48,8 +51,9 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
         }
         "tool_use" => {
             let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-            push_header(out, &format!("[tool_use: {name}]"), styles::Text::dim());
+            out.extend(attr_lines(&[("Tool", name)]));
             if let Some(input) = block.get("input") {
+                out.push(Line::raw(""));
                 let pretty =
                     serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
                 append_plain(out, &pretty, Style::new());
@@ -57,19 +61,20 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
         }
         "tool_reference" => {
             let name = block.get("tool_name").and_then(Value::as_str).unwrap_or("");
-            push_header(out, &format!("- tool_name: {name}"), styles::Text::dim());
+            out.extend(attr_lines(&[("Tool", name)]));
         }
         "tool_result" => {
             let is_error = block
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let (label, style) = if is_error {
-                ("[tool_result error]", Style::new().fg(Color::Red))
-            } else {
-                ("[tool_result]", styles::Text::dim())
-            };
-            push_header(out, label, style);
+            if is_error {
+                out.push(Line::from(vec![
+                    Span::styled("Status  ", styles::Text::dim()),
+                    Span::styled("error", Style::new().fg(Color::Red)),
+                ]));
+                out.push(Line::raw(""));
+            }
             match block.get("content") {
                 Some(Value::String(text)) => append_maybe_json(out, text, Style::new()),
                 Some(Value::Array(blocks)) => {
@@ -81,12 +86,9 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &Value) {
             }
         }
         other => {
-            let label = if other.is_empty() {
-                "[block]".to_string()
-            } else {
-                format!("[{other}]")
-            };
-            push_header(out, &label, styles::Text::dim());
+            if !other.is_empty() {
+                out.extend(attr_lines(&[("Type", other)]));
+            }
         }
     }
 }
@@ -102,10 +104,6 @@ fn append_tool_result_block(out: &mut Vec<Line<'static>>, block: &Value) {
     } else {
         append_block(out, block);
     }
-}
-
-fn push_header(out: &mut Vec<Line<'static>>, label: &str, style: Style) {
-    out.push(Line::from(Span::styled(label.to_string(), style)));
 }
 
 /// Returns true when `text`, after trimming, is fully enclosed in a matching

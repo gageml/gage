@@ -321,7 +321,7 @@ pub async fn list(args: SessionListArgs, agent: bool) {
             } else {
                 format_model(models.value(i))
             };
-            let mut row = vec![id_display, project, title, modified, size, model, count];
+            let mut row = vec![id_display, project, title, model, modified, size, count];
             if args.stats {
                 let (time, tin, tout, tcache, turns) =
                     match gage_claude::stats::compute_session_stats(std::path::Path::new(
@@ -347,7 +347,7 @@ pub async fn list(args: SessionListArgs, agent: bool) {
     }
 
     let mut header: Vec<String> = [
-        "Id", "Project", "Title", "Modified", "Size", "Model", "Messages",
+        "Id", "Project", "Title", "Model", "Modified", "Size", "Messages",
     ]
     .iter()
     .map(|s| s.to_string())

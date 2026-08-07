@@ -706,7 +706,7 @@ fn row_to_item(
     };
     let prefix = Span::raw(format!("{indent}{glyph}"));
     let line = match &row.kind {
-        RowKind::Session => Line::from(vec![prefix, Span::raw(doc.session.id.clone())]),
+        RowKind::Session => Line::from(vec![prefix, Span::raw("<Summary>")]),
         RowKind::Entry { index } => {
             let kind = doc
                 .entries

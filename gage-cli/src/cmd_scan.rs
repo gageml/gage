@@ -518,6 +518,10 @@ fn load_scan_results(
                 Some(r) => format!("{} ({})", i.status.as_str(), r.as_str()),
                 None => i.status.as_str().to_string(),
             },
+            status_cell: match i.status_reason {
+                Some(r) => r.as_str().to_string(),
+                None => i.status.as_str().to_string(),
+            },
             author: i.author.clone(),
             created: gage_core::datetime::ms_to_iso8601(i.created),
             description: i.description.clone(),

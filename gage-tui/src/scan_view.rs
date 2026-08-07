@@ -146,8 +146,11 @@ pub struct IssueItem {
     pub id: String,
     pub name: String,
     pub title: String,
-    /// Status display string, e.g. `open` or `closed (resolved)`
+    /// Status display string, e.g. `open` or `closed (completed)`
     pub status: String,
+    /// Compact status for the issues table: the close reason when one
+    /// is recorded (a reason implies closed), otherwise the status
+    pub status_cell: String,
     pub author: String,
     /// Creation time display string
     pub created: String,
@@ -403,7 +406,7 @@ async fn event_loop(
                         if key.kind == KeyEventKind::Press
                             && handle_key(&mut state, key) => break,
                     // Input thread died (terminal input unavailable);
-                    // without keys the view can never be dismissed, so
+                    // without keys the view can never be backed, so
                     // exit rather than trap the user.
                     None => break,
                     _ => {}
@@ -483,6 +486,10 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
                 KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
                 KeyCode::Right => state.step_dialog_item(1),
                 KeyCode::Left => state.step_dialog_item(-1),
+                KeyCode::Char('i') if matches!(state.dialog, Dialog::Session { .. }) => {
+                    state.notes_mode = !state.notes_mode;
+                    state.scroll_view.reset();
+                }
                 _ => {}
             }
             return false;
@@ -521,14 +528,23 @@ enum Focus {
 
 /// Content-fit column width: widest value (or the header), capped at a
 /// third of the panel so one long value can't starve the fill columns.
-fn fit_col<'a>(header: &str, values: impl Iterator<Item = &'a str>, area: Rect) -> Constraint {
+fn fit_col<'a>(header: &str, values: impl Iterator<Item = &'a str>, area: Rect) -> u16 {
     let widest = values
         .map(|v| v.width())
         .max()
         .unwrap_or(0)
         .max(header.width());
     let cap = (area.width / 3) as usize;
-    Constraint::Length(widest.min(cap) as u16)
+    widest.min(cap) as u16
+}
+
+/// Rendered width of a table's single fill column: the panel interior
+/// (borders excluded) minus the fixed column widths and one column gap
+/// per fixed column.
+fn fill_width(area: Rect, fixed: &[u16]) -> usize {
+    let inner = area.width.saturating_sub(2) as usize;
+    let fixed_total: usize = fixed.iter().map(|w| *w as usize).sum::<usize>() + fixed.len();
+    inner.saturating_sub(fixed_total)
 }
 
 const LOG_CAP: usize = 500;
@@ -548,6 +564,9 @@ struct ViewState {
     scan_done_pending: bool,
     /// Scroll state and layout cache for the open content dialog
     scroll_view: ScrollView,
+    /// Session dialog issues/notes mode: show the session's issues and
+    /// notes, with only the annotated messages as context
+    notes_mode: bool,
 }
 
 enum Dialog {
@@ -593,6 +612,7 @@ impl ViewState {
             dialog: Dialog::None,
             scan_done_pending: false,
             scroll_view: ScrollView::new(),
+            notes_mode: false,
             model,
         };
         state.sync_tables();
@@ -907,6 +927,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         dialog,
         scroll_view,
         model,
+        notes_mode,
         ..
     } = state;
     match dialog {
@@ -918,12 +939,12 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         }
         Dialog::Issue { issue } => {
             scroll_view.render_modal(frame, format!(" Issue {} ", issue.id), |width| {
-                vec![issue_lines(issue, width as usize)]
+                vec![issue_lines(issue, width as usize, true)]
             })
         }
         Dialog::Session { id, content } => {
             scroll_view.render_modal(frame, format!(" Session {id} "), |width| {
-                session_sections(content, width as usize)
+                session_sections(content, width as usize, *notes_mode)
             })
         }
         Dialog::Log { content, .. } => {
@@ -951,8 +972,10 @@ fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
     lines
 }
 
-/// Issue detail content, mirroring `gage issue show`.
-fn issue_lines(issue: &IssueItem, width: usize) -> Vec<Line<'static>> {
+/// Issue detail content, mirroring `gage issue show`. `related` adds
+/// the Notes and Issue history sections; the session dialog omits them
+/// to keep its embedded issues compact.
+fn issue_lines(issue: &IssueItem, width: usize, related: bool) -> Vec<Line<'static>> {
     let mut lines = attr_lines(&[
         ("Name", &issue.name),
         ("Status", &issue.status),
@@ -966,42 +989,39 @@ fn issue_lines(issue: &IssueItem, width: usize) -> Vec<Line<'static>> {
         lines.extend(markdown::render(description));
     }
 
+    if !related {
+        return lines;
+    }
+
     if !issue.evidence.is_empty() {
         let mut content: Vec<Line<'static>> = Vec::new();
-        for (i, ev) in issue.evidence.iter().enumerate() {
-            if i > 0 {
-                content.push(Line::raw(""));
-            }
-            content.extend(attr_lines(&[
-                ("Id", &ev.id),
-                ("Name", &ev.name),
-                ("Target", &ev.target),
-            ]));
-            content.push(Line::raw(""));
-            content.extend(
+        for ev in &issue.evidence {
+            let mut entry =
+                attr_lines(&[("Id", &ev.id), ("Name", &ev.name), ("Target", &ev.target)]);
+            entry.push(Line::raw(""));
+            entry.extend(
                 ev.value
                     .lines()
                     .map(|l| Line::from(Span::styled(l.to_string(), styles::Text::accent()))),
             );
+            content.extend(content_box(entry, styles::Text::dim(), width));
         }
         bar_section(&mut lines, "Notes", content, width);
     }
 
     if !issue.events.is_empty() {
         let mut content: Vec<Line<'static>> = Vec::new();
-        for (i, ev) in issue.events.iter().enumerate() {
-            if i > 0 {
-                content.push(Line::raw(""));
-            }
-            content.extend(attr_lines(&[
+        for ev in &issue.events {
+            let mut entry = attr_lines(&[
                 ("Change", &ev.kind),
                 ("Author", &ev.author),
                 ("Created", &ev.timestamp),
-            ]));
+            ]);
             if let Some(message) = &ev.message {
-                content.push(Line::raw(""));
-                content.extend(message.lines().map(|l| Line::raw(l.to_string())));
+                entry.push(Line::raw(""));
+                entry.extend(message.lines().map(|l| Line::raw(l.to_string())));
             }
+            content.extend(content_box(entry, styles::Text::dim(), width));
         }
         bar_section(&mut lines, "Issue history", content, width);
     }
@@ -1074,8 +1094,8 @@ fn session_content(
     let mut content = SessionContent {
         intro: attr_lines(&[
             ("Title", &session.title),
-            ("Notes", &notes),
             ("Issues", &issues),
+            ("Notes", &notes),
         ]),
         sections: Vec::new(),
         issues: session_issues,
@@ -1132,39 +1152,58 @@ fn session_content(
     content
 }
 
-/// Session dialog sections: intro (header attributes), the session's
-/// issues, the session-level notes, one section per message — a
-/// full-width header bar (dim line number, label, one column of inner
-/// padding each side) over a blank line, the rendered body, and the
-/// section's notes — and any trailing notice. Consecutive boxes stack
-/// border-to-border; a blank line only separates a run of boxes from
-/// what precedes it.
-fn session_sections(content: &SessionContent, width: usize) -> Vec<Vec<Line<'static>>> {
+/// Session dialog sections: intro (header attributes), one section per
+/// message — a full-width header bar (dim line number, label, one
+/// column of inner padding each side) over a blank line and the
+/// rendered body — and any trailing notice. With `notes_mode` on, the
+/// session's issues and session-level notes render after the intro,
+/// each section carries its notes, and sections without notes are
+/// omitted; off shows every message and no note/issue boxes.
+/// Consecutive boxes stack border-to-border; a blank line only
+/// separates a run of boxes from what precedes it.
+fn session_sections(
+    content: &SessionContent,
+    width: usize,
+    notes_mode: bool,
+) -> Vec<Vec<Line<'static>>> {
     let mut out = Vec::with_capacity(content.sections.len() + 2);
-    out.push(content.intro.clone());
-    for (i, issue) in content.issues.iter().enumerate() {
-        let mut lines = if i == 0 { vec![Line::raw("")] } else { vec![] };
-        lines.extend(content_box(
-            issue_lines(issue, width.saturating_sub(4)),
-            styles::Text::issue_border(),
-            width,
-        ));
-        out.push(lines);
-    }
-    for (i, note) in content.notes.iter().enumerate() {
-        let mut lines = if i == 0 && content.issues.is_empty() {
-            vec![Line::raw("")]
-        } else {
-            vec![]
-        };
-        lines.extend(content_box(
-            note_lines(note),
-            styles::Text::note_border(),
-            width,
-        ));
-        out.push(lines);
+    let mut intro = content.intro.clone();
+    let hint = if notes_mode {
+        "i to hide issues/notes"
+    } else {
+        "i to view issues/notes"
+    };
+    intro.push(Line::raw(""));
+    intro.push(Line::from(Span::styled(hint, styles::Text::dim())));
+    out.push(intro);
+    if notes_mode {
+        for (i, issue) in content.issues.iter().enumerate() {
+            let mut lines = if i == 0 { vec![Line::raw("")] } else { vec![] };
+            lines.extend(content_box(
+                issue_lines(issue, width.saturating_sub(4), false),
+                styles::Text::issue_border(),
+                width,
+            ));
+            out.push(lines);
+        }
+        for (i, note) in content.notes.iter().enumerate() {
+            let mut lines = if i == 0 && content.issues.is_empty() {
+                vec![Line::raw("")]
+            } else {
+                vec![]
+            };
+            lines.extend(content_box(
+                note_lines(note),
+                styles::Text::note_border(),
+                width,
+            ));
+            out.push(lines);
+        }
     }
     for section in &content.sections {
+        if notes_mode && section.notes.is_empty() {
+            continue;
+        }
         let number = format!(" {} ", section.line_num);
         let label_width = width.saturating_sub(number.width());
         let mut lines = vec![
@@ -1179,15 +1218,17 @@ fn session_sections(content: &SessionContent, width: usize) -> Vec<Vec<Line<'sta
             Line::raw(""),
         ];
         lines.extend(section.body.iter().cloned());
-        for (i, note) in section.notes.iter().enumerate() {
-            if i == 0 {
-                lines.push(Line::raw(""));
+        if notes_mode {
+            for (i, note) in section.notes.iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::raw(""));
+                }
+                lines.extend(content_box(
+                    note_lines(note),
+                    styles::Text::note_border(),
+                    width,
+                ));
             }
-            lines.extend(content_box(
-                note_lines(note),
-                styles::Text::note_border(),
-                width,
-            ));
         }
         out.push(lines);
     }
@@ -1394,9 +1435,9 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
         lines.push(Line::raw(format!("  {label:<9} {n:>value_width$}")).left_aligned());
     }
     let hint = if model.out_path.is_some() {
-        "q/Enter dismiss · l log"
+        "q/Enter back · l log"
     } else {
-        "q/Enter dismiss"
+        "q/Enter back"
     };
     dialog::draw_lines(frame, lines, hint);
 }
@@ -1565,14 +1606,13 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .collect();
     let count = rows.len();
     // Widen for the "<glyph> " prefix on each scanner cell
-    let scanner_col = match fit_col(
-        "Scanner",
-        state.model.tasks.iter().map(|t| t.id.scanner.as_str()),
-        area,
-    ) {
-        Constraint::Length(w) => Constraint::Length(w + 2),
-        c => c,
-    };
+    let scanner_col = Constraint::Length(
+        fit_col(
+            "Scanner",
+            state.model.tasks.iter().map(|t| t.id.scanner.as_str()),
+            area,
+        ) + 2,
+    );
     let table = Table::new(
         rows,
         [
@@ -1671,21 +1711,6 @@ fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 
 fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let selected = state.notes.selected_index();
-    let rows: Vec<Row> = state
-        .model
-        .notes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| {
-            Row::new(vec![
-                Cell::from(id_span(&n.id, selected == Some(i))),
-                Cell::from(n.name.clone()),
-                Cell::from(n.value.clone()),
-                Cell::from(n.target_cell.clone()),
-            ])
-        })
-        .collect();
-    let count = rows.len();
     let name_col = fit_col(
         "Name",
         state.model.notes.iter().map(|n| n.name.as_str()),
@@ -1696,13 +1721,29 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         state.model.notes.iter().map(|n| n.target_cell.as_str()),
         area,
     );
+    let value_width = fill_width(area, &[8, name_col, target_col]);
+    let rows: Vec<Row> = state
+        .model
+        .notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            Row::new(vec![
+                Cell::from(id_span(&n.id, selected == Some(i))),
+                Cell::from(n.name.clone()),
+                Cell::from(ellipsize(&n.value, value_width)),
+                Cell::from(n.target_cell.clone()),
+            ])
+        })
+        .collect();
+    let count = rows.len();
     let table = Table::new(
         rows,
         [
             Constraint::Length(8),
-            name_col,
+            Constraint::Length(name_col),
             Constraint::Fill(1),
-            target_col,
+            Constraint::Length(target_col),
         ],
     )
     .header(header_row(["Id", "Name", "Value", "Target"]))
@@ -1737,6 +1778,17 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .unwrap_or(0)
         .max("Sessions".width())
         .min(SESSIONS_CAP);
+    let name_col = fit_col(
+        "Name",
+        state.model.issues.iter().map(|i| i.name.as_str()),
+        area,
+    );
+    let status_col = fit_col(
+        "Status",
+        state.model.issues.iter().map(|i| i.status_cell.as_str()),
+        area,
+    );
+    let title_width = fill_width(area, &[8, name_col, 5, sessions_width as u16, status_col]);
     let rows: Vec<Row> = state
         .model
         .issues
@@ -1751,29 +1803,28 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             Row::new(vec![
                 Cell::from(id_span(&i.id, selected == Some(idx))),
                 Cell::from(i.name.clone()),
-                Cell::from(i.title.clone()),
+                Cell::from(ellipsize(&i.title, title_width)),
                 Cell::from(notes),
                 Cell::from(ellipsize(sessions, sessions_width)),
+                Cell::from(i.status_cell.clone()),
             ])
         })
         .collect();
     let count = rows.len();
-    let name_col = fit_col(
-        "Name",
-        state.model.issues.iter().map(|i| i.name.as_str()),
-        area,
-    );
     let table = Table::new(
         rows,
         [
             Constraint::Length(8),
-            name_col,
+            Constraint::Length(name_col),
             Constraint::Fill(1),
             Constraint::Length(5),
             Constraint::Length(sessions_width as u16),
+            Constraint::Length(status_col),
         ],
     )
-    .header(header_row(["Id", "Name", "Title", "Notes", "Sessions"]))
+    .header(header_row([
+        "Id", "Name", "Title", "Notes", "Sessions", "Status",
+    ]))
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Issues))
     .block(panel_block(
         format!(" Issues ({count}) "),
@@ -1808,17 +1859,11 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
 fn footer_help(state: &ViewState) -> &'static str {
     match state.dialog {
         Dialog::ConfirmQuit | Dialog::ScanDone => "",
-        Dialog::Note { .. } | Dialog::Issue { .. } | Dialog::Session { .. } => {
-            "q close · ↑/↓ scroll · ←/→ next/prev item"
-        }
-        Dialog::Log { .. } => "q close · ↑/↓ scroll",
-        Dialog::None => {
-            if state.model.finished {
-                "scan complete · q quit · Tab cycle · ↑/↓ select · l log"
-            } else {
-                "q quit · Tab cycle · ↑/↓ select · l log"
-            }
-        }
+        Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next note",
+        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next issue",
+        Dialog::Session { .. } => "q back · ↑/↓ scroll · ←/→ prev/next session · i issues/notes",
+        Dialog::Log { .. } => "q back · ↑/↓ scroll",
+        Dialog::None => "q quit · Tab cycle · ↑/↓ select · l log",
     }
 }
 
