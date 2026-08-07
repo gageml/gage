@@ -1,4 +1,5 @@
 mod app;
+mod attrs;
 mod dialog;
 mod doc;
 mod item_table;

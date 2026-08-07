@@ -30,6 +30,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::item_table::ItemTable;
 use crate::scroll::ScrollView;
@@ -916,8 +917,8 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
             })
         }
         Dialog::Issue { issue } => {
-            scroll_view.render_modal(frame, format!(" Issue {} ", issue.id), |_| {
-                vec![issue_lines(issue)]
+            scroll_view.render_modal(frame, format!(" Issue {} ", issue.id), |width| {
+                vec![issue_lines(issue, width as usize)]
             })
         }
         Dialog::Session { id, content } => {
@@ -936,7 +937,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
 /// Note detail content: caption/value header columns, then the value
 /// and explanation rendered as markdown.
 fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
-    let mut lines = header_lines(&[
+    let mut lines = attr_lines(&[
         ("Name", &note.name),
         ("Target", &note.target),
         ("Author", &note.author),
@@ -951,8 +952,8 @@ fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
 }
 
 /// Issue detail content, mirroring `gage issue show`.
-fn issue_lines(issue: &IssueItem) -> Vec<Line<'static>> {
-    let mut lines = header_lines(&[
+fn issue_lines(issue: &IssueItem, width: usize) -> Vec<Line<'static>> {
+    let mut lines = attr_lines(&[
         ("Name", &issue.name),
         ("Status", &issue.status),
         ("Author", &issue.author),
@@ -971,17 +972,19 @@ fn issue_lines(issue: &IssueItem) -> Vec<Line<'static>> {
             if i > 0 {
                 content.push(Line::raw(""));
             }
-            content.push(Line::from(Span::styled(
-                format!("{} · {} · {}", ev.id, ev.name, ev.target),
-                styles::Text::dim(),
-            )));
+            content.extend(attr_lines(&[
+                ("Id", &ev.id),
+                ("Name", &ev.name),
+                ("Target", &ev.target),
+            ]));
+            content.push(Line::raw(""));
             content.extend(
                 ev.value
                     .lines()
                     .map(|l| Line::from(Span::styled(l.to_string(), styles::Text::accent()))),
             );
         }
-        section(&mut lines, "Evidence", content);
+        bar_section(&mut lines, "Notes", content, width);
     }
 
     if !issue.events.is_empty() {
@@ -990,15 +993,17 @@ fn issue_lines(issue: &IssueItem) -> Vec<Line<'static>> {
             if i > 0 {
                 content.push(Line::raw(""));
             }
-            content.push(Line::from(Span::styled(
-                format!("{} · {} · {}", ev.kind, ev.author, ev.timestamp),
-                styles::Text::dim(),
-            )));
+            content.extend(attr_lines(&[
+                ("Change", &ev.kind),
+                ("Author", &ev.author),
+                ("Created", &ev.timestamp),
+            ]));
             if let Some(message) = &ev.message {
+                content.push(Line::raw(""));
                 content.extend(message.lines().map(|l| Line::raw(l.to_string())));
             }
         }
-        section(&mut lines, "Events", content);
+        bar_section(&mut lines, "Issue history", content, width);
     }
 
     lines
@@ -1033,8 +1038,8 @@ struct SessionSection {
 /// Notes from `all_notes` targeting this session are attached: a note
 /// with a line number goes to the last section at or before that line
 /// (session-level if none precedes it), a note without one goes to
-/// the session. Issues from `all_issues` attach when any of their
-/// evidence targets this session — the same attribution rule as the
+/// the session. Issues from `all_issues` attach when the session is in
+/// their recorded session links — the same attribution rule as the
 /// sessions table's issue counts.
 fn session_content(
     session: &SessionItem,
@@ -1043,14 +1048,7 @@ fn session_content(
 ) -> SessionContent {
     let session_issues: Vec<IssueItem> = all_issues
         .iter()
-        .filter(|issue| {
-            issue.evidence.iter().any(|ev| {
-                matches!(
-                    NoteTarget::from_uri(&ev.target),
-                    Ok(NoteTarget::Session(t)) if t.session_id == session.id
-                )
-            })
-        })
+        .filter(|issue| issue.sessions.contains(&session.id))
         .cloned()
         .collect();
 
@@ -1074,7 +1072,7 @@ fn session_content(
     let notes = session.notes.to_string();
     let issues = session.issues.to_string();
     let mut content = SessionContent {
-        intro: header_lines(&[
+        intro: attr_lines(&[
             ("Title", &session.title),
             ("Notes", &notes),
             ("Issues", &issues),
@@ -1147,7 +1145,7 @@ fn session_sections(content: &SessionContent, width: usize) -> Vec<Vec<Line<'sta
     for (i, issue) in content.issues.iter().enumerate() {
         let mut lines = if i == 0 { vec![Line::raw("")] } else { vec![] };
         lines.extend(content_box(
-            issue_lines(issue),
+            issue_lines(issue, width.saturating_sub(4)),
             styles::Text::issue_border(),
             width,
         ));
@@ -1266,27 +1264,29 @@ fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
 
 /// Header attributes as caption/value columns; the caption column pads
 /// to the widest caption.
-fn header_lines(headers: &[(&'static str, &str)]) -> Vec<Line<'static>> {
-    let caption_width = headers.iter().map(|(c, _)| c.width()).max().unwrap_or(0);
-    headers
-        .iter()
-        .map(|(caption, value)| {
-            Line::from(vec![
-                Span::styled(
-                    format!("{caption:<width$}  ", width = caption_width),
-                    styles::Text::dim(),
-                ),
-                Span::raw((*value).to_string()),
-            ])
-        })
-        .collect()
-}
-
 /// A captioned page section separated from what precedes it by a
 /// blank line.
 fn section(lines: &mut Vec<Line<'static>>, caption: &'static str, content: Vec<Line<'static>>) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(caption, styles::Text::dim())));
+    lines.extend(content);
+}
+
+/// Section under a full-width header bar, matching the session
+/// dialog's message headers: one column of inner padding, header
+/// style across the width, a blank line before the content.
+fn bar_section(
+    lines: &mut Vec<Line<'static>>,
+    caption: &'static str,
+    content: Vec<Line<'static>>,
+    width: usize,
+) {
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!(" {caption:<pad$}", pad = width.saturating_sub(1)),
+        styles::Text::header(),
+    )));
+    lines.push(Line::raw(""));
     lines.extend(content);
 }
 
@@ -1744,10 +1744,15 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .zip(&session_cells)
         .enumerate()
         .map(|(idx, (i, sessions))| {
+            let notes = match i.evidence.len() {
+                0 => String::new(),
+                n => n.to_string(),
+            };
             Row::new(vec![
                 Cell::from(id_span(&i.id, selected == Some(idx))),
                 Cell::from(i.name.clone()),
                 Cell::from(i.title.clone()),
+                Cell::from(notes),
                 Cell::from(ellipsize(sessions, sessions_width)),
             ])
         })
@@ -1764,10 +1769,11 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             Constraint::Length(8),
             name_col,
             Constraint::Fill(1),
+            Constraint::Length(5),
             Constraint::Length(sessions_width as u16),
         ],
     )
-    .header(header_row(["Id", "Name", "Title", "Sessions"]))
+    .header(header_row(["Id", "Name", "Title", "Notes", "Sessions"]))
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Issues))
     .block(panel_block(
         format!(" Issues ({count}) "),
