@@ -640,18 +640,27 @@ impl ViewState {
         match self.dialog {
             Dialog::Note { .. } => {
                 let ids: Vec<&str> = self.model.notes.iter().map(|n| n.id.as_str()).collect();
+                let before = self.notes.selected_index();
                 self.notes.select_by(delta, &ids);
-                self.open_selected_note();
+                if self.notes.selected_index() != before {
+                    self.open_selected_note();
+                }
             }
             Dialog::Issue { .. } => {
                 let ids: Vec<&str> = self.model.issues.iter().map(|i| i.id.as_str()).collect();
+                let before = self.issues.selected_index();
                 self.issues.select_by(delta, &ids);
-                self.open_selected_issue();
+                if self.issues.selected_index() != before {
+                    self.open_selected_issue();
+                }
             }
             Dialog::Session { .. } => {
                 let ids: Vec<&str> = self.model.sessions.iter().map(|s| s.id.as_str()).collect();
+                let before = self.sessions.selected_index();
                 self.sessions.select_by(delta, &ids);
-                self.open_selected_session();
+                if self.sessions.selected_index() != before {
+                    self.open_selected_session();
+                }
             }
             _ => {}
         }
