@@ -818,10 +818,10 @@ impl ViewState {
 
     fn cycle_focus(&mut self, dir: isize) {
         self.focus = match (self.focus, dir >= 0) {
-            (Focus::Tasks, true) | (Focus::Notes, false) => Focus::Sessions,
-            (Focus::Sessions, true) | (Focus::Issues, false) => Focus::Notes,
-            (Focus::Notes, true) | (Focus::Tasks, false) => Focus::Issues,
-            (Focus::Issues, true) | (Focus::Sessions, false) => Focus::Tasks,
+            (Focus::Tasks, true) | (Focus::Issues, false) => Focus::Sessions,
+            (Focus::Sessions, true) | (Focus::Notes, false) => Focus::Issues,
+            (Focus::Issues, true) | (Focus::Tasks, false) => Focus::Notes,
+            (Focus::Notes, true) | (Focus::Sessions, false) => Focus::Tasks,
         };
     }
 
@@ -883,7 +883,7 @@ fn sorted_task_ids(model: &ScanModel) -> Vec<String> {
 }
 
 fn draw(frame: &mut Frame, state: &mut ViewState) {
-    let [progress, tasks, sessions, notes, issues, footer] = Layout::vertical([
+    let [progress, tasks, sessions, issues, notes, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(3),
         Constraint::Fill(2),
@@ -895,8 +895,8 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     draw_progress(frame, progress, state);
     draw_tasks(frame, tasks, state);
     draw_sessions(frame, sessions, state);
-    draw_notes(frame, notes, state);
     draw_issues(frame, issues, state);
+    draw_notes(frame, notes, state);
     draw_footer(frame, footer, state);
     // Split borrows: the dialog holds the content, the scroll view
     // holds position and layout cache
@@ -1402,10 +1402,10 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
 fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     let model = &state.model;
     let counts = Line::from(vec![
-        Span::styled("  Notes ", styles::Text::dim()),
-        Span::raw(model.notes.len().to_string()),
         Span::styled("  Issues ", styles::Text::dim()),
         Span::raw(model.issues.len().to_string()),
+        Span::styled("  Notes ", styles::Text::dim()),
+        Span::raw(model.notes.len().to_string()),
         Span::styled("  Errors ", styles::Text::dim()),
         if model.errors > 0 {
             Span::styled(model.errors.to_string(), styles::RunStatus::error())
