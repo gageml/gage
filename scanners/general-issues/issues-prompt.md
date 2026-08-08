@@ -5,20 +5,28 @@ value `finding`
 
 `SELECT * FROM note WHERE name = 'finding'`
 
-Use row pading (`LIMIT` AND `OFFSET`) as needed to manage size limits.
+Use row padding (`LIMIT` AND `OFFSET`) as needed to manage size limits.
 
 Use these notes to review findings for the applicable sessions.
 
 Sessions are identified by their ID in the `target` column in the format
 `session:<session_id>`
 
-Identify systematic underlying issues that explain the findings. You need enough
-evidence across the findings to confidently identify an issue. Not all findings
-imply issues. If a finding repeats across multiple sessions, this is stronger
-evidence than a finding that only appears once. In some cases, a single finding
-may be sufficient to establish an issue with high confidence. The trigger for an
-issue should be confidence based on the quality, quantity and veracity of the
-supporting evidence.
+Identify systematic underlying issues that explain the findings. A problem the
+session itself diagnosed and fixed is not an issue. Models commonly attempt
+changes, run tools or other verification steps, and detect errors. This is a
+normal and effective process and does not typically represent an issue. However,
+if the same error-detection-and-fix cycle repeats itself, it may represent a
+systematic issue that should be reported. Additionally, if the in-session
+correct error, even if only a single instance, is notably egregious (e.g.
+destructive or high risk), report it as an issue.
+
+You need enough evidence across the findings to confidently identify an issue.
+Not all findings imply issues. If a finding repeats across multiple sessions,
+this is stronger evidence than a finding that only appears once. In some cases,
+a single finding may be sufficient to establish an issue with high confidence.
+The trigger for an issue should be confidence based on the quality, quantity and
+veracity of the supporting evidence.
 
 Investigate further as needed by reading the session content directly. Select
 from the `message` table via `mcp__gage__Query`, filtering by

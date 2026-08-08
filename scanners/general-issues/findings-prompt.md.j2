@@ -48,4 +48,9 @@ judgement.
 A tool use error may imply that the assistant has bad instructions or has made a
 mistake. It may imply that the tool itself has issues.
 
-Note that it's common to see
+Note that it's common to see mechanical file-state feedback from the Edit and
+Write tools: "File has not been read yet", "file has been modified, re-read it",
+"String to replace not found in file". These are part of the normal edit cycle
+and normally do not imply issues. A tool error is evidence of an issue when it
+repeats without recovery, blocks the session, reveals a defect/bug in the tool, or
+is a result of incorrect or ambiguous tool documentation.
