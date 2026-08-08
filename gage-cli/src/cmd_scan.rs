@@ -195,7 +195,7 @@ fn list(args: ScanListArgs) {
     let show = args.limit.show_count(total);
 
     let header: Vec<String> = [
-        "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Duration", "Created",
+        "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Cost", "Duration", "Created",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -216,7 +216,7 @@ fn list(args: ScanListArgs) {
         .with(Style::rounded())
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::new(1..6), Alignment::right())
+        .modify(Columns::new(1..7), Alignment::right())
         .modify(Columns::last().not(Rows::first()), s::dim())
         .to_string();
     println!("{table}");
@@ -233,6 +233,7 @@ fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::R
     let sessions = scan::session_ids_for_scan(conn, &run.id)?.len();
     let notes = scan::note_ids_for_scan(conn, &run.id)?.len();
     let issues = scan::issue_ids_for_scan(conn, &run.id)?.len();
+    let cost = format_cost(scan::cost_for_scan(conn, &run.id)?);
     let duration = run
         .parse_metadata()?
         .map(|m| crate::human::format_duration(Duration::from_millis(m.elapsed_ms())))
@@ -244,9 +245,21 @@ fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::R
         notes.to_string(),
         issues.to_string(),
         errors.to_string(),
+        cost,
         duration,
         crate::human::format_elapsed_ms(run.created),
     ])
+}
+
+/// USD cost as `$X.XX`, with a trailing `+` when any agent's cost is
+/// unrecorded (the total understates true spend). Empty when the scan
+/// has no recorded agents.
+fn format_cost(cost: scan::ScanCost) -> String {
+    if cost.total_usd == 0.0 && !cost.incomplete {
+        return String::new();
+    }
+    let suffix = if cost.incomplete { "+" } else { "" };
+    format!("${:.2}{suffix}", cost.total_usd)
 }
 
 /// Scan-run summary from `scan.metadata`. None when the run never
@@ -405,10 +418,11 @@ fn load_scan_model(
         total: summary.as_ref().map(|s| s.total).unwrap_or(0),
         progress: summary
             .as_ref()
-            .map(|s| s.completed + s.failed)
+            .map(|s| s.completed + s.failed + s.skipped)
             .unwrap_or(0),
         notes: results.notes,
         issues: results.issues,
+        cost: results.cost,
         errors,
         finished: true,
         elapsed: run
@@ -434,6 +448,7 @@ fn reconcile_results(
             notes: r.notes,
             issues: r.issues,
             sessions: r.sessions,
+            cost: r.cost,
         },
         Err(e) => gage_tui::scan_view::Event::Log(format!("results refresh failed: {e}")),
     }
@@ -445,6 +460,7 @@ struct ScanResults {
     notes: Vec<gage_tui::scan_view::NoteItem>,
     issues: Vec<gage_tui::scan_view::IssueItem>,
     sessions: Vec<gage_tui::scan_view::SessionCounts>,
+    cost: Option<gage_tui::scan_view::ScanCost>,
 }
 
 fn load_scan_results(
@@ -531,7 +547,15 @@ fn load_scan_results(
         });
     }
 
+    let cost = scan::cost_for_scan(conn, scan_id)?;
+    let cost =
+        (cost.total_usd != 0.0 || cost.incomplete).then_some(gage_tui::scan_view::ScanCost {
+            usd: cost.total_usd,
+            incomplete: cost.incomplete,
+        });
+
     Ok(ScanResults {
+        cost,
         issues: issue_items,
         notes: notes
             .iter()

@@ -406,6 +406,32 @@ pub fn tasks_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<ScanTask>,
     Ok(tasks)
 }
 
+/// Recorded agent spend for a scan. `total_usd` sums each
+/// `task_agent` result's `total_cost_usd`. `incomplete` is true when
+/// any agent has no recorded cost (abnormal termination or still
+/// running), so the total understates true spend.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanCost {
+    pub total_usd: f64,
+    pub incomplete: bool,
+}
+
+pub fn cost_for_scan(conn: &Connection, scan_id: &str) -> Result<ScanCost, ScanError> {
+    let cost = conn.query_row(
+        "SELECT COALESCE(SUM(json_extract(result, '$.total_cost_usd')), 0.0), \
+                COUNT(*) FILTER (WHERE json_extract(result, '$.total_cost_usd') IS NULL) > 0 \
+         FROM task_agent WHERE scan_id = ?1",
+        params![scan_id],
+        |row| {
+            Ok(ScanCost {
+                total_usd: row.get(0)?,
+                incomplete: row.get(1)?,
+            })
+        },
+    )?;
+    Ok(cost)
+}
+
 /// Distinct scanner names recorded for a scan, ascending.
 pub fn scanner_names_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
     let mut stmt = conn.prepare(
@@ -646,6 +672,55 @@ mod tests {
             .unwrap();
         assert_eq!(exit_code, Some(0));
         assert!(result.unwrap().contains("total_cost_usd"));
+    }
+
+    #[test]
+    fn cost_sums_agent_results_and_flags_missing_costs() {
+        let conn = open_db_in_memory().unwrap();
+        let scan = test_scan();
+        insert_scan(&conn, &scan).unwrap();
+        insert_task(&conn, &test_task(&scan.id)).unwrap();
+
+        let cost = cost_for_scan(&conn, &scan.id).unwrap();
+        assert_eq!(cost.total_usd, 0.0);
+        assert!(!cost.incomplete);
+
+        let agent = |session_id: &str| TaskAgent {
+            session_id: session_id.to_string(),
+            scan_id: scan.id.clone(),
+            scanner_name: "user_friction".to_string(),
+            task_name: "friction".to_string(),
+            exit_code: None,
+            stderr: None,
+            result: None,
+        };
+        insert_task_agent(&conn, &agent("11111111-1111-1111-1111-111111111111")).unwrap();
+        insert_task_agent(&conn, &agent("22222222-2222-2222-2222-222222222222")).unwrap();
+        finish_task_agent(
+            &conn,
+            "11111111-1111-1111-1111-111111111111",
+            0,
+            "",
+            Some(r#"{"type":"result","total_cost_usd":0.42}"#),
+        )
+        .unwrap();
+
+        let cost = cost_for_scan(&conn, &scan.id).unwrap();
+        assert_eq!(cost.total_usd, 0.42);
+        assert!(cost.incomplete);
+
+        finish_task_agent(
+            &conn,
+            "22222222-2222-2222-2222-222222222222",
+            0,
+            "",
+            Some(r#"{"type":"result","total_cost_usd":0.08}"#),
+        )
+        .unwrap();
+
+        let cost = cost_for_scan(&conn, &scan.id).unwrap();
+        assert_eq!(cost.total_usd, 0.5);
+        assert!(!cost.incomplete);
     }
 
     #[test]

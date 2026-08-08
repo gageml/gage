@@ -71,12 +71,23 @@ pub struct ScanModel {
     pub total: usize,
     pub progress: usize,
     pub errors: usize,
+    /// Recorded agent spend; None when the scan has no agent data yet.
+    pub cost: Option<ScanCost>,
     pub finished: bool,
     /// Scan duration; None while a live scan is running.
     pub elapsed: Option<Duration>,
     /// The scan's captured stdout stream (`{scan_id}.out`), shown by
     /// the log dialog. None disables the dialog.
     pub out_path: Option<PathBuf>,
+}
+
+/// Agent spend in USD. `incomplete` marks a total that understates
+/// true spend (an agent's cost is unrecorded) and renders as a
+/// trailing `+`.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanCost {
+    pub usd: f64,
+    pub incomplete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -260,9 +271,11 @@ impl ScanModel {
                 notes,
                 issues,
                 sessions,
+                cost,
             } => {
                 self.notes = notes.clone();
                 self.issues = issues.clone();
+                self.cost = *cost;
                 for counts in sessions {
                     if let Some(row) = self.sessions.iter_mut().find(|s| s.id == counts.id) {
                         row.notes = counts.notes;
@@ -348,6 +361,7 @@ pub enum Event {
         notes: Vec<NoteItem>,
         issues: Vec<IssueItem>,
         sessions: Vec<SessionCounts>,
+        cost: Option<ScanCost>,
     },
     /// The scan is over; the view stays up until the user quits.
     Finished,
@@ -1436,7 +1450,7 @@ fn token_ranges(line: &str, n: usize) -> Vec<(usize, usize)> {
 }
 
 fn draw_confirm_quit(frame: &mut Frame) {
-    dialog::draw_message(frame, "Stop the current scan?", "y / n");
+    dialog::draw_message(frame, "Stop the scan? It cannot be restarted.", "y / n");
 }
 
 fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
@@ -1483,7 +1497,7 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
 
 fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     let model = &state.model;
-    let counts = Line::from(vec![
+    let mut count_spans = vec![
         Span::styled("  Issues ", styles::Text::dim()),
         Span::raw(model.issues.len().to_string()),
         Span::styled("  Notes ", styles::Text::dim()),
@@ -1494,7 +1508,13 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
         } else {
             Span::raw("0")
         },
-    ]);
+    ];
+    if let Some(cost) = model.cost {
+        let suffix = if cost.incomplete { "+" } else { "" };
+        count_spans.push(Span::styled("  Cost ", styles::Text::dim()));
+        count_spans.push(Span::raw(format!("${:.2}{suffix}", cost.usd)));
+    }
+    let counts = Line::from(count_spans);
     let [tasks, badges] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(counts.width() as u16),
@@ -1523,9 +1543,14 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
             fmt_duration(state.started.elapsed())
         ),
     };
+    let gauge_style = if model.finished {
+        styles::Panel::gauge_done()
+    } else {
+        styles::Panel::gauge_running()
+    };
     frame.render_widget(
         Gauge::default()
-            .gauge_style(styles::Panel::gauge())
+            .gauge_style(gauge_style)
             .ratio(ratio)
             .label(label),
         tasks,
