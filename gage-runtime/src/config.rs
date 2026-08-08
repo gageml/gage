@@ -224,19 +224,29 @@ fn config(session: Ref<Session>) -> SessionConfigQuery {
 }
 
 fn resolve_project(src: &Path) -> crate::Result<Project> {
-    let name = src
-        .parent()
-        .and_then(Path::file_name)
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| Error::Config("session path has no project directory".into()))?;
+    let name = session_dir_name(src)?;
+    resolve_project_opt(src)?
+        .ok_or_else(|| Error::Config(format!("no project recorded for session dir `{name}`")))
+}
+
+/// Resolve the project for a session, or `None` when the session's
+/// encoded directory isn't recorded in `~/.claude.json`. An
+/// unrecorded directory is a normal state (e.g. a scratchpad cwd, or
+/// a project the user deleted), not a failure.
+fn resolve_project_opt(src: &Path) -> crate::Result<Option<Project>> {
+    let name = session_dir_name(src)?;
     let home = ClaudeHome::from_env().map_err(|e| Error::Config(e.to_string()))?;
     match project_for_session_name(&home, &name) {
-        Ok(Some(p)) => Ok(Project { path: p.path }),
-        Ok(None) => Err(Error::Config(format!(
-            "no project recorded for session dir `{name}`"
-        ))),
+        Ok(p) => Ok(p.map(|p| Project { path: p.path })),
         Err(e) => Err(Error::Config(e.to_string())),
     }
+}
+
+fn session_dir_name(src: &Path) -> crate::Result<String> {
+    src.parent()
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| Error::Config("session path has no project directory".into()))
 }
 
 #[derive(Any)]
@@ -259,7 +269,13 @@ impl SessionConfigQuery {
 // file contents when the projection asks for them, and these rows are
 // metadata. `Config::read()` fetches contents on demand.
 async fn fetch_session_config(q: SessionConfigQuery) -> crate::Result<Vec<Config>> {
-    let project = resolve_project(&q.src)?;
+    let Some(project) = resolve_project_opt(&q.src)? else {
+        tracing::debug!(
+            "no project recorded for session dir `{}`; no config files",
+            session_dir_name(&q.src)?
+        );
+        return Ok(vec![]);
+    };
     let ctx = current_scan_ctx();
     let df_ctx = &ctx.run.scan_ctx;
 
