@@ -414,6 +414,7 @@ fn load_scan_model(
     });
 
     Ok(ScanModel {
+        scan_id: short_uuid(&run.id).to_string(),
         out_path: Some(ScanStreams::out_path(&run.id)),
         total: summary.as_ref().map(|s| s.total).unwrap_or(0),
         progress: summary
@@ -1328,6 +1329,7 @@ async fn run_scan_tui(
     };
 
     let mut model = scan_view::ScanModel::new(setup);
+    model.scan_id = short_uuid(&scan_id).to_string();
     model.out_path = Some(ScanStreams::out_path(&scan_id));
     let ui_cancel = cancel.clone();
     let ui_fut = async move {

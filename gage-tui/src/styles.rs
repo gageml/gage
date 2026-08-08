@@ -152,6 +152,11 @@ impl Text {
         Style::new().fg(Color::LightCyan)
     }
 
+    /// Object id, e.g. the scan id in the scan header
+    pub fn id() -> Style {
+        Style::new().fg(Color::Cyan)
+    }
+
     /// Full-width section header, e.g. message sections in the session
     /// dialog. DarkGray is the one palette slot themes map to a
     /// with-the-theme gray; no relative lighten/darken exists in ANSI.

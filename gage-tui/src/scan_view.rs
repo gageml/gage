@@ -64,6 +64,7 @@ pub struct ScanSetup {
 /// historical one.
 #[derive(Debug, Clone, Default)]
 pub struct ScanModel {
+    pub scan_id: String,
     pub tasks: Vec<TaskItem>,
     pub sessions: Vec<SessionItem>,
     pub notes: Vec<NoteItem>,
@@ -1488,9 +1489,9 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
         lines.push(Line::raw(format!("  {label:<9} {n:>value_width$}")).left_aligned());
     }
     let hint = if model.out_path.is_some() {
-        "q/Enter back · l log"
+        "Enter dismiss · l log"
     } else {
-        "q/Enter back"
+        "Enter dismiss"
     };
     dialog::draw_lines(frame, lines, hint);
 }
@@ -1526,35 +1527,38 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     } else {
         0.0
     };
-    // A finished model without a duration (a historical scan that never
-    // completed) shows no time rather than a ticking one.
-    let label = match (model.finished, model.elapsed) {
-        (true, Some(e)) => format!(
-            "{}/{} · done {}",
-            model.progress,
-            model.total,
-            fmt_duration(e)
-        ),
-        (true, None) => format!("{}/{}", model.progress, model.total),
-        (false, _) => format!(
+    if model.finished {
+        // A finished model without a duration (a historical scan that
+        // never completed) shows no time rather than a ticking one.
+        let summary = match model.elapsed {
+            Some(e) => format!(
+                " · {}/{} tasks run in {}",
+                model.progress,
+                model.total,
+                fmt_duration(e)
+            ),
+            None => format!(" · {}/{} tasks run", model.progress, model.total),
+        };
+        let line = Line::from(vec![
+            Span::styled(model.scan_id.clone(), styles::Text::id()),
+            Span::styled(summary, styles::Text::dim()),
+        ]);
+        frame.render_widget(Paragraph::new(line), tasks);
+    } else {
+        let label = format!(
             "{}/{} · {}",
             model.progress,
             model.total,
             fmt_duration(state.started.elapsed())
-        ),
-    };
-    let gauge_style = if model.finished {
-        styles::Panel::gauge_done()
-    } else {
-        styles::Panel::gauge_running()
-    };
-    frame.render_widget(
-        Gauge::default()
-            .gauge_style(gauge_style)
-            .ratio(ratio)
-            .label(label),
-        tasks,
-    );
+        );
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(styles::Panel::gauge())
+                .ratio(ratio)
+                .label(label),
+            tasks,
+        );
+    }
 
     frame.render_widget(Paragraph::new(counts), badges);
 }
