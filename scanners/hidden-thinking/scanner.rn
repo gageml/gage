@@ -87,7 +87,7 @@ pub async fn issue() {
             #{
                 name: "hidden-thinking",
                 title: "Thinking blocks hidden in recent session",
-                description: "scanner:/hidden-thinking/issue.md",
+                description: "scanner:/hidden-thinking/issue-description.md",
                 evidence: [#{ note, timestamp }],
             },
         )
