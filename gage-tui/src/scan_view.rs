@@ -486,8 +486,18 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
                 KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
                 KeyCode::Right => state.step_dialog_item(1),
                 KeyCode::Left => state.step_dialog_item(-1),
-                KeyCode::Char('i') if matches!(state.dialog, Dialog::Session { .. }) => {
-                    state.notes_mode = !state.notes_mode;
+                KeyCode::Char('i')
+                    if matches!(&state.dialog, Dialog::Session { content, .. }
+                        if content.issue_count > 0) =>
+                {
+                    state.show_issues = !state.show_issues;
+                    state.scroll_view.reset();
+                }
+                KeyCode::Char('n')
+                    if matches!(&state.dialog, Dialog::Session { content, .. }
+                        if content.note_count > 0) =>
+                {
+                    state.show_notes = !state.show_notes;
                     state.scroll_view.reset();
                 }
                 _ => {}
@@ -564,9 +574,11 @@ struct ViewState {
     scan_done_pending: bool,
     /// Scroll state and layout cache for the open content dialog
     scroll_view: ScrollView,
-    /// Session dialog issues/notes mode: show the session's issues and
-    /// notes, with only the annotated messages as context
-    notes_mode: bool,
+    /// Session dialog: show the session's issues
+    show_issues: bool,
+    /// Session dialog: show the session's notes, with only the
+    /// annotated messages as context
+    show_notes: bool,
 }
 
 enum Dialog {
@@ -612,7 +624,8 @@ impl ViewState {
             dialog: Dialog::None,
             scan_done_pending: false,
             scroll_view: ScrollView::new(),
-            notes_mode: false,
+            show_issues: false,
+            show_notes: false,
             model,
         };
         state.sync_tables();
@@ -927,7 +940,8 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         dialog,
         scroll_view,
         model,
-        notes_mode,
+        show_issues,
+        show_notes,
         ..
     } = state;
     match dialog {
@@ -944,7 +958,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         }
         Dialog::Session { id, content } => {
             scroll_view.render_modal(frame, format!(" Session {id} "), |width| {
-                session_sections(content, width as usize, *notes_mode)
+                session_sections(content, width as usize, *show_issues, *show_notes)
             })
         }
         Dialog::Log { content, .. } => {
@@ -1029,12 +1043,14 @@ fn issue_lines(issue: &IssueItem, width: usize, related: bool) -> Vec<Line<'stat
     lines
 }
 
-/// Session dialog content: intro lines (header attributes and any
-/// availability notice), message sections, the session's issues,
-/// session-level notes (targets with no line number), and an optional
-/// trailing notice (truncation or read error).
+/// Session dialog content: header attributes, message sections, the
+/// session's issues, session-level notes (targets with no line
+/// number), and an optional trailing notice (truncation or read
+/// error).
 struct SessionContent {
-    intro: Vec<Line<'static>>,
+    title: String,
+    issue_count: usize,
+    note_count: usize,
     sections: Vec<SessionSection>,
     issues: Vec<IssueItem>,
     notes: Vec<NoteItem>,
@@ -1089,14 +1105,10 @@ fn session_content(
         }
     }
 
-    let notes = session.notes.to_string();
-    let issues = session.issues.to_string();
     let mut content = SessionContent {
-        intro: attr_lines(&[
-            ("Title", &session.title),
-            ("Issues", &issues),
-            ("Notes", &notes),
-        ]),
+        title: session.title.clone(),
+        issue_count: session.issues,
+        note_count: session.notes,
         sections: Vec::new(),
         issues: session_issues,
         notes: session_notes,
@@ -1155,28 +1167,53 @@ fn session_content(
 /// Session dialog sections: intro (header attributes), one section per
 /// message — a full-width header bar (dim line number, label, one
 /// column of inner padding each side) over a blank line and the
-/// rendered body — and any trailing notice. With `notes_mode` on, the
-/// session's issues and session-level notes render after the intro,
-/// each section carries its notes, and sections without notes are
-/// omitted; off shows every message and no note/issue boxes.
+/// rendered body — and any trailing notice. With `show_issues` on, the
+/// session's issues render after the intro. With `show_notes` on,
+/// session-level notes render after the intro, each section carries
+/// its notes, and sections without notes are omitted.
 /// Consecutive boxes stack border-to-border; a blank line only
 /// separates a run of boxes from what precedes it.
 fn session_sections(
     content: &SessionContent,
     width: usize,
-    notes_mode: bool,
+    show_issues: bool,
+    show_notes: bool,
 ) -> Vec<Vec<Line<'static>>> {
     let mut out = Vec::with_capacity(content.sections.len() + 2);
-    let mut intro = content.intro.clone();
-    let hint = if notes_mode {
-        "i to hide issues/notes"
-    } else {
-        "i to view issues/notes"
-    };
-    intro.push(Line::raw(""));
-    intro.push(Line::from(Span::styled(hint, styles::Text::dim())));
+    // A session with none of a kind has no toggle; a flag left on by
+    // another session's dialog must not filter this one's messages
+    let show_issues = show_issues && content.issue_count > 0;
+    let show_notes = show_notes && content.note_count > 0;
+    let issues = content.issue_count.to_string();
+    let notes = content.note_count.to_string();
+    let mut intro = attr_lines(&[
+        ("Title", &content.title),
+        ("Issues", &issues),
+        ("Notes", &notes),
+    ]);
+    let toggles = [
+        ('i', show_issues, content.issue_count),
+        ('n', show_notes, content.note_count),
+    ];
+    for (line, (key, shown, count)) in intro.iter_mut().skip(1).zip(toggles) {
+        if count == 0 {
+            continue;
+        }
+        let (status, action) = if shown {
+            ("visible", "hide")
+        } else {
+            ("hidden", "show")
+        };
+        line.spans.push(Span::raw(" - "));
+        line.spans
+            .push(Span::styled(status, styles::Text::accent()));
+        line.spans.push(Span::styled(
+            format!(" ({key} to {action})"),
+            styles::Text::dim(),
+        ));
+    }
     out.push(intro);
-    if notes_mode {
+    if show_issues {
         for (i, issue) in content.issues.iter().enumerate() {
             let mut lines = if i == 0 { vec![Line::raw("")] } else { vec![] };
             lines.extend(content_box(
@@ -1186,8 +1223,10 @@ fn session_sections(
             ));
             out.push(lines);
         }
+    }
+    if show_notes {
         for (i, note) in content.notes.iter().enumerate() {
-            let mut lines = if i == 0 && content.issues.is_empty() {
+            let mut lines = if i == 0 && (!show_issues || content.issues.is_empty()) {
                 vec![Line::raw("")]
             } else {
                 vec![]
@@ -1201,7 +1240,7 @@ fn session_sections(
         }
     }
     for section in &content.sections {
-        if notes_mode && section.notes.is_empty() {
+        if show_notes && section.notes.is_empty() {
             continue;
         }
         let number = format!(" {} ", section.line_num);
@@ -1218,7 +1257,7 @@ fn session_sections(
             Line::raw(""),
         ];
         lines.extend(section.body.iter().cloned());
-        if notes_mode {
+        if show_notes {
             for (i, note) in section.notes.iter().enumerate() {
                 if i == 0 {
                     lines.push(Line::raw(""));
