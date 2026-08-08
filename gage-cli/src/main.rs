@@ -89,7 +89,7 @@ enum Command {
     /// Run scanners on sessions
     Scan(cmd_scan::ScanArgs),
 
-    /// Run an agent declared by a scanner
+    /// Run a scanner agent
     Agent(cmd_agent::AgentArgs),
 
     /// Manage sessions
@@ -117,10 +117,10 @@ enum Command {
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
 
-    /// Push Gage data to every configured remote
+    /// Copy Gage data to remotes
     Push(cmd_sync::PushArgs),
 
-    /// Copy Gage data to a local directory for inspection
+    /// Copy Gage data from remotes
     Pull(cmd_sync::PullArgs),
 
     /// Manage Gage configuration
