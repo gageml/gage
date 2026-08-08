@@ -503,9 +503,10 @@ async fn run_tasks(
                     }
                     TaskResult::SkippedByFault => {
                         accounting.skipped += 1;
-                        // Fault-skips remove work from the pipeline
-                        // rather than counting toward progress
-                        status.total = status.total.saturating_sub(1);
+                        // A skip resolves its task; progress counts it
+                        // so the bar's total stays the planned task
+                        // count shown in the task list
+                        status.progress += 1;
                     }
                 }
                 let (task_status, error) = match &outcome {
