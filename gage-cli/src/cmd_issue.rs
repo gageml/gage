@@ -283,8 +283,11 @@ pub fn show(args: IssueShowArgs) {
         let entries: Vec<String> = related
             .iter()
             .map(|n| {
-                let header =
-                    console::style(format!("{} · {} · {}", n.id, n.name, n.target.to_uri(),)).dim();
+                let header = console::style(textwrap::fill(
+                    &format!("{} · {} · {}", n.id, n.name, n.target.to_uri()),
+                    value_width,
+                ))
+                .dim();
                 let value_str = crate::cmd_note::format_value(&n.value);
                 let value = console::style(textwrap::fill(&value_str, value_width))
                     .cyan()
@@ -299,11 +302,14 @@ pub fn show(args: IssueShowArgs) {
         let entries: Vec<String> = events
             .iter()
             .map(|ev| {
-                let header = console::style(format!(
-                    "{} · {} · {}",
-                    ev.event.type_str(),
-                    ev.author,
-                    gage_core::datetime::ms_to_iso8601(ev.timestamp),
+                let header = console::style(textwrap::fill(
+                    &format!(
+                        "{} · {} · {}",
+                        ev.event.type_str(),
+                        ev.author,
+                        gage_core::datetime::ms_to_iso8601(ev.timestamp),
+                    ),
+                    value_width,
                 ))
                 .dim();
                 match ev.event.message() {
