@@ -357,9 +357,16 @@ fn load_scan_model(
     let run = scan::get_scan(conn, prefix)?;
     let summary = scan_summary(&run)?;
 
+    let results = load_scan_results(conn, &run.id)?;
+
     let tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
         .into_iter()
         .map(|t| TaskItem {
+            cost: results
+                .task_costs
+                .iter()
+                .find(|tc| tc.id.scanner == t.scanner_name && tc.id.task == t.task_name)
+                .map(|tc| tc.cost),
             id: TaskId {
                 scanner: t.scanner_name,
                 task: t.task_name,
@@ -381,7 +388,6 @@ fn load_scan_model(
         .collect();
     let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
 
-    let results = load_scan_results(conn, &run.id)?;
     let counts: HashMap<&str, (usize, usize)> = results
         .sessions
         .iter()
@@ -450,6 +456,7 @@ fn reconcile_results(
             issues: r.issues,
             sessions: r.sessions,
             cost: r.cost,
+            task_costs: r.task_costs,
         },
         Err(e) => gage_tui::scan_view::Event::Log(format!("results refresh failed: {e}")),
     }
@@ -462,6 +469,7 @@ struct ScanResults {
     issues: Vec<gage_tui::scan_view::IssueItem>,
     sessions: Vec<gage_tui::scan_view::SessionCounts>,
     cost: Option<gage_tui::scan_view::ScanCost>,
+    task_costs: Vec<gage_tui::scan_view::TaskCost>,
 }
 
 fn load_scan_results(
@@ -554,9 +562,23 @@ fn load_scan_results(
             usd: cost.total_usd,
             incomplete: cost.incomplete,
         });
+    let task_costs = scan::costs_for_tasks(conn, scan_id)?
+        .into_iter()
+        .map(|tc| gage_tui::scan_view::TaskCost {
+            id: gage_tui::scan_view::TaskId {
+                scanner: tc.scanner_name,
+                task: tc.task_name,
+            },
+            cost: gage_tui::scan_view::ScanCost {
+                usd: tc.cost.total_usd,
+                incomplete: tc.cost.incomplete,
+            },
+        })
+        .collect();
 
     Ok(ScanResults {
         cost,
+        task_costs,
         issues: issue_items,
         notes: notes
             .iter()

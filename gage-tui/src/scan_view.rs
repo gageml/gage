@@ -91,10 +91,19 @@ pub struct ScanCost {
     pub incomplete: bool,
 }
 
+/// A task's recorded agent spend.
+#[derive(Debug, Clone)]
+pub struct TaskCost {
+    pub id: TaskId,
+    pub cost: ScanCost,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskItem {
     pub id: TaskId,
     pub state: TaskState,
+    /// Recorded agent spend; None when the task has no agent data.
+    pub cost: Option<ScanCost>,
     pub elapsed: Option<Duration>,
     /// Live-scan dispatch time; drives the ticking elapsed display.
     pub started: Option<Instant>,
@@ -202,6 +211,7 @@ impl ScanModel {
             .map(|id| TaskItem {
                 id,
                 state: TaskState::Pending,
+                cost: None,
                 started: None,
                 elapsed: None,
                 progress: None,
@@ -273,10 +283,16 @@ impl ScanModel {
                 issues,
                 sessions,
                 cost,
+                task_costs,
             } => {
                 self.notes = notes.clone();
                 self.issues = issues.clone();
                 self.cost = *cost;
+                for tc in task_costs {
+                    if let Some(item) = self.tasks.iter_mut().find(|t| t.id == tc.id) {
+                        item.cost = Some(tc.cost);
+                    }
+                }
                 for counts in sessions {
                     if let Some(row) = self.sessions.iter_mut().find(|s| s.id == counts.id) {
                         row.notes = counts.notes;
@@ -363,6 +379,7 @@ pub enum Event {
         issues: Vec<IssueItem>,
         sessions: Vec<SessionCounts>,
         cost: Option<ScanCost>,
+        task_costs: Vec<TaskCost>,
     },
     /// The scan is over; the view stays up until the user quits.
     Finished,
@@ -1510,11 +1527,16 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
             Span::raw("0")
         },
     ];
-    if let Some(cost) = model.cost {
-        let suffix = if cost.incomplete { "+" } else { "" };
-        count_spans.push(Span::styled("  Cost ", styles::Text::dim()));
-        count_spans.push(Span::raw(format!("${:.2}{suffix}", cost.usd)));
-    }
+    // No cost data reads as $0.00+ while running (spend not yet
+    // recorded) and $0.00 once finished, so the entry never appears
+    // or disappears mid-scan
+    let (usd, incomplete) = match model.cost {
+        Some(cost) => (cost.usd, cost.incomplete),
+        None => (0.0, !model.finished),
+    };
+    let suffix = if incomplete { "+" } else { "" };
+    count_spans.push(Span::styled("  Cost ", styles::Text::dim()));
+    count_spans.push(Span::raw(format!("${usd:.2}{suffix}")));
     let counts = Line::from(count_spans);
     let [tasks, badges] = Layout::horizontal([
         Constraint::Fill(1),
@@ -1625,13 +1647,32 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .max("Status".width())
         + 2;
 
+    let costs: Vec<String> = state
+        .model
+        .sorted_tasks()
+        .iter()
+        .map(|t| match t.cost {
+            Some(c) => {
+                let suffix = if c.incomplete { "+" } else { "" };
+                format!("${:.2}{suffix}", c.usd)
+            }
+            None => String::new(),
+        })
+        .collect();
+    let cost_width = costs
+        .iter()
+        .map(|c| c.width())
+        .max()
+        .unwrap_or(0)
+        .max("Cost".width());
+
     let rows: Vec<Row> = state
         .model
         .sorted_tasks()
         .iter()
-        .zip(&labels)
+        .zip(labels.iter().zip(&costs))
         .enumerate()
-        .map(|(i, (t, (label, label_style, time)))| {
+        .map(|(i, (t, ((label, label_style, time), cost)))| {
             let glyph = match t.state {
                 TaskState::Pending => "□",
                 TaskState::Running => spinner,
@@ -1668,6 +1709,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             Row::new(vec![
                 Cell::from(format!("{glyph} {}", t.id.scanner)),
                 Cell::from(t.id.task.clone()),
+                Cell::from(format!("{cost:>cost_width$}")),
                 status,
             ])
         })
@@ -1686,11 +1728,20 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         [
             scanner_col,
             Constraint::Fill(1),
+            Constraint::Length(cost_width as u16),
             Constraint::Length(status_width as u16),
         ],
     )
-    .header(header_row([
-        "Scanner", "Task", " Status", // Left pad Status to align with values
+    .header(Row::new([
+        Cell::from(Span::styled("Scanner", styles::Text::dim())),
+        Cell::from(Span::styled("Task", styles::Text::dim())),
+        // Right-align Cost over its right-aligned values
+        Cell::from(Span::styled(
+            format!("{:>cost_width$}", "Cost"),
+            styles::Text::dim(),
+        )),
+        // Left pad Status to align with values
+        Cell::from(Span::styled(" Status", styles::Text::dim())),
     ]))
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Tasks))
     .block(panel_block(

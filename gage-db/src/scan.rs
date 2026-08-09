@@ -432,6 +432,39 @@ pub fn cost_for_scan(conn: &Connection, scan_id: &str) -> Result<ScanCost, ScanE
     Ok(cost)
 }
 
+/// A task's recorded agent spend, keyed by scanner and task name.
+#[derive(Debug, Clone)]
+pub struct TaskCost {
+    pub scanner_name: String,
+    pub task_name: String,
+    pub cost: ScanCost,
+}
+
+/// Per-task agent spend for a scan. Tasks with no `task_agent` rows
+/// contribute no entry.
+pub fn costs_for_tasks(conn: &Connection, scan_id: &str) -> Result<Vec<TaskCost>, ScanError> {
+    let mut stmt = conn.prepare(
+        "SELECT scanner_name, task_name, \
+                COALESCE(SUM(json_extract(result, '$.total_cost_usd')), 0.0), \
+                COUNT(*) FILTER (WHERE json_extract(result, '$.total_cost_usd') IS NULL) > 0 \
+         FROM task_agent WHERE scan_id = ?1 \
+         GROUP BY scanner_name, task_name",
+    )?;
+    let costs = stmt
+        .query_map(params![scan_id], |row| {
+            Ok(TaskCost {
+                scanner_name: row.get(0)?,
+                task_name: row.get(1)?,
+                cost: ScanCost {
+                    total_usd: row.get(2)?,
+                    incomplete: row.get(3)?,
+                },
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(costs)
+}
+
 /// Distinct scanner names recorded for a scan, ascending.
 pub fn scanner_names_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
     let mut stmt = conn.prepare(
