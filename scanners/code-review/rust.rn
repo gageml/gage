@@ -3,7 +3,13 @@ use gage::{AgentRunner, Progress, Template, tools::Query, call_agent, query, sca
 pub const SCANNER = #{
     name: "rust-code-review",
     description: "Review Rust code quality",
-    tasks: #{ issues: #{} },
+    tasks: #{
+        issues: #{
+            issues: #{
+                writes: #{ "code-review": "Rust code quality issue" },
+            },
+        },
+    },
 };
 
 const REVIEW_KEY = ("rust-code-review", "issues", 1);

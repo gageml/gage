@@ -180,8 +180,9 @@ pub async fn run(
         scanner_tasks.push(tasks);
     }
 
-    let plan =
-        scheduler::plan(&slots, &scanner_tasks, &run).map_err(|e| RunError::Plan(e.to_string()))?;
+    let scanner_names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
+    let plan = scheduler::plan(&scanner_names, &scanner_tasks)
+        .map_err(|e| RunError::Plan(e.to_string()))?;
 
     // Every planned task gets its row up front (status `pending`), so
     // the plan is on record even if the run dies before dispatch. The

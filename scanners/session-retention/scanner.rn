@@ -12,6 +12,11 @@ pub const SCANNER = #{
                     ),
                 },
             },
+            issues: #{
+                writes: #{
+                    "session-retention": "Session retention policy is unset",
+                },
+            },
         },
     },
 };

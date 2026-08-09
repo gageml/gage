@@ -1,0 +1,37 @@
+use gage::{global, scan, write_note};
+
+pub const SCANNER = #{
+    name: "issue-summary",
+    description: "
+Summarize the issue docket once every issue writer has run
+
+Declares an issue dependency on every issue name, so the scheduler
+places this scanner after all issue writing tasks in the plan. Writes
+a scan targeted note carrying the issue counts by status.
+",
+    tasks: #{
+        main: #{
+            issues: #{ wants: ["*"] },
+            notes: #{
+                writes: #{
+                    "issue-summary": include_str!("issue-summary-note.md"),
+                },
+            },
+        },
+    },
+};
+
+pub async fn main() {
+    let open = global().issues().status("open").await?.len();
+    let pending = global().issues().status("pending").await?.len();
+    write_note(
+        #{
+            name: "issue-summary",
+            value: open + pending,
+            target: #{ scan: scan().id },
+            metadata: #{ open: open, pending: pending },
+        },
+    )
+    .await?;
+    Ok(())
+}

@@ -109,11 +109,12 @@ impl std::fmt::Display for PlanError {
 }
 
 /// Build a single DAG over every (scanner, task) declaration.
+/// `scanner_names` and `scanner_tasks` are parallel: entry `i` of each
+/// describes the same scanner.
 #[allow(clippy::indexing_slicing)]
 pub(crate) fn plan(
-    scanners: &[ScannerSlot],
+    scanner_names: &[String],
     scanner_tasks: &[HashMap<String, TaskDef>],
-    _run: &Arc<RunContext>,
 ) -> Result<Plan, PlanError> {
     let mut graph = Graph::<usize, ()>::new();
     let mut tasks: Vec<Task> = Vec::new();
@@ -133,9 +134,8 @@ pub(crate) fn plan(
         }
     }
     planned.sort_by(|a, b| {
-        scanners[a.0]
-            .name
-            .cmp(&scanners[b.0].name)
+        scanner_names[a.0]
+            .cmp(&scanner_names[b.0])
             .then_with(|| a.1.cmp(b.1))
     });
 
@@ -208,7 +208,7 @@ pub(crate) fn plan(
                 }
                 if !matched {
                     warnings.push(PlanWarning {
-                        scanner: scanners[scanner_idx].name.clone(),
+                        scanner: scanner_names[scanner_idx].clone(),
                         task: task_name.clone(),
                         message: format!("wants {kind} '{want}' but no task writes it"),
                     });
@@ -225,12 +225,11 @@ pub(crate) fn plan(
                 .iter()
                 .map(|n| {
                     let t = &tasks[*graph.node_weight(*n).unwrap()];
-                    format!("{}::{}", scanners[t.scanner_idx].name, t.task_name)
+                    format!("{}::{}", scanner_names[t.scanner_idx], t.task_name)
                 })
                 .collect();
             return Err(PlanError {
-                scanner: scanners[tasks[*graph.node_weight(scc[0]).unwrap()].scanner_idx]
-                    .name
+                scanner: scanner_names[tasks[*graph.node_weight(scc[0]).unwrap()].scanner_idx]
                     .clone(),
                 message: format!("cycle in task dependencies: {}", names.join(" -> ")),
             });
@@ -636,4 +635,223 @@ async fn dispatch_task(
 
 fn render_vm_err(e: &rune::runtime::VmError, sources: &rune::Sources) -> String {
     crate::runner::render_vm_error(e, sources, &e.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use gage_registry::scanner::TaskDepsDef;
+
+    use super::*;
+
+    /// `(task_name, notes_wants, notes_writes, issues_wants, issues_writes)`
+    type TaskEntry<'a> = (
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a [&'a str],
+    );
+
+    /// Build one scanner's task map from [`TaskEntry`] tuples.
+    fn tasks(entries: &[TaskEntry<'_>]) -> HashMap<String, TaskDef> {
+        entries
+            .iter()
+            .map(|(name, nw, nwr, iw, iwr)| {
+                (
+                    (*name).to_string(),
+                    TaskDef {
+                        name: (*name).to_string(),
+                        notes: deps(nw, nwr),
+                        issues: deps(iw, iwr),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn deps(wants: &[&str], writes: &[&str]) -> TaskDepsDef {
+        TaskDepsDef {
+            wants: wants.iter().map(|s| (*s).to_string()).collect(),
+            writes: writes
+                .iter()
+                .map(|s| ((*s).to_string(), String::new()))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Index of `scanner::task` in the plan.
+    fn idx(plan: &Plan, scanner_names: &[String], scanner: &str, task: &str) -> usize {
+        plan.tasks
+            .iter()
+            .position(|t| scanner_names[t.scanner_idx] == scanner && t.task_name == task)
+            .unwrap_or_else(|| panic!("no task {scanner}::{task} in plan"))
+    }
+
+    /// Assert `producer` is upstream of `consumer`: the edge is in
+    /// `downstream` and the consumer's in-degree counts it.
+    fn assert_edge(plan: &Plan, producer: usize, consumer: usize) {
+        assert!(
+            plan.downstream[producer].contains(&consumer),
+            "expected edge {producer} -> {consumer}, downstream: {:?}",
+            plan.downstream,
+        );
+        assert!(plan.deps[consumer] > 0, "consumer {consumer} has no deps");
+    }
+
+    #[test]
+    fn note_wants_orders_consumer_after_producer() {
+        let scanners = names(&["a", "b"]);
+        let plan = plan(
+            &scanners,
+            &[
+                tasks(&[("write", &[], &["finding"], &[], &[])]),
+                tasks(&[("read", &["finding"], &[], &[], &[])]),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let producer = idx(&plan, &scanners, "a", "write");
+        let consumer = idx(&plan, &scanners, "b", "read");
+        assert_edge(&plan, producer, consumer);
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn issue_wants_orders_consumer_after_producer() {
+        let scanners = names(&["a", "b"]);
+        let plan = plan(
+            &scanners,
+            &[
+                tasks(&[("write", &[], &[], &[], &["bug"])]),
+                tasks(&[("read", &[], &[], &["bug"], &[])]),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let producer = idx(&plan, &scanners, "a", "write");
+        let consumer = idx(&plan, &scanners, "b", "read");
+        assert_edge(&plan, producer, consumer);
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn note_and_issue_names_do_not_cross_match() {
+        let scanners = names(&["a", "b"]);
+        let plan = plan(
+            &scanners,
+            &[
+                // writes a *note* named "bug"
+                tasks(&[("write", &[], &["bug"], &[], &[])]),
+                // wants an *issue* named "bug"
+                tasks(&[("read", &[], &[], &["bug"], &[])]),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let consumer = idx(&plan, &scanners, "b", "read");
+        assert_eq!(plan.deps[consumer], 0);
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(plan.warnings[0].message.contains("wants issue 'bug'"));
+    }
+
+    #[test]
+    fn star_wants_depends_on_every_issue_writer() {
+        // The `issue-summary` shape: one consumer downstream of every
+        // issue writer in the plan.
+        let scanners = names(&["a", "b", "summary"]);
+        let plan = plan(
+            &scanners,
+            &[
+                tasks(&[("write", &[], &[], &[], &["one"])]),
+                tasks(&[("write", &[], &[], &[], &["two"])]),
+                tasks(&[("main", &[], &["issue-summary"], &["*"], &[])]),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let consumer = idx(&plan, &scanners, "summary", "main");
+        assert_edge(&plan, idx(&plan, &scanners, "a", "write"), consumer);
+        assert_edge(&plan, idx(&plan, &scanners, "b", "write"), consumer);
+        assert_eq!(plan.deps[consumer], 2);
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn prefix_glob_matches_writer() {
+        let scanners = names(&["a", "b"]);
+        let plan = plan(
+            &scanners,
+            &[
+                tasks(&[("write", &[], &["session.finding.abc"], &[], &[])]),
+                tasks(&[("read", &["session.finding.*"], &[], &[], &[])]),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_edge(
+            &plan,
+            idx(&plan, &scanners, "a", "write"),
+            idx(&plan, &scanners, "b", "read"),
+        );
+    }
+
+    #[test]
+    fn unsatisfied_wants_warns_and_still_plans_the_task() {
+        let scanners = names(&["a"]);
+        let plan = plan(
+            &scanners,
+            &[tasks(&[("read", &["nobody-writes-this"], &[], &[], &[])])],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(
+            plan.deps[0], 0,
+            "an unsatisfied want must not block dispatch"
+        );
+        assert_eq!(plan.warnings.len(), 1);
+        assert_eq!(plan.warnings[0].scanner, "a");
+        assert_eq!(plan.warnings[0].task, "read");
+        assert!(
+            plan.warnings[0]
+                .message
+                .contains("wants note 'nobody-writes-this'")
+        );
+    }
+
+    #[test]
+    fn task_wanting_what_it_writes_has_no_self_edge() {
+        let scanners = names(&["a"]);
+        let plan = plan(
+            &scanners,
+            &[tasks(&[("both", &["finding"], &["finding"], &[], &[])])],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(plan.deps[0], 0);
+        assert!(plan.downstream[0].is_empty());
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn cycle_is_a_plan_error() {
+        let scanners = names(&["a", "b"]);
+        let err = plan(
+            &scanners,
+            &[
+                tasks(&[("one", &["y"], &["x"], &[], &[])]),
+                tasks(&[("two", &["x"], &["y"], &[], &[])]),
+            ],
+        )
+        .err()
+        .expect("mutual wants should cycle");
+        assert!(err.message.contains("cycle in task dependencies"));
+    }
 }

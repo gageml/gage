@@ -20,7 +20,12 @@ consition and recommends fixes for issues it finds.
                 },
             },
         },
-        issue: #{ notes: #{ wants: ["thinking.empty"] } },
+        issue: #{
+            notes: #{ wants: ["thinking.empty"] },
+            issues: #{
+                writes: #{ "hidden-thinking": "Thinking blocks are hidden" },
+            },
+        },
     },
 };
 
