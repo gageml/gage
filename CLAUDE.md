@@ -157,3 +157,9 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 
 [Rust API Guidelines C-CONV]:
   https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
+
+## Other rules
+
+- Do NOT edit files under /docs in this project unless instructed to do so. User
+  facing docs are written exclusively by competent humans who can write without
+  sounding like clowns.
