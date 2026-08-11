@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use rusqlite::{Connection, params};
-use tracing::debug;
+use tracing::{Level, debug, enabled};
 
 use crate::issue::{self, IssueError};
 
@@ -36,11 +36,6 @@ pub fn related_issues(
 ) -> Result<Vec<RelatedIssue>, IssueError> {
     let subject = issue::get(conn, issue_id)?;
 
-    let name_gate: i64 = conn.query_row(
-        "SELECT count(*) FROM issue WHERE name = ?1 AND id <> ?2",
-        params![subject.name, subject.id],
-        |row| row.get(0),
-    )?;
     let mut stmt = conn.prepare(
         "SELECT DISTINCT i.id FROM issue i
          JOIN session_issue si ON si.issue_id = i.id
@@ -52,13 +47,20 @@ pub fn related_issues(
     let candidates: Vec<String> = stmt
         .query_map(params![subject.name, subject.id], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
-    debug!(
-        issue = %subject.id,
-        name_gate,
-        session_gate = candidates.len(),
-        threshold,
-        "related_issues candidates"
-    );
+    if enabled!(Level::DEBUG) {
+        let name_gate: i64 = conn.query_row(
+            "SELECT count(*) FROM issue WHERE name = ?1 AND id <> ?2",
+            params![subject.name, subject.id],
+            |row| row.get(0),
+        )?;
+        debug!(
+            issue = %subject.id,
+            name_gate,
+            session_gate = candidates.len(),
+            threshold,
+            "related_issues candidates"
+        );
+    }
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
