@@ -349,6 +349,13 @@ const NOTE_SELECT: &str = "SELECT n.id, n.created, n.modified, n.author, n.targe
             n.name, n.value, n.explanation, n.metadata
      FROM note n";
 
+/// Every note id, unordered. Peer set for prefix-disambiguated
+/// displays; matches what [`get`] resolves against.
+pub fn all_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM note")?;
+    stmt.query_map([], |row| row.get::<_, String>(0))?.collect()
+}
+
 pub fn get(conn: &Connection, id_prefix: &str) -> Result<Note, NoteError> {
     let pattern = format!("{id_prefix}%");
     let mut stmt = conn.prepare(&format!("{NOTE_SELECT} WHERE n.id LIKE ?1"))?;

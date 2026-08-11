@@ -245,6 +245,26 @@ pub async fn list(args: SessionListArgs, agent: bool) {
 
     let show = args.limit.show_count(total);
 
+    // Peer set for the ID highlighter: every id in the corpus (not
+    // the filtered subset), so the disambiguating prefix matches what
+    // `one_session()` actually resolves against.
+    let highlighter = {
+        let all_ids_sql = format!("SELECT id FROM {table}");
+        let all_batches = run_query(&ctx, &all_ids_sql).await;
+        let mut all_ids: Vec<String> = Vec::new();
+        for batch in &all_batches {
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                all_ids.push(col.value(i).to_string());
+            }
+        }
+        style::IdHighlighter::new(all_ids)
+    };
+
     let sql = format!(
         "SELECT id, project, mtime, size, title, model, message_count, path \
          FROM {table}{where_clause} ORDER BY mtime DESC LIMIT {show}"
@@ -312,9 +332,9 @@ pub async fn list(args: SessionListArgs, agent: bool) {
             };
             let count = counts.value(i).to_string();
             let id_display = if args.full_id {
-                id.to_string()
+                highlighter.full(id)
             } else {
-                short_uuid(id).to_string()
+                highlighter.short(id)
             };
             let model = if models.is_null(i) {
                 String::new()
@@ -365,7 +385,6 @@ pub async fn list(args: SessionListArgs, agent: bool) {
     table
         .with(Style::rounded())
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
         .modify(Columns::last(), Alignment::right())
         .modify(Columns::new(6..7), Alignment::right());

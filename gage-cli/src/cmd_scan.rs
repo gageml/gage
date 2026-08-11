@@ -194,6 +194,8 @@ fn list(args: ScanListArgs) {
 
     let show = args.limit.show_count(total);
 
+    let highlighter = s::IdHighlighter::new(scan::all_scan_ids(&conn).unwrap());
+
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Cost", "Duration", "Created",
     ]
@@ -203,7 +205,7 @@ fn list(args: ScanListArgs) {
 
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(show);
     for run in runs.iter().take(show) {
-        match list_row(&conn, run) {
+        match list_row(&conn, run, &highlighter) {
             Ok(row) => rows.push(row),
             Err(e) => {
                 eprintln!("Error: {e}");
@@ -215,7 +217,6 @@ fn list(args: ScanListArgs) {
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::new(1..7), Alignment::right())
         .modify(Columns::last().not(Rows::first()), s::dim())
         .to_string();
@@ -224,7 +225,11 @@ fn list(args: ScanListArgs) {
     args.limit.print_summary(show, total, "scan run");
 }
 
-fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::Result<Vec<String>> {
+fn list_row(
+    conn: &gage_db::rusqlite::Connection,
+    run: &scan::Scan,
+    highlighter: &s::IdHighlighter,
+) -> anyhow::Result<Vec<String>> {
     let tasks = scan::tasks_for_scan(conn, &run.id)?;
     let errors = tasks
         .iter()
@@ -239,7 +244,7 @@ fn list_row(conn: &gage_db::rusqlite::Connection, run: &scan::Scan) -> anyhow::R
         .map(|m| crate::human::format_duration(Duration::from_millis(m.elapsed_ms())))
         .unwrap_or_default();
     Ok(vec![
-        short_uuid(&run.id).to_string(),
+        highlighter.short(&run.id),
         tasks.len().to_string(),
         sessions.to_string(),
         notes.to_string(),

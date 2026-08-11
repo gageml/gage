@@ -144,6 +144,8 @@ pub fn list(args: NoteListArgs) {
 
     let show = args.limit.show_count(total);
 
+    let highlighter = style::IdHighlighter::new(note::all_ids(&conn).unwrap());
+
     let header: Vec<String> = ["Id", "Name", "Value", "Target", "Created"]
         .iter()
         .map(|s| s.to_string())
@@ -154,7 +156,7 @@ pub fn list(args: NoteListArgs) {
         .take(show)
         .map(|n| {
             vec![
-                short_uuid(&n.id).to_string(),
+                highlighter.short(&n.id),
                 n.name.clone(),
                 format_value_cell(&n.value),
                 shorten_target(&n.target),
@@ -172,7 +174,6 @@ pub fn list(args: NoteListArgs) {
                 .priority(PriorityMax::left()),
         )
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::one(2).not(Rows::first()), Color::FG_BRIGHT_CYAN)
         .modify(Columns::new(3..5).not(Rows::first()), style::dim())
         .to_string();

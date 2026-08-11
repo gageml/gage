@@ -167,6 +167,8 @@ pub fn list(args: IssueListArgs) {
 
     let show = args.limit.show_count(total);
 
+    let highlighter = style::IdHighlighter::new(issue::all_ids(&conn).unwrap());
+
     let header: Vec<String> = ["Id", "Name", "Title", "Status", "Created"]
         .iter()
         .map(|s| s.to_string())
@@ -177,7 +179,7 @@ pub fn list(args: IssueListArgs) {
         .take(show)
         .map(|t| {
             vec![
-                short_uuid(&t.id).to_string(),
+                highlighter.short(&t.id),
                 t.name.clone(),
                 t.title.clone(),
                 t.status.as_str().to_string(),
@@ -195,7 +197,6 @@ pub fn list(args: IssueListArgs) {
                 .priority(PriorityMax::left()),
         )
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
         .modify(Columns::new(3..5).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
@@ -302,6 +303,7 @@ pub fn show(args: IssueShowArgs) {
         .collect();
 
     if !related.is_empty() {
+        let highlighter = style::IdHighlighter::new(issue::all_ids(&conn).unwrap());
         let entries: Vec<String> = related
             .iter()
             .map(|r| {
@@ -315,7 +317,7 @@ pub fn show(args: IssueShowArgs) {
                 textwrap::fill(
                     &format!(
                         "{} · {} · {}",
-                        short_uuid(&rel.id),
+                        highlighter.short(&rel.id),
                         rel.status.as_str(),
                         rel.title
                     ),

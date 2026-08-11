@@ -691,6 +691,13 @@ pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, Iss
     Ok(issues)
 }
 
+/// Every issue id, unordered. Peer set for prefix-disambiguated
+/// displays; matches what [`get`] resolves against.
+pub fn all_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM issue")?;
+    stmt.query_map([], |row| row.get::<_, String>(0))?.collect()
+}
+
 pub fn get(conn: &Connection, id_prefix: &str) -> Result<Issue, IssueError> {
     let pattern = format!("{id_prefix}%");
     let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.id LIKE ?1"))?;
