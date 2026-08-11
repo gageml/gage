@@ -314,38 +314,12 @@ pub fn show(args: IssueShowArgs) {
         })
         .collect();
 
-    if !related.is_empty() {
-        let highlighter = style::IdHighlighter::new(issue::all_ids(&conn).unwrap());
-        let entries: Vec<String> = related
-            .iter()
-            .map(|r| {
-                let rel = match issue::get(&conn, &r.id) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        std::process::exit(1);
-                    }
-                };
-                textwrap::fill(
-                    &format!(
-                        "{} · {} · {}",
-                        highlighter.short(&rel.id),
-                        rel.status.as_str(),
-                        rel.title
-                    ),
-                    value_width,
-                )
-            })
-            .collect();
-        rows.push(vec![related_label.to_string(), entries.join("\n")]);
-    }
-
     if !evidence.is_empty() {
         let entries: Vec<String> = evidence
             .iter()
             .map(|n| {
                 let header = console::style(textwrap::fill(
-                    &format!("{} · {} · {}", n.id, n.name, n.target.to_uri()),
+                    &format!("{} · {} · {}", short_uuid(&n.id), n.name, n.target.to_uri()),
                     value_width,
                 ))
                 .dim();
@@ -357,6 +331,26 @@ pub fn show(args: IssueShowArgs) {
             })
             .collect();
         rows.push(vec![evidence_label.to_string(), entries.join("\n\n")]);
+    }
+
+    if !related.is_empty() {
+        let entries: Vec<String> = related
+            .iter()
+            .map(|r| {
+                let rel = match issue::get(&conn, &r.id) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let prefix = format!("{} · {} · ", short_uuid(&rel.id), rel.status.as_str());
+                let wrapped = textwrap::fill(&format!("{prefix}{}", rel.title), value_width);
+                let dimmed = console::style(&prefix).dim().to_string();
+                wrapped.replacen(&prefix, &dimmed, 1)
+            })
+            .collect();
+        rows.push(vec![related_label.to_string(), entries.join("\n")]);
     }
 
     if !events.is_empty() {
