@@ -238,7 +238,7 @@ pub fn show(args: IssueShowArgs) {
         ),
     ];
 
-    let related = match issue::related_notes(&conn, &issue.id) {
+    let evidence = match issue::related_notes(&conn, &issue.id) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -254,12 +254,33 @@ pub fn show(args: IssueShowArgs) {
         }
     };
 
+    let config = match gage_core::config::Config::load_user() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let related =
+        match gage_db::related::related_issues(&conn, &issue.id, config.issues.related_threshold) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        };
+
+    let related_label = "related";
     let evidence_label = "evidence";
     let events_label = "events";
     let label_width = attrs
         .iter()
         .map(|(k, _)| k.len())
-        .chain([evidence_label.len(), events_label.len()])
+        .chain([
+            related_label.len(),
+            evidence_label.len(),
+            events_label.len(),
+        ])
         .max()
         .unwrap_or(0);
     let (_, term_width) = console::Term::stdout().size();
@@ -282,6 +303,31 @@ pub fn show(args: IssueShowArgs) {
 
     if !related.is_empty() {
         let entries: Vec<String> = related
+            .iter()
+            .map(|r| {
+                let rel = match issue::get(&conn, &r.id) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                textwrap::fill(
+                    &format!(
+                        "{} · {} · {}",
+                        short_uuid(&rel.id),
+                        rel.status.as_str(),
+                        rel.title
+                    ),
+                    value_width,
+                )
+            })
+            .collect();
+        rows.push(vec![related_label.to_string(), entries.join("\n")]);
+    }
+
+    if !evidence.is_empty() {
+        let entries: Vec<String> = evidence
             .iter()
             .map(|n| {
                 let header = console::style(textwrap::fill(

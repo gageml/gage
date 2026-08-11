@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use gage_db::db::open_db;
-use gage_db::issue::{self, IssueFilters, IssueStatusFilter, StatusReason};
+use gage_db::issue::{self, StatusReason};
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
     service::RequestContext,
@@ -59,22 +59,10 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
     issue::close(&conn, &issue.id, reason, &author, message.as_deref(), now)
         .map_err(|e| McpError::internal_error(format!("close issue: {e}"), None))?;
 
-    let open = issue::find(
-        &conn,
-        &IssueFilters {
-            status: IssueStatusFilter::Open,
-            ..Default::default()
-        },
-    )
-    .map_err(|e| McpError::internal_error(format!("count open issues: {e}"), None))?;
-    let remaining = match open.len() {
-        0 => "No open issues remain.".to_string(),
-        1 => "1 open issue remains.".to_string(),
-        n => format!("{n} open issues remain."),
-    };
     Ok(format!(
-        "Closed issue {} ({}). {remaining}",
+        "Closed issue {} ({}) as {}.",
         gage_core::uuid::short_uuid(&issue.id),
+        issue.title,
         reason.as_str()
     ))
 }

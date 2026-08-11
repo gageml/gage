@@ -96,6 +96,7 @@ pub async fn issue(#{ title, description, session }, meta) {
             title,
             description,
             sessions: [session],
+            pending: true,
         },
     )
     .await?;

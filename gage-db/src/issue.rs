@@ -303,6 +303,20 @@ pub fn promote(
     timestamp: i64,
 ) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
+    promote_in_tx(&tx, issue_id, author, message, timestamp)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`promote`] without transaction management. The caller holds the
+/// enclosing transaction.
+pub(crate) fn promote_in_tx(
+    tx: &Connection,
+    issue_id: &str,
+    author: &str,
+    message: Option<&str>,
+    timestamp: i64,
+) -> Result<(), IssueError> {
     let rows = tx.execute(
         "UPDATE issue
          SET status = 'open', modified = ?1
@@ -322,7 +336,7 @@ pub fn promote(
         });
     }
     insert_event(
-        &tx,
+        tx,
         &LoggedEvent {
             issue_id: issue_id.to_string(),
             author: author.to_string(),
@@ -332,7 +346,6 @@ pub fn promote(
             },
         },
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -347,6 +360,20 @@ pub fn reopen(
     timestamp: i64,
 ) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
+    reopen_in_tx(&tx, issue_id, author, message, timestamp)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`reopen`] without transaction management. The caller holds the
+/// enclosing transaction.
+pub(crate) fn reopen_in_tx(
+    tx: &Connection,
+    issue_id: &str,
+    author: &str,
+    message: Option<&str>,
+    timestamp: i64,
+) -> Result<(), IssueError> {
     let rows = tx.execute(
         "UPDATE issue
          SET status = 'open', status_reason = NULL, modified = ?1
@@ -357,7 +384,7 @@ pub fn reopen(
         return Err(IssueError::NotFound(issue_id.to_string()));
     }
     insert_event(
-        &tx,
+        tx,
         &LoggedEvent {
             issue_id: issue_id.to_string(),
             author: author.to_string(),
@@ -367,7 +394,6 @@ pub fn reopen(
             },
         },
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -384,6 +410,21 @@ pub fn close(
     timestamp: i64,
 ) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
+    close_in_tx(&tx, issue_id, reason, author, message, timestamp)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`close`] without transaction management. The caller holds the
+/// enclosing transaction.
+pub(crate) fn close_in_tx(
+    tx: &Connection,
+    issue_id: &str,
+    reason: StatusReason,
+    author: &str,
+    message: Option<&str>,
+    timestamp: i64,
+) -> Result<(), IssueError> {
     let rows = tx.execute(
         "UPDATE issue
          SET status = 'closed', status_reason = ?1, modified = ?2
@@ -394,7 +435,7 @@ pub fn close(
         return Err(IssueError::NotFound(issue_id.to_string()));
     }
     insert_event(
-        &tx,
+        tx,
         &LoggedEvent {
             issue_id: issue_id.to_string(),
             author: author.to_string(),
@@ -404,7 +445,6 @@ pub fn close(
             },
         },
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -419,6 +459,20 @@ pub fn comment(
     timestamp: i64,
 ) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
+    comment_in_tx(&tx, issue_id, author, message, timestamp)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`comment`] without transaction management. The caller holds the
+/// enclosing transaction.
+pub(crate) fn comment_in_tx(
+    tx: &Connection,
+    issue_id: &str,
+    author: &str,
+    message: &str,
+    timestamp: i64,
+) -> Result<(), IssueError> {
     let rows = tx.execute(
         "UPDATE issue SET modified = ?1 WHERE id = ?2",
         params![timestamp, issue_id],
@@ -427,7 +481,7 @@ pub fn comment(
         return Err(IssueError::NotFound(issue_id.to_string()));
     }
     insert_event(
-        &tx,
+        tx,
         &LoggedEvent {
             issue_id: issue_id.to_string(),
             author: author.to_string(),
@@ -437,7 +491,6 @@ pub fn comment(
             },
         },
     )?;
-    tx.commit()?;
     Ok(())
 }
 

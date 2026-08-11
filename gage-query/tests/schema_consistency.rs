@@ -41,9 +41,10 @@ fn tvf_calls(note_id: &str) -> Vec<String> {
     vec![
         "message_text('main.rs', 200)".to_string(),
         format!("note_message_context('{note_id}', 1, 1)"),
-        // Unknown id returns zero rows, so the smoke test doesn't need a
+        // Unknown ids return zero rows, so the smoke tests don't need a
         // seeded issue.
         "issue_report('no-such-issue')".to_string(),
+        "related_issues('no-such-issue')".to_string(),
     ]
 }
 

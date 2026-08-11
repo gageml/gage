@@ -53,6 +53,30 @@ pub struct Config {
 
     #[serde(default)]
     pub query: QueryConfig,
+
+    #[serde(default)]
+    pub issues: IssuesConfig,
+}
+
+/// Issue settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuesConfig {
+    /// Similarity score at or above which two issues are reported as
+    /// related (see `related_issues` and `gage issue show`).
+    #[serde(default = "default_related_threshold")]
+    pub related_threshold: f64,
+}
+
+fn default_related_threshold() -> f64 {
+    0.2
+}
+
+impl Default for IssuesConfig {
+    fn default() -> Self {
+        Self {
+            related_threshold: default_related_threshold(),
+        }
+    }
 }
 
 /// Query-tool settings.

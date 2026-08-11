@@ -39,6 +39,7 @@ pub enum GageTool {
     NoteWrite(NoteWriteConfig),
     IssueClose,
     IssueComment,
+    IssuePendingResolve,
 }
 
 impl GageTool {
@@ -50,6 +51,7 @@ impl GageTool {
             GageTool::NoteWrite(_) => "NoteWrite",
             GageTool::IssueClose => "IssueClose",
             GageTool::IssueComment => "IssueComment",
+            GageTool::IssuePendingResolve => "IssuePendingResolve",
         }
     }
 
@@ -62,6 +64,7 @@ impl GageTool {
             "NoteWrite" => Some(GageTool::NoteWrite(NoteWriteConfig::default())),
             "IssueClose" => Some(GageTool::IssueClose),
             "IssueComment" => Some(GageTool::IssueComment),
+            "IssuePendingResolve" => Some(GageTool::IssuePendingResolve),
             _ => None,
         }
     }
@@ -189,7 +192,7 @@ fn build_server(spec: &ToolSpec) -> GageServer {
             GageTool::Query(c) => config.query = c.clone(),
             GageTool::IssueWrite(c) => config.issue_write = c.clone(),
             GageTool::NoteWrite(c) => config.note_write = c.clone(),
-            GageTool::IssueClose | GageTool::IssueComment => {}
+            GageTool::IssueClose | GageTool::IssueComment | GageTool::IssuePendingResolve => {}
         }
     }
     let mut router = rmcp::handler::server::router::tool::ToolRouter::<GageServer>::new();
