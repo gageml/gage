@@ -785,9 +785,9 @@ impl ViewState {
     }
 
     /// Read the scan's captured streams — `.err` (in red), `.out`,
-    /// then `.log`, separated by a blank line. Absent or empty files
-    /// are skipped; the files are created lazily, so a scan may simply
-    /// have produced nothing.
+    /// then `.log`, one entry per line with a blank line between
+    /// entries. Absent or empty files are skipped; the files are
+    /// created lazily, so a scan may simply have produced nothing.
     fn read_log(&self) -> Vec<Line<'static>> {
         let Some(out_path) = &self.model.out_path else {
             return Vec::new();
@@ -800,14 +800,16 @@ impl ViewState {
             if content.is_empty() {
                 continue;
             }
-            if !lines.is_empty() {
-                lines.push(Line::raw(""));
+            for l in content.lines() {
+                if !lines.is_empty() {
+                    lines.push(Line::raw(""));
+                }
+                lines.push(match ext {
+                    "err" => Line::from(Span::styled(l.to_string(), styles::LogLevel::error())),
+                    "log" => log_line(l),
+                    _ => Line::raw(l.to_string()),
+                });
             }
-            lines.extend(content.lines().map(|l| match ext {
-                "err" => Line::from(Span::styled(l.to_string(), styles::LogLevel::error())),
-                "log" => log_line(l),
-                _ => Line::raw(l.to_string()),
-            }));
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled("(no output)", styles::Text::dim())));
