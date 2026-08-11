@@ -3,18 +3,19 @@ use gage::{global, scan, write_note};
 pub const SCANNER = #{
     name: "issue-summary",
     description: "
-Summarize the issue docket once every issue writer has run
+Write issue-summary note at the end of a scan
 
-Declares an issue dependency on every issue name, so the scheduler
-places this scanner after all issue writing tasks in the plan. Writes
-a scan targeted note carrying the issue counts by status.
+Note includes counts of all open and pending issues not just those
+written for the scan.
 ",
     tasks: #{
         main: #{
             issues: #{ wants: ["*"] },
             notes: #{
                 writes: #{
-                    "issue-summary": include_str!("issue-summary-note.md"),
+                    "issue-summary": include_str!(
+                        "issue-summary-note.md"
+                    ),
                 },
             },
         },

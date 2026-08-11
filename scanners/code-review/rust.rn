@@ -1,4 +1,13 @@
-use gage::{AgentRunner, Progress, Template, tools::Query, call_agent, query, scan, write_issue};
+use gage::{
+    AgentRunner,
+    Progress,
+    Template,
+    tools::Query,
+    call_agent,
+    query,
+    scan,
+    write_issue,
+};
 
 pub const SCANNER = #{
     name: "rust-code-review",
@@ -6,20 +15,20 @@ pub const SCANNER = #{
     tasks: #{
         issues: #{
             issues: #{
-                writes: #{ "code-review": "Rust code quality issue" },
+                writes: #{ "code-review[rust]": "Rust code quality issue" },
             },
         },
     },
 };
 
-const REVIEW_KEY = ("rust-code-review", "issues", 1);
+const ISSUE_VALIDATION_KEY = ("rust-code-review", "issues", 1);
 
 pub async fn issues() {
     let t = Template::new(include_str!("rust-prompt.md.j2")).await?;
     let runner = AgentRunner::new();
     let (_, sessions, validate) = scan()
         .sessions()
-        .split_valid(REVIEW_KEY)
+        .split_valid(ISSUE_VALIDATION_KEY)
         .await?;
     let queued = 0;
     for s in sessions {
@@ -91,7 +100,7 @@ fn issue_tooldef() {
 pub async fn issue(#{ title, description, session }, meta) {
     let issue = write_issue(
         #{
-            name: "code-review",
+            name: "code-review[rust]",
             author: meta.agent_tool_use(),
             title,
             description,
