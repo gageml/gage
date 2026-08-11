@@ -1575,12 +1575,23 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
             model.total,
             fmt_duration(state.started.elapsed())
         );
+        let id_width = model.scan_id.width() as u16;
+        let [id_area, _gap, gauge_area] = Layout::horizontal([
+            Constraint::Length(id_width),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(tasks);
+        frame.render_widget(
+            Paragraph::new(Span::styled(model.scan_id.clone(), styles::Text::id())),
+            id_area,
+        );
         frame.render_widget(
             Gauge::default()
                 .gauge_style(styles::Panel::gauge())
                 .ratio(ratio)
                 .label(label),
-            tasks,
+            gauge_area,
         );
     }
 
@@ -1702,11 +1713,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 // highlight, so the label renders plain
                 Cell::from(text)
             } else {
-                let (head, rest) = text.split_at(1 + label.len());
-                Cell::from(Line::from(vec![
-                    Span::styled(head.to_string(), *label_style),
-                    Span::raw(rest.to_string()),
-                ]))
+                Cell::from(Span::styled(text, *label_style))
             };
             Row::new(vec![
                 Cell::from(format!("{glyph} {}", t.id.scanner)),

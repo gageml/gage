@@ -52,7 +52,7 @@ impl Panel {
     }
 
     pub fn gauge() -> Style {
-        Style::new().fg(Color::Cyan)
+        Style::new().fg(Color::Green)
     }
 
     /// Filled region of an in-cell progress bar. Reverse video renders
@@ -60,7 +60,7 @@ impl Panel {
     /// label over the bar.
     pub fn gauge_fill() -> Style {
         Style::new()
-            .fg(Color::Cyan)
+            .fg(Color::Green)
             .add_modifier(Modifier::REVERSED)
     }
 }
@@ -121,7 +121,7 @@ impl RunStatus {
     }
 
     pub fn running() -> Style {
-        Style::new().fg(Color::Yellow)
+        Style::new().fg(Color::Green)
     }
 
     pub fn completed() -> Style {
