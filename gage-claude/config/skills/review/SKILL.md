@@ -34,7 +34,7 @@ adjudicate and apply. Apply nothing until every sub-agent has returned.
 
    ```sql
    SELECT r.related_id, r.score, i.title, i.status, i.status_reason
-   FROM related_issues('<issue_id>') r JOIN issue i ON i.id = r.related_id
+   FROM related_issue('<issue_id>') r JOIN issue i ON i.id = r.related_id
    ```
 
 3. A pending issue with no related issues is novel by definition. Do not spawn

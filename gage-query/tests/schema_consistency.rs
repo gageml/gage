@@ -44,7 +44,7 @@ fn tvf_calls(note_id: &str) -> Vec<String> {
         // Unknown ids return zero rows, so the smoke tests don't need a
         // seeded issue.
         "issue_report('no-such-issue')".to_string(),
-        "related_issues('no-such-issue')".to_string(),
+        "related_issue('no-such-issue')".to_string(),
     ]
 }
 

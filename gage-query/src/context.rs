@@ -21,7 +21,7 @@ use crate::tables::message::MessageTable;
 use crate::tables::message_text::MessageTextFn;
 use crate::tables::note_doc::note_doc_table;
 use crate::tables::note_message_context::NoteMessageContextFn;
-use crate::tables::related_issues::RelatedIssuesFn;
+use crate::tables::related_issue::RelatedIssueFn;
 use crate::tables::session::SessionTable;
 
 fn default_root() -> PathBuf {
@@ -117,7 +117,7 @@ async fn build_context(
         Arc::new(NoteMessageContextFn::new(Arc::clone(&store))),
     );
     ctx.register_udtf("issue_report", Arc::new(IssueReportFn::new()));
-    ctx.register_udtf("related_issues", Arc::new(RelatedIssuesFn::new()));
+    ctx.register_udtf("related_issue", Arc::new(RelatedIssueFn::new()));
 
     register_disk_table(
         &ctx,

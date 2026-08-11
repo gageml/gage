@@ -1,7 +1,7 @@
 //! Related-issue retrieval. Two issues are related when they share a
 //! name, share at least one session, and their text similarity meets a
 //! threshold. This is the single implementation behind the
-//! `related_issues(issue_id)` table valued function, the `related`
+//! `related_issue(issue_id)` table valued function, the `related`
 //! attribute of `gage issue show`, and pending issue resolution.
 //!
 //! Similarity is TF-IDF weighted cosine over title and description.

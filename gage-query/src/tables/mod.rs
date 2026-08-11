@@ -5,7 +5,7 @@ pub mod message;
 pub mod message_text;
 pub mod note_doc;
 pub mod note_message_context;
-pub mod related_issues;
+pub mod related_issue;
 pub mod session;
 pub(crate) mod walk;
 
@@ -16,7 +16,7 @@ pub use issue_report::IssueReportFn;
 pub use message::MessageTable;
 pub use message_text::MessageTextFn;
 pub use note_message_context::NoteMessageContextFn;
-pub use related_issues::RelatedIssuesFn;
+pub use related_issue::RelatedIssueFn;
 
 use datafusion::arrow::datatypes::SchemaRef;
 
@@ -49,9 +49,9 @@ pub fn registered_tvfs() -> Vec<TvfInfo> {
             schema: issue_report::issue_report_schema(),
         },
         TvfInfo {
-            name: "related_issues",
-            args: related_issues::RELATED_ISSUES_ARGS,
-            schema: related_issues::related_issues_schema(),
+            name: "related_issue",
+            args: related_issue::RELATED_ISSUE_ARGS,
+            schema: related_issue::related_issue_schema(),
         },
     ]
 }

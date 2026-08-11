@@ -1,4 +1,4 @@
-//! `related_issues(issue_id)` — issues related to one issue, as
+//! `related_issue(issue_id)` — issues related to one issue, as
 //! `(related_id, score)` rows ordered by descending score.
 //!
 //! Candidates share the subject's name and at least one session; the
@@ -27,9 +27,9 @@ use gage_db::db::open_db;
 use gage_db::issue::IssueError;
 use gage_db::related::related_issues;
 
-pub const RELATED_ISSUES_ARGS: &str = "issue_id text";
+pub const RELATED_ISSUE_ARGS: &str = "issue_id text";
 
-pub fn related_issues_schema() -> SchemaRef {
+pub fn related_issue_schema() -> SchemaRef {
     SCHEMA.clone()
 }
 
@@ -41,25 +41,25 @@ static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 });
 
 #[derive(Debug, Default)]
-pub struct RelatedIssuesFn;
+pub struct RelatedIssueFn;
 
-impl RelatedIssuesFn {
+impl RelatedIssueFn {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl TableFunctionImpl for RelatedIssuesFn {
+impl TableFunctionImpl for RelatedIssueFn {
     fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let [arg] = args else {
             return Err(DataFusionError::Plan(
-                "related_issues(issue_id) takes exactly one argument".into(),
+                "related_issue(issue_id) takes exactly one argument".into(),
             ));
         };
         let issue_id = string_literal(arg).ok_or_else(|| {
-            DataFusionError::Plan("related_issues issue_id must be a string literal".into())
+            DataFusionError::Plan("related_issue issue_id must be a string literal".into())
         })?;
-        Ok(Arc::new(RelatedIssuesTable { issue_id }))
+        Ok(Arc::new(RelatedIssueTable { issue_id }))
     }
 }
 
@@ -73,12 +73,12 @@ fn string_literal(e: &Expr) -> Option<String> {
 }
 
 #[derive(Debug)]
-struct RelatedIssuesTable {
+struct RelatedIssueTable {
     issue_id: String,
 }
 
 #[async_trait]
-impl TableProvider for RelatedIssuesTable {
+impl TableProvider for RelatedIssueTable {
     fn as_any(&self) -> &dyn Any {
         self
     }

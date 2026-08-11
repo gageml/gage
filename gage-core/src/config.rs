@@ -62,7 +62,7 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuesConfig {
     /// Similarity score at or above which two issues are reported as
-    /// related (see `related_issues` and `gage issue show`).
+    /// related (see `related_issue` and `gage issue show`).
     #[serde(default = "default_related_threshold")]
     pub related_threshold: f64,
 }
