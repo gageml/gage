@@ -126,6 +126,10 @@ pub struct NoteFilters {
     pub names: Vec<String>,
     /// Scanner name filter; matches `author = scanner:{name}`.
     pub scanner: Option<String>,
+    /// Maximum rows to return; `None` returns all matching rows.
+    pub limit: Option<u32>,
+    /// Rows to skip before returning; applied with `limit`.
+    pub offset: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -373,7 +377,9 @@ pub fn get(conn: &Connection, id_prefix: &str) -> Result<Note, NoteError> {
     }
 }
 
-fn find_query(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+/// The `WHERE ...` fragment and its bound values for a note query with
+/// the given filters. Empty string when no filters are set.
+fn where_clause(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
     let mut clauses = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -429,14 +435,35 @@ fn find_query(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::To
         values.push(Box::new(format!("scanner:{scanner}")));
     }
 
-    let where_clause = if clauses.is_empty() {
+    let clause = if clauses.is_empty() {
         String::new()
     } else {
         format!(" WHERE {}", clauses.join(" AND "))
     };
+    (clause, values)
+}
 
-    let sql = format!("{NOTE_SELECT}{where_clause} ORDER BY n.created DESC");
+fn find_query(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let (clause, values) = where_clause(filters);
+    let mut sql = format!("{NOTE_SELECT}{clause} ORDER BY n.created DESC");
+    if let Some(limit) = filters.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+        if let Some(offset) = filters.offset {
+            sql.push_str(&format!(" OFFSET {offset}"));
+        }
+    }
     (sql, values)
+}
+
+/// Total number of notes matching `filters` (ignoring `limit` and
+/// `offset`). Used to render "showing N of M" summaries after a
+/// paginated `find`.
+pub fn count_matching(conn: &Connection, filters: &NoteFilters) -> Result<u32, NoteError> {
+    let (clause, values) = where_clause(filters);
+    let sql = format!("SELECT count(*) FROM note n{clause}");
+    let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    let n: u32 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
+    Ok(n)
 }
 
 pub fn find(conn: &Connection, filters: &NoteFilters) -> Result<Vec<Note>, NoteError> {

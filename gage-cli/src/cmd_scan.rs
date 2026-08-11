@@ -498,7 +498,7 @@ fn load_scan_results(
         conn,
         &gage_db::issue::IssueFilters {
             status: gage_db::issue::IssueStatusFilter::Any,
-            name: None,
+            ..Default::default()
         },
     )?
     .into_iter()
@@ -1506,7 +1506,7 @@ fn remove_scan_logs(scan_id: &str) {
 fn all_issue_ids(conn: &gage_db::rusqlite::Connection) -> std::collections::HashSet<String> {
     let filters = gage_db::issue::IssueFilters {
         status: gage_db::issue::IssueStatusFilter::Any,
-        name: None,
+        ..Default::default()
     };
     gage_db::issue::find(conn, &filters)
         .map(|issues| issues.into_iter().map(|i| i.id).collect())
@@ -1519,7 +1519,7 @@ fn new_issues_since(
 ) -> Vec<gage_db::issue::Issue> {
     let filters = gage_db::issue::IssueFilters {
         status: gage_db::issue::IssueStatusFilter::Any,
-        name: None,
+        ..Default::default()
     };
     gage_db::issue::find(conn, &filters)
         .map(|issues| {

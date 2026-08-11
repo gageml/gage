@@ -151,6 +151,7 @@ fn fetch_issues(q: IssuesQuery) -> super::Result<Vec<Issue>> {
     let filters = IssueFilters {
         status,
         name: q.name,
+        ..Default::default()
     };
     let db = ctx.db.lock().unwrap();
     let db_issues = issue::find(&db, &filters).map_err(|e| Error::Db(e.to_string()))?;

@@ -651,6 +651,10 @@ pub enum IssueStatusFilter {
 pub struct IssueFilters {
     pub status: IssueStatusFilter,
     pub name: Option<String>,
+    /// Maximum rows to return; `None` returns all matching rows.
+    pub limit: Option<u32>,
+    /// Rows to skip before returning; applied with `limit`.
+    pub offset: Option<u32>,
 }
 
 const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.title, i.description, i.status,
@@ -682,13 +686,50 @@ pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, Iss
         format!(" WHERE {}", clauses.join(" AND "))
     };
 
-    let sql = format!("{ISSUE_SELECT}{where_clause} ORDER BY i.created DESC");
+    let mut sql = format!("{ISSUE_SELECT}{where_clause} ORDER BY i.created DESC");
+    if let Some(limit) = filters.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+        if let Some(offset) = filters.offset {
+            sql.push_str(&format!(" OFFSET {offset}"));
+        }
+    }
     let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let issues = stmt
         .query_map(params.as_slice(), row_to_issue)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(issues)
+}
+
+/// Total number of issues matching `filters` (ignoring `limit` and
+/// `offset`). Used to render "showing N of M" summaries after a
+/// paginated `find`.
+pub fn count(conn: &Connection, filters: &IssueFilters) -> Result<u32, IssueError> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    match filters.status {
+        IssueStatusFilter::Open => clauses.push("i.status = 'open'".to_string()),
+        IssueStatusFilter::Closed => clauses.push("i.status = 'closed'".to_string()),
+        IssueStatusFilter::Pending => clauses.push("i.status = 'pending'".to_string()),
+        IssueStatusFilter::Unresolved => {
+            clauses.push("i.status IN ('open', 'pending')".to_string())
+        }
+        IssueStatusFilter::Reconciled => clauses.push("i.status IN ('open', 'closed')".to_string()),
+        IssueStatusFilter::Any => {}
+    }
+    if let Some(name) = &filters.name {
+        clauses.push(format!("i.name = ?{}", values.len() + 1));
+        values.push(Box::new(name.clone()));
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    let sql = format!("SELECT count(*) FROM issue i{where_clause}");
+    let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    let n: u32 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
+    Ok(n)
 }
 
 /// Every issue id, unordered. Peer set for prefix-disambiguated

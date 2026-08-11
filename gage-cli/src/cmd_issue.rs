@@ -143,29 +143,42 @@ pub struct IssueListArgs {
 
 pub fn list(args: IssueListArgs) {
     let conn = db::open_db().unwrap();
-    let filters = IssueFilters {
+    let filter_only = IssueFilters {
         status: if args.closed {
             IssueStatusFilter::Closed
         } else {
             IssueStatusFilter::Unresolved
         },
         name: args.name,
+        limit: None,
+        offset: None,
     };
-    let issues = match issue::find(&conn, &filters) {
-        Ok(t) => t,
+    let total = match issue::count(&conn, &filter_only) {
+        Ok(n) => n as usize,
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };
-
-    let total = issues.len();
     if total == 0 {
         println!("No issues found");
         return;
     }
 
     let show = args.limit.show_count(total);
+    let issues = match issue::find(
+        &conn,
+        &IssueFilters {
+            limit: Some(show as u32),
+            ..filter_only
+        },
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let highlighter = style::IdHighlighter::new(issue::all_ids(&conn).unwrap());
 
@@ -176,7 +189,6 @@ pub fn list(args: IssueListArgs) {
 
     let rows: Vec<Vec<String>> = issues
         .iter()
-        .take(show)
         .map(|t| {
             vec![
                 highlighter.short(&t.id),

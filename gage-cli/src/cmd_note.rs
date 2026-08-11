@@ -123,26 +123,37 @@ pub fn list(args: NoteListArgs) {
         },
         None => None,
     };
-    let filters = NoteFilters {
+    let filter_only = NoteFilters {
         session,
         name: args.name,
         ..Default::default()
     };
-    let notes = match note::find(&conn, &filters) {
-        Ok(n) => n,
+    let total = match note::count_matching(&conn, &filter_only) {
+        Ok(n) => n as usize,
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };
-
-    let total = notes.len();
     if total == 0 {
         println!("No notes found");
         return;
     }
 
     let show = args.limit.show_count(total);
+    let notes = match note::find(
+        &conn,
+        &NoteFilters {
+            limit: Some(show as u32),
+            ..filter_only
+        },
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let highlighter = style::IdHighlighter::new(note::all_ids(&conn).unwrap());
 
@@ -153,7 +164,6 @@ pub fn list(args: NoteListArgs) {
 
     let rows: Vec<Vec<String>> = notes
         .iter()
-        .take(show)
         .map(|n| {
             vec![
                 highlighter.short(&n.id),
