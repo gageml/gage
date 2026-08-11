@@ -58,10 +58,13 @@ pub struct IssueAddArgs {
     /// Description (prompted if omitted)
     #[arg(short, long)]
     description: Option<String>,
-
     /// Issue name (default: user-issue)
     #[arg(short, long, default_value = "user-issue")]
     name: String,
+
+    /// Add as 'pending' instead of the default 'open'
+    #[arg(short, long)]
+    pending: bool,
 }
 
 #[derive(Args)]
@@ -111,6 +114,10 @@ pub struct IssueCloseArgs {
     #[arg(short, long)]
     skipped: bool,
 
+    /// Close as 'duplicate' instead of the default 'completed'
+    #[arg(short, long, conflicts_with = "skipped")]
+    duplicate: bool,
+
     /// Message explaining issue close
     #[arg(short, long)]
     message: Option<String>,
@@ -129,24 +136,18 @@ pub struct IssueListArgs {
     #[arg(long)]
     name: Option<String>,
 
-    /// Include closed issues
+    /// Show closed issues
     #[arg(short, long)]
     closed: bool,
-
-    /// List pending issues only
-    #[arg(short, long)]
-    pending: bool,
 }
 
 pub fn list(args: IssueListArgs) {
     let conn = db::open_db().unwrap();
     let filters = IssueFilters {
-        status: if args.pending {
-            IssueStatusFilter::Pending
-        } else if args.closed {
-            IssueStatusFilter::Reconciled
+        status: if args.closed {
+            IssueStatusFilter::Closed
         } else {
-            IssueStatusFilter::Open
+            IssueStatusFilter::Unresolved
         },
         name: args.name,
     };
@@ -337,8 +338,7 @@ pub fn add(args: IssueAddArgs) {
         let description: String = match args.description {
             Some(ref d) => d.clone(),
             None => cli::input("Description")
-                .placeholder("Type a description (optional)")
-                .required(false)
+                .placeholder("Type a description")
                 .interact()?,
         };
         let description = if description.is_empty() {
@@ -361,7 +361,11 @@ pub fn add(args: IssueAddArgs) {
             id,
             title,
             description,
-            status: IssueStatus::Open,
+            status: if args.pending {
+                IssueStatus::Pending
+            } else {
+                IssueStatus::Open
+            },
             status_reason: None,
             created: gage_core::datetime::now_ms(),
             modified: None,
@@ -453,6 +457,8 @@ pub fn close(args: IssueCloseArgs) {
 
     let reason = if args.skipped {
         StatusReason::Skipped
+    } else if args.duplicate {
+        StatusReason::Duplicate
     } else {
         StatusReason::Completed
     };
@@ -464,6 +470,20 @@ pub fn close(args: IssueCloseArgs) {
             target_issue.title,
         ))?;
         cli::log::step(format!("Reason\n{}", console::style(reason.as_str()).dim()))?;
+
+        let message: Option<String> = match args.message {
+            Some(ref m) => {
+                cli::log::step(format!("Message\n{}", console::style(m).dim()))?;
+                Some(m.clone())
+            }
+            None => {
+                let m: String = cli::input("Message")
+                    .placeholder("Type a message (optional)")
+                    .required(false)
+                    .interact()?;
+                if m.is_empty() { None } else { Some(m) }
+            }
+        };
 
         if !args.yes {
             let confirmed = cli::confirm("Close this issue?")
@@ -481,7 +501,7 @@ pub fn close(args: IssueCloseArgs) {
             &target_issue.id,
             reason,
             &author,
-            args.message.as_deref(),
+            message.as_deref(),
             now,
         )
         .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;

@@ -586,6 +586,8 @@ pub enum IssueStatusFilter {
     Closed,
     /// Only `pending` issues.
     Pending,
+    /// Open and pending issues; excludes closed.
+    Unresolved,
     /// Open and closed issues; excludes pending.
     Reconciled,
     /// All issues regardless of status.
@@ -610,6 +612,9 @@ pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, Iss
         IssueStatusFilter::Open => clauses.push("i.status = 'open'".to_string()),
         IssueStatusFilter::Closed => clauses.push("i.status = 'closed'".to_string()),
         IssueStatusFilter::Pending => clauses.push("i.status = 'pending'".to_string()),
+        IssueStatusFilter::Unresolved => {
+            clauses.push("i.status IN ('open', 'pending')".to_string())
+        }
         IssueStatusFilter::Reconciled => clauses.push("i.status IN ('open', 'closed')".to_string()),
         IssueStatusFilter::Any => {}
     }
@@ -930,6 +935,19 @@ mod tests {
         .unwrap();
         assert_eq!(reconciled.len(), 1);
         assert_eq!(reconciled[0].id, "issue-aaa");
+
+        let unresolved = find(
+            &conn,
+            &IssueFilters {
+                status: IssueStatusFilter::Unresolved,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Both samples share `created`, so relative order is unspecified
+        let mut ids: Vec<&str> = unresolved.iter().map(|i| i.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["issue-aaa", "issue-bbb"]);
 
         let all = find(
             &conn,

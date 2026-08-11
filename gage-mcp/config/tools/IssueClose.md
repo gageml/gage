@@ -9,7 +9,7 @@ description = "Issue ID (from list or detail)"
 [parameters.reason]
 type = "string"
 required = true
-description = "One of: completed, skipped"
+description = "One of: completed, skipped, duplicate"
 
 [parameters.message]
 type = "string"
@@ -23,8 +23,9 @@ idempotent_hint = false
 
 Use to mark an issue as closed.
 
-You can close an issue with one of two reasons: completed or skipped. If
-a fix was applied or some other action take, use completed, otherwise
-use skipped.
+You can close an issue with one of three reasons: completed, skipped, or
+duplicate. If a fix was applied or some other action taken, use
+completed. If the issue duplicates another issue that remains the issue
+of record, use duplicate. Otherwise use skipped.
 
 ---eof-567---

@@ -36,9 +36,10 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
     let reason = match reason_str.as_str() {
         "completed" => StatusReason::Completed,
         "skipped" => StatusReason::Skipped,
+        "duplicate" => StatusReason::Duplicate,
         other => {
             return Err(McpError::invalid_params(
-                format!("reason must be 'completed' or 'skipped' (got '{other}')"),
+                format!("reason must be 'completed', 'skipped', or 'duplicate' (got '{other}')"),
                 None,
             ));
         }
