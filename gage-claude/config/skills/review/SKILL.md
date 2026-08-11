@@ -153,10 +153,10 @@ accurate --- using this rubric:
   would the user enjoy?
 - `user pain addressed` - If left unsolved, what cost does the user incur? What
   pain does the user face?
-- `fix ease` - According to the issue fix advice, how straight forward is the
-  fix to apply?
-- `fix risk` - What risk does the proposed fix present to the user? If something
-  goes wrong, what could it cost the user?
+- `fix ease` - If the issue proposes a fix, how straight forward is the fix to
+  apply?
+- `fix risk` - If the issue proposes a fix, what risk does it present to the
+  user? If something goes wrong, what could it cost the user?
 
 The sub-agent should include the issue report in its reply along with its
 answers to the rubric questions.

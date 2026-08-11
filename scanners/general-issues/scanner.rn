@@ -13,7 +13,7 @@ pub const SCANNER = #{
     name: "general-issues",
     description: "Scan sessions for general issues",
     tasks: #{
-        findings: #{
+        notes: #{
             notes: #{
                 writes: #{ "finding": "Noteworthy finding in a session" },
             },
@@ -31,11 +31,11 @@ pub const SCANNER = #{
 
 const FINDINGS_KEY = ("general-issues", "findings", 3);
 
-/// Submit each session to an agent to write findings.
+/// Submit each session to an agent to write finding notes.
 ///
 /// Sessions already processed under the current findings key are
-/// skipped; their prior findings are carried forward into this scan.
-pub async fn findings() {
+/// skipped with their prior findings are carried forward into this scan.
+pub async fn notes() {
     // Skip previously scanned sessions per key
     let (prev_sessions, new_sessions, validate) = scan()
         .sessions()

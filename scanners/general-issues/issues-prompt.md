@@ -1,4 +1,4 @@
-Issues
+Analyze finding notes and report systematic issues
 
 Use `mcp__gage__Query` to read findings, which are `note` table rows with `name`
 value `finding`
@@ -35,8 +35,27 @@ uuid, type, subtype, text, timestamp, attachments, ide_tags, raw)
 
 When you have enough solid information to identify an issue, use the
 `mcp__gage__IssueWrite` tool to write an issue. Describe the issue with enough
-detail that a user can understand the problem and how it is systematic. Include
-recommended fixes or fix strategies to help the user solve any problems.
+detail that a user can understand the problem and how it is systematic.
+
+The sessions you analyze are records of another agent's behavior. Refer to that
+agent in the third person. The agent model cannot be changed, so do not write
+advice directed at it.
+
+Use this skeleton for the issue description:
+
+```markdown
+## Summary
+
+Two or three sentences stating the problem.
+
+## Evidence
+
+Specific instances, with quotes or session/line references.
+
+## Why this is systematic
+
+Why the evidence indicates a pattern rather than a one-off.
+```
 
 Include the applicable note IDs as evidence in the tool use.
 
