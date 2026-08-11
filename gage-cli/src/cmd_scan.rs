@@ -597,6 +597,7 @@ fn load_scan_results(
                 author: n.author.clone(),
                 created: gage_core::datetime::ms_to_iso8601(n.created),
                 explanation: n.explanation.clone(),
+                metadata: n.metadata.clone(),
             })
             .collect(),
         sessions: counts

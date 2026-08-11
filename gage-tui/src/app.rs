@@ -836,6 +836,15 @@ fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
     for l in value.lines() {
         lines.push(Line::from(l.to_string()));
     }
+    if let Some(metadata) = &note.metadata {
+        let pretty = serde_json::from_str::<serde_json::Value>(metadata)
+            .and_then(|v| serde_json::to_string_pretty(&v))
+            .unwrap_or_else(|_| metadata.clone());
+        lines.push(Line::from(""));
+        for l in pretty.lines() {
+            lines.push(Line::from(l.to_string()));
+        }
+    }
     let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default().padding(Padding::uniform(1)));

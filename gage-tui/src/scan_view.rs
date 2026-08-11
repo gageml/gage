@@ -159,6 +159,8 @@ pub struct NoteItem {
     /// Creation time display string
     pub created: String,
     pub explanation: Option<String>,
+    /// Raw JSON text for the note's metadata, if any.
+    pub metadata: Option<String>,
 }
 
 /// An issue opened during the scan.
@@ -1003,21 +1005,35 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     }
 }
 
-/// Note detail content: caption/value header columns, then the value
-/// and explanation rendered as markdown.
+/// Note detail content: caption/value header columns (with an optional
+/// multi-line Metadata attribute), the value rendered as markdown, and
+/// an optional explanation.
 fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
-    let mut lines = attr_lines(&[
+    let metadata_pretty = note.metadata.as_deref().map(pretty_json);
+    let mut attrs: Vec<(&'static str, &str)> = vec![
         ("Name", &note.name),
         ("Target", &note.target),
         ("Author", &note.author),
         ("Created", &note.created),
-    ]);
+    ];
+    if let Some(pretty) = &metadata_pretty {
+        attrs.push(("Metadata", pretty));
+    }
+    let mut lines = attr_lines(&attrs);
     lines.push(Line::raw(""));
     lines.extend(markdown::render(&note.value_full));
     if let Some(explanation) = &note.explanation {
         section(&mut lines, "Explanation", markdown::render(explanation));
     }
     lines
+}
+
+/// Pretty-print a raw JSON string (2-space indent). Falls back to the
+/// raw text if the string does not parse as JSON.
+fn pretty_json(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 /// Issue detail content, mirroring `gage issue show`. `related` adds
