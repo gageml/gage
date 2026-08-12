@@ -194,7 +194,13 @@ fn list(args: ScanListArgs) {
 
     let show = args.limit.show_count(total);
 
-    let highlighter = s::IdHighlighter::new(scan::all_scan_ids(&conn).unwrap());
+    let highlighter = s::IdHighlighter::new(match scan::all_ids(&conn) {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    });
 
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Cost", "Duration", "Created",

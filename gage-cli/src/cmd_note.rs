@@ -155,7 +155,13 @@ pub fn list(args: NoteListArgs) {
         }
     };
 
-    let highlighter = style::IdHighlighter::new(note::all_ids(&conn).unwrap());
+    let highlighter = style::IdHighlighter::new(match note::all_ids(&conn) {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    });
 
     let header: Vec<String> = ["Id", "Name", "Value", "Target", "Created"]
         .iter()

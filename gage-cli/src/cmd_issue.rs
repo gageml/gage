@@ -180,7 +180,13 @@ pub fn list(args: IssueListArgs) {
         }
     };
 
-    let highlighter = style::IdHighlighter::new(issue::all_ids(&conn).unwrap());
+    let highlighter = style::IdHighlighter::new(match issue::all_ids(&conn) {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    });
 
     let header: Vec<String> = ["Id", "Name", "Title", "Status", "Created"]
         .iter()

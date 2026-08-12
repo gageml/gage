@@ -513,7 +513,7 @@ pub fn delete_scan(conn: &Connection, scan_id: &str) -> Result<(), ScanError> {
 
 /// Every scan id, unordered. Peer set for prefix-disambiguated
 /// displays; matches what [`get_scan`] resolves against.
-pub fn all_scan_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+pub fn all_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM scan")?;
     stmt.query_map([], |row| row.get::<_, String>(0))?.collect()
 }
