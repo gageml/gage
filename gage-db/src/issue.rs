@@ -64,82 +64,145 @@ impl std::str::FromStr for StatusReason {
 }
 
 /// A change logged against an issue. The variant determines the `type`
-/// column; the carried message is the `value` column. `Comment` requires
-/// a message; the others carry an optional one.
-///
-/// `Close`, `Reopen`, and `Promote` are legacy variants preserved for
-/// reading rows written before the `set_status` refactor. New status
-/// changes always log `Status`.
+/// column (`"create"`, `"status"`, `"comment"`) and encodes its
+/// per-variant fields into the `metadata` JSON column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueEvent {
-    Create,
-    Close {
-        message: Option<String>,
+    Create {
+        status: IssueStatus,
     },
-    Reopen {
-        message: Option<String>,
-    },
-    Promote {
+    Status {
+        status: IssueStatus,
+        reason: Option<StatusReason>,
         message: Option<String>,
     },
     Comment {
         message: String,
     },
-    Status {
-        to: IssueStatus,
-        message: Option<String>,
-    },
 }
 
 impl IssueEvent {
-    /// Value of the `type` column for this variant. `Status` events use
-    /// the target status name (`"open"` / `"closed"` / `"pending"`),
-    /// distinct from the legacy action verbs.
+    /// Value of the `type` column for this variant.
     pub fn type_str(&self) -> &'static str {
         match self {
-            IssueEvent::Create => "create",
-            IssueEvent::Close { .. } => "close",
-            IssueEvent::Reopen { .. } => "reopen",
-            IssueEvent::Promote { .. } => "promote",
+            IssueEvent::Create { .. } => "create",
+            IssueEvent::Status { .. } => "status",
             IssueEvent::Comment { .. } => "comment",
-            IssueEvent::Status { to, .. } => to.as_str(),
         }
     }
 
-    /// Free-form message carried by the event, stored in the `value`
-    /// column. `None` for events without a message.
+    /// Free-form message carried by the event. `None` for events without
+    /// a message.
     pub fn message(&self) -> Option<&str> {
         match self {
-            IssueEvent::Create => None,
-            IssueEvent::Close { message }
-            | IssueEvent::Reopen { message }
-            | IssueEvent::Promote { message }
-            | IssueEvent::Status { message, .. } => message.as_deref(),
+            IssueEvent::Create { .. } => None,
+            IssueEvent::Status { message, .. } => message.as_deref(),
             IssueEvent::Comment { message } => Some(message),
         }
     }
 
-    /// Reconstruct an event from its `type` and `value` columns.
-    fn from_columns(type_str: &str, value: Option<String>) -> Result<Self, String> {
+    /// Short display label for the event, e.g. `"comment"`,
+    /// `"created"`, `"created (pending)"`, `"open"`,
+    /// `"close (completed)"`.
+    pub fn to_label(&self) -> String {
+        match self {
+            IssueEvent::Comment { .. } => "comment".to_string(),
+            IssueEvent::Create {
+                status: IssueStatus::Open,
+            } => "created".to_string(),
+            IssueEvent::Create { status } => format!("created ({})", status.as_str()),
+            IssueEvent::Status {
+                status: IssueStatus::Closed,
+                reason: Some(r),
+                ..
+            } => format!("close ({})", r.as_str()),
+            IssueEvent::Status {
+                status: IssueStatus::Closed,
+                reason: None,
+                ..
+            } => "close".to_string(),
+            IssueEvent::Status { status, .. } => status.as_str().to_string(),
+        }
+    }
+
+    /// Encode this event's fields as the JSON payload stored in the
+    /// `metadata` column. `None` when the variant has no fields.
+    fn to_metadata_json(&self) -> Option<String> {
+        let mut obj = serde_json::Map::new();
+        match self {
+            IssueEvent::Create { status } => {
+                obj.insert(
+                    "status".into(),
+                    serde_json::Value::String(status.as_str().into()),
+                );
+            }
+            IssueEvent::Status {
+                status,
+                reason,
+                message,
+            } => {
+                obj.insert(
+                    "status".into(),
+                    serde_json::Value::String(status.as_str().into()),
+                );
+                if let Some(r) = reason {
+                    obj.insert(
+                        "status_reason".into(),
+                        serde_json::Value::String(r.as_str().into()),
+                    );
+                }
+                if let Some(m) = message {
+                    obj.insert("message".into(), serde_json::Value::String(m.clone()));
+                }
+            }
+            IssueEvent::Comment { message } => {
+                obj.insert("message".into(), serde_json::Value::String(message.clone()));
+            }
+        }
+        Some(serde_json::Value::Object(obj).to_string())
+    }
+
+    /// Reconstruct an event from its `type` column and the JSON payload
+    /// stored in `metadata`.
+    fn from_columns(type_str: &str, metadata: Option<String>) -> Result<Self, String> {
+        let obj: serde_json::Value = match metadata.as_deref() {
+            Some(s) if !s.is_empty() => {
+                serde_json::from_str(s).map_err(|e| format!("invalid metadata json: {e}"))?
+            }
+            _ => serde_json::Value::Object(Default::default()),
+        };
+        let read_status = |key: &str| -> Result<Option<IssueStatus>, String> {
+            match obj.get(key).and_then(|v| v.as_str()) {
+                Some(s) => Ok(Some(s.parse()?)),
+                None => Ok(None),
+            }
+        };
+        let read_reason = |key: &str| -> Result<Option<StatusReason>, String> {
+            match obj.get(key).and_then(|v| v.as_str()) {
+                Some(s) => Ok(Some(s.parse()?)),
+                None => Ok(None),
+            }
+        };
+        let read_string = |key: &str| obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string());
         match type_str {
-            "create" => Ok(IssueEvent::Create),
-            "close" => Ok(IssueEvent::Close { message: value }),
-            "reopen" => Ok(IssueEvent::Reopen { message: value }),
-            "promote" => Ok(IssueEvent::Promote { message: value }),
+            "create" => {
+                let status =
+                    read_status("status")?.ok_or("create event missing metadata.status")?;
+                Ok(IssueEvent::Create { status })
+            }
+            "status" => {
+                let status =
+                    read_status("status")?.ok_or("status event missing metadata.status")?;
+                let reason = read_reason("status_reason")?;
+                let message = read_string("message");
+                Ok(IssueEvent::Status {
+                    status,
+                    reason,
+                    message,
+                })
+            }
             "comment" => Ok(IssueEvent::Comment {
-                message: value.unwrap_or_default(),
-            }),
-            "open" => Ok(IssueEvent::Status {
-                to: IssueStatus::Open,
-                message: value,
-            }),
-            "closed" => Ok(IssueEvent::Status {
-                to: IssueStatus::Closed,
-                message: value,
-            }),
-            "pending" => Ok(IssueEvent::Status {
-                to: IssueStatus::Pending,
-                message: value,
+                message: read_string("message").unwrap_or_default(),
             }),
             other => Err(format!("unknown issue event type '{other}'")),
         }
@@ -297,7 +360,9 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
             issue_id: issue.id.clone(),
             author: issue.author.clone(),
             timestamp: issue.created,
-            event: IssueEvent::Create,
+            event: IssueEvent::Create {
+                status: issue.status,
+            },
         },
     )?;
     tx.commit()?;
@@ -321,11 +386,12 @@ fn find_by_dup_key(conn: &Connection, name: &str, author: &str) -> Result<Issue,
 }
 
 /// Set an issue's status. Any transition is allowed; the caller is
-/// trusted to know what it's doing. `status_reason` is stored only when
-/// `new_status` is `Closed` (silently discarded otherwise, since the
+/// trusted to know what it's doing. `reason` is meaningful only when
+/// `new_status` is `Closed`: a missing reason defaults to `Completed`,
+/// and a reason passed for any other status is silently discarded (the
 /// schema only carries a reason for closed issues). Bumps `modified`
-/// and logs a `Status` event carrying the optional message. The update
-/// and event insert share a transaction.
+/// and logs a `Status` event carrying the effective reason and the
+/// optional message. The update and event insert share a transaction.
 pub fn set_status(
     conn: &Connection,
     issue_id: &str,
@@ -354,7 +420,7 @@ pub(crate) fn set_status_in_tx(
     timestamp: i64,
 ) -> Result<(), IssueError> {
     let effective_reason = if new_status == IssueStatus::Closed {
-        reason
+        Some(reason.unwrap_or(StatusReason::Completed))
     } else {
         None
     };
@@ -379,7 +445,8 @@ pub(crate) fn set_status_in_tx(
             author: author.to_string(),
             timestamp,
             event: IssueEvent::Status {
-                to: new_status,
+                status: new_status,
+                reason: effective_reason,
                 message: message.map(str::to_string),
             },
         },
@@ -440,14 +507,14 @@ pub fn insert_issue_event(conn: &Connection, event: &LoggedEvent) -> Result<(), 
 
 fn insert_event(conn: &Connection, event: &LoggedEvent) -> Result<(), IssueError> {
     conn.execute(
-        "INSERT INTO issue_event (issue_id, type, author, timestamp, value)
+        "INSERT INTO issue_event (issue_id, type, author, timestamp, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             event.issue_id,
             event.event.type_str(),
             event.author,
             event.timestamp,
-            event.event.message(),
+            event.event.to_metadata_json(),
         ],
     )?;
     Ok(())
@@ -456,7 +523,7 @@ fn insert_event(conn: &Connection, event: &LoggedEvent) -> Result<(), IssueError
 /// Events logged against `issue_id`, ordered by `timestamp` ascending.
 pub fn issue_events_for(conn: &Connection, issue_id: &str) -> Result<Vec<LoggedEvent>, IssueError> {
     let mut stmt = conn.prepare(
-        "SELECT issue_id, type, author, timestamp, value
+        "SELECT issue_id, type, author, timestamp, metadata
          FROM issue_event WHERE issue_id = ?1 ORDER BY timestamp ASC",
     )?;
     let rows = stmt
@@ -467,8 +534,8 @@ pub fn issue_events_for(conn: &Connection, issue_id: &str) -> Result<Vec<LoggedE
 
 fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<LoggedEvent> {
     let type_str: String = row.get(1)?;
-    let value: Option<String> = row.get(4)?;
-    let event = IssueEvent::from_columns(&type_str, value).map_err(|e| {
+    let metadata: Option<String> = row.get(4)?;
+    let event = IssueEvent::from_columns(&type_str, metadata).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Text,
@@ -919,9 +986,16 @@ mod tests {
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(
+            events[0].event,
+            IssueEvent::Create {
+                status: IssueStatus::Pending,
+            }
+        );
+        assert_eq!(
             events[1].event,
             IssueEvent::Status {
-                to: IssueStatus::Open,
+                status: IssueStatus::Open,
+                reason: None,
                 message: Some("novel".to_string()),
             }
         );
@@ -1020,13 +1094,19 @@ mod tests {
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].event, IssueEvent::Create);
+        assert_eq!(
+            events[0].event,
+            IssueEvent::Create {
+                status: IssueStatus::Open,
+            }
+        );
         assert_eq!(events[0].author, "scanner:test");
         assert_eq!(events[1].author, "user:tester");
         assert_eq!(
             events[1].event,
             IssueEvent::Status {
-                to: IssueStatus::Closed,
+                status: IssueStatus::Closed,
+                reason: Some(StatusReason::Completed),
                 message: Some("done in PR 42".to_string()),
             }
         );
@@ -1063,18 +1143,25 @@ mod tests {
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 3);
-        assert_eq!(events[0].event, IssueEvent::Create);
+        assert_eq!(
+            events[0].event,
+            IssueEvent::Create {
+                status: IssueStatus::Open,
+            }
+        );
         assert_eq!(
             events[1].event,
             IssueEvent::Status {
-                to: IssueStatus::Closed,
+                status: IssueStatus::Closed,
+                reason: Some(StatusReason::Skipped),
                 message: None,
             }
         );
         assert_eq!(
             events[2].event,
             IssueEvent::Status {
-                to: IssueStatus::Open,
+                status: IssueStatus::Open,
+                reason: None,
                 message: Some("resurfaced".to_string()),
             }
         );
@@ -1136,7 +1223,12 @@ mod tests {
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].event, IssueEvent::Create);
+        assert_eq!(
+            events[0].event,
+            IssueEvent::Create {
+                status: IssueStatus::Open,
+            }
+        );
         assert_eq!(events[1].author, "user:tester");
         assert_eq!(
             events[1].event,

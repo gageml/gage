@@ -206,7 +206,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             type      TEXT NOT NULL,
             author    TEXT NOT NULL,
             timestamp INTEGER NOT NULL,
-            value     TEXT
+            metadata  TEXT
         );
         CREATE INDEX idx_issue_event_issue_id ON issue_event(issue_id);
 

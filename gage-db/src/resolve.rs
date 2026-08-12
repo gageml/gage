@@ -521,7 +521,15 @@ mod tests {
         let events = issue::issue_events_for(&conn, "c-done").unwrap();
         let reopens = events
             .iter()
-            .filter(|e| e.event.type_str() == "open")
+            .filter(|e| {
+                matches!(
+                    e.event,
+                    issue::IssueEvent::Status {
+                        status: IssueStatus::Open,
+                        ..
+                    }
+                )
+            })
             .count();
         assert_eq!(reopens, 1);
     }

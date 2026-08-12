@@ -205,7 +205,7 @@ fn render_note(out: &mut String, note: &Note) {
 fn render_event(out: &mut String, ev: &LoggedEvent) {
     out.push_str(&format!(
         "- {} · {} · {}\n",
-        ev.event.type_str(),
+        ev.event.to_label(),
         ev.author,
         ms_to_iso8601(ev.timestamp),
     ));

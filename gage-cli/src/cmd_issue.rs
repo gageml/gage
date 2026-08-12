@@ -366,7 +366,7 @@ pub fn show(args: IssueShowArgs) {
                 let header = console::style(textwrap::fill(
                     &format!(
                         "{} · {} · {}",
-                        ev.event.type_str(),
+                        ev.event.to_label(),
                         ev.author,
                         gage_core::datetime::ms_to_iso8601(ev.timestamp),
                     ),

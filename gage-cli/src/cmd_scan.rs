@@ -540,7 +540,7 @@ fn load_scan_results(
         let events = gage_db::issue::issue_events_for(conn, &i.id)?
             .iter()
             .map(|ev| EventItem {
-                kind: ev.event.type_str().to_string(),
+                kind: ev.event.to_label(),
                 author: ev.author.clone(),
                 timestamp: gage_core::datetime::ms_to_iso8601(ev.timestamp),
                 message: ev.event.message().map(str::to_string),

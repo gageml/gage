@@ -391,8 +391,8 @@ mod tests {
                 ('sess:a','n1'), ('sess:b','n2'), ('sess:c','n3');
              INSERT INTO issue (id, name, title, status, created, author) VALUES
                 ('i1','dup','t','open',100,'u');
-             INSERT INTO issue_event (issue_id, type, author, timestamp) VALUES
-                ('i1','open','u',100);",
+             INSERT INTO issue_event (issue_id, type, author, timestamp, metadata) VALUES
+                ('i1','create','u',100,'{\"status\":\"open\"}');",
         )
         .unwrap();
     }
