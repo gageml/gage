@@ -214,7 +214,7 @@ pub fn list(args: IssueListArgs) {
                 .suffix("…")
                 .priority(PriorityMax::left()),
         )
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(3..5).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
@@ -384,7 +384,7 @@ pub fn show(args: IssueShowArgs) {
 
     let table = Table::from_iter(rows)
         .with(Style::rounded())
-        .modify(Columns::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
 }

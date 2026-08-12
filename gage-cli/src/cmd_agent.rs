@@ -17,6 +17,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::style as cli_style;
 
 #[derive(Args)]
 pub struct AgentArgs {
@@ -232,7 +233,7 @@ fn list_agents(registry: &ScannerRegistry) {
                 .keep_words(true)
                 .priority(Priority::max(true)),
         )
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Rows::first(), cli_style::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
 }

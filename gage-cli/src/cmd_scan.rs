@@ -222,7 +222,7 @@ fn list(args: ScanListArgs) {
 
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(1..7), Alignment::right())
         .modify(Columns::last().not(Rows::first()), s::dim())
         .to_string();
@@ -1623,7 +1623,7 @@ fn list_scanners(registry: &ScannerRegistry) {
                 .keep_words(true)
                 .priority(Priority::max(true)),
         )
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
 }

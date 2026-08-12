@@ -384,7 +384,7 @@ pub async fn list(args: SessionListArgs, agent: bool) {
     let mut table = Table::from_iter(std::iter::once(header).chain(table_rows));
     table
         .with(Style::rounded())
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
         .modify(Columns::last(), Alignment::right())
         .modify(Columns::new(6..7), Alignment::right());

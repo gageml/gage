@@ -228,8 +228,11 @@ fn list_remotes() {
     let mut table = Table::from_iter(std::iter::once(header).chain(rows));
     table
         .with(Style::rounded())
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
+        .modify(Rows::first(), cli_style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::first().not(Rows::first()),
+            cli_style::tty(Color::FG_BRIGHT_YELLOW),
+        )
         .modify(Columns::one(1).not(Rows::first()), cli_style::dim());
     println!("{table}");
 }

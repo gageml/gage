@@ -189,8 +189,11 @@ pub fn list(args: NoteListArgs) {
                 .suffix("…")
                 .priority(PriorityMax::left()),
         )
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::one(2).not(Rows::first()), Color::FG_BRIGHT_CYAN)
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::one(2).not(Rows::first()),
+            style::tty(Color::FG_BRIGHT_CYAN),
+        )
         .modify(Columns::new(3..5).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
@@ -318,8 +321,8 @@ pub async fn show(args: NoteShowArgs) {
 
     let table = Table::from_iter(rows)
         .with(Style::rounded())
-        .modify(Columns::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Cell::new(2, 1), Color::FG_BRIGHT_CYAN)
+        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Cell::new(2, 1), style::tty(Color::FG_BRIGHT_CYAN))
         .to_string();
     println!("{table}");
 }

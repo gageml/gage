@@ -17,6 +17,8 @@ use gage_core::config::{
     find_project_root, user_config_path,
 };
 
+use crate::style;
+
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Show effective Gage configuration
@@ -110,7 +112,7 @@ fn show() {
 
     let table = Table::from_iter(rows)
         .with(Style::rounded())
-        .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
 }

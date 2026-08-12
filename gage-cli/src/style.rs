@@ -11,12 +11,25 @@ pub fn spinner(message: &str) -> indicatif::ProgressBar {
     spinner
 }
 
+/// Returns `c` when colors are enabled for stdout, else an empty `Color`.
+/// Wrap every `tabled::settings::Color` used in listing tables so table
+/// styling honors the same TTY gate as `console::style`, avoiding the
+/// half-colored output that mixes bare ID columns with escape-wrapped
+/// headers when the CLI is piped.
+pub fn tty(c: Color) -> Color {
+    if console::colors_enabled() {
+        c
+    } else {
+        Color::new("", "")
+    }
+}
+
 pub fn dim() -> Color {
-    Color::new("\x1b[2m", "\x1b[22m")
+    tty(Color::new("\x1b[2m", "\x1b[22m"))
 }
 
 pub fn dim_italic() -> Color {
-    Color::new("\x1b[2;3m", "\x1b[22;23m")
+    tty(Color::new("\x1b[2;3m", "\x1b[22;23m"))
 }
 
 /// Renders IDs as short, jj-style displays where the disambiguating
@@ -39,10 +52,10 @@ impl IdHighlighter {
         Self { sorted_peers }
     }
 
-    /// Length of the shortest prefix of `id` that resolves uniquely
-    /// against the peer set. Always at least 1. May exceed `id.len()`
-    /// only when a peer duplicates `id` byte-for-byte, which is not a
-    /// case Gage constructs.
+    /// Length in characters of the shortest prefix of `id` that resolves
+    /// uniquely against the peer set. Always at least 1. May exceed the
+    /// character count of `id` only when a peer duplicates `id`
+    /// character-for-character, which is not a case Gage constructs.
     pub fn unique_prefix_len(&self, id: &str) -> usize {
         let pos = match self.sorted_peers.binary_search_by(|p| p.as_str().cmp(id)) {
             Ok(i) => i,
@@ -56,8 +69,8 @@ impl IdHighlighter {
                 continue;
             }
             let common = id
-                .bytes()
-                .zip(peer.bytes())
+                .chars()
+                .zip(peer.chars())
                 .take_while(|(a, b)| a == b)
                 .count();
             max_common = max_common.max(common);
@@ -67,23 +80,31 @@ impl IdHighlighter {
 
     /// Styled 8-char short display: bright yellow up to the unique
     /// prefix, dark yellow for the tail. If the unique prefix reaches
-    /// or exceeds the shown length, the whole short display is bright
-    /// yellow — the display is ambiguous and the caller may want to
-    /// widen it, but the coloring at least signals which chars carry
-    /// disambiguation weight.
+    /// or exceeds the 8-char display length, the whole short display
+    /// is bright yellow — the display is ambiguous and the caller may
+    /// want to widen it (see `full`), but the coloring at least signals
+    /// which chars carry disambiguation weight.
     pub fn short(&self, id: &str) -> String {
         self.styled(id, short_uuid(id))
     }
 
-    /// Styled full-length display: same two-tone treatment as `short`,
-    /// applied over the entire ID.
+    /// Styled full-length display: bright yellow up to the unique
+    /// prefix, dark yellow for the tail. If the unique prefix reaches
+    /// or exceeds the ID length — only when a peer duplicates the ID
+    /// character-for-character, which Gage does not construct — the
+    /// whole ID is bright yellow.
     pub fn full(&self, id: &str) -> String {
         self.styled(id, id)
     }
 
     fn styled(&self, id: &str, display: &str) -> String {
-        let split = self.unique_prefix_len(id).min(display.len());
-        let (prefix, tail) = display.split_at(split);
+        let split_chars = self.unique_prefix_len(id);
+        let split_bytes = display
+            .char_indices()
+            .nth(split_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(display.len());
+        let (prefix, tail) = display.split_at(split_bytes);
         format!(
             "{}{}",
             style(prefix).yellow().bright(),
@@ -202,5 +223,18 @@ mod tests {
         let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into()]);
         // No neighbor to disambiguate against: unique_prefix_len is 1.
         assert_eq!(h.short("01k2h4t9aaaa"), expected_styled("0", "1k2h4t9"));
+    }
+
+    #[test]
+    fn full_handles_multibyte_shared_prefix() {
+        console::set_colors_enabled(true);
+        // "\u{1F600}" (😀) and "\u{1F900}" (🤀) are both 4-byte UTF-8
+        // sequences that share their first two leading bytes (f0 9f).
+        // Under a byte-count implementation, max_common would be 2 and
+        // split_at(3) would land inside the 4-byte emoji and panic. Under
+        // char counting, the emojis differ at char position 0, so the
+        // split lands on the char boundary between the emoji and "xy".
+        let h = IdHighlighter::new(vec!["\u{1F600}xy".into(), "\u{1F900}xy".into()]);
+        assert_eq!(h.full("\u{1F600}xy"), expected_styled("\u{1F600}", "xy"));
     }
 }
