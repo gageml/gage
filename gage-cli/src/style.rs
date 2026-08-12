@@ -158,4 +158,49 @@ mod tests {
         let out = h.short("01k2h4t9aaaa");
         assert_eq!(plain(&out), "01k2h4t9");
     }
+
+    /// Builds the expected styled string by calling `console::style` the same
+    /// way `styled()` does. If `console` ever changes its emit format both
+    /// sides move together, so the tests stay meaningful without hard-coding
+    /// escape sequences.
+    fn expected_styled(prefix: &str, tail: &str) -> String {
+        format!(
+            "{}{}",
+            console::style(prefix).yellow().bright(),
+            console::style(tail).yellow(),
+        )
+    }
+
+    #[test]
+    fn short_splits_at_unique_prefix() {
+        console::set_colors_enabled(true);
+        let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k9m2b0bbbb".into()]);
+        // Shared "01k" needs 4 chars ("01k2") to disambiguate.
+        assert_eq!(h.short("01k2h4t9aaaa"), expected_styled("01k2", "h4t9"));
+    }
+
+    #[test]
+    fn full_splits_at_unique_prefix() {
+        console::set_colors_enabled(true);
+        let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k9m2b0bbbb".into()]);
+        // Same split boundary, applied over the whole id rather than short().
+        assert_eq!(h.full("01k2h4t9aaaa"), expected_styled("01k2", "h4t9aaaa"),);
+    }
+
+    #[test]
+    fn short_all_bright_when_prefix_reaches_display_length() {
+        console::set_colors_enabled(true);
+        // Peer shares the full 8-char short display; unique_prefix_len is 9,
+        // clamped by min(display.len()) to 8 — every visible char is bright.
+        let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k2h4t9bbbb".into()]);
+        assert_eq!(h.short("01k2h4t9aaaa"), expected_styled("01k2h4t9", ""));
+    }
+
+    #[test]
+    fn short_single_peer_is_one_bright_char() {
+        console::set_colors_enabled(true);
+        let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into()]);
+        // No neighbor to disambiguate against: unique_prefix_len is 1.
+        assert_eq!(h.short("01k2h4t9aaaa"), expected_styled("0", "1k2h4t9"));
+    }
 }
