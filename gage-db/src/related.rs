@@ -274,13 +274,13 @@ mod tests {
             &["s1"],
         );
         add_issue(&conn, "i-b", "Fetch retry loop runs forever", &["s1"]);
-        crate::issue::close(
+        crate::issue::set_status(
             &conn,
             "i-b",
-            crate::issue::StatusReason::Completed,
+            crate::issue::IssueStatus::Closed,
+            Some(crate::issue::StatusReason::Completed),
             "user:test",
             None,
-            2_000,
         )
         .unwrap();
 

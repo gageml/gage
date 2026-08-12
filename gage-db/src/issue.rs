@@ -66,17 +66,35 @@ impl std::str::FromStr for StatusReason {
 /// A change logged against an issue. The variant determines the `type`
 /// column; the carried message is the `value` column. `Comment` requires
 /// a message; the others carry an optional one.
+///
+/// `Close`, `Reopen`, and `Promote` are legacy variants preserved for
+/// reading rows written before the `set_status` refactor. New status
+/// changes always log `Status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueEvent {
     Create,
-    Close { message: Option<String> },
-    Reopen { message: Option<String> },
-    Promote { message: Option<String> },
-    Comment { message: String },
+    Close {
+        message: Option<String>,
+    },
+    Reopen {
+        message: Option<String>,
+    },
+    Promote {
+        message: Option<String>,
+    },
+    Comment {
+        message: String,
+    },
+    Status {
+        to: IssueStatus,
+        message: Option<String>,
+    },
 }
 
 impl IssueEvent {
-    /// Value of the `type` column for this variant.
+    /// Value of the `type` column for this variant. `Status` events use
+    /// the target status name (`"open"` / `"closed"` / `"pending"`),
+    /// distinct from the legacy action verbs.
     pub fn type_str(&self) -> &'static str {
         match self {
             IssueEvent::Create => "create",
@@ -84,6 +102,7 @@ impl IssueEvent {
             IssueEvent::Reopen { .. } => "reopen",
             IssueEvent::Promote { .. } => "promote",
             IssueEvent::Comment { .. } => "comment",
+            IssueEvent::Status { to, .. } => to.as_str(),
         }
     }
 
@@ -94,7 +113,8 @@ impl IssueEvent {
             IssueEvent::Create => None,
             IssueEvent::Close { message }
             | IssueEvent::Reopen { message }
-            | IssueEvent::Promote { message } => message.as_deref(),
+            | IssueEvent::Promote { message }
+            | IssueEvent::Status { message, .. } => message.as_deref(),
             IssueEvent::Comment { message } => Some(message),
         }
     }
@@ -108,6 +128,18 @@ impl IssueEvent {
             "promote" => Ok(IssueEvent::Promote { message: value }),
             "comment" => Ok(IssueEvent::Comment {
                 message: value.unwrap_or_default(),
+            }),
+            "open" => Ok(IssueEvent::Status {
+                to: IssueStatus::Open,
+                message: value,
+            }),
+            "closed" => Ok(IssueEvent::Status {
+                to: IssueStatus::Closed,
+                message: value,
+            }),
+            "pending" => Ok(IssueEvent::Status {
+                to: IssueStatus::Pending,
+                message: value,
             }),
             other => Err(format!("unknown issue event type '{other}'")),
         }
@@ -167,8 +199,6 @@ pub struct LoggedEvent {
 #[derive(Debug)]
 pub enum IssueError {
     NotFound(String),
-    /// A pending-only transition was applied to a non-pending issue.
-    NotPending(String),
     Ambiguous(String, Vec<String>),
     /// An issue with the same `(name, author)` already exists. The
     /// existing issue is returned so the caller can decide what to do.
@@ -186,7 +216,6 @@ impl std::fmt::Display for IssueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IssueError::NotFound(prefix) => write!(f, "no issue matching '{prefix}'"),
-            IssueError::NotPending(id) => write!(f, "issue '{id}' is not pending"),
             IssueError::Ambiguous(prefix, ids) => {
                 write!(f, "Found more than one issue matching {prefix}")?;
                 for id in ids {
@@ -291,94 +320,54 @@ fn find_by_dup_key(conn: &Connection, name: &str, author: &str) -> Result<Issue,
         .map_err(IssueError::from)
 }
 
-/// Promote a pending issue to open. Bumps `modified` and logs a
-/// `Promote` event carrying the optional message. The update and event
-/// insert share a transaction. Returns `NotPending` when the issue
-/// exists but is not pending.
-pub fn promote(
+/// Set an issue's status. Any transition is allowed; the caller is
+/// trusted to know what it's doing. `status_reason` is stored only when
+/// `new_status` is `Closed` (silently discarded otherwise, since the
+/// schema only carries a reason for closed issues). Bumps `modified`
+/// and logs a `Status` event carrying the optional message. The update
+/// and event insert share a transaction.
+pub fn set_status(
     conn: &Connection,
     issue_id: &str,
+    new_status: IssueStatus,
+    reason: Option<StatusReason>,
     author: &str,
     message: Option<&str>,
-    timestamp: i64,
 ) -> Result<(), IssueError> {
+    let now = gage_core::datetime::now_ms();
     let tx = conn.unchecked_transaction()?;
-    promote_in_tx(&tx, issue_id, author, message, timestamp)?;
+    set_status_in_tx(&tx, issue_id, new_status, reason, author, message, now)?;
     tx.commit()?;
     Ok(())
 }
 
-/// [`promote`] without transaction management. The caller holds the
-/// enclosing transaction.
-pub(crate) fn promote_in_tx(
+/// [`set_status`] without transaction management. The caller holds the
+/// enclosing transaction and supplies the timestamp so batched writes
+/// share one.
+pub(crate) fn set_status_in_tx(
     tx: &Connection,
     issue_id: &str,
+    new_status: IssueStatus,
+    reason: Option<StatusReason>,
     author: &str,
     message: Option<&str>,
     timestamp: i64,
 ) -> Result<(), IssueError> {
+    let effective_reason = if new_status == IssueStatus::Closed {
+        reason
+    } else {
+        None
+    };
     let rows = tx.execute(
         "UPDATE issue
-         SET status = 'open', modified = ?1
-         WHERE id = ?2 AND status = 'pending'",
-        params![timestamp, issue_id],
-    )?;
-    if rows == 0 {
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM issue WHERE id = ?1)",
-            [issue_id],
-            |r| r.get(0),
-        )?;
-        return Err(if exists {
-            IssueError::NotPending(issue_id.to_string())
-        } else {
-            IssueError::NotFound(issue_id.to_string())
-        });
-    }
-    insert_event(
-        tx,
-        &LoggedEvent {
-            issue_id: issue_id.to_string(),
-            author: author.to_string(),
+         SET status = ?1, status_reason = ?2, modified = ?3
+         WHERE id = ?4",
+        params![
+            new_status.as_str(),
+            effective_reason.map(StatusReason::as_str),
             timestamp,
-            event: IssueEvent::Promote {
-                message: message.map(str::to_string),
-            },
-        },
-    )?;
-    Ok(())
-}
-
-/// Reopen a closed issue: clears `status_reason` and sets status back
-/// to `open`. Bumps `modified` and logs a `Reopen` event carrying the
-/// optional message. The update and event insert share a transaction.
-pub fn reopen(
-    conn: &Connection,
-    issue_id: &str,
-    author: &str,
-    message: Option<&str>,
-    timestamp: i64,
-) -> Result<(), IssueError> {
-    let tx = conn.unchecked_transaction()?;
-    reopen_in_tx(&tx, issue_id, author, message, timestamp)?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// [`reopen`] without transaction management. The caller holds the
-/// enclosing transaction.
-pub(crate) fn reopen_in_tx(
-    tx: &Connection,
-    issue_id: &str,
-    author: &str,
-    message: Option<&str>,
-    timestamp: i64,
-) -> Result<(), IssueError> {
-    let rows = tx.execute(
-        "UPDATE issue
-         SET status = 'open', status_reason = NULL, modified = ?1
-         WHERE id = ?2",
-        params![timestamp, issue_id],
+            issue_id,
+        ],
     )?;
     if rows == 0 {
         return Err(IssueError::NotFound(issue_id.to_string()));
@@ -389,58 +378,8 @@ pub(crate) fn reopen_in_tx(
             issue_id: issue_id.to_string(),
             author: author.to_string(),
             timestamp,
-            event: IssueEvent::Reopen {
-                message: message.map(str::to_string),
-            },
-        },
-    )?;
-    Ok(())
-}
-
-/// Mark an issue as closed with the given reason. Idempotent: a
-/// repeat close overwrites `status_reason` and bumps `modified`. Logs a
-/// `Close` event carrying the optional message. The update and event
-/// insert share a transaction.
-pub fn close(
-    conn: &Connection,
-    issue_id: &str,
-    reason: StatusReason,
-    author: &str,
-    message: Option<&str>,
-    timestamp: i64,
-) -> Result<(), IssueError> {
-    let tx = conn.unchecked_transaction()?;
-    close_in_tx(&tx, issue_id, reason, author, message, timestamp)?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// [`close`] without transaction management. The caller holds the
-/// enclosing transaction.
-pub(crate) fn close_in_tx(
-    tx: &Connection,
-    issue_id: &str,
-    reason: StatusReason,
-    author: &str,
-    message: Option<&str>,
-    timestamp: i64,
-) -> Result<(), IssueError> {
-    let rows = tx.execute(
-        "UPDATE issue
-         SET status = 'closed', status_reason = ?1, modified = ?2
-         WHERE id = ?3",
-        params![reason.as_str(), timestamp, issue_id],
-    )?;
-    if rows == 0 {
-        return Err(IssueError::NotFound(issue_id.to_string()));
-    }
-    insert_event(
-        tx,
-        &LoggedEvent {
-            issue_id: issue_id.to_string(),
-            author: author.to_string(),
-            timestamp,
-            event: IssueEvent::Close {
+            event: IssueEvent::Status {
+                to: new_status,
                 message: message.map(str::to_string),
             },
         },
@@ -456,10 +395,10 @@ pub fn comment(
     issue_id: &str,
     author: &str,
     message: &str,
-    timestamp: i64,
 ) -> Result<(), IssueError> {
+    let now = gage_core::datetime::now_ms();
     let tx = conn.unchecked_transaction()?;
-    comment_in_tx(&tx, issue_id, author, message, timestamp)?;
+    comment_in_tx(&tx, issue_id, author, message, now)?;
     tx.commit()?;
     Ok(())
 }
@@ -957,47 +896,49 @@ mod tests {
     }
 
     #[test]
-    fn promote_pending_issue_opens_and_logs_event() {
+    fn set_status_opens_pending_issue_and_logs_event() {
         let conn = open_db_in_memory().unwrap();
         let mut issue = sample("issue-aaa", "thinking.empty");
         issue.status = IssueStatus::Pending;
         insert(&conn, &issue).unwrap();
 
-        promote(
+        set_status(
             &conn,
             "issue-aaa",
+            IssueStatus::Open,
+            None,
             "scanner:reconcile",
             Some("novel"),
-            issue.created + 100,
         )
         .unwrap();
 
         let fetched = get(&conn, "issue-aaa").unwrap();
         assert_eq!(fetched.status, IssueStatus::Open);
-        assert_eq!(fetched.modified, Some(issue.created + 100));
+        assert!(fetched.modified.is_some());
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(
             events[1].event,
-            IssueEvent::Promote {
-                message: Some("novel".to_string())
+            IssueEvent::Status {
+                to: IssueStatus::Open,
+                message: Some("novel".to_string()),
             }
         );
     }
 
     #[test]
-    fn promote_non_pending_issue_errors() {
+    fn set_status_unknown_issue_is_not_found() {
         let conn = open_db_in_memory().unwrap();
-        let issue = sample("issue-aaa", "thinking.empty");
-        insert(&conn, &issue).unwrap();
-
         assert!(matches!(
-            promote(&conn, "issue-aaa", "scanner:reconcile", None, 1),
-            Err(IssueError::NotPending(_))
-        ));
-        assert!(matches!(
-            promote(&conn, "nope", "scanner:reconcile", None, 1),
+            set_status(
+                &conn,
+                "nope",
+                IssueStatus::Open,
+                None,
+                "scanner:reconcile",
+                None
+            ),
             Err(IssueError::NotFound(_))
         ));
     }
@@ -1062,18 +1003,18 @@ mod tests {
     }
 
     #[test]
-    fn close_logs_event_with_message() {
+    fn set_status_closed_records_reason_and_logs_event() {
         let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
-        close(
+        set_status(
             &conn,
             "issue-aaa",
-            StatusReason::Completed,
+            IssueStatus::Closed,
+            Some(StatusReason::Completed),
             "user:tester",
             Some("done in PR 42"),
-            1_742_428_900_000,
         )
         .unwrap();
 
@@ -1084,48 +1025,57 @@ mod tests {
         assert_eq!(events[1].author, "user:tester");
         assert_eq!(
             events[1].event,
-            IssueEvent::Close {
-                message: Some("done in PR 42".to_string())
+            IssueEvent::Status {
+                to: IssueStatus::Closed,
+                message: Some("done in PR 42".to_string()),
             }
         );
 
         let fetched = get(&conn, "issue-aaa").unwrap();
         assert_eq!(fetched.status, IssueStatus::Closed);
+        assert_eq!(fetched.status_reason, Some(StatusReason::Completed));
     }
 
     #[test]
-    fn reopen_logs_event_and_events_ordered() {
+    fn set_status_open_clears_reason() {
         let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
-        let created = issue.created;
-        close(
+        set_status(
             &conn,
             "issue-aaa",
-            StatusReason::Skipped,
+            IssueStatus::Closed,
+            Some(StatusReason::Skipped),
             "user:tester",
             None,
-            created + 100,
         )
         .unwrap();
-        reopen(
+        set_status(
             &conn,
             "issue-aaa",
+            IssueStatus::Open,
+            None,
             "user:tester",
             Some("resurfaced"),
-            created + 200,
         )
         .unwrap();
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].event, IssueEvent::Create);
-        assert_eq!(events[1].event, IssueEvent::Close { message: None });
+        assert_eq!(
+            events[1].event,
+            IssueEvent::Status {
+                to: IssueStatus::Closed,
+                message: None,
+            }
+        );
         assert_eq!(
             events[2].event,
-            IssueEvent::Reopen {
-                message: Some("resurfaced".to_string())
+            IssueEvent::Status {
+                to: IssueStatus::Open,
+                message: Some("resurfaced".to_string()),
             }
         );
 
@@ -1135,19 +1085,54 @@ mod tests {
     }
 
     #[test]
+    fn set_status_pending_is_allowed() {
+        let conn = open_db_in_memory().unwrap();
+        let issue = sample("issue-aaa", "thinking.empty");
+        insert(&conn, &issue).unwrap();
+
+        set_status(
+            &conn,
+            "issue-aaa",
+            IssueStatus::Pending,
+            None,
+            "user:tester",
+            Some("staging for review"),
+        )
+        .unwrap();
+
+        let fetched = get(&conn, "issue-aaa").unwrap();
+        assert_eq!(fetched.status, IssueStatus::Pending);
+        assert_eq!(fetched.status_reason, None);
+    }
+
+    #[test]
+    fn set_status_discards_reason_when_not_closed() {
+        let conn = open_db_in_memory().unwrap();
+        let issue = sample("issue-aaa", "thinking.empty");
+        insert(&conn, &issue).unwrap();
+
+        set_status(
+            &conn,
+            "issue-aaa",
+            IssueStatus::Pending,
+            Some(StatusReason::Completed),
+            "user:tester",
+            None,
+        )
+        .unwrap();
+
+        let fetched = get(&conn, "issue-aaa").unwrap();
+        assert_eq!(fetched.status, IssueStatus::Pending);
+        assert_eq!(fetched.status_reason, None);
+    }
+
+    #[test]
     fn comment_logs_event_and_bumps_modified() {
         let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
 
-        comment(
-            &conn,
-            "issue-aaa",
-            "user:tester",
-            "looks related to PR 42",
-            issue.created + 100,
-        )
-        .unwrap();
+        comment(&conn, "issue-aaa", "user:tester", "looks related to PR 42").unwrap();
 
         let events = issue_events_for(&conn, "issue-aaa").unwrap();
         assert_eq!(events.len(), 2);
@@ -1161,7 +1146,7 @@ mod tests {
         );
 
         let fetched = get(&conn, "issue-aaa").unwrap();
-        assert_eq!(fetched.modified, Some(issue.created + 100));
+        assert!(fetched.modified.is_some());
         assert_eq!(fetched.status, IssueStatus::Open);
     }
 
@@ -1169,7 +1154,7 @@ mod tests {
     fn comment_unknown_issue_is_not_found() {
         let conn = open_db_in_memory().unwrap();
         assert!(matches!(
-            comment(&conn, "nope", "user:tester", "hi", 1),
+            comment(&conn, "nope", "user:tester", "hi"),
             Err(IssueError::NotFound(_))
         ));
     }
@@ -1179,13 +1164,13 @@ mod tests {
         let conn = open_db_in_memory().unwrap();
         let issue = sample("issue-aaa", "thinking.empty");
         insert(&conn, &issue).unwrap();
-        close(
+        set_status(
             &conn,
             "issue-aaa",
-            StatusReason::Completed,
+            IssueStatus::Closed,
+            Some(StatusReason::Completed),
             "user:tester",
             Some("done"),
-            issue.created + 100,
         )
         .unwrap();
 

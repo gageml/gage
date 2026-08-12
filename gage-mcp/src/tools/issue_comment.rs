@@ -37,13 +37,12 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         issue::IssueError::NotFound(_) | issue::IssueError::Ambiguous(_, _) => {
             McpError::invalid_params(e.to_string(), None)
         }
-        issue::IssueError::Db(_)
-        | issue::IssueError::Duplicate(_)
-        | issue::IssueError::NotPending(_) => McpError::internal_error(e.to_string(), None),
+        issue::IssueError::Db(_) | issue::IssueError::Duplicate(_) => {
+            McpError::internal_error(e.to_string(), None)
+        }
     })?;
 
-    let now = gage_core::datetime::now_ms();
-    issue::comment(&conn, &issue.id, &author, &comment, now)
+    issue::comment(&conn, &issue.id, &author, &comment)
         .map_err(|e| McpError::internal_error(format!("comment on issue: {e}"), None))?;
 
     Ok(format!(

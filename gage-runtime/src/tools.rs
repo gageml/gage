@@ -31,8 +31,8 @@ pub fn module() -> Result<Module, ContextError> {
     m.function_meta(NoteWrite::names)?;
     m.function_meta(NoteWrite::scan)?;
     m.function_meta(NoteWrite::global)?;
-    m.ty::<IssueClose>()?;
-    m.function_meta(IssueClose::new)?;
+    m.ty::<IssueUpdate>()?;
+    m.function_meta(IssueUpdate::new)?;
     m.ty::<IssueComment>()?;
     m.function_meta(IssueComment::new)?;
     Ok(m)
@@ -196,15 +196,15 @@ fn parse_names(names: &Object) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// Close issues. No settings.
+/// Update issues (currently status only). No settings.
 #[derive(Any, Debug, Clone, Default)]
 #[rune(item = ::gage::tools)]
-pub struct IssueClose;
+pub struct IssueUpdate;
 
-impl IssueClose {
+impl IssueUpdate {
     #[rune::function(path = Self::new)]
     fn new() -> Self {
-        IssueClose
+        IssueUpdate
     }
 }
 

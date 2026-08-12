@@ -164,9 +164,16 @@ fn do_promote_issue(args: Object) -> super::Result<()> {
     let id = required_string(&args, "id")?;
     let message = optional_string(&args, "message")?;
     let author = format!("scanner:{}", ctx.scanner_name);
-    let now = gage_core::datetime::now_ms();
     let db = ctx.db.lock().unwrap();
-    issue::promote(&db, &id, &author, message.as_deref(), now).map_err(|e| Error::Db(e.to_string()))
+    issue::set_status(
+        &db,
+        &id,
+        IssueStatus::Open,
+        None,
+        &author,
+        message.as_deref(),
+    )
+    .map_err(|e| Error::Db(e.to_string()))
 }
 
 /// Close an issue: `close_issue(#{ id, reason, message? })` where
@@ -179,10 +186,16 @@ fn do_close_issue(args: Object) -> super::Result<()> {
         .map_err(Error::Args)?;
     let message = optional_string(&args, "message")?;
     let author = format!("scanner:{}", ctx.scanner_name);
-    let now = gage_core::datetime::now_ms();
     let db = ctx.db.lock().unwrap();
-    issue::close(&db, &id, reason, &author, message.as_deref(), now)
-        .map_err(|e| Error::Db(e.to_string()))
+    issue::set_status(
+        &db,
+        &id,
+        IssueStatus::Closed,
+        Some(reason),
+        &author,
+        message.as_deref(),
+    )
+    .map_err(|e| Error::Db(e.to_string()))
 }
 
 /// Reopen a closed issue: `reopen_issue(#{ id, message? })`.
@@ -191,9 +204,16 @@ fn do_reopen_issue(args: Object) -> super::Result<()> {
     let id = required_string(&args, "id")?;
     let message = optional_string(&args, "message")?;
     let author = format!("scanner:{}", ctx.scanner_name);
-    let now = gage_core::datetime::now_ms();
     let db = ctx.db.lock().unwrap();
-    issue::reopen(&db, &id, &author, message.as_deref(), now).map_err(|e| Error::Db(e.to_string()))
+    issue::set_status(
+        &db,
+        &id,
+        IssueStatus::Open,
+        None,
+        &author,
+        message.as_deref(),
+    )
+    .map_err(|e| Error::Db(e.to_string()))
 }
 
 #[derive(Any)]
@@ -752,7 +772,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
             }
 
             if reopen {
-                issue::reopen(&db, &prev.id, &prev.author, None, now)
+                issue::set_status(&db, &prev.id, IssueStatus::Open, None, &prev.author, None)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
 

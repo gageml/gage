@@ -1027,8 +1027,8 @@ fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
     if let Ok(t) = rune::from_value::<crate::tools::NoteWrite>(item.clone()) {
         return GageTool::try_from(t).map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
     }
-    if rune::from_value::<crate::tools::IssueClose>(item.clone()).is_ok() {
-        return Ok(GageTool::IssueClose);
+    if rune::from_value::<crate::tools::IssueUpdate>(item.clone()).is_ok() {
+        return Ok(GageTool::IssueUpdate);
     }
     if rune::from_value::<crate::tools::IssueComment>(item.clone()).is_ok() {
         return Ok(GageTool::IssueComment);

@@ -7,8 +7,7 @@
 use rusqlite::Connection;
 
 use crate::issue::{
-    self, Issue, IssueError, IssueStatus, StatusReason, close_in_tx, comment_in_tx, promote_in_tx,
-    reopen_in_tx,
+    self, Issue, IssueError, IssueStatus, StatusReason, comment_in_tx, set_status_in_tx,
 };
 
 /// One disposition in a resolution plan.
@@ -86,7 +85,7 @@ pub fn apply(
     let mut applied = Applied::default();
     for p in &plan {
         if let Planned::Open { issue } = p {
-            promote_in_tx(&tx, issue, author, None, timestamp)?;
+            set_status_in_tx(&tx, issue, IssueStatus::Open, None, author, None, timestamp)?;
             applied.promoted += 1;
         }
     }
@@ -98,7 +97,7 @@ pub fn apply(
         } = p
             && !reopened.contains(&of.as_str())
         {
-            reopen_in_tx(&tx, of, author, None, timestamp)?;
+            set_status_in_tx(&tx, of, IssueStatus::Open, None, author, None, timestamp)?;
             reopened.push(of);
         }
     }
@@ -106,10 +105,11 @@ pub fn apply(
     for p in &plan {
         if let Planned::Duplicate { issue, of, .. } = p {
             let message = format!("duplicate of {of}");
-            close_in_tx(
+            set_status_in_tx(
                 &tx,
                 issue,
-                StatusReason::Duplicate,
+                IssueStatus::Closed,
+                Some(StatusReason::Duplicate),
                 author,
                 Some(&message),
                 timestamp,
@@ -521,7 +521,7 @@ mod tests {
         let events = issue::issue_events_for(&conn, "c-done").unwrap();
         let reopens = events
             .iter()
-            .filter(|e| e.event.type_str() == "reopen")
+            .filter(|e| e.event.type_str() == "open")
             .count();
         assert_eq!(reopens, 1);
     }

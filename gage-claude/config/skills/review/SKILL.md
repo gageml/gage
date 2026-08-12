@@ -249,8 +249,8 @@ Always confirm (or ask the user to confirm) fixes before closing the issue. User
 commentary about the issue, context about a failure mode, or agreement with my
 analysis is not a directive to close.
 
-Use `mcp__plugin_gage_gage__IssueClose` to close an issue that's been verified
-as fixed.
+Use `mcp__plugin_gage_gage__IssueUpdate` with `status=closed` and
+`status_reason=completed` to close an issue that's been verified as fixed.
 
-If the user decides to not fix the issue, close the issue with the
-`reason=skipped`.
+If the user decides to not fix the issue, close it with `status=closed` and
+`status_reason=skipped`.

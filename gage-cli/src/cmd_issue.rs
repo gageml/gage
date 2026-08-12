@@ -554,15 +554,14 @@ pub fn close(args: IssueCloseArgs) {
             }
         }
 
-        let now = gage_core::datetime::now_ms();
         let author = crate::author::resolve_author(None);
-        issue::close(
+        issue::set_status(
             &conn,
             &target_issue.id,
-            reason,
+            IssueStatus::Closed,
+            Some(reason),
             &author,
             message.as_deref(),
-            now,
         )
         .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
@@ -606,14 +605,14 @@ pub fn open(args: IssueOpenArgs) {
             }
         }
 
-        let now = gage_core::datetime::now_ms();
         let author = crate::author::resolve_author(None);
-        issue::reopen(
+        issue::set_status(
             &conn,
             &target_issue.id,
+            IssueStatus::Open,
+            None,
             &author,
             args.message.as_deref(),
-            now,
         )
         .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
@@ -654,9 +653,8 @@ pub fn comment(args: IssueCommentArgs) {
             }
         }
 
-        let now = gage_core::datetime::now_ms();
         let author = crate::author::resolve_author(None);
-        issue::comment(&conn, &target_issue.id, &author, &message, now)
+        issue::comment(&conn, &target_issue.id, &author, &message)
             .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
 
         Ok(format!("Commented on issue {}", short_uuid(&target_issue.id)).into())
