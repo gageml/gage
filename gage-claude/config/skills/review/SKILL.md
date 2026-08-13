@@ -245,6 +245,9 @@ closed with "skipped" reason -- see below).
 If the issue is valid, get the user's explicit approval before resolving any
 issues. Do not make any changes without approval from the user.
 
+Present any recommended options along with the option to defer or close the
+issue as skipped.
+
 Always confirm (or ask the user to confirm) fixes before closing the issue. User
 commentary about the issue, context about a failure mode, or agreement with my
 analysis is not a directive to close.
