@@ -110,7 +110,7 @@ pub struct ScanRunArgs {
     #[arg(short = 'f', long = "file", value_name = "PATH")]
     files: Vec<String>,
 
-    /// Scan most recent N sessions
+    /// Scan the latest N sessions
     #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "today", "all", "sample"])]
     limit: Option<usize>,
 
@@ -1076,7 +1076,7 @@ async fn run_dialog(
         let label = if args.all {
             "all".to_string()
         } else if let Some(n) = args.limit {
-            format!("{n} most recent")
+            format!("{n} latest")
         } else {
             let window = if args.today {
                 "today".to_string()

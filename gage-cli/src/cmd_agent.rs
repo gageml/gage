@@ -33,7 +33,7 @@ pub struct AgentArgs {
     #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "all"])]
     pub sessions: Vec<String>,
 
-    /// Scope to most recent N sessions
+    /// Scope to the latest N sessions
     #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "all"])]
     pub limit: Option<usize>,
 
@@ -198,7 +198,7 @@ fn sessions_label(args: &AgentArgs, selected: &[SessionInfo]) -> String {
     if args.all {
         "all".to_string()
     } else if let Some(n) = args.limit {
-        format!("{n} most recent")
+        format!("{n} latest")
     } else {
         let d = args.days.unwrap_or(30);
         format!("last {d} day{}", if d == 1 { "" } else { "s" })
