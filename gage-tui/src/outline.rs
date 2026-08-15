@@ -7,7 +7,11 @@
 use std::collections::HashSet;
 
 pub struct Outline {
+    session_expanded: bool,
     entry_expanded: HashSet<usize>,
+    /// Ordered note ids attached to the session itself (no line target).
+    /// Rendered as children of the session row.
+    session_note_ids: Vec<String>,
     /// `entry_note_ids[i]` is the ordered list of note ids attached to entry
     /// `i`'s line. Mutated when notes are added or removed; outline rebuilds
     /// from this projection.
@@ -25,8 +29,14 @@ pub struct Row {
 #[derive(Clone)]
 pub enum RowKind {
     Session,
-    Entry { index: usize },
-    Note { entry_index: usize, note_id: String },
+    Entry {
+        index: usize,
+    },
+    /// `entry_index` is `None` for a session-level note under the session row
+    Note {
+        entry_index: Option<usize>,
+        note_id: String,
+    },
 }
 
 pub enum CollapseOutcome {
@@ -36,9 +46,11 @@ pub enum CollapseOutcome {
 }
 
 impl Outline {
-    pub fn new(entry_note_ids: Vec<Vec<String>>) -> Self {
+    pub fn new(session_note_ids: Vec<String>, entry_note_ids: Vec<Vec<String>>) -> Self {
         let mut o = Self {
+            session_expanded: false,
             entry_expanded: HashSet::new(),
+            session_note_ids,
             entry_note_ids,
             visible: Vec::new(),
         };
@@ -98,20 +110,27 @@ impl Outline {
     /// Replace the entry/note projection in place. Preserves expansion state
     /// (session + per-entry) so a reload doesn't collapse the tree. Entry
     /// indices that no longer exist drop out of the expanded set.
-    pub fn reload(&mut self, entry_note_ids: Vec<Vec<String>>) {
+    pub fn reload(&mut self, session_note_ids: Vec<String>, entry_note_ids: Vec<Vec<String>>) {
         self.entry_expanded.retain(|i| *i < entry_note_ids.len());
+        self.session_note_ids = session_note_ids;
         self.entry_note_ids = entry_note_ids;
         self.rebuild();
     }
 
-    /// Append a note id under `entry_index`, ensure the entry is expanded so
-    /// the new note is visible, and rebuild. Returns the visible-row index of
-    /// the new note row.
-    pub fn add_note(&mut self, entry_index: usize, note_id: String) -> Option<usize> {
-        self.entry_note_ids
-            .get_mut(entry_index)?
-            .push(note_id.clone());
-        self.entry_expanded.insert(entry_index);
+    /// Append a note id under `entry_index` (`None` targets the session row),
+    /// ensure the parent is expanded so the new note is visible, and rebuild.
+    /// Returns the visible-row index of the new note row.
+    pub fn add_note(&mut self, entry_index: Option<usize>, note_id: String) -> Option<usize> {
+        match entry_index {
+            Some(i) => {
+                self.entry_note_ids.get_mut(i)?.push(note_id.clone());
+                self.entry_expanded.insert(i);
+            }
+            None => {
+                self.session_note_ids.push(note_id.clone());
+                self.session_expanded = true;
+            }
+        }
         self.rebuild();
         self.visible.iter().position(|r| match &r.kind {
             RowKind::Note { note_id: id, .. } => id == &note_id,
@@ -119,15 +138,21 @@ impl Outline {
         })
     }
 
-    /// Remove a note id wherever it appears, then rebuild. Returns the entry
-    /// index that previously owned the note, if any.
-    pub fn remove_note(&mut self, note_id: &str) -> Option<usize> {
-        let mut found: Option<usize> = None;
-        for (i, ids) in self.entry_note_ids.iter_mut().enumerate() {
-            if let Some(pos) = ids.iter().position(|n| n == note_id) {
-                ids.remove(pos);
-                found = Some(i);
-                break;
+    /// Remove a note id wherever it appears, then rebuild. Returns the owner
+    /// if the note was found — `Some(entry_index)` for a line note, `None`
+    /// for a session-level note.
+    pub fn remove_note(&mut self, note_id: &str) -> Option<Option<usize>> {
+        let mut found: Option<Option<usize>> = None;
+        if let Some(pos) = self.session_note_ids.iter().position(|n| n == note_id) {
+            self.session_note_ids.remove(pos);
+            found = Some(None);
+        } else {
+            for (i, ids) in self.entry_note_ids.iter_mut().enumerate() {
+                if let Some(pos) = ids.iter().position(|n| n == note_id) {
+                    ids.remove(pos);
+                    found = Some(Some(i));
+                    break;
+                }
             }
         }
         self.rebuild();
@@ -139,7 +164,9 @@ impl Outline {
             return;
         };
         match &row.kind {
-            RowKind::Session => return,
+            RowKind::Session => {
+                self.session_expanded = expanded;
+            }
             RowKind::Entry { index } => {
                 let index = *index;
                 if expanded {
@@ -171,12 +198,27 @@ impl Outline {
     fn rebuild(&mut self) {
         let entry_count = self.entry_note_ids.len();
         let mut rows = Vec::with_capacity(1 + entry_count);
+        let session_has_children = !self.session_note_ids.is_empty();
+        let session_expanded = session_has_children && self.session_expanded;
         rows.push(Row {
             level: 1,
-            has_children: false,
-            expanded: false,
+            has_children: session_has_children,
+            expanded: session_expanded,
             kind: RowKind::Session,
         });
+        if session_expanded {
+            for id in &self.session_note_ids {
+                rows.push(Row {
+                    level: 2,
+                    has_children: false,
+                    expanded: false,
+                    kind: RowKind::Note {
+                        entry_index: None,
+                        note_id: id.clone(),
+                    },
+                });
+            }
+        }
         for (i, notes) in self.entry_note_ids.iter().enumerate() {
             let has_children = !notes.is_empty();
             let expanded = has_children && self.entry_expanded.contains(&i);
@@ -193,7 +235,7 @@ impl Outline {
                         has_children: false,
                         expanded: false,
                         kind: RowKind::Note {
-                            entry_index: i,
+                            entry_index: Some(i),
                             note_id: id.clone(),
                         },
                     });

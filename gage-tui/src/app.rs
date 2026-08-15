@@ -172,17 +172,8 @@ struct AppState {
 
 impl AppState {
     fn new(doc: Document) -> Self {
-        let entry_note_ids: Vec<Vec<String>> = doc
-            .entries
-            .iter()
-            .map(|e| {
-                doc.notes_for_line(e.line)
-                    .into_iter()
-                    .map(|n| n.id.clone())
-                    .collect()
-            })
-            .collect();
-        let outline = Outline::new(entry_note_ids);
+        let (session_note_ids, entry_note_ids) = note_projection(&doc);
+        let outline = Outline::new(session_note_ids, entry_note_ids);
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         Self {
@@ -313,18 +304,9 @@ impl AppState {
             tokio::runtime::Handle::current().block_on(session::load(&session_id, db))
         })
         .map_err(|e| io::Error::other(e.to_string()))?;
-        let entry_note_ids: Vec<Vec<String>> = doc
-            .entries
-            .iter()
-            .map(|e| {
-                doc.notes_for_line(e.line)
-                    .into_iter()
-                    .map(|n| n.id.clone())
-                    .collect()
-            })
-            .collect();
+        let (session_note_ids, entry_note_ids) = note_projection(&doc);
         self.doc = doc;
-        self.outline.reload(entry_note_ids);
+        self.outline.reload(session_note_ids, entry_note_ids);
         let new_sel = prior
             .and_then(|kind| {
                 self.outline
@@ -369,22 +351,18 @@ impl AppState {
             .and_then(|i| self.outline.row(i))?;
         match &row.kind {
             RowKind::Entry { index } => Some(*index),
-            RowKind::Note { entry_index, .. } => Some(*entry_index),
+            RowKind::Note { entry_index, .. } => *entry_index,
             RowKind::Session => None,
         }
     }
 
-    fn selected_note(&self) -> Option<(usize, &Note)> {
+    fn selected_note(&self) -> Option<&Note> {
         let row = self
             .list_state
             .selected()
             .and_then(|i| self.outline.row(i))?;
-        if let RowKind::Note {
-            entry_index,
-            note_id,
-        } = &row.kind
-        {
-            self.doc.note(note_id).map(|n| (*entry_index, n))
+        if let RowKind::Note { note_id, .. } = &row.kind {
+            self.doc.note(note_id)
         } else {
             None
         }
@@ -400,7 +378,7 @@ impl AppState {
     }
 
     fn begin_edit_note(&mut self) -> bool {
-        let Some((_, note)) = self.selected_note() else {
+        let Some(note) = self.selected_note() else {
             return false;
         };
         if note.author != self.author() || !is_comment(&note.name) {
@@ -422,7 +400,7 @@ impl AppState {
     }
 
     fn begin_delete_note(&mut self) {
-        let Some((_, note)) = self.selected_note() else {
+        let Some(note) = self.selected_note() else {
             return;
         };
         if note.author != self.author() {
@@ -436,6 +414,27 @@ impl AppState {
 
 fn resolve_username() -> String {
     std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Outline projection of the document's notes — session-level note ids, then
+/// per-entry note ids keyed by entry position.
+fn note_projection(doc: &Document) -> (Vec<String>, Vec<Vec<String>>) {
+    let session = doc
+        .session_notes()
+        .into_iter()
+        .map(|n| n.id.clone())
+        .collect();
+    let entries = doc
+        .entries
+        .iter()
+        .map(|e| {
+            doc.notes_for_line(e.line)
+                .into_iter()
+                .map(|n| n.id.clone())
+                .collect()
+        })
+        .collect();
+    (session, entries)
 }
 
 /// Stored note names are namespaced (e.g. `comment.abcd1234`) so multiple
@@ -524,7 +523,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
                 state.doc.add_note(note);
                 // Selection stays on the row that opened the dialog; the new
                 // note rows are appended after it, so the index is unaffected.
-                state.outline.add_note(entry_index, id);
+                state.outline.add_note(Some(entry_index), id);
             }
         }
         Dialog::EditNote {
@@ -571,10 +570,14 @@ fn handle_confirm_delete(state: &mut AppState, code: KeyCode, db: &Connection) {
                 && note::delete(db, &note_id).is_ok()
             {
                 state.doc.remove_note(&note_id);
-                if let Some(entry_index) = state.outline.remove_note(&note_id) {
-                    let target_row = state.outline.rows().iter().position(
-                        |r| matches!(&r.kind, RowKind::Entry { index } if *index == entry_index),
-                    );
+                if let Some(owner) = state.outline.remove_note(&note_id) {
+                    let target_row = match owner {
+                        Some(entry_index) => state.outline.rows().iter().position(
+                            |r| matches!(&r.kind, RowKind::Entry { index } if *index == entry_index),
+                        ),
+                        // Session notes hang off the session row, always row 0
+                        None => Some(0),
+                    };
                     if let Some(r) = target_row {
                         state.list_state.select(Some(r));
                     } else {
@@ -635,7 +638,7 @@ fn footer_hint(state: &AppState) -> String {
         "Enter ◂ ▸",
         "n note",
     ];
-    if let Some((_, note)) = state.selected_note()
+    if let Some(note) = state.selected_note()
         && note.author == state.author()
     {
         if is_comment(&note.name) {
@@ -793,7 +796,10 @@ fn body_title(doc: &Document, kind: Option<&RowKind>) -> String {
             entry_index,
             note_id,
         }) => {
-            let head = entry_header(doc, *entry_index);
+            let head = match entry_index {
+                Some(i) => entry_header(doc, *i),
+                None => doc.session.id.clone(),
+            };
             let name = doc
                 .note(note_id)
                 .map(|n| n.name.clone())

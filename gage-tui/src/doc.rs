@@ -28,6 +28,14 @@ impl Document {
             .collect()
     }
 
+    /// Notes attached to the session itself — a session target with no line.
+    pub fn session_notes(&self) -> Vec<&Note> {
+        self.notes
+            .iter()
+            .filter(|n| matches!(&n.target, NoteTarget::Session(t) if t.line.is_none()))
+            .collect()
+    }
+
     pub fn add_note(&mut self, note: Note) {
         self.notes.push(note);
     }
