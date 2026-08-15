@@ -36,6 +36,7 @@ use tracing::debug;
 
 use crate::event::{ActiveTask, RunStatus, RunSummary, ScanEvent, WorkerStatus};
 use gage_core::glob::glob_match;
+use gage_core::task::task_display;
 use gage_db::scan::{ScanError, TaskStatus, finish_task, start_task};
 use gage_registry::scanner::TaskDef;
 use gage_runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
@@ -225,7 +226,7 @@ pub(crate) fn plan(
                 .iter()
                 .map(|n| {
                     let t = &tasks[*graph.node_weight(*n).unwrap()];
-                    format!("{}::{}", scanner_names[t.scanner_idx], t.task_name)
+                    task_display(&scanner_names[t.scanner_idx], &t.task_name)
                 })
                 .collect();
             return Err(PlanError {

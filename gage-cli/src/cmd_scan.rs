@@ -15,6 +15,7 @@ use tabled::{
 };
 
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
+use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
 use gage_db::{db, scan};
 use gage_query::ScanSessionContext;
@@ -1169,7 +1170,7 @@ async fn run_dialog(
                         task,
                         message,
                     } => {
-                        eprintln!("error: {scanner}::{task}");
+                        eprintln!("error: {}", task_display(scanner, task));
                         for line in message.lines() {
                             eprintln!("{line}");
                         }
@@ -1179,7 +1180,7 @@ async fn run_dialog(
                         task,
                         message,
                     } => {
-                        eprintln!("warning: {scanner}::{task}: {message}");
+                        eprintln!("warning: {}: {message}", task_display(scanner, task));
                     }
                     gage_scan::event::ScanEvent::Status(_) => {}
                 }
@@ -1416,13 +1417,16 @@ fn capture_event(streams: &mut ScanStreams, event: &gage_scan::event::ScanEvent)
             scanner,
             task,
             message,
-        } => streams.err_line(&format!("warning: {scanner}::{task}: {message}")),
+        } => streams.err_line(&format!(
+            "warning: {}: {message}",
+            task_display(scanner, task)
+        )),
         ScanEvent::TaskFailed {
             scanner,
             task,
             message,
         } => {
-            streams.err_line(&format!("error: {scanner}::{task}"));
+            streams.err_line(&format!("error: {}", task_display(scanner, task)));
             streams.err_line(message);
         }
         ScanEvent::Status(_) => {}

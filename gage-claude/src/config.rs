@@ -41,6 +41,9 @@ pub enum ConfigFile {
     Memory(PathBuf),
     /// `<project>/CLAUDE.local.md`. Only emitted by the project walk.
     LocalMemory(PathBuf),
+    /// Root-level stack manifest (`Cargo.toml`, `package.json`, …).
+    /// Only emitted by the project walk.
+    Manifest(PathBuf),
 
     Skill {
         name: String,
@@ -111,6 +114,7 @@ impl ConfigFile {
             | ConfigFile::LocalSettings(p)
             | ConfigFile::Memory(p)
             | ConfigFile::LocalMemory(p)
+            | ConfigFile::Manifest(p)
             | ConfigFile::InstalledPlugins(p) => p,
             ConfigFile::Skill { path, .. }
             | ConfigFile::SkillRule { path, .. }
@@ -220,6 +224,7 @@ pub(crate) struct ProjectWants {
     pub local_settings: bool,
     pub memory: bool,
     pub local_memory: bool,
+    pub manifest: bool,
     pub skills: bool,
     pub commands: bool,
     pub agents: bool,
@@ -288,6 +293,7 @@ pub(crate) fn project_files(root: PathBuf, wants: ProjectWants) -> ConfigFiles {
         local_settings = wants.local_settings,
         memory = wants.memory,
         local_memory = wants.local_memory,
+        manifest = wants.manifest,
         skills = wants.skills,
         commands = wants.commands,
         agents = wants.agents,
@@ -316,6 +322,7 @@ pub(crate) fn project_files(root: PathBuf, wants: ProjectWants) -> ConfigFiles {
                 wants.local_memory,
                 check_file(root.join("CLAUDE.local.md"), ConfigFile::LocalMemory),
             ))
+            .chain(opt(wants.manifest, manifest_files(&root)))
             .chain(opt(
                 wants.skills,
                 walk_skills(claude.join("skills"), SkillKind::User, counters.clone()),
@@ -334,6 +341,30 @@ pub(crate) fn project_files(root: PathBuf, wants: ProjectWants) -> ConfigFiles {
             )),
     );
     ConfigFiles { inner, counters }
+}
+
+/// Root-level stack manifest files the `manifest` phase probes for.
+const MANIFEST_FILES: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "setup.py",
+    "go.mod",
+    "Gemfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "CMakeLists.txt",
+    "composer.json",
+    "mix.exs",
+];
+
+fn manifest_files(root: &Path) -> ConfigFileIter {
+    let mut iter = empty_iter();
+    for name in MANIFEST_FILES {
+        iter = Box::new(iter.chain(check_file(root.join(name), ConfigFile::Manifest)));
+    }
+    iter
 }
 
 fn empty_iter() -> ConfigFileIter {

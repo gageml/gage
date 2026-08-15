@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use gage_core::task::{task_display, task_name_display};
 use gage_db::target::NoteTarget;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -865,13 +866,16 @@ impl ViewState {
                 scanner,
                 task,
                 message,
-            } => self.push_log(format!("warning: {scanner}::{task}: {message}")),
+            } => self.push_log(format!(
+                "warning: {}: {message}",
+                task_display(&scanner, &task)
+            )),
             Event::Failed {
                 scanner,
                 task,
                 message,
             } => {
-                self.push_log(format!("error: {scanner}::{task}"));
+                self.push_log(format!("error: {}", task_display(&scanner, &task)));
                 for line in message.lines() {
                     self.push_log(format!("  {line}"));
                 }
@@ -1733,7 +1737,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             };
             Row::new(vec![
                 Cell::from(format!("{glyph} {}", t.id.scanner)),
-                Cell::from(t.id.task.clone()),
+                Cell::from(task_name_display(&t.id.task)),
                 Cell::from(format!("{cost:>cost_width$}")),
                 status,
             ])

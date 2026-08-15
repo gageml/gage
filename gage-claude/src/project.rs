@@ -22,7 +22,8 @@ pub struct Project {
 impl Project {
     /// Start a finder for project-scope config files rooted at the
     /// project's cwd. Each phase (settings, local settings, memory,
-    /// local memory, skills, commands, agents) is enabled by default;
+    /// local memory, manifest, skills, commands, agents) is enabled by
+    /// default;
     /// toggle individual phases off to skip the I/O they would do.
     /// Call `.find()` to get the lazy iterator.
     pub fn config(&self) -> ProjectFinder {
@@ -33,6 +34,7 @@ impl Project {
                 local_settings: true,
                 memory: true,
                 local_memory: true,
+                manifest: true,
                 skills: true,
                 commands: true,
                 agents: true,
@@ -65,6 +67,10 @@ impl ProjectFinder {
     }
     pub fn local_memory(mut self, on: bool) -> Self {
         self.wants.local_memory = on;
+        self
+    }
+    pub fn manifest(mut self, on: bool) -> Self {
+        self.wants.manifest = on;
         self
     }
     /// Skills *and* their rule files. Both come out of one `read_dir`,

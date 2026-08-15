@@ -1,0 +1,46 @@
+Write code quality finding notes for session {{ session_id }}
+
+Review the code the assistant wrote or changed in session {{ session_id }} and
+look for code quality issues:
+
+- Project rule violations
+- Best practice violations (your judgement)
+- Poor stack alignment (missing useful libraries, working against libraries)
+- Bugs the session did not detect
+
+The evidence must be in the record itself. Do not infer or assume conditions
+beyond what the record shows. Do not report issues the session itself
+diagnoses and fixes.
+
+Many sessions contain no code quality issues. Do not force findings onto a
+session.
+
+{% if project %}
+## Project context
+
+The session belongs to project `{{ project }}`. Summary notes for the project
+describe its rules and stack. Read them first via `mcp__gage__Query`:
+
+`SELECT name, value FROM note WHERE target = 'project:{{ project }}' AND name LIKE 'project-summary.%'`
+
+Judge the session's code against these summaries. A rule violation finding
+must name the rule it violates.
+{% endif %}
+
+## Reading the session
+
+Read the conversation by querying the `message` table via `mcp__gage__Query`,
+filtering by `session_id = '{{ session_id }}'`. `message` table columns:
+(session_id, line, uuid, type, subtype, text, timestamp, attachments,
+ide_tags, raw). Code changes appear as Edit and Write tool calls.
+
+## Writing findings
+
+Write findings using the `mcp__gage__Finding` tool using a single request
+rather than one tool use per finding. This saves time and tokens.
+
+If you did not find issues for the session, do not use `mcp__gage__Finding`
+to report "no issues found". Only use the tool to report found issues.
+
+In your reply, simply state how many findings you wrote. If you didn't write
+any findings, say so. Do not re-state the findings in your reply.

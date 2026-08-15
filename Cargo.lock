@@ -2875,6 +2875,7 @@ version = "0.0.1"
 dependencies = [
  "datafusion",
  "gage-claude",
+ "gage-core",
  "gage-db",
  "gage-index",
  "gage-query",

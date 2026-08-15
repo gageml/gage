@@ -1,0 +1,269 @@
+use gage::tools::Query;
+use gage::{
+    AgentRunner,
+    Template,
+    call_agent,
+    carry_forward_notes,
+    files_valid,
+    query,
+    scan,
+    write_note,
+};
+
+pub const SCANNER = #{
+    name: "code-review",
+    description: "Review sessions for code quality",
+    tasks: #{
+        project_summary: #{
+            notes: #{
+                writes: #{
+                    "project-summary.rules": "Summary of a project's rules",
+                    "project-summary.stack": "Summary of a project's stack and architecture",
+                },
+            },
+        },
+        findings: #{
+            notes: #{
+                wants: ["project-summary.*"],
+                writes: #{ "finding.code": "Code quality finding in a session" },
+            },
+        },
+    },
+};
+
+const RULES_KEY = ("code-review", "project_summary", "rules", 1);
+const STACK_KEY = ("code-review", "project_summary", "stack", 1);
+
+/// Write project summary notes for each scan session project.
+///
+/// One agent call per project writes the summary notes its files
+/// support. A note type whose file set is unchanged since the last
+/// run is skipped; a project with nothing to summarize is skipped
+/// entirely.
+pub async fn project_summary() {
+    let t = Template::new(include_str!("project-summary-prompt.md.j2")).await?;
+    let runner = AgentRunner::new();
+    for project in scan().sessions().projects()? {
+        let sections = [];
+        let validates = [];
+        add_section(
+            sections,
+            validates,
+            RULES_KEY,
+            project,
+            project.config().type(["memory", "skill-rule"]).await?,
+            "rules",
+        )
+        .await?;
+        add_section(
+            sections,
+            validates,
+            STACK_KEY,
+            project,
+            project.config().type("manifest").await?,
+            "stack",
+        )
+        .await?;
+        if sections.is_empty() {
+            continue
+        }
+        let prompt = t.render(#{ project: project.path, sections }).await?;
+        runner.add(
+            call_agent(prompt)
+                .name("project-summary")
+                .tools(#{ write_summary: write_summary_tooldef() })
+                .model("medium"),
+            #{ project: project.path, validates },
+        );
+    }
+
+    let results = runner.start();
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ project, validates }))) => {
+                log::info!(
+                    "project-summary: {:?}",
+                    #{
+                        project,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                for v in validates {
+                    v().await?;
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Queue a prompt section for a summary note type when its file set
+/// exists and has changed since the digest was last recorded.
+async fn add_section(sections, validates, key, project, files, kind) {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let (valid, validate) = files_valid(key, project, files).await?;
+    if valid {
+        return Ok(());
+    }
+    let contents = [];
+    for f in files {
+        contents.push(#{ path: f.path, text: f.read().await? });
+    }
+    sections.push(#{ kind, files: contents });
+    validates.push(validate);
+    Ok(())
+}
+
+fn write_summary_tooldef() {
+    #{
+        name: "ProjectSummary",
+        description: "Write a project summary note",
+        inputs: #{
+            name: #{
+                type: "string",
+                description: "Note name as directed by the prompt",
+            },
+            project: #{ type: "string", description: "Project path" },
+            summary: #{ type: "string", description: "Summary content" },
+        },
+    }
+}
+
+pub async fn write_summary(inputs, meta) {
+    if inputs.name != "project-summary.rules" && inputs.name != "project-summary.stack" {
+        return Ok(format!("error: unknown note name `{}`", inputs.name));
+    }
+    // Scanner authorship (the default) rather than per-call authorship:
+    // the duplicate key (name, target, author) then matches across
+    // runs, so a re-summary replaces the prior note instead of
+    // accumulating alongside it.
+    let note = write_note(
+        #{
+            name: inputs.name,
+            value: inputs.summary,
+            target: #{ project: inputs.project },
+        },
+    )
+    .replace_prev()
+    .await?;
+    Ok(format!("Wrote summary note {}", note.id))
+}
+
+const FINDINGS_KEY = ("code-review", "findings", 1);
+
+/// Submit each session that edits files to a code review agent that
+/// writes finding notes, informed by the session project's summary
+/// notes.
+pub async fn findings() {
+    let (prev_sessions, new_sessions, validate) = scan()
+        .sessions()
+        .split_valid(FINDINGS_KEY)
+        .await?;
+    carry_forward_notes(prev_sessions, ["finding.code"]).await?;
+
+    let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
+    let runner = AgentRunner::new();
+    for s in new_sessions {
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            validate(s).await?;
+            continue
+        }
+        // An unrecorded project is a normal state (deleted project,
+        // scratchpad cwd); the review proceeds without summary notes.
+        let project = match s.project() {
+            Ok(p) => p.path,
+            Err(_) => "",
+        };
+        let prompt = t.render(#{ session_id: s.id, project }).await?;
+        runner.add(
+            call_agent(prompt)
+                .name("code-review")
+                .gage_tools([Query::new()])
+                .tools(#{ write_finding: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s.id },
+        );
+    }
+
+    let results = runner.start();
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!(
+                    "code-review findings: {:?}",
+                    #{
+                        session,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                validate(session).await?;
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+async fn skip_session(s) {
+    // Use query instead of iterating over messages to keep scanner
+    // memory use down. File edits show up as Edit/Write tool calls.
+    let result = query(
+        format!(
+            "SELECT count(*) AS n FROM message \
+            WHERE session_id = '{}' \
+            AND type = 'assistant' AND subtype = 'tool_use' \
+            AND regexp_like(raw, '\"name\"\\s*:\\s*\"(Edit|Write|MultiEdit)\"')",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ n } = result.get(0).expect("should return one row");
+    if n == 0 {
+        Ok(Some("no file edits"))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_finding_tooldef() {
+    #{
+        name: "Finding",
+        description: "Write a code quality finding about the session",
+        inputs: #{
+            description: #{
+                type: "string",
+                description: "Finding description",
+            },
+            session: #{ type: "string", description: "Session ID" },
+            lines: #{
+                type: "string",
+                description: "Session line numbers associated with the finding",
+                required: false,
+            },
+        },
+    }
+}
+
+pub async fn write_finding(inputs, meta) {
+    let metadata = #{};
+    if let Some(lines) = inputs.get("lines") {
+        metadata.insert("lines", lines)
+    }
+    let note = write_note(
+        #{
+            name: "finding.code",
+            author: meta.agent_tool_use(),
+            value: inputs.description,
+            target: #{ session: inputs.session },
+            metadata,
+        },
+    )
+    .await?;
+    Ok(format!("Wrote finding note {}", note.id))
+}

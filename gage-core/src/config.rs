@@ -349,6 +349,6 @@ mod tests {
         let mut config = Config::default();
         config.scanners.disable.push("hidden-*".to_string());
         assert!(!config.is_scanner_enabled("hidden-thinking"));
-        assert!(config.is_scanner_enabled("general-issues"));
+        assert!(config.is_scanner_enabled("general-findings"));
     }
 }

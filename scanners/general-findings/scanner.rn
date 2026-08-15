@@ -1,4 +1,4 @@
-use gage::tools::{IssueWrite, Query};
+use gage::tools::Query;
 use gage::{
     AgentRunner,
     Template,
@@ -10,38 +10,30 @@ use gage::{
 };
 
 pub const SCANNER = #{
-    name: "general-issues",
-    description: "Scan sessions for general issues",
+    name: "general-findings",
+    description: "Scan sessions for general findings",
     tasks: #{
-        notes: #{
+        findings: #{
             notes: #{
-                writes: #{ "finding": "Noteworthy finding in a session" },
-            },
-        },
-        issues: #{
-            notes: #{ wants: ["finding"] },
-            issues: #{
-                writes: #{
-                    "general": "General issue derived from session findings",
-                },
+                writes: #{ "finding.general": "Noteworthy finding in a session" },
             },
         },
     },
 };
 
-const FINDINGS_KEY = ("general-issues", "findings", 3);
+const FINDINGS_KEY = ("general-findings", "findings", 1);
 
 /// Submit each session to an agent to write finding notes.
 ///
 /// Sessions already processed under the current findings key are
 /// skipped with their prior findings are carried forward into this scan.
-pub async fn notes() {
+pub async fn findings() {
     // Skip previously scanned sessions per key
     let (prev_sessions, new_sessions, validate) = scan()
         .sessions()
         .split_valid(FINDINGS_KEY)
         .await?;
-    carry_forward_notes(prev_sessions, ["finding"]).await?;
+    carry_forward_notes(prev_sessions, ["finding.general"]).await?;
 
     // Init template for agent prompts
     let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
@@ -146,7 +138,7 @@ pub async fn write_finding(inputs, meta) {
     }
     let note = write_note(
         #{
-            name: "finding",
+            name: "finding.general",
             author: meta.agent_tool_use(),
             value: inputs.description,
             target: #{ session: inputs.session },
@@ -155,45 +147,4 @@ pub async fn write_finding(inputs, meta) {
     )
     .await?;
     Ok(format!("Wrote finding note {}", note.id))
-}
-
-const ISSUES_KEY = ("general-issues", "issues", 1);
-
-const NEW_FINDINGS_THRESHOLD = 5;
-
-/// Ask agent to review findings and write issues.
-///
-/// The findings available to the agent are limited to those written
-/// for the current scan. Skips the agent when every finding has
-/// already been analyzed under the current issues key.
-pub async fn issues() {
-    let (prev_findings, new_findings, validate) = scan()
-        .notes()
-        .names(["finding"])
-        .split_valid(ISSUES_KEY)
-        .await?;
-
-    let threshold = if prev_findings.is_empty() {
-        1
-    } else {
-        NEW_FINDINGS_THRESHOLD
-    };
-    if new_findings.len() < threshold {
-        return Ok(());
-    }
-
-    let agent = call_agent(include_str!("issues-prompt.md"))
-        .name("issue-writer")
-        .gage_tools([Query::new(), IssueWrite::new()])
-        .model("large")
-        .await?;
-    let result = agent.wait().await?;
-    log::info!(
-        "issues: {:?}",
-        #{
-            result: result.text,
-            metadata: result.as_metadata(),
-        },
-    );
-    validate().await
 }

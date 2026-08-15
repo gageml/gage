@@ -1,9 +1,9 @@
 Analyze finding notes and report systematic issues
 
-Use `mcp__gage__Query` to read findings, which are `note` table rows with `name`
-value `finding`
+Use `mcp__gage__Query` to read findings, which are `note` table rows with
+names under `finding.`
 
-`SELECT * FROM note WHERE name = 'finding'`
+`SELECT * FROM note WHERE name LIKE 'finding.%'`
 
 Use row padding (`LIMIT` AND `OFFSET`) as needed to manage size limits.
 

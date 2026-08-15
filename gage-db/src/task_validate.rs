@@ -1,8 +1,9 @@
 //! Validation state for keyed task runs. A row records that the task
 //! identified by `key` is valid with respect to the entity in `ref`
-//! (`session:<id>` or `note:<id>`), optionally qualified by a compared
-//! `value` (e.g. a session's size). For membership schemes (notes) the
-//! row's existence is the state and `value` is NULL.
+//! (`session:<id>`, `note:<id>`, or `project:<path>`), optionally
+//! qualified by a compared `value` (e.g. a session's size, a project
+//! file-set digest). For membership schemes (notes) the row's
+//! existence is the state and `value` is NULL.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -12,6 +13,10 @@ pub fn session_ref(session_id: &str) -> String {
 
 pub fn note_ref(note_id: &str) -> String {
     format!("note:{note_id}")
+}
+
+pub fn project_ref(project_path: &str) -> String {
+    format!("project:{project_path}")
 }
 
 /// Compared value for `(key, ref)`, or `None` when there is no row.

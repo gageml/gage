@@ -1,4 +1,5 @@
-//! Task-run memoization: `split_valid` / `carry_forward_notes`.
+//! Task-run memoization: `split_valid` / `files_valid` /
+//! `carry_forward_notes`.
 //!
 //! Partitions a scan's sessions or notes by validation state recorded
 //! in `task_validate` so scanners can skip work already done under the
@@ -7,13 +8,15 @@
 //! `.local.design/session-caching.md`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use gage_db::note;
 use gage_db::scan::insert_scan_note;
-use gage_db::task_validate::{self, note_ref, session_ref};
+use gage_db::task_validate::{self, note_ref, project_ref, session_ref};
 use rune::runtime::{Function, Protocol, Ref, Value, Vec as RuneVec};
 use rune::{Any, ContextError, Module};
 
+use crate::config::{Config, Project};
 use crate::db::{Note, NotesQuery, fetch_notes};
 use crate::error::Error;
 use crate::scan::{Session, Sessions};
@@ -30,6 +33,11 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
         do_notes_split_valid(q)
     })?;
 
+    m.function("files_valid", FilesValid::new).build()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: FilesValid| async move {
+        do_files_valid(q)
+    })?;
+
     m.function("carry_forward_notes", CarryForward::new)
         .build()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForward| async move {
@@ -41,6 +49,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<SessionsSplitValid>()?;
     m.ty::<NotesSplitValid>()?;
+    m.ty::<FilesValid>()?;
     m.ty::<CarryForward>()?;
     Ok(())
 }
@@ -226,6 +235,109 @@ fn do_notes_split_valid(q: NotesSplitValid) -> crate::Result<(Vec<Note>, Vec<Not
     .unwrap();
 
     Ok((prev, new, validate))
+}
+
+/// Builder returned by `files_valid(key, project, files)`. The check
+/// runs when the value is awaited.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct FilesValid {
+    #[rune(skip)]
+    key: Value,
+    #[rune(skip)]
+    project: Value,
+    #[rune(skip)]
+    files: Value,
+}
+
+impl FilesValid {
+    fn new(key: Value, project: Value, files: Value) -> Self {
+        Self {
+            key,
+            project,
+            files,
+        }
+    }
+}
+
+/// Check a project's file set against the digest recorded under the
+/// key. Returns `(valid, validate)`: `valid` is true when the recorded
+/// digest matches the current file set, and `validate` is a
+/// no-argument function that records the current digest — called by
+/// the scanner when the work consuming the files has completed.
+fn do_files_valid(q: FilesValid) -> crate::Result<(bool, Function)> {
+    let key = key_string(&q.key)?;
+    let ref_ = project_ref(&project_path(&q.project)?);
+    let digest = files_digest(&config_paths(&q.files)?)?;
+
+    let ctx = current_scan_ctx();
+    let valid = {
+        let db = ctx.db.lock().unwrap();
+        task_validate::value(&db, &key, &ref_)
+            .map_err(|e| Error::Db(e.to_string()))?
+            .as_deref()
+            == Some(digest.as_str())
+    };
+
+    let validate = Function::new(move || {
+        let key = key.clone();
+        let ref_ = ref_.clone();
+        let digest = digest.clone();
+        async move {
+            let ctx = current_scan_ctx();
+            let db = ctx.db.lock().unwrap();
+            task_validate::put(&db, &key, &ref_, Some(&digest))
+                .map_err(|e| Error::Db(e.to_string()))
+        }
+    })
+    .unwrap();
+
+    Ok((valid, validate))
+}
+
+/// A `Project` or a project path string.
+fn project_path(v: &Value) -> crate::Result<String> {
+    if let Ok(p) = rune::from_value::<Ref<Project>>(v.clone()) {
+        return Ok(p.path.to_string_lossy().into_owned());
+    }
+    v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
+        Error::Args(format!(
+            "expected a Project or project path string, got {}: {e}",
+            v.type_info()
+        ))
+    })
+}
+
+/// Paths of a list of `Config` rows.
+fn config_paths(v: &Value) -> crate::Result<Vec<PathBuf>> {
+    let items: RuneVec = rune::from_value(v.clone())
+        .map_err(|e| Error::Args(format!("'files' must be a list of Config rows: {e}")))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let c = rune::from_value::<Ref<Config>>(item.clone())
+            .map_err(|e| Error::Args(format!("'files' entries must be Config rows: {e}")))?;
+        out.push(c.path.clone());
+    }
+    Ok(out)
+}
+
+/// Deterministic digest over the file set: sorted `(path, content)`
+/// pairs folded through the std hasher. Any file addition, deletion,
+/// or content change produces a different digest. The std hasher is
+/// not guaranteed stable across Rust releases; a hasher change costs
+/// one redundant re-run per project, not correctness.
+fn files_digest(paths: &[PathBuf]) -> crate::Result<String> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut sorted: Vec<&PathBuf> = paths.iter().collect();
+    sorted.sort();
+    let mut h = DefaultHasher::new();
+    for p in sorted {
+        p.hash(&mut h);
+        let content =
+            std::fs::read(p).map_err(|e| Error::Config(format!("read {}: {e}", p.display())))?;
+        content.hash(&mut h);
+    }
+    Ok(format!("{:016x}", h.finish()))
 }
 
 /// Builder returned by `carry_forward_notes(sessions, names)`. The link

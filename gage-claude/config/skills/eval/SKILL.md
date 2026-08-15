@@ -27,7 +27,7 @@ Test shape:
 ```toml
 [[test]]
 name = "rune-iter-error"
-scanners = ["general-issues"]
+scanners = ["general-findings", "finding-issues"]
 fixture = "rune-iter-error"     # fixtures/rune-iter-error/projects/
 samples = 3                     # optional; default 1
 expect.empty = true             # the scan should write nothing of substance

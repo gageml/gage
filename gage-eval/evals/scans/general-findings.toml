@@ -8,7 +8,7 @@
 # review, where this session produced a bogus API-ergonomics issue.
 
 name = "rune-iter-error"
-scanners = ["general-issues"]
+scanners = ["general-findings", "finding-issues"]
 fixture = "rune-iter-error"
 expect.empty = true
 samples = 3

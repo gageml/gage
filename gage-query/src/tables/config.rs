@@ -387,6 +387,7 @@ fn collect_rows(
                 .local_settings(want_local_settings)
                 .memory(want_project_memory)
                 .local_memory(want_local_memory)
+                .manifest(want_project_other && type_filter.is_none_or(|f| f.contains("manifest")))
                 .skills(
                     want_project_other
                         && type_filter
@@ -510,6 +511,7 @@ fn type_code_of(file: &ConfigFile) -> &'static str {
     match file {
         ConfigFile::Settings(_) | ConfigFile::LocalSettings(_) => "settings",
         ConfigFile::Memory(_) | ConfigFile::LocalMemory(_) => "memory",
+        ConfigFile::Manifest(_) => "manifest",
         ConfigFile::Skill { .. } => "skill",
         ConfigFile::SkillRule { .. } => "skill-rule",
         ConfigFile::Command { .. } => "command",
@@ -558,6 +560,11 @@ fn into_row(
         | ConfigFile::Memory(_)
         | ConfigFile::LocalMemory(_)
         | ConfigFile::InstalledPlugins(_) => String::new(),
+        // The file name distinguishes manifests within one project
+        ConfigFile::Manifest(p) => p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         ConfigFile::Skill { name, .. }
         | ConfigFile::Command { name, .. }
         | ConfigFile::Agent { name, .. } => name,

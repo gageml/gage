@@ -1,5 +1,6 @@
-//! Rune-facing config accessors: `user().config()` for user settings
-//! and `session.config()` for a session project's config files.
+//! Rune-facing config accessors: `user().config()` for user settings,
+//! `session.config()` / `project.config()` for a project's config
+//! files.
 //!
 //! `user().config()` exposes Claude Code's user-level configuration
 //! (`~/.claude/settings.json`) as a `UserConfig` value resolved
@@ -7,9 +8,11 @@
 //!
 //! `session.config()` resolves the session's project and queries the
 //! `config` table for that project's config files, yielding `Config`
-//! rows. File text is never selected — `Config::read()` reads the
+//! rows; `project.config()` is the same query rooted at a `Project`
+//! directly. File text is never selected — `Config::read()` reads the
 //! file on demand.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
@@ -26,7 +29,7 @@ use tracing::warn;
 
 use crate::datetime::DateTime;
 use crate::error::Error;
-use crate::scan::Session;
+use crate::scan::{Session, Sessions};
 use crate::state::current_scan_ctx;
 use crate::value::json_to_value;
 
@@ -39,10 +42,12 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     )?;
 
     m.function_meta(project)?;
+    m.function_meta(projects)?;
     m.function_meta(config)?;
-    m.associated_function("type", SessionConfigQuery::type_)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionConfigQuery| async move {
-        fetch_session_config(q).await
+    m.function_meta(project_config)?;
+    m.associated_function("type", ConfigQuery::type_)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: ConfigQuery| async move {
+        fetch_config(q).await
     })?;
     Ok(())
 }
@@ -58,7 +63,7 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
         p.path.to_string_lossy().into_owned()
     })?;
 
-    m.ty::<SessionConfigQuery>()?;
+    m.ty::<ConfigQuery>()?;
     m.ty::<Config>()?;
     m.field_function(&Protocol::GET, "type", |c: &Config| c.type_.clone())?;
     m.field_function(&Protocol::GET, "path", |c: &Config| {
@@ -215,10 +220,35 @@ fn project(session: Ref<Session>) -> crate::Result<Project> {
     resolve_project(&session.src)
 }
 
+/// Distinct projects for the sessions, in iteration order. Sessions
+/// whose project is not recorded are skipped — an unrecorded project
+/// is a normal state (deleted project, scratchpad cwd), not a failure.
 #[rune::function(instance)]
-fn config(session: Ref<Session>) -> SessionConfigQuery {
-    SessionConfigQuery {
-        src: session.src.clone(),
+fn projects(sessions: Ref<Sessions>) -> crate::Result<Vec<Project>> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for s in sessions.remaining() {
+        if let Some(p) = resolve_project_opt(&s.src)?
+            && seen.insert(p.path.clone())
+        {
+            out.push(p);
+        }
+    }
+    Ok(out)
+}
+
+#[rune::function(instance)]
+fn config(session: Ref<Session>) -> ConfigQuery {
+    ConfigQuery {
+        root: ConfigRoot::Session(session.src.clone()),
+        type_: None,
+    }
+}
+
+#[rune::function(instance, path = config)]
+fn project_config(project: Ref<Project>) -> ConfigQuery {
+    ConfigQuery {
+        root: ConfigRoot::Project(project.path.clone()),
         type_: None,
     }
 }
@@ -251,14 +281,21 @@ fn session_dir_name(src: &Path) -> crate::Result<String> {
 
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub struct SessionConfigQuery {
+pub struct ConfigQuery {
     #[rune(skip)]
-    src: PathBuf,
+    root: ConfigRoot,
     #[rune(skip)]
     type_: Option<Value>,
 }
 
-impl SessionConfigQuery {
+/// Where a config query is rooted: a session (project resolved from
+/// its JSONL path) or a project directly.
+enum ConfigRoot {
+    Session(PathBuf),
+    Project(PathBuf),
+}
+
+impl ConfigQuery {
     fn type_(mut self, t: Value) -> Self {
         self.type_ = Some(t);
         self
@@ -268,19 +305,25 @@ impl SessionConfigQuery {
 // `text` is deliberately not selected: the `config` table only reads
 // file contents when the projection asks for them, and these rows are
 // metadata. `Config::read()` fetches contents on demand.
-async fn fetch_session_config(q: SessionConfigQuery) -> crate::Result<Vec<Config>> {
-    let Some(project) = resolve_project_opt(&q.src)? else {
-        tracing::debug!(
-            "no project recorded for session dir `{}`; no config files",
-            session_dir_name(&q.src)?
-        );
-        return Ok(vec![]);
+async fn fetch_config(q: ConfigQuery) -> crate::Result<Vec<Config>> {
+    let project_path = match &q.root {
+        ConfigRoot::Project(p) => p.clone(),
+        ConfigRoot::Session(src) => match resolve_project_opt(src)? {
+            Some(p) => p.path,
+            None => {
+                tracing::debug!(
+                    "no project recorded for session dir `{}`; no config files",
+                    session_dir_name(src)?
+                );
+                return Ok(vec![]);
+            }
+        },
     };
     let ctx = current_scan_ctx();
     let df_ctx = &ctx.run.scan_ctx;
 
     let mut params = vec![ScalarValue::Utf8(Some(
-        project.path.to_string_lossy().into_owned(),
+        project_path.to_string_lossy().into_owned(),
     ))];
     let mut clauses = vec!["project = $1".to_string()];
     if let Some(t) = q.type_ {
