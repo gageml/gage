@@ -47,6 +47,9 @@ pub struct RunSummary {
     pub completed: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// The run was canceled before completing; the counts cover only
+    /// what ran before the cancellation.
+    pub canceled: bool,
 }
 
 #[derive(Debug)]

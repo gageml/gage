@@ -120,6 +120,7 @@ pub enum TaskState {
     Completed,
     Error,
     Skipped,
+    Canceled,
 }
 
 impl TaskState {
@@ -128,7 +129,7 @@ impl TaskState {
         match self {
             TaskState::Running => 0,
             TaskState::Pending => 1,
-            TaskState::Completed | TaskState::Error | TaskState::Skipped => 2,
+            TaskState::Completed | TaskState::Error | TaskState::Skipped | TaskState::Canceled => 2,
         }
     }
 }
@@ -389,9 +390,17 @@ pub enum Event {
 }
 
 /// Show a live scan, applying events to the model as they arrive.
-pub async fn run(model: ScanModel, mut events: UnboundedReceiver<Event>) -> io::Result<()> {
+/// `on_cancel` requests an orderly scan cancellation; the view calls
+/// it when the user confirms canceling mid-scan, then waits for
+/// [`Event::Finished`] (or channel close) as confirmation that the
+/// scan has stopped.
+pub async fn run(
+    model: ScanModel,
+    mut events: UnboundedReceiver<Event>,
+    on_cancel: impl Fn(),
+) -> io::Result<()> {
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, model, &mut events).await;
+    let result = event_loop(&mut terminal, model, &mut events, &on_cancel).await;
     ratatui::restore();
     result
 }
@@ -402,7 +411,8 @@ pub async fn view(mut model: ScanModel) -> io::Result<()> {
     let (tx, mut events) = unbounded_channel();
     drop(tx);
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, model, &mut events).await;
+    // A finished model never opens the cancel path
+    let result = event_loop(&mut terminal, model, &mut events, &|| {}).await;
     ratatui::restore();
     result
 }
@@ -411,6 +421,7 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     model: ScanModel,
     events: &mut UnboundedReceiver<Event>,
+    on_cancel: &impl Fn(),
 ) -> io::Result<()> {
     let mut state = ViewState::new(model);
     let stop_input = Arc::new(AtomicBool::new(false));
@@ -439,7 +450,7 @@ async fn event_loop(
                 match ev {
                     Some(TermEvent::Key(key))
                         if key.kind == KeyEventKind::Press
-                            && handle_key(&mut state, key) => break,
+                            && handle_key(&mut state, key, on_cancel) => break,
                     // Input thread died (terminal input unavailable);
                     // without keys the view can never be backed, so
                     // exit rather than trap the user.
@@ -481,11 +492,20 @@ fn spawn_input_thread(stop: Arc<AtomicBool>) -> UnboundedReceiver<TermEvent> {
 }
 
 /// Returns true when the view should close.
-fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
+fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bool {
     match &state.dialog {
         Dialog::ConfirmQuit => {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => return true,
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // The scan can finish while the confirm is up; the
+                    // affirmed cancel then reduces to a plain quit
+                    if state.model.finished {
+                        return true;
+                    }
+                    state.cancel_requested = true;
+                    state.dialog = Dialog::Canceling;
+                    on_cancel();
+                }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
                     state.dialog = Dialog::None;
                 }
@@ -493,6 +513,9 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
             }
             return false;
         }
+        // No key handling while the cancellation completes; Finished
+        // (or the events channel closing) dismisses the dialog
+        Dialog::Canceling => return false,
         Dialog::ScanDone => {
             match key.code {
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
@@ -607,6 +630,9 @@ struct ViewState {
     /// A live scan finished while another dialog was open; ScanDone
     /// shows once that dialog closes
     scan_done_pending: bool,
+    /// The user confirmed canceling the scan; titles the ScanDone
+    /// announcement as canceled when the cancellation completes
+    cancel_requested: bool,
     /// Scroll state and layout cache for the open content dialog
     scroll_view: ScrollView,
     /// Session dialog: show the session's issues
@@ -618,8 +644,11 @@ struct ViewState {
 
 enum Dialog {
     None,
-    /// Quit requested mid-scan; y stops the scan
+    /// Quit requested mid-scan; y cancels the scan
     ConfirmQuit,
+    /// Cancel confirmed; waiting for the runner to wind down. Ignores
+    /// all keys and closes itself when the scan is verified stopped.
+    Canceling,
     /// Zoomed note detail. Holds a snapshot of the item so a results
     /// refresh can't shift what's being read.
     Note {
@@ -658,6 +687,7 @@ impl ViewState {
             started: Instant::now(),
             dialog: Dialog::None,
             scan_done_pending: false,
+            cancel_requested: false,
             scroll_view: ScrollView::new(),
             show_issues: false,
             show_notes: false,
@@ -820,7 +850,7 @@ impl ViewState {
         lines
     }
 
-    /// Quitting a finished view is immediate; quitting mid-scan stops
+    /// Quitting a finished view is immediate; `q` mid-scan cancels
     /// the scan, so it requires confirmation first.
     fn request_quit(&mut self) -> bool {
         if self.model.finished {
@@ -836,15 +866,37 @@ impl ViewState {
     /// finished and never transition. When another dialog is up the
     /// announcement is deferred until it closes — completion still
     /// shows in the header and footer meanwhile.
+    ///
+    /// A user-canceled scan announces with the same summary dialog,
+    /// titled as canceled, replacing the Canceling dialog. Tasks left
+    /// running or pending move to Canceled — the same terminal state
+    /// the runner records for their db rows.
     fn mark_finished(&mut self) {
-        if !self.model.finished {
-            self.model.finished = true;
-            self.model.elapsed = Some(self.started.elapsed());
-            if matches!(self.dialog, Dialog::None) {
-                self.dialog = Dialog::ScanDone;
-            } else {
-                self.scan_done_pending = true;
+        if self.model.finished {
+            return;
+        }
+        self.model.finished = true;
+        self.model.elapsed = Some(self.started.elapsed());
+        if self.cancel_requested {
+            for item in &mut self.model.tasks {
+                if matches!(item.state, TaskState::Running | TaskState::Pending) {
+                    item.state = TaskState::Canceled;
+                    item.elapsed = item.started.map(|t| t.elapsed());
+                    item.progress = None;
+                }
             }
+            // The state changes re-rank the task sort; re-anchor the
+            // table selections to the new order
+            self.sync_tables();
+            // Canceling ignores all keys, so it is still the open
+            // dialog here
+            self.dialog = Dialog::ScanDone;
+            return;
+        }
+        if matches!(self.dialog, Dialog::None) {
+            self.dialog = Dialog::ScanDone;
+        } else {
+            self.scan_done_pending = true;
         }
     }
 
@@ -982,10 +1034,12 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         model,
         show_issues,
         show_notes,
+        cancel_requested,
         ..
     } = state;
     match dialog {
         Dialog::ConfirmQuit => draw_confirm_quit(frame),
+        Dialog::Canceling => dialog::draw_message(frame, "Canceling the scan...", ""),
         Dialog::Note { note } => {
             scroll_view.render_modal(frame, format!(" Note {} ", note.id), |_| {
                 vec![note_lines(note)]
@@ -1004,7 +1058,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         Dialog::Log { content, .. } => {
             scroll_view.render_modal(frame, " Log ".to_string(), |_| vec![content.clone()]);
         }
-        Dialog::ScanDone => draw_scan_done(frame, model),
+        Dialog::ScanDone => draw_scan_done(frame, model, *cancel_requested),
         Dialog::None => {}
     }
 }
@@ -1490,13 +1544,15 @@ fn token_ranges(line: &str, n: usize) -> Vec<(usize, usize)> {
 }
 
 fn draw_confirm_quit(frame: &mut Frame) {
-    dialog::draw_message(frame, "Stop the scan? It cannot be restarted.", "y / n");
+    dialog::draw_message(frame, "Cancel the scan? It cannot be restarted.", "y / n");
 }
 
-fn draw_scan_done(frame: &mut Frame, model: &ScanModel) {
-    let title = match model.elapsed {
-        Some(e) => format!("Scan completed in {}", fmt_duration(e)),
-        None => "Scan completed".to_string(),
+fn draw_scan_done(frame: &mut Frame, model: &ScanModel, canceled: bool) {
+    let title = match (canceled, model.elapsed) {
+        (true, Some(e)) => format!("Scan canceled after {}", fmt_duration(e)),
+        (true, None) => "Scan canceled".to_string(),
+        (false, Some(e)) => format!("Scan completed in {}", fmt_duration(e)),
+        (false, None) => "Scan completed".to_string(),
     };
     let mut lines = vec![
         Line::raw(format!("  {title}")).left_aligned(),
@@ -1640,6 +1696,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 TaskState::Completed => ("done", styles::RunStatus::completed()),
                 TaskState::Error => ("error", styles::RunStatus::error()),
                 TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
+                TaskState::Canceled => ("canceled", styles::RunStatus::skipped()),
             };
             let time = match t.state {
                 // Read a stable "0s" during the first second rather than
@@ -1664,7 +1721,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     // the labels on screen, so the column doesn't jitter as states
     // change. One space each side: the label aligns under the padded
     // header and the time doesn't touch the panel border.
-    let label_width = ["pending", "running", "done", "error", "skipped"]
+    let label_width = ["pending", "running", "done", "error", "skipped", "canceled"]
         .iter()
         .map(|l| l.width())
         .max()
@@ -1711,7 +1768,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 TaskState::Running => spinner,
                 TaskState::Completed => "✓",
                 TaskState::Error => "✗",
-                TaskState::Skipped => "⊘",
+                TaskState::Skipped | TaskState::Canceled => "⊘",
             };
             let pad = status_width - 2 - label.width();
             let text = format!(" {label}{time:>pad$} ");
@@ -1736,34 +1793,28 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 Cell::from(Span::styled(text, *label_style))
             };
             Row::new(vec![
-                Cell::from(format!("{glyph} {}", t.id.scanner)),
-                Cell::from(task_name_display(&t.id.task)),
+                Cell::from(format!(
+                    "{glyph} {}:{}",
+                    t.id.scanner,
+                    task_name_display(&t.id.task)
+                )),
                 Cell::from(format!("{cost:>cost_width$}")),
                 status,
             ])
         })
         .collect();
     let count = rows.len();
-    // Widen for the "<glyph> " prefix on each scanner cell
-    let scanner_col = Constraint::Length(
-        fit_col(
-            "Scanner",
-            state.model.tasks.iter().map(|t| t.id.scanner.as_str()),
-            area,
-        ) + 2,
-    );
     let table = Table::new(
         rows,
         [
-            scanner_col,
             Constraint::Fill(1),
             Constraint::Length(cost_width as u16),
             Constraint::Length(status_width as u16),
         ],
     )
     .header(Row::new([
-        Cell::from(Span::styled("Scanner", styles::Text::dim())),
-        Cell::from(Span::styled("Task", styles::Text::dim())),
+        // Left pad Task past the "<glyph> " prefix on each value
+        Cell::from(Span::styled("  Task", styles::Text::dim())),
         // Right-align Cost over its right-aligned values
         Cell::from(Span::styled(
             format!("{:>cost_width$}", "Cost"),
@@ -2006,12 +2057,13 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
 /// empty footer.
 fn footer_help(state: &ViewState) -> &'static str {
     match state.dialog {
-        Dialog::ConfirmQuit | Dialog::ScanDone => "",
+        Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
         Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next note",
         Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next issue",
         Dialog::Session { .. } => "q back · ↑/↓ scroll · ←/→ prev/next session · i issues/notes",
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
-        Dialog::None => "q quit · Tab cycle · ↑/↓ select · l log",
+        Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log",
+        Dialog::None => "q cancel scan · Tab cycle · ↑/↓ select · l log",
     }
 }
 

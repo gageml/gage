@@ -261,7 +261,9 @@ fn register_scan(
         &Scan {
             id: scan_id.clone(),
             created: gage_core::datetime::now_ms(),
-            metadata: None,
+            // Replaced by the agent-run summary; a dead pid under this
+            // payload marks a run that died
+            metadata: Some(gage_db::scan::running_metadata(std::process::id())),
         },
     )?;
     for s in selected.iter() {

@@ -204,14 +204,15 @@ pub async fn run(
                 let conn = db.lock().unwrap();
                 persist_run_summary(&conn, &summary, run_started.elapsed())?;
             }
-            if summary.failed > 0 {
+            if summary.canceled {
+                Err(RunError::Canceled)
+            } else if summary.failed > 0 {
                 Err(RunError::Emitted)
             } else {
                 Ok(summary)
             }
         }
         Err(scheduler::RunError::Channel) => Err(RunError::Emitted),
-        Err(scheduler::RunError::Canceled) => Err(RunError::Canceled),
         Err(scheduler::RunError::Db(e)) => Err(RunError::Db(e)),
     }
 }
@@ -245,9 +246,9 @@ fn insert_plan_tasks(
     Ok(())
 }
 
-/// Persist the run summary to `scan.metadata`. Written only on normal
-/// completion — a canceled or aborted run leaves the column NULL,
-/// which marks the scan as incomplete.
+/// Persist the run summary to `scan.metadata`. Written on completion
+/// and cancellation alike — only a run that died leaves the column
+/// NULL, which marks the scan as incomplete.
 fn persist_run_summary(
     conn: &Connection,
     summary: &RunSummary,
@@ -261,6 +262,7 @@ fn persist_run_summary(
             completed: summary.completed,
             failed: summary.failed,
             skipped: summary.skipped,
+            canceled: summary.canceled,
             elapsed_ms: elapsed.as_millis() as u64,
         },
     )?;
@@ -273,7 +275,9 @@ fn init_run(scan_id: &str, session_ids: &[&str], db: &Connection) -> Result<(), 
         &Scan {
             id: scan_id.to_string(),
             created: gage_core::datetime::now_ms(),
-            metadata: None,
+            // Replaced by the end-of-run summary; a dead pid under this
+            // payload marks a run that died
+            metadata: Some(gage_db::scan::running_metadata(std::process::id())),
         },
     )?;
 

@@ -309,7 +309,7 @@ pub(crate) async fn run_plan(
     on_event(ScanEvent::Status(status.clone()));
 
     debug!(tasks = plan.tasks.len(), "scheduling");
-    run_tasks(
+    let canceled = run_tasks(
         plan,
         &scanners,
         &run,
@@ -327,6 +327,7 @@ pub(crate) async fn run_plan(
         completed: accounting.completed,
         failed: accounting.failed,
         skipped: accounting.skipped,
+        canceled,
     })
 }
 
@@ -338,10 +339,12 @@ struct RunAccounting {
 
 pub enum RunError {
     Channel,
-    Canceled,
     Db(ScanError),
 }
 
+/// Dispatch the plan's tasks. Returns whether the run was canceled;
+/// on cancellation, in-flight and pending task rows are finalized as
+/// `canceled` before returning, so the db is terminal either way.
 #[allow(clippy::indexing_slicing, clippy::too_many_arguments)]
 async fn run_tasks(
     plan: Plan,
@@ -352,7 +355,7 @@ async fn run_tasks(
     status: &mut RunStatus,
     accounting: &mut RunAccounting,
     on_event: &mut (impl FnMut(ScanEvent) + Send),
-) -> Result<(), RunError> {
+) -> Result<bool, RunError> {
     let task_count = plan.tasks.len();
     let tasks = Arc::new(plan.tasks);
     let downstream = Arc::new(plan.downstream);
@@ -576,9 +579,20 @@ async fn run_tasks(
     }
 
     if canceled {
-        return Err(RunError::Canceled);
+        // Workers are joined, so no task is still writing; finalize
+        // the in-flight rows the aborted workers left behind and the
+        // pending rows that will never dispatch.
+        if let Some(slot) = scanners.first() {
+            let conn = slot.db.lock().unwrap();
+            gage_db::scan::cancel_unfinished_tasks(
+                &conn,
+                &run.scan_id,
+                gage_core::datetime::now_ms(),
+            )
+            .map_err(RunError::Db)?;
+        }
     }
-    Ok(())
+    Ok(canceled)
 }
 
 #[allow(clippy::indexing_slicing)]

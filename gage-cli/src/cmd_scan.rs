@@ -204,7 +204,8 @@ fn list(args: ScanListArgs) {
     });
 
     let header: Vec<String> = [
-        "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Cost", "Duration", "Created",
+        "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Cost", "Status", "Duration",
+        "Created",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -225,6 +226,7 @@ fn list(args: ScanListArgs) {
         .with(Style::rounded())
         .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(1..7), Alignment::right())
+        .modify(Columns::one(7).not(Rows::first()), s::dim())
         .modify(Columns::last().not(Rows::first()), s::dim())
         .to_string();
     println!("{table}");
@@ -246,9 +248,19 @@ fn list_row(
     let notes = scan::note_ids_for_scan(conn, &run.id)?.len();
     let issues = scan::issue_ids_for_scan(conn, &run.id)?.len();
     let cost = format_cost(scan::cost_for_scan(conn, &run.id)?);
-    let duration = run
-        .parse_metadata()?
-        .map(|m| crate::human::format_duration(Duration::from_millis(m.elapsed_ms())))
+    let metadata = run.parse_metadata()?;
+    // A Running payload whose process is gone is a run that died;
+    // absent metadata (a run predating the running marker) reads the
+    // same. Both render as incomplete.
+    let status = match &metadata {
+        Some(scan::ScanMetadata::Scan(s)) if s.canceled => "canceled",
+        Some(scan::ScanMetadata::Running(r)) if scan_process_alive(r.pid, run.created) => "running",
+        Some(scan::ScanMetadata::Running(_)) | None => "incomplete",
+        Some(_) => "completed",
+    };
+    let duration = metadata
+        .and_then(|m| m.elapsed_ms())
+        .map(|ms| crate::human::format_duration(Duration::from_millis(ms)))
         .unwrap_or_default();
     Ok(vec![
         highlighter.short(&run.id),
@@ -258,6 +270,7 @@ fn list_row(
         issues.to_string(),
         errors.to_string(),
         cost,
+        status.to_string(),
         duration,
         crate::human::format_elapsed_ms(run.created),
     ])
@@ -274,12 +287,52 @@ fn format_cost(cost: scan::ScanCost) -> String {
     format!("${:.2}{suffix}", cost.total_usd)
 }
 
+/// Whether `pid` is alive and is the process that recorded it in the
+/// scan's Running metadata. Existence alone is not identity — a pid
+/// can be recycled. A recycled holder necessarily started after the
+/// original process died, and the original started before the scan
+/// row was created; so a process whose start postdates `created_ms`
+/// is disqualified. Unreadable process data reads as not running.
+fn scan_process_alive(pid: u32, created_ms: i64) -> bool {
+    // btime and the tick conversion each truncate to whole seconds;
+    // the slack keeps a genuine process from reading as started just
+    // after its own scan row
+    const SLACK_SECS: i64 = 2;
+    match process_start_epoch(pid) {
+        Some(start_secs) => start_secs <= created_ms / 1000 + SLACK_SECS,
+        None => false,
+    }
+}
+
+/// A process's start time in epoch seconds: the boot time (`btime` in
+/// `/proc/stat`) plus its start offset (field 22 of `/proc/{pid}/stat`,
+/// in clock ticks since boot). None when the process is gone or its
+/// stat data cannot be read.
+fn process_start_epoch(pid: u32) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // comm (field 2) may contain spaces; fields resume after its
+    // closing paren with state (field 3), putting starttime (field 22)
+    // at offset 19
+    let after_comm = stat.rsplit(')').next()?;
+    let ticks: i64 = after_comm.split_whitespace().nth(19)?.parse().ok()?;
+    let btime: i64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))
+        .and_then(|v| v.trim().parse().ok())?;
+    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_sec <= 0 {
+        return None;
+    }
+    Some(btime + ticks / ticks_per_sec)
+}
+
 /// Scan-run summary from `scan.metadata`. None when the run never
 /// completed or is an agent run.
 fn scan_summary(run: &scan::Scan) -> anyhow::Result<Option<scan::ScanSummary>> {
     Ok(match run.parse_metadata()? {
         Some(scan::ScanMetadata::Scan(s)) => Some(s),
-        Some(scan::ScanMetadata::Agent(_)) | None => None,
+        Some(scan::ScanMetadata::Agent(_) | scan::ScanMetadata::Running(_)) | None => None,
     })
 }
 
@@ -323,12 +376,15 @@ fn pick_scan(conn: &gage_db::rusqlite::Connection) -> std::io::Result<Option<Str
         .iter()
         .take(30)
         .map(|run| {
-            // Best-effort enrichment: unparsable metadata renders the
-            // same as a run that never completed (no duration)
-            let duration = if let Ok(Some(m)) = run.parse_metadata() {
-                crate::human::format_duration(Duration::from_millis(m.elapsed_ms()))
-            } else {
-                String::new()
+            // Best-effort enrichment: unparsable or still-running
+            // metadata renders the same as a run that never completed
+            // (no duration)
+            let duration = match run.parse_metadata() {
+                Ok(Some(m)) => m
+                    .elapsed_ms()
+                    .map(|ms| crate::human::format_duration(Duration::from_millis(ms)))
+                    .unwrap_or_default(),
+                _ => String::new(),
             };
             let label = format!(
                 "{}  {} {}",
@@ -389,6 +445,7 @@ fn load_scan_model(
                 scan::TaskStatus::Completed => TaskState::Completed,
                 scan::TaskStatus::Failed => TaskState::Error,
                 scan::TaskStatus::Skipped => TaskState::Skipped,
+                scan::TaskStatus::Canceled => TaskState::Canceled,
             },
             elapsed: match (t.started, t.stopped) {
                 (Some(a), Some(b)) => Some(Duration::from_millis(b.saturating_sub(a) as u64)),
@@ -446,7 +503,8 @@ fn load_scan_model(
         finished: true,
         elapsed: run
             .parse_metadata()?
-            .map(|m| Duration::from_millis(m.elapsed_ms())),
+            .and_then(|m| m.elapsed_ms())
+            .map(Duration::from_millis),
         tasks,
         sessions,
     })
@@ -1393,8 +1451,11 @@ async fn run_scan_tui(
     model.scan_id = short_uuid(&scan_id).to_string();
     model.out_path = Some(ScanStreams::out_path(&scan_id));
     let ui_cancel = cancel.clone();
+    let run_cancel = cancel.clone();
     let ui_fut = async move {
-        let result = scan_view::run(model, rx).await;
+        // The in-view cancel request cancels the run; the view stays up
+        // and closes its Canceling dialog on the runner's Finished event.
+        let result = scan_view::run(model, rx, move || run_cancel.cancel()).await;
         // Closing the view mid-scan stops the run; after the scan
         // completes this is a no-op.
         ui_cancel.cancel();

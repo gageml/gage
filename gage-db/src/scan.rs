@@ -155,6 +155,36 @@ pub fn finish_task(
     Ok(())
 }
 
+/// Finalize a canceled scan's unfinished tasks: every `started` row is
+/// marked `canceled` with the given stop time, and every `pending` row
+/// (never dispatched) is marked `canceled` with no stop time. Returns
+/// the number of rows updated.
+pub fn cancel_unfinished_tasks(
+    conn: &Connection,
+    scan_id: &str,
+    stopped_ms: i64,
+) -> Result<usize, ScanError> {
+    let started = conn.execute(
+        "UPDATE scan_task SET status = ?2, stopped = ?3 \
+         WHERE scan_id = ?1 AND status = ?4",
+        params![
+            scan_id,
+            TaskStatus::Canceled.as_str(),
+            stopped_ms,
+            TaskStatus::Started.as_str(),
+        ],
+    )?;
+    let pending = conn.execute(
+        "UPDATE scan_task SET status = ?2 WHERE scan_id = ?1 AND status = ?3",
+        params![
+            scan_id,
+            TaskStatus::Canceled.as_str(),
+            TaskStatus::Pending.as_str(),
+        ],
+    )?;
+    Ok(started + pending)
+}
+
 /// Record an agent session spawned by a task. Called when the claude
 /// process reports its session id; `exit_code`/`stderr`/`result` are
 /// filled in by [`finish_task_agent`] when the process exits.
@@ -190,28 +220,45 @@ pub fn finish_task_agent(
     Ok(())
 }
 
-/// Payload persisted to `scan.metadata` when a run completes. A scan
-/// writes its task summary; an agent run writes agent-run information.
-/// Absent metadata (NULL column) means the run never completed.
+/// Payload persisted to `scan.metadata`. A run writes [`RunningScan`]
+/// at start and replaces it at wind-down: a scan writes its task
+/// summary, an agent run its agent-run information. A `Running`
+/// payload whose pid is dead marks a run that died; absent metadata
+/// (NULL column) is the same last-known state for runs predating the
+/// running marker.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum ScanMetadata {
     Scan(ScanSummary),
     Agent(AgentRunSummary),
+    Running(RunningScan),
 }
 
 impl ScanMetadata {
-    pub fn elapsed_ms(&self) -> u64 {
+    /// Run duration; None while the run is still marked running.
+    pub fn elapsed_ms(&self) -> Option<u64> {
         match self {
-            ScanMetadata::Scan(s) => s.elapsed_ms,
-            ScanMetadata::Agent(a) => a.elapsed_ms,
+            ScanMetadata::Scan(s) => Some(s.elapsed_ms),
+            ScanMetadata::Agent(a) => Some(a.elapsed_ms),
+            ScanMetadata::Running(_) => None,
         }
     }
 }
 
+/// Startup payload for `scan.metadata`: the process running the scan.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RunningScan {
+    pub pid: u32,
+}
+
+/// `scan.metadata` startup payload marking the scan as running.
+pub fn running_metadata(pid: u32) -> String {
+    serde_json::to_string(&ScanMetadata::Running(RunningScan { pid })).unwrap()
+}
+
 impl Scan {
-    /// Parse `metadata` into its payload. None when the run never
-    /// completed.
+    /// Parse `metadata` into its payload. None when the column is
+    /// NULL — a run predating the running marker that never completed.
     pub fn parse_metadata(&self) -> Result<Option<ScanMetadata>, serde_json::Error> {
         self.metadata
             .as_deref()
@@ -227,6 +274,10 @@ pub struct ScanSummary {
     pub completed: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// The run was canceled by the user before completing. Defaults to
+    /// false so summaries written before the field existed parse.
+    #[serde(default)]
+    pub canceled: bool,
     pub elapsed_ms: u64,
 }
 
@@ -240,6 +291,7 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Skipped,
+    Canceled,
 }
 
 impl TaskStatus {
@@ -250,6 +302,7 @@ impl TaskStatus {
             TaskStatus::Completed => "completed",
             TaskStatus::Failed => "failed",
             TaskStatus::Skipped => "skipped",
+            TaskStatus::Canceled => "canceled",
         }
     }
 
@@ -260,6 +313,7 @@ impl TaskStatus {
             "completed" => TaskStatus::Completed,
             "failed" => TaskStatus::Failed,
             "skipped" => TaskStatus::Skipped,
+            "canceled" => TaskStatus::Canceled,
             _ => return None,
         })
     }
@@ -582,6 +636,7 @@ mod tests {
                 completed: 2,
                 failed: 1,
                 skipped: 0,
+                canceled: false,
                 elapsed_ms: 1500,
             })
             .unwrap(),
@@ -602,6 +657,12 @@ mod tests {
         match scan.parse_metadata().unwrap() {
             Some(ScanMetadata::Agent(a)) => assert_eq!(a.elapsed_ms, 2500),
             other => panic!("expected Agent variant, got {other:?}"),
+        }
+
+        scan.metadata = Some(running_metadata(4242));
+        match scan.parse_metadata().unwrap() {
+            Some(ScanMetadata::Running(r)) => assert_eq!(r.pid, 4242),
+            other => panic!("expected Running variant, got {other:?}"),
         }
     }
 
