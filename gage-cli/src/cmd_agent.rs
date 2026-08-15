@@ -114,7 +114,11 @@ async fn run_dialog(
     }
 
     let db = Arc::new(Mutex::new(gage_db::db::open_db().unwrap()));
-    let scanner = Scanner { def, params: None };
+    let scanner = Scanner {
+        def,
+        params: None,
+        only_tasks: None,
+    };
 
     let spinner = if args.interactive {
         None

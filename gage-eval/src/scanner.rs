@@ -484,7 +484,7 @@ mod tests {
             index: 1,
             name: Some("t".to_string()),
             prompt: None,
-            scanners: vec!["general-findings".to_string()],
+            scanners: vec!["general".to_string()],
             samples,
             expect: Some(expect),
             disabled: false,

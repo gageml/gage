@@ -210,13 +210,20 @@ impl Config {
     /// in `enable` / `disable` may contain `*` wildcards that match any
     /// run of characters.
     pub fn is_scanner_enabled(&self, name: &str) -> bool {
-        if self.scanners.disable.iter().any(|p| glob_match(p, name)) {
+        if self.is_scanner_disabled(name) {
             return false;
         }
         if self.scanners.enable.is_empty() {
             return true;
         }
         self.scanners.enable.iter().any(|p| glob_match(p, name))
+    }
+
+    /// True if the named scanner is explicitly disabled. Unlike
+    /// `is_scanner_enabled`, absence from a non-empty `enable` list
+    /// does not count — this consults the `disable` list only.
+    pub fn is_scanner_disabled(&self, name: &str) -> bool {
+        self.scanners.disable.iter().any(|p| glob_match(p, name))
     }
 }
 
@@ -349,6 +356,6 @@ mod tests {
         let mut config = Config::default();
         config.scanners.disable.push("hidden-*".to_string());
         assert!(!config.is_scanner_enabled("hidden-thinking"));
-        assert!(config.is_scanner_enabled("general-findings"));
+        assert!(config.is_scanner_enabled("general"));
     }
 }

@@ -27,9 +27,6 @@ mod tests {
 
     #[test]
     fn single_word_task_unchanged() {
-        assert_eq!(
-            task_display("general-findings", "findings"),
-            "general-findings::findings"
-        );
+        assert_eq!(task_display("general", "findings"), "general::findings");
     }
 }

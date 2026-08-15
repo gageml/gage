@@ -980,7 +980,9 @@ async fn run_dialog(
     } else {
         for name in &args.scanners {
             let bare = name.split("#{").next().unwrap();
-            if !registry.is_known(bare) {
+            // Library scanners are not selectable — same error as an
+            // unknown name
+            if !registry.is_known(bare) || registry.is_library(bare) {
                 cli::log::error(format!("Unknown scanner: {bare}"))?;
                 return Err(DialogError::Canceled);
             }
@@ -1000,7 +1002,7 @@ async fn run_dialog(
         cli::log::step(format!("Scanners{scanner_lines}"))?;
     }
 
-    let scanners: Vec<Scanner<'_>> = {
+    let mut scanners: Vec<Scanner<'_>> = {
         let mut out = Vec::new();
         for spec in &selected_names {
             match Scanner::from_spec(spec, &registry) {
@@ -1013,6 +1015,30 @@ async fn run_dialog(
         }
         out
     };
+
+    // Pull in tasks that declare themselves `required_by` what the
+    // selection writes
+    let required = {
+        let selected_defs: Vec<_> = scanners.iter().map(|s| s.def).collect();
+        registry.required_tasks(&selected_defs, &config)
+    };
+    if !required.is_empty() {
+        let lines: String = required
+            .iter()
+            .flat_map(|(def, tasks)| {
+                tasks.iter().map(|t| {
+                    format!(
+                        "\n{}",
+                        style(gage_core::task::task_display(&def.name, t)).dim()
+                    )
+                })
+            })
+            .collect();
+        cli::log::step(format!("Required tasks{lines}"))?;
+    }
+    for (def, tasks) in required {
+        scanners.push(Scanner::with_tasks(def, tasks));
+    }
 
     // Compile all scanners up front. A scanner that does not compile
     // (or declares a task with no matching function) is a full stop:

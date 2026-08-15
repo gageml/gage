@@ -14,6 +14,11 @@
 //!   issue name.
 //! - An unsatisfied `wants` (no task in the plan writes a matching item)
 //!   is a planner *warning*, not an error. The task still runs.
+//! - `required_by` patterns contribute ordering edges the same way
+//!   `wants` does, without the unmatched warning. Pull-in (scheduling a
+//!   task whose scanner was not selected) happens before compilation,
+//!   in `ScannerRegistry::required_tasks`; by plan time a pulled-in
+//!   task is an ordinary task.
 //! - Cycle detection runs at plan time over the full graph.
 //! - Worker pool: N tokio tasks pulling from an unbounded ready queue.
 //!   Per-scanner concurrency is unrestricted — each task builds a
@@ -181,10 +186,15 @@ pub(crate) fn plan(
     //
     // An unsatisfied `wants` (no task in the plan writes a matching item)
     // is recorded as a warning, not an error — the consumer still runs.
+    // `required_by` patterns contribute ordering edges exactly as
+    // `wants` does, without the unmatched warning: an unmatched
+    // `required_by` just means no writer pulled the task in.
     for &(scanner_idx, task_name, def) in &planned {
-        for (wants, writes_index, kind) in [
-            (&def.notes.wants, &note_writes, "note"),
-            (&def.issues.wants, &issue_writes, "issue"),
+        for (wants, writes_index, kind, warn_unmatched) in [
+            (&def.notes.wants, &note_writes, "note", true),
+            (&def.issues.wants, &issue_writes, "issue", true),
+            (&def.notes.required_by, &note_writes, "note", false),
+            (&def.issues.required_by, &issue_writes, "issue", false),
         ] {
             for want in wants {
                 let mut matched = false;
@@ -207,7 +217,7 @@ pub(crate) fn plan(
                         graph.update_edge(from, to, ());
                     }
                 }
-                if !matched {
+                if !matched && warn_unmatched {
                     warnings.push(PlanWarning {
                         scanner: scanner_names[scanner_idx].clone(),
                         task: task_name.clone(),
@@ -680,6 +690,7 @@ mod tests {
                 .iter()
                 .map(|s| ((*s).to_string(), String::new()))
                 .collect::<BTreeMap<_, _>>(),
+            required_by: Vec::new(),
         }
     }
 

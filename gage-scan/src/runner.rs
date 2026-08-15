@@ -171,10 +171,13 @@ pub async fn run(
                 slot.db.clone(),
             );
         }
+        // A scanner pulled in via `required_by` plans only its pulled
+        // tasks; an explicitly selected scanner plans all of them.
         let tasks: HashMap<String, _> = s
             .def
             .tasks
             .iter()
+            .filter(|(k, _)| s.only_tasks.as_ref().is_none_or(|only| only.contains(k)))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         scanner_tasks.push(tasks);

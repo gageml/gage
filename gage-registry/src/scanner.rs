@@ -1,9 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use std::collections::BTreeMap;
-
+use gage_core::glob::glob_match;
 use rune::SourceId;
 use rune::alloc;
 use rune::alloc::prelude::TryClone;
@@ -84,11 +83,15 @@ fn embedded_digest() -> String {
 
 /// A task's declared dependencies for one item kind (notes or issues):
 /// `wants` lists `*`-glob patterns over item names the task consumes;
-/// `writes` maps each item name the task produces to its docstring.
+/// `writes` maps each item name the task produces to its docstring;
+/// `required_by` lists `*`-glob patterns over item names whose writers
+/// require this task — a planned task writing a matching name schedules
+/// this task even when its scanner is not selected.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TaskDepsDef {
     pub wants: Vec<String>,
     pub writes: BTreeMap<String, String>,
+    pub required_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +106,10 @@ pub struct ScannerDef {
     pub description: String,
     pub version: String,
     pub hidden: bool,
+    /// Library scanners are infrastructure: excluded from listings and
+    /// the default run set, not explicitly selectable, and scheduled
+    /// only when a task's `required_by` pulls it into a plan.
+    pub library: bool,
     pub tasks: BTreeMap<String, TaskDef>,
     /// Agent defs declared via `SCANNER.agents`: fn name → description.
     /// Each names a public function returning an un-awaited `CallAgent`
@@ -275,6 +282,10 @@ impl fmt::Display for ParseError {
 pub struct Scanner<'a> {
     pub def: &'a ScannerDef,
     pub params: Option<json::Value>,
+    /// When set, only these tasks participate in the plan. Set for
+    /// scanners pulled in via `required_by`; `None` (explicit
+    /// selection) plans every declared task.
+    pub only_tasks: Option<Vec<String>>,
 }
 
 impl fmt::Debug for Scanner<'_> {
@@ -308,6 +319,16 @@ impl fmt::Display for ScannerSpecError {
 }
 
 impl<'a> Scanner<'a> {
+    /// Scanner pulled into a plan by `required_by`, restricted to the
+    /// pulled tasks.
+    pub fn with_tasks(def: &'a ScannerDef, tasks: Vec<String>) -> Self {
+        Scanner {
+            def,
+            params: resolve_params(&def.config()),
+            only_tasks: Some(tasks),
+        }
+    }
+
     pub fn from_spec(spec: &str, registry: &'a ScannerRegistry) -> Result<Self, ScannerSpecError> {
         let (name, config_override) = match spec.find("#{") {
             Some(pos) => (&spec[..pos], Some(&spec[pos..])),
@@ -356,7 +377,11 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        Ok(Scanner { def, params })
+        Ok(Scanner {
+            def,
+            params,
+            only_tasks: None,
+        })
     }
 }
 
@@ -557,7 +582,7 @@ impl ScannerRegistry {
         let mut defs: Vec<_> = self
             .defs
             .values()
-            .filter(|d| !d.hidden && !d.from_file)
+            .filter(|d| !d.hidden && !d.library && !d.from_file)
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
@@ -571,6 +596,81 @@ impl ScannerRegistry {
         self.list_visible()
             .into_iter()
             .filter(|d| config.is_scanner_enabled(&d.name))
+            .collect()
+    }
+
+    /// True if `name` is a known library scanner. Library scanners are
+    /// not explicitly selectable — selection treats them as unknown.
+    pub fn is_library(&self, name: &str) -> bool {
+        self.defs.get(name).is_some_and(|d| d.library)
+    }
+
+    /// Tasks pulled into a plan via `required_by`: tasks of scanners
+    /// outside `selected` whose `required_by` patterns match an item
+    /// name a planned task writes. Matching runs to fixpoint, so a
+    /// pulled-in task's own `writes` can pull further tasks. Scanners
+    /// in the config `disable` list are never pulled — explicit
+    /// disable wins over `required_by`. Returns `(def, task_names)`
+    /// pairs in scanner-name order.
+    pub fn required_tasks(
+        &self,
+        selected: &[&ScannerDef],
+        config: &gage_core::config::Config,
+    ) -> Vec<(&ScannerDef, Vec<String>)> {
+        let selected_names: HashSet<&str> = selected.iter().map(|d| d.name.as_str()).collect();
+
+        let mut note_names: HashSet<String> = HashSet::new();
+        let mut issue_names: HashSet<String> = HashSet::new();
+        for def in selected {
+            for task in def.tasks.values() {
+                note_names.extend(task.notes.writes.keys().cloned());
+                issue_names.extend(task.issues.writes.keys().cloned());
+            }
+        }
+
+        let candidates: Vec<&ScannerDef> = self
+            .defs
+            .values()
+            .filter(|d| !selected_names.contains(d.name.as_str()))
+            .filter(|d| !config.is_scanner_disabled(&d.name))
+            .collect();
+
+        let mut pulled: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        loop {
+            let mut changed = false;
+            for def in &candidates {
+                for task in def.tasks.values() {
+                    let already = pulled
+                        .get(def.name.as_str())
+                        .is_some_and(|tasks| tasks.contains(&task.name));
+                    if already {
+                        continue;
+                    }
+                    let matched = patterns_match(&task.notes.required_by, &note_names)
+                        || patterns_match(&task.issues.required_by, &issue_names);
+                    if !matched {
+                        continue;
+                    }
+                    note_names.extend(task.notes.writes.keys().cloned());
+                    issue_names.extend(task.issues.writes.keys().cloned());
+                    pulled
+                        .entry(def.name.as_str())
+                        .or_default()
+                        .push(task.name.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        pulled
+            .into_iter()
+            .map(|(name, mut tasks)| {
+                tasks.sort();
+                (self.defs.get(name).unwrap(), tasks)
+            })
             .collect()
     }
 
@@ -591,6 +691,13 @@ impl ScannerRegistry {
     }
 }
 
+/// True when any `*`-glob pattern matches any name in the set.
+fn patterns_match(patterns: &[String], names: &HashSet<String>) -> bool {
+    patterns
+        .iter()
+        .any(|p| names.iter().any(|n| glob_match(p, n)))
+}
+
 fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError> {
     let file = parse::parse_all::<ast::File>(source, SourceId::empty(), false)
         .map_err(ParseError::Syntax)?;
@@ -599,6 +706,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
     let mut description = None;
     let mut version = String::new();
     let mut hidden = false;
+    let mut library = false;
     let mut tasks_obj: Option<&ast::ExprObject> = None;
     let mut agents_obj: Option<&ast::ExprObject> = None;
 
@@ -631,15 +739,8 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
                     Some("version") => {
                         version = expr_str(source, expr).unwrap_or_default();
                     }
-                    Some("hidden") => {
-                        if let ast::Expr::Lit(lit) = expr
-                            && let ast::Lit::Bool(_) = &lit.lit
-                        {
-                            let span = expr.span();
-                            let text = &source[span.start.0 as usize..span.end.0 as usize];
-                            hidden = text == "true";
-                        }
-                    }
+                    Some("hidden") => hidden = expr_bool(source, expr),
+                    Some("library") => library = expr_bool(source, expr),
                     Some("tasks") => {
                         if let ast::Expr::Object(obj) = expr {
                             tasks_obj = Some(obj);
@@ -675,6 +776,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
         description: description.unwrap_or_default(),
         version,
         hidden,
+        library,
         tasks,
         agents,
         ast: file,
@@ -787,6 +889,13 @@ impl DepsKind {
         }
     }
 
+    fn required_by_field(self) -> &'static str {
+        match self {
+            DepsKind::Notes => "notes.required_by",
+            DepsKind::Issues => "issues.required_by",
+        }
+    }
+
     fn writes_field(self) -> &'static str {
         match self {
             DepsKind::Notes => "notes.writes",
@@ -812,19 +921,10 @@ fn parse_task_deps(
         };
         match key.as_str() {
             "wants" => {
-                let ast::Expr::Vec(vec_expr) = expr else {
-                    return Err(ParseError::TaskFieldType {
-                        task: task.to_string(),
-                        field: kind.wants_field(),
-                    });
-                };
-                for (item_expr, _) in &vec_expr.items {
-                    let s = expr_str(source, item_expr).ok_or(ParseError::TaskFieldType {
-                        task: task.to_string(),
-                        field: kind.wants_field(),
-                    })?;
-                    deps.wants.push(s);
-                }
+                deps.wants = parse_patterns(source, expr, task, kind.wants_field())?;
+            }
+            "required_by" => {
+                deps.required_by = parse_patterns(source, expr, task, kind.required_by_field())?;
             }
             "writes" => {
                 let ast::Expr::Object(writes_obj) = expr else {
@@ -839,6 +939,30 @@ fn parse_task_deps(
         }
     }
     Ok(deps)
+}
+
+/// Parse a `*`-glob pattern list field (`wants`, `required_by`).
+fn parse_patterns(
+    source: &str,
+    expr: &ast::Expr,
+    task: &str,
+    field: &'static str,
+) -> Result<Vec<String>, ParseError> {
+    let ast::Expr::Vec(vec_expr) = expr else {
+        return Err(ParseError::TaskFieldType {
+            task: task.to_string(),
+            field,
+        });
+    };
+    let mut out = Vec::with_capacity(vec_expr.items.len());
+    for (item_expr, _) in &vec_expr.items {
+        let s = expr_str(source, item_expr).ok_or(ParseError::TaskFieldType {
+            task: task.to_string(),
+            field,
+        })?;
+        out.push(s);
+    }
+    Ok(out)
 }
 
 fn parse_notes(
@@ -1000,6 +1124,17 @@ fn field_key(source: &str, key: &ast::ObjectKey) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// True when the expression is the boolean literal `true`.
+fn expr_bool(source: &str, expr: &ast::Expr) -> bool {
+    if let ast::Expr::Lit(lit) = expr
+        && let ast::Lit::Bool(_) = &lit.lit
+    {
+        let span = expr.span();
+        return &source[span.start.0 as usize..span.end.0 as usize] == "true";
+    }
+    false
 }
 
 fn expr_str(source: &str, expr: &ast::Expr) -> Option<String> {

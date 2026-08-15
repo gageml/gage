@@ -10,7 +10,7 @@ use gage::{
 };
 
 pub const SCANNER = #{
-    name: "general-findings",
+    name: "general",
     description: "Scan sessions for general findings",
     tasks: #{
         findings: #{
@@ -21,7 +21,7 @@ pub const SCANNER = #{
     },
 };
 
-const FINDINGS_KEY = ("general-findings", "findings", 1);
+const FINDINGS_KEY = ("general", "findings", 1);
 
 /// Submit each session to an agent to write finding notes.
 ///
