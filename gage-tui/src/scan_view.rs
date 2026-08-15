@@ -1,5 +1,6 @@
 //! Scan view — renders a [`ScanModel`]: overall progress, a tasks
-//! table, a sessions table, and a results table.
+//! table (with each task's agent sessions as expandable child rows),
+//! a sessions table, and a results table.
 //!
 //! Two entry points share the rendering and key handling. [`run`]
 //! drives a live scan: the caller runs the scan, adapts runner events
@@ -9,12 +10,12 @@
 //! already-complete model (a historical scan loaded from the db) with
 //! no event source.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gage_core::task::{task_display, task_name_display};
 use gage_db::target::NoteTarget;
@@ -99,6 +100,14 @@ pub struct TaskCost {
     pub cost: ScanCost,
 }
 
+/// An agent session with its owning task, as delivered by a
+/// [`Event::Results`] refresh.
+#[derive(Debug, Clone)]
+pub struct TaskAgent {
+    pub task: TaskId,
+    pub agent: AgentItem,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskItem {
     pub id: TaskId,
@@ -111,6 +120,36 @@ pub struct TaskItem {
     /// Latest task-reported `(pos, total)` while running; None renders
     /// as indeterminate.
     pub progress: Option<(u64, u64)>,
+    /// Agent sessions spawned by this task, in recorded order
+    pub agents: Vec<AgentItem>,
+}
+
+/// One agent session spawned by a task.
+#[derive(Debug, Clone)]
+pub struct AgentItem {
+    pub session_id: String,
+    /// Archived JSONL source, read by the session dialog; None when
+    /// the session is not on disk
+    pub path: Option<PathBuf>,
+    pub state: AgentState,
+    /// Recorded spend in USD; None until a terminal result is recorded
+    pub cost: Option<f64>,
+    /// First session-entry timestamp, epoch milliseconds
+    pub started_ms: Option<i64>,
+    /// Last session-entry timestamp, epoch milliseconds; None while
+    /// the agent is running
+    pub ended_ms: Option<i64>,
+}
+
+/// Agent state derived from its `task_agent` row: a terminal result
+/// gives Done or Error; a recorded exit without a result is Error; no
+/// exit recorded is Running (rendered as failed once the scan is over,
+/// since nothing can finish it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentState {
+    Running,
+    Done,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +258,7 @@ impl ScanModel {
                 started: None,
                 elapsed: None,
                 progress: None,
+                agents: Vec::new(),
             })
             .collect();
         let sessions = setup
@@ -288,6 +328,7 @@ impl ScanModel {
                 sessions,
                 cost,
                 task_costs,
+                agents,
             } => {
                 self.notes = notes.clone();
                 self.issues = issues.clone();
@@ -295,6 +336,14 @@ impl ScanModel {
                 for tc in task_costs {
                     if let Some(item) = self.tasks.iter_mut().find(|t| t.id == tc.id) {
                         item.cost = Some(tc.cost);
+                    }
+                }
+                for item in &mut self.tasks {
+                    item.agents.clear();
+                }
+                for ta in agents {
+                    if let Some(item) = self.tasks.iter_mut().find(|t| t.id == ta.task) {
+                        item.agents.push(ta.agent.clone());
                     }
                 }
                 for counts in sessions {
@@ -384,6 +433,7 @@ pub enum Event {
         sessions: Vec<SessionCounts>,
         cost: Option<ScanCost>,
         task_costs: Vec<TaskCost>,
+        agents: Vec<TaskAgent>,
     },
     /// The scan is over; the view stays up until the user quits.
     Finished,
@@ -580,6 +630,9 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
         KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
         KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
         KeyCode::Enter if state.focus == Focus::Sessions => state.open_selected_session(),
+        KeyCode::Enter if state.focus == Focus::Tasks => state.enter_task_row(),
+        KeyCode::Right if state.focus == Focus::Tasks => state.expand_task_row(),
+        KeyCode::Left if state.focus == Focus::Tasks => state.collapse_task_row(),
         KeyCode::Char('l') => state.open_log(),
         _ => {}
     }
@@ -621,6 +674,9 @@ struct ViewState {
     model: ScanModel,
     focus: Focus,
     tasks: ItemTable,
+    /// Task keys whose agent rows are hidden. Stored as the collapsed
+    /// set so newly appearing agents surface expanded by default.
+    collapsed: HashSet<String>,
     sessions: ItemTable,
     notes: ItemTable,
     issues: ItemTable,
@@ -660,10 +716,13 @@ enum Dialog {
     },
     /// Zoomed session contents, read from the JSONL at open. Section
     /// headers are padded to the dialog width at draw time, so the
-    /// content is kept structured rather than pre-flattened.
+    /// content is kept structured rather than pre-flattened. `nav`
+    /// selects what ←/→ steps through — the sessions table or the
+    /// tasks panel's agent rows — and titles the dialog accordingly.
     Session {
         id: String,
         content: SessionContent,
+        nav: SessionNav,
     },
     /// Captured scan streams (`{scan_id}.{err,out,log}`), reloaded
     /// from the files while a live scan runs.
@@ -675,10 +734,21 @@ enum Dialog {
     ScanDone,
 }
 
+/// What a session dialog was opened from, and therefore what ←/→
+/// steps through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionNav {
+    /// The sessions table
+    Sessions,
+    /// The tasks panel's agent rows
+    Agents,
+}
+
 impl ViewState {
     fn new(model: ScanModel) -> Self {
         let mut state = Self {
             tasks: ItemTable::new(),
+            collapsed: HashSet::new(),
             sessions: ItemTable::new(),
             notes: ItemTable::new(),
             issues: ItemTable::new(),
@@ -701,7 +771,7 @@ impl ViewState {
     /// change — data replacement or re-sort moves rows under the
     /// positional table state; the tables re-anchor by item id.
     fn sync_tables(&mut self) {
-        let task_ids = sorted_task_ids(&self.model);
+        let task_ids = flat_task_ids(&self.model, &self.collapsed);
         let refs: Vec<&str> = task_ids.iter().map(String::as_str).collect();
         self.tasks.update(&refs);
         let ids: Vec<&str> = self.model.sessions.iter().map(|s| s.id.as_str()).collect();
@@ -755,14 +825,18 @@ impl ViewState {
                     self.open_selected_issue();
                 }
             }
-            Dialog::Session { .. } => {
-                let ids: Vec<&str> = self.model.sessions.iter().map(|s| s.id.as_str()).collect();
-                let before = self.sessions.selected_index();
-                self.sessions.select_by(delta, &ids);
-                if self.sessions.selected_index() != before {
-                    self.open_selected_session();
+            Dialog::Session { nav, .. } => match nav {
+                SessionNav::Sessions => {
+                    let ids: Vec<&str> =
+                        self.model.sessions.iter().map(|s| s.id.as_str()).collect();
+                    let before = self.sessions.selected_index();
+                    self.sessions.select_by(delta, &ids);
+                    if self.sessions.selected_index() != before {
+                        self.open_selected_session();
+                    }
                 }
-            }
+                SessionNav::Agents => self.step_agent_dialog(delta),
+            },
             _ => {}
         }
     }
@@ -778,7 +852,122 @@ impl ViewState {
         self.dialog = Dialog::Session {
             id: session.id.clone(),
             content: session_content(session, &self.model.notes, &self.model.issues),
+            nav: SessionNav::Sessions,
         };
+    }
+
+    /// Enter on the tasks panel: a task row with agents toggles its
+    /// expansion; an agent row opens its session dialog.
+    fn enter_task_row(&mut self) {
+        match self.selected_task_row() {
+            Some(TaskRowAction::Toggle(key)) => {
+                if !self.collapsed.remove(&key) {
+                    self.collapsed.insert(key);
+                }
+                self.sync_tables();
+            }
+            Some(TaskRowAction::OpenAgent(item)) => self.open_agent_session(&item),
+            None => {}
+        }
+    }
+
+    /// Right on the tasks panel: expand a collapsed task row.
+    fn expand_task_row(&mut self) {
+        if let Some(TaskRowAction::Toggle(key)) = self.selected_task_row()
+            && self.collapsed.remove(&key)
+        {
+            self.sync_tables();
+        }
+    }
+
+    /// Left on the tasks panel: collapse an expanded task row; on an
+    /// agent row, select the owning task first (the session viewer's
+    /// collapse convention).
+    fn collapse_task_row(&mut self) {
+        let Some(i) = self.tasks.selected_index() else {
+            return;
+        };
+        let target = {
+            let rows = flat_task_rows(&self.model, &self.collapsed);
+            match rows.get(i) {
+                Some(TaskRow::Task(t)) if !t.agents.is_empty() => {
+                    CollapseTarget::Task(task_key(&t.id))
+                }
+                Some(TaskRow::Agent(t, _)) => CollapseTarget::Parent(task_key(&t.id)),
+                _ => return,
+            }
+        };
+        match target {
+            CollapseTarget::Task(key) => {
+                if self.collapsed.insert(key) {
+                    self.sync_tables();
+                }
+            }
+            CollapseTarget::Parent(parent) => {
+                let ids = flat_task_ids(&self.model, &self.collapsed);
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                if let Some(p) = refs.iter().position(|id| *id == parent) {
+                    self.tasks.select_by(p as isize - i as isize, &refs);
+                }
+            }
+        }
+    }
+
+    /// The action Enter would take on the selected tasks-panel row.
+    fn selected_task_row(&self) -> Option<TaskRowAction> {
+        let i = self.tasks.selected_index()?;
+        match flat_task_rows(&self.model, &self.collapsed).get(i)? {
+            TaskRow::Task(t) if !t.agents.is_empty() => {
+                Some(TaskRowAction::Toggle(task_key(&t.id)))
+            }
+            TaskRow::Agent(t, a) => Some(TaskRowAction::OpenAgent(agent_session_item(t, a))),
+            TaskRow::Task(_) => None,
+        }
+    }
+
+    fn open_agent_session(&mut self, item: &SessionItem) {
+        self.scroll_view.reset();
+        self.dialog = Dialog::Session {
+            id: item.id.clone(),
+            content: session_content(item, &self.model.notes, &self.model.issues),
+            nav: SessionNav::Agents,
+        };
+    }
+
+    /// Step the session dialog to the previous/next agent row of the
+    /// tasks panel, moving the panel selection with it.
+    fn step_agent_dialog(&mut self, delta: isize) {
+        let Some(i) = self.tasks.selected_index() else {
+            return;
+        };
+        let stepped = {
+            let rows = flat_task_rows(&self.model, &self.collapsed);
+            let agent_indexes: Vec<usize> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, row)| matches!(row, TaskRow::Agent(..)).then_some(idx))
+                .collect();
+            let pos = agent_indexes.iter().position(|idx| *idx == i);
+            pos.and_then(|pos| {
+                let next =
+                    (pos as isize + delta).clamp(0, agent_indexes.len() as isize - 1) as usize;
+                if next == pos {
+                    return None;
+                }
+                let target = *agent_indexes.get(next).expect("next is clamped in bounds");
+                match rows.get(target) {
+                    Some(TaskRow::Agent(t, a)) => Some((target, agent_session_item(t, a))),
+                    _ => None,
+                }
+            })
+        };
+        let Some((target, item)) = stepped else {
+            return;
+        };
+        let ids = flat_task_ids(&self.model, &self.collapsed);
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        self.tasks.select_by(target as isize - i as isize, &refs);
+        self.open_agent_session(&item);
     }
 
     fn open_log(&mut self) {
@@ -980,7 +1169,7 @@ impl ViewState {
     fn focused_apply(&mut self, op: impl Fn(&mut ItemTable, &[&str])) {
         match self.focus {
             Focus::Tasks => {
-                let ids = sorted_task_ids(&self.model);
+                let ids = flat_task_ids(&self.model, &self.collapsed);
                 let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
                 op(&mut self.tasks, &refs);
             }
@@ -1000,14 +1189,98 @@ impl ViewState {
     }
 }
 
-/// Task ids in display (sorted) order — tasks have no single id
-/// column, so identity is the `{scanner}::{task}` pair.
-fn sorted_task_ids(model: &ScanModel) -> Vec<String> {
-    model
-        .sorted_tasks()
+/// A task's row id — tasks have no single id column, so identity is
+/// the `{scanner}::{task}` pair. Agent rows use the session id, which
+/// cannot collide with this form.
+fn task_key(id: &TaskId) -> String {
+    format!("{}::{}", id.scanner, id.task)
+}
+
+/// One row of the tasks panel: a task, or an agent session under its
+/// (expanded) task.
+enum TaskRow<'a> {
+    Task(&'a TaskItem),
+    Agent(&'a TaskItem, &'a AgentItem),
+}
+
+/// The tasks panel's visible rows: tasks in display order, each
+/// followed by its agent rows unless collapsed.
+fn flat_task_rows<'a>(model: &'a ScanModel, collapsed: &HashSet<String>) -> Vec<TaskRow<'a>> {
+    let mut rows = Vec::new();
+    for t in model.sorted_tasks() {
+        let expanded = !collapsed.contains(&task_key(&t.id));
+        rows.push(TaskRow::Task(t));
+        if expanded {
+            for a in &t.agents {
+                rows.push(TaskRow::Agent(t, a));
+            }
+        }
+    }
+    rows
+}
+
+/// Row ids for the tasks panel in visible order — the identity list
+/// [`ItemTable`] anchors its selection to.
+fn flat_task_ids(model: &ScanModel, collapsed: &HashSet<String>) -> Vec<String> {
+    flat_task_rows(model, collapsed)
         .iter()
-        .map(|t| format!("{}::{}", t.id.scanner, t.id.task))
+        .map(|row| match row {
+            TaskRow::Task(t) => task_key(&t.id),
+            TaskRow::Agent(_, a) => a.session_id.clone(),
+        })
         .collect()
+}
+
+/// What Enter does on a tasks-panel row.
+enum TaskRowAction {
+    /// Toggle a task row's agent expansion
+    Toggle(String),
+    /// Open an agent row's session dialog
+    OpenAgent(SessionItem),
+}
+
+/// What Left does on a tasks-panel row.
+enum CollapseTarget {
+    /// Collapse this task's agent rows
+    Task(String),
+    /// Select the agent row's owning task
+    Parent(String),
+}
+
+/// The session dialog's view of an agent session. Titled by the
+/// owning task; note/issue counts are zero — scanner notes and issues
+/// target scanned sessions, not the agent sessions that wrote them.
+fn agent_session_item(task: &TaskItem, agent: &AgentItem) -> SessionItem {
+    SessionItem {
+        id: agent.session_id.clone(),
+        title: task_display(&task.id.scanner, &task.id.task),
+        path: agent.path.clone(),
+        notes: 0,
+        issues: 0,
+    }
+}
+
+/// An agent's duration: last minus first session timestamp once both
+/// are known, otherwise first timestamp to now (a live agent still
+/// writing). None without a start, or when the scan is over and no
+/// end was ever recorded (nothing is still running to measure).
+fn agent_duration(agent: &AgentItem, finished: bool) -> Option<Duration> {
+    let started = agent.started_ms?;
+    let ended = match agent.ended_ms {
+        Some(e) => e,
+        None if finished => return None,
+        None => now_ms(),
+    };
+    Some(Duration::from_millis(
+        ended.saturating_sub(started).max(0) as u64
+    ))
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be past the epoch")
+        .as_millis() as i64
 }
 
 fn draw(frame: &mut Frame, state: &mut ViewState) {
@@ -1050,8 +1323,12 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
                 vec![issue_lines(issue, width as usize, true)]
             })
         }
-        Dialog::Session { id, content } => {
-            scroll_view.render_modal(frame, format!(" Session {id} "), |width| {
+        Dialog::Session { id, content, nav } => {
+            let title = match nav {
+                SessionNav::Sessions => format!(" Session {id} "),
+                SessionNav::Agents => format!(" Agent {id} "),
+            };
+            scroll_view.render_modal(frame, title, |width| {
                 session_sections(content, width as usize, *show_issues, *show_notes)
             })
         }
@@ -1681,40 +1958,56 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let frame_idx = (state.started.elapsed().as_millis() / 100) as usize % SPINNER.len();
     let spinner = *SPINNER.get(frame_idx).expect("mod len is in bounds");
     let selected = state.tasks.selected_index();
+    let finished = state.model.finished;
+    let flat = flat_task_rows(&state.model, &state.collapsed);
 
     // Status cell contents are computed up front: the column sizes to
     // the widest `{label} {time}` value, and the progress fill needs
     // that final width before the spans are built.
-    let labels: Vec<(&'static str, Style, String)> = state
-        .model
-        .sorted_tasks()
+    let labels: Vec<(&'static str, Style, String)> = flat
         .iter()
-        .map(|t| {
-            let (label, style) = match t.state {
-                TaskState::Pending => ("pending", styles::RunStatus::pending()),
-                TaskState::Running => ("running", styles::RunStatus::running()),
-                TaskState::Completed => ("done", styles::RunStatus::completed()),
-                TaskState::Error => ("error", styles::RunStatus::error()),
-                TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
-                TaskState::Canceled => ("canceled", styles::RunStatus::skipped()),
-            };
-            let time = match t.state {
-                // Read a stable "0s" during the first second rather than
-                // showing the sub-second ramp up on each refresh
-                TaskState::Running => t
-                    .started
-                    .map(|s| {
-                        let e = s.elapsed();
-                        if e < Duration::from_secs(1) {
+        .map(|row| match row {
+            TaskRow::Task(t) => {
+                let (label, style) = match t.state {
+                    TaskState::Pending => ("pending", styles::RunStatus::pending()),
+                    TaskState::Running => ("running", styles::RunStatus::running()),
+                    TaskState::Completed => ("done", styles::RunStatus::completed()),
+                    TaskState::Error => ("error", styles::RunStatus::error()),
+                    TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
+                    TaskState::Canceled => ("canceled", styles::RunStatus::skipped()),
+                };
+                let time = match t.state {
+                    // Read a stable "0s" during the first second rather than
+                    // showing the sub-second ramp up on each refresh
+                    TaskState::Running => t
+                        .started
+                        .map(|s| {
+                            let e = s.elapsed();
+                            if e < Duration::from_secs(1) {
+                                "0s".to_string()
+                            } else {
+                                fmt_duration(e)
+                            }
+                        })
+                        .unwrap_or_default(),
+                    _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
+                };
+                (label, style, time)
+            }
+            TaskRow::Agent(t, a) => {
+                let (label, style, _) = agent_status(a, t, finished);
+                let time = agent_duration(a, finished)
+                    .map(|e| {
+                        // Same sub-second hold as running tasks
+                        if a.ended_ms.is_none() && e < Duration::from_secs(1) {
                             "0s".to_string()
                         } else {
                             fmt_duration(e)
                         }
                     })
-                    .unwrap_or_default(),
-                _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
-            };
-            (label, style, time)
+                    .unwrap_or_default();
+                (label, style, time)
+            }
         })
         .collect();
     // The label field sizes to the widest possible status label, not
@@ -1737,16 +2030,20 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .max("Status".width())
         + 2;
 
-    let costs: Vec<String> = state
-        .model
-        .sorted_tasks()
+    let costs: Vec<String> = flat
         .iter()
-        .map(|t| match t.cost {
-            Some(c) => {
-                let suffix = if c.incomplete { "+" } else { "" };
-                format!("${:.2}{suffix}", c.usd)
-            }
-            None => String::new(),
+        .map(|row| match row {
+            TaskRow::Task(t) => match t.cost {
+                Some(c) => {
+                    let suffix = if c.incomplete { "+" } else { "" };
+                    format!("${:.2}{suffix}", c.usd)
+                }
+                None => String::new(),
+            },
+            TaskRow::Agent(_, a) => match a.cost {
+                Some(usd) => format!("${usd:.2}"),
+                None => String::new(),
+            },
         })
         .collect();
     let cost_width = costs
@@ -1756,23 +2053,19 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .unwrap_or(0)
         .max("Cost".width());
 
-    let rows: Vec<Row> = state
-        .model
-        .sorted_tasks()
+    let rows: Vec<Row> = flat
         .iter()
         .zip(labels.iter().zip(&costs))
         .enumerate()
-        .map(|(i, (t, ((label, label_style, time), cost)))| {
-            let glyph = match t.state {
-                TaskState::Pending => "□",
-                TaskState::Running => spinner,
-                TaskState::Completed => "✓",
-                TaskState::Error => "✗",
-                TaskState::Skipped | TaskState::Canceled => "⊘",
-            };
+        .map(|(i, (row, ((label, label_style, time), cost)))| {
+            let is_selected = selected == Some(i);
             let pad = status_width - 2 - label.width();
             let text = format!(" {label}{time:>pad$} ");
-            let status = if let Some((pos, total)) = t.progress {
+            let progress = match row {
+                TaskRow::Task(t) => t.progress,
+                TaskRow::Agent(..) => None,
+            };
+            let status = if let Some((pos, total)) = progress {
                 let ratio = if total > 0 {
                     (pos as f64 / total as f64).min(1.0)
                 } else {
@@ -1782,9 +2075,9 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 // highlight, which only the focused panel uses; under
                 // the unfocused gray highlight the normal fill styling
                 // composes correctly
-                let reversed = selected == Some(i) && state.focus == Focus::Tasks;
+                let reversed = is_selected && state.focus == Focus::Tasks;
                 Cell::from(gauge_line(&text, ratio, status_width, reversed))
-            } else if selected == Some(i) {
+            } else if is_selected {
                 // Colored/dim cells on the selected row would invert
                 // into per-cell backgrounds under the REVERSED
                 // highlight, so the label renders plain
@@ -1792,12 +2085,44 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             } else {
                 Cell::from(Span::styled(text, *label_style))
             };
+            let name = match row {
+                TaskRow::Task(t) => {
+                    // Fold arrow matching the session viewer's outline;
+                    // blank for a task with no agent rows to expand
+                    let fold = if t.agents.is_empty() {
+                        "  "
+                    } else if state.collapsed.contains(&task_key(&t.id)) {
+                        "▶ "
+                    } else {
+                        "▼ "
+                    };
+                    let glyph = match t.state {
+                        TaskState::Pending => "□",
+                        TaskState::Running => spinner,
+                        TaskState::Completed => "✓",
+                        TaskState::Error => "✗",
+                        TaskState::Skipped | TaskState::Canceled => "⊘",
+                    };
+                    Cell::from(format!(
+                        "{fold}{glyph} {}:{}",
+                        t.id.scanner,
+                        task_name_display(&t.id.task)
+                    ))
+                }
+                TaskRow::Agent(t, a) => {
+                    let (_, _, glyph) = agent_status(a, t, finished);
+                    let glyph = glyph.unwrap_or(spinner);
+                    let id = short_id(&a.session_id);
+                    let text = format!("    {glyph} {id}");
+                    if is_selected {
+                        Cell::from(text)
+                    } else {
+                        Cell::from(Span::styled(text, styles::Text::dim()))
+                    }
+                }
+            };
             Row::new(vec![
-                Cell::from(format!(
-                    "{glyph} {}:{}",
-                    t.id.scanner,
-                    task_name_display(&t.id.task)
-                )),
+                name,
                 Cell::from(format!("{cost:>cost_width$}")),
                 status,
             ])
@@ -1813,8 +2138,8 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         ],
     )
     .header(Row::new([
-        // Left pad Task past the "<glyph> " prefix on each value
-        Cell::from(Span::styled("  Task", styles::Text::dim())),
+        // Left pad Task past the "<fold><glyph> " prefix on each value
+        Cell::from(Span::styled("    Task", styles::Text::dim())),
         // Right-align Cost over its right-aligned values
         Cell::from(Span::styled(
             format!("{:>cost_width$}", "Cost"),
@@ -1831,6 +2156,26 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     state
         .tasks
         .render(frame, area, table, count, state.focus == Focus::Tasks);
+}
+
+/// An agent row's status label, style, and glyph (None is the live
+/// spinner). A non-terminal agent after the scan is over can never
+/// finish — it renders canceled under a canceled task, error
+/// otherwise.
+fn agent_status(
+    agent: &AgentItem,
+    parent: &TaskItem,
+    finished: bool,
+) -> (&'static str, Style, Option<&'static str>) {
+    match agent.state {
+        AgentState::Done => ("done", styles::RunStatus::completed(), Some("✓")),
+        AgentState::Error => ("error", styles::RunStatus::error(), Some("✗")),
+        AgentState::Running if !finished => ("running", styles::RunStatus::running(), None),
+        AgentState::Running if parent.state == TaskState::Canceled => {
+            ("canceled", styles::RunStatus::skipped(), Some("⊘"))
+        }
+        AgentState::Running => ("error", styles::RunStatus::error(), Some("✗")),
+    }
 }
 
 /// The `Gauge` technique in a table cell: the leading `ratio` share of
@@ -2060,7 +2405,13 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
         Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next note",
         Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next issue",
-        Dialog::Session { .. } => "q back · ↑/↓ scroll · ←/→ prev/next session · i issues/notes",
+        Dialog::Session {
+            nav: SessionNav::Agents,
+            ..
+        } => "q back · ↑/↓ scroll · ←/→ prev/next agent",
+        Dialog::Session { .. } => {
+            "q back · ↑/↓ scroll · ←/→ prev/next session · i issues · n notes"
+        }
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log",
         Dialog::None => "q cancel scan · Tab cycle · ↑/↓ select · l log",

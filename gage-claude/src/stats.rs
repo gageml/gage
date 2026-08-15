@@ -32,6 +32,11 @@ pub struct SessionStats {
     /// Excludes tool execution time, permission waits, and time
     /// between turns.
     pub model_time_ms: u64,
+    /// Timestamp of the first entry carrying one, epoch milliseconds.
+    /// None when no entry has a parseable timestamp.
+    pub started_ms: Option<i64>,
+    /// Timestamp of the last entry carrying one, epoch milliseconds.
+    pub ended_ms: Option<i64>,
 }
 
 /// Walk the session JSONL once and compute all three stats.
@@ -43,6 +48,7 @@ pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
     let mut cached_tokens: i64 = 0;
     let mut model_time_ms: i64 = 0;
     let mut prev_ts: Option<i64> = None;
+    let mut first_ts: Option<i64> = None;
     let mut max_turn: usize = 0;
 
     for item in reader {
@@ -78,6 +84,7 @@ pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
                     model_time_ms += delta;
                 }
             }
+            first_ts = first_ts.or(Some(ts));
             prev_ts = Some(ts);
         }
     }
@@ -88,6 +95,8 @@ pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
         output_tokens: output_tokens.max(0) as u64,
         cached_tokens: cached_tokens.max(0) as u64,
         model_time_ms: model_time_ms.max(0) as u64,
+        started_ms: first_ts,
+        ended_ms: prev_ts,
     })
 }
 

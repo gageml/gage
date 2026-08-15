@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
+use gage_core::config::gage_home;
 use regex::Regex;
 use serde::{Serialize, Serializer};
 
@@ -238,6 +239,23 @@ pub fn projects_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir));
     }
     crate::home::claude_home().map(|h| h.join("projects"))
+}
+
+/// Locate an agent session JSONL in the gage archive,
+/// `<gage_home>/claude/<name>/<session_id>.jsonl`. The sandbox name
+/// is not recorded with the session id, so every archive subdirectory
+/// is probed. None when the session is not archived.
+pub fn find_agent_session(session_id: &str) -> Option<PathBuf> {
+    let archive = gage_home().join("claude");
+    let file = format!("{session_id}.jsonl");
+    let entries = std::fs::read_dir(&archive).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join(&file);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub fn find_session(id_prefix: &str) -> Vec<SessionInfo> {

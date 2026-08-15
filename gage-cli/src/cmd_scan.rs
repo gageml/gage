@@ -425,9 +425,10 @@ fn load_scan_model(
     let run = scan::get_scan(conn, prefix)?;
     let summary = scan_summary(&run)?;
 
-    let results = load_scan_results(conn, &run.id)?;
+    let mut agent_times = AgentTimes::default();
+    let results = load_scan_results(conn, &run.id, &mut agent_times)?;
 
-    let tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
+    let mut tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
         .into_iter()
         .map(|t| TaskItem {
             cost: results
@@ -453,8 +454,14 @@ fn load_scan_model(
             },
             started: None,
             progress: None,
+            agents: Vec::new(),
         })
         .collect();
+    for ta in &results.agents {
+        if let Some(item) = tasks.iter_mut().find(|t| t.id == ta.task) {
+            item.agents.push(ta.agent.clone());
+        }
+    }
     let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
 
     let counts: HashMap<&str, (usize, usize)> = results
@@ -515,10 +522,12 @@ fn load_scan_model(
 fn reconcile_results(
     db: &Arc<Mutex<gage_db::rusqlite::Connection>>,
     scan_id: &str,
+    agent_times: &Mutex<AgentTimes>,
 ) -> gage_tui::scan_view::Event {
     let results = {
         let conn = db.lock().unwrap();
-        load_scan_results(&conn, scan_id)
+        let mut times = agent_times.lock().unwrap();
+        load_scan_results(&conn, scan_id, &mut times)
     };
     match results {
         Ok(r) => gage_tui::scan_view::Event::Results {
@@ -527,24 +536,28 @@ fn reconcile_results(
             sessions: r.sessions,
             cost: r.cost,
             task_costs: r.task_costs,
+            agents: r.agents,
         },
         Err(e) => gage_tui::scan_view::Event::Log(format!("results refresh failed: {e}")),
     }
 }
 
-/// Notes, issues, and per-session counts recorded for a scan — shared
-/// between the historical loader and the live view's reconcile poll.
+/// Notes, issues, per-session counts, and agent sessions recorded for
+/// a scan — shared between the historical loader and the live view's
+/// reconcile poll.
 struct ScanResults {
     notes: Vec<gage_tui::scan_view::NoteItem>,
     issues: Vec<gage_tui::scan_view::IssueItem>,
     sessions: Vec<gage_tui::scan_view::SessionCounts>,
     cost: Option<gage_tui::scan_view::ScanCost>,
     task_costs: Vec<gage_tui::scan_view::TaskCost>,
+    agents: Vec<gage_tui::scan_view::TaskAgent>,
 }
 
 fn load_scan_results(
     conn: &gage_db::rusqlite::Connection,
     scan_id: &str,
+    agent_times: &mut AgentTimes,
 ) -> anyhow::Result<ScanResults> {
     use gage_tui::scan_view::{EventItem, EvidenceItem, IssueItem, NoteItem, SessionCounts};
     use std::collections::{HashMap, HashSet};
@@ -646,9 +659,15 @@ fn load_scan_results(
         })
         .collect();
 
+    let agents = scan::agents_for_scan(conn, scan_id)?
+        .iter()
+        .map(|row| agent_item(row, agent_times))
+        .collect();
+
     Ok(ScanResults {
         cost,
         task_costs,
+        agents,
         issues: issue_items,
         notes: notes
             .iter()
@@ -670,6 +689,113 @@ fn load_scan_results(
             .map(|(id, (notes, issues))| SessionCounts { id, notes, issues })
             .collect(),
     })
+}
+
+/// Adapt a `task_agent` row to the scan view's agent entry: state and
+/// cost from the recorded terminal result, session path from the gage
+/// archive, and time bounds from the session JSONL via the cache.
+fn agent_item(row: &scan::TaskAgent, times: &mut AgentTimes) -> gage_tui::scan_view::TaskAgent {
+    use gage_tui::scan_view::{AgentItem, AgentState, TaskId};
+
+    let result = row.result.as_deref().and_then(|raw| {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(session_id = %row.session_id, "unparseable agent result: {e}");
+                None
+            }
+        }
+    });
+    let state = match (&result, row.exit_code) {
+        (Some(r), _) => {
+            let is_error = r
+                .get("is_error")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if is_error {
+                AgentState::Error
+            } else {
+                AgentState::Done
+            }
+        }
+        (None, Some(_)) => AgentState::Error,
+        (None, None) => AgentState::Running,
+    };
+    let cost = result
+        .as_ref()
+        .and_then(|r| r.get("total_cost_usd"))
+        .and_then(serde_json::Value::as_f64);
+    let path = gage_claude::session::find_agent_session(&row.session_id);
+    let terminal = state != AgentState::Running;
+    let (started_ms, ended_ms) = times.resolve(&row.session_id, path.as_deref(), terminal);
+    gage_tui::scan_view::TaskAgent {
+        task: TaskId {
+            scanner: row.scanner_name.clone(),
+            task: row.task_name.clone(),
+        },
+        agent: AgentItem {
+            session_id: row.session_id.clone(),
+            path,
+            state,
+            cost,
+            started_ms,
+            ended_ms,
+        },
+    }
+}
+
+/// Session time bounds per agent, cached across reconcile ticks so a
+/// tick does not re-walk every agent JSONL. The start is read once at
+/// discovery; the end is read once more after the agent's row records
+/// a terminal outcome, and is only reported once final — a running
+/// agent's duration is measured against now, not its last write.
+#[derive(Default)]
+struct AgentTimes {
+    map: std::collections::HashMap<String, AgentTimesEntry>,
+}
+
+struct AgentTimesEntry {
+    started_ms: Option<i64>,
+    ended_ms: Option<i64>,
+    /// The bounds were read after the terminal outcome was recorded,
+    /// so `ended_ms` is final.
+    terminal_read: bool,
+}
+
+impl AgentTimes {
+    fn resolve(
+        &mut self,
+        session_id: &str,
+        path: Option<&std::path::Path>,
+        terminal: bool,
+    ) -> (Option<i64>, Option<i64>) {
+        if let Some(e) = self.map.get(session_id)
+            && e.started_ms.is_some()
+            && (e.terminal_read || !terminal)
+        {
+            return (e.started_ms, e.ended_ms.filter(|_| e.terminal_read));
+        }
+        let Some(path) = path else {
+            return (None, None);
+        };
+        match gage_claude::stats::compute_session_stats(path) {
+            Ok(stats) => {
+                self.map.insert(
+                    session_id.to_string(),
+                    AgentTimesEntry {
+                        started_ms: stats.started_ms,
+                        ended_ms: stats.ended_ms,
+                        terminal_read: terminal,
+                    },
+                );
+                (stats.started_ms, stats.ended_ms.filter(|_| terminal))
+            }
+            Err(e) => {
+                tracing::warn!(session_id, "agent session stats unavailable: {e}");
+                (None, None)
+            }
+        }
+    }
 }
 
 /// Locate and stat a session file for title resolution. None when the
@@ -1394,6 +1520,9 @@ async fn run_scan_tui(
     // sent the final reconcile.
     let scan_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    // Agent session time bounds, cached across reconcile passes
+    let agent_times = Arc::new(Mutex::new(AgentTimes::default()));
+
     // Reconcile notes/issues from the db once a second while the scan
     // runs — the same read the historical loader uses.
     let results_poll = {
@@ -1402,6 +1531,7 @@ async fn run_scan_tui(
         let cancel = cancel.clone();
         let scan_id = scan_id.clone();
         let scan_done = Arc::clone(&scan_done);
+        let agent_times = Arc::clone(&agent_times);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
@@ -1411,7 +1541,7 @@ async fn run_scan_tui(
                         if scan_done.load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
-                        if tx.send(reconcile_results(&db, &scan_id)).is_err() {
+                        if tx.send(reconcile_results(&db, &scan_id, &agent_times)).is_err() {
                             break;
                         }
                     }
@@ -1442,7 +1572,7 @@ async fn run_scan_tui(
         // Finish handling: stop the poll, send one final reconcile so
         // the UI is current, then announce completion.
         scan_done.store(true, std::sync::atomic::Ordering::Relaxed);
-        send_view_event(&event_tx, reconcile_results(&db, &scan_id));
+        send_view_event(&event_tx, reconcile_results(&db, &scan_id, &agent_times));
         send_view_event(&event_tx, scan_view::Event::Finished);
         result
     };

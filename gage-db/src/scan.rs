@@ -519,6 +519,30 @@ pub fn costs_for_tasks(conn: &Connection, scan_id: &str) -> Result<Vec<TaskCost>
     Ok(costs)
 }
 
+/// Agent sessions recorded for a scan, in (scanner_name, task_name,
+/// session_id) order.
+pub fn agents_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<TaskAgent>, ScanError> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, scan_id, scanner_name, task_name, exit_code, stderr, result \
+         FROM task_agent WHERE scan_id = ?1 \
+         ORDER BY scanner_name, task_name, session_id",
+    )?;
+    let agents = stmt
+        .query_map(params![scan_id], |row| {
+            Ok(TaskAgent {
+                session_id: row.get(0)?,
+                scan_id: row.get(1)?,
+                scanner_name: row.get(2)?,
+                task_name: row.get(3)?,
+                exit_code: row.get(4)?,
+                stderr: row.get(5)?,
+                result: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(agents)
+}
+
 /// Distinct scanner names recorded for a scan, ascending.
 pub fn scanner_names_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
     let mut stmt = conn.prepare(
@@ -773,6 +797,13 @@ mod tests {
             .unwrap();
         assert_eq!(exit_code, Some(0));
         assert!(result.unwrap().contains("total_cost_usd"));
+
+        let agents = agents_for_scan(&conn, &scan.id).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].session_id, "cccccccc-cccc-cccc-cccc-cccccccccccc");
+        assert_eq!(agents[0].scanner_name, "user_friction");
+        assert_eq!(agents[0].task_name, "friction");
+        assert_eq!(agents[0].exit_code, Some(0));
     }
 
     #[test]
