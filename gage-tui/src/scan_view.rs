@@ -674,9 +674,9 @@ struct ViewState {
     model: ScanModel,
     focus: Focus,
     tasks: ItemTable,
-    /// Task keys whose agent rows are hidden. Stored as the collapsed
-    /// set so newly appearing agents surface expanded by default.
-    collapsed: HashSet<String>,
+    /// Task keys whose agent rows are shown. Stored as the expanded
+    /// set so tasks surface collapsed by default.
+    expanded: HashSet<String>,
     sessions: ItemTable,
     notes: ItemTable,
     issues: ItemTable,
@@ -748,7 +748,7 @@ impl ViewState {
     fn new(model: ScanModel) -> Self {
         let mut state = Self {
             tasks: ItemTable::new(),
-            collapsed: HashSet::new(),
+            expanded: HashSet::new(),
             sessions: ItemTable::new(),
             notes: ItemTable::new(),
             issues: ItemTable::new(),
@@ -771,7 +771,7 @@ impl ViewState {
     /// change — data replacement or re-sort moves rows under the
     /// positional table state; the tables re-anchor by item id.
     fn sync_tables(&mut self) {
-        let task_ids = flat_task_ids(&self.model, &self.collapsed);
+        let task_ids = flat_task_ids(&self.model, &self.expanded);
         let refs: Vec<&str> = task_ids.iter().map(String::as_str).collect();
         self.tasks.update(&refs);
         let ids: Vec<&str> = self.model.sessions.iter().map(|s| s.id.as_str()).collect();
@@ -861,8 +861,8 @@ impl ViewState {
     fn enter_task_row(&mut self) {
         match self.selected_task_row() {
             Some(TaskRowAction::Toggle(key)) => {
-                if !self.collapsed.remove(&key) {
-                    self.collapsed.insert(key);
+                if !self.expanded.remove(&key) {
+                    self.expanded.insert(key);
                 }
                 self.sync_tables();
             }
@@ -874,7 +874,7 @@ impl ViewState {
     /// Right on the tasks panel: expand a collapsed task row.
     fn expand_task_row(&mut self) {
         if let Some(TaskRowAction::Toggle(key)) = self.selected_task_row()
-            && self.collapsed.remove(&key)
+            && self.expanded.insert(key)
         {
             self.sync_tables();
         }
@@ -888,7 +888,7 @@ impl ViewState {
             return;
         };
         let target = {
-            let rows = flat_task_rows(&self.model, &self.collapsed);
+            let rows = flat_task_rows(&self.model, &self.expanded);
             match rows.get(i) {
                 Some(TaskRow::Task(t)) if !t.agents.is_empty() => {
                     CollapseTarget::Task(task_key(&t.id))
@@ -899,12 +899,12 @@ impl ViewState {
         };
         match target {
             CollapseTarget::Task(key) => {
-                if self.collapsed.insert(key) {
+                if self.expanded.remove(&key) {
                     self.sync_tables();
                 }
             }
             CollapseTarget::Parent(parent) => {
-                let ids = flat_task_ids(&self.model, &self.collapsed);
+                let ids = flat_task_ids(&self.model, &self.expanded);
                 let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
                 if let Some(p) = refs.iter().position(|id| *id == parent) {
                     self.tasks.select_by(p as isize - i as isize, &refs);
@@ -916,7 +916,7 @@ impl ViewState {
     /// The action Enter would take on the selected tasks-panel row.
     fn selected_task_row(&self) -> Option<TaskRowAction> {
         let i = self.tasks.selected_index()?;
-        match flat_task_rows(&self.model, &self.collapsed).get(i)? {
+        match flat_task_rows(&self.model, &self.expanded).get(i)? {
             TaskRow::Task(t) if !t.agents.is_empty() => {
                 Some(TaskRowAction::Toggle(task_key(&t.id)))
             }
@@ -941,7 +941,7 @@ impl ViewState {
             return;
         };
         let stepped = {
-            let rows = flat_task_rows(&self.model, &self.collapsed);
+            let rows = flat_task_rows(&self.model, &self.expanded);
             let agent_indexes: Vec<usize> = rows
                 .iter()
                 .enumerate()
@@ -964,7 +964,7 @@ impl ViewState {
         let Some((target, item)) = stepped else {
             return;
         };
-        let ids = flat_task_ids(&self.model, &self.collapsed);
+        let ids = flat_task_ids(&self.model, &self.expanded);
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         self.tasks.select_by(target as isize - i as isize, &refs);
         self.open_agent_session(&item);
@@ -1169,7 +1169,7 @@ impl ViewState {
     fn focused_apply(&mut self, op: impl Fn(&mut ItemTable, &[&str])) {
         match self.focus {
             Focus::Tasks => {
-                let ids = flat_task_ids(&self.model, &self.collapsed);
+                let ids = flat_task_ids(&self.model, &self.expanded);
                 let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
                 op(&mut self.tasks, &refs);
             }
@@ -1204,13 +1204,12 @@ enum TaskRow<'a> {
 }
 
 /// The tasks panel's visible rows: tasks in display order, each
-/// followed by its agent rows unless collapsed.
-fn flat_task_rows<'a>(model: &'a ScanModel, collapsed: &HashSet<String>) -> Vec<TaskRow<'a>> {
+/// followed by its agent rows when expanded.
+fn flat_task_rows<'a>(model: &'a ScanModel, expanded: &HashSet<String>) -> Vec<TaskRow<'a>> {
     let mut rows = Vec::new();
     for t in model.sorted_tasks() {
-        let expanded = !collapsed.contains(&task_key(&t.id));
         rows.push(TaskRow::Task(t));
-        if expanded {
+        if expanded.contains(&task_key(&t.id)) {
             for a in &t.agents {
                 rows.push(TaskRow::Agent(t, a));
             }
@@ -1221,8 +1220,8 @@ fn flat_task_rows<'a>(model: &'a ScanModel, collapsed: &HashSet<String>) -> Vec<
 
 /// Row ids for the tasks panel in visible order — the identity list
 /// [`ItemTable`] anchors its selection to.
-fn flat_task_ids(model: &ScanModel, collapsed: &HashSet<String>) -> Vec<String> {
-    flat_task_rows(model, collapsed)
+fn flat_task_ids(model: &ScanModel, expanded: &HashSet<String>) -> Vec<String> {
+    flat_task_rows(model, expanded)
         .iter()
         .map(|row| match row {
             TaskRow::Task(t) => task_key(&t.id),
@@ -1959,7 +1958,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let spinner = *SPINNER.get(frame_idx).expect("mod len is in bounds");
     let selected = state.tasks.selected_index();
     let finished = state.model.finished;
-    let flat = flat_task_rows(&state.model, &state.collapsed);
+    let flat = flat_task_rows(&state.model, &state.expanded);
 
     // Status cell contents are computed up front: the column sizes to
     // the widest `{label} {time}` value, and the progress fill needs
@@ -2091,10 +2090,10 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                     // blank for a task with no agent rows to expand
                     let fold = if t.agents.is_empty() {
                         "  "
-                    } else if state.collapsed.contains(&task_key(&t.id)) {
-                        "▶ "
-                    } else {
+                    } else if state.expanded.contains(&task_key(&t.id)) {
                         "▼ "
+                    } else {
+                        "▶ "
                     };
                     let glyph = match t.state {
                         TaskState::Pending => "□",
