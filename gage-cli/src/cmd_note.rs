@@ -5,7 +5,6 @@ use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
 use gage_db::note::{self, Note, NoteFilters};
-use gage_db::scan;
 use gage_db::target::{NoteTarget, SessionTarget};
 use gage_registry::scanner::ScannerRegistry;
 use gage_registry::scheme::{ErrorScheme, ScannerScheme};
@@ -164,19 +163,6 @@ pub fn list(args: NoteListArgs) {
         }
     });
 
-    // Scan that first wrote each note; empty when the note was written
-    // outside a scan (e.g. `gage note add`).
-    let scan_ids: Vec<Option<String>> = notes
-        .iter()
-        .map(|n| match scan::scan_id_for_note(&conn, &n.id) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        })
-        .collect();
-
     let header: Vec<String> = ["Id", "Name", "Value", "Target", "Scan", "Created"]
         .iter()
         .map(|s| s.to_string())
@@ -184,14 +170,13 @@ pub fn list(args: NoteListArgs) {
 
     let rows: Vec<Vec<String>> = notes
         .iter()
-        .zip(&scan_ids)
-        .map(|(n, scan_id)| {
+        .map(|n| {
             vec![
                 highlighter.short(&n.id),
                 n.name.clone(),
                 format_value_cell(&n.value),
                 target_label(&n.target),
-                scan_id
+                n.scan
                     .as_deref()
                     .map(short_uuid)
                     .unwrap_or_default()

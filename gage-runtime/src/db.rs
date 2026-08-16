@@ -497,6 +497,7 @@ fn do_replace_note(note: Note) -> super::Result<Note> {
         value: value_to_note_value(&note.value)?,
         explanation: note.explanation.clone(),
         metadata: note.metadata_raw.clone(),
+        scan: None,
     };
     let db = ctx.db.lock().unwrap();
     let updated = note::replace(&db, &note.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
@@ -650,6 +651,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         created: now,
         modified: None,
         author,
+        scan: None,
     };
 
     tracing::info!(

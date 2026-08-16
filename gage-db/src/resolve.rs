@@ -271,6 +271,7 @@ mod tests {
             created: 1_000,
             modified: None,
             author: format!("agent:test?call={id}"),
+            scan: None,
         };
         insert(conn, &issue).unwrap();
     }

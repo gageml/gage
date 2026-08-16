@@ -229,6 +229,10 @@ pub struct Issue {
     /// `scanner:{path}` URIs in issue fields. With `name`, forms the
     /// duplication key.
     pub author: String,
+    /// Scan that created the issue; `None` when the issue was written
+    /// outside a scan (e.g. `gage issue add`). Derived from `scan_issue`
+    /// on read; not written by [`insert`].
+    pub scan: Option<String>,
 }
 
 /// A note recorded as evidence for an issue, linked via the
@@ -316,6 +320,7 @@ impl Issue {
             created: gage_core::datetime::now_ms(),
             modified: None,
             author: author.to_string(),
+            scan: None,
         }
     }
 }
@@ -663,9 +668,11 @@ pub struct IssueFilters {
     pub offset: Option<u32>,
 }
 
+// An issue has at most one scan_issue row (only creation links a scan;
+// see IssueWrite), so the join cannot multiply rows.
 const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.title, i.description, i.status,
-            i.status_reason, i.created, i.modified, i.author
-     FROM issue i";
+            i.status_reason, i.created, i.modified, i.author, si.scan_id
+     FROM issue i LEFT JOIN scan_issue si ON si.issue_id = i.id";
 
 pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, IssueError> {
     let mut clauses: Vec<String> = Vec::new();
@@ -766,7 +773,11 @@ pub fn get(conn: &Connection, id_prefix: &str) -> Result<Issue, IssueError> {
 /// then `note.created`.
 pub fn related_notes(conn: &Connection, issue_id: &str) -> Result<Vec<Note>, IssueError> {
     let sql = "SELECT n.id, n.created, n.modified, n.author, n.target,
-                      n.name, n.value, n.explanation, n.metadata
+                      n.name, n.value, n.explanation, n.metadata,
+                      (SELECT sn.scan_id FROM scan_note sn
+                       JOIN scan s ON s.id = sn.scan_id
+                       WHERE sn.note_id = n.id
+                       ORDER BY s.created LIMIT 1)
                FROM issue_evidence ie
                JOIN note n ON ie.note_id = n.id
                WHERE ie.issue_id = ?1
@@ -789,6 +800,7 @@ fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
         value: row.get(6)?,
         explanation: row.get(7)?,
         metadata: row.get(8)?,
+        scan: row.get(9)?,
     })
 }
 
@@ -823,6 +835,7 @@ fn row_to_issue(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
         created: row.get(6)?,
         modified: row.get(7)?,
         author: row.get(8)?,
+        scan: row.get(9)?,
     })
 }
 
@@ -843,6 +856,7 @@ mod tests {
             created: 1_742_428_800_000,
             modified: None,
             author: "scanner:test".to_string(),
+            scan: None,
         }
     }
 
@@ -937,6 +951,7 @@ mod tests {
             value: NoteValue::from("yes"),
             explanation: None,
             metadata: None,
+            scan: None,
         };
         insert_note(&conn, &note).unwrap();
 
@@ -1307,6 +1322,7 @@ mod tests {
                     value: NoteValue::from("v"),
                     explanation: None,
                     metadata: None,
+                    scan: None,
                 },
             )
             .unwrap();

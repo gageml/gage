@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 #[derive(Debug, Clone)]
 pub struct Scan {
@@ -414,37 +414,6 @@ pub fn issue_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String
         .query_map(params![scan_id], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ids)
-}
-
-/// Scan that wrote `issue_id`; `None` when the issue was written
-/// outside a scan. Only issue creation links a scan (see `IssueWrite`),
-/// so an issue has at most one row in `scan_issue`.
-pub fn scan_id_for_issue(conn: &Connection, issue_id: &str) -> Result<Option<String>, ScanError> {
-    let id = conn
-        .query_row(
-            "SELECT scan_id FROM scan_issue WHERE issue_id = ?1",
-            params![issue_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(id)
-}
-
-/// Scan that first wrote `note_id`; `None` when the note was written
-/// outside a scan. Later scans also link a note they replace or carry
-/// forward, so the earliest linked scan is the creator.
-pub fn scan_id_for_note(conn: &Connection, note_id: &str) -> Result<Option<String>, ScanError> {
-    let id = conn
-        .query_row(
-            "SELECT sn.scan_id FROM scan_note sn
-             JOIN scan s ON s.id = sn.scan_id
-             WHERE sn.note_id = ?1
-             ORDER BY s.created LIMIT 1",
-            params![note_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(id)
 }
 
 pub fn all(conn: &Connection) -> Result<Vec<Scan>, ScanError> {

@@ -189,6 +189,7 @@ mod tests {
             // Unique author per issue so the (name, author) dup key
             // never fires across test fixtures
             author: format!("agent:test?call={id}"),
+            scan: None,
         };
         insert(conn, &issue).unwrap();
         for s in sessions {

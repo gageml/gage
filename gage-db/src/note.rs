@@ -92,6 +92,12 @@ pub struct Note {
     pub value: NoteValue,
     pub explanation: Option<String>,
     pub metadata: Option<String>,
+    /// Scan that first wrote the note; `None` when the note was written
+    /// outside a scan (e.g. `gage note add`). Later scans also link a
+    /// note they replace or carry forward, so the earliest linked scan
+    /// is the creator. Derived from `scan_note` on read; not written by
+    /// [`insert`].
+    pub scan: Option<String>,
 }
 
 /// Read-only projection of a note that keeps `value` and `metadata` as
@@ -198,6 +204,7 @@ impl Note {
             value: value.into(),
             explanation: None,
             metadata: None,
+            scan: None,
         }
     }
 }
@@ -350,7 +357,11 @@ pub fn delete(conn: &Connection, id: &str) -> Result<(), NoteError> {
 }
 
 const NOTE_SELECT: &str = "SELECT n.id, n.created, n.modified, n.author, n.target,
-            n.name, n.value, n.explanation, n.metadata
+            n.name, n.value, n.explanation, n.metadata,
+            (SELECT sn.scan_id FROM scan_note sn
+             JOIN scan s ON s.id = sn.scan_id
+             WHERE sn.note_id = n.id
+             ORDER BY s.created LIMIT 1)
      FROM note n";
 
 /// Every note id, unordered. Peer set for prefix-disambiguated
@@ -530,6 +541,7 @@ fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
         value: row.get(6)?,
         explanation: row.get(7)?,
         metadata: row.get(8)?,
+        scan: row.get(9)?,
     })
 }
 
@@ -568,6 +580,7 @@ mod tests {
             value: NoteValue::from("test value"),
             explanation: None,
             metadata: None,
+            scan: None,
         }
     }
 
