@@ -1,5 +1,5 @@
-//! Task-run memoization: `split_valid` / `files_valid` /
-//! `carry_forward_notes`.
+//! Task-run memoization: `split_valid` / `split_valid_range` /
+//! `files_valid` / `carry_forward_notes`.
 //!
 //! Partitions a scan's sessions or notes by validation state recorded
 //! in `task_validate` so scanners can skip work already done under the
@@ -8,7 +8,7 @@
 //! `.local.design/session-caching.md`.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gage_db::note;
 use gage_db::scan::insert_scan_note;
@@ -19,7 +19,7 @@ use rune::{Any, ContextError, Module};
 use crate::config::{Config, Project};
 use crate::db::{Note, NotesQuery, fetch_notes};
 use crate::error::Error;
-use crate::scan::{Session, Sessions};
+use crate::scan::{Range, Session, Sessions};
 use crate::state::current_scan_ctx;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
@@ -27,6 +27,12 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsSplitValid| async move {
         do_sessions_split_valid(q)
     })?;
+
+    m.function_meta(sessions_split_valid_range)?;
+    m.associated_function(
+        &Protocol::INTO_FUTURE,
+        |q: SessionsSplitValidRange| async move { do_sessions_split_valid_range(q) },
+    )?;
 
     m.function_meta(notes_split_valid)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesSplitValid| async move {
@@ -48,6 +54,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 
 pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<SessionsSplitValid>()?;
+    m.ty::<SessionsSplitValidRange>()?;
     m.ty::<NotesSplitValid>()?;
     m.ty::<FilesValid>()?;
     m.ty::<CarryForward>()?;
@@ -111,6 +118,24 @@ fn do_sessions_split_valid(
     q: SessionsSplitValid,
 ) -> crate::Result<(Vec<Session>, Vec<Session>, Function)> {
     let key = key_string(&q.key)?;
+    let (prev, new, entries, _) = split_by_size(q.sessions, &key)?;
+    let validate = size_validate_fn(key, entries);
+    Ok((prev, new, validate))
+}
+
+/// Partition `sessions` by comparing each one's size at selection
+/// against its recorded size under `key`. Returns the valid and stale
+/// partitions, the stale sessions' sizes for `validate`
+/// (session id -> size string), and the stale sessions' recorded
+/// sizes where one exists (session id -> recorded size).
+type SizeSplit = (
+    Vec<Session>,
+    Vec<Session>,
+    HashMap<String, String>,
+    HashMap<String, u64>,
+);
+
+fn split_by_size(sessions: Vec<Session>, key: &str) -> crate::Result<SizeSplit> {
     let ctx = current_scan_ctx();
     let sizes: HashMap<&str, u64> = ctx
         .run
@@ -123,24 +148,31 @@ fn do_sessions_split_valid(
     let mut new = Vec::new();
     // session id -> size at selection, for `validate`
     let mut entries: HashMap<String, String> = HashMap::new();
-    {
-        let db = ctx.db.lock().unwrap();
-        for s in q.sessions {
-            let size = *sizes
-                .get(s.id.as_str())
-                .ok_or_else(|| Error::Args(format!("session {} not in scan selection", s.id)))?;
-            let recorded = task_validate::value(&db, &key, &session_ref(&s.id))
-                .map_err(|e| Error::Db(e.to_string()))?;
-            if recorded.as_deref() == Some(size.to_string().as_str()) {
-                prev.push(s);
-            } else {
-                entries.insert(s.id.clone(), size.to_string());
-                new.push(s);
+    let mut recorded_sizes: HashMap<String, u64> = HashMap::new();
+    let db = ctx.db.lock().unwrap();
+    for s in sessions {
+        let size = *sizes
+            .get(s.id.as_str())
+            .ok_or_else(|| Error::Args(format!("session {} not in scan selection", s.id)))?;
+        let recorded = task_validate::value(&db, key, &session_ref(&s.id))
+            .map_err(|e| Error::Db(e.to_string()))?;
+        if recorded.as_deref() == Some(size.to_string().as_str()) {
+            prev.push(s);
+        } else {
+            if let Some(r) = recorded.and_then(|v| v.parse::<u64>().ok()) {
+                recorded_sizes.insert(s.id.clone(), r);
             }
+            entries.insert(s.id.clone(), size.to_string());
+            new.push(s);
         }
     }
+    Ok((prev, new, entries, recorded_sizes))
+}
 
-    let validate = Function::new(move |session: Value| {
+/// The deferred validate for the size validator: called with a session
+/// (or session id) split as stale, records its size at selection.
+fn size_validate_fn(key: String, entries: HashMap<String, String>) -> Function {
+    Function::new(move |session: Value| {
         let key = key.clone();
         let entries = entries.clone();
         async move {
@@ -154,9 +186,108 @@ fn do_sessions_split_valid(
                 .map_err(|e| Error::Db(e.to_string()))
         }
     })
-    .unwrap();
+    .unwrap()
+}
 
+/// Builder returned by `sessions.split_valid_range(key)`. The
+/// partition runs when the value is awaited.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub(crate) struct SessionsSplitValidRange {
+    #[rune(skip)]
+    sessions: Vec<Session>,
+    #[rune(skip)]
+    key: Value,
+}
+
+#[rune::function(instance, path = split_valid_range)]
+fn sessions_split_valid_range(sessions: Ref<Sessions>, key: Value) -> SessionsSplitValidRange {
+    SessionsSplitValidRange {
+        sessions: sessions.remaining(),
+        key,
+    }
+}
+
+/// Partition sessions by recorded size, exactly as `split_valid` does,
+/// and give each grown stale session its unseen line range. Returns
+/// `(prev, new, validate)` over plain `Session` values: sessions in
+/// `prev` and unseen sessions in `new` have `range: None`; a grown
+/// session in `new` has `Some(Range)` spanning its unscanned lines.
+fn do_sessions_split_valid_range(
+    q: SessionsSplitValidRange,
+) -> crate::Result<(Vec<Session>, Vec<Session>, Function)> {
+    let key = key_string(&q.key)?;
+    let (prev, mut new, entries, recorded_sizes) = split_by_size(q.sessions, &key)?;
+
+    for s in &mut new {
+        let Some(&recorded) = recorded_sizes.get(&s.id) else {
+            continue;
+        };
+        let Some(size) = entries.get(&s.id).and_then(|v| v.parse::<u64>().ok()) else {
+            continue;
+        };
+        if recorded >= size {
+            // Not grown (shrunk or replaced): re-scan whole
+            continue;
+        }
+        s.range = derive_range(&s.src, recorded, size)?.map(|(start, end)| Range { start, end });
+    }
+
+    let validate = size_validate_fn(key, entries);
     Ok((prev, new, validate))
+}
+
+/// The unseen line range of a session that grew from `recorded` to
+/// `size` bytes. Session files are append-only JSONL, one entry per
+/// newline-terminated line: the newline count over the first
+/// `recorded` bytes is the validated line count, and the count over
+/// the first `size` bytes is the current line count (a trailing
+/// partial line counts as a line). Returns inclusive 1-based bounds,
+/// or `None` when the file no longer supports a sane derivation.
+fn derive_range(path: &Path, recorded: u64, size: u64) -> crate::Result<Option<(u64, u64)>> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| Error::Config(format!("read session {}: {e}", path.display())))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = [0u8; 64 * 1024];
+    let mut pos: u64 = 0;
+    let mut validated_lines: u64 = 0;
+    let mut lines: u64 = 0;
+    let mut last_newline_end: u64 = 0;
+    while pos < size {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| Error::Config(format!("read session {}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        // Count only up to the size at selection; content appended
+        // since is next scan's business
+        let used = usize::try_from((size - pos).min(n as u64)).unwrap();
+        for (i, b) in buf.iter().take(used).enumerate() {
+            if *b == b'\n' {
+                lines += 1;
+                let end = pos + i as u64 + 1;
+                last_newline_end = end;
+                if end <= recorded {
+                    validated_lines += 1;
+                }
+            }
+        }
+        pos += used as u64;
+    }
+    // A trailing partial line is a line
+    let current_lines = if pos > last_newline_end {
+        lines + 1
+    } else {
+        lines
+    };
+    let start = validated_lines + 1;
+    if current_lines < start {
+        return Ok(None);
+    }
+    Ok(Some((start, current_lines)))
 }
 
 /// A `Session` or a session id string.
@@ -401,4 +532,70 @@ fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_range;
+    use std::io::Write;
+
+    fn session_file(content: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f
+    }
+
+    #[test]
+    fn grown_by_whole_lines() {
+        // Two validated lines, one appended
+        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
+        let recorded = 16; // through the second newline
+        let size = 24;
+        assert_eq!(
+            derive_range(f.path(), recorded, size).unwrap(),
+            Some((3, 3))
+        );
+    }
+
+    #[test]
+    fn trailing_partial_line_counts() {
+        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\"");
+        let recorded = 16;
+        let size = 20;
+        assert_eq!(
+            derive_range(f.path(), recorded, size).unwrap(),
+            Some((3, 3))
+        );
+    }
+
+    #[test]
+    fn recorded_bisecting_a_line_reincludes_it() {
+        // Validation caught line 2 mid-append: only line 1 counts as
+        // validated, so line 2 is re-scanned
+        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
+        let recorded = 12; // inside the second line
+        let size = 24;
+        assert_eq!(
+            derive_range(f.path(), recorded, size).unwrap(),
+            Some((2, 3))
+        );
+    }
+
+    #[test]
+    fn file_shorter_than_recorded_is_not_ranged() {
+        let f = session_file(b"{\"a\":1}\n");
+        assert_eq!(derive_range(f.path(), 16, 24).unwrap(), None);
+    }
+
+    #[test]
+    fn size_caps_the_count() {
+        // Lines appended after selection (beyond `size`) are excluded
+        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n{\"d\":4}\n");
+        let recorded = 8;
+        let size = 16; // selection saw two lines
+        assert_eq!(
+            derive_range(f.path(), recorded, size).unwrap(),
+            Some((2, 2))
+        );
+    }
 }

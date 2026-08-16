@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use gage_db::issue::IssueStatus;
+pub use gage_query::scope::SessionScope;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta};
@@ -76,6 +77,11 @@ pub struct QueryConfig {
     /// Scope the tool's query context to this scan id
     /// ([`gage_query::create_agent_context`]). `None` → unscoped.
     pub scan: Option<String>,
+    /// Narrow the context to these sessions, each with an optional
+    /// line range ([`gage_query::create_agent_context_scoped`]).
+    /// Honored only when `scan` is set; `None` → every session in the
+    /// scan, unconstrained.
+    pub sessions: Option<Vec<SessionScope>>,
 }
 
 /// `IssueWrite` tool settings.
@@ -283,6 +289,7 @@ mod tests {
             tools: vec![
                 GageTool::Query(QueryConfig {
                     scan: Some("scan-1".into()),
+                    sessions: None,
                 }),
                 GageTool::IssueWrite(IssueWriteConfig::default()),
             ],

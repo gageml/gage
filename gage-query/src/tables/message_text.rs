@@ -23,10 +23,16 @@ use datafusion::prelude::Expr;
 use gage_index::{DEFAULT_SNIPPET_CHARS, IndexStore};
 
 use super::walk::reconcile_for_query;
+use crate::scope::Scope;
 
 /// Default cap when no `LIMIT` is supplied. Explicit user limits pass
 /// through verbatim with no ceiling.
 const DEFAULT_LIMIT: usize = 100;
+
+/// Over-fetch factor for scoped searches. The scope filter runs after
+/// ranking, so the search fetches this many times the requested limit
+/// before filtering.
+const SCOPE_OVERFETCH: usize = 8;
 
 /// Argument-list display string for `\df` in the repl. Matches the
 /// shape of psql's "Argument data types" column.
@@ -51,11 +57,18 @@ static MESSAGE_TEXT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 #[derive(Debug)]
 pub struct MessageTextFn {
     store: Arc<IndexStore>,
+    scope: Option<Scope>,
 }
 
 impl MessageTextFn {
     pub fn new(store: Arc<IndexStore>) -> Self {
-        Self { store }
+        Self { store, scope: None }
+    }
+
+    /// Constrain hits to the scope's sessions and line ranges.
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
     }
 }
 
@@ -92,6 +105,7 @@ impl TableFunctionImpl for MessageTextFn {
             query,
             snippet_len,
             store: Arc::clone(&self.store),
+            scope: self.scope.clone(),
         }))
     }
 }
@@ -101,6 +115,7 @@ struct MessageTextTable {
     query: String,
     snippet_len: usize,
     store: Arc<IndexStore>,
+    scope: Option<Scope>,
 }
 
 #[async_trait]
@@ -131,14 +146,32 @@ impl TableProvider for MessageTextTable {
             None => (DEFAULT_LIMIT, true),
         };
 
+        // A scoped search over-fetches, then filters to the scope, so
+        // out-of-scope high scorers do not starve the result set.
+        let fetch = match &self.scope {
+            Some(_) => effective.saturating_mul(SCOPE_OVERFETCH),
+            None => effective,
+        };
+
         let store = Arc::clone(&self.store);
         let query = self.query.clone();
         let snippet_len = self.snippet_len;
-        let hits =
-            tokio::task::spawn_blocking(move || store.search(&query, effective, snippet_len))
+        let mut hits =
+            tokio::task::spawn_blocking(move || store.search(&query, fetch, snippet_len))
                 .await
                 .map_err(|e| DataFusionError::Execution(format!("search task failed: {e}")))?
                 .map_err(|e| DataFusionError::Execution(format!("search failed: {e}")))?;
+
+        if let Some(scope) = &self.scope {
+            hits.retain(|h| {
+                scope.contains_session(&h.session_id)
+                    && match scope.session_lines(&h.session_id) {
+                        Some((start, end)) => h.line >= start && h.line <= end,
+                        None => true,
+                    }
+            });
+            hits.truncate(effective);
+        }
 
         if default_capped && hits.len() == effective {
             tracing::info!(

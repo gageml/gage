@@ -86,3 +86,11 @@ To scan many notes' context in one query, use a `ROW_NUMBER()` windowed CTE over
 Read notes `note` (id, name, target, author, value, netadata, explanation,
 created modified). Each note name has a corresponding entry in `note_doc`
 (note_name, doc, written_by) that provides documentation for the note.
+
+## Scoped contexts
+
+A scan-scoped Query tool may also be constrained to specific sessions and, per
+session, to a line range. `entry`, `message`, `message_text` hits, and
+`note_message_context` windows then return only in-range rows, even though the
+SQL carries no such predicate. Rows outside the scope do not exist from the
+tool's point of view; do not infer their absence from the corpus.

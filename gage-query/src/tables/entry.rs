@@ -93,10 +93,11 @@ impl TableProvider for EntryTable {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
-        // Intentionally limit pushdowns to session_id
+        // Pushdowns limited to session_id (path pruning) and line
+        // (row masking); everything else needs the parsed columns
         Ok(filters
             .iter()
-            .map(|f| filter::pushdown(f, "session_id"))
+            .map(|f| filter::pushdown_lines(f, "session_id"))
             .collect())
     }
 
@@ -111,6 +112,7 @@ impl TableProvider for EntryTable {
             SessionSource::Corpus(store) => session_paths(store, filters, "session_id")?,
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
+        let row_filter = filter::RowFilter::new(filters, "session_id")?;
         let cache = session_cache(state)?;
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
@@ -121,6 +123,7 @@ impl TableProvider for EntryTable {
             cache,
             projected_schema,
             projection.cloned(),
+            row_filter,
             limit,
         )))
     }
@@ -135,6 +138,7 @@ struct EntryExec {
     cache: Arc<SessionCache>,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
+    row_filter: Option<filter::RowFilter>,
     limit: Option<usize>,
     properties: PlanProperties,
 }
@@ -154,6 +158,7 @@ impl EntryExec {
         cache: Arc<SessionCache>,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
+        row_filter: Option<filter::RowFilter>,
         limit: Option<usize>,
     ) -> Self {
         let properties = PlanProperties::new(
@@ -167,6 +172,7 @@ impl EntryExec {
             cache,
             projected_schema,
             projection,
+            row_filter,
             limit,
             properties,
         }
@@ -221,6 +227,7 @@ impl ExecutionPlan for EntryExec {
         let paths = (*self.paths).clone();
         let cache = self.cache.clone();
         let projection = self.projection.clone();
+        let row_filter = self.row_filter.clone();
         let schema = self.projected_schema.clone();
         let limit = self.limit;
 
@@ -243,7 +250,11 @@ impl ExecutionPlan for EntryExec {
             })
             .map(move |res| {
                 res.and_then(|derived| {
-                    let projected = derived.batch.project(PROJECTION)?;
+                    let mut projected = derived.batch.project(PROJECTION)?;
+                    // session_id / line sit at indices 0 / 1 of PROJECTION
+                    if let Some(f) = &row_filter {
+                        projected = f.filter_batch(&projected, 0, 1)?;
+                    }
                     match &projection {
                         Some(p) => projected.project(p).map_err(DataFusionError::from),
                         None => Ok(projected),

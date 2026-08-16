@@ -96,7 +96,13 @@ impl GageServer {
         self.ctx
             .get_or_init(|| async {
                 match &self.tools_config.query.scan {
-                    Some(scan_id) => gage_query::create_agent_context(scan_id.clone()).await,
+                    Some(scan_id) => {
+                        gage_query::create_agent_context_scoped(gage_query::AgentScope {
+                            scan_id: scan_id.clone(),
+                            sessions: self.tools_config.query.sessions.clone(),
+                        })
+                        .await
+                    }
                     None => gage_query::create_context_default().await,
                 }
             })

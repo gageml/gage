@@ -56,4 +56,7 @@ Hints:
 - Join `issue` to `note` through `issue_evidence` to inspect the evidence behind
   an issue
 
+The tool may be scoped to sessions and per-session line ranges; rows outside
+the scope do not exist from this tool's point of view.
+
 ---eof-123---

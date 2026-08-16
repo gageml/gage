@@ -1019,7 +1019,7 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
 /// Downcast one `gage_tools` entry to a `gage::tools` builder value.
 fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
     if let Ok(t) = rune::from_value::<crate::tools::Query>(item.clone()) {
-        return Ok(t.into());
+        return GageTool::try_from(t).map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
     }
     if let Ok(t) = rune::from_value::<crate::tools::IssueWrite>(item.clone()) {
         return GageTool::try_from(t).map_err(|e| Error::Agent(format!("'gage_tools': {e}")));

@@ -18,6 +18,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
 
     m.ty::<Session>()?;
+    m.ty::<Range>()?;
     m.ty::<Scan>()?;
     m.function_meta(Scan::sessions)?;
 
@@ -52,6 +53,29 @@ pub struct Session {
     /// accessors can resolve the session's project.
     #[rune(skip)]
     pub src: PathBuf,
+    /// The line range this session is constrained to. `None` means
+    /// unconstrained: the whole session. Set by `split_valid_range`
+    /// for grown sessions; consumed by `messages()` / `entries()` and
+    /// the `Query` tool configuration.
+    #[rune(get)]
+    pub range: Option<Range>,
+}
+
+/// A contiguous line span. `start` and `end` are inclusive 1-based
+/// line numbers into the session's JSONL.
+#[derive(Any, Clone, Copy, Debug, PartialEq, Eq)]
+#[rune(item = ::gage)]
+pub struct Range {
+    #[rune(get)]
+    pub start: u64,
+    #[rune(get)]
+    pub end: u64,
+}
+
+impl rune::alloc::prelude::TryClone for Range {
+    fn try_clone(&self) -> Result<Self, rune::alloc::Error> {
+        Ok(*self)
+    }
 }
 
 #[derive(Any, Clone)]
@@ -157,6 +181,7 @@ fn scan() -> Scan {
                 id: s.id.clone(),
                 modified: DateTime::from_system_time(s.mtime),
                 src: s.src.clone(),
+                range: None,
             })
             .collect(),
     }

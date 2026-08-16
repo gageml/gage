@@ -13,7 +13,7 @@ use gage_claude::home::ClaudeHome;
 use gage_index::IndexStore;
 
 use crate::cache::SessionCache;
-use crate::scope::{Scope, ScopeEdge, ScopedTable};
+use crate::scope::{Scope, ScopeEdge, ScopedTable, SessionScope};
 use crate::tables::config::ConfigTable;
 use crate::tables::entry::EntryTable;
 use crate::tables::issue_report::IssueReportFn;
@@ -60,16 +60,38 @@ pub async fn create_context_default() -> SessionContext {
     create_context(&root, &cache_dir).await
 }
 
+/// What an agent context is scoped to: a scan, optionally narrowed to
+/// explicit sessions with per-session line ranges.
+#[derive(Clone, Debug)]
+pub struct AgentScope {
+    pub scan_id: String,
+    /// When set, the visible session set is exactly this list (instead
+    /// of every session in the scan), and each entry's line range
+    /// constrains its session's `entry`/`message` rows.
+    pub sessions: Option<Vec<SessionScope>>,
+}
+
 /// Per-agent context scoped to one `scan_id`. Every readable table
 /// (`session`, `entry`, `message`, `note`, `session_note`, `issue`,
 /// `issue_evidence`, `session_issue`) returns only rows reachable from that scan's
-/// `scan_session` / `scan_note` / `scan_issue` edges. The unscoped
-/// metadata tables (`config`, `note_doc`) and TVFs are exposed as
-/// they are in the default context.
+/// `scan_session` / `scan_note` / `scan_issue` edges. The
+/// session-serving TVFs (`message_text`, `note_message_context`) honor
+/// the same session scope. The unscoped metadata tables (`config`,
+/// `note_doc`) are exposed as they are in the default context.
 pub async fn create_agent_context(scan_id: impl Into<String>) -> SessionContext {
+    create_agent_context_scoped(AgentScope {
+        scan_id: scan_id.into(),
+        sessions: None,
+    })
+    .await
+}
+
+/// [`create_agent_context`] with the full [`AgentScope`], including the
+/// optional session narrowing and line ranges.
+pub async fn create_agent_context_scoped(scope: AgentScope) -> SessionContext {
     let root = default_root();
     let cache_dir = default_cache_dir(&root);
-    build_context(&root, &cache_dir, Some(scan_id.into())).await
+    build_context(&root, &cache_dir, Some(scope)).await
 }
 
 /// Register the gage JSON UDF suite on a context. Used by
@@ -88,11 +110,7 @@ pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
     build_context(root, cache_dir, None).await
 }
 
-async fn build_context(
-    root: &Path,
-    cache_dir: &Path,
-    agent_scan_id: Option<String>,
-) -> SessionContext {
+async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>) -> SessionContext {
     // The sqlite connection pool below opens the db file directly and
     // neither creates nor migrates it; a fresh gage home needs both.
     gage_db::db::ensure_db().expect("ensure gage db");
@@ -108,43 +126,45 @@ async fn build_context(
     let ctx = SessionContext::new_with_state(state);
     install_udfs(&ctx);
     let store = Arc::new(IndexStore::new(root, cache_dir));
-    ctx.register_udtf(
-        "message_text",
-        Arc::new(MessageTextFn::new(Arc::clone(&store))),
-    );
-    ctx.register_udtf(
-        "note_message_context",
-        Arc::new(NoteMessageContextFn::new(Arc::clone(&store))),
-    );
+
+    // One session scope shared by the session-serving tables and TVFs
+    let session_scope = agent.as_ref().map(|a| {
+        Scope::resolve_sessions(&a.scan_id, ScopeEdge::Session, a.sessions.as_deref())
+            .expect("resolve scope")
+    });
+
+    let mut message_text = MessageTextFn::new(Arc::clone(&store));
+    let mut note_context = NoteMessageContextFn::new(Arc::clone(&store));
+    if let Some(scope) = &session_scope {
+        message_text = message_text.with_scope(scope.clone());
+        note_context = note_context.with_scope(scope.clone());
+    }
+    ctx.register_udtf("message_text", Arc::new(message_text));
+    ctx.register_udtf("note_message_context", Arc::new(note_context));
     ctx.register_udtf("issue_report", Arc::new(IssueReportFn::new()));
     ctx.register_udtf("related_issue", Arc::new(RelatedIssueFn::new()));
 
-    register_disk_table(
-        &ctx,
-        "session",
-        "id",
-        ScopeEdge::Session,
-        &agent_scan_id,
-        || Arc::new(SessionTable::new(store.clone())),
-    );
+    register_disk_table(&ctx, "session", "id", None, &session_scope, || {
+        Arc::new(SessionTable::new(store.clone()))
+    });
     register_disk_table(
         &ctx,
         "entry",
         "session_id",
-        ScopeEdge::Session,
-        &agent_scan_id,
+        Some("line"),
+        &session_scope,
         || Arc::new(EntryTable::new(store.clone())),
     );
     register_disk_table(
         &ctx,
         "message",
         "session_id",
-        ScopeEdge::Session,
-        &agent_scan_id,
+        Some("line"),
+        &session_scope,
         || Arc::new(MessageTable::new(store.clone())),
     );
 
-    register_sqlite_tables(&ctx, agent_scan_id.as_deref()).await;
+    register_sqlite_tables(&ctx, agent.as_ref().map(|a| a.scan_id.as_str())).await;
 
     // `root` is `<claude_home>/projects`; recover the claude_home dir
     // for the `config` table. Tests that pass a non-standard `root`
@@ -193,22 +213,26 @@ async fn build_context(
 
 /// Register a disk-backed provider, wrapping in [`ScopedTable`] when
 /// the context is agent-scoped. `id_col` is the column the wrapper
-/// filters on; `make_inner` constructs the unwrapped provider.
+/// filters on; `line_col` declares the table's line column so the
+/// scope's line ranges apply; `make_inner` constructs the unwrapped
+/// provider.
 fn register_disk_table(
     ctx: &SessionContext,
     name: &str,
     id_col: &'static str,
-    edge: ScopeEdge,
-    agent_scan_id: &Option<String>,
+    line_col: Option<&'static str>,
+    session_scope: &Option<Scope>,
     make_inner: impl FnOnce() -> Arc<dyn TableProvider>,
 ) {
     let inner = make_inner();
-    let provider: Arc<dyn TableProvider> = match agent_scan_id {
-        Some(scan_id) => Arc::new(ScopedTable::new(
-            inner,
-            id_col,
-            Scope::resolve(scan_id, edge).expect("resolve scope"),
-        )),
+    let provider: Arc<dyn TableProvider> = match session_scope {
+        Some(scope) => {
+            let mut scoped = ScopedTable::new(inner, id_col, scope.clone());
+            if let Some(line_col) = line_col {
+                scoped = scoped.with_line_col(line_col);
+            }
+            Arc::new(scoped)
+        }
         None => inner,
     };
     ctx.register_table(name, provider).unwrap();

@@ -26,26 +26,19 @@ const ISSUES_KEY = ("finding-issues", "issues", 1);
 // exactly (globs only apply to task `wants`)
 const FINDING_NAMES = ["finding.general", "finding.code"];
 
-const NEW_FINDINGS_THRESHOLD = 5;
-
 /// Ask agent to review findings and write issues.
 ///
 /// The findings available to the agent are limited to those written
 /// for the current scan. Skips the agent when every finding has
 /// already been analyzed under the current issues key.
 pub async fn issues() {
-    let (prev_findings, new_findings, validate) = scan()
+    let (_prev_findings, new_findings, validate) = scan()
         .notes()
         .names(FINDING_NAMES)
         .split_valid(ISSUES_KEY)
         .await?;
 
-    let threshold = if prev_findings.is_empty() {
-        1
-    } else {
-        NEW_FINDINGS_THRESHOLD
-    };
-    if new_findings.len() < threshold {
+    if new_findings.is_empty() {
         return Ok(());
     }
 

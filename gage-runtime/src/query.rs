@@ -38,6 +38,8 @@ pub struct MessageQuery {
     #[rune(skip)]
     session_id: Option<String>,
     #[rune(skip)]
+    lines: Option<(u64, u64)>,
+    #[rune(skip)]
     type_: Option<Value>,
     #[rune(skip)]
     reverse: bool,
@@ -47,6 +49,7 @@ pub struct MessageQuery {
 fn messages(session: Ref<Session>) -> MessageQuery {
     MessageQuery {
         session_id: Some(session.id.clone()),
+        lines: session.range.map(|r| (r.start, r.end)),
         type_: None,
         reverse: false,
     }
@@ -73,6 +76,8 @@ pub struct EntryQuery {
     #[rune(skip)]
     session_id: Option<String>,
     #[rune(skip)]
+    lines: Option<(u64, u64)>,
+    #[rune(skip)]
     type_: Option<Value>,
 }
 
@@ -80,6 +85,7 @@ pub struct EntryQuery {
 fn entries(session: Ref<Session>) -> EntryQuery {
     EntryQuery {
         session_id: Some(session.id.clone()),
+        lines: session.range.map(|r| (r.start, r.end)),
         type_: None,
     }
 }
@@ -102,6 +108,7 @@ async fn do_fetch_entries(q: EntryQuery) -> super::Result<Vec<Entry>> {
         params.push(ScalarValue::Utf8(Some(id)));
         clauses.push(format!("session_id = ${}", params.len()));
     }
+    push_lines_clause(q.lines, &mut clauses, &mut params);
     if let Some(t) = q.type_ {
         let spec = serde_json::to_value(&t)
             .map_err(|e| Error::Args(format!("`.type()` value could not be read: {e}")))?;
@@ -137,6 +144,7 @@ async fn do_fetch_messages(q: MessageQuery) -> super::Result<Vec<Message>> {
         params.push(ScalarValue::Utf8(Some(id)));
         clauses.push(format!("session_id = ${}", params.len()));
     }
+    push_lines_clause(q.lines, &mut clauses, &mut params);
     if let Some(t) = q.type_ {
         let spec = serde_json::to_value(&t)
             .map_err(|e| Error::Args(format!("`.type()` value could not be read: {e}")))?;
@@ -160,6 +168,20 @@ async fn do_fetch_messages(q: MessageQuery) -> super::Result<Vec<Message>> {
         .map_err(|e| Error::Db(e.to_string()))?;
     let batches = df.collect().await.map_err(|e| Error::Db(e.to_string()))?;
     Ok(messages_from_batches(batches))
+}
+
+/// Constrain `line` to the session's range when one is set.
+fn push_lines_clause(
+    lines: Option<(u64, u64)>,
+    clauses: &mut Vec<String>,
+    params: &mut Vec<ScalarValue>,
+) {
+    if let Some((start, end)) = lines {
+        params.push(ScalarValue::Int64(Some(start as i64)));
+        clauses.push(format!("line >= ${}", params.len()));
+        params.push(ScalarValue::Int64(Some(end as i64)));
+        clauses.push(format!("line <= ${}", params.len()));
+    }
 }
 
 fn type_clause(spec: &serde_json::Value, params: &mut Vec<ScalarValue>) -> super::Result<String> {

@@ -3,7 +3,6 @@ use gage::{
     AgentRunner,
     Template,
     call_agent,
-    carry_forward_notes,
     query,
     scan,
     write_note,
@@ -26,14 +25,14 @@ const FINDINGS_KEY = ("general", "findings", 1);
 /// Submit each session to an agent to write finding notes.
 ///
 /// Sessions already processed under the current findings key are
-/// skipped with their prior findings are carried forward into this scan.
+/// skipped. A grown session carries the range of its unscanned lines;
+/// the agent's Query view is constrained to that range.
 pub async fn findings() {
     // Skip previously scanned sessions per key
-    let (prev_sessions, new_sessions, validate) = scan()
+    let (_prev_sessions, new_sessions, validate) = scan()
         .sessions()
-        .split_valid(FINDINGS_KEY)
+        .split_valid_range(FINDINGS_KEY)
         .await?;
-    carry_forward_notes(prev_sessions, ["finding.general"]).await?;
 
     // Init template for agent prompts
     let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
@@ -52,7 +51,9 @@ pub async fn findings() {
         runner.add(
             call_agent(prompt)
                 .name("session-finding")
-                .gage_tools([Query::new()])
+                // The agent sees this session only, clipped to
+                // s.range when it is Some
+                .gage_tools([Query::new().sessions([s])])
                 .tools(#{ write_finding: write_finding_tooldef() })
                 .model("medium"),
             #{ session: s.id },

@@ -35,6 +35,7 @@ use gage_index::{COL_LINE, COL_TEXT, IndexStore};
 
 use super::message::{into_message_batch, message_schema};
 use super::walk::session_cache;
+use crate::scope::Scope;
 
 /// Argument-list display string for `\df`.
 pub const NOTE_MESSAGE_CONTEXT_ARGS: &str = "note_id text, before integer, after integer";
@@ -48,11 +49,20 @@ static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(message_schema);
 #[derive(Debug)]
 pub struct NoteMessageContextFn {
     store: Arc<IndexStore>,
+    scope: Option<Scope>,
 }
 
 impl NoteMessageContextFn {
     pub fn new(store: Arc<IndexStore>) -> Self {
-        Self { store }
+        Self { store, scope: None }
+    }
+
+    /// Constrain windows to the scope's sessions and line ranges: an
+    /// out-of-scope session returns no rows, and a window never
+    /// extends past its session's line bounds.
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
     }
 }
 
@@ -81,6 +91,7 @@ impl TableFunctionImpl for NoteMessageContextFn {
             before,
             after,
             store: Arc::clone(&self.store),
+            scope: self.scope.clone(),
         }))
     }
 }
@@ -111,6 +122,7 @@ struct NoteMessageContextTable {
     before: usize,
     after: usize,
     store: Arc<IndexStore>,
+    scope: Option<Scope>,
 }
 
 #[async_trait]
@@ -135,11 +147,23 @@ impl TableProvider for NoteMessageContextTable {
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let target = resolve_target(&self.note_id)?;
+        let bounds = match (&target, &self.scope) {
+            // Out-of-scope session: no rows
+            (Some(t), Some(scope)) if !scope.contains_session(&t.session_id) => {
+                return MemTable::try_new(SCHEMA.clone(), vec![vec![empty_batch()]])?
+                    .scan(state, projection, &[], None)
+                    .await;
+            }
+            (Some(t), Some(scope)) => scope.session_lines(&t.session_id),
+            _ => None,
+        };
         let batch = match target {
-            Some(t) => match window_for(state, &self.store, &t, self.before, self.after).await? {
-                Some(b) => b,
-                None => empty_batch(),
-            },
+            Some(t) => {
+                match window_for(state, &self.store, &t, self.before, self.after, bounds).await? {
+                    Some(b) => b,
+                    None => empty_batch(),
+                }
+            }
             None => empty_batch(),
         };
         let mem = MemTable::try_new(SCHEMA.clone(), vec![vec![batch]])?;
@@ -229,6 +253,7 @@ async fn window_for(
     target: &Target,
     before: usize,
     after: usize,
+    bounds: Option<(i64, i64)>,
 ) -> Result<Option<RecordBatch>> {
     let Some(path) = SessionListBuilder::new()
         .root(store.root())
@@ -292,6 +317,15 @@ async fn window_for(
             taken += 1;
         }
         i += 1;
+    }
+
+    // Clip to the scope's line bounds: the window never serves rows
+    // outside the session's constrained range
+    if let Some((start, end)) = bounds {
+        indices.retain(|&i| {
+            let line = lines.value(i as usize);
+            line >= start && line <= end
+        });
     }
 
     let idx = UInt64Array::from(indices);

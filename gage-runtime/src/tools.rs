@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use gage_db::issue::IssueStatus;
-use gage_mcp::{GageTool, IssueWriteConfig, NoteWriteConfig, QueryConfig};
+use gage_mcp::{GageTool, IssueWriteConfig, NoteWriteConfig, QueryConfig, SessionScope};
 use rune::runtime::Object;
 use rune::{Any, ContextError, Module};
 
@@ -20,6 +20,7 @@ pub fn module() -> Result<Module, ContextError> {
     m.function_meta(Query::new)?;
     m.function_meta(Query::scan)?;
     m.function_meta(Query::global)?;
+    m.function_meta(Query::sessions)?;
     m.ty::<IssueWrite>()?;
     m.function_meta(IssueWrite::new)?;
     m.function_meta(IssueWrite::name)?;
@@ -61,11 +62,17 @@ impl ScanScope {
 
 /// SQL query surface over Gage data. Scoped to the current scan by
 /// default; `scan(id)` targets another scan; `global()` removes the
-/// scoping so the context spans all scans.
+/// scoping so the context spans all scans; `sessions(..)` narrows the
+/// context to the given sessions, each constrained to its `range`
+/// when one is set.
 #[derive(Any, Debug, Clone, Default)]
 #[rune(item = ::gage::tools)]
 pub struct Query {
     scan: ScanScope,
+    /// Parsed `sessions(..)` argument. The parse error is deferred so
+    /// the builder chain stays fluent; `gage_tools` parsing surfaces
+    /// it.
+    sessions: Option<Result<Vec<SessionScope>, String>>,
 }
 
 impl Query {
@@ -85,6 +92,35 @@ impl Query {
         self.scan = ScanScope::Global;
         self
     }
+
+    #[rune::function(instance)]
+    fn sessions(mut self, sessions: rune::runtime::Vec) -> Self {
+        self.sessions = Some(parse_sessions(&sessions));
+        self
+    }
+}
+
+/// A list of `Session` values or session id strings. A `Session`
+/// contributes its id and its `range`; a bare id is unconstrained.
+fn parse_sessions(list: &rune::runtime::Vec) -> Result<Vec<SessionScope>, String> {
+    let mut out = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        if let Ok(s) = rune::from_value::<crate::scan::Session>(item.clone()) {
+            out.push(SessionScope {
+                session_id: s.id,
+                lines: s.range.map(|r| (r.start as i64, r.end as i64)),
+            });
+            continue;
+        }
+        let id = item
+            .borrow_string_ref()
+            .map_err(|e| format!("'sessions' entries must be Session values or id strings: {e}"))?;
+        out.push(SessionScope {
+            session_id: id.to_string(),
+            lines: None,
+        });
+    }
+    Ok(out)
 }
 
 /// Write issues. `name(..)` sets the issue name for every write
@@ -220,11 +256,15 @@ impl IssueComment {
     }
 }
 
-impl From<Query> for GageTool {
-    fn from(t: Query) -> Self {
-        GageTool::Query(QueryConfig {
+impl TryFrom<Query> for GageTool {
+    type Error = String;
+
+    fn try_from(t: Query) -> Result<Self, String> {
+        let sessions = t.sessions.transpose()?;
+        Ok(GageTool::Query(QueryConfig {
             scan: t.scan.resolve(),
-        })
+            sessions,
+        }))
     }
 }
 
