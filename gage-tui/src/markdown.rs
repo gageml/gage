@@ -5,7 +5,7 @@
 //! widget with `Wrap { trim: false }`, which preserves the leading indent and
 //! bullet prefix we bake into each line here.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -14,7 +14,7 @@ use crate::styles;
 pub fn render(input: &str) -> Vec<Line<'static>> {
     let parser = Parser::new_ext(
         input,
-        Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH,
+        Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
     );
     let mut r = Renderer::default();
     for event in parser {
@@ -33,11 +33,20 @@ struct Renderer {
     blockquote_depth: usize,
     item_prefix: Option<String>,
     line_indent: usize,
+    table: Option<TableState>,
 }
 
 struct ListInfo {
     ordered: bool,
     index: u64,
+}
+
+struct TableState {
+    alignments: Vec<Alignment>,
+    header: Vec<Vec<Span<'static>>>,
+    rows: Vec<Vec<Vec<Span<'static>>>>,
+    cur_row: Vec<Vec<Span<'static>>>,
+    cur_cell: Vec<Span<'static>>,
 }
 
 impl Renderer {
@@ -113,6 +122,16 @@ impl Renderer {
                 .style_stack
                 .push(Style::new().add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { .. } => self.style_stack.push(styles::Markdown::link()),
+            Tag::Table(alignments) => {
+                self.block_break();
+                self.table = Some(TableState {
+                    alignments,
+                    header: Vec::new(),
+                    rows: Vec::new(),
+                    cur_row: Vec::new(),
+                    cur_cell: Vec::new(),
+                });
+            }
             _ => {}
         }
     }
@@ -145,8 +164,98 @@ impl Renderer {
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
                 self.style_stack.pop();
             }
+            TagEnd::TableCell => {
+                if let Some(t) = &mut self.table {
+                    let cell = std::mem::take(&mut t.cur_cell);
+                    t.cur_row.push(cell);
+                }
+            }
+            TagEnd::TableHead => {
+                if let Some(t) = &mut self.table {
+                    t.header = std::mem::take(&mut t.cur_row);
+                }
+            }
+            TagEnd::TableRow => {
+                if let Some(t) = &mut self.table {
+                    let row = std::mem::take(&mut t.cur_row);
+                    t.rows.push(row);
+                }
+            }
+            TagEnd::Table => self.end_table(),
             _ => {}
         }
+    }
+
+    fn end_table(&mut self) {
+        let Some(t) = self.table.take() else {
+            return;
+        };
+        let ncols = t
+            .header
+            .len()
+            .max(t.rows.iter().map(Vec::len).max().unwrap_or(0));
+        if ncols == 0 {
+            return;
+        }
+        let mut widths = vec![0usize; ncols];
+        for row in std::iter::once(&t.header).chain(&t.rows) {
+            for (i, cell) in row.iter().enumerate() {
+                if let Some(w) = widths.get_mut(i) {
+                    *w = (*w).max(cell_width(cell));
+                }
+            }
+        }
+        self.emit_table_row(&t.header, &widths, &t.alignments, true);
+        let mut sep = Vec::with_capacity(ncols * 2 - 1);
+        for (i, w) in widths.iter().enumerate() {
+            if i > 0 {
+                sep.push(Span::raw("  "));
+            }
+            sep.push(Span::styled("─".repeat(*w), styles::Text::dim()));
+        }
+        self.lines.push(Line::from(sep));
+        for row in &t.rows {
+            self.emit_table_row(row, &widths, &t.alignments, false);
+        }
+    }
+
+    fn emit_table_row(
+        &mut self,
+        row: &[Vec<Span<'static>>],
+        widths: &[usize],
+        alignments: &[Alignment],
+        header: bool,
+    ) {
+        let empty = Vec::new();
+        let mut spans = Vec::new();
+        for (i, width) in widths.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let cell = row.get(i).unwrap_or(&empty);
+            let pad = width - cell_width(cell);
+            let (left, right) = match alignments.get(i) {
+                Some(Alignment::Right) => (pad, 0),
+                Some(Alignment::Center) => (pad / 2, pad - pad / 2),
+                _ => (0, pad),
+            };
+            if left > 0 {
+                spans.push(Span::raw(" ".repeat(left)));
+            }
+            for span in cell {
+                let style = if header {
+                    span.style.add_modifier(Modifier::BOLD)
+                } else {
+                    span.style
+                };
+                spans.push(Span::styled(span.content.clone(), style));
+            }
+            // Skip trailing pad on the last column to avoid trailing whitespace
+            if right > 0 && i < widths.len() - 1 {
+                spans.push(Span::raw(" ".repeat(right)));
+            }
+        }
+        self.lines.push(Line::from(spans));
     }
 
     fn text(&mut self, t: &str) {
@@ -174,6 +283,10 @@ impl Renderer {
     }
 
     fn push_span(&mut self, span: Span<'static>) {
+        if let Some(t) = &mut self.table {
+            t.cur_cell.push(span);
+            return;
+        }
         if self.cur.is_empty() {
             self.apply_line_start();
         }
@@ -230,6 +343,10 @@ impl Renderer {
         }
         self.lines
     }
+}
+
+fn cell_width(cell: &[Span<'static>]) -> usize {
+    cell.iter().map(|s| s.content.chars().count()).sum()
 }
 
 fn heading_level(level: HeadingLevel) -> usize {
