@@ -145,7 +145,8 @@ Priority is your rollup of the sub-agent's user benefit, user pain addressed,
 fix ease, and fix risk for that issue. Use high, medium, or low according to
 your own judgement from the sub-agent results.
 
-Having presented the summary, get direction from the user using this statement:
+Having presented the summary, get direction from the user. If there is more than
+one issue to address, use this statement:
 
 > Would you like to start with a specific issue or should I present each in
 > order?
