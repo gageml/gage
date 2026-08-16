@@ -2111,7 +2111,6 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 }
                 TaskRow::Agent(t, a) => {
                     let (_, _, glyph) = agent_status(a, t, finished);
-                    let glyph = glyph.unwrap_or(spinner);
                     let id = short_id(&a.session_id);
                     let text = format!("    {glyph} {id}");
                     if is_selected {
@@ -2158,23 +2157,22 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .render(frame, area, table, count, state.focus == Focus::Tasks);
 }
 
-/// An agent row's status label, style, and glyph (None is the live
-/// spinner). A non-terminal agent after the scan is over can never
-/// finish — it renders canceled under a canceled task, error
-/// otherwise.
+/// An agent row's status label, style, and glyph. A non-terminal agent
+/// after the scan is over can never finish — it renders canceled under
+/// a canceled task, error otherwise.
 fn agent_status(
     agent: &AgentItem,
     parent: &TaskItem,
     finished: bool,
-) -> (&'static str, Style, Option<&'static str>) {
+) -> (&'static str, Style, &'static str) {
     match agent.state {
-        AgentState::Done => ("done", styles::RunStatus::completed(), Some("✓")),
-        AgentState::Error => ("error", styles::RunStatus::error(), Some("✗")),
-        AgentState::Running if !finished => ("running", styles::RunStatus::running(), None),
+        AgentState::Done => ("done", styles::RunStatus::completed(), "✓"),
+        AgentState::Error => ("error", styles::RunStatus::error(), "✗"),
+        AgentState::Running if !finished => ("running", styles::RunStatus::running(), "•"),
         AgentState::Running if parent.state == TaskState::Canceled => {
-            ("canceled", styles::RunStatus::skipped(), Some("⊘"))
+            ("canceled", styles::RunStatus::skipped(), "⊘")
         }
-        AgentState::Running => ("error", styles::RunStatus::error(), Some("✗")),
+        AgentState::Running => ("error", styles::RunStatus::error(), "✗"),
     }
 }
 
