@@ -206,6 +206,45 @@ async fn test_notes_split_valid() {
 }
 
 #[test]
+async fn test_files_valid_does_not_consume_files() {
+    // `files_valid` must only read its `files` argument; the caller
+    // iterates the same list afterward to build the agent prompt.
+    let files = [];
+    let (valid, validate) = gage::files_valid(
+        ("test-scanner", "task", "kind", 1),
+        "/no/such/project",
+        files,
+    )
+    .await
+    .unwrap();
+    assert_eq!(files.len(), 0);
+
+    // The digest round-trips through validate: unrecorded, then valid
+    assert_eq!(valid, false);
+    validate().await.unwrap();
+    let (valid, _validate) = gage::files_valid(
+        ("test-scanner", "task", "kind", 1),
+        "/no/such/project",
+        files,
+    )
+    .await
+    .unwrap();
+    assert_eq!(valid, true);
+}
+
+#[test]
+async fn test_carry_forward_does_not_consume_args() {
+    // `carry_forward_notes` must only read its `sessions` and `names`
+    // arguments; callers may reuse both lists after the call.
+    let sessions = ["55555555-5555-5555-5555-555555555555"];
+    let names = ["test.carry.keep"];
+    let n = gage::carry_forward_notes(sessions, names).await.unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(names.len(), 1);
+}
+
+#[test]
 async fn test_pending_issue_lifecycle() {
     gage::write_issue(
         #{
@@ -226,25 +265,26 @@ async fn test_pending_issue_lifecycle() {
     let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 0);
 
-    gage::promote_issue(#{ id: issue.id, message: "novel" })
+    gage::update_issue(issue.id, #{ status: "open", message: "novel" })
         .await
         .unwrap();
     let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 1);
 
-    gage::close_issue(#{ id: issue.id, reason: "duplicate", message: "dup of x" })
+    gage::update_issue(issue.id, #{ status: "closed", status_reason: "duplicate", message: "dup of x" })
         .await
         .unwrap();
     let closed = gage::global().issues().status("closed").name("test.pending").await.unwrap();
     assert_eq!(closed.len(), 1);
     assert_eq!(closed.get(0).unwrap().status_reason, Some("duplicate"));
 
-    gage::reopen_issue(#{ id: issue.id }).await.unwrap();
+    gage::update_issue(issue.id, #{ status: "open" }).await.unwrap();
     let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 1);
 
-    // Promote is pending-only; an open issue errors
-    assert!(gage::promote_issue(#{ id: issue.id }).await.is_err());
+    // Invalid status and missing status are errors
+    assert!(gage::update_issue(issue.id, #{ status: "bogus" }).await.is_err());
+    assert!(gage::update_issue(issue.id, #{}).await.is_err());
 }
 
 #[test]

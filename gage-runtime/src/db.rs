@@ -46,17 +46,8 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
         fetch_issues(q)
     })?;
 
-    m.function("promote_issue", |args: Object| async move {
-        do_promote_issue(args)
-    })
-    .build()?;
-    m.function(
-        "close_issue",
-        |args: Object| async move { do_close_issue(args) },
-    )
-    .build()?;
-    m.function("reopen_issue", |args: Object| async move {
-        do_reopen_issue(args)
+    m.function("update_issue", |id: String, args: Object| async move {
+        do_update_issue(id, args)
     })
     .build()?;
 
@@ -158,62 +149,25 @@ fn fetch_issues(q: IssuesQuery) -> super::Result<Vec<Issue>> {
     Ok(db_issues.into_iter().map(Issue::from).collect())
 }
 
-/// Promote a pending issue to open: `promote_issue(#{ id, message? })`.
-fn do_promote_issue(args: Object) -> super::Result<()> {
+/// Update an issue: `update_issue(id, #{ status, status_reason?, message? })`.
+/// `status` is `"open"`, `"closed"`, or `"pending"`. `status_reason`
+/// (`"completed"`, `"skipped"`, or `"duplicate"`) applies only when
+/// closing; a missing reason defaults to `"completed"`.
+fn do_update_issue(id: String, args: Object) -> super::Result<()> {
     let ctx = current_scan_ctx();
-    let id = required_string(&args, "id")?;
-    let message = optional_string(&args, "message")?;
-    let author = format!("scanner:{}", ctx.scanner_name);
-    let db = ctx.db.lock().unwrap();
-    issue::set_status(
-        &db,
-        &id,
-        IssueStatus::Open,
-        None,
-        &author,
-        message.as_deref(),
-    )
-    .map_err(|e| Error::Db(e.to_string()))
-}
-
-/// Close an issue: `close_issue(#{ id, reason, message? })` where
-/// `reason` is `"completed"`, `"skipped"`, or `"duplicate"`.
-fn do_close_issue(args: Object) -> super::Result<()> {
-    let ctx = current_scan_ctx();
-    let id = required_string(&args, "id")?;
-    let reason: StatusReason = required_string(&args, "reason")?
+    let status: IssueStatus = required_string(&args, "status")?
         .parse()
+        .map_err(Error::Args)?;
+    let reason = optional_string(&args, "status_reason")?
+        .map(|s| s.parse::<StatusReason>())
+        .transpose()
         .map_err(Error::Args)?;
     let message = optional_string(&args, "message")?;
     let author = format!("scanner:{}", ctx.scanner_name);
     let db = ctx.db.lock().unwrap();
-    issue::set_status(
-        &db,
-        &id,
-        IssueStatus::Closed,
-        Some(reason),
-        &author,
-        message.as_deref(),
-    )
-    .map_err(|e| Error::Db(e.to_string()))
-}
-
-/// Reopen a closed issue: `reopen_issue(#{ id, message? })`.
-fn do_reopen_issue(args: Object) -> super::Result<()> {
-    let ctx = current_scan_ctx();
-    let id = required_string(&args, "id")?;
-    let message = optional_string(&args, "message")?;
-    let author = format!("scanner:{}", ctx.scanner_name);
-    let db = ctx.db.lock().unwrap();
-    issue::set_status(
-        &db,
-        &id,
-        IssueStatus::Open,
-        None,
-        &author,
-        message.as_deref(),
-    )
-    .map_err(|e| Error::Db(e.to_string()))
+    let target = issue::get(&db, &id).map_err(|e| Error::Db(e.to_string()))?;
+    issue::set_status(&db, &target.id, status, reason, &author, message.as_deref())
+        .map_err(|e| Error::Db(e.to_string()))
 }
 
 #[derive(Any)]
