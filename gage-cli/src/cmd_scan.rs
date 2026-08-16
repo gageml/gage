@@ -677,7 +677,7 @@ fn load_scan_results(
                 value: crate::cmd_note::format_value_cell(&n.value),
                 value_full: crate::cmd_note::format_value(&n.value),
                 target: n.target.to_uri(),
-                target_cell: crate::cmd_note::shorten_target(&n.target),
+                target_cell: crate::cmd_note::target_label(&n.target),
                 author: n.author.clone(),
                 created: gage_core::datetime::ms_to_iso8601(n.created),
                 explanation: n.explanation.clone(),

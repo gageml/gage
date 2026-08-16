@@ -175,7 +175,7 @@ pub fn list(args: NoteListArgs) {
                 highlighter.short(&n.id),
                 n.name.clone(),
                 format_value_cell(&n.value),
-                shorten_target(&n.target),
+                target_label(&n.target),
                 crate::human::format_elapsed_ms(n.created),
             ]
         })
@@ -491,11 +491,11 @@ fn resolve_target(input: &str) -> Result<NoteTarget, String> {
 
 /// Glyph-prefixed short display form of a note target: ids reduced to
 /// their 8-char short form. Shared with the scan view's notes table.
-pub(crate) fn shorten_target(target: &NoteTarget) -> String {
+pub(crate) fn target_label(target: &NoteTarget) -> String {
     let (glyph, s) = match target {
         NoteTarget::Session(t) => ("▪", t.to_uri()),
         NoteTarget::Scan(t) => ("≡", short_uuid(&t.scan_id).to_string()),
-        NoteTarget::Project(t) => ("⊡", t.project_path.clone()),
+        NoteTarget::Project(t) => ("⊡", t.to_shortened_path()),
     };
     // Session uris open with a 36-char uuid, optionally followed by a
     // line ref; keep the short id plus the suffix

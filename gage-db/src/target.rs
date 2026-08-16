@@ -52,6 +52,28 @@ pub struct ProjectTarget {
     pub project_path: String,
 }
 
+impl ProjectTarget {
+    /// The project path with a leading `$HOME` replaced by `~`, for
+    /// display. Falls back to the full path when `HOME` is unset or
+    /// is not a prefix.
+    pub fn to_shortened_path(&self) -> String {
+        match std::env::var_os("HOME") {
+            Some(home) => shorten_home(&self.project_path, &home.to_string_lossy()),
+            None => self.project_path.clone(),
+        }
+    }
+}
+
+fn shorten_home(path: &str, home: &str) -> String {
+    if path == home {
+        "~".to_string()
+    } else if let Some(rest) = path.strip_prefix(home).and_then(|r| r.strip_prefix('/')) {
+        format!("~/{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub input: String,
@@ -241,6 +263,17 @@ mod tests {
         for t in cases {
             assert_eq!(NoteTarget::from_uri(&t.to_uri()).unwrap(), t);
         }
+    }
+
+    #[test]
+    fn shorten_home_substitutes_tilde() {
+        assert_eq!(shorten_home("/home/me/proj", "/home/me"), "~/proj");
+        assert_eq!(shorten_home("/home/me", "/home/me"), "~");
+        assert_eq!(shorten_home("/opt/proj", "/home/me"), "/opt/proj");
+        assert_eq!(
+            shorten_home("/home/melon/proj", "/home/me"),
+            "/home/melon/proj"
+        );
     }
 
     #[test]
