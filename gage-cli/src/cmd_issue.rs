@@ -4,6 +4,7 @@ use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
 use gage_db::issue::{self, Issue, IssueFilters, IssueStatus, IssueStatusFilter, StatusReason};
+use gage_db::scan;
 use gage_registry::scanner::ScannerRegistry;
 use gage_registry::scheme::{ErrorScheme, ScannerScheme};
 
@@ -188,18 +189,37 @@ pub fn list(args: IssueListArgs) {
         }
     });
 
-    let header: Vec<String> = ["Id", "Name", "Title", "Status", "Created"]
+    // Scan that wrote each issue; empty when the issue was written
+    // outside a scan (e.g. `gage issue add`).
+    let scan_ids: Vec<Option<String>> = issues
+        .iter()
+        .map(|t| match scan::scan_id_for_issue(&conn, &t.id) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        })
+        .collect();
+
+    let header: Vec<String> = ["Id", "Name", "Title", "Scan", "Status", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
 
     let rows: Vec<Vec<String>> = issues
         .iter()
-        .map(|t| {
+        .zip(&scan_ids)
+        .map(|(t, scan_id)| {
             vec![
                 highlighter.short(&t.id),
                 t.name.clone(),
                 t.title.clone(),
+                scan_id
+                    .as_deref()
+                    .map(short_uuid)
+                    .unwrap_or_default()
+                    .to_string(),
                 t.status.as_str().to_string(),
                 crate::human::format_elapsed_ms(t.created),
             ]
@@ -215,7 +235,7 @@ pub fn list(args: IssueListArgs) {
                 .priority(PriorityMax::left()),
         )
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::new(3..5).not(Rows::first()), style::dim())
+        .modify(Columns::new(3..6).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
 
