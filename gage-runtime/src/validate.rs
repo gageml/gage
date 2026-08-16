@@ -308,13 +308,16 @@ fn project_path(v: &Value) -> crate::Result<String> {
     })
 }
 
-/// Paths of a list of `Config` rows.
+/// Paths of a list of `Config` rows. Borrows the list — a take would
+/// gut the caller's value, which scanners reuse after the call.
 fn config_paths(v: &Value) -> crate::Result<Vec<PathBuf>> {
-    let items: RuneVec = rune::from_value(v.clone())
+    let items = v
+        .borrow_ref::<RuneVec>()
         .map_err(|e| Error::Args(format!("'files' must be a list of Config rows: {e}")))?;
     let mut out = Vec::with_capacity(items.len());
     for item in items.iter() {
-        let c = rune::from_value::<Ref<Config>>(item.clone())
+        let c = item
+            .borrow_ref::<Config>()
             .map_err(|e| Error::Args(format!("'files' entries must be Config rows: {e}")))?;
         out.push(c.path.clone());
     }
@@ -362,14 +365,18 @@ impl CarryForward {
 /// tasks as if written by this scan. Returns the number of notes
 /// linked.
 fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
-    let items: RuneVec = rune::from_value(q.sessions)
+    let items = q
+        .sessions
+        .borrow_ref::<RuneVec>()
         .map_err(|e| Error::Args(format!("'sessions' must be a list: {e}")))?;
     let mut session_ids = Vec::with_capacity(items.len());
     for item in items.iter() {
         session_ids.push(session_id(item)?);
     }
 
-    let items: RuneVec = rune::from_value(q.names)
+    let items = q
+        .names
+        .borrow_ref::<RuneVec>()
         .map_err(|e| Error::Args(format!("'names' must be a list: {e}")))?;
     let mut names = Vec::with_capacity(items.len());
     for item in items.iter() {
