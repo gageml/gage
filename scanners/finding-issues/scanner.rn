@@ -3,7 +3,7 @@ use gage::{call_agent, scan};
 
 pub const SCANNER = #{
     name: "finding-issues",
-    description: "Report systematic issues from session findings",
+    description: "Report issues from session findings",
     library: true,
     tasks: #{
         issues: #{

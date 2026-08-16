@@ -25,7 +25,7 @@ pub const SCANNER = #{
         findings: #{
             notes: #{
                 wants: ["project-summary.*"],
-                writes: #{ "finding.code": "Code quality finding in a session" },
+                writes: #{ "finding.code": include_str!("finding-code-doc.md") },
             },
         },
     },

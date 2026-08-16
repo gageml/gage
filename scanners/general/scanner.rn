@@ -15,7 +15,7 @@ pub const SCANNER = #{
     tasks: #{
         findings: #{
             notes: #{
-                writes: #{ "finding.general": "Noteworthy finding in a session" },
+                writes: #{ "finding.general": include_str!("finding-general-doc.md") },
             },
         },
     },
