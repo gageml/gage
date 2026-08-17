@@ -292,7 +292,7 @@ fn derive_range(path: &Path, recorded: u64, size: u64) -> crate::Result<Option<(
 
 /// A `Session` or a session id string.
 fn session_id(v: &Value) -> crate::Result<String> {
-    if let Ok(s) = rune::from_value::<Ref<Session>>(v.clone()) {
+    if let Ok(s) = v.borrow_ref::<Session>() {
         return Ok(s.id.clone());
     }
     v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
@@ -428,7 +428,7 @@ fn do_files_valid(q: FilesValid) -> crate::Result<(bool, Function)> {
 
 /// A `Project` or a project path string.
 fn project_path(v: &Value) -> crate::Result<String> {
-    if let Ok(p) = rune::from_value::<Ref<Project>>(v.clone()) {
+    if let Ok(p) = v.borrow_ref::<Project>() {
         return Ok(p.path.to_string_lossy().into_owned());
     }
     v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {

@@ -105,9 +105,9 @@ impl Query {
 fn parse_sessions(list: &rune::runtime::Vec) -> Result<Vec<SessionScope>, String> {
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
-        if let Ok(s) = rune::from_value::<crate::scan::Session>(item.clone()) {
+        if let Ok(s) = item.borrow_ref::<crate::scan::Session>() {
             out.push(SessionScope {
-                session_id: s.id,
+                session_id: s.id.clone(),
                 lines: s.range.map(|r| (r.start as i64, r.end as i64)),
             });
             continue;
@@ -225,8 +225,10 @@ fn parse_names(names: &Object) -> Result<BTreeMap<String, String>, String> {
     }
     let mut out = BTreeMap::new();
     for (name, doc) in names.iter() {
-        let doc: String = rune::from_value(doc.clone())
-            .map_err(|e| format!("NoteWrite names['{name}'] must be a doc string: {e}"))?;
+        let doc = doc
+            .borrow_string_ref()
+            .map_err(|e| format!("NoteWrite names['{name}'] must be a doc string: {e}"))?
+            .to_string();
         out.insert(name.to_string(), doc);
     }
     Ok(out)
@@ -316,5 +318,44 @@ pub(crate) fn apply_default_scan(tool: GageTool) -> GageTool {
             GageTool::NoteWrite(c)
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use gage_mcp::SessionScope;
+
+    use super::parse_sessions;
+    use crate::datetime::DateTime;
+    use crate::scan::{Range, Session};
+
+    // Regression: parse_sessions must borrow its entries, not take them.
+    // A take guts the cell shared with the script's variable, so a later
+    // read like `s.id` after `Query::new().sessions([s])` fails with
+    // "Cannot read, value has snapshot M-000000".
+    #[test]
+    fn parse_sessions_leaves_caller_values_readable() {
+        let session = Session {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            modified: DateTime::from_millis(0),
+            src: PathBuf::from("/tmp/session.jsonl"),
+            range: Some(Range { start: 3, end: 9 }),
+        };
+        let v = rune::to_value(session).unwrap();
+        let list = rune::runtime::Vec::try_from(vec![v.clone()]).unwrap();
+
+        let parsed = parse_sessions(&list).unwrap();
+        assert_eq!(
+            parsed,
+            vec![SessionScope {
+                session_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                lines: Some((3, 9)),
+            }]
+        );
+
+        let s = v.borrow_ref::<Session>().unwrap();
+        assert_eq!(s.id, "11111111-1111-1111-1111-111111111111");
     }
 }

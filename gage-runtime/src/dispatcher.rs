@@ -249,6 +249,11 @@ async fn run_one(
 /// type name as a string so the model still gets a non-empty
 /// success result.
 fn interpret_return(val: &rune::runtime::Value) -> Result<JsonValue, String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the tool function's return value; the dispatcher holds the \
+                  only live handle"
+    )]
     if let Ok(result) =
         rune::from_value::<Result<rune::runtime::Value, rune::runtime::Value>>(val.clone())
     {

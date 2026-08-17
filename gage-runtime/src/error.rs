@@ -6,7 +6,7 @@
 //! `::gage::Error::<Variant>`.
 
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Ref, Value, VmError};
+use rune::runtime::{Formatter, Value, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::db::{Issue, Note};
@@ -117,9 +117,9 @@ impl std::fmt::Debug for Error {
 /// Identity summary of the value carried by a `Duplicate` error. Tries
 /// `Issue`, then `Note`; falls back to the Rune type name.
 fn describe_duplicate(v: &Value) -> String {
-    if let Ok(issue) = rune::from_value::<Ref<Issue>>(v.clone()) {
+    if let Ok(issue) = v.borrow_ref::<Issue>() {
         format!("issue name={:?} id={:?}", issue.name, issue.id)
-    } else if let Ok(note) = rune::from_value::<Ref<Note>>(v.clone()) {
+    } else if let Ok(note) = v.borrow_ref::<Note>() {
         format!(
             "note name={:?} target={:?} id={:?}",
             note.name,

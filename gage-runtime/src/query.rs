@@ -381,7 +381,7 @@ impl Message {
         self.object
             .get_or_init(|| {
                 let raw_val = self.get("raw");
-                let raw_str: String = rune::from_value(raw_val).unwrap();
+                let raw_str = raw_val.borrow_string_ref().unwrap();
                 let val: serde_json::Value = serde_json::from_str(&raw_str).unwrap();
                 rune::to_value(super::value::json_to_object(&val)).unwrap()
             })
@@ -395,10 +395,12 @@ impl Message {
 
     #[rune::function]
     pub fn model(&self) -> Option<String> {
-        let object: Object = rune::from_value(self.object()).unwrap();
-        let message: Object = rune::from_value(object.get(&key("message"))?.clone()).unwrap();
-        let model = message.get(&key("model"))?.clone();
-        Some(rune::from_value(model).unwrap())
+        let object = self.object();
+        let object = object.borrow_ref::<Object>().unwrap();
+        let message = object.get(&key("message"))?.clone();
+        let message = message.borrow_ref::<Object>().unwrap();
+        let model = message.get(&key("model"))?;
+        Some(model.borrow_string_ref().unwrap().to_string())
     }
 
     #[rune::function]
@@ -559,7 +561,7 @@ impl Entry {
         self.object
             .get_or_init(|| {
                 let raw_val = self.get("raw");
-                let raw_str: String = rune::from_value(raw_val).unwrap();
+                let raw_str = raw_val.borrow_string_ref().unwrap();
                 let val: serde_json::Value = serde_json::from_str(&raw_str).unwrap();
                 rune::to_value(super::value::json_to_object(&val)).unwrap()
             })

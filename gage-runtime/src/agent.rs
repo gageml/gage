@@ -985,6 +985,11 @@ impl CallAgent {
 }
 
 fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the 'gage_tools' list from the caller's cell; callers pass \
+                  list literals today — candidate for borrow_ref conversion"
+    )]
     let items: rune::runtime::Vec = FromValue::from_value(v).map_err(|e| {
         Error::Agent(format!(
             "'gage_tools' must be a list of tool names or gage::tools values: {e}"
@@ -993,13 +998,13 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
     let mut out = Vec::with_capacity(items.len());
     let mut star = false;
     for item in items.iter() {
-        if let Ok(s) = String::from_value(item.clone()) {
-            if s == "*" {
+        if let Ok(s) = item.borrow_string_ref() {
+            if &*s == "*" {
                 star = true;
                 continue;
             }
             let tool = GageTool::from_name(&s)
-                .ok_or_else(|| Error::Agent(format!("'gage_tools': unknown tool '{s}'")))?;
+                .ok_or_else(|| Error::Agent(format!("'gage_tools': unknown tool '{}'", &*s)))?;
             out.push(crate::tools::apply_default_scan(tool));
             continue;
         }
@@ -1017,6 +1022,11 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
 }
 
 /// Downcast one `gage_tools` entry to a `gage::tools` builder value.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes each gage::tools builder out of the caller's list; scanners \
+              pass builder temporaries today — candidate for borrow_ref + clone"
+)]
 fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
     if let Ok(t) = rune::from_value::<crate::tools::Query>(item.clone()) {
         return GageTool::try_from(t).map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
@@ -1040,6 +1050,11 @@ fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
 }
 
 fn parse_custom_tools(v: Value) -> super::Result<Vec<CustomToolDef>> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the 'tools' object from the caller's cell; callers pass \
+                  literals today — candidate for borrow_ref conversion"
+    )]
     let obj: Object = FromValue::from_value(v).map_err(|e| {
         Error::Agent(format!(
             "'tools' must be an object keyed by function name: {e}"
@@ -1058,6 +1073,11 @@ fn parse_custom_tools(v: Value) -> super::Result<Vec<CustomToolDef>> {
 }
 
 fn parse_one_custom_tool(fn_name: String, decl: Value) -> super::Result<CustomToolDef> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the tool declaration object from the caller's cell; callers \
+                  pass literals today — candidate for borrow_ref conversion"
+    )]
     let obj: Object = FromValue::from_value(decl).map_err(|e| {
         Error::Agent(format!(
             "'tools.{fn_name}' must be an object {{ name, description, inputs }}: {e}"
@@ -1081,11 +1101,17 @@ fn pop_string(obj: &Object, key: &str, fn_name: &str) -> super::Result<String> {
     let v = obj
         .get(&rune::alloc::String::try_from(key).unwrap())
         .ok_or_else(|| Error::Agent(format!("'tools.{fn_name}.{key}' is required")))?;
-    String::from_value(v.clone())
+    v.borrow_string_ref()
+        .map(|s| s.to_string())
         .map_err(|e| Error::Agent(format!("'tools.{fn_name}.{key}' must be a string: {e}")))
 }
 
 fn parse_inputs(v: Value, fn_name: &str) -> super::Result<Vec<InputDecl>> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the 'inputs' object from the caller's cell; callers pass \
+                  literals today — candidate for borrow_ref conversion"
+    )]
     let obj: Object = FromValue::from_value(v).map_err(|e| {
         Error::Agent(format!(
             "'tools.{fn_name}.inputs' must be an object keyed by input name: {e}"
@@ -1103,6 +1129,11 @@ fn parse_inputs(v: Value, fn_name: &str) -> super::Result<Vec<InputDecl>> {
 }
 
 fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<InputDecl> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the input declaration object from the caller's cell; \
+                  callers pass literals today — candidate for borrow_ref conversion"
+    )]
     let obj: Object = FromValue::from_value(decl).map_err(|e| {
         Error::Agent(format!(
             "'tools.{fn_name}.inputs.{name}' must be an object \
@@ -1110,7 +1141,7 @@ fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<In
         ))
     })?;
     let type_str = match obj.get(&rune::alloc::String::try_from("type").unwrap()) {
-        Some(v) => String::from_value(v.clone()).map_err(|e| {
+        Some(v) => v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
             Error::Agent(format!(
                 "'tools.{fn_name}.inputs.{name}.type' must be a string: {e}"
             ))
@@ -1118,7 +1149,7 @@ fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<In
         None => "string".to_string(),
     };
     let required = match obj.get(&rune::alloc::String::try_from("required").unwrap()) {
-        Some(v) => bool::from_value(v.clone()).map_err(|e| {
+        Some(v) => v.as_bool().map_err(|e| {
             Error::Agent(format!(
                 "'tools.{fn_name}.inputs.{name}.required' must be a bool: {e}"
             ))
@@ -1126,7 +1157,7 @@ fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<In
         None => true,
     };
     let description = match obj.get(&rune::alloc::String::try_from("description").unwrap()) {
-        Some(v) => Some(String::from_value(v.clone()).map_err(|e| {
+        Some(v) => Some(v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
             Error::Agent(format!(
                 "'tools.{fn_name}.inputs.{name}.description' must be a string: {e}"
             ))
@@ -1552,6 +1583,11 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 }
 
 /// Downcast an agent-def return value to its `CallAgent` builder.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "consumes the agent-def's returned call_agent(..) builder; the def \
+              returns a fresh value by contract"
+)]
 fn call_from_value(v: rune::Value) -> Result<CallAgent, Error> {
     rune::from_value(v).map_err(|e| {
         Error::Agent(format!(

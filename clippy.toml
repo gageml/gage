@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "rune::runtime::from_value::from_value", reason = "for #[derive(Any)] types this is a take that guts the script's shared cell (use-after-move at the Rune boundary); use Value::borrow_ref and clone, or #[expect] with a reason naming why the take (or plain-type conversion) is safe here" },
+    { path = "rune::runtime::from_value::FromValue::from_value", reason = "for #[derive(Any)] types (including String, Vec, Object) this is a take that guts the script's shared cell; use Value::borrow_ref / borrow_string_ref, or #[expect] with a reason naming why the take (or inline-scalar read) is safe here" },
+    { path = "rune::runtime::value::Value::downcast", reason = "takes the value out of the script's shared cell; use Value::borrow_ref and clone, or #[expect] with a reason naming why the take is safe here" },
+]

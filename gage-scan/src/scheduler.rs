@@ -632,6 +632,11 @@ async fn dispatch_task(
                 Err(e) => return TaskResult::VmError(render_vm_err(&e, &sources)),
             };
             match execution.complete().await {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "takes the VM execution's return value; the scheduler \
+                              holds the only live handle"
+                )]
                 Ok(val) => match rune::from_value::<
                     Result<rune::runtime::Value, rune::runtime::Value>,
                 >(val)

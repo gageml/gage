@@ -70,19 +70,19 @@ struct SerValue<'a>(&'a Value);
 
 impl Serialize for SerValue<'_> {
     fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        if rune::from_value::<()>(self.0.clone()).is_ok() {
+        if self.0.into_unit().is_ok() {
             return ser.serialize_none();
         }
         if let Ok(s) = self.0.borrow_string_ref() {
             return ser.serialize_str(&s);
         }
-        if let Ok(i) = rune::from_value::<i64>(self.0.clone()) {
+        if let Ok(i) = self.0.as_integer::<i64>() {
             return ser.serialize_i64(i);
         }
-        if let Ok(f) = rune::from_value::<f64>(self.0.clone()) {
+        if let Ok(f) = self.0.as_float() {
             return ser.serialize_f64(f);
         }
-        if let Ok(b) = rune::from_value::<bool>(self.0.clone()) {
+        if let Ok(b) = self.0.as_bool() {
             return ser.serialize_bool(b);
         }
         if let Ok(msg) = self.0.borrow_ref::<Message>() {
@@ -91,18 +91,18 @@ impl Serialize for SerValue<'_> {
         if let Ok(entry) = self.0.borrow_ref::<Entry>() {
             return SerObject(&entry.inner).serialize(ser);
         }
-        if let Ok(vec) = rune::from_value::<Vec<Value>>(self.0.clone()) {
+        if let Ok(vec) = self.0.borrow_ref::<rune::runtime::Vec>() {
             let mut seq = ser.serialize_seq(Some(vec.len()))?;
-            for item in &vec {
+            for item in vec.iter() {
                 seq.serialize_element(&SerValue(item))?;
             }
             return seq.end();
         }
-        if let Ok(obj) = rune::from_value::<Object>(self.0.clone()) {
+        if let Ok(obj) = self.0.borrow_ref::<Object>() {
             return SerObject(&obj).serialize(ser);
         }
-        if let Ok(Some(inner)) = rune::from_value::<Option<Value>>(self.0.clone()) {
-            return SerValue(&inner).serialize(ser);
+        if let Ok(Some(inner)) = self.0.borrow_ref::<Option<Value>>().as_deref() {
+            return SerValue(inner).serialize(ser);
         }
         ser.serialize_none()
     }

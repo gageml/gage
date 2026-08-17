@@ -498,6 +498,11 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
                     failed = true;
                 }
                 Ok(value) => {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "takes the VM execution's return value; the runner \
+                                  holds the only live handle"
+                    )]
                     match rune::from_value::<Result<rune::runtime::Value, rune::runtime::Value>>(
                         value,
                     ) {

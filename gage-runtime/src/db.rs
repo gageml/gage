@@ -11,7 +11,7 @@ use gage_db::target::{NoteTarget, ProjectTarget, ScanTarget, SessionTarget};
 use rune::Any;
 use rune::alloc;
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, FromValue, Object, Protocol, Ref, Value, Vec as RuneVec, VmError};
+use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{ContextError, Module};
 use tracing::{error, warn};
 
@@ -818,6 +818,11 @@ fn has_changed_evidence(existing: &[DbIssueEvidence], incoming: &[EvidenceSpec])
 /// object `#{ note, name?, timestamp?, digest? }`: `name` defaults to the
 /// note's name, `timestamp` to `now`, `digest` to none.
 fn evidence_from_value(v: &Value, now: i64) -> super::Result<Vec<EvidenceSpec>> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the 'evidence' list from the caller's cell; callers pass \
+                  literals today — candidate for borrow_ref conversion"
+    )]
     let items: RuneVec = rune::from_value(v.clone())
         .map_err(|e| Error::Args(format!("'evidence' must be a list: {e}")))?;
     let mut out = Vec::new();
@@ -828,7 +833,7 @@ fn evidence_from_value(v: &Value, now: i64) -> super::Result<Vec<EvidenceSpec>> 
 }
 
 fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpec> {
-    if let Ok(note) = rune::from_value::<Ref<Note>>(item.clone()) {
+    if let Ok(note) = item.borrow_ref::<Note>() {
         return Ok(EvidenceSpec {
             note_id: note.id.clone(),
             name: note.name.clone(),
@@ -837,6 +842,11 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
             session_id: note.target_session(),
         });
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the evidence entry object from the caller's cell; callers \
+                  pass literals today — candidate for borrow_ref conversion"
+    )]
     let obj: Object = rune::from_value(item.clone()).map_err(|e| {
         Error::Args(format!(
             "'evidence' entries must be a Note or #{{note, name, timestamp, digest}}: {e}"
@@ -845,7 +855,8 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
     let note_val = obj
         .get("note")
         .ok_or_else(|| Error::Args("evidence entry requires 'note'".into()))?;
-    let note: Ref<Note> = rune::from_value(note_val.clone())
+    let note = note_val
+        .borrow_ref::<Note>()
         .map_err(|e| Error::Args(format!("evidence 'note' must be a Note value: {e}")))?;
     Ok(EvidenceSpec {
         note_id: note.id.clone(),
@@ -867,6 +878,11 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
 /// fields we don't recognize, are errors. The target field is required
 /// at the call site; this function rejects empty / unspecified objects.
 fn target_from_value(v: &Value) -> super::Result<NoteTarget> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the 'target' object from the caller's cell; callers pass \
+                  literals today — candidate for borrow_ref conversion"
+    )]
     let obj: Object = rune::from_value(v.clone())
         .map_err(|e| Error::Args(format!("target must be an object: {e}")))?;
 
@@ -959,6 +975,11 @@ fn optional_string_array(obj: &Object, key: &str) -> super::Result<Vec<String>> 
     let Some(v) = obj.get(key) else {
         return Ok(Vec::new());
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the field's list from the caller's cell; callers pass \
+                  literals today — candidate for borrow_ref conversion"
+    )]
     let items: RuneVec = rune::from_value(v.clone())
         .map_err(|e| Error::Args(format!("field '{key}' must be a list: {e}")))?;
     let mut out = Vec::with_capacity(items.len());
@@ -974,7 +995,8 @@ fn optional_string_array(obj: &Object, key: &str) -> super::Result<Vec<String>> 
 fn optional_bool(obj: &Object, key: &str) -> super::Result<Option<bool>> {
     match obj.get(key) {
         None => Ok(None),
-        Some(v) => bool::from_value(v.clone())
+        Some(v) => v
+            .as_bool()
             .map(Some)
             .map_err(|e| Error::Args(format!("field '{key}' must be a bool: {e}"))),
     }
@@ -983,7 +1005,8 @@ fn optional_bool(obj: &Object, key: &str) -> super::Result<Option<bool>> {
 fn optional_i64(obj: &Object, key: &str) -> super::Result<Option<i64>> {
     match obj.get(key) {
         None => Ok(None),
-        Some(v) => i64::from_value(v.clone())
+        Some(v) => v
+            .as_integer::<i64>()
             .map(Some)
             .map_err(|e| Error::Args(format!("field '{key}' must be an integer: {e}"))),
     }
@@ -993,7 +1016,8 @@ fn optional_u32(obj: &Object, key: &str) -> super::Result<Option<u32>> {
     match obj.get(key) {
         None => Ok(None),
         Some(v) => {
-            let i = i64::from_value(v.clone())
+            let i = v
+                .as_integer::<i64>()
                 .map_err(|e| Error::Args(format!("field '{key}' must be an integer: {e}")))?;
             u32::try_from(i).map(Some).map_err(|e| {
                 Error::Args(format!(

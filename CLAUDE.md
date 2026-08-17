@@ -136,6 +136,30 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - Display strings explicitly intended for human output (e.g. a `~`-substituted
     config path)
 
+- **Rune boundary: borrow, don't take.** At the Rust/Rune boundary,
+  `rune::from_value::<T>()`, `FromValue::from_value`, and `Value::downcast` are
+  _takes_ when `T` is an `Any` type - and in Rune that includes `String`, `Vec`,
+  and `Object`, not just `#[derive(Any)]` externals. A take moves the contents
+  out of the value's storage cell. Cloning the `Value` first does not help: a
+  clone is a second handle to the same cell. If the script still holds a
+  variable referring to that cell, its next read fails at runtime with "Cannot
+  read, value has snapshot M-000000 and is not available for reading" - Rune's
+  use-after-move.
+
+  - Registered functions take `Ref<T>` / `Mut<T>` parameters (or `&Value`),
+    never an `Any` type by value, and never accept a container whose elements
+    they will downcast.
+  - Read through `Value::borrow_ref::<T>()` / `borrow_string_ref()` and clone
+    what you need. Scalars (bool/int/float/char) are stored inline, not in a
+    cell: use `as_bool()`, `as_integer::<T>()`, `as_float()`.
+  - `clippy.toml` disallows the take-shaped methods. A deliberate take needs
+    `#[expect(clippy::disallowed_methods, reason = "...")]` where the reason
+    names why the take is safe - e.g. the function holds the only live handle,
+    as with a VM execution's return value.
+  - A Rust function newly exposed to Rune that accepts values gets a test
+    asserting the caller's value is still readable afterwards (see
+    `parse_sessions_leaves_caller_values_readable` in gage-runtime).
+
 - When writing clap command or arg text:
   - Look for and follow existing conventions --- this is a user interface and
     should be consistent throughout the CLI

@@ -176,6 +176,11 @@ pub async fn run_tests(
                     TestOutcome::Fail(report)
                 }
                 Ok(value) => {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "takes the VM execution's return value; the test \
+                                  runner holds the only live handle"
+                    )]
                     if let Ok(Err(err)) = rune::from_value::<
                         Result<rune::runtime::Value, rune::runtime::Value>,
                     >(value)

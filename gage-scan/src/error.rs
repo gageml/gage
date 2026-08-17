@@ -7,10 +7,10 @@
 // typed Error and use its Rust `Debug` instead — that is plain Rust
 // formatting, not the Rune protocol, so it is safe post-VM.
 pub(crate) fn render_task_error(err: rune::runtime::Value) -> String {
-    if let Ok(e) = rune::from_value::<gage_runtime::error::Error>(err.clone()) {
-        format!("{e:?}")
-    } else if let Ok(s) = rune::from_value::<String>(err.clone()) {
-        s
+    if let Ok(e) = err.borrow_ref::<gage_runtime::error::Error>() {
+        format!("{:?}", *e)
+    } else if let Ok(s) = err.borrow_string_ref() {
+        s.to_string()
     } else {
         format!(
             "task returned a non-error value of type `{}`",
