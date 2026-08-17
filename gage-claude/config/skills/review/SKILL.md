@@ -14,6 +14,22 @@ Your task is to help the user process Gage issues. There are two phases:
 
 Run phase 1 to completion before starting phase 2.
 
+## Scoped invocation
+
+Arguments to this skill, when present, are issue IDs that restrict scope:
+
+- Phase 1 resolves only the pending issues among them.
+- Phase 2 reviews only the open issues among them.
+- An ID matching neither a pending nor an open issue is reported to the user and
+  otherwise ignored.
+
+Scope restricts which issues are processed, not which issues they are compared
+against. Related-issue queries in phase 1 always draw from the full issue set
+--- a scoped pending issue can duplicate an issue outside the scope, and must
+close against it.
+
+With no arguments, all pending and open issues are in scope.
+
 ## Phase 1: Pending issue resolution
 
 **Background**

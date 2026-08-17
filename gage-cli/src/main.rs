@@ -32,6 +32,7 @@ mod cmd_init;
 mod cmd_issue;
 mod cmd_note;
 mod cmd_query;
+mod cmd_review;
 mod cmd_scan;
 mod cmd_session;
 mod cmd_sync;
@@ -88,6 +89,12 @@ enum Command {
 
     /// Run scanners on sessions
     Scan(cmd_scan::ScanArgs),
+
+    /// Review issues in a Claude Code session
+    ///
+    /// Starts an interactive session that resolves pending issues,
+    /// then walks through open issues as directed.
+    Review(cmd_review::ReviewArgs),
 
     /// Run a scanner agent
     Agent(cmd_agent::AgentArgs),
@@ -245,6 +252,7 @@ async fn main() {
             },
             Command::Test(args) => cmd_test::run(args).await,
             Command::Scan(args) => cmd_scan::run(args).await,
+            Command::Review(args) => cmd_review::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
                 McpCommand::Stdio => {
                     if let Err(e) = gage_mcp::serve_stdio().await {
