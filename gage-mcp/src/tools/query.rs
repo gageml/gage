@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::time::Instant;
 
 use gage_query::slow_log;
-use gage_query::write_yaml;
+use gage_query::write_yaml_capped;
 use rmcp::{
     ErrorData as McpError,
     handler::server::router::tool::ToolRoute,
@@ -23,12 +23,15 @@ const _: () = assert!(
     "QueryGage description exceeds Claude Code's 2048-byte cap",
 );
 
-/// Maximum serialized byte size for a `query` result. Above this we
-/// return a structured size-cap error with remediation hints so the
-/// model can narrow the query before the harness-level truncation
-/// fires. Sized to stay comfortably under Claude Code's ~25k-token
-/// tool-result cap (≈100 KB of JSON).
-const RESULT_CAP_BYTES: usize = 60_000;
+/// Maximum serialized byte size for one `query` result page. A result
+/// over this is returned as a truncated first page with continuation
+/// instructions, keeping paging in SQL where the model can act on it.
+/// Claude Code persists any tool result over 50,000 characters to a
+/// file the model sees only a 2KB preview of (v2.1.51+), so pages must
+/// stay under that; 45,000 bytes leaves margin for the truncation
+/// banner and threshold drift (a UTF-8 byte count never undercounts
+/// characters).
+const PAGE_CAP_BYTES: usize = 45_000;
 
 fn route() -> ToolRoute<GageServer> {
     ToolRoute::new_dyn(
@@ -76,27 +79,35 @@ fn handle(
             return Ok(success("0 rows"));
         }
         let mut buf: Vec<u8> = b"```yaml\n".to_vec();
-        if let Err(e) = write_yaml(&mut buf, &batches) {
-            return Ok(domain_error(format!("YAML serialization error: {e}")));
-        }
+        let rows_written = match write_yaml_capped(&mut buf, &batches, PAGE_CAP_BYTES) {
+            Ok(n) => n,
+            Err(e) => return Ok(domain_error(format!("YAML serialization error: {e}"))),
+        };
         buf.extend_from_slice(b"\n```\n");
-        if buf.len() > RESULT_CAP_BYTES {
+        let yaml = String::from_utf8(buf)
+            .map_err(|e| McpError::internal_error(format!("UTF-8 error: {e}"), None))?;
+        if rows_written == row_count {
+            return Ok(success(yaml));
+        }
+        if rows_written == 0 {
             let msg = json!({
-                "error": "result exceeds size cap",
-                "bytes": buf.len(),
-                "cap_bytes": RESULT_CAP_BYTES,
-                "rows": row_count,
-                "suggestion": "Re-run with a smaller LIMIT, paginate with `line > N`, \
-                               SELECT substr(text, 1, 800) or substr(raw, 1, 800) \
+                "error": "single row exceeds page cap",
+                "cap_bytes": PAGE_CAP_BYTES,
+                "suggestion": "SELECT substr(text, 1, 800) or substr(raw, 1, 800) \
                                instead of the full column, or omit wide columns \
                                (text, raw) entirely.",
             })
             .to_string();
             return Ok(domain_error(msg));
         }
-        let text = String::from_utf8(buf)
-            .map_err(|e| McpError::internal_error(format!("UTF-8 error: {e}"), None))?;
-        Ok(success(text))
+        Ok(success(format!(
+            "TRUNCATED: showing rows 1-{rows_written} of {row_count} \
+             (page cap {PAGE_CAP_BYTES} bytes)\n{yaml}\
+             To continue, re-run the query with `OFFSET {rows_written}` appended \
+             (stable only under a deterministic ORDER BY), or preferably use a \
+             keyset predicate on the ordered column (e.g. `AND line > <last line \
+             shown>`)."
+        )))
     })
 }
 

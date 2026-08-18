@@ -112,6 +112,31 @@ pub fn write_yaml<W: Write>(w: &mut W, batches: &[RecordBatch]) -> Result<()> {
     Ok(())
 }
 
+/// Like `write_yaml`, but stops before `buf` would grow past
+/// `cap_bytes`. Rows are always emitted whole: a row that would push
+/// `buf` over the cap is rolled back and serialization stops there.
+/// Returns the number of rows written, which is zero when the first
+/// row alone exceeds the cap.
+pub fn write_yaml_capped(
+    buf: &mut Vec<u8>,
+    batches: &[RecordBatch],
+    cap_bytes: usize,
+) -> Result<usize> {
+    let mut rows_written = 0;
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            let mark = buf.len();
+            write_yaml_batch(buf, &batch.slice(row, 1), rows_written == 0)?;
+            if buf.len() > cap_bytes {
+                buf.truncate(mark);
+                return Ok(rows_written);
+            }
+            rows_written += 1;
+        }
+    }
+    Ok(rows_written)
+}
+
 /// Emit one batch in the format described by `write_yaml`. The first
 /// row of the run gets no leading separator; every subsequent row
 /// (including the first row of a non-first batch) is preceded by `---`.
@@ -251,4 +276,78 @@ fn u64_value(n: u64) -> serde_yaml::Value {
 
 fn f64_value(n: f64) -> serde_yaml::Value {
     serde_yaml::Value::Number(serde_yaml::Number::from(n))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    use super::*;
+
+    fn batch(rows: &[(i64, &str)]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("line", DataType::Int64, false),
+            Field::new("text", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn capped_writes_all_rows_under_cap() {
+        let b = batch(&[(1, "a"), (2, "b")]);
+        let mut capped = Vec::new();
+        let rows = write_yaml_capped(&mut capped, &[b.clone()], 10_000).unwrap();
+        assert_eq!(rows, 2);
+        let mut full = Vec::new();
+        write_yaml(&mut full, &[b]).unwrap();
+        assert_eq!(capped, full);
+    }
+
+    #[test]
+    fn capped_stops_at_row_boundary() {
+        let b = batch(&[(1, "aaaa"), (2, "bbbb"), (3, "cccc")]);
+        let mut one_row = Vec::new();
+        write_yaml(&mut one_row, &[b.slice(0, 1)]).unwrap();
+        // Cap fits the first row but not the second.
+        let cap = one_row.len() + 4;
+        let mut buf = Vec::new();
+        let rows = write_yaml_capped(&mut buf, &[b], cap).unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(buf, one_row);
+    }
+
+    #[test]
+    fn capped_returns_zero_when_first_row_exceeds_cap() {
+        let b = batch(&[(1, "a long value that cannot fit")]);
+        let mut buf = b"prefix".to_vec();
+        let rows = write_yaml_capped(&mut buf, &[b], 10).unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(buf, b"prefix");
+    }
+
+    #[test]
+    fn capped_spans_batches() {
+        let b1 = batch(&[(1, "a")]);
+        let b2 = batch(&[(2, "b")]);
+        let mut capped = Vec::new();
+        let rows = write_yaml_capped(&mut capped, &[b1.clone(), b2.clone()], 10_000).unwrap();
+        assert_eq!(rows, 2);
+        let mut full = Vec::new();
+        write_yaml(&mut full, &[b1, b2]).unwrap();
+        assert_eq!(capped, full);
+    }
 }

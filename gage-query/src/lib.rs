@@ -14,6 +14,6 @@ pub use context::{
     AgentScope, create_agent_context, create_agent_context_scoped, create_context,
     create_context_default, default_index_store, install_udfs,
 };
-pub use print_format::{PrintFormat, write_yaml};
+pub use print_format::{PrintFormat, write_yaml, write_yaml_capped};
 pub use repl::{exec_command, run_repl};
 pub use scan_context::ScanSessionContext;
