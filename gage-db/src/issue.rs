@@ -806,8 +806,8 @@ pub fn related_notes(conn: &Connection, issue_id: &str) -> Result<Vec<Note>, Iss
                       n.name, n.value, n.metadata,
                       (SELECT sn.scan_id FROM scan_note sn
                        JOIN scan s ON s.id = sn.scan_id
-                       WHERE sn.note_id = n.id
-                       ORDER BY s.created LIMIT 1)
+                       WHERE sn.note_id = n.id AND sn.role = 'wrote'
+                       ORDER BY s.created DESC LIMIT 1)
                FROM issue_evidence ie
                JOIN note n ON ie.note_id = n.id
                WHERE ie.issue_id = ?1

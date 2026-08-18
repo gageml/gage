@@ -367,12 +367,38 @@ pub fn insert_scan_session(
     Ok(())
 }
 
-/// Record that `note_id` was written during `scan_id`. A repeat write of
-/// the same note in the same scan is a no-op.
-pub fn insert_scan_note(conn: &Connection, scan_id: &str, note_id: &str) -> Result<(), ScanError> {
+/// How a scan is linked to a note: the scan wrote the note's value, or
+/// it carried a prior note forward into its visible set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanNoteRole {
+    Wrote,
+    Carried,
+}
+
+impl ScanNoteRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScanNoteRole::Wrote => "wrote",
+            ScanNoteRole::Carried => "carried",
+        }
+    }
+}
+
+/// Record that `note_id` was written during (or carried forward into)
+/// `scan_id`. A repeat link in the same scan is a no-op, except that a
+/// `Wrote` link upgrades an existing `Carried` link — a write always
+/// wins attribution, and a carry never downgrades it.
+pub fn insert_scan_note(
+    conn: &Connection,
+    scan_id: &str,
+    note_id: &str,
+    role: ScanNoteRole,
+) -> Result<(), ScanError> {
     conn.execute(
-        "INSERT OR IGNORE INTO scan_note (scan_id, note_id) VALUES (?1, ?2)",
-        params![scan_id, note_id],
+        "INSERT INTO scan_note (scan_id, note_id, role) VALUES (?1, ?2, ?3)
+         ON CONFLICT (scan_id, note_id) DO UPDATE SET role = excluded.role
+         WHERE excluded.role = 'wrote'",
+        params![scan_id, note_id, role.as_str()],
     )?;
     Ok(())
 }
@@ -699,6 +725,47 @@ mod tests {
         let scans = all(&conn).unwrap();
         assert_eq!(scans.len(), 1);
         assert_eq!(scans[0].id, "scan-001");
+    }
+
+    #[test]
+    fn scan_attribution_follows_latest_writer() {
+        let conn = open_db_in_memory().unwrap();
+        for (id, created) in [("scan-a", 1000), ("scan-b", 2000), ("scan-c", 3000)] {
+            let scan = Scan {
+                id: id.to_string(),
+                created,
+                metadata: None,
+            };
+            insert_scan(&conn, &scan).unwrap();
+        }
+        let target = NoteTarget::Session(SessionTarget {
+            session_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            line: None,
+            line_end: None,
+        });
+        let note = Note::new(
+            target,
+            "finding",
+            NoteValue(serde_json::Value::from("v")),
+            "scanner:test",
+        );
+        note::insert(&conn, &note).unwrap();
+        let scan_of = |note_id: &str| note::get(&conn, note_id).unwrap().scan;
+
+        insert_scan_note(&conn, "scan-a", &note.id, ScanNoteRole::Wrote).unwrap();
+        assert_eq!(scan_of(&note.id), Some("scan-a".to_string()));
+
+        // A later scan replaces the value: attribution moves to it
+        insert_scan_note(&conn, "scan-b", &note.id, ScanNoteRole::Wrote).unwrap();
+        assert_eq!(scan_of(&note.id), Some("scan-b".to_string()));
+
+        // A carried-forward link does not steal attribution
+        insert_scan_note(&conn, "scan-c", &note.id, ScanNoteRole::Carried).unwrap();
+        assert_eq!(scan_of(&note.id), Some("scan-b".to_string()));
+
+        // A write in the same scan upgrades its carried link
+        insert_scan_note(&conn, "scan-c", &note.id, ScanNoteRole::Wrote).unwrap();
+        assert_eq!(scan_of(&note.id), Some("scan-c".to_string()));
     }
 
     #[test]

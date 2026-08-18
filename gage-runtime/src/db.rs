@@ -6,7 +6,7 @@ use gage_db::issue::{
     IssueStatus, IssueStatusFilter, StatusReason,
 };
 use gage_db::note::{self, Note as DbNote, NoteError, NoteFilters, NoteValue};
-use gage_db::scan::{insert_scan_issue, insert_scan_note};
+use gage_db::scan::{ScanNoteRole, insert_scan_issue, insert_scan_note};
 use gage_db::target::{NoteTarget, ProjectTarget, ScanTarget, SessionTarget};
 use rune::Any;
 use rune::alloc;
@@ -441,7 +441,7 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
     let db = ctx.db.lock().unwrap();
     match note::insert(&db, &db_note) {
         Ok(()) => {
-            insert_scan_note(&db, &ctx.run.scan_id, &db_note.id)
+            insert_scan_note(&db, &ctx.run.scan_id, &db_note.id, ScanNoteRole::Wrote)
                 .map_err(|e| Error::Db(e.to_string()))?;
             Ok(db_note.into())
         }
@@ -449,7 +449,7 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
             DuplicatePolicy::Replace => {
                 let updated =
                     note::replace(&db, &prev.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
-                insert_scan_note(&db, &ctx.run.scan_id, &updated.id)
+                insert_scan_note(&db, &ctx.run.scan_id, &updated.id, ScanNoteRole::Wrote)
                     .map_err(|e| Error::Db(e.to_string()))?;
                 Ok(updated.into())
             }
@@ -497,7 +497,8 @@ fn do_replace_note(note: Note) -> super::Result<Note> {
     };
     let db = ctx.db.lock().unwrap();
     let updated = note::replace(&db, &note.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
-    insert_scan_note(&db, &ctx.run.scan_id, &updated.id).map_err(|e| Error::Db(e.to_string()))?;
+    insert_scan_note(&db, &ctx.run.scan_id, &updated.id, ScanNoteRole::Wrote)
+        .map_err(|e| Error::Db(e.to_string()))?;
     Ok(updated.into())
 }
 

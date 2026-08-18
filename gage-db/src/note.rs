@@ -91,11 +91,11 @@ pub struct Note {
     pub name: String,
     pub value: NoteValue,
     pub metadata: Option<String>,
-    /// Scan that first wrote the note; `None` when the note was written
-    /// outside a scan (e.g. `gage note add`). Later scans also link a
-    /// note they replace or carry forward, so the earliest linked scan
-    /// is the creator. Derived from `scan_note` on read; not written by
-    /// [`insert`].
+    /// Scan that wrote the note's current value — the latest scan
+    /// linked with role `wrote` (a replace relinks the replacing scan);
+    /// carried-forward links don't affect attribution. `None` when the
+    /// note was written outside a scan (e.g. `gage note add`). Derived
+    /// from `scan_note` on read; not written by [`insert`].
     pub scan: Option<String>,
 }
 
@@ -356,8 +356,8 @@ const NOTE_SELECT: &str = "SELECT n.id, n.created, n.modified, n.author, n.targe
             n.name, n.value, n.metadata,
             (SELECT sn.scan_id FROM scan_note sn
              JOIN scan s ON s.id = sn.scan_id
-             WHERE sn.note_id = n.id
-             ORDER BY s.created LIMIT 1)
+             WHERE sn.note_id = n.id AND sn.role = 'wrote'
+             ORDER BY s.created DESC LIMIT 1)
      FROM note n";
 
 /// Every note id, unordered. Peer set for prefix-disambiguated

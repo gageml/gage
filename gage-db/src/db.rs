@@ -254,6 +254,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE scan_note (
             scan_id TEXT NOT NULL REFERENCES scan(id),
             note_id TEXT NOT NULL REFERENCES note(id),
+            role TEXT NOT NULL CHECK (role IN ('wrote', 'carried')),
             PRIMARY KEY (scan_id, note_id)
         );
         CREATE INDEX idx_scan_note_note_id ON scan_note(note_id);

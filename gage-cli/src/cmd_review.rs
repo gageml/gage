@@ -51,8 +51,11 @@ pub fn run(args: ReviewArgs) {
         prompt.push_str(id);
     }
 
+    let session_id = uuid::Uuid::new_v4().to_string();
     let mut cmd = std::process::Command::new(&claude_bin);
-    cmd.arg("-n").arg("Review Gage issues");
+    cmd.arg("--session-id").arg(&session_id);
+    cmd.arg("-n")
+        .arg(format!("Review Gage issues {}", &session_id[..8]));
     if let Some(model) = &args.model {
         cmd.arg("--model").arg(model);
     }
