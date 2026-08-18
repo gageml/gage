@@ -10,6 +10,7 @@ use gage_db::scan::{insert_scan_issue, insert_scan_note};
 use gage_db::target::{NoteTarget, ProjectTarget, ScanTarget, SessionTarget};
 use rune::Any;
 use rune::alloc;
+use rune::alloc::clone::TryClone;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{ContextError, Module};
@@ -20,8 +21,10 @@ use crate::scan::{Scan, Session};
 use crate::state::current_scan_ctx;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function("write_note", |n: Object| NoteInsert::new(n))
-        .build()?;
+    m.function("write_note", |n: &Object| -> alloc::Result<NoteInsert> {
+        Ok(NoteInsert::new(n.try_clone()?))
+    })
+    .build()?;
     m.function_meta(NoteInsert::replace_prev)?;
     m.function_meta(NoteInsert::keep_prev)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NoteInsert| async move {
@@ -29,8 +32,10 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     })?;
     m.associated_function("replace", |note: Note| async move { do_replace_note(note) })?;
 
-    m.function("write_issue", |t: Object| IssueInsert::new(t))
-        .build()?;
+    m.function("write_issue", |t: &Object| -> alloc::Result<IssueInsert> {
+        Ok(IssueInsert::new(t.try_clone()?))
+    })
+    .build()?;
     m.function_meta(IssueInsert::keep_status)?;
     m.function_meta(IssueInsert::open_on_new_evidence)?;
     m.function_meta(IssueInsert::open_on_changed_evidence)?;
@@ -46,9 +51,10 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
         fetch_issues(q)
     })?;
 
-    m.function("update_issue", |id: String, args: Object| async move {
-        do_update_issue(id, args)
-    })
+    m.function(
+        "update_issue",
+        |id: Ref<str>, args: Ref<Object>| async move { do_update_issue(&id, &args) },
+    )
     .build()?;
 
     m.function_meta(session_notes)?;
@@ -153,19 +159,19 @@ fn fetch_issues(q: IssuesQuery) -> super::Result<Vec<Issue>> {
 /// `status` is `"open"`, `"closed"`, or `"pending"`. `status_reason`
 /// (`"completed"`, `"skipped"`, or `"duplicate"`) applies only when
 /// closing; a missing reason defaults to `"completed"`.
-fn do_update_issue(id: String, args: Object) -> super::Result<()> {
+fn do_update_issue(id: &str, args: &Object) -> super::Result<()> {
     let ctx = current_scan_ctx();
-    let status: IssueStatus = required_string(&args, "status")?
+    let status: IssueStatus = required_string(args, "status")?
         .parse()
         .map_err(Error::Args)?;
-    let reason = optional_string(&args, "status_reason")?
+    let reason = optional_string(args, "status_reason")?
         .map(|s| s.parse::<StatusReason>())
         .transpose()
         .map_err(Error::Args)?;
-    let message = optional_string(&args, "message")?;
+    let message = optional_string(args, "message")?;
     let author = format!("scanner:{}", ctx.scanner_name);
     let db = ctx.db.lock().unwrap();
-    let target = issue::get(&db, &id).map_err(|e| Error::Db(e.to_string()))?;
+    let target = issue::get(&db, id).map_err(|e| Error::Db(e.to_string()))?;
     issue::set_status(&db, &target.id, status, reason, &author, message.as_deref())
         .map_err(|e| Error::Db(e.to_string()))
 }
@@ -810,12 +816,8 @@ fn has_changed_evidence(existing: &[DbIssueEvidence], incoming: &[EvidenceSpec])
 /// object `#{ note, name?, timestamp?, digest? }`: `name` defaults to the
 /// note's name, `timestamp` to `now`, `digest` to none.
 fn evidence_from_value(v: &Value, now: i64) -> super::Result<Vec<EvidenceSpec>> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the 'evidence' list from the caller's cell; callers pass \
-                  literals today — candidate for borrow_ref conversion"
-    )]
-    let items: RuneVec = rune::from_value(v.clone())
+    let items = v
+        .borrow_ref::<RuneVec>()
         .map_err(|e| Error::Args(format!("'evidence' must be a list: {e}")))?;
     let mut out = Vec::new();
     for item in items.iter() {
@@ -834,16 +836,12 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
             session_id: note.target_session(),
         });
     }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the evidence entry object from the caller's cell; callers \
-                  pass literals today — candidate for borrow_ref conversion"
-    )]
-    let obj: Object = rune::from_value(item.clone()).map_err(|e| {
+    let obj_ref = item.borrow_ref::<Object>().map_err(|e| {
         Error::Args(format!(
             "'evidence' entries must be a Note or #{{note, name, timestamp, digest}}: {e}"
         ))
     })?;
+    let obj = &*obj_ref;
     let note_val = obj
         .get("note")
         .ok_or_else(|| Error::Args("evidence entry requires 'note'".into()))?;
@@ -852,9 +850,9 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
         .map_err(|e| Error::Args(format!("evidence 'note' must be a Note value: {e}")))?;
     Ok(EvidenceSpec {
         note_id: note.id.clone(),
-        name: optional_string(&obj, "name")?.unwrap_or_else(|| note.name.clone()),
-        timestamp: optional_i64(&obj, "timestamp")?.unwrap_or(now),
-        digest: optional_string(&obj, "digest")?,
+        name: optional_string(obj, "name")?.unwrap_or_else(|| note.name.clone()),
+        timestamp: optional_i64(obj, "timestamp")?.unwrap_or(now),
+        digest: optional_string(obj, "digest")?,
         session_id: note.target_session(),
     })
 }
@@ -870,13 +868,10 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
 /// fields we don't recognize, are errors. The target field is required
 /// at the call site; this function rejects empty / unspecified objects.
 fn target_from_value(v: &Value) -> super::Result<NoteTarget> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the 'target' object from the caller's cell; callers pass \
-                  literals today — candidate for borrow_ref conversion"
-    )]
-    let obj: Object = rune::from_value(v.clone())
+    let obj_ref = v
+        .borrow_ref::<Object>()
         .map_err(|e| Error::Args(format!("target must be an object: {e}")))?;
+    let obj = &*obj_ref;
 
     let present = |key: &str| obj.get(key).is_some();
     let session_group = present("session") || present("line") || present("line_end");
@@ -895,21 +890,21 @@ fn target_from_value(v: &Value) -> super::Result<NoteTarget> {
 
     if scan_group {
         return Ok(NoteTarget::Scan(ScanTarget {
-            scan_id: required_string(&obj, "scan")?,
+            scan_id: required_string(obj, "scan")?,
         }));
     }
     if project_group {
         return Ok(NoteTarget::Project(ProjectTarget {
-            project_path: required_string(&obj, "project")?,
+            project_path: required_string(obj, "project")?,
         }));
     }
     if session_group {
-        let line = optional_u32(&obj, "line")?;
-        let line_end = optional_u32(&obj, "line_end")?;
+        let line = optional_u32(obj, "line")?;
+        let line_end = optional_u32(obj, "line_end")?;
         if line_end.is_some() && line.is_none() {
             return Err(Error::Args("target.line_end requires target.line".into()));
         }
-        let session_id = optional_string(&obj, "session")?.ok_or_else(|| {
+        let session_id = optional_string(obj, "session")?.ok_or_else(|| {
             Error::Args("target with 'line' or 'line_end' requires 'session'".into())
         })?;
         return Ok(NoteTarget::Session(SessionTarget {
@@ -966,12 +961,8 @@ fn optional_string_array(obj: &Object, key: &str) -> super::Result<Vec<String>> 
     let Some(v) = obj.get(key) else {
         return Ok(Vec::new());
     };
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the field's list from the caller's cell; callers pass \
-                  literals today — candidate for borrow_ref conversion"
-    )]
-    let items: RuneVec = rune::from_value(v.clone())
+    let items = v
+        .borrow_ref::<RuneVec>()
         .map_err(|e| Error::Args(format!("field '{key}' must be a list: {e}")))?;
     let mut out = Vec::with_capacity(items.len());
     for item in items.iter() {
@@ -1041,7 +1032,67 @@ fn value_to_note_value(v: &Value) -> super::Result<NoteValue> {
 
 #[cfg(test)]
 mod tests {
+    use rune::Vm;
+    use rune::sync::Arc;
+
     use super::*;
+
+    /// Runs `expr` as the body of `main` with the db module installed
+    /// and returns the result value.
+    fn eval(expr: &str) -> Result<Value, rune::runtime::VmError> {
+        let context = crate::lsp_context().unwrap();
+        let runtime = Arc::try_new(context.runtime().unwrap()).unwrap();
+
+        let mut sources = rune::Sources::new();
+        sources
+            .insert(rune::Source::memory(format!("pub fn main() {{ {expr} }}")).unwrap())
+            .unwrap();
+        let unit = rune::prepare(&mut sources)
+            .with_context(&context)
+            .build()
+            .unwrap();
+        let mut vm = Vm::new(runtime, Arc::try_new(unit).unwrap());
+        vm.call(["main"], ())
+    }
+
+    // Regression: a registered function whose closure declares an owned
+    // Any parameter (Object, String, ...) makes the VM take the
+    // argument out of its cell. A script that passed a variable then
+    // fails its next read with "Cannot read, value has snapshot
+    // M-000000". Registration signatures must borrow.
+    #[test]
+    fn write_note_leaves_caller_object_readable() {
+        let val = eval(
+            "let spec = #{ name: \"finding\" };
+             let b = gage::write_note(spec);
+             spec.name",
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "finding");
+    }
+
+    #[test]
+    fn write_issue_leaves_caller_object_readable() {
+        let val = eval(
+            "let spec = #{ title: \"t\" };
+             let b = gage::write_issue(spec);
+             spec.title",
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "t");
+    }
+
+    #[test]
+    fn update_issue_leaves_caller_values_readable() {
+        let val = eval(
+            "let id = \"i1\";
+             let args = #{ status: \"open\" };
+             let f = gage::update_issue(id, args);
+             id + args.status",
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "i1open");
+    }
 
     fn existing(
         note_id: &str,
@@ -1113,5 +1164,68 @@ mod tests {
             &existing,
             &[incoming("n2", "b", 50, Some("x"))]
         ));
+    }
+
+    fn test_note() -> Note {
+        Note::from(DbNote {
+            id: "n1".to_string(),
+            author: "tester".to_string(),
+            created: 0,
+            modified: None,
+            target: NoteTarget::Session(SessionTarget {
+                session_id: "s1".to_string(),
+                line: None,
+                line_end: None,
+            }),
+            name: "finding".to_string(),
+            value: NoteValue(serde_json::Value::from("x")),
+            metadata: None,
+            scan: None,
+        })
+    }
+
+    // Regression: evidence parsing must borrow the caller's list and
+    // entries, not take them. A take guts the cell shared with the
+    // script's variable, so a later read fails with "Cannot read, value
+    // has snapshot M-000000".
+    #[test]
+    fn evidence_parsing_leaves_caller_values_readable() {
+        let note_val = rune::to_value(test_note()).unwrap();
+        let list = RuneVec::try_from(vec![note_val.clone()]).unwrap();
+        let list_val = rune::to_value(list).unwrap();
+
+        let specs = evidence_from_value(&list_val, 42).unwrap();
+        assert_eq!(specs.len(), 1);
+        let spec = specs.first().unwrap();
+        assert_eq!(spec.note_id, "n1");
+        assert_eq!(spec.timestamp, 42);
+
+        assert_eq!(list_val.borrow_ref::<RuneVec>().unwrap().len(), 1);
+        assert_eq!(note_val.borrow_ref::<Note>().unwrap().id, "n1");
+    }
+
+    #[test]
+    fn target_parsing_leaves_caller_value_readable() {
+        let mut obj = Object::new();
+        obj.insert(
+            rune::alloc::String::try_from("session").unwrap(),
+            rune::to_value("s1".to_string()).unwrap(),
+        )
+        .unwrap();
+        let obj_val = rune::to_value(obj).unwrap();
+
+        let target = target_from_value(&obj_val).unwrap();
+        assert!(matches!(
+            target,
+            NoteTarget::Session(SessionTarget { ref session_id, .. }) if session_id == "s1"
+        ));
+
+        assert!(
+            obj_val
+                .borrow_ref::<Object>()
+                .unwrap()
+                .get("session")
+                .is_some()
+        );
     }
 }

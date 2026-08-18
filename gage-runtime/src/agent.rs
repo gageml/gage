@@ -16,7 +16,7 @@ use gage_agent::{AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgent
 use gage_mcp::{CustomToolCallback, GageTool, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, FromValue, Mut, Object, Protocol, Value, VmError};
+use rune::runtime::{Formatter, Mut, Object, Protocol, Value, VmError};
 use rune::{ContextError, Module};
 use serde_json::Value as JsonValue;
 
@@ -985,12 +985,7 @@ impl CallAgent {
 }
 
 fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the 'gage_tools' list from the caller's cell; callers pass \
-                  list literals today — candidate for borrow_ref conversion"
-    )]
-    let items: rune::runtime::Vec = FromValue::from_value(v).map_err(|e| {
+    let items = v.borrow_ref::<rune::runtime::Vec>().map_err(|e| {
         Error::Agent(format!(
             "'gage_tools' must be a list of tool names or gage::tools values: {e}"
         ))
@@ -1022,25 +1017,23 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
 }
 
 /// Downcast one `gage_tools` entry to a `gage::tools` builder value.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "takes each gage::tools builder out of the caller's list; scanners \
-              pass builder temporaries today — candidate for borrow_ref + clone"
-)]
 fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
-    if let Ok(t) = rune::from_value::<crate::tools::Query>(item.clone()) {
-        return GageTool::try_from(t).map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
+    if let Ok(t) = item.borrow_ref::<crate::tools::Query>() {
+        return GageTool::try_from(t.clone())
+            .map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
     }
-    if let Ok(t) = rune::from_value::<crate::tools::IssueWrite>(item.clone()) {
-        return GageTool::try_from(t).map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
+    if let Ok(t) = item.borrow_ref::<crate::tools::IssueWrite>() {
+        return GageTool::try_from(t.clone())
+            .map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
     }
-    if let Ok(t) = rune::from_value::<crate::tools::NoteWrite>(item.clone()) {
-        return GageTool::try_from(t).map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
+    if let Ok(t) = item.borrow_ref::<crate::tools::NoteWrite>() {
+        return GageTool::try_from(t.clone())
+            .map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
     }
-    if rune::from_value::<crate::tools::IssueUpdate>(item.clone()).is_ok() {
+    if item.borrow_ref::<crate::tools::IssueUpdate>().is_ok() {
         return Ok(GageTool::IssueUpdate);
     }
-    if rune::from_value::<crate::tools::IssueComment>(item.clone()).is_ok() {
+    if item.borrow_ref::<crate::tools::IssueComment>().is_ok() {
         return Ok(GageTool::IssueComment);
     }
     Err(Error::Agent(format!(
@@ -1050,12 +1043,7 @@ fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
 }
 
 fn parse_custom_tools(v: Value) -> super::Result<Vec<CustomToolDef>> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the 'tools' object from the caller's cell; callers pass \
-                  literals today — candidate for borrow_ref conversion"
-    )]
-    let obj: Object = FromValue::from_value(v).map_err(|e| {
+    let obj = v.borrow_ref::<Object>().map_err(|e| {
         Error::Agent(format!(
             "'tools' must be an object keyed by function name: {e}"
         ))
@@ -1073,18 +1061,14 @@ fn parse_custom_tools(v: Value) -> super::Result<Vec<CustomToolDef>> {
 }
 
 fn parse_one_custom_tool(fn_name: String, decl: Value) -> super::Result<CustomToolDef> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the tool declaration object from the caller's cell; callers \
-                  pass literals today — candidate for borrow_ref conversion"
-    )]
-    let obj: Object = FromValue::from_value(decl).map_err(|e| {
+    let obj_ref = decl.borrow_ref::<Object>().map_err(|e| {
         Error::Agent(format!(
             "'tools.{fn_name}' must be an object {{ name, description, inputs }}: {e}"
         ))
     })?;
-    let mcp_name = pop_string(&obj, "name", &fn_name)?;
-    let description = pop_string(&obj, "description", &fn_name)?;
+    let obj = &*obj_ref;
+    let mcp_name = pop_string(obj, "name", &fn_name)?;
+    let description = pop_string(obj, "description", &fn_name)?;
     let inputs = match obj.get(&rune::alloc::String::try_from("inputs").unwrap()) {
         Some(v) => parse_inputs(v.clone(), &fn_name)?,
         None => Vec::new(),
@@ -1107,12 +1091,7 @@ fn pop_string(obj: &Object, key: &str, fn_name: &str) -> super::Result<String> {
 }
 
 fn parse_inputs(v: Value, fn_name: &str) -> super::Result<Vec<InputDecl>> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the 'inputs' object from the caller's cell; callers pass \
-                  literals today — candidate for borrow_ref conversion"
-    )]
-    let obj: Object = FromValue::from_value(v).map_err(|e| {
+    let obj = v.borrow_ref::<Object>().map_err(|e| {
         Error::Agent(format!(
             "'tools.{fn_name}.inputs' must be an object keyed by input name: {e}"
         ))
@@ -1129,12 +1108,7 @@ fn parse_inputs(v: Value, fn_name: &str) -> super::Result<Vec<InputDecl>> {
 }
 
 fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<InputDecl> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "takes the input declaration object from the caller's cell; \
-                  callers pass literals today — candidate for borrow_ref conversion"
-    )]
-    let obj: Object = FromValue::from_value(decl).map_err(|e| {
+    let obj = decl.borrow_ref::<Object>().map_err(|e| {
         Error::Agent(format!(
             "'tools.{fn_name}.inputs.{name}' must be an object \
              {{ type, required?, description? }}: {e}"
@@ -1644,10 +1618,70 @@ pub fn interactive_spec(v: rune::Value) -> Result<InteractiveSpec, Error> {
 #[cfg(test)]
 mod tests {
     use rune::Module;
+    use rune::runtime::Object;
+
+    use super::{GageTool, GageTools, parse_custom_tools, parse_gage_tools};
 
     #[test]
     fn registers_into_module() {
         let mut m = Module::with_crate("gage").unwrap();
         super::register(&mut m).unwrap();
+    }
+
+    // Regression: the builder's parse helpers must borrow the caller's
+    // containers, not take them. A take guts the cell shared with the
+    // script's variable, so a later read fails with "Cannot read, value
+    // has snapshot M-000000".
+    #[test]
+    fn parse_gage_tools_leaves_caller_values_readable() {
+        let tool_val = rune::to_value(crate::tools::IssueUpdate).unwrap();
+        let list = rune::runtime::Vec::try_from(vec![tool_val.clone()]).unwrap();
+        let list_val = rune::to_value(list).unwrap();
+
+        let parsed = parse_gage_tools(list_val.clone()).unwrap();
+        assert!(matches!(parsed, GageTools::Some(ref tools)
+            if matches!(tools[..], [GageTool::IssueUpdate])));
+
+        assert_eq!(
+            list_val.borrow_ref::<rune::runtime::Vec>().unwrap().len(),
+            1
+        );
+        assert!(tool_val.borrow_ref::<crate::tools::IssueUpdate>().is_ok());
+    }
+
+    #[test]
+    fn parse_custom_tools_leaves_caller_values_readable() {
+        let key = |s: &str| rune::alloc::String::try_from(s).unwrap();
+        let mut decl = Object::new();
+        decl.insert(key("name"), rune::to_value("t".to_string()).unwrap())
+            .unwrap();
+        decl.insert(key("description"), rune::to_value("d".to_string()).unwrap())
+            .unwrap();
+        let decl_val = rune::to_value(decl).unwrap();
+
+        let mut tools = Object::new();
+        tools.insert(key("my_tool"), decl_val.clone()).unwrap();
+        let tools_val = rune::to_value(tools).unwrap();
+
+        let defs = parse_custom_tools(tools_val.clone()).unwrap();
+        assert_eq!(defs.len(), 1);
+        let def = defs.first().unwrap();
+        assert_eq!(def.fn_name, "my_tool");
+        assert_eq!(def.mcp_name, "t");
+
+        assert!(
+            tools_val
+                .borrow_ref::<Object>()
+                .unwrap()
+                .get("my_tool")
+                .is_some()
+        );
+        assert!(
+            decl_val
+                .borrow_ref::<Object>()
+                .unwrap()
+                .get("name")
+                .is_some()
+        );
     }
 }
