@@ -165,8 +165,7 @@ impl TextIndex {
     ) -> Result<Vec<Hit>> {
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
-        let mut parser = QueryParser::for_index(&self.index, vec![self.f_text]);
-        parser.set_conjunction_by_default();
+        let parser = QueryParser::for_index(&self.index, vec![self.f_text]);
         let query = parser
             .parse_query(query)
             .map_err(|e| IndexError::QueryParse(e.to_string()))?;
@@ -284,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn and_by_default() {
+    fn or_by_default() {
         let (index, _dir) = temp_index();
         write(
             &index,
@@ -292,12 +291,13 @@ mod tests {
                 ("s1", 1, "alpha and beta together"),
                 ("s2", 1, "only alpha here"),
                 ("s3", 1, "only beta here"),
+                ("s4", 1, "neither term present"),
             ],
         );
         let hits = index
             .search("alpha beta", 10, DEFAULT_SNIPPET_CHARS)
             .unwrap();
-        assert_eq!(hits.len(), 1);
+        assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].session_id, "s1");
     }
 

@@ -35,6 +35,24 @@ ORDER BY mt.score DESC
 LIMIT 20;
 ```
 
+### Recipe: exclude the current session (self-hits)
+
+The index includes the session you are running in, so a search often matches
+your own conversation --- the question that prompted the search, and your
+earlier queries quoting the same terms. When searching on behalf of the current
+conversation, exclude it by id. If the id is unknown, it is the session with
+the greatest `mtime` in `session`, and its hits are recognizable by snippets
+quoting your own question or queries:
+
+```sql
+SELECT mt.session_id, mt.line, mt.score, s.title, mt.snippet
+FROM message_text('prepared plan') mt
+JOIN session s ON s.id = mt.session_id
+WHERE mt.session_id <> '<current-session-id>'
+ORDER BY mt.score DESC
+LIMIT 20;
+```
+
 ### Recipe: count hits, group by session
 
 ```sql
@@ -80,6 +98,10 @@ To scan many notes' context in one query, use a `ROW_NUMBER()` windowed CTE over
   `SELECT i.line, (SELECT m.text FROM message m WHERE m.line > i.line ORDER BY m.line LIMIT 1) FROM interrupts i`
   will fail with "Physical plan does not support logical expression
   ScalarSubquery". Use a `ROW_NUMBER()` windowed CTE instead.
+
+- **No `any_value` aggregate.** To carry a representative value through a
+  `GROUP BY` (e.g. a session title), add the column to the `GROUP BY` or use
+  `min(...)` / `max(...)`.
 
 ## Notes
 

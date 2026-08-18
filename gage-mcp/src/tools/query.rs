@@ -73,7 +73,7 @@ fn handle(
         let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
         slow_log::record(sql, start.elapsed(), Some(row_count), None);
         if batches.is_empty() {
-            return Ok(success(""));
+            return Ok(success("0 rows"));
         }
         let mut buf: Vec<u8> = b"```yaml\n".to_vec();
         if let Err(e) = write_yaml(&mut buf, &batches) {
