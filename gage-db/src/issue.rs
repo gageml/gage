@@ -2,6 +2,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::note::{Note, target_from_column};
+use crate::target::NoteTarget;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueStatus {
@@ -216,9 +217,14 @@ pub struct Issue {
     pub name: String,
     pub title: String,
     pub description: Option<String>,
+    /// Advisory target the issue refers to, mirroring `Note.target`.
+    /// Stored as a URI; never used for queries (see `session_issue` for
+    /// that). `None` when the issue has no direct target.
+    pub target: Option<NoteTarget>,
     pub status: IssueStatus,
     /// `Some` when `status == Closed`; `None` while `Open`.
     pub status_reason: Option<StatusReason>,
+    pub metadata: Option<String>,
     /// Epoch milliseconds.
     pub created: i64,
     /// Epoch milliseconds. `None` until the issue is updated.
@@ -270,6 +276,9 @@ pub enum IssueError {
     /// An issue with the same `(name, author)` already exists. The
     /// existing issue is returned so the caller can decide what to do.
     Duplicate(Box<Issue>),
+    /// A session target carried a `session_id` that is not the expected
+    /// UUID form. Same shape check as `NoteError::InvalidSessionId`.
+    InvalidSessionId(String),
     Db(rusqlite::Error),
 }
 
@@ -297,6 +306,9 @@ impl std::fmt::Display for IssueError {
                     prev.name, prev.author
                 )
             }
+            IssueError::InvalidSessionId(id) => {
+                write!(f, "invalid session id: '{id}' (expected 36-char UUID)")
+            }
             IssueError::Db(e) => write!(f, "database error: {e}"),
         }
     }
@@ -315,8 +327,10 @@ impl Issue {
             name: name.to_string(),
             title,
             description,
+            target: None,
             status: IssueStatus::Open,
             status_reason: None,
+            metadata: None,
             created: gage_core::datetime::now_ms(),
             modified: None,
             author: author.to_string(),
@@ -325,8 +339,7 @@ impl Issue {
     }
 }
 
-const ISSUE_COLUMNS: &str =
-    "id, name, title, description, status, status_reason, created, modified, author";
+const ISSUE_COLUMNS: &str = "id, name, title, description, target, status, status_reason, metadata, created, modified, author";
 
 /// Insert an issue.
 ///
@@ -338,15 +351,17 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
     let res = tx.execute(
         &format!(
             "INSERT INTO issue ({ISSUE_COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
         ),
         params![
             issue.id,
             issue.name,
             issue.title,
             issue.description,
+            issue.target.as_ref().map(NoteTarget::to_uri),
             issue.status.as_str(),
             issue.status_reason.map(StatusReason::as_str),
+            issue.metadata,
             issue.created,
             issue.modified,
             issue.author,
@@ -359,6 +374,7 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
         }
         return Err(e.into());
     }
+    insert_target_relation(&tx, issue)?;
     insert_event(
         &tx,
         &LoggedEvent {
@@ -371,6 +387,19 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
         },
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Mirror an issue's advisory target into `session_issue`, the relation
+/// table that backs session-scoped queries. Only session targets have a
+/// relation row; scan and project targets have no table to mirror into.
+fn insert_target_relation(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
+    if let Some(NoteTarget::Session(s)) = &issue.target {
+        if !crate::note::is_session_id_shape(&s.session_id) {
+            return Err(IssueError::InvalidSessionId(s.session_id.clone()));
+        }
+        insert_session_issue(conn, &s.session_id, &issue.id)?;
+    }
     Ok(())
 }
 
@@ -671,7 +700,8 @@ pub struct IssueFilters {
 // An issue has at most one scan_issue row (only creation links a scan;
 // see IssueWrite), so the join cannot multiply rows.
 const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.title, i.description, i.status,
-            i.status_reason, i.created, i.modified, i.author, si.scan_id
+            i.status_reason, i.created, i.modified, i.author, i.target,
+            i.metadata, si.scan_id
      FROM issue i LEFT JOIN scan_issue si ON si.issue_id = i.id";
 
 pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, IssueError> {
@@ -773,7 +803,7 @@ pub fn get(conn: &Connection, id_prefix: &str) -> Result<Issue, IssueError> {
 /// then `note.created`.
 pub fn related_notes(conn: &Connection, issue_id: &str) -> Result<Vec<Note>, IssueError> {
     let sql = "SELECT n.id, n.created, n.modified, n.author, n.target,
-                      n.name, n.value, n.explanation, n.metadata,
+                      n.name, n.value, n.metadata,
                       (SELECT sn.scan_id FROM scan_note sn
                        JOIN scan s ON s.id = sn.scan_id
                        WHERE sn.note_id = n.id
@@ -798,9 +828,8 @@ fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
         target: target_from_column(4, row.get(4)?)?,
         name: row.get(5)?,
         value: row.get(6)?,
-        explanation: row.get(7)?,
-        metadata: row.get(8)?,
-        scan: row.get(9)?,
+        metadata: row.get(7)?,
+        scan: row.get(8)?,
     })
 }
 
@@ -825,6 +854,8 @@ fn row_to_issue(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
             })
         })
         .transpose()?;
+    let target: Option<String> = row.get(9)?;
+    let target = target.map(|uri| target_from_column(9, uri)).transpose()?;
     Ok(Issue {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -835,7 +866,9 @@ fn row_to_issue(row: &rusqlite::Row) -> rusqlite::Result<Issue> {
         created: row.get(6)?,
         modified: row.get(7)?,
         author: row.get(8)?,
-        scan: row.get(9)?,
+        target,
+        metadata: row.get(10)?,
+        scan: row.get(11)?,
     })
 }
 
@@ -851,8 +884,10 @@ mod tests {
             name: name.to_string(),
             title: "Sample title".to_string(),
             description: Some("scanner:description.md".to_string()),
+            target: None,
             status: IssueStatus::Open,
             status_reason: None,
+            metadata: None,
             created: 1_742_428_800_000,
             modified: None,
             author: "scanner:test".to_string(),
@@ -872,6 +907,48 @@ mod tests {
             fetched.description.as_deref(),
             Some("scanner:description.md")
         );
+    }
+
+    #[test]
+    fn insert_with_session_target_links_session_and_roundtrips() {
+        use crate::target::SessionTarget;
+        const SESSION: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+        let conn = open_db_in_memory().unwrap();
+        let mut issue = sample("issue-aaa", "n1");
+        issue.target = Some(NoteTarget::Session(
+            SessionTarget::new(SESSION).with_line(42),
+        ));
+        insert(&conn, &issue).unwrap();
+
+        let sessions = issue_sessions(&conn, "issue-aaa").unwrap();
+        assert_eq!(sessions, vec![SESSION.to_string()]);
+
+        match get(&conn, "issue-aaa").unwrap().target {
+            Some(NoteTarget::Session(t)) => {
+                assert_eq!(t.session_id, SESSION);
+                assert_eq!(t.line, Some(42));
+            }
+            other => panic!("expected session target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_with_malformed_session_target_rolls_back() {
+        use crate::target::SessionTarget;
+
+        let conn = open_db_in_memory().unwrap();
+        let mut issue = sample("issue-aaa", "n1");
+        issue.target = Some(NoteTarget::Session(SessionTarget::new("not-a-uuid")));
+
+        match insert(&conn, &issue) {
+            Err(IssueError::InvalidSessionId(id)) => assert_eq!(id, "not-a-uuid"),
+            other => panic!("expected InvalidSessionId, got {other:?}"),
+        }
+        assert!(matches!(
+            get(&conn, "issue-aaa"),
+            Err(IssueError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -949,7 +1026,6 @@ mod tests {
             target: NoteTarget::Session(SessionTarget::new("11111111-1111-1111-1111-111111111111")),
             name: "thinking.empty".to_string(),
             value: NoteValue::from("yes"),
-            explanation: None,
             metadata: None,
             scan: None,
         };
@@ -1320,7 +1396,6 @@ mod tests {
                     target: NoteTarget::Session(SessionTarget::new(session)),
                     name: "thinking.empty".to_string(),
                     value: NoteValue::from("v"),
-                    explanation: None,
                     metadata: None,
                     scan: None,
                 },

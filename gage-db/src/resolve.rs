@@ -266,6 +266,8 @@ mod tests {
             name: "general".to_string(),
             title: format!("Issue {id}"),
             description: None,
+            target: None,
+            metadata: None,
             status,
             status_reason: None,
             created: 1_000,

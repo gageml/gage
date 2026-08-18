@@ -6,7 +6,7 @@ use gage_db::db::open_db;
 use gage_db::issue::{self, Issue, IssueEvidence};
 use gage_db::note;
 use gage_db::scan::insert_scan_issue;
-use gage_db::target::NoteTarget;
+use gage_db::target::{NoteTarget, SessionTarget};
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
     service::RequestContext,
@@ -42,7 +42,28 @@ async fn handle(
     let title = req_string(&params, "title")?;
     let description = opt_string(&params, "description");
     let evidence_ids = opt_string_array(&params, "evidence")?;
-    let sessions = opt_string_array(&params, "sessions")?;
+    let session_id = opt_string(&params, "session_id");
+    let session_line = opt_u32(&params, "session_line")?;
+
+    if let Some(id) = &session_id
+        && !is_session_id_shape(id)
+    {
+        return Ok(format!(
+            "error: `session_id` must be a 36-char UUID; got `{id}`."
+        ));
+    }
+
+    let target = match (session_id, session_line) {
+        (Some(id), Some(line)) => Some(NoteTarget::Session(SessionTarget::new(id).with_line(line))),
+        (Some(id), None) => Some(NoteTarget::Session(SessionTarget::new(id))),
+        (None, Some(_)) => {
+            return Ok(
+                "error: `session_line` requires `session_id`; supply both or omit `session_line`."
+                    .to_string(),
+            );
+        }
+        (None, None) => None,
+    };
 
     let conn = open_db().unwrap();
 
@@ -62,6 +83,7 @@ async fn handle(
 
     let mut issue_row = Issue::new(&config.name, title, description, &author);
     issue_row.status = config.status;
+    issue_row.target = target;
     let now = issue_row.created;
 
     issue::insert(&conn, &issue_row).map_err(|e| match e {
@@ -103,14 +125,14 @@ async fn handle(
         .map_err(|e| McpError::internal_error(format!("link evidence: {e}"), None))?;
     }
 
-    // Related sessions: the explicit `sessions` list plus the session
-    // each evidence note targets. The insert is idempotent, so
-    // duplicates across the two sources are harmless.
+    // Related sessions: the session each evidence note targets. The
+    // direct target's row was written by `issue::insert`; the insert is
+    // idempotent, so overlap between the two sources is harmless.
     let evidence_sessions = evidence_notes.iter().filter_map(|n| match &n.target {
         NoteTarget::Session(t) => Some(t.session_id.as_str()),
         _ => None,
     });
-    for session_id in sessions.iter().map(String::as_str).chain(evidence_sessions) {
+    for session_id in evidence_sessions {
         issue::insert_session_issue(&conn, session_id, &issue_row.id)
             .map_err(|e| McpError::internal_error(format!("link session: {e}"), None))?;
     }
@@ -138,6 +160,38 @@ fn opt_string(params: &JsonObject, key: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+
+fn opt_u32(params: &JsonObject, key: &str) -> Result<Option<u32>, McpError> {
+    let Some(v) = params.get(key) else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let n = match v {
+        serde_json::Value::Number(n) => n.as_u64().ok_or_else(|| {
+            McpError::invalid_params(format!("`{key}` must be a positive integer"), None)
+        })?,
+        _ => {
+            return Err(McpError::invalid_params(
+                format!("`{key}` must be an integer"),
+                None,
+            ));
+        }
+    };
+    u32::try_from(n)
+        .map(Some)
+        .map_err(|_e| McpError::invalid_params(format!("`{key}` out of range"), None))
+}
+
+fn is_session_id_shape(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 36
+        && b.get(8) == Some(&b'-')
+        && b.get(13) == Some(&b'-')
+        && b.get(18) == Some(&b'-')
+        && b.get(23) == Some(&b'-')
 }
 
 fn opt_string_array(params: &JsonObject, key: &str) -> Result<Vec<String>, McpError> {

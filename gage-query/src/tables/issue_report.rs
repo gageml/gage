@@ -193,9 +193,6 @@ fn render_note(out: &mut String, note: &Note) {
     out.push_str(&format!("- target: {}\n", note.target.to_uri()));
     out.push_str(&format!("- author: {}\n", note.author));
     out.push_str(&format!("- created: {}\n", ms_to_iso8601(note.created)));
-    if let Some(e) = note.explanation.as_deref().filter(|s| !s.is_empty()) {
-        out.push_str(&format!("- explanation: {e}\n"));
-    }
     if let Some(m) = note.metadata.as_deref().filter(|s| !s.is_empty()) {
         out.push_str(&format!("- metadata: {m}\n"));
     }

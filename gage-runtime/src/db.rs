@@ -248,8 +248,6 @@ pub(crate) struct Note {
     pub name: String,
     #[rune(get)]
     pub value: Value,
-    #[rune(get)]
-    pub explanation: Option<String>,
 
     #[rune(skip)]
     target_db: NoteTarget,
@@ -274,11 +272,7 @@ impl Note {
             self.target_uri(),
         )?;
         self.value.debug_fmt(f)?;
-        write!(
-            f,
-            ", explanation: {:?}, created: {} }}",
-            self.explanation, self.created
-        )?;
+        write!(f, ", created: {} }}", self.created)?;
         Ok(())
     }
 
@@ -420,13 +414,11 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
         Some(v) => value_to_note_value(&v)?,
         None => return Err(Error::Args("write_note requires 'value'".into())),
     };
-    let explanation = optional_string(n, "explanation")?;
     let metadata_raw = optional_object_json(n, "metadata")?;
     let author =
         optional_string(n, "author")?.unwrap_or_else(|| format!("scanner:{}", ctx.scanner_name));
 
     let db_note = DbNote {
-        explanation,
         metadata: metadata_raw,
         ..DbNote::new(target, &name, value_db, &author)
     };
@@ -437,7 +429,6 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
         target = ?db_note.target,
         author = db_note.author,
         value = ?db_note.value,
-        explanation = db_note.explanation,
         metadata = db_note.metadata,
         "write_note",
     );
@@ -484,7 +475,7 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
 /// Commit a replace of the existing note row this `Note` identifies.
 /// Used to resolve `Err(Error::Duplicate { new, .. })` by hand:
 /// `new.replace().await`. Identity (`new.id`) is unchanged; only
-/// `value`/`metadata`/`explanation` and `modified` are written.
+/// `value`/`metadata` and `modified` are written.
 fn do_replace_note(note: Note) -> super::Result<Note> {
     let ctx = current_scan_ctx();
     let db_note = DbNote {
@@ -495,7 +486,6 @@ fn do_replace_note(note: Note) -> super::Result<Note> {
         target: note.target_db.clone(),
         name: note.name.clone(),
         value: value_to_note_value(&note.value)?,
-        explanation: note.explanation.clone(),
         metadata: note.metadata_raw.clone(),
         scan: None,
     };
@@ -651,6 +641,8 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         created: now,
         modified: None,
         author,
+        target: None,
+        metadata: None,
         scan: None,
     };
 
@@ -942,7 +934,6 @@ impl From<DbNote> for Note {
             created: db.created,
             name: db.name,
             value,
-            explanation: db.explanation,
             target_db: db.target,
             target_obj: OnceLock::new(),
             metadata_raw: db.metadata,

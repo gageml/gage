@@ -39,9 +39,9 @@ async fn handle(params: JsonObject, author: String) -> Result<String, McpError> 
         issue::IssueError::NotFound(_) | issue::IssueError::Ambiguous(_, _) => {
             McpError::invalid_params(e.to_string(), None)
         }
-        issue::IssueError::Db(_) | issue::IssueError::Duplicate(_) => {
-            McpError::internal_error(e.to_string(), None)
-        }
+        issue::IssueError::Db(_)
+        | issue::IssueError::Duplicate(_)
+        | issue::IssueError::InvalidSessionId(_) => McpError::internal_error(e.to_string(), None),
     })?;
 
     let Some(new_status) = status else {

@@ -148,7 +148,6 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             author      TEXT NOT NULL,
             value       TEXT NOT NULL,
             metadata    TEXT,
-            explanation TEXT,
             created     INTEGER NOT NULL,
             modified    INTEGER
         );
@@ -177,13 +176,16 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             author        TEXT NOT NULL,
             title         TEXT NOT NULL,
             description   TEXT,
+            target        TEXT,
             status        TEXT NOT NULL,
             status_reason TEXT,
+            metadata      TEXT,
             created       INTEGER NOT NULL,
             modified      INTEGER
         );
         CREATE UNIQUE INDEX idx_issue_duplicate_key ON issue(name, author);
         CREATE INDEX idx_issue_status ON issue(status);
+        CREATE INDEX idx_issue_target ON issue(target);
 
         CREATE TABLE issue_evidence (
             issue_id TEXT NOT NULL REFERENCES issue(id),

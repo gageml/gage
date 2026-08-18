@@ -199,7 +199,6 @@ pub struct NoteItem {
     pub author: String,
     /// Creation time display string
     pub created: String,
-    pub explanation: Option<String>,
     /// Raw JSON text for the note's metadata, if any.
     pub metadata: Option<String>,
 }
@@ -1340,8 +1339,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
 }
 
 /// Note detail content: caption/value header columns (with an optional
-/// multi-line Metadata attribute), the value rendered as markdown, and
-/// an optional explanation.
+/// multi-line Metadata attribute) and the value rendered as markdown.
 fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
     let metadata_pretty = note.metadata.as_deref().map(pretty_json);
     let mut attrs: Vec<(&'static str, &str)> = vec![
@@ -1356,9 +1354,6 @@ fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
     let mut lines = attr_lines(&attrs);
     lines.push(Line::raw(""));
     lines.extend(markdown::render(&note.value_full));
-    if let Some(explanation) = &note.explanation {
-        section(&mut lines, "Explanation", markdown::render(explanation));
-    }
     lines
 }
 
@@ -1728,14 +1723,6 @@ fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
 
 /// Header attributes as caption/value columns; the caption column pads
 /// to the widest caption.
-/// A captioned page section separated from what precedes it by a
-/// blank line.
-fn section(lines: &mut Vec<Line<'static>>, caption: &'static str, content: Vec<Line<'static>>) {
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(caption, styles::Text::dim())));
-    lines.extend(content);
-}
-
 /// Section under a full-width header bar, matching the session
 /// dialog's message headers: one column of inner padding, header
 /// style across the width, a blank line before the content.

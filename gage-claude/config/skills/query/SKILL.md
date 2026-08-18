@@ -83,8 +83,8 @@ To scan many notes' context in one query, use a `ROW_NUMBER()` windowed CTE over
 
 ## Notes
 
-Read notes `note` (id, name, target, author, value, netadata, explanation,
-created modified). Each note name has a corresponding entry in `note_doc`
+Read notes `note` (id, name, target, author, value, metadata, created,
+modified). Each note name has a corresponding entry in `note_doc`
 (note_name, doc, written_by) that provides documentation for the note.
 
 ## Scoped contexts

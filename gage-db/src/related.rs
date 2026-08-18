@@ -182,6 +182,8 @@ mod tests {
             name: name.to_string(),
             title: title.to_string(),
             description: None,
+            target: None,
+            metadata: None,
             status: IssueStatus::Pending,
             status_reason: None,
             created: 1_000,

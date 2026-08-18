@@ -90,7 +90,6 @@ pub struct Note {
     pub target: NoteTarget,
     pub name: String,
     pub value: NoteValue,
-    pub explanation: Option<String>,
     pub metadata: Option<String>,
     /// Scan that first wrote the note; `None` when the note was written
     /// outside a scan (e.g. `gage note add`). Later scans also link a
@@ -113,7 +112,6 @@ pub struct NoteRaw {
     pub target: NoteTarget,
     pub name: String,
     pub value: String,
-    pub explanation: Option<String>,
     pub metadata: Option<String>,
 }
 
@@ -202,7 +200,6 @@ impl Note {
             target,
             name: name.to_string(),
             value: value.into(),
-            explanation: None,
             metadata: None,
             scan: None,
         }
@@ -210,7 +207,7 @@ impl Note {
 }
 
 const NOTE_COLUMNS: &str = "id, created, modified, author, target,
-    name, value, explanation, metadata";
+    name, value, metadata";
 
 /// Insert a note.
 ///
@@ -223,7 +220,7 @@ pub fn insert(conn: &Connection, note: &Note) -> Result<(), NoteError> {
     let insert_res = tx.execute(
         &format!(
             "INSERT INTO note ({NOTE_COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
         ),
         params![
             note.id,
@@ -233,7 +230,6 @@ pub fn insert(conn: &Connection, note: &Note) -> Result<(), NoteError> {
             target_uri,
             note.name,
             note.value,
-            note.explanation,
             note.metadata,
         ],
     );
@@ -271,16 +267,16 @@ fn find_by_dup_key(
         .map_err(NoteError::from)
 }
 
-/// Replace an existing note's mutable fields (`value`, `metadata`,
-/// `explanation`) and stamp `modified`. Identity
-/// (`name`/`target`/`author`) is unchanged.
+/// Replace an existing note's mutable fields (`value`, `metadata`)
+/// and stamp `modified`. Identity (`name`/`target`/`author`) is
+/// unchanged.
 pub fn replace(conn: &Connection, prev_id: &str, new: &Note) -> Result<Note, NoteError> {
     let tx = conn.unchecked_transaction()?;
     let modified = gage_core::datetime::now_ms();
     let rows = tx.execute(
-        "UPDATE note SET value = ?1, metadata = ?2, explanation = ?3, modified = ?4
-         WHERE id = ?5",
-        params![new.value, new.metadata, new.explanation, modified, prev_id],
+        "UPDATE note SET value = ?1, metadata = ?2, modified = ?3
+         WHERE id = ?4",
+        params![new.value, new.metadata, modified, prev_id],
     )?;
     if rows == 0 {
         return Err(NoteError::NotFound(prev_id.to_string()));
@@ -319,7 +315,7 @@ fn insert_target_relation(conn: &Connection, note: &Note) -> Result<(), NoteErro
 
 /// Cheap shape check: 36 chars and 4 hyphens at the UUID v4 positions.
 /// Stand-in for a real FK; the canonical session lives in the filesystem.
-fn is_session_id_shape(id: &str) -> bool {
+pub(crate) fn is_session_id_shape(id: &str) -> bool {
     let b = id.as_bytes();
     b.len() == 36
         && b.get(8) == Some(&b'-')
@@ -357,7 +353,7 @@ pub fn delete(conn: &Connection, id: &str) -> Result<(), NoteError> {
 }
 
 const NOTE_SELECT: &str = "SELECT n.id, n.created, n.modified, n.author, n.target,
-            n.name, n.value, n.explanation, n.metadata,
+            n.name, n.value, n.metadata,
             (SELECT sn.scan_id FROM scan_note sn
              JOIN scan s ON s.id = sn.scan_id
              WHERE sn.note_id = n.id
@@ -539,9 +535,8 @@ fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
         target: target_from_column(4, row.get(4)?)?,
         name: row.get(5)?,
         value: row.get(6)?,
-        explanation: row.get(7)?,
-        metadata: row.get(8)?,
-        scan: row.get(9)?,
+        metadata: row.get(7)?,
+        scan: row.get(8)?,
     })
 }
 
@@ -554,8 +549,7 @@ fn row_to_note_raw(row: &rusqlite::Row) -> rusqlite::Result<NoteRaw> {
         target: target_from_column(4, row.get(4)?)?,
         name: row.get(5)?,
         value: row.get(6)?,
-        explanation: row.get(7)?,
-        metadata: row.get(8)?,
+        metadata: row.get(7)?,
     })
 }
 
@@ -578,7 +572,6 @@ mod tests {
             target,
             name: name.to_string(),
             value: NoteValue::from("test value"),
-            explanation: None,
             metadata: None,
             scan: None,
         }

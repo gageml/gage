@@ -251,6 +251,14 @@ pub fn show(args: IssueShowArgs) {
             },
         ),
         ("description", description_display),
+        (
+            "target",
+            issue
+                .target
+                .as_ref()
+                .map(|t| t.to_uri())
+                .unwrap_or_default(),
+        ),
         ("author", issue.author.clone()),
         ("created", gage_core::datetime::ms_to_iso8601(issue.created)),
         (
@@ -426,6 +434,8 @@ pub fn add(args: IssueAddArgs) {
             id,
             title,
             description,
+            target: None,
+            metadata: None,
             status: if args.pending {
                 IssueStatus::Pending
             } else {

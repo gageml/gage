@@ -26,18 +26,18 @@ Tables:
 - message (session_id, line, uuid, type, subtype, text, timestamp, attachments,
   ide_tags, raw) - conversation text (user and assistant) per session
 
-- note (id, author, created, modified, target, name, value, metadata,
-  explanation) - notes written by scanners; `name` is the scanner output kind,
-  `value` its payload, `explanation` the optional narrative. `target` is
-  advisory; do not parse it. To resolve a note to its session and line, join
-  through `session_note` (see below)
+- note (id, author, created, modified, target, name, value, metadata) - notes
+  written by scanners; `name` is the scanner output kind, `value` its payload.
+  `target` is advisory; do not parse it. To resolve a note to its session and
+  line, join through `session_note` (see below)
 
 - session_note (session_id, line, line_end, note_id) - link table resolving
   notes whose `target` is `session:<id>[:<line>[-<end>]]`. Use to join `note` to
   `session` / `message` / `entry` without parsing `target`
 
-- issue (id, name, title, description, status, status_reason, created, modified,
-  author) - issues raised from notes
+- issue (id, name, author, title, description, target, status, status_reason,
+  metadata, created, modified) - issues raised from notes; `target` is advisory,
+  as on `note`
 
 - issue_evidence (issue_id, note_id, name, timestamp, digest) - link table from
   issues to the notes that support them

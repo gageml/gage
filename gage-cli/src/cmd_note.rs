@@ -1,13 +1,11 @@
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_claude::session::one_session;
-use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
 use gage_db::note::{self, Note, NoteFilters};
 use gage_db::target::{NoteTarget, SessionTarget};
 use gage_registry::scanner::ScannerRegistry;
-use gage_registry::scheme::{ErrorScheme, ScannerScheme};
 use tabled::{
     Table,
     settings::{
@@ -251,14 +249,11 @@ pub async fn show(args: NoteShowArgs) {
         }
     };
 
-    let explanation_display = resolve_display(&note, note.explanation.as_deref());
-
     let mut attrs = vec![
         ("id", note.id.clone()),
         ("name", note.name.clone()),
         ("value", format_value(&note.value)),
         ("target", note.target.to_uri()),
-        ("explanation", explanation_display),
         ("author", note.author.clone()),
         ("created", gage_core::datetime::ms_to_iso8601(note.created)),
         (
@@ -330,29 +325,6 @@ pub async fn show(args: NoteShowArgs) {
         .modify(Cell::new(2, 1), style::tty(Color::FG_BRIGHT_CYAN))
         .to_string();
     println!("{table}");
-}
-
-fn note_text_resolver(note: &Note) -> TextResolver {
-    let registry = ScannerRegistry::load();
-    let r = TextResolver::new();
-    match note.author.strip_prefix("scanner:") {
-        Some(name) => match ScannerScheme::with_scanner_name(&registry, name) {
-            Ok(s) => r.with_scheme("scanner", s),
-            Err(e) => r.with_scheme("scanner", ErrorScheme::new(e.to_string())),
-        },
-        None => r.with_scheme("scanner", ScannerScheme::absolute_only()),
-    }
-}
-
-fn resolve_display(note: &Note, value: Option<&str>) -> String {
-    let Some(raw) = value else {
-        return String::new();
-    };
-    let resolver = note_text_resolver(note);
-    match resolver.resolve(raw.to_string()) {
-        Ok(text) => text,
-        Err(e) => format!("(unresolved {raw}: {e})"),
-    }
 }
 
 pub(crate) fn format_value(value: &note::NoteValue) -> String {
