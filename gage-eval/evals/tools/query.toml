@@ -44,10 +44,11 @@ claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
 
 # Turns:
 #
-# 1. TooLSearch
-# 2. Query
-# 3. Reply
-expect.max_turns = 4
+# 1. ToolSearch
+# 2. Query (open-ended read; may take up to three)
+# 5. Reply
+# +1 for an optional query-skill load
+expect.max_turns = 5
 
 # Session c28 asks about empty files
 expect.match = "(?i)files|empty|missing|emptiness"

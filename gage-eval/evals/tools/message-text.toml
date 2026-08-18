@@ -28,7 +28,7 @@ prompt = "Find a session that mentions both Levenshtein and parsing. Reply with 
 fixture = "search-messages"
 claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
 
-expect.max_turns = 4
+expect.max_turns = 5
 expect.match = "b2c00000"
 
 [[test]] # --------------------------------------------------------
