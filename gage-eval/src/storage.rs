@@ -112,6 +112,11 @@ pub fn manifest_path(run: &Path) -> PathBuf {
     run.join("manifest.json")
 }
 
+/// Test names recorded in the run manifest.
+pub fn test_names(run: &Path) -> io::Result<Vec<String>> {
+    Ok(read_manifest(&manifest_path(run))?.test_names)
+}
+
 pub fn test_json_path(run: &Path, test_name: &str) -> PathBuf {
     test_dir(run, test_name).join("test.json")
 }
@@ -134,12 +139,14 @@ pub fn error_exit_code_path(run: &Path, test_name: &str) -> PathBuf {
 
 /// Locate the session JSONL claude wrote for this test. Each test runs
 /// in its own per-test cwd, so claude creates exactly one projects
-/// subdir containing exactly one `.jsonl` whose `cwd` field matches
-/// `test_cwd(run_id, test_name)`. Returns `None` if no matching session
-/// exists (e.g. claude failed before writing anything).
+/// subdir containing exactly one `.jsonl` whose `cwd` field is the
+/// test's `results/<test_name>/cwd` dir. Sessions record the
+/// pre-archival workspace path, so the match compares the run-relative
+/// suffix rather than the absolute path. Returns `None` if no matching
+/// session exists (e.g. claude failed before writing anything).
 pub fn session_path(run: &Path, test_name: &str) -> Option<PathBuf> {
     let projects = claude_home(run).join("projects");
-    let expected_cwd = test_cwd(run, test_name);
+    let expected_suffix = Path::new("results").join(test_name).join("cwd");
     let projects_iter = fs::read_dir(&projects).ok()?;
     for entry in projects_iter.flatten() {
         let subdir = entry.path();
@@ -152,7 +159,7 @@ pub fn session_path(run: &Path, test_name: &str) -> Option<PathBuf> {
             if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            if first_entry_cwd(&p).as_deref() == Some(expected_cwd.to_string_lossy().as_ref()) {
+            if first_entry_cwd(&p).is_some_and(|cwd| Path::new(&cwd).ends_with(&expected_suffix)) {
                 return Some(p);
             }
         }

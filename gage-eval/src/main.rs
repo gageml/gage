@@ -71,6 +71,10 @@ struct ViewArgs {
     /// Rebuild report.md
     #[arg(long)]
     refresh: bool,
+
+    /// Pick a test and view its session
+    #[arg(short, long)]
+    session: bool,
 }
 
 const DEFAULT_MODEL: &str = "sonnet";
@@ -154,6 +158,10 @@ fn cmd_view(args: ViewArgs) {
             std::process::exit(1);
         }
     };
+    if args.session {
+        cmd_view_session(&run);
+        return;
+    }
     let path = match view::ensure_report(&run, args.refresh) {
         Ok(p) => p,
         Err(e) => {
@@ -164,6 +172,95 @@ fn cmd_view(args: ViewArgs) {
     if let Err(e) = view::page(&path) {
         eprintln!("pager failed: {e}");
         std::process::exit(2);
+    }
+}
+
+fn cmd_view_session(run: &storage::RunSummary) {
+    let session_id = match pick_test_session(run) {
+        Ok(Some(id)) => id,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    let run_dir = storage::run_dir(&run.run_id);
+    let projects = storage::claude_home(&run_dir).join("projects");
+    // SAFETY: set_var is unsafe in edition 2024; we set this before the
+    // tokio runtime spawns any threads.
+    unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &projects) };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let options = gage_tui::ViewOptions { show_turns: true };
+    let view = gage_tui::session_view::run(&session_id, options);
+    if let Err(e) = rt.block_on(view) {
+        eprintln!("failed to view session: {e}");
+        std::process::exit(2);
+    }
+}
+
+/// Present a pick list of the run's tests, one row per test with a
+/// session JSONL. Resolves to the selected test's session id; `None`
+/// when canceled or when no test has a session.
+fn pick_test_session(run: &storage::RunSummary) -> std::io::Result<Option<String>> {
+    let run_dir = storage::run_dir(&run.run_id);
+    let mut items: Vec<(String, String, String)> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for name in storage::test_names(&run_dir)? {
+        let id = storage::session_path(&run_dir, &name)
+            .and_then(|p| Some(p.file_stem()?.to_str()?.to_string()));
+        let Some(id) = id else {
+            missing.push(name);
+            continue;
+        };
+        let glyph = match score::read_score(&run_dir, &name)? {
+            Some(s) if s.passed => "✓ ",
+            Some(_) => "✗ ",
+            None => "  ",
+        };
+        items.push((id, format!("{glyph}{name}"), String::new()));
+    }
+    if !missing.is_empty() {
+        eprintln!("no session for: {}", missing.join(", "));
+    }
+    if items.is_empty() {
+        println!("No sessions found");
+        return Ok(None);
+    }
+    let _sigint = SigintGuard::new();
+    match cliclack::select("Select a test session")
+        .items(&items)
+        .max_rows(15)
+        .filter_mode()
+        .interact()
+    {
+        Ok(id) => Ok(Some(id)),
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// RAII guard that ignores SIGINT for its lifetime and restores the
+/// previous disposition on drop. The console crate detects Ctrl+C as a
+/// 0x03 byte in raw mode and then calls `libc::raise(SIGINT)`; without
+/// this guard the raised signal terminates the process before the
+/// caller can act on the `ErrorKind::Interrupted` returned by the
+/// prompt.
+struct SigintGuard {
+    prev: libc::sighandler_t,
+}
+
+impl SigintGuard {
+    fn new() -> Self {
+        let prev = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        Self { prev }
+    }
+}
+
+impl Drop for SigintGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::signal(libc::SIGINT, self.prev);
+        }
     }
 }
 
