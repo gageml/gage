@@ -630,6 +630,7 @@ fn load_scan_results(
                 Some(r) => r.as_str().to_string(),
                 None => i.status.as_str().to_string(),
             },
+            closed: i.status == gage_db::issue::IssueStatus::Closed,
             author: i.author.clone(),
             created: gage_core::datetime::ms_to_iso8601(i.created),
             description: i.description.clone(),
