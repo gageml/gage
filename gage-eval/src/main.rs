@@ -340,8 +340,12 @@ fn cmd_run(args: RunArgs) {
             let bar = console::style("│").bright().black();
             if exit_code != 0 {
                 error_count += 1;
-                let msg = console::style(format!("  {name}  exit={exit_code}")).red();
-                pb.println(format!("{bar} {msg}"));
+                // Scored tests report the exit code among their failed
+                // checks; only unscored tests need a standalone line.
+                if score.is_none() {
+                    let msg = console::style(format!("  {name}  claude exited {exit_code}")).red();
+                    pb.println(format!("{bar} {msg}"));
+                }
             }
             if let Some(s) = score {
                 if s.passed {
@@ -349,14 +353,12 @@ fn cmd_run(args: RunArgs) {
                     pb.println(format!("{bar}   ✓ {name}"));
                 } else {
                     failed += 1;
-                    let missed: Vec<&str> = s
-                        .matches
-                        .iter()
-                        .filter(|m| !m.matched)
-                        .map(|m| m.pattern.as_str())
-                        .collect();
-                    let msg = console::style(format!("✗ {name}  missed: {missed:?}")).red();
+                    let msg = console::style(format!("✗ {name} FAILED")).red();
                     pb.println(format!("{bar}   {msg}"));
+                    for m in s.matches.iter().filter(|m| !m.matched) {
+                        let line = console::style(one_line(&m.pattern, 120)).red();
+                        pb.println(format!("{bar}     {line}"));
+                    }
                 }
             }
         }
@@ -394,6 +396,18 @@ fn cmd_run(args: RunArgs) {
         )
         .unwrap();
     }
+}
+
+/// Collapse whitespace runs to single spaces and truncate to `max`
+/// chars for one-line terminal display.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut out: String = flat.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 fn show_run_intro(tests: &[&eval::Test], args: &RunArgs) -> std::io::Result<()> {

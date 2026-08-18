@@ -1,0 +1,46 @@
+# Sentinel probes: every tool description ends with a `---eof-NNN---`
+# marker unique to that tool. Asking for the code proves the full
+# description reached the model — a truncated or missing description
+# fails here before it fails anywhere subtle.
+
+[[test]] # --------------------------------------------------------
+
+name = "query"
+prompt = "What is the eof code for the Query tool"
+max_turns = 2
+expect.match = "123"
+
+[[test]] # --------------------------------------------------------
+
+name = "issue-comment"
+prompt = "What is the eof code for the IssueComment tool"
+max_turns = 2
+expect.match = "234"
+
+[[test]] # --------------------------------------------------------
+
+name = "note-write"
+prompt = "What is the eof code for the NoteWrite tool"
+max_turns = 2
+expect.match = "345"
+
+[[test]] # --------------------------------------------------------
+
+name = "issue-pending-resolve"
+prompt = "What is the eof code for the IssuePendingResolve tool"
+max_turns = 2
+expect.match = "456"
+
+[[test]] # --------------------------------------------------------
+
+name = "issue-update"
+prompt = "What is the eof code for the IssueUpdate tool"
+max_turns = 2
+expect.match = "567"
+
+[[test]] # --------------------------------------------------------
+
+name = "issue-write"
+prompt = "What is the eof code for the IssueWrite tool"
+max_turns = 2
+expect.match = "789"

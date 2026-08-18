@@ -35,3 +35,5 @@ what each is for.
 Provide `session_id` and optionally `session_line` to attach the note to a
 specific session or line. Otherwise omit these inputs and the note attaches
 to the active scan.
+
+---eof-345---

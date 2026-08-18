@@ -1,12 +1,5 @@
 [[test]] # --------------------------------------------------------
 
-name = "tool-flag"
-prompt = "What is the eof code for the IssueGet tool"
-max_turns = 2
-expect.match = "678"
-
-[[test]] # --------------------------------------------------------
-
 name = "issue-description"
 
 prompt = """
@@ -17,23 +10,20 @@ db_init = """
 INSERT INTO scan (id, created) VALUES ('s1', 0);
 INSERT INTO scan_task (scan_id, scanner_name, scanner_version, task_name, status)
   VALUES ('s1', 'hidden-thinking', '1', 'find', 'completed');
-INSERT INTO issue (id, name, target, title, description, status, created, author)
-  VALUES ('i-open-1', 'thinking.empty', '',
+INSERT INTO issue (id, name, title, description, status, created, author)
+  VALUES ('i-open-1', 'thinking.empty',
           'Thinking blocks hidden in recent session',
           'Set showThinkingSummaries to true in settings.json.',
           'open', 1000, 'scanner:hidden-thinking');
 """
 
-claude.permissions.allow = [
-  "mcp__plugin_gage_gage__IssueList",
-  "mcp__plugin_gage_gage__IssueGet",
-]
+claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
 
 # Turns:
 #
 # 1. ToolSearch
-# 2. IssueList
-# 3. IssueGet
+# 2. Query (list open issues)
+# 3. Query (issue detail)
 # 4. Reply
 expect.max_turns = 4
 

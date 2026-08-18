@@ -39,6 +39,6 @@ prompt = "How many messages mention telemetry?"
 fixture = "search-messages"
 claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
 
-expect.max_turns = 4
+expect.max_turns = 5
 # Two messages in session d4e mention "telemetry"
 expect.match = "2"

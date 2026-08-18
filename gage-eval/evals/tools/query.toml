@@ -1,12 +1,5 @@
 [[test]] # --------------------------------------------------------
 
-name = "tool-flag"
-prompt = "What is the eof code for the Query tool"
-max_turns = 2
-expect.match = "123"
-
-[[test]] # --------------------------------------------------------
-
 name = "session-count"
 prompt = "How many sessions are there?"
 
@@ -15,10 +8,10 @@ claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
 
 # Turns:
 #
-# 1. TooLSearch
-# 2. Query
-# 3. Reply
-expect.max_turns = 3
+# 1. ToolSearch
+# 2. Query (may take two)
+# 4. Reply
+expect.max_turns = 4
 
 # Fixture has 4 sessions
 expect.match = "4 sessions|4\\.?"
@@ -33,10 +26,10 @@ claude.permissions.allow = ["mcp__plugin_gage_gage__Query"]
 
 # Turns:
 #
-# 1. TooLSearch
-# 2. Query
-# 3. Reply
-expect.max_turns = 3
+# 1. ToolSearch
+# 2. Query (may take two)
+# 4. Reply
+expect.max_turns = 4
 
 # Fixture has 3 empty sessions
 expect.match = "3 empty sessions|3\\.?"

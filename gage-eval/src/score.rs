@@ -52,19 +52,21 @@ pub fn score_test(run: &Path, test: &Test) -> io::Result<Option<Score>> {
     let mut matches = Vec::with_capacity(patterns.len() + 2);
     for pat in patterns {
         let re = Regex::new(&pat).map_err(io::Error::other)?;
+        let matched = re.is_match(&output);
+        let verb = if matched { "matches" } else { "does not match" };
         matches.push(MatchResult {
-            matched: re.is_match(&output),
-            pattern: pat,
+            pattern: format!("output {verb} /{pat}/"),
+            matched,
         });
     }
 
     for sql in &expect.db_rows {
         let (rows, label) = match run_db_rows(run, &test.id(), sql) {
-            Ok(n) => (n, format!("db: returned {n} rows")),
-            Err(e) => (0, format!("db: {e}")),
+            Ok(n) => (n, format!("db query returned {n} rows")),
+            Err(e) => (0, format!("db query failed ({e})")),
         };
         matches.push(MatchResult {
-            pattern: format!("{sql}\n  -> {label}"),
+            pattern: format!("{label}: {}", condense_sql(sql)),
             matched: rows > 0,
         });
     }
@@ -76,7 +78,7 @@ pub fn score_test(run: &Path, test: &Test) -> io::Result<Option<Score>> {
     if let Some(max) = expect.max_turns {
         let actual = turns.unwrap_or(0);
         matches.push(MatchResult {
-            pattern: format!("turns <= {max} (was {actual})"),
+            pattern: format!("used {actual} turns, limit {max}"),
             matched: actual <= max,
         });
     }
@@ -86,7 +88,7 @@ pub fn score_test(run: &Path, test: &Test) -> io::Result<Option<Score>> {
     // intended, so the test fails regardless of the other checks.
     let exit_code = read_exit_code(run, &test.id());
     matches.push(MatchResult {
-        pattern: format!("exit code == 0 (was {exit_code})"),
+        pattern: format!("claude exited {exit_code}"),
         matched: exit_code == 0,
     });
 
@@ -98,6 +100,11 @@ pub fn score_test(run: &Path, test: &Test) -> io::Result<Option<Score>> {
     let bytes = serde_json::to_vec_pretty(&score).map_err(io::Error::other)?;
     fs::write(storage::score_path(run, &test.id()), bytes)?;
     Ok(Some(score))
+}
+
+/// Collapse a multi-line SQL string to one line for score/report text.
+fn condense_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Read the recorded claude exit code for a test. `run_one` writes the

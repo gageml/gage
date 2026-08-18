@@ -187,13 +187,11 @@ fn render_test(out: &mut String, run: &Path, test_name: &str, test: &Test) -> To
             if s.passed {
                 out.push_str("- Result: ✓ pass\n");
             } else {
-                let missed: Vec<&str> = s
-                    .matches
-                    .iter()
-                    .filter(|m| !m.matched)
-                    .map(|m| m.pattern.as_str())
-                    .collect();
-                out.push_str(&format!("- Result: ✗ fail (missed: {missed:?})\n"));
+                let failed = s.matches.iter().filter(|m| !m.matched).count();
+                out.push_str(&format!(
+                    "- Result: ✗ fail ({failed} of {} checks)\n",
+                    s.matches.len()
+                ));
             }
         }
         Ok(None) => {}

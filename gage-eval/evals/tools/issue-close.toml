@@ -1,12 +1,5 @@
 [[test]] # --------------------------------------------------------
 
-name = "tool-flag"
-prompt = "What is the eof code for the IssueClose tool"
-max_turns = 2
-expect.match = "567"
-
-[[test]] # --------------------------------------------------------
-
 name = "close-completed"
 
 prompt = """
@@ -18,37 +11,37 @@ db_init = """
 INSERT INTO scan (id, created) VALUES ('s1', 0);
 INSERT INTO scan_task (scan_id, scanner_name, scanner_version, task_name, status)
   VALUES ('s1', 'hidden-thinking', '1', 'find', 'completed');
-INSERT INTO issue (id, name, target, title, status, created, author)
-  VALUES ('i-open-1', 'thinking.empty', '',
+INSERT INTO issue (id, name, title, status, created, author)
+  VALUES ('i-open-1', 'thinking.empty',
           'Thinking blocks hidden in recent session',
           'open', 1000, 'scanner:hidden-thinking');
 """
 
 claude.permissions.allow = [
-  "mcp__plugin_gage_gage__IssueList",
-  "mcp__plugin_gage_gage__IssueClose",
+  "mcp__plugin_gage_gage__Query",
+  "mcp__plugin_gage_gage__IssueUpdate",
 ]
 
 # Turns:
 #
 # 1. ToolSearch
-# 2. IssueList
-# 3. IssueClose
+# 2. Query
+# 3. IssueUpdate
 # 4. Reply
 expect.max_turns = 4
 
-# Confirm closed issue with status 'completed' and the close event
+# Confirm issue closed with reason 'completed' and the status event
 # carries the message
 expect.db_rows = ["""
 SELECT 1 FROM issue
 WHERE id = 'i-open-1'
   AND status = 'closed'
-  AND closed_reason = 'completed'
+  AND status_reason = 'completed'
 """, """
 SELECT 1 FROM issue_event
 WHERE issue_id = 'i-open-1'
-  AND type = 'close'
-  AND value = 'Set thinking display to summarized'
+  AND type = 'status'
+  AND json_extract(metadata, '$.message') = 'Set thinking display to summarized'
 """]
 
 [[test]] # --------------------------------------------------------
@@ -64,35 +57,35 @@ db_init = """
 INSERT INTO scan (id, created) VALUES ('s1', 0);
 INSERT INTO scan_task (scan_id, scanner_name, scanner_version, task_name, status)
   VALUES ('s1', 'hidden-thinking', '1', 'find', 'completed');
-INSERT INTO issue (id, name, target, title, status, created, author)
-  VALUES ('i-open-1', 'thinking.empty', '',
+INSERT INTO issue (id, name, title, status, created, author)
+  VALUES ('i-open-1', 'thinking.empty',
           'Thinking blocks hidden in recent session',
           'open', 1000, 'scanner:hidden-thinking');
 """
 
 claude.permissions.allow = [
-  "mcp__plugin_gage_gage__IssueList",
-  "mcp__plugin_gage_gage__IssueClose",
+  "mcp__plugin_gage_gage__Query",
+  "mcp__plugin_gage_gage__IssueUpdate",
 ]
 
 # Turns:
 #
 # 1. ToolSearch
-# 2. IssueList
-# 3. IssueClose
+# 2. Query
+# 3. IssueUpdate
 # 4. Reply
 expect.max_turns = 4
 
-# Confirm issue is closed with reason 'skipped' and the close event
+# Confirm issue closed with reason 'skipped' and the status event
 # carries the message
 expect.db_rows = ["""
 SELECT 1 FROM issue
 WHERE id = 'i-open-1'
   AND status = 'closed'
-  AND closed_reason = 'skipped'
+  AND status_reason = 'skipped'
 """, """
 SELECT 1 FROM issue_event
 WHERE issue_id = 'i-open-1'
-  AND type = 'close'
-  AND value = 'Not applicable here'
+  AND type = 'status'
+  AND json_extract(metadata, '$.message') = 'Not applicable here'
 """]

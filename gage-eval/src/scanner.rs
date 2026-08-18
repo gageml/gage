@@ -417,22 +417,34 @@ fn aggregate(test: &Test, outcomes: &[SampleOutcome]) -> Score {
     let mut matches = Vec::new();
     for ((kind, entry), m) in entries.iter().zip(&item_matched) {
         matches.push(MatchResult {
-            pattern: format!("{kind} {} ({m}/{k} samples) — {}", entry.name, entry.expect),
+            pattern: format!(
+                "expected {kind} \"{}\" written in {m}/{k} samples — {}",
+                entry.name, entry.expect
+            ),
             matched: *m == k,
         });
     }
     for (sql, m) in expect.db_rows.iter().zip(&db_matched) {
         matches.push(MatchResult {
-            pattern: format!("db rows ({m}/{k} samples): {sql}"),
+            pattern: format!("db query returned rows in {m}/{k} samples: {sql}"),
             matched: *m == k,
         });
     }
     matches.push(MatchResult {
-        pattern: format!("no unexpected items (extras in {unexpected_samples}/{k} samples)"),
+        pattern: format!("unexpected items written in {unexpected_samples}/{k} samples"),
         matched: unexpected_samples == 0,
     });
+    let first_error = outcomes.iter().find_map(|o| match o {
+        SampleOutcome::Error(msg) => Some(msg.as_str()),
+        SampleOutcome::Judged { .. } => None,
+    });
     matches.push(MatchResult {
-        pattern: format!("all samples judged ({judged_samples}/{k})"),
+        pattern: match first_error {
+            Some(msg) => {
+                format!("judge produced a verdict in {judged_samples}/{k} samples ({msg})")
+            }
+            None => format!("judge produced a verdict in {judged_samples}/{k} samples"),
+        },
         matched: judged_samples == k,
     });
 
@@ -571,13 +583,13 @@ mod tests {
             score
                 .matches
                 .iter()
-                .any(|m| m.pattern.contains("(1/2 samples)"))
+                .any(|m| m.pattern.contains("written in 1/2 samples"))
         );
         assert!(
             score
                 .matches
                 .iter()
-                .any(|m| m.pattern.contains("extras in 1/2"))
+                .any(|m| m.pattern.contains("unexpected items written in 1/2"))
         );
 
         let score = aggregate(
@@ -592,7 +604,7 @@ mod tests {
             score
                 .matches
                 .iter()
-                .any(|m| m.pattern.contains("all samples judged (1/2)"))
+                .any(|m| m.pattern.contains("verdict in 1/2 samples (scan exited 1)"))
         );
     }
 

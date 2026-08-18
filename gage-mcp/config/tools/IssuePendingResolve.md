@@ -37,3 +37,5 @@ duplicate, resolve A against B's final target instead.
 
 A call need not dispose every pending issue; the result reports how
 many pending issues remain.
+
+---eof-456---
