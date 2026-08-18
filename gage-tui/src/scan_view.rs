@@ -222,10 +222,20 @@ pub struct IssueItem {
     /// Creation time display string
     pub created: String,
     pub description: Option<String>,
-    /// Ids of sessions linked to the issue
-    pub sessions: Vec<String>,
+    /// Sessions the issue applies to, per its session links
+    pub sessions: Vec<IssueSessionItem>,
     pub evidence: Vec<EvidenceItem>,
     pub events: Vec<EventItem>,
+}
+
+/// A session an issue applies to, resolved for display.
+#[derive(Debug, Clone)]
+pub struct IssueSessionItem {
+    pub id: String,
+    /// Project display path, `~`-substituted when under HOME
+    pub project: String,
+    /// Session title
+    pub title: String,
 }
 
 /// A note recorded as evidence for an issue.
@@ -633,17 +643,8 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
             let page = state.scroll_view.page() as isize;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
-                KeyCode::Char('c') if matches!(&state.dialog, Dialog::Issue { issue } if !issue.closed) =>
-                {
-                    state.open_close_prompt();
-                }
-                KeyCode::Char('o') if matches!(&state.dialog, Dialog::Issue { issue } if issue.closed) =>
-                {
-                    state.open_open_prompt();
-                }
-                KeyCode::Char('r') if matches!(&state.dialog, Dialog::Issue { issue } if !issue.closed) =>
-                {
-                    state.open_review_prompt();
+                KeyCode::Char('a') if matches!(state.dialog, Dialog::Issue { .. }) => {
+                    state.open_actions_prompt();
                 }
                 KeyCode::Char('l') if matches!(state.dialog, Dialog::Log { .. }) => {
                     state.dialog = Dialog::None
@@ -691,9 +692,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
         KeyCode::Char('G') => state.select_last(),
         KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
         KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
-        KeyCode::Char('c') if state.focus == Focus::Issues => state.close_selected_issue(),
-        KeyCode::Char('o') if state.focus == Focus::Issues => state.reopen_selected_issue(),
-        KeyCode::Char('r') if state.focus == Focus::Issues => state.review_selected_issue(),
+        KeyCode::Char('a') if state.focus == Focus::Issues => state.actions_for_selected_issue(),
         KeyCode::Enter if state.focus == Focus::Sessions => state.open_selected_session(),
         KeyCode::Enter if state.focus == Focus::Tasks => state.enter_task_row(),
         KeyCode::Right if state.focus == Focus::Tasks => state.expand_task_row(),
@@ -708,41 +707,39 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
 /// overlay, leaving whatever is beneath it untouched.
 fn handle_prompt_key(state: &mut ViewState, key: KeyEvent) {
     match &state.prompt {
-        Some(Prompt::Close { reason: None, .. }) => match key.code {
-            KeyCode::Char('c') => state.set_close_reason(StatusReason::Completed),
-            KeyCode::Char('s') => state.set_close_reason(StatusReason::Skipped),
-            KeyCode::Char('d') => state.set_close_reason(StatusReason::Duplicate),
-            KeyCode::Char('q') | KeyCode::Esc => state.prompt = None,
-            _ => {}
-        },
-        Some(Prompt::Close {
-            reason: Some(_), ..
-        })
-        | Some(Prompt::Open {
-            status: Some(_), ..
-        }) => handle_comment_key(state, key),
+        Some(Prompt::Actions { issue }) => {
+            let closed = issue.closed;
+            match key.code {
+                KeyCode::Char('r') => state.start_review(),
+                KeyCode::Char('c') if !closed => state.start_close(StatusReason::Completed),
+                KeyCode::Char('s') if !closed => state.start_close(StatusReason::Skipped),
+                KeyCode::Char('d') if !closed => state.start_close(StatusReason::Duplicate),
+                KeyCode::Char('o') if closed => state.start_open(IssueStatus::Open),
+                KeyCode::Char('p') if closed => state.start_open(IssueStatus::Pending),
+                KeyCode::Char('t') => state.start_comment(),
+                KeyCode::Char('q') | KeyCode::Esc => state.prompt = None,
+                _ => {}
+            }
+        }
+        Some(Prompt::Close { .. }) | Some(Prompt::Open { .. }) | Some(Prompt::Comment { .. }) => {
+            handle_comment_key(state, key)
+        }
         Some(Prompt::Review { .. }) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => state.confirm_review(),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
-                state.prompt = None;
+                state.back_to_actions();
             }
-            _ => {}
-        },
-        Some(Prompt::Open { status: None, .. }) => match key.code {
-            KeyCode::Char('o') => state.set_open_status(IssueStatus::Open),
-            KeyCode::Char('p') => state.set_open_status(IssueStatus::Pending),
-            KeyCode::Char('q') | KeyCode::Esc => state.prompt = None,
             _ => {}
         },
         None => {}
     }
 }
 
-/// Comment entry for a chosen close reason or reopen status. Enter
-/// applies the change; Esc steps back to the choice keeping the text.
-/// Newline shortcuts mirror the note editor: terminals without the
-/// Kitty keyboard protocol can't distinguish Shift+Enter from Enter,
-/// so Alt+Enter and Ctrl+J are accepted as fallbacks.
+/// Comment entry for a close, reopen, or comment action. Enter applies
+/// the change; Esc steps back to the actions menu. Newline shortcuts
+/// mirror the note editor: terminals without the Kitty keyboard
+/// protocol can't distinguish Shift+Enter from Enter, so Alt+Enter and
+/// Ctrl+J are accepted as fallbacks.
 fn handle_comment_key(state: &mut ViewState, key: KeyEvent) {
     let mods = key.modifiers;
     let is_newline_shortcut = (matches!(key.code, KeyCode::Enter)
@@ -752,12 +749,15 @@ fn handle_comment_key(state: &mut ViewState, key: KeyEvent) {
         KeyCode::Enter if !is_newline_shortcut => match &state.prompt {
             Some(Prompt::Close { .. }) => state.apply_close(),
             Some(Prompt::Open { .. }) => state.apply_open(),
+            Some(Prompt::Comment { .. }) => state.apply_comment(),
             _ => {}
         },
-        KeyCode::Esc => state.comment_step_back(),
+        KeyCode::Esc => state.back_to_actions(),
         _ => {
             let editor = match &mut state.prompt {
-                Some(Prompt::Close { editor, .. }) | Some(Prompt::Open { editor, .. }) => editor,
+                Some(Prompt::Close { editor, .. })
+                | Some(Prompt::Open { editor, .. })
+                | Some(Prompt::Comment { editor, .. }) => editor,
                 _ => return,
             };
             if is_newline_shortcut {
@@ -827,6 +827,13 @@ fn set_issue_status(
 ) -> Result<(), String> {
     let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
     issue::set_status(&conn, issue_id, status, reason, author, message).map_err(|e| e.to_string())
+}
+
+/// Record a comment against `issue_id` in the db. A fresh connection
+/// per change, like [`set_issue_status`].
+fn add_issue_comment(issue_id: &str, author: &str, message: &str) -> Result<(), String> {
+    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
+    issue::comment(&conn, issue_id, author, message).map_err(|e| e.to_string())
 }
 
 /// Writer identity for issue events, matching the CLI's `user:{name}`.
@@ -944,25 +951,35 @@ enum Dialog {
 /// snapshot of its issue so the prompt works with or without the
 /// issue dialog beneath.
 enum Prompt {
-    /// Close an issue: pick a reason, then enter an optional comment
-    /// and apply. `reason` is `None` while the reason is being chosen;
-    /// the editor's text survives stepping back to the reason choice.
+    /// Menu of the actions available for an issue, keyed by letter.
+    /// Review and comment are always offered; the close reasons show
+    /// for an open issue and the reopen statuses for a closed one.
+    /// Every other prompt is entered from here, and backing out of one
+    /// returns to this menu.
+    Actions { issue: Box<IssueItem> },
+    /// Close an issue with the reason picked in the actions menu:
+    /// enter an optional comment and apply
     Close {
         issue: Box<IssueItem>,
-        reason: Option<StatusReason>,
+        reason: StatusReason,
         editor: TextArea,
     },
     /// Confirm launching an interactive Claude Code review session for
     /// an issue. `y` suspends the view and hands the terminal to
     /// claude; the view resumes when the session ends.
     Review { issue: Box<IssueItem> },
-    /// Reopen a closed issue as open or pending. The counterpart of
-    /// `Close` for the closed state, with the same two steps: `status`
-    /// is `None` while the status is being chosen, then the comment
-    /// editor applies on Enter.
+    /// Reopen a closed issue with the status picked in the actions
+    /// menu; the counterpart of `Close`
     Open {
         issue: Box<IssueItem>,
-        status: Option<IssueStatus>,
+        status: IssueStatus,
+        editor: TextArea,
+    },
+    /// Record a comment against an issue. Unlike the status prompts'
+    /// comments, the text is required; Enter with an empty editor does
+    /// nothing.
+    Comment {
+        issue: Box<IssueItem>,
         editor: TextArea,
     },
 }
@@ -1039,57 +1056,89 @@ impl ViewState {
         }
     }
 
-    /// Open the close prompt over the issue dialog's issue. No-op for
-    /// an already-closed issue.
-    fn open_close_prompt(&mut self) {
-        if let Dialog::Issue { issue } = &self.dialog
-            && !issue.closed
-        {
-            self.prompt = Some(Prompt::Close {
+    /// Open the actions menu over the issue dialog's issue
+    fn open_actions_prompt(&mut self) {
+        if let Dialog::Issue { issue } = &self.dialog {
+            self.prompt = Some(Prompt::Actions {
                 issue: issue.clone(),
-                reason: None,
-                editor: TextArea::new(""),
             });
         }
     }
 
-    /// Open the close prompt for the issues table's selected issue.
-    /// No-op for a closed issue.
-    fn close_selected_issue(&mut self) {
+    /// Open the actions menu for the issues table's selected issue
+    fn actions_for_selected_issue(&mut self) {
         let Some(i) = self.issues.selected_index() else {
             return;
         };
-        if let Some(issue) = self.model.issues.get(i)
-            && !issue.closed
-        {
-            self.prompt = Some(Prompt::Close {
+        if let Some(issue) = self.model.issues.get(i) {
+            self.prompt = Some(Prompt::Actions {
                 issue: Box::new(issue.clone()),
-                reason: None,
+            });
+        }
+    }
+
+    /// Take the actions menu's issue to hand to a chosen action's
+    /// prompt. None (leaving the prompt untouched) when the open
+    /// prompt is not the actions menu.
+    fn take_actions_issue(&mut self) -> Option<Box<IssueItem>> {
+        match self.prompt.take() {
+            Some(Prompt::Actions { issue }) => Some(issue),
+            other => {
+                self.prompt = other;
+                None
+            }
+        }
+    }
+
+    fn start_review(&mut self) {
+        if let Some(issue) = self.take_actions_issue() {
+            self.prompt = Some(Prompt::Review { issue });
+        }
+    }
+
+    fn start_close(&mut self, reason: StatusReason) {
+        if let Some(issue) = self.take_actions_issue() {
+            self.prompt = Some(Prompt::Close {
+                issue,
+                reason,
                 editor: TextArea::new(""),
             });
         }
     }
 
-    fn set_close_reason(&mut self, reason: StatusReason) {
-        if let Some(Prompt::Close { reason: r, .. }) = &mut self.prompt {
-            *r = Some(reason);
+    fn start_open(&mut self, status: IssueStatus) {
+        if let Some(issue) = self.take_actions_issue() {
+            self.prompt = Some(Prompt::Open {
+                issue,
+                status,
+                editor: TextArea::new(""),
+            });
         }
     }
 
-    fn set_open_status(&mut self, status: IssueStatus) {
-        if let Some(Prompt::Open { status: s, .. }) = &mut self.prompt {
-            *s = Some(status);
+    fn start_comment(&mut self) {
+        if let Some(issue) = self.take_actions_issue() {
+            self.prompt = Some(Prompt::Comment {
+                issue,
+                editor: TextArea::new(""),
+            });
         }
     }
 
-    /// Step a close or reopen prompt back from comment entry to its
-    /// choice step. The editor's text is kept.
-    fn comment_step_back(&mut self) {
-        match &mut self.prompt {
-            Some(Prompt::Close { reason, .. }) => *reason = None,
-            Some(Prompt::Open { status, .. }) => *status = None,
-            _ => {}
-        }
+    /// Step back from an action's prompt to the actions menu. Entered
+    /// comment text is discarded.
+    fn back_to_actions(&mut self) {
+        let issue = match self.prompt.take() {
+            Some(Prompt::Close { issue, .. })
+            | Some(Prompt::Open { issue, .. })
+            | Some(Prompt::Comment { issue, .. })
+            | Some(Prompt::Review { issue }) => issue,
+            other => {
+                self.prompt = other;
+                return;
+            }
+        };
+        self.prompt = Some(Prompt::Actions { issue });
     }
 
     /// Apply the close prompt's reason and comment to the db, reflect
@@ -1099,7 +1148,7 @@ impl ViewState {
     fn apply_close(&mut self) {
         let Some(Prompt::Close {
             mut issue,
-            reason: Some(reason),
+            reason,
             editor,
         }) = self.prompt.take()
         else {
@@ -1119,7 +1168,7 @@ impl ViewState {
             self.push_log(format!("Close issue {} failed: {e}", issue.id));
             self.prompt = Some(Prompt::Close {
                 issue,
-                reason: Some(reason),
+                reason,
                 editor,
             });
             return;
@@ -1138,7 +1187,8 @@ impl ViewState {
     }
 
     /// Reflect a changed issue snapshot in the results table and in an
-    /// open issue dialog showing it.
+    /// open issue dialog showing it. The dialog's rendered content is
+    /// rebuilt at its current scroll position.
     fn reflect_issue(&mut self, issue: &IssueItem) {
         if let Some(item) = self.model.issues.iter_mut().find(|i| i.id == issue.id) {
             *item = issue.clone();
@@ -1147,37 +1197,7 @@ impl ViewState {
             && open.id == issue.id
         {
             **open = issue.clone();
-        }
-    }
-
-    /// Open the reopen prompt over the issue dialog's issue. No-op
-    /// unless the issue is closed.
-    fn open_open_prompt(&mut self) {
-        if let Dialog::Issue { issue } = &self.dialog
-            && issue.closed
-        {
-            self.prompt = Some(Prompt::Open {
-                issue: issue.clone(),
-                status: None,
-                editor: TextArea::new(""),
-            });
-        }
-    }
-
-    /// Open the reopen prompt for the issues table's selected issue.
-    /// No-op unless the issue is closed.
-    fn reopen_selected_issue(&mut self) {
-        let Some(i) = self.issues.selected_index() else {
-            return;
-        };
-        if let Some(issue) = self.model.issues.get(i)
-            && issue.closed
-        {
-            self.prompt = Some(Prompt::Open {
-                issue: Box::new(issue.clone()),
-                status: None,
-                editor: TextArea::new(""),
-            });
+            self.scroll_view.invalidate();
         }
     }
 
@@ -1188,7 +1208,7 @@ impl ViewState {
     fn apply_open(&mut self) {
         let Some(Prompt::Open {
             mut issue,
-            status: Some(status),
+            status,
             editor,
         }) = self.prompt.take()
         else {
@@ -1202,7 +1222,7 @@ impl ViewState {
             self.push_log(format!("Open issue {} failed: {e}", issue.id));
             self.prompt = Some(Prompt::Open {
                 issue,
-                status: Some(status),
+                status,
                 editor,
             });
             return;
@@ -1220,31 +1240,35 @@ impl ViewState {
         self.push_log(format!("Opened issue {} ({})", issue.id, status.as_str()));
     }
 
-    /// Open the review confirmation over the issue dialog's issue.
-    /// No-op for a closed issue.
-    fn open_review_prompt(&mut self) {
-        if let Dialog::Issue { issue } = &self.dialog
-            && !issue.closed
-        {
-            self.prompt = Some(Prompt::Review {
-                issue: issue.clone(),
-            });
-        }
-    }
-
-    /// Open the review confirmation for the issues table's selected
-    /// issue. No-op for a closed issue.
-    fn review_selected_issue(&mut self) {
-        let Some(i) = self.issues.selected_index() else {
+    /// Record the comment prompt's text against the issue, reflect the
+    /// new event, and dismiss the prompt. The comment is required:
+    /// Enter with an empty editor keeps the prompt up. On a db failure
+    /// the prompt stays up with its text intact and the error goes to
+    /// the scan log.
+    fn apply_comment(&mut self) {
+        let Some(Prompt::Comment { mut issue, editor }) = self.prompt.take() else {
             return;
         };
-        if let Some(issue) = self.model.issues.get(i)
-            && !issue.closed
-        {
-            self.prompt = Some(Prompt::Review {
-                issue: Box::new(issue.clone()),
-            });
+        let text = editor.text();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            self.prompt = Some(Prompt::Comment { issue, editor });
+            return;
         }
+        let author = user_author();
+        if let Err(e) = add_issue_comment(&issue.id, &author, trimmed) {
+            self.push_log(format!("Comment on issue {} failed: {e}", issue.id));
+            self.prompt = Some(Prompt::Comment { issue, editor });
+            return;
+        }
+        issue.events.push(EventItem {
+            kind: "comment".to_string(),
+            author,
+            timestamp: gage_core::datetime::ms_to_iso8601(gage_core::datetime::now_ms()),
+            message: Some(trimmed.to_string()),
+        });
+        self.reflect_issue(&issue);
+        self.push_log(format!("Commented on issue {}", issue.id));
     }
 
     /// Confirm the review: stage the issue for the event loop's launch
@@ -1275,16 +1299,8 @@ impl ViewState {
             && issue.id == issue_id
         {
             loaded.apply(issue);
+            self.scroll_view.invalidate();
         }
-    }
-
-    /// Whether the issues table's selected issue is closed. False with
-    /// no selection.
-    fn selected_issue_closed(&self) -> bool {
-        self.issues
-            .selected_index()
-            .and_then(|i| self.model.issues.get(i))
-            .is_some_and(|i| i.closed)
     }
 
     /// Move the source table's selection while an item dialog is open
@@ -1830,26 +1846,20 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
 /// their own centered area, so whatever is beneath stays visible.
 fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
     match prompt {
-        Prompt::Close { reason, editor, .. } => match reason {
-            None => dialog::draw_message(
+        Prompt::Actions { issue } => draw_actions(frame, issue),
+        Prompt::Close { reason, editor, .. } => {
+            let comment_prompt = match reason {
+                StatusReason::Duplicate => "Comment — name the surviving issue ID",
+                _ => "Comment (optional)",
+            };
+            draw_status_comment(
                 frame,
-                "Close this issue?",
-                "c completed · s skipped · d duplicate · q back",
-            ),
-            Some(reason) => {
-                let comment_prompt = match reason {
-                    StatusReason::Duplicate => "Comment — name the surviving issue ID",
-                    _ => "Comment (optional)",
-                };
-                draw_status_comment(
-                    frame,
-                    format!(" Close issue ({}) ", reason.as_str()),
-                    comment_prompt,
-                    "Enter close · Shift-Enter newline · Esc back",
-                    editor,
-                );
-            }
-        },
+                format!(" Close issue ({}) ", reason.as_str()),
+                comment_prompt,
+                "Enter close · Shift-Enter newline · Esc back",
+                editor,
+            );
+        }
         Prompt::Review { .. } => dialog::draw_wrapped(
             frame,
             &[
@@ -1859,17 +1869,41 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
             ],
             "y / n",
         ),
-        Prompt::Open { status, editor, .. } => match status {
-            None => dialog::draw_message(frame, "Open this issue?", "o open · p pending · q back"),
-            Some(status) => draw_status_comment(
-                frame,
-                format!(" Open issue ({}) ", status.as_str()),
-                "Comment (optional)",
-                "Enter open · Shift-Enter newline · Esc back",
-                editor,
-            ),
-        },
+        Prompt::Open { status, editor, .. } => draw_status_comment(
+            frame,
+            format!(" Open issue ({}) ", status.as_str()),
+            "Comment (optional)",
+            "Enter open · Shift-Enter newline · Esc back",
+            editor,
+        ),
+        Prompt::Comment { editor, .. } => draw_status_comment(
+            frame,
+            " Comment issue ".to_string(),
+            "Comment",
+            "Enter comment · Shift-Enter newline · Esc back",
+            editor,
+        ),
     }
+}
+
+/// The actions menu: one left-aligned row per available action. Close
+/// reasons show for an open issue, reopen statuses for a closed one.
+fn draw_actions(frame: &mut Frame, issue: &IssueItem) {
+    let mut actions = vec![("r", "review (starts interactive agent)")];
+    if issue.closed {
+        actions.push(("o", "reopen"));
+        actions.push(("p", "set as pending"));
+    } else {
+        actions.push(("c", "close as completed"));
+        actions.push(("s", "close as skipped"));
+        actions.push(("d", "close as duplicate"));
+    }
+    actions.push(("t", "comment"));
+    let lines = actions
+        .into_iter()
+        .map(|(key, label)| Line::raw(format!("  {key} {label}")).left_aligned())
+        .collect();
+    dialog::draw_lines(frame, lines, "q back");
 }
 
 /// Note detail content: caption/value header columns (with an optional
@@ -1909,14 +1943,24 @@ fn issue_lines(issue: &IssueItem, width: usize, related: bool) -> Vec<Line<'stat
         ("Author", &issue.author),
         ("Created", &issue.created),
     ]);
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(issue.title.clone()));
+    let mut body = vec![Line::raw(issue.title.clone())];
     if let Some(description) = &issue.description {
-        lines.push(Line::raw(""));
-        lines.extend(markdown::render(description));
+        body.push(Line::raw(""));
+        body.extend(markdown::render(description));
     }
-
-    if !related {
+    if related {
+        if !issue.sessions.is_empty() {
+            bar_section(
+                &mut lines,
+                "Target",
+                issue_session_lines(&issue.sessions, width),
+                width,
+            );
+        }
+        bar_section(&mut lines, "Description", body, width);
+    } else {
+        lines.push(Line::raw(""));
+        lines.extend(body);
         return lines;
     }
 
@@ -1946,13 +1990,42 @@ fn issue_lines(issue: &IssueItem, width: usize, related: bool) -> Vec<Line<'stat
             ]);
             if let Some(message) = &ev.message {
                 entry.push(Line::raw(""));
-                entry.extend(message.lines().map(|l| Line::raw(l.to_string())));
+                entry.extend(
+                    message
+                        .lines()
+                        .map(|l| Line::from(Span::styled(l.to_string(), styles::Text::accent()))),
+                );
             }
             content.extend(content_box(entry, styles::Text::dim(), width));
         }
         bar_section(&mut lines, "Issue history", content, width);
     }
 
+    lines
+}
+
+/// Two-column table of the sessions an issue applies to: dim column
+/// headings like the panel tables, then one row per session. The
+/// project column is content-fit and capped by `fit_col`, the session
+/// title fills the rest, and both cells truncate so a row never wraps.
+fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<'static>> {
+    let area = Rect::new(0, 0, width as u16, 1);
+    let project_width =
+        fit_col("Project", sessions.iter().map(|s| s.project.as_str()), area) as usize;
+    let title_width = width.saturating_sub(project_width + 2);
+    let mut lines = vec![Line::from(Span::styled(
+        format!("{:<title_width$}  Project", "Session"),
+        styles::Text::dim(),
+    ))];
+    for s in sessions {
+        lines.push(Line::from(vec![
+            Span::raw(format!(
+                "{:<title_width$}  ",
+                ellipsize(&s.title, title_width)
+            )),
+            Span::raw(ellipsize(&s.project, project_width)),
+        ]));
+    }
     lines
 }
 
@@ -1997,7 +2070,7 @@ fn session_content(
 ) -> SessionContent {
     let session_issues: Vec<IssueItem> = all_issues
         .iter()
-        .filter(|issue| issue.sessions.contains(&session.id))
+        .filter(|issue| issue.sessions.iter().any(|s| s.id == session.id))
         .cloned()
         .collect();
 
@@ -2870,7 +2943,7 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .issues
         .iter()
         .map(|i| {
-            let ids: Vec<String> = i.sessions.iter().map(|s| short_id(s)).collect();
+            let ids: Vec<String> = i.sessions.iter().map(|s| short_id(&s.id)).collect();
             ids.join(" ")
         })
         .collect();
@@ -2966,10 +3039,7 @@ fn footer_help(state: &ViewState) -> &'static str {
     match state.dialog {
         Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
         Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next",
-        Dialog::Issue { ref issue } if issue.closed => {
-            "q back · ↑/↓ scroll · ←/→ prev/next · o open"
-        }
-        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · r review · c close",
+        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · a action",
         Dialog::Session {
             nav: SessionNav::Agents,
             ..
@@ -2977,13 +3047,10 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::Session { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · i issues · n notes",
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::None if state.focus == Focus::Issues => {
-            match (state.model.finished, state.selected_issue_closed()) {
-                (true, true) => "q quit · Tab cycle · ↑/↓ select · o open · l log",
-                (true, false) => "q quit · Tab cycle · ↑/↓ select · r review · c close · l log",
-                (false, true) => "q cancel scan · Tab cycle · ↑/↓ select · o open · l log",
-                (false, false) => {
-                    "q cancel scan · Tab cycle · ↑/↓ select · r review · c close · l log"
-                }
+            if state.model.finished {
+                "q quit · Tab cycle · ↑/↓ select · a action · l log"
+            } else {
+                "q cancel scan · Tab cycle · ↑/↓ select · a action · l log"
             }
         }
         Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log",
