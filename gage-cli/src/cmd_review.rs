@@ -1,7 +1,7 @@
 //! `gage review` — review issues in an interactive Claude Code session.
 
 use clap::Args;
-use gage_claude::proc::find_claude;
+use gage_claude::review::review_command;
 use gage_db::db;
 use gage_db::issue;
 
@@ -38,30 +38,13 @@ pub fn run(args: ReviewArgs) {
         std::process::exit(1);
     }
 
-    let claude_bin = match find_claude() {
-        Ok(p) => p,
+    let mut cmd = match review_command(&ids, args.model.as_deref(), &args.claude_args) {
+        Ok(cmd) => cmd,
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };
-
-    let mut prompt = String::from("/gage:review");
-    for id in &ids {
-        prompt.push(' ');
-        prompt.push_str(id);
-    }
-
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let mut cmd = std::process::Command::new(&claude_bin);
-    cmd.arg("--session-id").arg(&session_id);
-    cmd.arg("-n")
-        .arg(format!("Review Gage issues {}", &session_id[..8]));
-    if let Some(model) = &args.model {
-        cmd.arg("--model").arg(model);
-    }
-    cmd.args(&args.claude_args);
-    cmd.arg(prompt);
 
     match cmd.status() {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),

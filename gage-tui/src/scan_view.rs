@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use gage_claude::review::review_command;
 use gage_core::task::{task_display, task_name_display};
 use gage_db::issue::{self, IssueStatus, StatusReason};
 use gage_db::target::NoteTarget;
@@ -476,7 +477,7 @@ async fn event_loop(
     on_cancel: &impl Fn(),
 ) -> io::Result<()> {
     let mut state = ViewState::new(model);
-    let stop_input = Arc::new(AtomicBool::new(false));
+    let mut stop_input = Arc::new(AtomicBool::new(false));
     let mut input = spawn_input_thread(Arc::clone(&stop_input));
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut events_closed = false;
@@ -500,9 +501,15 @@ async fn event_loop(
             }
             ev = input.recv() => {
                 match ev {
-                    Some(TermEvent::Key(key))
-                        if key.kind == KeyEventKind::Press
-                            && handle_key(&mut state, key, on_cancel) => break,
+                    Some(TermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
+                        if handle_key(&mut state, key, on_cancel) {
+                            break;
+                        }
+                        if state.pending_review.is_some() {
+                            run_review_session(terminal, &mut state, &mut input, &mut stop_input)
+                                .await?;
+                        }
+                    }
                     // Input thread died (terminal input unavailable);
                     // without keys the view can never be backed, so
                     // exit rather than trap the user.
@@ -514,6 +521,43 @@ async fn event_loop(
         }
     }
     stop_input.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Hand the terminal to an interactive `/gage:review` session for the
+/// staged issue, then restore the view. The input thread is stopped
+/// first so the child owns stdin, and restarted with a fresh stop flag
+/// once the session ends. The issue is re-read afterwards — the
+/// session may have closed or commented it.
+async fn run_review_session(
+    terminal: &mut DefaultTerminal,
+    state: &mut ViewState,
+    input: &mut UnboundedReceiver<TermEvent>,
+    stop_input: &mut Arc<AtomicBool>,
+) -> io::Result<()> {
+    let Some(issue_id) = state.pending_review.take() else {
+        return Ok(());
+    };
+    stop_input.store(true, Ordering::Relaxed);
+    // The channel closes when the input thread exits; draining until
+    // then keeps buffered keys out of the child's session.
+    while input.recv().await.is_some() {}
+    ratatui::restore();
+    let result =
+        review_command(std::slice::from_ref(&issue_id), None, &[]).and_then(|mut cmd| cmd.status());
+    *terminal = ratatui::init();
+    terminal.clear()?;
+    *stop_input = Arc::new(AtomicBool::new(false));
+    *input = spawn_input_thread(Arc::clone(stop_input));
+    match result {
+        Ok(status) if status.success() => {}
+        Ok(status) => state.push_log(format!(
+            "Review session exited with status {}",
+            status.code().unwrap_or(1)
+        )),
+        Err(e) => state.push_log(format!("Review session failed: {e}")),
+    }
+    state.refresh_issue(&issue_id);
     Ok(())
 }
 
@@ -594,6 +638,16 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
             handle_comment_key(state, key);
             return false;
         }
+        Dialog::ReviewIssue { .. } => {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => state.confirm_review(),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
+                    state.dismiss_review_dialog();
+                }
+                _ => {}
+            }
+            return false;
+        }
         Dialog::OpenIssue { status: None, .. } => {
             match key.code {
                 KeyCode::Char('o') => state.set_open_status(IssueStatus::Open),
@@ -623,6 +677,10 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
                 KeyCode::Char('o') if matches!(&state.dialog, Dialog::Issue { issue } if issue.closed) =>
                 {
                     state.open_open_dialog();
+                }
+                KeyCode::Char('r') if matches!(&state.dialog, Dialog::Issue { issue } if !issue.closed) =>
+                {
+                    state.open_review_dialog();
                 }
                 KeyCode::Char('l') if matches!(state.dialog, Dialog::Log { .. }) => {
                     state.dialog = Dialog::None
@@ -672,6 +730,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
         KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
         KeyCode::Char('c') if state.focus == Focus::Issues => state.close_selected_issue(),
         KeyCode::Char('o') if state.focus == Focus::Issues => state.reopen_selected_issue(),
+        KeyCode::Char('r') if state.focus == Focus::Issues => state.review_selected_issue(),
         KeyCode::Enter if state.focus == Focus::Sessions => state.open_selected_session(),
         KeyCode::Enter if state.focus == Focus::Tasks => state.enter_task_row(),
         KeyCode::Right if state.focus == Focus::Tasks => state.expand_task_row(),
@@ -711,6 +770,53 @@ fn handle_comment_key(state: &mut ViewState, key: KeyEvent) {
             }
         }
     }
+}
+
+/// An issue's re-read status fields and history, applied onto
+/// [`IssueItem`] snapshots after an external change.
+struct IssueStatusUpdate {
+    status: String,
+    status_cell: String,
+    closed: bool,
+    events: Vec<EventItem>,
+}
+
+impl IssueStatusUpdate {
+    fn apply(&self, item: &mut IssueItem) {
+        item.status = self.status.clone();
+        item.status_cell = self.status_cell.clone();
+        item.closed = self.closed;
+        item.events = self.events.clone();
+    }
+}
+
+/// Re-read an issue's status fields and history from the db,
+/// mirroring how the scan model builds them.
+fn load_issue_status(issue_id: &str) -> Result<IssueStatusUpdate, String> {
+    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
+    let issue = issue::get(&conn, issue_id).map_err(|e| e.to_string())?;
+    let events = issue::issue_events_for(&conn, issue_id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|ev| EventItem {
+            kind: ev.event.to_label(),
+            author: ev.author.clone(),
+            timestamp: gage_core::datetime::ms_to_iso8601(ev.timestamp),
+            message: ev.event.message().map(str::to_string),
+        })
+        .collect();
+    Ok(IssueStatusUpdate {
+        status: match issue.status_reason {
+            Some(r) => format!("{} ({})", issue.status.as_str(), r.as_str()),
+            None => issue.status.as_str().to_string(),
+        },
+        status_cell: match issue.status_reason {
+            Some(r) => r.as_str().to_string(),
+            None => issue.status.as_str().to_string(),
+        },
+        closed: issue.status == IssueStatus::Closed,
+        events,
+    })
 }
 
 /// Set `issue_id`'s status in the db. A fresh connection per change
@@ -784,6 +890,11 @@ struct ViewState {
     cancel_requested: bool,
     /// Scroll state and layout cache for the open content dialog
     scroll_view: ScrollView,
+    /// Issue whose confirmed review session the event loop should
+    /// launch. Set by the review dialog's `y`; the loop takes it after
+    /// key handling, since only the loop owns the terminal and input
+    /// thread the launch must suspend.
+    pending_review: Option<String>,
     /// Session dialog: show the session's issues
     show_issues: bool,
     /// Session dialog: show the session's notes, with only the
@@ -818,6 +929,13 @@ enum Dialog {
         return_to_issue: bool,
         reason: Option<StatusReason>,
         editor: TextArea,
+    },
+    /// Confirm launching an interactive Claude Code review session for
+    /// an issue. `y` suspends the view and hands the terminal to
+    /// claude; the view resumes when the session ends.
+    ReviewIssue {
+        issue: Box<IssueItem>,
+        return_to_issue: bool,
     },
     /// Reopen a closed issue as open or pending. The counterpart of
     /// `CloseIssue` for the closed state, with the same two steps:
@@ -874,6 +992,7 @@ impl ViewState {
             scan_done_pending: false,
             cancel_requested: false,
             scroll_view: ScrollView::new(),
+            pending_review: None,
             show_issues: false,
             show_notes: false,
             model,
@@ -1133,6 +1252,87 @@ impl ViewState {
         if return_to_issue {
             self.scroll_view.reset();
             self.dialog = Dialog::Issue { issue };
+        }
+    }
+
+    /// Open the review confirmation over the issue dialog's issue.
+    /// No-op for a closed issue.
+    fn open_review_dialog(&mut self) {
+        if let Dialog::Issue { issue } = &self.dialog
+            && !issue.closed
+        {
+            self.dialog = Dialog::ReviewIssue {
+                issue: issue.clone(),
+                return_to_issue: true,
+            };
+        }
+    }
+
+    /// Open the review confirmation for the issues table's selected
+    /// issue. No-op for a closed issue.
+    fn review_selected_issue(&mut self) {
+        let Some(i) = self.issues.selected_index() else {
+            return;
+        };
+        if let Some(issue) = self.model.issues.get(i)
+            && !issue.closed
+        {
+            self.dialog = Dialog::ReviewIssue {
+                issue: Box::new(issue.clone()),
+                return_to_issue: false,
+            };
+        }
+    }
+
+    /// Back out of the review confirmation — to the issue dialog when
+    /// it was opened from there, otherwise to the issues table.
+    fn dismiss_review_dialog(&mut self) {
+        if let Dialog::ReviewIssue {
+            issue,
+            return_to_issue: true,
+        } = std::mem::replace(&mut self.dialog, Dialog::None)
+        {
+            self.scroll_view.reset();
+            self.dialog = Dialog::Issue { issue };
+        }
+    }
+
+    /// Confirm the review: stage the issue for the event loop's launch
+    /// and settle the dialog on where the session should return to.
+    fn confirm_review(&mut self) {
+        let Dialog::ReviewIssue {
+            issue,
+            return_to_issue,
+        } = std::mem::replace(&mut self.dialog, Dialog::None)
+        else {
+            return;
+        };
+        self.pending_review = Some(issue.id.clone());
+        if return_to_issue {
+            self.scroll_view.reset();
+            self.dialog = Dialog::Issue { issue };
+        }
+    }
+
+    /// Re-read an issue's status and history from the db after the
+    /// review session, which may have changed either. Updates the
+    /// results table and any open issue dialog; a read failure keeps
+    /// the stale snapshot and goes to the scan log.
+    fn refresh_issue(&mut self, issue_id: &str) {
+        let loaded = match load_issue_status(issue_id) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                self.push_log(format!("Refresh issue {issue_id} failed: {e}"));
+                return;
+            }
+        };
+        if let Some(item) = self.model.issues.iter_mut().find(|i| i.id == issue_id) {
+            loaded.apply(item);
+        }
+        if let Dialog::Issue { issue } = &mut self.dialog
+            && issue.id == issue_id
+        {
+            loaded.apply(issue);
         }
     }
 
@@ -1683,6 +1883,15 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
                 );
             }
         },
+        Dialog::ReviewIssue { .. } => dialog::draw_wrapped(
+            frame,
+            &[
+                "You are about to start a review session in Claude Code. \
+                 When finished, exit the session to return here.",
+                "Start Claude Code?",
+            ],
+            "y / n",
+        ),
         Dialog::OpenIssue { status, editor, .. } => match status {
             None => dialog::draw_message(frame, "Open this issue?", "o open · p pending · q back"),
             Some(status) => draw_status_comment(
@@ -2804,8 +3013,8 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::Issue { ref issue } if issue.closed => {
             "q back · ↑/↓ scroll · ←/→ prev/next issue · o open"
         }
-        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next issue · c close",
-        Dialog::CloseIssue { .. } | Dialog::OpenIssue { .. } => "",
+        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next issue · r review · c close",
+        Dialog::CloseIssue { .. } | Dialog::OpenIssue { .. } | Dialog::ReviewIssue { .. } => "",
         Dialog::Session {
             nav: SessionNav::Agents,
             ..
@@ -2817,9 +3026,11 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::None if state.focus == Focus::Issues => {
             match (state.model.finished, state.selected_issue_closed()) {
                 (true, true) => "q quit · Tab cycle · ↑/↓ select · o open · l log",
-                (true, false) => "q quit · Tab cycle · ↑/↓ select · c close · l log",
+                (true, false) => "q quit · Tab cycle · ↑/↓ select · r review · c close · l log",
                 (false, true) => "q cancel scan · Tab cycle · ↑/↓ select · o open · l log",
-                (false, false) => "q cancel scan · Tab cycle · ↑/↓ select · c close · l log",
+                (false, false) => {
+                    "q cancel scan · Tab cycle · ↑/↓ select · r review · c close · l log"
+                }
             }
         }
         Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log",

@@ -2600,6 +2600,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2639,7 +2640,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
