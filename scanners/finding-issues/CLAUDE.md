@@ -6,8 +6,8 @@ The agent instructions should reflect the open endedness of the finding notes
 used to infer issues and avoid over prescription. The scanner should excel at
 the meta problem of identifying issues from the long tail of possible findings.
 
-Evidentiary standards are type specific and live in the note docs declared by
-the finding scanners (`notes.writes`). The issue writer reads `note_doc` and
-applies each doc's standard. Its prompt stays free of finding-type
-enumerations; a new finding kind participates by declaring its standard in its
-own doc, with no change to this scanner.
+Note docs (declared by finding scanners under `notes.writes`) describe the
+notes as they are and carry no issue-writing policy. Evidentiary standards live
+in this scanner's prompt, stated generically so confidence follows from what a
+doc says about its notes. A new finding kind participates by declaring a
+descriptive doc, with no change to this scanner.
