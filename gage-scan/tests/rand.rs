@@ -32,6 +32,10 @@ fn run_rune(script: &str) -> rune::Value {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn random_f64_in_unit_range() {
     let val = run_rune(
         r#"
@@ -46,6 +50,10 @@ fn random_f64_in_unit_range() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn random_range_f64() {
     let val = run_rune(
         r#"

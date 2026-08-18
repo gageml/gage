@@ -32,6 +32,10 @@ fn run_rune(script: &str) -> rune::Value {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn args_variant_round_trips() {
     let val = run_rune(
         r#"
@@ -49,6 +53,10 @@ fn args_variant_round_trips() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn db_variant_round_trips() {
     let val = run_rune(
         r#"
@@ -66,6 +74,10 @@ fn db_variant_round_trips() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn http_variant_carries_status_and_body() {
     let val = run_rune(
         r#"
@@ -83,6 +95,10 @@ fn http_variant_carries_status_and_body() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn http_getters_accessible_without_destructure() {
     let val = run_rune(
         r#"
@@ -97,6 +113,10 @@ fn http_getters_accessible_without_destructure() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn duplicate_variant_carries_prev_and_new() {
     let val = run_rune(
         r#"
@@ -114,6 +134,10 @@ fn duplicate_variant_carries_prev_and_new() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn each_variant_constructs() {
     let val = run_rune(
         r#"

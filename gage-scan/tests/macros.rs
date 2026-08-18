@@ -37,6 +37,10 @@ fn run_rune(embed_key: &str, script: &str) -> rune::Value {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn include_str_loads_file() {
     let val = run_rune(
         "test-fixture.rn",
@@ -61,11 +65,19 @@ fn include_json_loads_array() {
         }
         "#,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the VM execution's return value; the test holds the only live handle"
+    )]
     let len = rune::from_value::<i64>(val).unwrap();
     assert_eq!(len, 3);
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn include_json_elements_are_strings() {
     let val = run_rune(
         "test-fixture.rn",
@@ -80,6 +92,10 @@ fn include_json_elements_are_strings() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn include_json_contains_known_element() {
     let val = run_rune(
         "test-fixture.rn",

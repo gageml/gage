@@ -33,6 +33,10 @@ fn run_rune(script: &str) -> rune::Value {
     vm.call(["main"], ()).unwrap()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn run_template(script: &str) -> String {
     let val = run_rune(script);
     rune::from_value::<String>(val).unwrap()
@@ -185,6 +189,10 @@ fn invalid_template_returns_error() {
         }
         "#,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the VM execution's return value; the test holds the only live handle"
+    )]
     let result = rune::from_value::<String>(val).unwrap();
     assert_eq!(result, "template");
 }
@@ -313,6 +321,10 @@ fn run_rune_async(script: &str) -> rune::Value {
     })
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the test holds the only live handle"
+)]
 fn run_template_async(script: &str) -> String {
     let val = run_rune_async(script);
     rune::from_value::<Result<String, rune::Value>>(val)
@@ -364,6 +376,10 @@ fn template_struct_parse_error_at_new() {
         }
         "#,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the VM execution's return value; the test holds the only live handle"
+    )]
     let result = rune::from_value::<String>(val).unwrap();
     assert_eq!(result, "template");
 }
