@@ -1,6 +1,6 @@
 use console::style;
 use gage_core::uuid::short_uuid;
-use tabled::settings::Color;
+use tabled::settings::{Color, peaker::Peaker};
 
 pub fn spinner(message: &str) -> indicatif::ProgressBar {
     let spinner = indicatif::ProgressBar::new_spinner();
@@ -30,6 +30,34 @@ pub fn dim() -> Color {
 
 pub fn dim_italic() -> Color {
     tty(Color::new("\x1b[2;3m", "\x1b[22;23m"))
+}
+
+/// Truncates the biggest column first (like `PriorityMax::left`), but never
+/// picks the Id column (index 0) when `protect_id` is set, so a full ID is
+/// preserved while the other columns absorb the shrink.
+pub struct IdAwarePriority {
+    protect_id: bool,
+}
+
+impl IdAwarePriority {
+    pub fn new(protect_id: bool) -> Self {
+        Self { protect_id }
+    }
+}
+
+impl Peaker for IdAwarePriority {
+    fn peak(&mut self, mins: &[usize], widths: &[usize]) -> Option<usize> {
+        let start = if self.protect_id { 1 } else { 0 };
+        widths
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(start)
+            .rev()
+            .filter(|&(i, w)| w != 0 && (mins.is_empty() || mins.get(i).is_none_or(|&m| w > m)))
+            .max_by_key(|&(_, w)| w)
+            .map(|(i, _)| i)
+    }
 }
 
 /// Renders IDs as short, jj-style displays where the disambiguating

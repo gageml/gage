@@ -14,6 +14,8 @@ use tabled::{
     },
 };
 
+use gage_claude::home::ClaudeHome;
+use gage_claude::project::project_for_session_name;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
@@ -222,8 +224,14 @@ fn list(args: ScanListArgs) {
         }
     }
 
+    let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
+        .with(
+            Width::truncate(term_width)
+                .suffix("…")
+                .priority(s::IdAwarePriority::new(true)),
+        )
         .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(1..7), Alignment::right())
         .modify(Columns::one(7).not(Rows::first()), s::dim())
@@ -426,7 +434,8 @@ fn load_scan_model(
     let summary = scan_summary(&run)?;
 
     let mut agent_times = AgentTimes::default();
-    let results = load_scan_results(conn, &run.id, &mut agent_times)?;
+    let mut session_displays = SessionDisplays::default();
+    let results = load_scan_results(conn, &run.id, &mut agent_times, &mut session_displays)?;
 
     let mut tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
         .into_iter()
@@ -523,11 +532,13 @@ fn reconcile_results(
     db: &Arc<Mutex<gage_db::rusqlite::Connection>>,
     scan_id: &str,
     agent_times: &Mutex<AgentTimes>,
+    session_displays: &Mutex<SessionDisplays>,
 ) -> gage_tui::scan_view::Event {
     let results = {
         let conn = db.lock().unwrap();
         let mut times = agent_times.lock().unwrap();
-        load_scan_results(&conn, scan_id, &mut times)
+        let mut displays = session_displays.lock().unwrap();
+        load_scan_results(&conn, scan_id, &mut times, &mut displays)
     };
     match results {
         Ok(r) => gage_tui::scan_view::Event::Results {
@@ -558,6 +569,7 @@ fn load_scan_results(
     conn: &gage_db::rusqlite::Connection,
     scan_id: &str,
     agent_times: &mut AgentTimes,
+    session_displays: &mut SessionDisplays,
 ) -> anyhow::Result<ScanResults> {
     use gage_tui::scan_view::{EventItem, EvidenceItem, IssueItem, NoteItem, SessionCounts};
     use std::collections::{HashMap, HashSet};
@@ -634,7 +646,7 @@ fn load_scan_results(
             author: i.author.clone(),
             created: gage_core::datetime::ms_to_iso8601(i.created),
             description: i.description.clone(),
-            sessions: gage_db::issue::issue_sessions(conn, &i.id)?,
+            sessions: issue_session_items(conn, &i.id, session_displays)?,
             evidence,
             events,
         });
@@ -689,6 +701,109 @@ fn load_scan_results(
             .map(|(id, (notes, issues))| SessionCounts { id, notes, issues })
             .collect(),
     })
+}
+
+/// Resolve an issue's linked sessions for display: project path and
+/// session title per link, from the cache.
+fn issue_session_items(
+    conn: &gage_db::rusqlite::Connection,
+    issue_id: &str,
+    displays: &mut SessionDisplays,
+) -> anyhow::Result<Vec<gage_tui::scan_view::IssueSessionItem>> {
+    let mut items = Vec::new();
+    for id in gage_db::issue::issue_sessions(conn, issue_id)? {
+        let display = displays.resolve(&id);
+        items.push(gage_tui::scan_view::IssueSessionItem {
+            id,
+            project: display.project,
+            title: display.title,
+        });
+    }
+    Ok(items)
+}
+
+/// Session display fields per linked session, cached across reconcile
+/// ticks like [`AgentTimes`] — titles and project paths do not change
+/// while a view is open, so each session resolves once.
+#[derive(Default)]
+struct SessionDisplays {
+    map: std::collections::HashMap<String, SessionDisplay>,
+    /// Session walk from the last unknown id; sessions can appear
+    /// while a scan runs, so an id missing from it refreshes the walk
+    paths: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Resolved project display per encoded directory name
+    projects: std::collections::HashMap<String, String>,
+}
+
+#[derive(Clone)]
+struct SessionDisplay {
+    project: String,
+    title: String,
+}
+
+impl SessionDisplays {
+    /// A session's display fields. Both fall back to a placeholder
+    /// when the session is not on disk.
+    fn resolve(&mut self, id: &str) -> SessionDisplay {
+        if let Some(display) = self.map.get(id) {
+            return display.clone();
+        }
+        if !self.paths.contains_key(id) {
+            self.paths = session::ls_sessions().into_iter().collect();
+        }
+        let display = match stat_session(&self.paths, id) {
+            Some(info) => {
+                let encoded = info.project_name().into_owned();
+                let home = ClaudeHome::from_env().ok();
+                let project = self
+                    .projects
+                    .entry(encoded)
+                    .or_insert_with_key(|encoded| project_display(home.as_ref(), encoded))
+                    .clone();
+                let store = gage_query::default_index_store();
+                SessionDisplay {
+                    project,
+                    title: session_title(&store, &info),
+                }
+            }
+            None => SessionDisplay {
+                project: "(unavailable)".to_string(),
+                title: "(unavailable)".to_string(),
+            },
+        };
+        self.map.insert(id.to_string(), display.clone());
+        display
+    }
+}
+
+/// Display path for an encoded project directory name: the first
+/// recorded project cwd that encodes to it, `~`-substituted. Falls
+/// back to the encoded name — the encoding is lossy and the registry
+/// may not know the cwd, and the raw name still identifies the storage
+/// directory.
+fn project_display(home: Option<&ClaudeHome>, encoded: &str) -> String {
+    home.and_then(|h| project_for_session_name(h, encoded).ok().flatten())
+        .map(|p| shorten_home_path(&p.path))
+        .unwrap_or_else(|| encoded.to_string())
+}
+
+/// The path with a leading `$HOME` replaced by `~`, for display
+fn shorten_home_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    let Some(home) = std::env::var_os("HOME") else {
+        return s.into_owned();
+    };
+    let home = home.to_string_lossy();
+    if s == home {
+        "~".to_string()
+    } else if let Some(rest) = s
+        .strip_prefix(home.as_ref())
+        .and_then(|r| r.strip_prefix('/'))
+    {
+        format!("~/{rest}")
+    } else {
+        s.into_owned()
+    }
 }
 
 /// Adapt a `task_agent` row to the scan view's agent entry: state and
@@ -1522,6 +1637,7 @@ async fn run_scan_tui(
 
     // Agent session time bounds, cached across reconcile passes
     let agent_times = Arc::new(Mutex::new(AgentTimes::default()));
+    let session_displays = Arc::new(Mutex::new(SessionDisplays::default()));
 
     // Reconcile notes/issues from the db once a second while the scan
     // runs — the same read the historical loader uses.
@@ -1532,6 +1648,7 @@ async fn run_scan_tui(
         let scan_id = scan_id.clone();
         let scan_done = Arc::clone(&scan_done);
         let agent_times = Arc::clone(&agent_times);
+        let session_displays = Arc::clone(&session_displays);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
@@ -1541,7 +1658,10 @@ async fn run_scan_tui(
                         if scan_done.load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
-                        if tx.send(reconcile_results(&db, &scan_id, &agent_times)).is_err() {
+                        if tx
+                            .send(reconcile_results(&db, &scan_id, &agent_times, &session_displays))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -1572,7 +1692,10 @@ async fn run_scan_tui(
         // Finish handling: stop the poll, send one final reconcile so
         // the UI is current, then announce completion.
         scan_done.store(true, std::sync::atomic::Ordering::Relaxed);
-        send_view_event(&event_tx, reconcile_results(&db, &scan_id, &agent_times));
+        send_view_event(
+            &event_tx,
+            reconcile_results(&db, &scan_id, &agent_times, &session_displays),
+        );
         send_view_event(&event_tx, scan_view::Event::Finished);
         result
     };

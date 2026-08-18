@@ -14,7 +14,6 @@ use tabled::{
     settings::{
         Alignment, Color, Style, Width,
         object::{Columns, Object, Rows},
-        peaker::Peaker,
     },
 };
 
@@ -181,34 +180,6 @@ async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
-    }
-}
-
-/// Truncates the biggest column first (like `PriorityMax::left`), but never
-/// picks the Id column (index 0) when `protect_id` is set, so a full session
-/// ID is preserved while the other columns absorb the shrink.
-struct IdAwarePriority {
-    protect_id: bool,
-}
-
-impl IdAwarePriority {
-    fn new(protect_id: bool) -> Self {
-        Self { protect_id }
-    }
-}
-
-impl Peaker for IdAwarePriority {
-    fn peak(&mut self, mins: &[usize], widths: &[usize]) -> Option<usize> {
-        let start = if self.protect_id { 1 } else { 0 };
-        widths
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(start)
-            .rev()
-            .filter(|&(i, w)| w != 0 && (mins.is_empty() || mins.get(i).is_none_or(|&m| w > m)))
-            .max_by_key(|&(_, w)| w)
-            .map(|(i, _)| i)
     }
 }
 
@@ -395,7 +366,7 @@ pub async fn list(args: SessionListArgs, agent: bool) {
     table.with(
         Width::truncate(term_width)
             .suffix("…")
-            .priority(IdAwarePriority::new(args.full_id)),
+            .priority(style::IdAwarePriority::new(args.full_id)),
     );
     let table = table.to_string();
     println!("{table}");
