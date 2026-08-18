@@ -104,6 +104,10 @@ pub fn apply(
     applied.reopened = reopened.len();
     for p in &plan {
         if let Planned::Duplicate { issue, of, .. } = p {
+            // The surviving issue's ID is preserved in the status
+            // event's message — the intended durable record of the
+            // duplicate link. There is deliberately no structured
+            // duplicate_of field: nothing consumes one.
             let message = format!("duplicate of {of}");
             set_status_in_tx(
                 &tx,

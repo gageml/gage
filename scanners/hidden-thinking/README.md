@@ -49,4 +49,4 @@ the issue after fixing config, config later regresses, a fresh empty
 block produces a new note, and the issue reopens. This scanner is the
 model for that reopen-on-new-evidence scheme.
 
-See [scanner docs](docs/index.md) for more information.
+See [scanner docs](../../docs/scanners.md) for more information.

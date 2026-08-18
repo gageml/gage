@@ -13,4 +13,4 @@ scanner writes an evidence note and opens an issue.
 
 - `session-retention` (issue) --- reference to `issue.md`
 
-See [scanner docs](docs/index.md) for more information.
+See [scanner docs](../../docs/scanners.md) for more information.

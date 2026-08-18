@@ -1,6 +1,7 @@
 //! `gage review` — review issues in an interactive Claude Code session.
 
 use clap::Args;
+use gage_claude::proc::find_claude;
 use gage_db::db;
 use gage_db::issue;
 
@@ -37,7 +38,7 @@ pub fn run(args: ReviewArgs) {
         std::process::exit(1);
     }
 
-    let claude_bin = match gage_claude::proc::find_claude() {
+    let claude_bin = match find_claude() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {e}");
