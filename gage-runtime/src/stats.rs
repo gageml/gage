@@ -83,6 +83,10 @@ mod tests {
         vm.call(["main"], ())
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the VM execution's return value; the test holds the only live handle"
+    )]
     fn mean_of(expr: &str) -> Option<f64> {
         let value = call(expr).unwrap();
         rune::from_value::<Option<f64>>(value).unwrap()

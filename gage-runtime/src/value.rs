@@ -80,6 +80,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the VM execution's return value; the test holds the only live handle"
+    )]
     fn non_null_is_unaffected() {
         assert_eq!(
             rune::from_value::<i64>(json_to_value(&json!(7))).unwrap(),

@@ -589,6 +589,10 @@ fn spawn_input_thread(stop: Arc<AtomicBool>) -> UnboundedReceiver<TermEvent> {
 
 /// Returns true when the view should close.
 fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bool {
+    if state.prompt.is_some() {
+        handle_prompt_key(state, key);
+        return false;
+    }
     match &state.dialog {
         Dialog::ConfirmQuit => {
             match key.code {
@@ -622,47 +626,6 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
             }
             return false;
         }
-        Dialog::CloseIssue { reason: None, .. } => {
-            match key.code {
-                KeyCode::Char('c') => state.set_close_reason(StatusReason::Completed),
-                KeyCode::Char('s') => state.set_close_reason(StatusReason::Skipped),
-                KeyCode::Char('d') => state.set_close_reason(StatusReason::Duplicate),
-                KeyCode::Char('q') | KeyCode::Esc => state.dismiss_close_dialog(),
-                _ => {}
-            }
-            return false;
-        }
-        Dialog::CloseIssue {
-            reason: Some(_), ..
-        } => {
-            handle_comment_key(state, key);
-            return false;
-        }
-        Dialog::ReviewIssue { .. } => {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => state.confirm_review(),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
-                    state.dismiss_review_dialog();
-                }
-                _ => {}
-            }
-            return false;
-        }
-        Dialog::OpenIssue { status: None, .. } => {
-            match key.code {
-                KeyCode::Char('o') => state.set_open_status(IssueStatus::Open),
-                KeyCode::Char('p') => state.set_open_status(IssueStatus::Pending),
-                KeyCode::Char('q') | KeyCode::Esc => state.dismiss_open_dialog(),
-                _ => {}
-            }
-            return false;
-        }
-        Dialog::OpenIssue {
-            status: Some(_), ..
-        } => {
-            handle_comment_key(state, key);
-            return false;
-        }
         Dialog::Note { .. }
         | Dialog::Issue { .. }
         | Dialog::Session { .. }
@@ -672,15 +635,15 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
                 KeyCode::Char('c') if matches!(&state.dialog, Dialog::Issue { issue } if !issue.closed) =>
                 {
-                    state.open_close_dialog();
+                    state.open_close_prompt();
                 }
                 KeyCode::Char('o') if matches!(&state.dialog, Dialog::Issue { issue } if issue.closed) =>
                 {
-                    state.open_open_dialog();
+                    state.open_open_prompt();
                 }
                 KeyCode::Char('r') if matches!(&state.dialog, Dialog::Issue { issue } if !issue.closed) =>
                 {
-                    state.open_review_dialog();
+                    state.open_review_prompt();
                 }
                 KeyCode::Char('l') if matches!(state.dialog, Dialog::Log { .. }) => {
                     state.dialog = Dialog::None
@@ -741,6 +704,40 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
     false
 }
 
+/// Key handling while a prompt overlays the view. `q`/Esc dismiss the
+/// overlay, leaving whatever is beneath it untouched.
+fn handle_prompt_key(state: &mut ViewState, key: KeyEvent) {
+    match &state.prompt {
+        Some(Prompt::Close { reason: None, .. }) => match key.code {
+            KeyCode::Char('c') => state.set_close_reason(StatusReason::Completed),
+            KeyCode::Char('s') => state.set_close_reason(StatusReason::Skipped),
+            KeyCode::Char('d') => state.set_close_reason(StatusReason::Duplicate),
+            KeyCode::Char('q') | KeyCode::Esc => state.prompt = None,
+            _ => {}
+        },
+        Some(Prompt::Close {
+            reason: Some(_), ..
+        })
+        | Some(Prompt::Open {
+            status: Some(_), ..
+        }) => handle_comment_key(state, key),
+        Some(Prompt::Review { .. }) => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => state.confirm_review(),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
+                state.prompt = None;
+            }
+            _ => {}
+        },
+        Some(Prompt::Open { status: None, .. }) => match key.code {
+            KeyCode::Char('o') => state.set_open_status(IssueStatus::Open),
+            KeyCode::Char('p') => state.set_open_status(IssueStatus::Pending),
+            KeyCode::Char('q') | KeyCode::Esc => state.prompt = None,
+            _ => {}
+        },
+        None => {}
+    }
+}
+
 /// Comment entry for a chosen close reason or reopen status. Enter
 /// applies the change; Esc steps back to the choice keeping the text.
 /// Newline shortcuts mirror the note editor: terminals without the
@@ -752,15 +749,15 @@ fn handle_comment_key(state: &mut ViewState, key: KeyEvent) {
         && (mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::ALT)))
         || (matches!(key.code, KeyCode::Char('j')) && mods.contains(KeyModifiers::CONTROL));
     match key.code {
-        KeyCode::Enter if !is_newline_shortcut => match &state.dialog {
-            Dialog::CloseIssue { .. } => state.apply_close(),
-            Dialog::OpenIssue { .. } => state.apply_open(),
+        KeyCode::Enter if !is_newline_shortcut => match &state.prompt {
+            Some(Prompt::Close { .. }) => state.apply_close(),
+            Some(Prompt::Open { .. }) => state.apply_open(),
             _ => {}
         },
         KeyCode::Esc => state.comment_step_back(),
         _ => {
-            let editor = match &mut state.dialog {
-                Dialog::CloseIssue { editor, .. } | Dialog::OpenIssue { editor, .. } => editor,
+            let editor = match &mut state.prompt {
+                Some(Prompt::Close { editor, .. }) | Some(Prompt::Open { editor, .. }) => editor,
                 _ => return,
             };
             if is_newline_shortcut {
@@ -882,6 +879,8 @@ struct ViewState {
     log: VecDeque<String>,
     started: Instant,
     dialog: Dialog,
+    /// Confirm/comment prompt overlaying the dialog (or the bare view)
+    prompt: Option<Prompt>,
     /// A live scan finished while another dialog was open; ScanDone
     /// shows once that dialog closes
     scan_done_pending: bool,
@@ -918,35 +917,6 @@ enum Dialog {
     Issue {
         issue: Box<IssueItem>,
     },
-    /// Close an issue: pick a reason, then enter an optional comment
-    /// and apply. `reason` is `None` while the reason is being chosen;
-    /// the editor's text survives stepping back to the reason choice.
-    /// Opened from the issue dialog or straight from the issues table;
-    /// `return_to_issue` records which, so backing out and applying
-    /// land where the user came from.
-    CloseIssue {
-        issue: Box<IssueItem>,
-        return_to_issue: bool,
-        reason: Option<StatusReason>,
-        editor: TextArea,
-    },
-    /// Confirm launching an interactive Claude Code review session for
-    /// an issue. `y` suspends the view and hands the terminal to
-    /// claude; the view resumes when the session ends.
-    ReviewIssue {
-        issue: Box<IssueItem>,
-        return_to_issue: bool,
-    },
-    /// Reopen a closed issue as open or pending. The counterpart of
-    /// `CloseIssue` for the closed state, with the same two steps:
-    /// `status` is `None` while the status is being chosen, then the
-    /// comment editor applies on Enter.
-    OpenIssue {
-        issue: Box<IssueItem>,
-        return_to_issue: bool,
-        status: Option<IssueStatus>,
-        editor: TextArea,
-    },
     /// Zoomed session contents, read from the JSONL at open. Section
     /// headers are padded to the dialog width at draw time, so the
     /// content is kept structured rather than pre-flattened. `nav`
@@ -965,6 +935,36 @@ enum Dialog {
     },
     /// A live scan just finished
     ScanDone,
+}
+
+/// A confirm/comment prompt drawn over whatever is beneath it — the
+/// issue dialog or the bare view, depending on where it was opened
+/// from. Opening one never disturbs the open dialog or its scroll
+/// state; dismissing removes only the overlay. Each variant holds a
+/// snapshot of its issue so the prompt works with or without the
+/// issue dialog beneath.
+enum Prompt {
+    /// Close an issue: pick a reason, then enter an optional comment
+    /// and apply. `reason` is `None` while the reason is being chosen;
+    /// the editor's text survives stepping back to the reason choice.
+    Close {
+        issue: Box<IssueItem>,
+        reason: Option<StatusReason>,
+        editor: TextArea,
+    },
+    /// Confirm launching an interactive Claude Code review session for
+    /// an issue. `y` suspends the view and hands the terminal to
+    /// claude; the view resumes when the session ends.
+    Review { issue: Box<IssueItem> },
+    /// Reopen a closed issue as open or pending. The counterpart of
+    /// `Close` for the closed state, with the same two steps: `status`
+    /// is `None` while the status is being chosen, then the comment
+    /// editor applies on Enter.
+    Open {
+        issue: Box<IssueItem>,
+        status: Option<IssueStatus>,
+        editor: TextArea,
+    },
 }
 
 /// What a session dialog was opened from, and therefore what ←/→
@@ -989,6 +989,7 @@ impl ViewState {
             log: VecDeque::new(),
             started: Instant::now(),
             dialog: Dialog::None,
+            prompt: None,
             scan_done_pending: false,
             cancel_requested: false,
             scroll_view: ScrollView::new(),
@@ -1038,23 +1039,22 @@ impl ViewState {
         }
     }
 
-    /// Open the close dialog over the issue dialog's issue. No-op for
+    /// Open the close prompt over the issue dialog's issue. No-op for
     /// an already-closed issue.
-    fn open_close_dialog(&mut self) {
+    fn open_close_prompt(&mut self) {
         if let Dialog::Issue { issue } = &self.dialog
             && !issue.closed
         {
-            self.dialog = Dialog::CloseIssue {
+            self.prompt = Some(Prompt::Close {
                 issue: issue.clone(),
-                return_to_issue: true,
                 reason: None,
                 editor: TextArea::new(""),
-            };
+            });
         }
     }
 
-    /// Open the close dialog for the issues table's selected issue,
-    /// without the issue dialog beneath. No-op for a closed issue.
+    /// Open the close prompt for the issues table's selected issue.
+    /// No-op for a closed issue.
     fn close_selected_issue(&mut self) {
         let Some(i) = self.issues.selected_index() else {
             return;
@@ -1062,62 +1062,46 @@ impl ViewState {
         if let Some(issue) = self.model.issues.get(i)
             && !issue.closed
         {
-            self.dialog = Dialog::CloseIssue {
+            self.prompt = Some(Prompt::Close {
                 issue: Box::new(issue.clone()),
-                return_to_issue: false,
                 reason: None,
                 editor: TextArea::new(""),
-            };
+            });
         }
     }
 
     fn set_close_reason(&mut self, reason: StatusReason) {
-        if let Dialog::CloseIssue { reason: r, .. } = &mut self.dialog {
+        if let Some(Prompt::Close { reason: r, .. }) = &mut self.prompt {
             *r = Some(reason);
         }
     }
 
     fn set_open_status(&mut self, status: IssueStatus) {
-        if let Dialog::OpenIssue { status: s, .. } = &mut self.dialog {
+        if let Some(Prompt::Open { status: s, .. }) = &mut self.prompt {
             *s = Some(status);
         }
     }
 
-    /// Step a close or reopen dialog back from comment entry to its
+    /// Step a close or reopen prompt back from comment entry to its
     /// choice step. The editor's text is kept.
     fn comment_step_back(&mut self) {
-        match &mut self.dialog {
-            Dialog::CloseIssue { reason, .. } => *reason = None,
-            Dialog::OpenIssue { status, .. } => *status = None,
+        match &mut self.prompt {
+            Some(Prompt::Close { reason, .. }) => *reason = None,
+            Some(Prompt::Open { status, .. }) => *status = None,
             _ => {}
         }
     }
 
-    /// Back out of the close dialog — to the issue dialog when it was
-    /// opened from there, otherwise to the issues table.
-    fn dismiss_close_dialog(&mut self) {
-        if let Dialog::CloseIssue {
-            issue,
-            return_to_issue: true,
-            ..
-        } = std::mem::replace(&mut self.dialog, Dialog::None)
-        {
-            self.scroll_view.reset();
-            self.dialog = Dialog::Issue { issue };
-        }
-    }
-
-    /// Apply the close dialog's reason and comment to the db, reflect
-    /// the change in the results table, and return to where the dialog
-    /// was opened from. On a db failure the close dialog stays up with
+    /// Apply the close prompt's reason and comment to the db, reflect
+    /// the change in the results table and any open issue dialog, and
+    /// dismiss the prompt. On a db failure the prompt stays up with
     /// its state intact and the error goes to the scan log.
     fn apply_close(&mut self) {
-        let Dialog::CloseIssue {
+        let Some(Prompt::Close {
             mut issue,
-            return_to_issue,
             reason: Some(reason),
             editor,
-        } = std::mem::replace(&mut self.dialog, Dialog::None)
+        }) = self.prompt.take()
         else {
             return;
         };
@@ -1133,12 +1117,11 @@ impl ViewState {
             message.as_deref(),
         ) {
             self.push_log(format!("Close issue {} failed: {e}", issue.id));
-            self.dialog = Dialog::CloseIssue {
+            self.prompt = Some(Prompt::Close {
                 issue,
-                return_to_issue,
                 reason: Some(reason),
                 editor,
-            };
+            });
             return;
         }
         issue.status = format!("closed ({})", reason.as_str());
@@ -1150,34 +1133,39 @@ impl ViewState {
             timestamp: gage_core::datetime::ms_to_iso8601(gage_core::datetime::now_ms()),
             message,
         });
-        if let Some(item) = self.model.issues.iter_mut().find(|i| i.id == issue.id) {
-            *item = (*issue).clone();
-        }
+        self.reflect_issue(&issue);
         self.push_log(format!("Closed issue {} ({})", issue.id, reason.as_str()));
-        if return_to_issue {
-            self.scroll_view.reset();
-            self.dialog = Dialog::Issue { issue };
+    }
+
+    /// Reflect a changed issue snapshot in the results table and in an
+    /// open issue dialog showing it.
+    fn reflect_issue(&mut self, issue: &IssueItem) {
+        if let Some(item) = self.model.issues.iter_mut().find(|i| i.id == issue.id) {
+            *item = issue.clone();
+        }
+        if let Dialog::Issue { issue: open } = &mut self.dialog
+            && open.id == issue.id
+        {
+            **open = issue.clone();
         }
     }
 
-    /// Open the reopen dialog over the issue dialog's issue. No-op
+    /// Open the reopen prompt over the issue dialog's issue. No-op
     /// unless the issue is closed.
-    fn open_open_dialog(&mut self) {
+    fn open_open_prompt(&mut self) {
         if let Dialog::Issue { issue } = &self.dialog
             && issue.closed
         {
-            self.dialog = Dialog::OpenIssue {
+            self.prompt = Some(Prompt::Open {
                 issue: issue.clone(),
-                return_to_issue: true,
                 status: None,
                 editor: TextArea::new(""),
-            };
+            });
         }
     }
 
-    /// Open the reopen dialog for the issues table's selected issue,
-    /// without the issue dialog beneath. No-op unless the issue is
-    /// closed.
+    /// Open the reopen prompt for the issues table's selected issue.
+    /// No-op unless the issue is closed.
     fn reopen_selected_issue(&mut self) {
         let Some(i) = self.issues.selected_index() else {
             return;
@@ -1185,40 +1173,24 @@ impl ViewState {
         if let Some(issue) = self.model.issues.get(i)
             && issue.closed
         {
-            self.dialog = Dialog::OpenIssue {
+            self.prompt = Some(Prompt::Open {
                 issue: Box::new(issue.clone()),
-                return_to_issue: false,
                 status: None,
                 editor: TextArea::new(""),
-            };
+            });
         }
     }
 
-    /// Back out of the reopen dialog — to the issue dialog when it was
-    /// opened from there, otherwise to the issues table.
-    fn dismiss_open_dialog(&mut self) {
-        if let Dialog::OpenIssue {
-            issue,
-            return_to_issue: true,
-            ..
-        } = std::mem::replace(&mut self.dialog, Dialog::None)
-        {
-            self.scroll_view.reset();
-            self.dialog = Dialog::Issue { issue };
-        }
-    }
-
-    /// Reopen the dialog's issue with the chosen status and comment
-    /// and return to where the dialog was opened from. On a db failure
-    /// the dialog stays up with its state intact and the error goes to
-    /// the scan log.
+    /// Reopen the prompt's issue with the chosen status and comment,
+    /// reflect the change, and dismiss the prompt. On a db failure the
+    /// prompt stays up with its state intact and the error goes to the
+    /// scan log.
     fn apply_open(&mut self) {
-        let Dialog::OpenIssue {
+        let Some(Prompt::Open {
             mut issue,
-            return_to_issue,
             status: Some(status),
             editor,
-        } = std::mem::replace(&mut self.dialog, Dialog::None)
+        }) = self.prompt.take()
         else {
             return;
         };
@@ -1228,12 +1200,11 @@ impl ViewState {
         let author = user_author();
         if let Err(e) = set_issue_status(&issue.id, status, None, &author, message.as_deref()) {
             self.push_log(format!("Open issue {} failed: {e}", issue.id));
-            self.dialog = Dialog::OpenIssue {
+            self.prompt = Some(Prompt::Open {
                 issue,
-                return_to_issue,
                 status: Some(status),
                 editor,
-            };
+            });
             return;
         }
         issue.status = status.as_str().to_string();
@@ -1245,26 +1216,19 @@ impl ViewState {
             timestamp: gage_core::datetime::ms_to_iso8601(gage_core::datetime::now_ms()),
             message,
         });
-        if let Some(item) = self.model.issues.iter_mut().find(|i| i.id == issue.id) {
-            *item = (*issue).clone();
-        }
+        self.reflect_issue(&issue);
         self.push_log(format!("Opened issue {} ({})", issue.id, status.as_str()));
-        if return_to_issue {
-            self.scroll_view.reset();
-            self.dialog = Dialog::Issue { issue };
-        }
     }
 
     /// Open the review confirmation over the issue dialog's issue.
     /// No-op for a closed issue.
-    fn open_review_dialog(&mut self) {
+    fn open_review_prompt(&mut self) {
         if let Dialog::Issue { issue } = &self.dialog
             && !issue.closed
         {
-            self.dialog = Dialog::ReviewIssue {
+            self.prompt = Some(Prompt::Review {
                 issue: issue.clone(),
-                return_to_issue: true,
-            };
+            });
         }
     }
 
@@ -1277,41 +1241,19 @@ impl ViewState {
         if let Some(issue) = self.model.issues.get(i)
             && !issue.closed
         {
-            self.dialog = Dialog::ReviewIssue {
+            self.prompt = Some(Prompt::Review {
                 issue: Box::new(issue.clone()),
-                return_to_issue: false,
-            };
-        }
-    }
-
-    /// Back out of the review confirmation — to the issue dialog when
-    /// it was opened from there, otherwise to the issues table.
-    fn dismiss_review_dialog(&mut self) {
-        if let Dialog::ReviewIssue {
-            issue,
-            return_to_issue: true,
-        } = std::mem::replace(&mut self.dialog, Dialog::None)
-        {
-            self.scroll_view.reset();
-            self.dialog = Dialog::Issue { issue };
+            });
         }
     }
 
     /// Confirm the review: stage the issue for the event loop's launch
-    /// and settle the dialog on where the session should return to.
+    /// and dismiss the prompt.
     fn confirm_review(&mut self) {
-        let Dialog::ReviewIssue {
-            issue,
-            return_to_issue,
-        } = std::mem::replace(&mut self.dialog, Dialog::None)
-        else {
+        let Some(Prompt::Review { issue }) = self.prompt.take() else {
             return;
         };
         self.pending_review = Some(issue.id.clone());
-        if return_to_issue {
-            self.scroll_view.reset();
-            self.dialog = Dialog::Issue { issue };
-        }
     }
 
     /// Re-read an issue's status and history from the db after the
@@ -1623,17 +1565,17 @@ impl ViewState {
             self.dialog = Dialog::ScanDone;
             return;
         }
-        if matches!(self.dialog, Dialog::None) {
+        if matches!(self.dialog, Dialog::None) && self.prompt.is_none() {
             self.dialog = Dialog::ScanDone;
         } else {
             self.scan_done_pending = true;
         }
     }
 
-    /// Show a deferred ScanDone once no other dialog is open. Run each
-    /// loop iteration before drawing.
+    /// Show a deferred ScanDone once no other dialog or prompt is
+    /// open. Run each loop iteration before drawing.
     fn promote_pending_dialog(&mut self) {
-        if self.scan_done_pending && matches!(self.dialog, Dialog::None) {
+        if self.scan_done_pending && matches!(self.dialog, Dialog::None) && self.prompt.is_none() {
             self.scan_done_pending = false;
             self.dialog = Dialog::ScanDone;
         }
@@ -1843,6 +1785,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     // holds position and layout cache
     let ViewState {
         dialog,
+        prompt,
         scroll_view,
         model,
         show_issues,
@@ -1863,45 +1806,6 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
                 vec![issue_lines(issue, width as usize, true)]
             })
         }
-        Dialog::CloseIssue { reason, editor, .. } => match reason {
-            None => dialog::draw_message(
-                frame,
-                "Close this issue?",
-                "c completed · s skipped · d duplicate · q back",
-            ),
-            Some(reason) => {
-                let prompt = match reason {
-                    StatusReason::Duplicate => "Comment — name the surviving issue ID",
-                    _ => "Comment (optional)",
-                };
-                draw_status_comment(
-                    frame,
-                    format!(" Close issue ({}) ", reason.as_str()),
-                    prompt,
-                    "Enter close · Shift-Enter newline · Esc back",
-                    editor,
-                );
-            }
-        },
-        Dialog::ReviewIssue { .. } => dialog::draw_wrapped(
-            frame,
-            &[
-                "You are about to start a review session in Claude Code. \
-                 When finished, exit the session to return here.",
-                "Start Claude Code?",
-            ],
-            "y / n",
-        ),
-        Dialog::OpenIssue { status, editor, .. } => match status {
-            None => dialog::draw_message(frame, "Open this issue?", "o open · p pending · q back"),
-            Some(status) => draw_status_comment(
-                frame,
-                format!(" Open issue ({}) ", status.as_str()),
-                "Comment (optional)",
-                "Enter open · Shift-Enter newline · Esc back",
-                editor,
-            ),
-        },
         Dialog::Session { id, content, nav } => {
             let title = match nav {
                 SessionNav::Sessions => format!(" Session {id} "),
@@ -1916,6 +1820,55 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         }
         Dialog::ScanDone => draw_scan_done(frame, model, *cancel_requested),
         Dialog::None => {}
+    }
+    if let Some(prompt) = prompt {
+        draw_prompt(frame, prompt);
+    }
+}
+
+/// Draw the open prompt over the frame. The prompt dialogs clear only
+/// their own centered area, so whatever is beneath stays visible.
+fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
+    match prompt {
+        Prompt::Close { reason, editor, .. } => match reason {
+            None => dialog::draw_message(
+                frame,
+                "Close this issue?",
+                "c completed · s skipped · d duplicate · q back",
+            ),
+            Some(reason) => {
+                let comment_prompt = match reason {
+                    StatusReason::Duplicate => "Comment — name the surviving issue ID",
+                    _ => "Comment (optional)",
+                };
+                draw_status_comment(
+                    frame,
+                    format!(" Close issue ({}) ", reason.as_str()),
+                    comment_prompt,
+                    "Enter close · Shift-Enter newline · Esc back",
+                    editor,
+                );
+            }
+        },
+        Prompt::Review { .. } => dialog::draw_wrapped(
+            frame,
+            &[
+                "You are about to start a review session in Claude Code. \
+                 When finished, exit the session to return here.",
+                "Start Claude Code?",
+            ],
+            "y / n",
+        ),
+        Prompt::Open { status, editor, .. } => match status {
+            None => dialog::draw_message(frame, "Open this issue?", "o open · p pending · q back"),
+            Some(status) => draw_status_comment(
+                frame,
+                format!(" Open issue ({}) ", status.as_str()),
+                "Comment (optional)",
+                "Enter open · Shift-Enter newline · Esc back",
+                editor,
+            ),
+        },
     }
 }
 
@@ -3004,24 +2957,24 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
 }
 
 /// Help text for the keys active in the current dialog state. Dialogs
-/// that show their key options inline (confirm, scan-done) get an
-/// empty footer.
+/// and prompts that show their key options inline (confirm, scan-done,
+/// issue prompts) get an empty footer.
 fn footer_help(state: &ViewState) -> &'static str {
+    if state.prompt.is_some() {
+        return "";
+    }
     match state.dialog {
         Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
-        Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next note",
+        Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next",
         Dialog::Issue { ref issue } if issue.closed => {
-            "q back · ↑/↓ scroll · ←/→ prev/next issue · o open"
+            "q back · ↑/↓ scroll · ←/→ prev/next · o open"
         }
-        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next issue · r review · c close",
-        Dialog::CloseIssue { .. } | Dialog::OpenIssue { .. } | Dialog::ReviewIssue { .. } => "",
+        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · r review · c close",
         Dialog::Session {
             nav: SessionNav::Agents,
             ..
-        } => "q back · ↑/↓ scroll · ←/→ prev/next agent",
-        Dialog::Session { .. } => {
-            "q back · ↑/↓ scroll · ←/→ prev/next session · i issues · n notes"
-        }
+        } => "q back · ↑/↓ scroll · ←/→ prev/next",
+        Dialog::Session { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · i issues · n notes",
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::None if state.focus == Focus::Issues => {
             match (state.model.finished, state.selected_issue_closed()) {

@@ -71,6 +71,10 @@ mod tests {
         vm.call(["main"], ()).unwrap()
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the VM execution's return value; the test holds the only live handle"
+    )]
     fn eval_bool(expr: &str) -> bool {
         rune::from_value::<bool>(eval(expr)).unwrap()
     }
@@ -92,6 +96,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "takes the VM execution's return value; the test holds the only live handle"
+    )]
     fn null_renders_as_null() {
         assert_eq!(
             rune::from_value::<String>(eval("format!(\"{}\", json::Null)")).unwrap(),
