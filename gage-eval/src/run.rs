@@ -1,10 +1,12 @@
 //! Run one test: spawn Claude Code with the Gage MCP server attached
 //! and record what landed on disk.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, mpsc};
 
 use serde::Serialize;
 
@@ -70,15 +72,17 @@ pub struct BatchConfig<'a> {
     /// Ad hoc evals dir to record in the manifest; `None` for the
     /// in-repo default.
     pub evals_dir: Option<&'a Path>,
-    /// Concurrent samples within a scanner test.
+    /// Concurrent tests.
     pub jobs: usize,
+    /// Concurrent samples within a scanner test.
+    pub sample_jobs: usize,
     pub judge_model: &'a str,
 }
 
 pub fn run_batch(
     tests: &[&Test],
     config: &BatchConfig<'_>,
-    mut on_event: impl FnMut(Event<'_>),
+    on_event: impl FnMut(Event<'_>),
 ) -> io::Result<RunResult> {
     let run_id = gage_core::uuid::new_uuid();
     let started_at = now_iso();
@@ -119,35 +123,14 @@ pub fn run_batch(
     };
     write_manifest(&run, &manifest)?;
 
-    for test in tests {
-        let name = test.id();
-        on_event(Event::Started(&name));
-        let (exit_code, score) = if test.is_scanner() {
-            fs::create_dir_all(storage::test_dir(&run, &name))?;
-            write_test_json(&run, test)?;
-            let score = scanner::run_test(
-                &run,
-                test,
-                config.root,
-                &gage_bin,
-                config.jobs,
-                config.judge_model,
-            )?;
-            (0, Some(score))
-        } else {
-            let (claude_bin, claude_home) = prompt_env
-                .as_ref()
-                .expect("prepared when prompt tests exist");
-            let max_turns = test.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
-            let exit_code = run_one(&run, test, max_turns, claude_bin, claude_home, config.root)?;
-            (exit_code, score::score_test(&run, test)?)
-        };
-        on_event(Event::TestFinished {
-            name: &name,
-            exit_code,
-            score,
-        });
-    }
+    run_tests_pooled(
+        tests,
+        config,
+        &run,
+        &gage_bin,
+        prompt_env.as_ref(),
+        on_event,
+    )?;
 
     write_manifest(
         &run,
@@ -159,6 +142,119 @@ pub fn run_batch(
     storage::archive_run(&run, &run_id)?;
 
     Ok(RunResult { run_id })
+}
+
+/// Worker-thread event forwarded over a channel so `on_event` (and the
+/// progress UI it drives) stays on the caller's thread.
+enum WorkerEvent {
+    Started(String),
+    Finished {
+        name: String,
+        exit_code: i32,
+        score: Option<Score>,
+    },
+}
+
+/// Run tests on a pool of `config.jobs` worker threads. Each test is
+/// fully independent (own cwd, own `GAGE_HOME` sandbox); the claude
+/// home is shared but read-only after plugin install. On a harness
+/// error the queue is drained so no new tests start, in-flight tests
+/// finish, and the first error is returned.
+fn run_tests_pooled(
+    tests: &[&Test],
+    config: &BatchConfig<'_>,
+    run: &Path,
+    gage_bin: &Path,
+    prompt_env: Option<&(PathBuf, PathBuf)>,
+    mut on_event: impl FnMut(Event<'_>),
+) -> io::Result<()> {
+    let queue: Mutex<VecDeque<&Test>> = Mutex::new(tests.iter().copied().collect());
+    let failed: Mutex<Option<io::Error>> = Mutex::new(None);
+    let workers = config.jobs.clamp(1, tests.len());
+
+    std::thread::scope(|s| {
+        let (tx, rx) = mpsc::channel::<WorkerEvent>();
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let queue = &queue;
+            let failed = &failed;
+            s.spawn(move || {
+                loop {
+                    let test = queue.lock().unwrap().pop_front();
+                    let Some(test) = test else { break };
+                    let name = test.id();
+                    tx.send(WorkerEvent::Started(name.clone()))
+                        .expect("event receiver lives until workers finish");
+                    match run_single(run, test, config, gage_bin, prompt_env) {
+                        Ok((exit_code, score)) => {
+                            tx.send(WorkerEvent::Finished {
+                                name,
+                                exit_code,
+                                score,
+                            })
+                            .expect("event receiver lives until workers finish");
+                        }
+                        Err(e) => {
+                            let mut first = failed.lock().unwrap();
+                            if first.is_none() {
+                                *first = Some(e);
+                            }
+                            queue.lock().unwrap().clear();
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        drop(tx);
+        for evt in rx {
+            match evt {
+                WorkerEvent::Started(name) => on_event(Event::Started(&name)),
+                WorkerEvent::Finished {
+                    name,
+                    exit_code,
+                    score,
+                } => on_event(Event::TestFinished {
+                    name: &name,
+                    exit_code,
+                    score,
+                }),
+            }
+        }
+    });
+
+    match failed.into_inner().unwrap() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Run one test to completion and score it. Dispatches on test kind.
+fn run_single(
+    run: &Path,
+    test: &Test,
+    config: &BatchConfig<'_>,
+    gage_bin: &Path,
+    prompt_env: Option<&(PathBuf, PathBuf)>,
+) -> io::Result<(i32, Option<Score>)> {
+    if test.is_scanner() {
+        fs::create_dir_all(storage::test_dir(run, &test.id()))?;
+        write_test_json(run, test)?;
+        let score = scanner::run_test(
+            run,
+            test,
+            config.root,
+            gage_bin,
+            config.sample_jobs,
+            config.judge_model,
+        )?;
+        Ok((0, Some(score)))
+    } else {
+        let (claude_bin, claude_home) = prompt_env.expect("prepared when prompt tests exist");
+        let max_turns = test.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
+        let exit_code = run_one(run, test, max_turns, claude_bin, claude_home, config.root)?;
+        Ok((exit_code, score::score_test(run, test)?))
+    }
 }
 
 /// Stage the Gage plugin marketplace under the run dir and install it

@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use indicatif::{ProgressBar, ProgressStyle};
 use tabled::{
@@ -81,6 +82,7 @@ const DEFAULT_MODEL: &str = "sonnet";
 const DEFAULT_EFFORT: &str = "low";
 const DEFAULT_JUDGE_MODEL: &str = "sonnet";
 const DEFAULT_JOBS: usize = 4;
+const DEFAULT_SAMPLE_JOBS: usize = 4;
 
 #[derive(Args)]
 struct RunArgs {
@@ -119,9 +121,13 @@ struct RunArgs {
     #[arg(short = 'd', long, value_name = "DIR")]
     evals_dir: Option<std::path::PathBuf>,
 
-    /// Concurrent samples within a scanner test
+    /// Concurrent tests
     #[arg(short, long, value_name = "N", default_value_t = DEFAULT_JOBS)]
     jobs: usize,
+
+    /// Concurrent samples within a scanner test
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_SAMPLE_JOBS)]
+    jobs_samples: usize,
 
     /// Judge model for scanner tests
     #[arg(long, value_name = "MODEL", default_value = DEFAULT_JUDGE_MODEL)]
@@ -424,6 +430,7 @@ fn cmd_run(args: RunArgs) {
         root: &root,
         evals_dir: args.evals_dir.as_deref(),
         jobs: args.jobs,
+        sample_jobs: args.jobs_samples,
         judge_model: &args.judge_model,
     };
     let result = match run::run_batch(&tests, &config, |evt| match evt {
@@ -479,15 +486,15 @@ fn cmd_run(args: RunArgs) {
         eprintln!("{}", console::style("│").bright().black());
         cliclack::log::remark(format!("{passed}/{scored} {plural} passed ({pct}%)")).unwrap();
     }
+    let run_id = short_uuid(&result.run_id);
     if error_count > 0 {
         cliclack::outro_cancel(format!(
-            "Run {} completed with errors (see above for details) in {elapsed}",
-            result.run_id
+            "Run {run_id} completed with errors (see above for details) in {elapsed}"
         ))
         .unwrap();
     } else {
         cliclack::outro(
-            console::style(format!("Run {} completed in {elapsed}", result.run_id))
+            console::style(format!("Run {run_id} completed in {elapsed}"))
                 .green()
                 .bright(),
         )
@@ -585,6 +592,17 @@ fn cmd_list(args: ListArgs) {
 }
 
 fn runs_table(runs: &[storage::RunSummary]) -> String {
+    // Prefix highlighting resolves against every run on disk — the set
+    // `view/delete <prefix>` lookups accept — not just the rows shown.
+    let peers = match storage::list_runs() {
+        Ok(all) => all.into_iter().map(|r| r.run_id).collect(),
+        // Listing failed; fall back to the shown rows so prefixes stay
+        // correct within the table. Every caller obtained `runs` from
+        // the same storage moments ago, so a real storage error has
+        // already surfaced through that path.
+        Err(_) => runs.iter().map(|r| r.run_id.clone()).collect(),
+    };
+    let highlighter = IdHighlighter::new(peers);
     let header: Vec<String> = [
         "Run",
         "Started",
@@ -602,7 +620,7 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
         .iter()
         .map(|r| {
             vec![
-                short_uuid(&r.run_id).to_string(),
+                highlighter.short(&r.run_id),
                 format_elapsed_ms(r.started_at_ms),
                 format_tests(r.total),
                 format_pass_pct(r.passed, r.total),
@@ -619,7 +637,6 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
     table
         .with(Style::rounded())
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
-        .modify(Columns::first().not(Rows::first()), Color::FG_BRIGHT_YELLOW)
         .modify(
             Columns::new(1..col_count - 1).not(Rows::first()),
             style::dim(),
