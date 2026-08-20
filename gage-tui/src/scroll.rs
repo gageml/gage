@@ -188,7 +188,7 @@ impl ScrollView {
 /// Content modals cover most of the frame, inset a few cells so the
 /// main view remains visible behind them.
 fn modal_rect(frame: Rect) -> Rect {
-    let margin_x = (frame.width / 10).clamp(2, 8);
+    let margin_x = (frame.width / 10).clamp(2, 6);
     let margin_y = (frame.height / 10).clamp(1, 3);
     frame.inner(Margin {
         horizontal: margin_x,

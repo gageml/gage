@@ -10,7 +10,7 @@
 //! already-complete model (a historical scan loaded from the db) with
 //! no event source.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +20,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gage_claude::review::review_command;
 use gage_core::task::{task_display, task_name_display};
 use gage_db::issue::{self, IssueStatus, StatusReason};
-use gage_db::target::NoteTarget;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -34,12 +33,15 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use gage_db::rusqlite::Connection;
+
 use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::item_table::ItemTable;
 use crate::scroll::ScrollView;
+use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::textarea::TextArea;
-use crate::{markdown, message, styles};
+use crate::{app, markdown, session, styles};
 
 /// A scan task identity, `{scanner}::{task}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,7 +465,11 @@ pub async fn run(
     on_cancel: impl Fn(),
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
+    let enhanced_keys = push_keyboard_enhancements();
     let result = event_loop(&mut terminal, model, &mut events, &on_cancel).await;
+    if enhanced_keys {
+        pop_keyboard_enhancements();
+    }
     ratatui::restore();
     result
 }
@@ -474,8 +480,12 @@ pub async fn view(mut model: ScanModel) -> io::Result<()> {
     let (tx, mut events) = unbounded_channel();
     drop(tx);
     let mut terminal = ratatui::init();
+    let enhanced_keys = push_keyboard_enhancements();
     // A finished model never opens the cancel path
     let result = event_loop(&mut terminal, model, &mut events, &|| {}).await;
+    if enhanced_keys {
+        pop_keyboard_enhancements();
+    }
     ratatui::restore();
     result
 }
@@ -552,10 +562,12 @@ async fn run_review_session(
     // The channel closes when the input thread exits; draining until
     // then keeps buffered keys out of the child's session.
     while input.recv().await.is_some() {}
+    pop_keyboard_enhancements();
     ratatui::restore();
     let result =
         review_command(std::slice::from_ref(&issue_id), None, &[]).and_then(|mut cmd| cmd.status());
     *terminal = ratatui::init();
+    push_keyboard_enhancements();
     terminal.clear()?;
     *stop_input = Arc::new(AtomicBool::new(false));
     *input = spawn_input_thread(Arc::clone(stop_input));
@@ -636,10 +648,11 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
             }
             return false;
         }
-        Dialog::Note { .. }
-        | Dialog::Issue { .. }
-        | Dialog::Session { .. }
-        | Dialog::Log { .. } => {
+        Dialog::Session { .. } => {
+            state.handle_session_dialog_key(key);
+            return false;
+        }
+        Dialog::Note { .. } | Dialog::Issue { .. } | Dialog::Log { .. } => {
             let page = state.scroll_view.page() as isize;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
@@ -657,20 +670,6 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
                 KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
                 KeyCode::Right => state.step_dialog_item(1),
                 KeyCode::Left => state.step_dialog_item(-1),
-                KeyCode::Char('i')
-                    if matches!(&state.dialog, Dialog::Session { content, .. }
-                        if content.issue_count > 0) =>
-                {
-                    state.show_issues = !state.show_issues;
-                    state.scroll_view.reset();
-                }
-                KeyCode::Char('n')
-                    if matches!(&state.dialog, Dialog::Session { content, .. }
-                        if content.note_count > 0) =>
-                {
-                    state.show_notes = !state.show_notes;
-                    state.scroll_view.reset();
-                }
                 _ => {}
             }
             return false;
@@ -901,11 +900,9 @@ struct ViewState {
     /// key handling, since only the loop owns the terminal and input
     /// thread the launch must suspend.
     pending_review: Option<String>,
-    /// Session dialog: show the session's issues
-    show_issues: bool,
-    /// Session dialog: show the session's notes, with only the
-    /// annotated messages as context
-    show_notes: bool,
+    /// Last UI position per viewed session, restored when a session
+    /// dialog re-opens (including ←/→ stepping away and back).
+    session_ui: HashMap<String, app::SavedUi>,
 }
 
 enum Dialog {
@@ -924,15 +921,17 @@ enum Dialog {
     Issue {
         issue: Box<IssueItem>,
     },
-    /// Zoomed session contents, read from the JSONL at open. Section
-    /// headers are padded to the dialog width at draw time, so the
-    /// content is kept structured rather than pre-flattened. `nav`
-    /// selects what ←/→ steps through — the sessions table or the
-    /// tasks panel's agent rows — and titles the dialog accordingly.
+    /// Zoomed session view — the same tree/body component
+    /// `gage session view` runs, embedded in a modal. `nav` selects
+    /// what ←/→ steps through at a tree terminus — the sessions table
+    /// or the tasks panel's agent rows — and titles the dialog
+    /// accordingly. The connection serves the view's note operations
+    /// for the dialog's lifetime.
     Session {
         id: String,
-        content: SessionContent,
+        view: Box<app::AppState>,
         nav: SessionNav,
+        db: Connection,
     },
     /// Captured scan streams (`{scan_id}.{err,out,log}`), reloaded
     /// from the files while a live scan runs.
@@ -1011,8 +1010,7 @@ impl ViewState {
             cancel_requested: false,
             scroll_view: ScrollView::new(),
             pending_review: None,
-            show_issues: false,
-            show_notes: false,
+            session_ui: HashMap::new(),
             model,
         };
         state.sync_tables();
@@ -1347,12 +1345,76 @@ impl ViewState {
         let Some(session) = self.model.sessions.get(i) else {
             return;
         };
-        self.scroll_view.reset();
-        self.dialog = Dialog::Session {
-            id: session.id.clone(),
-            content: session_content(session, &self.model.notes, &self.model.issues),
-            nav: SessionNav::Sessions,
+        let session = session.clone();
+        self.open_session_dialog(&session, SessionNav::Sessions);
+    }
+
+    /// Open the shared session view over `item` in a modal. The view is
+    /// the same component `gage session view` runs; its UI position is
+    /// restored when the session was viewed before.
+    fn open_session_dialog(&mut self, item: &SessionItem, nav: SessionNav) {
+        let db = match gage_db::db::open_db() {
+            Ok(db) => db,
+            Err(e) => {
+                self.push_log(format!("Open session {}: {e}", item.id));
+                return;
+            }
         };
+        let (doc, source) = match load_session_doc(item, &db) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                self.push_log(format!("Open session {}: {e}", item.id));
+                return;
+            }
+        };
+        let mut view = app::AppState::new(doc, true, source);
+        if let Some(saved) = self.session_ui.get(&item.id) {
+            view.restore_ui(saved);
+        }
+        self.dialog = Dialog::Session {
+            id: item.id.clone(),
+            view: Box::new(view),
+            nav,
+            db,
+        };
+    }
+
+    /// Route a key to the embedded session view, then apply what the
+    /// outcome means at this level: `Close` dismisses the dialog and
+    /// ←/→ at a tree terminus (`Ignored`) steps to the neighboring
+    /// session, remembering the current one's UI position.
+    fn handle_session_dialog_key(&mut self, key: KeyEvent) {
+        let mut close = false;
+        let mut step: isize = 0;
+        let mut error: Option<String> = None;
+        if let Dialog::Session { id, view, db, .. } = &mut self.dialog {
+            match app::handle_key(view, key, db) {
+                Ok(app::KeyOutcome::Consumed) => {}
+                Ok(app::KeyOutcome::Close) => {
+                    self.session_ui.insert(id.clone(), view.save_ui());
+                    close = true;
+                }
+                Ok(app::KeyOutcome::Ignored) => {
+                    step = match key.code {
+                        KeyCode::Left => -1,
+                        KeyCode::Right => 1,
+                        _ => 0,
+                    };
+                    if step != 0 {
+                        self.session_ui.insert(id.clone(), view.save_ui());
+                    }
+                }
+                Err(e) => error = Some(format!("Session view: {e}")),
+            }
+        }
+        if let Some(msg) = error {
+            self.push_log(msg);
+        }
+        if close {
+            self.dialog = Dialog::None;
+        } else if step != 0 {
+            self.step_dialog_item(step);
+        }
     }
 
     /// Enter on the tasks panel: a task row with agents toggles its
@@ -1425,12 +1487,7 @@ impl ViewState {
     }
 
     fn open_agent_session(&mut self, item: &SessionItem) {
-        self.scroll_view.reset();
-        self.dialog = Dialog::Session {
-            id: item.id.clone(),
-            content: session_content(item, &self.model.notes, &self.model.issues),
-            nav: SessionNav::Agents,
-        };
+        self.open_session_dialog(item, SessionNav::Agents);
     }
 
     /// Step the session dialog to the previous/next agent row of the
@@ -1804,8 +1861,6 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         prompt,
         scroll_view,
         model,
-        show_issues,
-        show_notes,
         cancel_requested,
         ..
     } = state;
@@ -1822,14 +1877,12 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
                 vec![issue_lines(issue, width as usize, true)]
             })
         }
-        Dialog::Session { id, content, nav } => {
+        Dialog::Session { id, view, nav, .. } => {
             let title = match nav {
                 SessionNav::Sessions => format!(" Session {id} "),
                 SessionNav::Agents => format!(" Agent {id} "),
             };
-            scroll_view.render_modal(frame, title, |width| {
-                session_sections(content, width as usize, *show_issues, *show_notes)
-            })
+            draw_session_dialog(frame, title, view);
         }
         Dialog::Log { content, .. } => {
             scroll_view.render_modal(frame, " Log ".to_string(), |_| vec![content.clone()]);
@@ -1884,6 +1937,23 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
             editor,
         ),
     }
+}
+
+/// Session dialog chrome: the same inset modal the scroll view uses
+/// for content dialogs, with the shared session view drawn inside.
+fn draw_session_dialog(frame: &mut Frame, title: String, view: &mut app::AppState) {
+    let area = frame.area();
+    let margin_x = (area.width / 10).clamp(2, 6);
+    let margin_y = (area.height / 10).clamp(1, 3);
+    let rect = area.inner(ratatui::layout::Margin {
+        horizontal: margin_x,
+        vertical: margin_y,
+    });
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(title);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    app::draw_in(frame, inner, view);
 }
 
 /// The actions menu: one left-aligned row per available action. Close
@@ -2033,237 +2103,32 @@ fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<
 /// session's issues, session-level notes (targets with no line
 /// number), and an optional trailing notice (truncation or read
 /// error).
-struct SessionContent {
-    title: String,
-    issue_count: usize,
-    note_count: usize,
-    sections: Vec<SessionSection>,
-    issues: Vec<IssueItem>,
-    notes: Vec<NoteItem>,
-    notice: Option<String>,
-}
-
-/// One message section: `{line} {label}` header over the rendered
-/// body, followed by any notes targeting the section's line.
-struct SessionSection {
-    line_num: u32,
-    label: String,
-    body: Vec<Line<'static>>,
-    notes: Vec<NoteItem>,
-}
-
-/// Read a session's contents for the dialog: header attributes, then
-/// one section per message — the data layer's message predicate
-/// (`is_message_row`). Section labels use the same function as the
-/// session viewer's outline ([`crate::doc::Entry::label`]).
-///
-/// Notes from `all_notes` targeting this session are attached: a note
-/// with a line number goes to the last section at or before that line
-/// (session-level if none precedes it), a note without one goes to
-/// the session. Issues from `all_issues` attach when the session is in
-/// their recorded session links — the same attribution rule as the
-/// sessions table's issue counts.
-fn session_content(
-    session: &SessionItem,
-    all_notes: &[NoteItem],
-    all_issues: &[IssueItem],
-) -> SessionContent {
-    let session_issues: Vec<IssueItem> = all_issues
-        .iter()
-        .filter(|issue| issue.sessions.iter().any(|s| s.id == session.id))
-        .cloned()
-        .collect();
-
-    let mut session_notes: Vec<NoteItem> = Vec::new();
-    let mut line_notes: Vec<(u32, NoteItem)> = Vec::new();
-    for note in all_notes {
-        // Non-session and malformed targets have no place in this
-        // dialog; both parse as Err or another variant and are skipped
-        let Ok(NoteTarget::Session(target)) = NoteTarget::from_uri(&note.target) else {
-            continue;
-        };
-        if target.session_id != session.id {
-            continue;
-        }
-        match target.line {
-            Some(line) => line_notes.push((line, note.clone())),
-            None => session_notes.push(note.clone()),
-        }
-    }
-
-    let mut content = SessionContent {
-        title: session.title.clone(),
-        issue_count: session.issues,
-        note_count: session.notes,
-        sections: Vec::new(),
-        issues: session_issues,
-        notes: session_notes,
-        notice: None,
-    };
-
-    let Some(path) = &session.path else {
-        content.notice = Some("(session file unavailable)".to_string());
-        return content;
-    };
-    let reader = match gage_claude::session_reader::SessionReader::open(path) {
-        Ok(r) => r,
-        Err(e) => {
-            content.notice = Some(format!("(cannot read session: {e})"));
-            return content;
-        }
-    };
-
-    for result in reader {
-        let (line_num, value) = match result {
-            Ok(pair) => pair,
-            Err(e) => {
-                content.notice = Some(format!("(read error: {e})"));
-                break;
+/// Load the session document for the dialog's embedded view. Prefers
+/// the indexed corpus (matching `gage session view`); a session absent
+/// from the index — agent sessions, or one indexed as empty — falls
+/// back to reading the JSONL directly when its path is known.
+fn load_session_doc(
+    item: &SessionItem,
+    db: &Connection,
+) -> Result<(crate::doc::Document, app::DocSource), String> {
+    let indexed = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(session::load(&item.id, db))
+    });
+    match indexed {
+        Ok(doc) if !doc.entries.is_empty() => Ok((doc, app::DocSource::Query)),
+        other => match &item.path {
+            Some(path) => {
+                let doc = session::load_from_path(&item.id, path, db).map_err(|e| e.to_string())?;
+                Ok((doc, app::DocSource::Path(path.clone())))
             }
-        };
-        if !gage_index::is_message_row(&value) {
-            continue;
-        }
-        let entry = crate::doc::Entry {
-            line: line_num,
-            value,
-        };
-        let body = entry.message().map(message::render).unwrap_or_default();
-        content.sections.push(SessionSection {
-            line_num,
-            label: entry.label().to_string(),
-            body,
-            notes: Vec::new(),
-        });
+            // No JSONL to fall back to: an empty indexed document still
+            // renders (as empty); an index error is surfaced.
+            None => match other {
+                Ok(doc) => Ok((doc, app::DocSource::Query)),
+                Err(e) => Err(e.to_string()),
+            },
+        },
     }
-    for (line, note) in line_notes {
-        match content
-            .sections
-            .iter_mut()
-            .rev()
-            .find(|s| s.line_num <= line)
-        {
-            Some(section) => section.notes.push(note),
-            None => content.notes.push(note),
-        }
-    }
-    content
-}
-
-/// Session dialog sections: intro (header attributes), one section per
-/// message — a full-width header bar (dim line number, label, one
-/// column of inner padding each side) over a blank line and the
-/// rendered body — and any trailing notice. With `show_issues` on, the
-/// session's issues render after the intro. With `show_notes` on,
-/// session-level notes render after the intro, each section carries
-/// its notes, and sections without notes are omitted.
-/// Consecutive boxes stack border-to-border; a blank line only
-/// separates a run of boxes from what precedes it.
-fn session_sections(
-    content: &SessionContent,
-    width: usize,
-    show_issues: bool,
-    show_notes: bool,
-) -> Vec<Vec<Line<'static>>> {
-    let mut out = Vec::with_capacity(content.sections.len() + 2);
-    // A session with none of a kind has no toggle; a flag left on by
-    // another session's dialog must not filter this one's messages
-    let show_issues = show_issues && content.issue_count > 0;
-    let show_notes = show_notes && content.note_count > 0;
-    let issues = content.issue_count.to_string();
-    let notes = content.note_count.to_string();
-    let mut intro = attr_lines(&[
-        ("Title", &content.title),
-        ("Issues", &issues),
-        ("Notes", &notes),
-    ]);
-    let toggles = [
-        ('i', show_issues, content.issue_count),
-        ('n', show_notes, content.note_count),
-    ];
-    for (line, (key, shown, count)) in intro.iter_mut().skip(1).zip(toggles) {
-        if count == 0 {
-            continue;
-        }
-        let (status, action) = if shown {
-            ("visible", "hide")
-        } else {
-            ("hidden", "show")
-        };
-        line.spans.push(Span::raw(" - "));
-        line.spans
-            .push(Span::styled(status, styles::Text::accent()));
-        line.spans.push(Span::styled(
-            format!(" ({key} to {action})"),
-            styles::Text::dim(),
-        ));
-    }
-    out.push(intro);
-    if show_issues {
-        for (i, issue) in content.issues.iter().enumerate() {
-            let mut lines = if i == 0 { vec![Line::raw("")] } else { vec![] };
-            lines.extend(content_box(
-                issue_lines(issue, width.saturating_sub(4), false),
-                styles::Text::issue_border(),
-                width,
-            ));
-            out.push(lines);
-        }
-    }
-    if show_notes {
-        for (i, note) in content.notes.iter().enumerate() {
-            let mut lines = if i == 0 && (!show_issues || content.issues.is_empty()) {
-                vec![Line::raw("")]
-            } else {
-                vec![]
-            };
-            lines.extend(content_box(
-                note_lines(note),
-                styles::Text::note_border(),
-                width,
-            ));
-            out.push(lines);
-        }
-    }
-    for section in &content.sections {
-        if show_notes && section.notes.is_empty() {
-            continue;
-        }
-        let number = format!(" {} ", section.line_num);
-        let label_width = width.saturating_sub(number.width());
-        let mut lines = vec![
-            Line::raw(""),
-            Line::from(vec![
-                Span::styled(number, styles::Text::header_dim()),
-                Span::styled(
-                    format!("{:<label_width$}", section.label),
-                    styles::Text::header(),
-                ),
-            ]),
-            Line::raw(""),
-        ];
-        lines.extend(section.body.iter().cloned());
-        if show_notes {
-            for (i, note) in section.notes.iter().enumerate() {
-                if i == 0 {
-                    lines.push(Line::raw(""));
-                }
-                lines.extend(content_box(
-                    note_lines(note),
-                    styles::Text::note_border(),
-                    width,
-                ));
-            }
-        }
-        out.push(lines);
-    }
-    if let Some(notice) = &content.notice {
-        out.push(vec![
-            Line::raw(""),
-            Line::from(Span::styled(notice.clone(), styles::Text::dim())),
-        ]);
-    }
-    out
 }
 
 /// Content embedded in the session dialog — a note's or issue's
@@ -3040,11 +2905,9 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
         Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next",
         Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · a action",
-        Dialog::Session {
-            nav: SessionNav::Agents,
-            ..
-        } => "q back · ↑/↓ scroll · ←/→ prev/next",
-        Dialog::Session { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · i issues · n notes",
+        Dialog::Session { .. } => {
+            "q back · Tab pane · j/k g/G · Enter ◂ ▸ · n note · ←/→ prev/next"
+        }
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::None if state.focus == Focus::Issues => {
             if state.model.finished {

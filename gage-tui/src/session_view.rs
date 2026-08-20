@@ -30,7 +30,7 @@ pub async fn run(session_id: &str, options: ViewOptions) -> Result<(), Box<dyn E
 /// Enables the Kitty keyboard protocol so the input layer can distinguish
 /// Shift+Enter from Enter. Terminals without support reject the escape
 /// sequence; callers treat the failure as "stay on legacy input."
-fn push_keyboard_enhancements() -> bool {
+pub(crate) fn push_keyboard_enhancements() -> bool {
     let push = execute!(
         io::stdout(),
         PushKeyboardEnhancementFlags(
@@ -44,6 +44,6 @@ fn push_keyboard_enhancements() -> bool {
     }
 }
 
-fn pop_keyboard_enhancements() {
+pub(crate) fn pop_keyboard_enhancements() {
     if let Ok(()) = execute!(io::stdout(), PopKeyboardEnhancementFlags) {}
 }

@@ -163,22 +163,6 @@ impl Text {
     pub fn header() -> Style {
         Style::new().bg(Color::DarkGray)
     }
-
-    /// Secondary text within a section header (e.g. the line number)
-    pub fn header_dim() -> Style {
-        Style::new().bg(Color::DarkGray).add_modifier(Modifier::DIM)
-    }
-
-    /// Border around a note embedded in the session dialog. ANSI
-    /// Yellow is the dark yellow slot (LightYellow is the bright one).
-    pub fn note_border() -> Style {
-        Style::new().fg(Color::Yellow)
-    }
-
-    /// Border around an issue embedded in the session dialog
-    pub fn issue_border() -> Style {
-        Style::new().fg(Color::LightCyan)
-    }
 }
 
 /// JSON syntax highlighting (see `syntax.rs`).

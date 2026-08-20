@@ -37,91 +37,169 @@ pub fn run(
     options: &ViewOptions,
     db: &Connection,
 ) -> io::Result<()> {
-    let mut state = AppState::new(doc);
-    let show_turns = options.show_turns;
-    let mut turns = show_turns.then(|| compute_turns(&state.doc));
+    let mut state = AppState::new(doc, options.show_turns, DocSource::Query);
     loop {
-        terminal.draw(|frame| draw(frame, &mut state, turns.as_deref()))?;
+        terminal.draw(|frame| draw(frame, &mut state))?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
+            && handle_key(&mut state, key, db)? == KeyOutcome::Close
         {
-            // Dialog input takes precedence over global keys.
-            match &mut state.dialog {
-                Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
-                    handle_note_dialog(&mut state, key, db);
-                    continue;
-                }
-                Dialog::ConfirmCancel { .. } => {
-                    handle_confirm_cancel(&mut state, key.code);
-                    continue;
-                }
-                Dialog::ConfirmDelete { .. } => {
-                    handle_confirm_delete(&mut state, key.code, db);
-                    continue;
-                }
-                Dialog::None => {}
-            }
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
-                KeyCode::Down | KeyCode::Char('j') => match state.focus {
-                    Focus::Outline => state.select_by(1),
-                    Focus::Body => state.body_scroll_by(1),
-                },
-                KeyCode::Up | KeyCode::Char('k') => match state.focus {
-                    Focus::Outline => state.select_by(-1),
-                    Focus::Body => state.body_scroll_by(-1),
-                },
-                KeyCode::Char('g') => match state.focus {
-                    Focus::Outline => state.select_first(),
-                    Focus::Body => state.body_scroll_to_top(),
-                },
-                KeyCode::Char('G') => match state.focus {
-                    Focus::Outline => state.select_last(),
-                    Focus::Body => state.body_scroll_to_bottom(),
-                },
-                KeyCode::PageDown => match state.focus {
-                    Focus::Outline => state.select_by(state.outline_page() as isize),
-                    Focus::Body => state.body_scroll_by(state.body_page() as i32),
-                },
-                KeyCode::PageUp => match state.focus {
-                    Focus::Outline => state.select_by(-(state.outline_page() as isize)),
-                    Focus::Body => state.body_scroll_by(-(state.body_page() as i32)),
-                },
-                KeyCode::Enter if state.focus == Focus::Outline => {
-                    if !state.begin_edit_note() {
-                        state.toggle_selected();
-                    }
-                }
-                KeyCode::Right if state.focus == Focus::Outline => state.expand_selected(),
-                KeyCode::Left if state.focus == Focus::Outline => state.collapse_selected(),
-                KeyCode::Char('l')
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && state.focus == Focus::Outline =>
-                {
-                    state.center_selected();
-                }
-                KeyCode::Char('n') => state.begin_add_note(),
-                KeyCode::Char('e') => {
-                    state.begin_edit_note();
-                }
-                KeyCode::Char('d') => state.begin_delete_note(),
-                KeyCode::Char('r') => {
-                    state.reload(db)?;
-                    if show_turns {
-                        turns = Some(compute_turns(&state.doc));
-                    }
-                }
-                _ => {}
-            }
+            return Ok(());
         }
     }
+}
+
+/// What a key press did, for hosts that embed the view. `Close` is a
+/// request to dismiss the view (`q`/`Esc`); `Ignored` means the key had
+/// no effect at the current position, letting a host bind its own
+/// meaning (e.g. ←/→ stepping to another session at a tree terminus).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyOutcome {
+    Consumed,
+    Close,
+    Ignored,
+}
+
+/// Apply one key press to the view. Dialog input takes precedence over
+/// global keys.
+pub(crate) fn handle_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    db: &Connection,
+) -> io::Result<KeyOutcome> {
+    match &mut state.dialog {
+        Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
+            handle_note_dialog(state, key, db);
+            return Ok(KeyOutcome::Consumed);
+        }
+        Dialog::ConfirmCancel { .. } => {
+            handle_confirm_cancel(state, key.code);
+            return Ok(KeyOutcome::Consumed);
+        }
+        Dialog::ConfirmDelete { .. } => {
+            handle_confirm_delete(state, key.code, db);
+            return Ok(KeyOutcome::Consumed);
+        }
+        Dialog::None => {}
+    }
+    let outcome = match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => KeyOutcome::Close,
+        KeyCode::Tab | KeyCode::BackTab => {
+            state.toggle_focus();
+            KeyOutcome::Consumed
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            match state.focus {
+                Focus::Outline => state.select_by(1),
+                Focus::Body => state.body_scroll_by(1),
+            }
+            KeyOutcome::Consumed
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            match state.focus {
+                Focus::Outline => state.select_by(-1),
+                Focus::Body => state.body_scroll_by(-1),
+            }
+            KeyOutcome::Consumed
+        }
+        KeyCode::Char('g') => {
+            match state.focus {
+                Focus::Outline => state.select_first(),
+                Focus::Body => state.body_scroll_to_top(),
+            }
+            KeyOutcome::Consumed
+        }
+        KeyCode::Char('G') => {
+            match state.focus {
+                Focus::Outline => state.select_last(),
+                Focus::Body => state.body_scroll_to_bottom(),
+            }
+            KeyOutcome::Consumed
+        }
+        KeyCode::PageDown => {
+            match state.focus {
+                Focus::Outline => state.select_by(state.outline_page() as isize),
+                Focus::Body => state.body_scroll_by(state.body_page() as i32),
+            }
+            KeyOutcome::Consumed
+        }
+        KeyCode::PageUp => {
+            match state.focus {
+                Focus::Outline => state.select_by(-(state.outline_page() as isize)),
+                Focus::Body => state.body_scroll_by(-(state.body_page() as i32)),
+            }
+            KeyOutcome::Consumed
+        }
+        KeyCode::Enter if state.focus == Focus::Outline => {
+            if !state.begin_edit_note() {
+                state.toggle_selected();
+            }
+            KeyOutcome::Consumed
+        }
+        KeyCode::Right if state.focus == Focus::Outline => {
+            if state.expand_selected() {
+                KeyOutcome::Consumed
+            } else {
+                KeyOutcome::Ignored
+            }
+        }
+        KeyCode::Left if state.focus == Focus::Outline => {
+            if state.collapse_selected() {
+                KeyOutcome::Consumed
+            } else {
+                KeyOutcome::Ignored
+            }
+        }
+        KeyCode::Char('l')
+            if key.modifiers.contains(KeyModifiers::CONTROL) && state.focus == Focus::Outline =>
+        {
+            state.center_selected();
+            KeyOutcome::Consumed
+        }
+        KeyCode::Char('n') => {
+            state.begin_add_note();
+            KeyOutcome::Consumed
+        }
+        KeyCode::Char('e') => {
+            state.begin_edit_note();
+            KeyOutcome::Consumed
+        }
+        KeyCode::Char('d') => {
+            state.begin_delete_note();
+            KeyOutcome::Consumed
+        }
+        KeyCode::Char('r') => {
+            state.reload(db)?;
+            KeyOutcome::Consumed
+        }
+        _ => KeyOutcome::Ignored,
+    };
+    Ok(outcome)
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Focus {
     Outline,
     Body,
+}
+
+/// Where the document came from, so `reload` can re-read it.
+pub(crate) enum DocSource {
+    /// The indexed corpus via `gage-query` (`session::load`)
+    Query,
+    /// A session JSONL read directly (`session::load_from_path`) — used
+    /// for sessions outside the active corpus index
+    Path(std::path::PathBuf),
+}
+
+/// Snapshot of the view's UI position, for hosts that re-open sessions
+/// and restore where the user left off.
+#[derive(Clone, Copy)]
+pub(crate) struct SavedUi {
+    selected: Option<usize>,
+    offset: usize,
+    body_scroll: u16,
+    focus_body: bool,
 }
 
 enum Dialog {
@@ -156,7 +234,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-struct AppState {
+pub(crate) struct AppState {
     doc: Document,
     username: String,
     outline: Outline,
@@ -168,14 +246,17 @@ struct AppState {
     outline_viewport: u16,
     highlighter: Highlighter,
     dialog: Dialog,
+    turns: Option<Vec<Option<usize>>>,
+    source: DocSource,
 }
 
 impl AppState {
-    fn new(doc: Document) -> Self {
+    pub(crate) fn new(doc: Document, show_turns: bool, source: DocSource) -> Self {
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let outline = Outline::new(session_note_ids, entry_note_ids);
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+        let turns = show_turns.then(|| compute_turns(&doc));
         Self {
             doc,
             username: resolve_username(),
@@ -188,7 +269,31 @@ impl AppState {
             outline_viewport: 0,
             highlighter: Highlighter::new(),
             dialog: Dialog::None,
+            turns,
+            source,
         }
+    }
+
+    pub(crate) fn save_ui(&self) -> SavedUi {
+        SavedUi {
+            selected: self.list_state.selected(),
+            offset: self.list_state.offset(),
+            body_scroll: self.body_scroll,
+            focus_body: self.focus == Focus::Body,
+        }
+    }
+
+    pub(crate) fn restore_ui(&mut self, saved: &SavedUi) {
+        let max = self.outline.len().saturating_sub(1);
+        self.list_state
+            .select(saved.selected.map(|i| i.min(max)).or(Some(0)));
+        *self.list_state.offset_mut() = saved.offset;
+        self.body_scroll = saved.body_scroll;
+        self.focus = if saved.focus_body {
+            Focus::Body
+        } else {
+            Focus::Outline
+        };
     }
 
     fn author(&self) -> String {
@@ -238,29 +343,37 @@ impl AppState {
         }
     }
 
-    fn expand_selected(&mut self) {
+    /// Returns whether the key changed anything — false at a terminus
+    /// (a row with nothing to expand).
+    fn expand_selected(&mut self) -> bool {
         let Some(idx) = self.list_state.selected() else {
-            return;
+            return false;
         };
         if self.outline.expand(idx) {
             self.body_scroll = 0;
+            return true;
         }
+        false
     }
 
-    fn collapse_selected(&mut self) {
+    /// Returns whether the key changed anything — false at a terminus
+    /// (a row with nothing to collapse and no parent to move to).
+    fn collapse_selected(&mut self) -> bool {
         let Some(idx) = self.list_state.selected() else {
-            return;
+            return false;
         };
         match self.outline.collapse(idx) {
             CollapseOutcome::Collapsed => {
                 self.clamp_selection();
                 self.body_scroll = 0;
+                true
             }
             CollapseOutcome::SelectParent(parent) => {
                 self.list_state.select(Some(parent));
                 self.body_scroll = 0;
+                true
             }
-            CollapseOutcome::None => {}
+            CollapseOutcome::None => false,
         }
     }
 
@@ -300,10 +413,16 @@ impl AppState {
             .selected()
             .and_then(|i| self.outline.row(i))
             .map(|r| r.kind.clone());
-        let doc = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(session::load(&session_id, db))
-        })
+        let doc = match &self.source {
+            DocSource::Query => tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(session::load(&session_id, db))
+            }),
+            DocSource::Path(path) => session::load_from_path(&session_id, path, db),
+        }
         .map_err(|e| io::Error::other(e.to_string()))?;
+        if self.turns.is_some() {
+            self.turns = Some(compute_turns(&doc));
+        }
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         self.doc = doc;
         self.outline.reload(session_note_ids, entry_note_ids);
@@ -596,16 +715,13 @@ fn page_size(viewport: u16) -> u16 {
     ((v * 9) / 10).max(1) as u16
 }
 
-fn draw(frame: &mut Frame, state: &mut AppState, turns: Option<&[Option<usize>]>) {
+fn draw(frame: &mut Frame, state: &mut AppState) {
     let [header_area, middle_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(frame.area());
-
-    let [outline_area, body_area] =
-        Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(middle_area);
 
     let short_id = state
         .doc
@@ -620,17 +736,25 @@ fn draw(frame: &mut Frame, state: &mut AppState, turns: Option<&[Option<usize>]>
     let header = Paragraph::new(Line::from(header_text).centered()).style(styles::Panel::header());
     frame.render_widget(header, header_area);
 
-    draw_outline(frame, state, outline_area, turns);
-    draw_body(frame, state, body_area);
+    draw_in(frame, middle_area, state);
 
     let footer =
         Paragraph::new(Line::from(footer_hint(state)).centered()).style(styles::Panel::footer());
     frame.render_widget(footer, footer_area);
+}
 
+/// Draw the outline/body panes into `area`, plus any editor/confirm
+/// overlay (centered on the frame). Used by the standalone app and by
+/// hosts embedding the view in a dialog.
+pub(crate) fn draw_in(frame: &mut Frame, area: Rect, state: &mut AppState) {
+    let [outline_area, body_area] =
+        Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(area);
+    draw_outline(frame, state, outline_area);
+    draw_body(frame, state, body_area);
     draw_dialog(frame, &mut state.dialog);
 }
 
-fn footer_hint(state: &AppState) -> String {
+pub(crate) fn footer_hint(state: &AppState) -> String {
     let mut hints = vec![
         "q quit",
         "Tab pane",
@@ -650,12 +774,7 @@ fn footer_hint(state: &AppState) -> String {
     hints.join(" · ")
 }
 
-fn draw_outline(
-    frame: &mut Frame,
-    state: &mut AppState,
-    area: Rect,
-    turns: Option<&[Option<usize>]>,
-) {
+fn draw_outline(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let active = state.focus == Focus::Outline;
 
     state.outline_viewport = area.height.saturating_sub(2);
@@ -666,7 +785,7 @@ fn draw_outline(
         .rows()
         .iter()
         .enumerate()
-        .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, turns))
+        .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, state.turns.as_deref()))
         .collect();
 
     let list = List::new(items)

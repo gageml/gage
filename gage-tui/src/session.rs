@@ -30,6 +30,41 @@ pub async fn load(session_id: &str, db: &Connection) -> Result<Document, Box<dyn
     })
 }
 
+/// Load a session document straight from its JSONL file, bypassing the
+/// query index. Used for sessions outside the active corpus (e.g. scan
+/// agent sessions opened from `gage scan view`). Session metadata is
+/// synthesized from the id and path; notes still come from the gage db.
+pub fn load_from_path(
+    session_id: &str,
+    path: &std::path::Path,
+    db: &Connection,
+) -> Result<Document, Box<dyn Error>> {
+    let mut entries = Vec::new();
+    for item in gage_claude::session_reader::SessionReader::open(path)? {
+        let (line, value) = item?;
+        entries.push(Entry { line, value });
+    }
+    let notes = note::find(
+        db,
+        &NoteFilters {
+            session: Some(session_id.to_string()),
+            ..Default::default()
+        },
+    )?;
+    let session = Session {
+        id: session_id.to_string(),
+        value: serde_json::json!({
+            "id": session_id,
+            "path": path.display().to_string(),
+        }),
+    };
+    Ok(Document {
+        session,
+        entries,
+        notes,
+    })
+}
+
 async fn load_session(ctx: &SessionContext, session_id: &str) -> Result<Session, Box<dyn Error>> {
     let sql = format!(
         "SELECT * FROM session WHERE id = '{}'",
