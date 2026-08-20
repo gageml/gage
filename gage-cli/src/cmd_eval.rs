@@ -14,7 +14,7 @@ use tabled::{
     },
 };
 
-use gage_eval::{eval, results, run as runner, storage, tokens, view};
+use gage_eval::{eval, results, run as runner, scan as scan_eval, storage, tokens, view};
 
 use crate::{limit, style};
 
@@ -157,9 +157,19 @@ async fn cmd_view(args: ViewArgs) {
             std::process::exit(1);
         }
     };
-    // Scan eval viewing lands in the next phase.
     if storage::scan_json_path(&storage::run_dir(&run.run_id)).exists() {
-        panic!("viewing a scan eval is not implemented yet");
+        let model = match scan_eval_model(&run) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("failed to load run: {e}");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = gage_tui::scan_eval_view::run(model) {
+            eprintln!("view failed: {e}");
+            std::process::exit(2);
+        }
+        return;
     }
     let model = match eval_model(&run) {
         Ok(m) => m,
@@ -172,6 +182,130 @@ async fn cmd_view(args: ViewArgs) {
         eprintln!("view failed: {e}");
         std::process::exit(2);
     }
+}
+
+/// Build the view model for a scan eval run from its `scan.json`.
+fn scan_eval_model(
+    run: &storage::RunSummary,
+) -> std::io::Result<gage_tui::scan_eval_view::ScanEvalModel> {
+    let se = scan_eval::read(&storage::run_dir(&run.run_id))?;
+
+    let tool_calls: u32 = se
+        .sessions
+        .iter()
+        .flat_map(|s| s.tool_use.values())
+        .map(|t| t.calls)
+        .sum();
+    let tool_errors: u32 = se
+        .sessions
+        .iter()
+        .flat_map(|s| s.tool_use.values())
+        .map(|t| t.errors)
+        .sum();
+    let notes: u32 = se.sessions.iter().map(|s| s.notes_written).sum();
+    let issues: u32 = se.sessions.iter().map(|s| s.issues_written).sum();
+    let zero_output: Vec<&scan_eval::AgentSession> = se
+        .sessions
+        .iter()
+        .filter(|s| s.notes_written + s.issues_written == 0)
+        .collect();
+    let zero_cost: f64 = zero_output.iter().filter_map(|s| s.cost).sum();
+
+    let mut attrs: Vec<(&'static str, String)> = vec![
+        ("Sessions", se.sessions.len().to_string()),
+        (
+            "Wall time",
+            se.wall_time_ms
+                .map(|ms| format_ms(ms as i64))
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "Parallelism",
+            se.parallelism
+                .map(|p| format!("{p:.1}x"))
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        ("Cost", format!("${:.2}", se.reported_cost)),
+        ("Tool calls", format!("{tool_calls} ({tool_errors} errors)")),
+        ("Output", format!("{notes} notes, {issues} issues")),
+        (
+            "Zero output",
+            format!("{} sessions (${zero_cost:.2})", zero_output.len()),
+        ),
+    ];
+    if se.cost_gap.abs() >= 0.01 {
+        attrs.push(("Cost gap", format!("${:.2}", se.cost_gap)));
+    }
+
+    // Per (scanner, task) aggregates, in first-seen order
+    let mut order: Vec<String> = Vec::new();
+    let mut agg: std::collections::HashMap<String, (u32, f64, u64, u64, u64)> =
+        std::collections::HashMap::new();
+    for s in &se.sessions {
+        let key = format!("{}/{}", s.scanner, s.task);
+        if !agg.contains_key(&key) {
+            order.push(key.clone());
+        }
+        let e = agg.entry(key).or_default();
+        e.0 += 1;
+        e.1 += s.cost.unwrap_or(0.0);
+        e.2 += u64::from(s.turns.unwrap_or(0));
+        e.3 += s.tokens.cache_read;
+        e.4 += s.tokens.cache_read + s.tokens.input;
+    }
+    let scanner_lines: Vec<String> = order
+        .iter()
+        .filter_map(|key| {
+            let (runs, cost, turns, cache_read, denom) = agg.get(key)?;
+            let avg_turns = *turns as f64 / (*runs).max(1) as f64;
+            let cache = if *denom > 0 {
+                format!("{:.0}%", *cache_read as f64 / *denom as f64 * 100.0)
+            } else {
+                "-".to_string()
+            };
+            Some(format!(
+                "{key}  ·  {runs} sessions  ·  ${cost:.2}  ·  ⌀{avg_turns:.1} turns  ·  cache {cache}"
+            ))
+        })
+        .collect();
+
+    let cluster_lines: Vec<String> = se
+        .error_clusters
+        .iter()
+        .map(|c| {
+            format!(
+                "{}x in {} session(s)  ·  {}",
+                c.count,
+                c.sessions.len(),
+                c.shape
+            )
+        })
+        .collect();
+
+    let mut sessions: Vec<gage_tui::scan_eval_view::ScanSessionItem> = se
+        .sessions
+        .into_iter()
+        .map(|s| gage_tui::scan_eval_view::ScanSessionItem {
+            tool_errors: s.tool_use.values().map(|t| t.errors).sum(),
+            output: s.notes_written + s.issues_written,
+            id: s.session_id,
+            scanner: s.scanner,
+            task: s.task,
+            turns: s.turns,
+            cost: s.cost,
+            path: s.path,
+        })
+        .collect();
+    sessions.sort_by(|a, b| a.id.cmp(&b.id));
+
+    Ok(gage_tui::scan_eval_view::ScanEvalModel {
+        run_id: run.run_id.clone(),
+        scan_id: se.scan_id,
+        attrs,
+        scanner_lines,
+        cluster_lines,
+        sessions,
+    })
 }
 
 /// Build the view model for a test eval run from its structured

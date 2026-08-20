@@ -8,6 +8,7 @@ mod markdown;
 mod message;
 mod options;
 mod outline;
+pub mod scan_eval_view;
 pub mod scan_view;
 mod scroll;
 mod session;

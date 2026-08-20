@@ -34,10 +34,19 @@ use crate::{message, styles};
 
 pub fn run(
     terminal: &mut DefaultTerminal,
-    doc: Document,
+    doc: Option<Document>,
     options: &ViewOptions,
     db: &Connection,
 ) -> io::Result<()> {
+    let doc = match doc {
+        Some(doc) => doc,
+        // No session given: the open dialog doubles as the initial
+        // picker; canceling it exits the app.
+        None => match standalone_pick(terminal, db)? {
+            Some(doc) => doc,
+            None => return Ok(()),
+        },
+    };
     let mut state = AppState::new(doc, options.show_turns, DocSource::Query);
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -48,6 +57,35 @@ pub fn run(
             return Ok(());
         }
     }
+}
+
+/// Run the open dialog on a blank background until the user picks a
+/// session or cancels.
+fn standalone_pick(
+    terminal: &mut DefaultTerminal,
+    db: &Connection,
+) -> io::Result<Option<Document>> {
+    let mut picker = Picker::load(None)?;
+    loop {
+        terminal.draw(|frame| draw_picker(frame, &mut picker))?;
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match picker_key(&mut picker, key.code) {
+                PickerAction::None => {}
+                PickerAction::Close => return Ok(None),
+                PickerAction::Open(id) => return load_doc_blocking(&id, db).map(Some),
+            }
+        }
+    }
+}
+
+/// Load a session document from the sync event loop.
+fn load_doc_blocking(session_id: &str, db: &Connection) -> io::Result<Document> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(session::load(session_id, db))
+    })
+    .map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// What a key press did, for hosts that embed the view. `Close` is a
@@ -79,6 +117,20 @@ pub(crate) fn handle_key(
         }
         Dialog::ConfirmDelete { .. } => {
             handle_confirm_delete(state, key.code, db);
+            return Ok(KeyOutcome::Consumed);
+        }
+        Dialog::OpenSession(picker) => {
+            match picker_key(picker, key.code) {
+                PickerAction::None => {}
+                PickerAction::Close => state.dialog = Dialog::None,
+                PickerAction::Open(id) => {
+                    state.dialog = Dialog::None;
+                    if id != state.doc.session.id {
+                        let doc = load_doc_blocking(&id, db)?;
+                        state.replace_doc(doc);
+                    }
+                }
+            }
             return Ok(KeyOutcome::Consumed);
         }
         Dialog::None => {}
@@ -151,6 +203,10 @@ pub(crate) fn handle_key(
             state.begin_add_note();
             KeyOutcome::Consumed
         }
+        KeyCode::Char('o') => {
+            state.dialog = Dialog::OpenSession(Picker::load(Some(&state.doc.session.id))?);
+            KeyOutcome::Consumed
+        }
         KeyCode::Char('e') => {
             state.begin_edit_note();
             KeyOutcome::Consumed
@@ -212,6 +268,140 @@ enum Dialog {
     ConfirmDelete {
         note_id: String,
     },
+    /// Session-open picker (`o`)
+    OpenSession(Picker),
+}
+
+/// Session-open picker state: recent sessions, newest first.
+pub(crate) struct Picker {
+    items: Vec<session::SessionListItem>,
+    list: ListState,
+    /// Visible rows, recorded at draw for paging keys
+    viewport: u16,
+}
+
+enum PickerAction {
+    None,
+    Close,
+    Open(String),
+}
+
+impl Picker {
+    /// Load the picker, preselecting `current` when it is in the list.
+    fn load(current: Option<&str>) -> io::Result<Self> {
+        let items = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(session::list_recent(200))
+        })
+        .map_err(|e| io::Error::other(e.to_string()))?;
+        let mut list = ListState::default();
+        let idx = current
+            .and_then(|id| items.iter().position(|i| i.id == id))
+            .unwrap_or(0);
+        list.select((!items.is_empty()).then_some(idx));
+        Ok(Self {
+            items,
+            list,
+            viewport: 0,
+        })
+    }
+
+    fn select_by(&mut self, delta: isize) {
+        if self.items.is_empty() {
+            return;
+        }
+        let max = (self.items.len() - 1) as isize;
+        let current = self.list.selected().unwrap_or(0) as isize;
+        self.list
+            .select(Some(current.saturating_add(delta).clamp(0, max) as usize));
+    }
+}
+
+fn picker_key(picker: &mut Picker, code: KeyCode) -> PickerAction {
+    let page = page_size(picker.viewport) as isize;
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => PickerAction::Close,
+        KeyCode::Enter => match picker.list.selected().and_then(|i| picker.items.get(i)) {
+            Some(item) => PickerAction::Open(item.id.clone()),
+            None => PickerAction::Close,
+        },
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Right => {
+            picker.select_by(1);
+            PickerAction::None
+        }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Left => {
+            picker.select_by(-1);
+            PickerAction::None
+        }
+        KeyCode::PageDown => {
+            picker.select_by(page);
+            PickerAction::None
+        }
+        KeyCode::PageUp => {
+            picker.select_by(-page);
+            PickerAction::None
+        }
+        KeyCode::Char('g') | KeyCode::Home => {
+            picker.list.select((!picker.items.is_empty()).then_some(0));
+            PickerAction::None
+        }
+        KeyCode::Char('G') | KeyCode::End => {
+            picker.list.select(picker.items.len().checked_sub(1));
+            PickerAction::None
+        }
+        _ => PickerAction::None,
+    }
+}
+
+fn draw_picker(frame: &mut Frame, picker: &mut Picker) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).clamp(40, 100);
+    let height = (picker.items.len() as u16 + 5).clamp(7, area.height.saturating_sub(2));
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let (body_area, hint_area) = draw_dialog_block(frame, rect, "Open session");
+    picker.viewport = body_area.height;
+
+    let items: Vec<ListItem> = picker
+        .items
+        .iter()
+        .map(|item| {
+            let short = gage_core::uuid::short_uuid(&item.id).to_string();
+            ListItem::new(Line::from(vec![
+                Span::styled(short, styles::Text::id()),
+                Span::styled(
+                    format!("  {:>7}  ", ago(item.mtime_ms)),
+                    styles::Text::dim(),
+                ),
+                Span::raw(item.title.clone()),
+            ]))
+        })
+        .collect();
+    let list = List::new(items).highlight_style(styles::Panel::selection(true));
+    frame.render_stateful_widget(list, body_area, &mut picker.list);
+
+    let max_offset = picker.items.len().saturating_sub(picker.viewport as usize);
+    let mut sb = ScrollbarState::new(max_offset).position(picker.list.offset());
+    frame.render_stateful_widget(scrollbar(true), body_area, &mut sb);
+
+    draw_hint(frame, hint_area, "Enter open · q cancel");
+}
+
+/// Relative age display for the picker, e.g. `3h ago`.
+fn ago(mtime_ms: i64) -> String {
+    let secs = (gage_core::datetime::now_ms() - mtime_ms) / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
 }
 
 fn new_editor(text: &str) -> TextArea {
@@ -400,6 +590,22 @@ impl AppState {
             .or(Some(0));
         self.list_state.select(new_sel);
         Ok(())
+    }
+
+    /// Swap in a different session's document, resetting the UI to the
+    /// top of the new session.
+    fn replace_doc(&mut self, doc: Document) {
+        if self.turns.is_some() {
+            self.turns = Some(compute_turns(&doc));
+        }
+        let (session_note_ids, entry_note_ids) = note_projection(&doc);
+        self.doc = doc;
+        self.outline.reload(session_note_ids, entry_note_ids);
+        self.list_state.select(Some(0));
+        *self.list_state.offset_mut() = 0;
+        self.body_scroll = 0;
+        self.focus = Focus::Outline;
+        self.source = DocSource::Query;
     }
 
     fn center_selected(&mut self) {
@@ -712,14 +918,25 @@ pub(crate) fn draw_in(frame: &mut Frame, area: Rect, state: &mut AppState) {
 }
 
 pub(crate) fn footer_hint(state: &AppState) -> String {
-    let mut hints = vec![
-        "q quit",
-        "Tab pane",
-        "j/k g/G PgUp/PgDn",
-        "Enter/Space toggle",
-        "n note",
-    ];
-    if let Some(note) = state.selected_note()
+    let mut hints = match state.focus {
+        Focus::Outline => vec![
+            "q quit",
+            "Tab pane",
+            "j/k g/G PgUp/PgDn",
+            "Enter/Space toggle",
+            "n note",
+            "o open",
+        ],
+        Focus::Body => vec![
+            "q quit",
+            "Tab pane",
+            "j/k g/G PgUp/PgDn scroll",
+            "n note",
+            "o open",
+        ],
+    };
+    if state.focus == Focus::Outline
+        && let Some(note) = state.selected_note()
         && note.author == state.author()
     {
         if is_comment(&note.name) {
@@ -1089,6 +1306,7 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog) {
         Dialog::ConfirmDelete { .. } => {
             draw_confirm(frame, "Delete this note? This cannot be undone.")
         }
+        Dialog::OpenSession(picker) => draw_picker(frame, picker),
     }
 }
 

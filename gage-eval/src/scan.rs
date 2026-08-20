@@ -88,6 +88,12 @@ pub struct ErrorCluster {
     pub sessions: Vec<String>,
 }
 
+/// Read a run's `scan.json`. Errors when the run is not a scan eval.
+pub fn read(run_dir: &Path) -> io::Result<ScanEval> {
+    let bytes = fs::read(storage::scan_json_path(run_dir))?;
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
+}
+
 /// Evaluate `scan_id_prefix` and store the result as a new eval run.
 pub fn run_scan_eval(
     scan_id_prefix: &str,

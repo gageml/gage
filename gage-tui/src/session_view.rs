@@ -13,9 +13,12 @@ use ratatui::crossterm::execute;
 use crate::options::ViewOptions;
 use crate::{app, session};
 
-pub async fn run(session_id: &str, options: ViewOptions) -> Result<(), Box<dyn Error>> {
+pub async fn run(session_id: Option<&str>, options: ViewOptions) -> Result<(), Box<dyn Error>> {
     let db = open_db()?;
-    let document = session::load(session_id, &db).await?;
+    let document = match session_id {
+        Some(id) => Some(session::load(id, &db).await?),
+        None => None,
+    };
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
     let result = app::run(&mut terminal, document, &options, &db);

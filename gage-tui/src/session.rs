@@ -30,6 +30,57 @@ pub async fn load(session_id: &str, db: &Connection) -> Result<Document, Box<dyn
     })
 }
 
+/// A row in the session-open picker.
+pub struct SessionListItem {
+    pub id: String,
+    pub title: String,
+    pub mtime_ms: i64,
+}
+
+/// Recent sessions from the active corpus, newest first, for the
+/// session-open picker.
+pub async fn list_recent(limit: usize) -> Result<Vec<SessionListItem>, Box<dyn Error>> {
+    use datafusion::arrow::array::TimestampMillisecondArray;
+
+    let ctx = gage_query::create_context_default().await;
+    let sql = format!("SELECT id, mtime, title FROM session ORDER BY mtime DESC LIMIT {limit}");
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    let mut items = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("session.id is a non-null Utf8 column");
+        let mtimes = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("session.mtime is a timestamp-ms column");
+        let titles = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("session.title is a Utf8 column");
+        for i in 0..batch.num_rows() {
+            items.push(SessionListItem {
+                id: ids.value(i).to_string(),
+                title: if titles.is_null(i) {
+                    String::new()
+                } else {
+                    titles.value(i).to_string()
+                },
+                mtime_ms: if mtimes.is_null(i) {
+                    0
+                } else {
+                    mtimes.value(i)
+                },
+            });
+        }
+    }
+    Ok(items)
+}
+
 /// Load a session document straight from its JSONL file, bypassing the
 /// query index. Used for sessions outside the active corpus (e.g. scan
 /// agent sessions opened from `gage scan view`). Session metadata is

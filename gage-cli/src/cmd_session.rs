@@ -489,22 +489,16 @@ pub async fn delete(args: SessionDeleteArgs) {
 }
 
 pub async fn view(args: SessionViewArgs) {
+    // No session arg: the view opens with its session picker dialog.
     let session_id = match args.session {
         Some(prefix) => match gage_claude::session::one_session(&prefix) {
-            Ok(s) => s.id,
+            Ok(s) => Some(s.id),
             Err(e) => {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
         },
-        None => match pick_session().await {
-            Ok(Some(id)) => id,
-            Ok(None) => return,
-            Err(e) => {
-                eprintln!("gage session view: {e}");
-                std::process::exit(1);
-            }
-        },
+        None => None,
     };
     let options = match gage_tui::ViewOptions::parse(&args.options) {
         Ok(o) => o,
@@ -513,76 +507,9 @@ pub async fn view(args: SessionViewArgs) {
             std::process::exit(1);
         }
     };
-    if let Err(e) = gage_tui::session_view::run(&session_id, options).await {
+    if let Err(e) = gage_tui::session_view::run(session_id.as_deref(), options).await {
         eprintln!("gage session view: {e}");
         std::process::exit(1);
-    }
-}
-
-async fn pick_session() -> std::io::Result<Option<String>> {
-    let ctx = gage_query::create_context_default().await;
-    let sql = "SELECT id, project, mtime, title \
-               FROM session ORDER BY mtime DESC LIMIT 30";
-    let batches = run_query(&ctx, sql).await;
-
-    let prefix = home_slug();
-    let mut items: Vec<(String, String, String)> = Vec::new();
-    for batch in &batches {
-        let ids = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let projects = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let mtimes = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
-        let titles = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            let id = ids.value(i).to_string();
-            let project = projects
-                .value(i)
-                .strip_prefix(&*prefix)
-                .unwrap_or(projects.value(i))
-                .to_string();
-            let age = crate::human::format_elapsed_ms(mtimes.value(i));
-            let title = if titles.is_null(i) || titles.value(i).is_empty() {
-                "(untitled)".to_string()
-            } else {
-                titles.value(i).to_string()
-            };
-            let label = format!("{}  {}", short_uuid(&id), title);
-            let hint = format!("{project} · {age}");
-            items.push((id, label, hint));
-        }
-    }
-
-    if items.is_empty() {
-        println!("No sessions found");
-        return Ok(None);
-    }
-
-    dialog::install_theme();
-    let _sigint = dialog::SigintGuard::new();
-    match cli::select("Select a session")
-        .items(&items)
-        .max_rows(15)
-        .filter_mode()
-        .interact()
-    {
-        Ok(id) => Ok(Some(id)),
-        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(None),
-        Err(e) => Err(e),
     }
 }
 

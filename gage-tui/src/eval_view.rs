@@ -16,6 +16,7 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
+use unicode_width::UnicodeWidthStr;
 
 use crate::item_table::ItemTable;
 use crate::scroll::ScrollView;
@@ -560,8 +561,17 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         }
         Dialog::None => "q quit · ↑/↓ select · Space expand · Enter open",
     };
-    let footer = Paragraph::new(Span::styled(help, styles::Panel::footer()));
-    frame.render_widget(footer, area);
+    let help_width = help.width() as u16;
+    let [_, help_area, _] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(help_width),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(help, styles::Panel::footer())),
+        help_area,
+    );
 }
 
 fn panel_block(title: String, active: bool) -> Block<'static> {
