@@ -2906,7 +2906,7 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next",
         Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · a action",
         Dialog::Session { .. } => {
-            "q back · Tab pane · j/k g/G · Enter ◂ ▸ · n note · ←/→ prev/next"
+            "q back · Tab pane · j/k g/G · Enter/Space toggle · n note · ←/→ prev/next"
         }
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::None if state.focus == Focus::Issues => {

@@ -39,12 +39,6 @@ pub enum RowKind {
     },
 }
 
-pub enum CollapseOutcome {
-    Collapsed,
-    SelectParent(usize),
-    None,
-}
-
 impl Outline {
     pub fn new(session_note_ids: Vec<String>, entry_note_ids: Vec<Vec<String>>) -> Self {
         let mut o = Self {
@@ -80,31 +74,6 @@ impl Outline {
         let expanded = row.expanded;
         self.set_expanded(idx, !expanded);
         true
-    }
-
-    pub fn expand(&mut self, idx: usize) -> bool {
-        let Some(row) = self.visible.get(idx) else {
-            return false;
-        };
-        if !row.has_children || row.expanded {
-            return false;
-        }
-        self.set_expanded(idx, true);
-        true
-    }
-
-    pub fn collapse(&mut self, idx: usize) -> CollapseOutcome {
-        let Some(row) = self.visible.get(idx) else {
-            return CollapseOutcome::None;
-        };
-        if row.has_children && row.expanded {
-            self.set_expanded(idx, false);
-            return CollapseOutcome::Collapsed;
-        }
-        if row.level > 1 {
-            return CollapseOutcome::SelectParent(self.parent_of(idx));
-        }
-        CollapseOutcome::None
     }
 
     /// Replace the entry/note projection in place. Preserves expansion state
@@ -178,21 +147,6 @@ impl Outline {
             RowKind::Note { .. } => return,
         }
         self.rebuild();
-    }
-
-    fn parent_of(&self, idx: usize) -> usize {
-        let Some(row) = self.visible.get(idx) else {
-            return 0;
-        };
-        let parent_level = row.level.saturating_sub(1);
-        for j in (0..idx).rev() {
-            if let Some(r) = self.visible.get(j)
-                && r.level <= parent_level
-            {
-                return j;
-            }
-        }
-        0
     }
 
     fn rebuild(&mut self) {

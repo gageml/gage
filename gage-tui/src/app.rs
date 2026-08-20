@@ -1,9 +1,10 @@
 //! TUI shell — header / outline / body / footer. Tab toggles which pane is
-//! active. In the outline: j/k/g/G/PgUp/PgDn navigate, Enter toggles
-//! expansion, Right expands, Left collapses (or moves to parent when the
-//! current row has no children to collapse). In the body: j/k/g/G/PgUp/PgDn
-//! scroll. `n` opens a note dialog over the selected entry; `e` edits the
-//! selected user comment note; `d` deletes the selected user-authored note.
+//! active. In the outline: j/k/g/G/PgUp/PgDn navigate, Enter or Space
+//! toggles expansion (Enter on a user comment note edits it instead). In
+//! the body: j/k/g/G/PgUp/PgDn scroll. `n` opens a note dialog over the
+//! selected entry; `e` edits the selected user comment note; `d` deletes
+//! the selected user-authored note. ←/→ are deliberately unbound so a
+//! host embedding the view can use them (e.g. stepping between sessions).
 
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,7 +26,7 @@ use serde_json::Value;
 
 use crate::doc::Document;
 use crate::options::ViewOptions;
-use crate::outline::{CollapseOutcome, Outline, RowKind};
+use crate::outline::{Outline, RowKind};
 use crate::session;
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
@@ -136,19 +137,9 @@ pub(crate) fn handle_key(
             }
             KeyOutcome::Consumed
         }
-        KeyCode::Right if state.focus == Focus::Outline => {
-            if state.expand_selected() {
-                KeyOutcome::Consumed
-            } else {
-                KeyOutcome::Ignored
-            }
-        }
-        KeyCode::Left if state.focus == Focus::Outline => {
-            if state.collapse_selected() {
-                KeyOutcome::Consumed
-            } else {
-                KeyOutcome::Ignored
-            }
+        KeyCode::Char(' ') if state.focus == Focus::Outline => {
+            state.toggle_selected();
+            KeyOutcome::Consumed
         }
         KeyCode::Char('l')
             if key.modifiers.contains(KeyModifiers::CONTROL) && state.focus == Focus::Outline =>
@@ -340,40 +331,6 @@ impl AppState {
         if self.outline.toggle(idx) {
             self.clamp_selection();
             self.body_scroll = 0;
-        }
-    }
-
-    /// Returns whether the key changed anything — false at a terminus
-    /// (a row with nothing to expand).
-    fn expand_selected(&mut self) -> bool {
-        let Some(idx) = self.list_state.selected() else {
-            return false;
-        };
-        if self.outline.expand(idx) {
-            self.body_scroll = 0;
-            return true;
-        }
-        false
-    }
-
-    /// Returns whether the key changed anything — false at a terminus
-    /// (a row with nothing to collapse and no parent to move to).
-    fn collapse_selected(&mut self) -> bool {
-        let Some(idx) = self.list_state.selected() else {
-            return false;
-        };
-        match self.outline.collapse(idx) {
-            CollapseOutcome::Collapsed => {
-                self.clamp_selection();
-                self.body_scroll = 0;
-                true
-            }
-            CollapseOutcome::SelectParent(parent) => {
-                self.list_state.select(Some(parent));
-                self.body_scroll = 0;
-                true
-            }
-            CollapseOutcome::None => false,
         }
     }
 
@@ -759,7 +716,7 @@ pub(crate) fn footer_hint(state: &AppState) -> String {
         "q quit",
         "Tab pane",
         "j/k g/G PgUp/PgDn",
-        "Enter ◂ ▸",
+        "Enter/Space toggle",
         "n note",
     ];
     if let Some(note) = state.selected_note()
