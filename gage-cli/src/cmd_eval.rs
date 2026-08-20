@@ -67,14 +67,26 @@ const DEFAULT_JOBS: usize = 4;
 const DEFAULT_SAMPLE_JOBS: usize = 4;
 
 #[derive(Args)]
+#[command(group = clap::ArgGroup::new("selection")
+    .required(true)
+    .multiple(false)
+    .args(["test", "all_tests", "scan"]))]
 pub struct RunArgs {
-    /// Tests to run (default: all)
+    /// Test to run (repeatable)
     ///
-    /// `*` matches everything; `eval/test` matches one test; a bare
-    /// token matches that test-id in any eval, or every test in an eval
-    /// of that name. `*` does not cross `/`. Prefix any spec with `!` to
-    /// exclude.
-    tests: Vec<String>,
+    /// A name or pattern: `eval/test` matches one test; a bare token
+    /// matches that test-id in any eval, or every test in an eval of
+    /// that name; `*` matches within a segment but does not cross `/`.
+    #[arg(short, long = "test", value_name = "TEST")]
+    test: Vec<String>,
+
+    /// Run all tests
+    #[arg(short, long)]
+    all_tests: bool,
+
+    /// Evaluate a scan (creates a scan eval run)
+    #[arg(short, long, value_name = "SCAN_ID")]
+    scan: Option<String>,
 
     /// Print selected tests and exit
     #[arg(short, long = "list-tests")]
@@ -145,6 +157,10 @@ async fn cmd_view(args: ViewArgs) {
             std::process::exit(1);
         }
     };
+    // Scan eval viewing lands in the next phase.
+    if storage::scan_json_path(&storage::run_dir(&run.run_id)).exists() {
+        panic!("viewing a scan eval is not implemented yet");
+    }
     let model = match eval_model(&run) {
         Ok(m) => m,
         Err(e) => {
@@ -285,6 +301,16 @@ fn delete_runs(runs: &[storage::RunSummary]) -> usize {
 }
 
 fn cmd_run(args: RunArgs) {
+    if let Some(scan_id) = &args.scan {
+        cmd_run_scan(scan_id, args.note.as_deref());
+        return;
+    }
+    // `-a` selects everything: an empty spec list is `select`'s "all".
+    let specs = if args.all_tests {
+        Vec::new()
+    } else {
+        args.test.clone()
+    };
     let root = match &args.evals_dir {
         Some(dir) => eval::Root::at(dir),
         None => eval::Root::repo(),
@@ -296,7 +322,7 @@ fn cmd_run(args: RunArgs) {
             std::process::exit(2);
         }
     };
-    let tests = match eval::select(&all, &args.tests) {
+    let tests = match eval::select(&all, &specs) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -455,6 +481,45 @@ fn one_line(s: &str, max: usize) -> String {
     let mut out: String = flat.chars().take(max).collect();
     out.push('…');
     out
+}
+
+/// Evaluate a scan into a new scan eval run and print a recap.
+fn cmd_run_scan(scan_id: &str, note: Option<&str>) {
+    cliclack::intro(console::style("Scan eval").bold()).unwrap();
+    let (run, eval) = match gage_eval::scan::run_scan_eval(scan_id, note) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("scan eval failed: {e}");
+            std::process::exit(2);
+        }
+    };
+    let tool_errors: u32 = eval
+        .sessions
+        .iter()
+        .flat_map(|s| s.tool_use.values())
+        .map(|t| t.errors)
+        .sum();
+    let cost: f64 = eval.reported_cost;
+    let wall = eval
+        .wall_time_ms
+        .map(|ms| format_elapsed(std::time::Duration::from_millis(ms)))
+        .unwrap_or_else(|| "-".to_string());
+    cliclack::log::remark(format!(
+        "Scan {}\nAgent sessions: {}\nTool errors: {}\nCost: ${cost:.2}\nWall time: {wall}",
+        short_uuid(&eval.scan_id),
+        eval.sessions.len(),
+        tool_errors,
+    ))
+    .unwrap();
+    let run_id = short_uuid(&run.run_id);
+    cliclack::outro(
+        console::style(format!(
+            "Run {run_id} completed — view with `gage eval view {run_id}`"
+        ))
+        .green()
+        .bright(),
+    )
+    .unwrap();
 }
 
 fn show_run_intro(tests: &[&eval::Test], args: &RunArgs) -> std::io::Result<()> {
