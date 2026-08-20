@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 datafusion = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
+gage-eval = { path = "../gage-eval" }
 gage-mcp = { path = "../gage-mcp" }
 gage-tui = { path = "../gage-tui" }
 gage-claude = { path = "../gage-claude" }

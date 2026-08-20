@@ -1,4 +1,7 @@
-use clap::{Args, Parser, Subcommand};
+//! The `gage eval` command: run and view evals. The eval engine lives
+//! in the `gage-eval` crate; this module is its command layer.
+
+use clap::{Args, Subcommand};
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -11,25 +14,12 @@ use tabled::{
     },
 };
 
-mod eval;
-mod limit;
-mod run;
-mod scanner;
-mod score;
-mod storage;
-mod style;
-mod tokens;
-mod view;
+use gage_eval::{eval, run as runner, score, storage, tokens, view};
 
-#[derive(Parser)]
-#[command(name = "gage-eval", about = "Run Gage MCP evals")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
+use crate::{limit, style};
 
 #[derive(Subcommand)]
-enum Command {
+pub enum EvalCommand {
     /// Run an eval
     Run(RunArgs),
     /// List eval runs
@@ -41,7 +31,7 @@ enum Command {
 }
 
 #[derive(Args)]
-struct ListArgs {
+pub struct ListArgs {
     #[command(flatten)]
     limit: limit::LimitArgs,
 
@@ -55,7 +45,7 @@ fn parse_duration(s: &str) -> Result<std::time::Duration, humantime::DurationErr
 }
 
 #[derive(Args)]
-struct DeleteArgs {
+pub struct DeleteArgs {
     /// Run UUIDs or unique prefixes. Each must match exactly one run
     run_ids: Vec<String>,
 
@@ -65,7 +55,7 @@ struct DeleteArgs {
 }
 
 #[derive(Args)]
-struct ViewArgs {
+pub struct ViewArgs {
     /// Run UUID or unique prefix
     run_id: String,
 
@@ -85,7 +75,7 @@ const DEFAULT_JOBS: usize = 4;
 const DEFAULT_SAMPLE_JOBS: usize = 4;
 
 #[derive(Args)]
-struct RunArgs {
+pub struct RunArgs {
     /// Tests to run (default: all)
     ///
     /// `*` matches everything; `eval/test` matches one test; a bare
@@ -108,7 +98,7 @@ struct RunArgs {
 
     /// Note recorded with the run
     ///
-    /// Stored in manifest.json and shown in `gage-eval list`. Useful for
+    /// Stored in manifest.json and shown in `gage eval list`. Useful for
     /// labeling what you were varying.
     #[arg(short, long)]
     note: Option<String>,
@@ -138,17 +128,16 @@ struct RunArgs {
     yes: bool,
 }
 
-fn main() {
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Run(args) => cmd_run(args),
-        Command::List(args) => cmd_list(args),
-        Command::View(args) => cmd_view(args),
-        Command::Delete(args) => cmd_delete(args),
+pub async fn run(command: EvalCommand) {
+    match command {
+        EvalCommand::Run(args) => cmd_run(args),
+        EvalCommand::List(args) => cmd_list(args),
+        EvalCommand::View(args) => cmd_view(args).await,
+        EvalCommand::Delete(args) => cmd_delete(args),
     }
 }
 
-fn cmd_view(args: ViewArgs) {
+async fn cmd_view(args: ViewArgs) {
     let run = match view::resolve(&args.run_id) {
         Ok(r) => r,
         Err(e) => {
@@ -165,7 +154,7 @@ fn cmd_view(args: ViewArgs) {
         }
     };
     if args.session {
-        cmd_view_session(&run);
+        cmd_view_session(&run).await;
         return;
     }
     let path = match view::ensure_report(&run, args.refresh) {
@@ -181,7 +170,7 @@ fn cmd_view(args: ViewArgs) {
     }
 }
 
-fn cmd_view_session(run: &storage::RunSummary) {
+async fn cmd_view_session(run: &storage::RunSummary) {
     let session_id = match pick_test_session(run) {
         Ok(Some(id)) => id,
         Ok(None) => return,
@@ -192,13 +181,12 @@ fn cmd_view_session(run: &storage::RunSummary) {
     };
     let run_dir = storage::run_dir(&run.run_id);
     let projects = storage::claude_home(&run_dir).join("projects");
-    // SAFETY: set_var is unsafe in edition 2024; we set this before the
-    // tokio runtime spawns any threads.
+    // SAFETY: set_var is unsafe in edition 2024; the runtime's worker
+    // threads exist, but nothing reads this variable concurrently — the
+    // sole reader is the session load performed on this thread below.
     unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &projects) };
-    let rt = tokio::runtime::Runtime::new().unwrap();
     let options = gage_tui::ViewOptions { show_turns: true };
-    let view = gage_tui::session_view::run(&session_id, options);
-    if let Err(e) = rt.block_on(view) {
+    if let Err(e) = gage_tui::session_view::run(&session_id, options).await {
         eprintln!("failed to view session: {e}");
         std::process::exit(2);
     }
@@ -423,7 +411,7 @@ fn cmd_run(args: RunArgs) {
     let mut error_count: u32 = 0;
     let mut passed: u32 = 0;
     let mut failed: u32 = 0;
-    let config = run::BatchConfig {
+    let config = runner::BatchConfig {
         model: &args.model,
         effort: &args.effort,
         note: args.note.as_deref(),
@@ -433,9 +421,9 @@ fn cmd_run(args: RunArgs) {
         sample_jobs: args.jobs_samples,
         judge_model: &args.judge_model,
     };
-    let result = match run::run_batch(&tests, &config, |evt| match evt {
-        run::Event::Started(name) => pb.set_message(name.to_string()),
-        run::Event::TestFinished {
+    let result = match runner::run_batch(&tests, &config, |evt| match evt {
+        runner::Event::Started(name) => pb.set_message(name.to_string()),
+        runner::Event::TestFinished {
             name,
             exit_code,
             score,

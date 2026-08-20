@@ -27,6 +27,7 @@ fn install_panic_hook() {
 mod author;
 mod cmd_agent;
 mod cmd_config;
+mod cmd_eval;
 mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
@@ -147,6 +148,12 @@ enum Command {
 
     /// Run scanner tests
     Test(cmd_test::TestArgs),
+
+    /// Run and view evals
+    Eval {
+        #[command(subcommand)]
+        command: cmd_eval::EvalCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -251,6 +258,7 @@ async fn main() {
                 cmd_issue::IssueCommand::Comment(args) => cmd_issue::comment(args),
             },
             Command::Test(args) => cmd_test::run(args).await,
+            Command::Eval { command } => cmd_eval::run(command).await,
             Command::Scan(args) => cmd_scan::run(args).await,
             Command::Review(args) => cmd_review::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {

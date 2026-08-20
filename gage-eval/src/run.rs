@@ -373,8 +373,9 @@ fn write_test_json(run: &Path, test: &Test) -> io::Result<()> {
     fs::write(storage::test_json_path(run, &test.id()), bytes)
 }
 
-/// Resolve the `gage` binary sitting next to the currently-running
-/// `gage-eval` binary. The plugin's MCP server invokes this.
+/// Resolve the `gage` binary as the currently-running executable's
+/// sibling — which, with evals embedded in the CLI, is the running
+/// `gage` itself. The plugin's MCP server and scanner tests invoke it.
 pub fn sibling_gage_bin() -> io::Result<PathBuf> {
     std::env::current_exe()?
         .parent()
