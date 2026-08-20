@@ -14,7 +14,7 @@ use tabled::{
     },
 };
 
-use gage_eval::{eval, run as runner, score, storage, tokens, view};
+use gage_eval::{eval, results, run as runner, storage, tokens, view};
 
 use crate::{limit, style};
 
@@ -58,14 +58,6 @@ pub struct DeleteArgs {
 pub struct ViewArgs {
     /// Run UUID or unique prefix
     run_id: String,
-
-    /// Rebuild report.md
-    #[arg(long)]
-    refresh: bool,
-
-    /// Pick a test and view its session
-    #[arg(short, long)]
-    session: bool,
 }
 
 const DEFAULT_MODEL: &str = "sonnet";
@@ -153,108 +145,71 @@ async fn cmd_view(args: ViewArgs) {
             std::process::exit(1);
         }
     };
-    if args.session {
-        cmd_view_session(&run).await;
-        return;
-    }
-    let path = match view::ensure_report(&run, args.refresh) {
-        Ok(p) => p,
+    let model = match eval_model(&run) {
+        Ok(m) => m,
         Err(e) => {
-            eprintln!("failed to build report: {e}");
+            eprintln!("failed to load run: {e}");
             std::process::exit(2);
         }
     };
-    if let Err(e) = view::page(&path) {
-        eprintln!("pager failed: {e}");
+    if let Err(e) = gage_tui::eval_view::run(model) {
+        eprintln!("view failed: {e}");
         std::process::exit(2);
     }
 }
 
-async fn cmd_view_session(run: &storage::RunSummary) {
-    let session_id = match pick_test_session(run) {
-        Ok(Some(id)) => id,
-        Ok(None) => return,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(2);
+/// Build the view model for a test eval run from its structured
+/// results (building `results.json` on demand for older runs).
+fn eval_model(run: &storage::RunSummary) -> std::io::Result<gage_tui::eval_view::EvalModel> {
+    let run_dir = storage::run_dir(&run.run_id);
+    let results = results::ensure(&run_dir)?;
+    let tests = results.tests.into_iter().map(test_item).collect();
+    Ok(gage_tui::eval_view::EvalModel {
+        run_id: run.run_id.clone(),
+        tests,
+    })
+}
+
+fn test_item(t: results::TestResult) -> gage_tui::eval_view::TestItem {
+    let input = match &t.prompt {
+        Some(p) => p.trim().to_string(),
+        None => {
+            let mut lines = vec![format!("scanners: {}", t.scanners.join(", "))];
+            if let Some(f) = &t.fixture {
+                lines.push(format!("fixture: {f}"));
+            }
+            if let Some(s) = t.samples {
+                lines.push(format!("samples: {s}"));
+            }
+            lines.join("\n")
         }
     };
-    let run_dir = storage::run_dir(&run.run_id);
-    let projects = storage::claude_home(&run_dir).join("projects");
-    // SAFETY: set_var is unsafe in edition 2024; the runtime's worker
-    // threads exist, but nothing reads this variable concurrently — the
-    // sole reader is the session load performed on this thread below.
-    unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &projects) };
-    let options = gage_tui::ViewOptions { show_turns: true };
-    if let Err(e) = gage_tui::session_view::run(&session_id, options).await {
-        eprintln!("failed to view session: {e}");
-        std::process::exit(2);
-    }
-}
-
-/// Present a pick list of the run's tests, one row per test with a
-/// session JSONL. Resolves to the selected test's session id; `None`
-/// when canceled or when no test has a session.
-fn pick_test_session(run: &storage::RunSummary) -> std::io::Result<Option<String>> {
-    let run_dir = storage::run_dir(&run.run_id);
-    let mut items: Vec<(String, String, String)> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
-    for name in storage::test_names(&run_dir)? {
-        let id = storage::session_path(&run_dir, &name)
-            .and_then(|p| Some(p.file_stem()?.to_str()?.to_string()));
-        let Some(id) = id else {
-            missing.push(name);
-            continue;
-        };
-        let glyph = match score::read_score(&run_dir, &name)? {
-            Some(s) if s.passed => "✓ ",
-            Some(_) => "✗ ",
-            None => "  ",
-        };
-        items.push((id, format!("{glyph}{name}"), String::new()));
-    }
-    if !missing.is_empty() {
-        eprintln!("no session for: {}", missing.join(", "));
-    }
-    if items.is_empty() {
-        println!("No sessions found");
-        return Ok(None);
-    }
-    let _sigint = SigintGuard::new();
-    match cliclack::select("Select a test session")
-        .items(&items)
-        .max_rows(15)
-        .filter_mode()
-        .interact()
-    {
-        Ok(id) => Ok(Some(id)),
-        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-/// RAII guard that ignores SIGINT for its lifetime and restores the
-/// previous disposition on drop. The console crate detects Ctrl+C as a
-/// 0x03 byte in raw mode and then calls `libc::raise(SIGINT)`; without
-/// this guard the raised signal terminates the process before the
-/// caller can act on the `ErrorKind::Interrupted` returned by the
-/// prompt.
-struct SigintGuard {
-    prev: libc::sighandler_t,
-}
-
-impl SigintGuard {
-    fn new() -> Self {
-        let prev = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
-        Self { prev }
-    }
-}
-
-impl Drop for SigintGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::signal(libc::SIGINT, self.prev);
-        }
+    let sessions = t
+        .sessions
+        .into_iter()
+        .map(|s| {
+            let short = short_uuid(&s.id);
+            let label = match s.sample {
+                Some(n) => format!("s{n} {} {short}", s.kind),
+                None => format!("{} {short}", s.kind),
+            };
+            gage_tui::eval_view::TestSession {
+                label,
+                id: s.id,
+                path: s.path,
+            }
+        })
+        .collect();
+    gage_tui::eval_view::TestItem {
+        name: t.name,
+        passed: t.passed,
+        checks: t.checks.into_iter().map(|c| (c.label, c.passed)).collect(),
+        turns: t.turns,
+        exit_code: t.exit_code,
+        input,
+        output: t.output,
+        stderr: t.stderr,
+        sessions,
     }
 }
 

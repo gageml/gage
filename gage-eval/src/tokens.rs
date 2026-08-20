@@ -51,18 +51,6 @@ pub fn session_tokens(path: &Path) -> Tokens {
     total
 }
 
-pub fn fmt_tokens(t: &Tokens) -> Option<String> {
-    if t.input == 0 && t.cached == 0 && t.output == 0 {
-        return None;
-    }
-    Some(format!(
-        "{} in / {} cached / {} out",
-        format_count(t.input),
-        format_count(t.cached),
-        format_count(t.output)
-    ))
-}
-
 pub fn format_count(n: u64) -> String {
     if n < 1_000 {
         n.to_string()

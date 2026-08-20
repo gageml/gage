@@ -3,6 +3,7 @@
 //! (`cmd_eval`) as `gage eval`.
 
 pub mod eval;
+pub mod results;
 pub mod run;
 pub mod score;
 pub mod storage;

@@ -132,6 +132,7 @@ pub fn run_batch(
         on_event,
     )?;
 
+    crate::results::write(&run)?;
     write_manifest(
         &run,
         &Manifest {

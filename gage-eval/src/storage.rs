@@ -133,6 +133,11 @@ pub fn score_path(run: &Path, test_name: &str) -> PathBuf {
     test_dir(run, test_name).join("score.json")
 }
 
+/// Structured run results, at the run root (see `results`)
+pub fn results_path(run: &Path) -> PathBuf {
+    run.join("results.json")
+}
+
 pub fn error_exit_code_path(run: &Path, test_name: &str) -> PathBuf {
     test_dir(run, test_name).join("ERROR_EXIT_CODE")
 }
