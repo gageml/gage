@@ -1,7 +1,8 @@
 //! Eval run view — a tree of the run's tests and their sessions.
 //! Enter on a test opens the test dialog; Enter on a session child
-//! opens the shared session viewer; Space expands/collapses. ←/→ in a
-//! dialog steps depth-first through the tree's nodes, switching dialog
+//! opens the shared session viewer; Space and ←/→ collapse/expand.
+//! `[`/`]` in a dialog step depth-first through the tree's nodes,
+//! switching dialog
 //! kind between test and session as needed. Follows the
 //! pane/table/footer structure of `gage scan view`; the caller builds
 //! an [`EvalModel`] from the eval run's structured results.
@@ -265,7 +266,7 @@ impl ViewState {
         out
     }
 
-    /// Every node in depth-first order, ignoring expansion — the ←/→
+    /// Every node in depth-first order, ignoring expansion — the `[`/`]`
     /// stepping order.
     fn all_nodes(&self) -> Vec<Node> {
         let mut out = Vec::new();
@@ -304,6 +305,38 @@ impl ViewState {
     fn selected_node(&self) -> Option<Node> {
         let i = self.table.selected_index()?;
         self.visible_nodes().get(i).copied()
+    }
+
+    /// Right on a collapsed test row expands it.
+    fn expand_selected(&mut self) {
+        let Some(node) = self.selected_node() else {
+            return;
+        };
+        let Some(test) = self.model.tests.get(node.test) else {
+            return;
+        };
+        if node.session.is_none() && !test.sessions.is_empty() && self.expanded.insert(node.test) {
+            self.sync_table();
+        }
+    }
+
+    /// Left collapses an expanded test row; on a session row it moves
+    /// to the parent test (the session-view convention).
+    fn collapse_selected(&mut self) {
+        let Some(node) = self.selected_node() else {
+            return;
+        };
+        match node.session {
+            Some(_) => self.select_node(Node {
+                test: node.test,
+                session: None,
+            }),
+            None => {
+                if self.expanded.remove(&node.test) {
+                    self.sync_table();
+                }
+            }
+        }
     }
 
     fn toggle_selected(&mut self) {
@@ -415,7 +448,7 @@ impl ViewState {
     }
 
     /// Route a key to the embedded session view; `Close` dismisses the
-    /// dialog and ←/→ when ignored by the view steps the tree.
+    /// dialog and `[`/`]` step the tree.
     fn handle_session_dialog_key(&mut self, key: KeyEvent) {
         let mut close = false;
         let mut step: isize = 0;
@@ -426,8 +459,8 @@ impl ViewState {
                 Ok(app::KeyOutcome::Close) => close = true,
                 Ok(app::KeyOutcome::Ignored) => {
                     step = match key.code {
-                        KeyCode::Left => -1,
-                        KeyCode::Right => 1,
+                        KeyCode::Char('[') => -1,
+                        KeyCode::Char(']') => 1,
                         _ => 0,
                     };
                 }
@@ -479,8 +512,8 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
                 KeyCode::PageUp => state.scroll_view.scroll_by(-page),
                 KeyCode::Char('g') => state.scroll_view.scroll_to_top(),
                 KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
-                KeyCode::Right => state.step_dialog(1),
-                KeyCode::Left => state.step_dialog(-1),
+                KeyCode::Char(']') => state.step_dialog(1),
+                KeyCode::Char('[') => state.step_dialog(-1),
                 _ => {}
             }
             return None;
@@ -502,6 +535,8 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
         KeyCode::Char('g') => state.table.select_first(&refs),
         KeyCode::Char('G') => state.table.select_last(&refs),
         KeyCode::Char(' ') => state.toggle_selected(),
+        KeyCode::Right => state.expand_selected(),
+        KeyCode::Left => state.collapse_selected(),
         KeyCode::Enter => state.open_selected(),
         _ => {}
     }
@@ -690,12 +725,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         return;
     }
     let help = match state.dialog {
-        Dialog::Test { .. } => "q close · ↑/↓ scroll · ←/→ prev/next",
+        Dialog::Test { .. } => "q close · ↑/↓ scroll · [/] prev/next",
         Dialog::Session { .. } => {
-            "q back · Tab pane · j/k g/G · Enter/Space toggle · n note · ←/→ prev/next"
+            "q back · Tab pane · j/k g/G · Enter/Space ◂ ▸ · n note · [/] prev/next"
         }
         Dialog::OpenRun(_) => "",
-        Dialog::None => "q quit · ↑/↓ select · Space expand · Enter open · o open run",
+        Dialog::None => "q quit · ↑/↓ select · Space/◂ ▸ expand · Enter open · o open run",
     };
     let help_width = help.width() as u16;
     let [_, help_area, _] = Layout::horizontal([

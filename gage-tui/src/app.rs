@@ -3,8 +3,9 @@
 //! toggles expansion (Enter on a user comment note edits it instead). In
 //! the body: j/k/g/G/PgUp/PgDn scroll. `n` opens a note dialog over the
 //! selected entry; `e` edits the selected user comment note; `d` deletes
-//! the selected user-authored note. ←/→ are deliberately unbound so a
-//! host embedding the view can use them (e.g. stepping between sessions).
+//! the selected user-authored note. →/← expand and collapse (← moves to
+//! the parent at a terminus). `[`/`]` are deliberately unbound so a host
+//! embedding the view can step between sessions with them.
 
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,7 +27,7 @@ use serde_json::Value;
 
 use crate::doc::Document;
 use crate::options::ViewOptions;
-use crate::outline::{Outline, RowKind};
+use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::picker::{self, PickItem, Picker, PickerAction};
 use crate::session;
 use crate::syntax::Highlighter;
@@ -155,7 +156,7 @@ fn load_doc_blocking(session_id: &str, db: &Connection) -> io::Result<Document> 
 /// What a key press did, for hosts that embed the view. `Close` is a
 /// request to dismiss the view (`q`/`Esc`); `Ignored` means the key had
 /// no effect at the current position, letting a host bind its own
-/// meaning (e.g. ←/→ stepping to another session at a tree terminus).
+/// meaning (e.g. `[`/`]` stepping to another session).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyOutcome {
     Consumed,
@@ -255,6 +256,14 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char(' ') if state.focus == Focus::Outline => {
             state.toggle_selected();
+            KeyOutcome::Consumed
+        }
+        KeyCode::Right if state.focus == Focus::Outline => {
+            state.expand_selected();
+            KeyOutcome::Consumed
+        }
+        KeyCode::Left if state.focus == Focus::Outline => {
+            state.collapse_selected();
             KeyOutcome::Consumed
         }
         KeyCode::Char('l')
@@ -455,6 +464,34 @@ impl AppState {
         if self.outline.toggle(idx) {
             self.clamp_selection();
             self.body_scroll = 0;
+        }
+    }
+
+    fn expand_selected(&mut self) {
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        if self.outline.expand(idx) {
+            self.body_scroll = 0;
+        }
+    }
+
+    /// Collapse the selected row, or move to its parent when there is
+    /// nothing to collapse (the session-view convention).
+    fn collapse_selected(&mut self) {
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        match self.outline.collapse(idx) {
+            CollapseOutcome::Collapsed => {
+                self.clamp_selection();
+                self.body_scroll = 0;
+            }
+            CollapseOutcome::SelectParent(parent) => {
+                self.list_state.select(Some(parent));
+                self.body_scroll = 0;
+            }
+            CollapseOutcome::None => {}
         }
     }
 

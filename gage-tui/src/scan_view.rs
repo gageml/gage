@@ -764,8 +764,8 @@ fn handle_key(
                 KeyCode::PageUp => state.scroll_view.scroll_by(-page),
                 KeyCode::Char('g') => state.scroll_view.scroll_to_top(),
                 KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
-                KeyCode::Right => state.step_dialog_item(1),
-                KeyCode::Left => state.step_dialog_item(-1),
+                KeyCode::Char(']') => state.step_dialog_item(1),
+                KeyCode::Char('[') => state.step_dialog_item(-1),
                 _ => {}
             }
             return false;
@@ -1003,7 +1003,7 @@ struct ViewState {
     /// thread the launch must suspend.
     pending_review: Option<String>,
     /// Last UI position per viewed session, restored when a session
-    /// dialog re-opens (including ←/→ stepping away and back).
+    /// dialog re-opens (including `[`/`]` stepping away and back).
     session_ui: HashMap<String, app::SavedUi>,
 }
 
@@ -1025,7 +1025,7 @@ enum Dialog {
     },
     /// Zoomed session view — the same tree/body component
     /// `gage session view` runs, embedded in a modal. `nav` selects
-    /// what ←/→ steps through at a tree terminus — the sessions table
+    /// what `[`/`]` steps through — the sessions table
     /// or the tasks panel's agent rows — and titles the dialog
     /// accordingly. The connection serves the view's note operations
     /// for the dialog's lifetime.
@@ -1087,7 +1087,7 @@ enum Prompt {
     },
 }
 
-/// What a session dialog was opened from, and therefore what ←/→
+/// What a session dialog was opened from, and therefore what `[`/`]`
 /// steps through.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SessionNav {
@@ -1516,7 +1516,7 @@ impl ViewState {
 
     /// Route a key to the embedded session view, then apply what the
     /// outcome means at this level: `Close` dismisses the dialog and
-    /// ←/→ at a tree terminus (`Ignored`) steps to the neighboring
+    /// `[`/`]` (`Ignored` by the view) steps to the neighboring
     /// session, remembering the current one's UI position.
     fn handle_session_dialog_key(&mut self, key: KeyEvent) {
         let mut close = false;
@@ -1531,8 +1531,8 @@ impl ViewState {
                 }
                 Ok(app::KeyOutcome::Ignored) => {
                     step = match key.code {
-                        KeyCode::Left => -1,
-                        KeyCode::Right => 1,
+                        KeyCode::Char('[') => -1,
+                        KeyCode::Char(']') => 1,
                         _ => 0,
                     };
                     if step != 0 {
@@ -3039,10 +3039,10 @@ fn footer_help(state: &ViewState) -> &'static str {
     }
     match state.dialog {
         Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
-        Dialog::Note { .. } => "q back · ↑/↓ scroll · ←/→ prev/next",
-        Dialog::Issue { .. } => "q back · ↑/↓ scroll · ←/→ prev/next · a action",
+        Dialog::Note { .. } => "q back · ↑/↓ scroll · [/] prev/next",
+        Dialog::Issue { .. } => "q back · ↑/↓ scroll · [/] prev/next · a action",
         Dialog::Session { .. } => {
-            "q back · Tab pane · j/k g/G · Enter/Space toggle · n note · ←/→ prev/next"
+            "q back · Tab pane · j/k g/G · Enter/Space ◂ ▸ · n note · [/] prev/next"
         }
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::OpenScan(_) => "",

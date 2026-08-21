@@ -1,7 +1,7 @@
 //! Scan eval view — two panes: a report-style summary of the scan's
 //! measurements, and the scan's agent sessions with triage columns.
 //! Enter on a session opens the shared session viewer (with note
-//! taking); ←/→ in the dialog steps to the neighboring session. The
+//! taking); `[`/`]` in the dialog step to the neighboring session. The
 //! caller builds a [`ScanEvalModel`] from the run's `scan.json`.
 
 use std::io;
@@ -187,8 +187,7 @@ impl ViewState {
     }
 
     /// Route a key to the embedded session view; `Close` dismisses the
-    /// dialog and ←/→ when ignored by the view steps to the
-    /// neighboring session.
+    /// dialog and `[`/`]` step to the neighboring session.
     fn handle_session_dialog_key(&mut self, key: KeyEvent) {
         let mut close = false;
         let mut step: isize = 0;
@@ -204,8 +203,8 @@ impl ViewState {
                 }
                 Ok(app::KeyOutcome::Ignored) => {
                     step = match key.code {
-                        KeyCode::Left => -1,
-                        KeyCode::Right => 1,
+                        KeyCode::Char('[') => -1,
+                        KeyCode::Char(']') => 1,
                         _ => 0,
                     };
                     if step != 0
@@ -454,7 +453,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     let help = match (&state.dialog, state.focus) {
         (Dialog::OpenRun(_), _) => "",
         (Dialog::Session { .. }, _) => {
-            "q back · Tab pane · j/k g/G · Enter/Space toggle · n note · ←/→ prev/next"
+            "q back · Tab pane · j/k g/G · Enter/Space ◂ ▸ · n note · [/] prev/next"
         }
         (Dialog::None, Focus::Summary) => {
             "q quit · Tab pane · j/k g/G PgUp/PgDn scroll · o open run"
