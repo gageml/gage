@@ -316,7 +316,9 @@ pub(crate) struct SavedUi {
 enum Dialog {
     None,
     AddNote {
-        entry_index: usize,
+        /// Target entry; None for a session-level note (the
+        /// `<Session>` row or one of its notes selected)
+        entry_index: Option<usize>,
         editor: TextArea,
     },
     EditNote {
@@ -583,12 +585,13 @@ impl AppState {
     }
 
     fn begin_add_note(&mut self) {
-        if let Some(entry_index) = self.selected_entry_index() {
-            self.dialog = Dialog::AddNote {
-                entry_index,
-                editor: new_editor(""),
-            };
+        if self.list_state.selected().is_none() {
+            return;
         }
+        self.dialog = Dialog::AddNote {
+            entry_index: self.selected_entry_index(),
+            editor: new_editor(""),
+        };
     }
 
     fn begin_edit_note(&mut self) -> bool {
@@ -718,13 +721,20 @@ fn commit_note(state: &mut AppState, db: &Connection) {
             entry_index,
             editor,
         } => {
-            let Some(entry) = state.doc.entries.get(entry_index) else {
-                return;
+            let line = match entry_index {
+                Some(i) => match state.doc.entries.get(i) {
+                    Some(entry) => Some(entry.line),
+                    None => return,
+                },
+                // Session-level note: a session target with no line
+                None => None,
             };
             let text = editor.text();
-            let target = NoteTarget::Session(
-                SessionTarget::new(&state.doc.session.id).with_line(entry.line),
-            );
+            let mut target = SessionTarget::new(&state.doc.session.id);
+            if let Some(line) = line {
+                target = target.with_line(line);
+            }
+            let target = NoteTarget::Session(target);
             // Notes are keyed by (name, target, author) in the DB, so a literal
             // "comment" name caps users at one comment per line. Suffix with a
             // short slice of the note's own UUID to keep the key unique while
@@ -737,7 +747,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
                 state.doc.add_note(note);
                 // Selection stays on the row that opened the dialog; the new
                 // note rows are appended after it, so the index is unaffected.
-                state.outline.add_note(Some(entry_index), id);
+                state.outline.add_note(entry_index, id);
             }
         }
         Dialog::EditNote {
