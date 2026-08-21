@@ -57,7 +57,7 @@ pub struct DeleteArgs {
 #[derive(Args)]
 pub struct ViewArgs {
     /// Run UUID or unique prefix
-    run_id: String,
+    run_id: Option<String>,
 }
 
 const DEFAULT_MODEL: &str = "sonnet";
@@ -142,51 +142,108 @@ pub async fn run(command: EvalCommand) {
 }
 
 async fn cmd_view(args: ViewArgs) {
-    let run = match view::resolve(&args.run_id) {
+    // The eval view app runs in one terminal session: with no run arg
+    // the run picker chooses the initial run, and `o` inside a view
+    // switches runs (and view kinds) without leaving the TUI.
+    let initial = args.run_id.as_deref().map(|prefix| {
+        let run = resolve_run(prefix);
+        match build_kind_model(&run) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("failed to load run: {e}");
+                std::process::exit(2);
+            }
+        }
+    });
+    let runs = eval_run_refs();
+    if initial.is_none() && runs.is_empty() {
+        println!("No runs found");
+        return;
+    }
+    let load = |id: &str| -> std::io::Result<gage_tui::eval_view::EvalKindModel> {
+        let run = view::resolve(id)?;
+        build_kind_model(&run)
+    };
+    if let Err(e) = gage_tui::eval_view::run_app(initial, runs, load) {
+        eprintln!("view failed: {e}");
+        std::process::exit(2);
+    }
+}
+
+/// Build the run's view model according to its kind (test vs scan
+/// eval, per the `scan.json` sentinel).
+fn build_kind_model(
+    run: &storage::RunSummary,
+) -> std::io::Result<gage_tui::eval_view::EvalKindModel> {
+    let runs = eval_run_refs();
+    if storage::scan_json_path(&storage::run_dir(&run.run_id)).exists() {
+        Ok(gage_tui::eval_view::EvalKindModel::Scan(scan_eval_model(
+            run, runs,
+        )?))
+    } else {
+        Ok(gage_tui::eval_view::EvalKindModel::Tests(eval_model(
+            run, runs,
+        )?))
+    }
+}
+
+/// Resolve a run id or prefix, exiting with the ambiguity table on a
+/// non-unique prefix.
+fn resolve_run(prefix: &str) -> storage::RunSummary {
+    match view::resolve(prefix) {
         Ok(r) => r,
         Err(e) => {
             if let Some(amb) = e
                 .get_ref()
                 .and_then(|inner| inner.downcast_ref::<view::AmbiguousError>())
             {
-                eprintln!("ambiguous prefix `{}` matches multiple runs:", args.run_id);
+                eprintln!("ambiguous prefix `{prefix}` matches multiple runs:");
                 eprint!("{}", runs_table(&amb.matches));
             } else {
                 eprintln!("{e}");
             }
             std::process::exit(1);
         }
-    };
-    if storage::scan_json_path(&storage::run_dir(&run.run_id)).exists() {
-        let model = match scan_eval_model(&run) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("failed to load run: {e}");
-                std::process::exit(2);
-            }
-        };
-        if let Err(e) = gage_tui::scan_eval_view::run(model) {
-            eprintln!("view failed: {e}");
-            std::process::exit(2);
-        }
-        return;
     }
-    let model = match eval_model(&run) {
-        Ok(m) => m,
+}
+
+/// Rows for the run-open picker: every eval run, newest first, with a
+/// kind-appropriate description.
+fn eval_run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
+    let runs = match storage::list_runs() {
+        Ok(r) => r,
         Err(e) => {
-            eprintln!("failed to load run: {e}");
+            eprintln!("list failed: {e}");
             std::process::exit(2);
         }
     };
-    if let Err(e) = gage_tui::eval_view::run(model) {
-        eprintln!("view failed: {e}");
-        std::process::exit(2);
-    }
+    runs.into_iter()
+        .map(|r| {
+            let descr = if storage::scan_json_path(&storage::run_dir(&r.run_id)).exists() {
+                "scan eval".to_string()
+            } else if r.total > 0 {
+                let pct = (r.passed as f64 / r.total as f64 * 100.0).round() as u32;
+                format!("{} tests · {pct}%", r.total)
+            } else {
+                "tests".to_string()
+            };
+            let descr = match &r.note {
+                Some(n) => format!("{descr} · {n}"),
+                None => descr,
+            };
+            gage_tui::eval_view::EvalRunRef {
+                id: r.run_id,
+                started_ms: r.started_at_ms,
+                descr,
+            }
+        })
+        .collect()
 }
 
 /// Build the view model for a scan eval run from its `scan.json`.
 fn scan_eval_model(
     run: &storage::RunSummary,
+    runs: Vec<gage_tui::eval_view::EvalRunRef>,
 ) -> std::io::Result<gage_tui::scan_eval_view::ScanEvalModel> {
     let se = scan_eval::read(&storage::run_dir(&run.run_id))?;
 
@@ -300,6 +357,7 @@ fn scan_eval_model(
 
     Ok(gage_tui::scan_eval_view::ScanEvalModel {
         run_id: run.run_id.clone(),
+        runs,
         scan_id: se.scan_id,
         attrs,
         scanner_lines,
@@ -310,13 +368,17 @@ fn scan_eval_model(
 
 /// Build the view model for a test eval run from its structured
 /// results (building `results.json` on demand for older runs).
-fn eval_model(run: &storage::RunSummary) -> std::io::Result<gage_tui::eval_view::EvalModel> {
+fn eval_model(
+    run: &storage::RunSummary,
+    runs: Vec<gage_tui::eval_view::EvalRunRef>,
+) -> std::io::Result<gage_tui::eval_view::EvalModel> {
     let run_dir = storage::run_dir(&run.run_id);
     let results = results::ensure(&run_dir)?;
     let tests = results.tests.into_iter().map(test_item).collect();
     Ok(gage_tui::eval_view::EvalModel {
         run_id: run.run_id.clone(),
         tests,
+        runs,
     })
 }
 

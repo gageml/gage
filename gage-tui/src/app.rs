@@ -27,6 +27,7 @@ use serde_json::Value;
 use crate::doc::Document;
 use crate::options::ViewOptions;
 use crate::outline::{Outline, RowKind};
+use crate::picker::{self, PickItem, Picker, PickerAction};
 use crate::session;
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
@@ -65,19 +66,82 @@ fn standalone_pick(
     terminal: &mut DefaultTerminal,
     db: &Connection,
 ) -> io::Result<Option<Document>> {
-    let mut picker = Picker::load(None)?;
+    let mut picker = session_picker(None)?;
     loop {
-        terminal.draw(|frame| draw_picker(frame, &mut picker))?;
+        terminal.draw(|frame| {
+            draw_empty_shell(frame);
+            picker.draw(frame);
+        })?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            match picker_key(&mut picker, key.code) {
+            match picker.handle_key(key.code) {
                 PickerAction::None => {}
                 PickerAction::Close => return Ok(None),
                 PickerAction::Open(id) => return load_doc_blocking(&id, db).map(Some),
             }
         }
     }
+}
+
+/// The app frame with no session open: empty panels behind the
+/// initial picker, so picking renders in place with no flash.
+fn draw_empty_shell(frame: &mut Frame) {
+    let [header_area, middle_area, footer_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    frame.render_widget(
+        Paragraph::new(Line::from("")).style(styles::Panel::header()),
+        header_area,
+    );
+    let [outline_area, body_area] =
+        Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(middle_area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(styles::Panel::border(false))
+            .title("Entries"),
+        outline_area,
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(styles::Panel::border(false)),
+        body_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from("")).style(styles::Panel::footer()),
+        footer_area,
+    );
+}
+
+/// Build the session-open picker from the corpus's recent sessions.
+fn session_picker(current: Option<&str>) -> io::Result<Picker> {
+    let items = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(session::list_recent(200))
+    })
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    let items = items
+        .into_iter()
+        .map(|item| {
+            let short = gage_core::uuid::short_uuid(&item.id).to_string();
+            PickItem {
+                line: Line::from(vec![
+                    Span::styled(short, styles::Text::id()),
+                    Span::styled(
+                        format!("  {:>4}  ", picker::ago(item.mtime_ms)),
+                        styles::Text::dim(),
+                    ),
+                    Span::raw(item.title),
+                ]),
+                id: item.id,
+            }
+        })
+        .collect();
+    Ok(Picker::new("Open session", items, current))
 }
 
 /// Load a session document from the sync event loop.
@@ -120,7 +184,7 @@ pub(crate) fn handle_key(
             return Ok(KeyOutcome::Consumed);
         }
         Dialog::OpenSession(picker) => {
-            match picker_key(picker, key.code) {
+            match picker.handle_key(key.code) {
                 PickerAction::None => {}
                 PickerAction::Close => state.dialog = Dialog::None,
                 PickerAction::Open(id) => {
@@ -204,7 +268,7 @@ pub(crate) fn handle_key(
             KeyOutcome::Consumed
         }
         KeyCode::Char('o') => {
-            state.dialog = Dialog::OpenSession(Picker::load(Some(&state.doc.session.id))?);
+            state.dialog = Dialog::OpenSession(session_picker(Some(&state.doc.session.id))?);
             KeyOutcome::Consumed
         }
         KeyCode::Char('e') => {
@@ -270,138 +334,6 @@ enum Dialog {
     },
     /// Session-open picker (`o`)
     OpenSession(Picker),
-}
-
-/// Session-open picker state: recent sessions, newest first.
-pub(crate) struct Picker {
-    items: Vec<session::SessionListItem>,
-    list: ListState,
-    /// Visible rows, recorded at draw for paging keys
-    viewport: u16,
-}
-
-enum PickerAction {
-    None,
-    Close,
-    Open(String),
-}
-
-impl Picker {
-    /// Load the picker, preselecting `current` when it is in the list.
-    fn load(current: Option<&str>) -> io::Result<Self> {
-        let items = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(session::list_recent(200))
-        })
-        .map_err(|e| io::Error::other(e.to_string()))?;
-        let mut list = ListState::default();
-        let idx = current
-            .and_then(|id| items.iter().position(|i| i.id == id))
-            .unwrap_or(0);
-        list.select((!items.is_empty()).then_some(idx));
-        Ok(Self {
-            items,
-            list,
-            viewport: 0,
-        })
-    }
-
-    fn select_by(&mut self, delta: isize) {
-        if self.items.is_empty() {
-            return;
-        }
-        let max = (self.items.len() - 1) as isize;
-        let current = self.list.selected().unwrap_or(0) as isize;
-        self.list
-            .select(Some(current.saturating_add(delta).clamp(0, max) as usize));
-    }
-}
-
-fn picker_key(picker: &mut Picker, code: KeyCode) -> PickerAction {
-    let page = page_size(picker.viewport) as isize;
-    match code {
-        KeyCode::Char('q') | KeyCode::Esc => PickerAction::Close,
-        KeyCode::Enter => match picker.list.selected().and_then(|i| picker.items.get(i)) {
-            Some(item) => PickerAction::Open(item.id.clone()),
-            None => PickerAction::Close,
-        },
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Right => {
-            picker.select_by(1);
-            PickerAction::None
-        }
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Left => {
-            picker.select_by(-1);
-            PickerAction::None
-        }
-        KeyCode::PageDown => {
-            picker.select_by(page);
-            PickerAction::None
-        }
-        KeyCode::PageUp => {
-            picker.select_by(-page);
-            PickerAction::None
-        }
-        KeyCode::Char('g') | KeyCode::Home => {
-            picker.list.select((!picker.items.is_empty()).then_some(0));
-            PickerAction::None
-        }
-        KeyCode::Char('G') | KeyCode::End => {
-            picker.list.select(picker.items.len().checked_sub(1));
-            PickerAction::None
-        }
-        _ => PickerAction::None,
-    }
-}
-
-fn draw_picker(frame: &mut Frame, picker: &mut Picker) {
-    let area = frame.area();
-    let width = area.width.saturating_sub(8).clamp(40, 100);
-    let height = (picker.items.len() as u16 + 5).clamp(7, area.height.saturating_sub(2));
-    let rect = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
-    let (body_area, hint_area) = draw_dialog_block(frame, rect, "Open session");
-    picker.viewport = body_area.height;
-
-    let items: Vec<ListItem> = picker
-        .items
-        .iter()
-        .map(|item| {
-            let short = gage_core::uuid::short_uuid(&item.id).to_string();
-            ListItem::new(Line::from(vec![
-                Span::styled(short, styles::Text::id()),
-                Span::styled(
-                    format!("  {:>7}  ", ago(item.mtime_ms)),
-                    styles::Text::dim(),
-                ),
-                Span::raw(item.title.clone()),
-            ]))
-        })
-        .collect();
-    let list = List::new(items).highlight_style(styles::Panel::selection(true));
-    frame.render_stateful_widget(list, body_area, &mut picker.list);
-
-    let max_offset = picker.items.len().saturating_sub(picker.viewport as usize);
-    let mut sb = ScrollbarState::new(max_offset).position(picker.list.offset());
-    frame.render_stateful_widget(scrollbar(true), body_area, &mut sb);
-
-    draw_hint(frame, hint_area, "Enter open · q cancel");
-}
-
-/// Relative age display for the picker, e.g. `3h ago`.
-fn ago(mtime_ms: i64) -> String {
-    let secs = (gage_core::datetime::now_ms() - mtime_ms) / 1000;
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86_400)
-    }
 }
 
 fn new_editor(text: &str) -> TextArea {
@@ -1306,7 +1238,7 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog) {
         Dialog::ConfirmDelete { .. } => {
             draw_confirm(frame, "Delete this note? This cannot be undone.")
         }
-        Dialog::OpenSession(picker) => draw_picker(frame, picker),
+        Dialog::OpenSession(picker) => picker.draw(frame),
     }
 }
 

@@ -38,6 +38,11 @@ use gage_db::rusqlite::Connection;
 use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::item_table::ItemTable;
+use crate::picker::{self, PickItem, Picker, PickerAction};
+
+/// Loader used by the open-scan dialog to rebuild the model for a
+/// picked scan id. Absent for live-scan views, where `o` is disabled.
+type ScanLoader<'a> = &'a dyn Fn(&str) -> io::Result<ScanModel>;
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::textarea::TextArea;
@@ -466,7 +471,7 @@ pub async fn run(
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = event_loop(&mut terminal, model, &mut events, &on_cancel).await;
+    let result = event_loop(&mut terminal, model, &mut events, &on_cancel, None).await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -474,20 +479,101 @@ pub async fn run(
     result
 }
 
-/// Show an already-complete model (a historical scan).
-pub async fn view(mut model: ScanModel) -> io::Result<()> {
-    model.finished = true;
-    let (tx, mut events) = unbounded_channel();
-    drop(tx);
+/// Show an already-complete model (a historical scan). `None` opens
+/// the scan picker first (canceling it exits); `load` rebuilds the
+/// model when the user opens a different scan (`o`, or the picker).
+pub async fn view(
+    model: Option<ScanModel>,
+    load: impl Fn(&str) -> io::Result<ScanModel>,
+) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    // A finished model never opens the cancel path
-    let result = event_loop(&mut terminal, model, &mut events, &|| {}).await;
+    let result = view_inner(&mut terminal, model, &load).await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
     ratatui::restore();
     result
+}
+
+async fn view_inner(
+    terminal: &mut DefaultTerminal,
+    model: Option<ScanModel>,
+    load: ScanLoader<'_>,
+) -> io::Result<()> {
+    let mut model = match model {
+        Some(m) => m,
+        None => match standalone_scan_pick(terminal, load)? {
+            Some(m) => m,
+            None => return Ok(()),
+        },
+    };
+    model.finished = true;
+    let (tx, mut events) = unbounded_channel();
+    drop(tx);
+    // A finished model never opens the cancel path
+    event_loop(terminal, model, &mut events, &|| {}, Some(load)).await
+}
+
+/// Run the open dialog on a blank background until the user picks a
+/// scan or cancels.
+fn standalone_scan_pick(
+    terminal: &mut DefaultTerminal,
+    load: ScanLoader<'_>,
+) -> io::Result<Option<ScanModel>> {
+    let mut picker = scan_picker(None)?;
+    // Empty panels behind the picker, so picking renders in place
+    // with no flash.
+    let mut shell = ViewState::new(ScanModel::default());
+    loop {
+        terminal.draw(|frame| {
+            draw(frame, &mut shell);
+            picker.draw(frame);
+        })?;
+        if let TermEvent::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match picker.handle_key(key.code) {
+                PickerAction::None => {}
+                PickerAction::Close => return Ok(None),
+                PickerAction::Open(id) => return load(&id).map(Some),
+            }
+        }
+    }
+}
+
+/// Build the scan-open picker from the db's scans, newest first.
+fn scan_picker(current: Option<&str>) -> io::Result<Picker> {
+    let conn = gage_db::db::open_db().map_err(io::Error::other)?;
+    let mut scans = gage_db::scan::all(&conn).map_err(io::Error::other)?;
+    scans.sort_by_key(|s| std::cmp::Reverse(s.created));
+    let items = scans
+        .into_iter()
+        .map(|scan| {
+            let status = match scan.parse_metadata() {
+                Ok(Some(gage_db::scan::ScanMetadata::Scan(s))) if s.canceled => "canceled",
+                Ok(Some(gage_db::scan::ScanMetadata::Scan(_)))
+                | Ok(Some(gage_db::scan::ScanMetadata::Agent(_))) => "completed",
+                Ok(Some(gage_db::scan::ScanMetadata::Running(_))) => "running",
+                // NULL metadata (a run that died before summarizing) and
+                // unparseable metadata read the same: incomplete.
+                Ok(None) | Err(_) => "incomplete",
+            };
+            let short = gage_core::uuid::short_uuid(&scan.id).to_string();
+            PickItem {
+                line: Line::from(vec![
+                    Span::styled(short, styles::Text::id()),
+                    Span::styled(
+                        format!("  {:>4}  ", picker::ago(scan.created)),
+                        styles::Text::dim(),
+                    ),
+                    Span::raw(status),
+                ]),
+                id: scan.id,
+            }
+        })
+        .collect();
+    Ok(Picker::new("Open scan", items, current))
 }
 
 async fn event_loop(
@@ -495,6 +581,7 @@ async fn event_loop(
     model: ScanModel,
     events: &mut UnboundedReceiver<Event>,
     on_cancel: &impl Fn(),
+    loader: Option<ScanLoader<'_>>,
 ) -> io::Result<()> {
     let mut state = ViewState::new(model);
     let mut stop_input = Arc::new(AtomicBool::new(false));
@@ -522,7 +609,7 @@ async fn event_loop(
             ev = input.recv() => {
                 match ev {
                     Some(TermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                        if handle_key(&mut state, key, on_cancel) {
+                        if handle_key(&mut state, key, on_cancel, loader) {
                             break;
                         }
                         if state.pending_review.is_some() {
@@ -610,7 +697,12 @@ fn spawn_input_thread(stop: Arc<AtomicBool>) -> UnboundedReceiver<TermEvent> {
 }
 
 /// Returns true when the view should close.
-fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bool {
+fn handle_key(
+    state: &mut ViewState,
+    key: KeyEvent,
+    on_cancel: &impl Fn(),
+    loader: Option<ScanLoader<'_>>,
+) -> bool {
     if state.prompt.is_some() {
         handle_prompt_key(state, key);
         return false;
@@ -650,6 +742,10 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
         }
         Dialog::Session { .. } => {
             state.handle_session_dialog_key(key);
+            return false;
+        }
+        Dialog::OpenScan(_) => {
+            state.handle_open_scan_key(key.code, loader);
             return false;
         }
         Dialog::Note { .. } | Dialog::Issue { .. } | Dialog::Log { .. } => {
@@ -697,6 +793,12 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
         KeyCode::Right if state.focus == Focus::Tasks => state.expand_task_row(),
         KeyCode::Left if state.focus == Focus::Tasks => state.collapse_task_row(),
         KeyCode::Char('l') => state.open_log(),
+        KeyCode::Char('o') if state.model.finished && loader.is_some() => {
+            match scan_picker(Some(&state.model.scan_id)) {
+                Ok(picker) => state.dialog = Dialog::OpenScan(picker),
+                Err(e) => state.push_log(format!("Open scan: {e}")),
+            }
+        }
         _ => {}
     }
     false
@@ -941,6 +1043,8 @@ enum Dialog {
     },
     /// A live scan just finished
     ScanDone,
+    /// Scan-open picker (`o`), historical views only
+    OpenScan(Picker),
 }
 
 /// A confirm/comment prompt drawn over whatever is beneath it — the
@@ -1015,6 +1119,37 @@ impl ViewState {
         };
         state.sync_tables();
         state
+    }
+
+    /// Swap in a different scan's model (historical only), resetting
+    /// the view.
+    fn replace_model(&mut self, mut model: ScanModel) {
+        model.finished = true;
+        *self = ViewState::new(model);
+    }
+
+    /// Route a key to the scan-open picker; Enter loads the picked
+    /// scan through `loader` and swaps the model in.
+    fn handle_open_scan_key(&mut self, code: KeyCode, loader: Option<ScanLoader<'_>>) {
+        let action = match &mut self.dialog {
+            Dialog::OpenScan(picker) => picker.handle_key(code),
+            _ => return,
+        };
+        match action {
+            PickerAction::None => {}
+            PickerAction::Close => self.dialog = Dialog::None,
+            PickerAction::Open(id) => {
+                self.dialog = Dialog::None;
+                if id != self.model.scan_id
+                    && let Some(load) = loader
+                {
+                    match load(&id) {
+                        Ok(model) => self.replace_model(model),
+                        Err(e) => self.push_log(format!("Open scan: {e}")),
+                    }
+                }
+            }
+        }
     }
 
     /// Reconcile every table's selection with the model after a
@@ -1888,6 +2023,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
             scroll_view.render_modal(frame, " Log ".to_string(), |_| vec![content.clone()]);
         }
         Dialog::ScanDone => draw_scan_done(frame, model, *cancel_requested),
+        Dialog::OpenScan(picker) => picker.draw(frame),
         Dialog::None => {}
     }
     if let Some(prompt) = prompt {
@@ -2909,14 +3045,15 @@ fn footer_help(state: &ViewState) -> &'static str {
             "q back · Tab pane · j/k g/G · Enter/Space toggle · n note · ←/→ prev/next"
         }
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
+        Dialog::OpenScan(_) => "",
         Dialog::None if state.focus == Focus::Issues => {
             if state.model.finished {
-                "q quit · Tab cycle · ↑/↓ select · a action · l log"
+                "q quit · Tab cycle · ↑/↓ select · a action · l log · o open"
             } else {
                 "q cancel scan · Tab cycle · ↑/↓ select · a action · l log"
             }
         }
-        Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log",
+        Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log · o open",
         Dialog::None => "q cancel scan · Tab cycle · ↑/↓ select · l log",
     }
 }

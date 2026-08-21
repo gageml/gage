@@ -19,6 +19,7 @@ use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
 use crate::item_table::ItemTable;
+use crate::picker::{self, PickItem, Picker, PickerAction};
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::{app, attrs::attr_lines, session, styles};
@@ -26,6 +27,129 @@ use crate::{app, attrs::attr_lines, session, styles};
 pub struct EvalModel {
     pub run_id: String,
     pub tests: Vec<TestItem>,
+    /// Eval runs for the open dialog, newest first
+    pub runs: Vec<EvalRunRef>,
+}
+
+/// A row in the run-open picker, shared by the eval and scan eval
+/// views. The caller (the CLI) supplies the display description.
+pub struct EvalRunRef {
+    pub id: String,
+    pub started_ms: i64,
+    pub descr: String,
+}
+
+/// Build the run-open picker, preselecting the active run.
+pub(crate) fn run_picker(runs: &[EvalRunRef], current: Option<&str>) -> Picker {
+    let items = runs
+        .iter()
+        .map(|run| {
+            let short = gage_core::uuid::short_uuid(&run.id).to_string();
+            PickItem {
+                line: Line::from(vec![
+                    Span::styled(short, styles::Text::id()),
+                    Span::styled(
+                        format!("  {:>4}  ", picker::ago(run.started_ms)),
+                        styles::Text::dim(),
+                    ),
+                    Span::raw(run.descr.clone()),
+                ]),
+                id: run.id.clone(),
+            }
+        })
+        .collect();
+    Picker::new("Open eval run", items, current)
+}
+
+/// An eval run's view model, by run kind.
+pub enum EvalKindModel {
+    Tests(EvalModel),
+    Scan(crate::scan_eval_view::ScanEvalModel),
+}
+
+/// The eval view app: one terminal session hosting the test and scan
+/// eval views, switching between them as `o` opens runs of either
+/// kind. With no initial model, the run picker shows over an empty
+/// shell; canceling it exits.
+pub fn run_app(
+    initial: Option<EvalKindModel>,
+    runs: Vec<EvalRunRef>,
+    load: impl Fn(&str) -> io::Result<EvalKindModel>,
+) -> io::Result<()> {
+    let mut terminal = ratatui::init();
+    let enhanced_keys = push_keyboard_enhancements();
+    let result = run_app_inner(&mut terminal, initial, &runs, &load);
+    if enhanced_keys {
+        pop_keyboard_enhancements();
+    }
+    ratatui::restore();
+    result
+}
+
+fn run_app_inner(
+    terminal: &mut DefaultTerminal,
+    initial: Option<EvalKindModel>,
+    runs: &[EvalRunRef],
+    load: &dyn Fn(&str) -> io::Result<EvalKindModel>,
+) -> io::Result<()> {
+    let mut model = match initial {
+        Some(model) => model,
+        None => match pick_over_shell(terminal, runs)? {
+            Some(id) => load(&id)?,
+            None => return Ok(()),
+        },
+    };
+    loop {
+        let next = match model {
+            EvalKindModel::Tests(m) => event_loop(terminal, m)?,
+            EvalKindModel::Scan(m) => crate::scan_eval_view::event_loop(terminal, m)?,
+        };
+        match next {
+            Some(id) => model = load(&id)?,
+            None => return Ok(()),
+        }
+    }
+}
+
+/// The initial run picker, drawn over an empty shell so the picked
+/// run renders in place with no flash.
+fn pick_over_shell(
+    terminal: &mut DefaultTerminal,
+    runs: &[EvalRunRef],
+) -> io::Result<Option<String>> {
+    let mut picker = run_picker(runs, None);
+    loop {
+        terminal.draw(|frame| {
+            draw_empty_shell(frame);
+            picker.draw(frame);
+        })?;
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match picker.handle_key(key.code) {
+                PickerAction::None => {}
+                PickerAction::Close => return Ok(None),
+                PickerAction::Open(id) => return Ok(Some(id)),
+            }
+        }
+    }
+}
+
+/// Empty tests panel and footer behind the initial picker.
+fn draw_empty_shell(frame: &mut Frame) {
+    let [tests_area, footer_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    frame.render_widget(panel_block(" Eval ".to_string(), false), tests_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled("", styles::Panel::footer())),
+        footer_area,
+    );
+}
+
+/// How the view exited: quit, or a request to open another run.
+pub(crate) enum ExitAction {
+    Quit,
+    Open(String),
 }
 
 pub struct TestItem {
@@ -54,18 +178,7 @@ pub struct TestSession {
     pub path: PathBuf,
 }
 
-pub fn run(model: EvalModel) -> io::Result<()> {
-    let mut terminal = ratatui::init();
-    let enhanced_keys = push_keyboard_enhancements();
-    let result = event_loop(&mut terminal, model);
-    if enhanced_keys {
-        pop_keyboard_enhancements();
-    }
-    ratatui::restore();
-    result
-}
-
-fn event_loop(terminal: &mut DefaultTerminal, model: EvalModel) -> io::Result<()> {
+fn event_loop(terminal: &mut DefaultTerminal, model: EvalModel) -> io::Result<Option<String>> {
     let mut state = ViewState::new(model);
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -73,8 +186,10 @@ fn event_loop(terminal: &mut DefaultTerminal, model: EvalModel) -> io::Result<()
             && key.kind == KeyEventKind::Press
         {
             state.error = None;
-            if handle_key(&mut state, key) {
-                return Ok(());
+            match handle_key(&mut state, key) {
+                Some(ExitAction::Quit) => return Ok(None),
+                Some(ExitAction::Open(id)) => return Ok(Some(id)),
+                None => {}
             }
         }
     }
@@ -101,6 +216,8 @@ struct ViewState {
 
 enum Dialog {
     None,
+    /// Run-open picker (`o`)
+    OpenRun(Picker),
     /// Test detail, indexed into the model's tests
     Test {
         test: usize,
@@ -283,7 +400,7 @@ impl ViewState {
                 session: None,
             },
             Dialog::Session { node, .. } => *node,
-            Dialog::None => return,
+            Dialog::None | Dialog::OpenRun(_) => return,
         };
         let nodes = self.all_nodes();
         let Some(pos) = nodes.iter().position(|n| *n == current) else {
@@ -332,12 +449,25 @@ fn ids_as_refs(ids: &[String]) -> Vec<&str> {
     ids.iter().map(String::as_str).collect()
 }
 
-/// Returns true when the view should close.
-fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
-    match &state.dialog {
+/// Returns the exit action when the view should close.
+fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
+    match &mut state.dialog {
+        Dialog::OpenRun(picker) => {
+            match picker.handle_key(key.code) {
+                PickerAction::None => {}
+                PickerAction::Close => state.dialog = Dialog::None,
+                PickerAction::Open(id) => {
+                    state.dialog = Dialog::None;
+                    if id != state.model.run_id {
+                        return Some(ExitAction::Open(id));
+                    }
+                }
+            }
+            return None;
+        }
         Dialog::Session { .. } => {
             state.handle_session_dialog_key(key);
-            return false;
+            return None;
         }
         Dialog::Test { .. } => {
             let page = state.scroll_view.page() as isize;
@@ -353,14 +483,18 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
                 KeyCode::Left => state.step_dialog(-1),
                 _ => {}
             }
-            return false;
+            return None;
         }
         Dialog::None => {}
     }
     let ids = state.visible_ids();
     let refs = ids_as_refs(&ids);
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('q') | KeyCode::Esc => return Some(ExitAction::Quit),
+        KeyCode::Char('o') => {
+            state.dialog =
+                Dialog::OpenRun(run_picker(&state.model.runs, Some(&state.model.run_id)));
+        }
         KeyCode::Down | KeyCode::Char('j') => state.table.select_by(1, &refs),
         KeyCode::Up | KeyCode::Char('k') => state.table.select_by(-1, &refs),
         KeyCode::PageDown => state.table.select_by(state.table.page() as isize, &refs),
@@ -371,7 +505,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
         KeyCode::Enter => state.open_selected(),
         _ => {}
     }
-    false
+    None
 }
 
 fn draw(frame: &mut Frame, state: &mut ViewState) {
@@ -386,6 +520,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
         ..
     } = state;
     match dialog {
+        Dialog::OpenRun(picker) => picker.draw(frame),
         Dialog::Test { test } => {
             if let Some(test) = model.tests.get(*test) {
                 scroll_view.render_modal(frame, format!(" Test {} ", test.name), |width| {
@@ -559,7 +694,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         Dialog::Session { .. } => {
             "q back · Tab pane · j/k g/G · Enter/Space toggle · n note · ←/→ prev/next"
         }
-        Dialog::None => "q quit · ↑/↓ select · Space expand · Enter open",
+        Dialog::OpenRun(_) => "",
+        Dialog::None => "q quit · ↑/↓ select · Space expand · Enter open · o open run",
     };
     let help_width = help.width() as u16;
     let [_, help_area, _] = Layout::horizontal([

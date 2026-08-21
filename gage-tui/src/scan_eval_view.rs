@@ -17,12 +17,15 @@ use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
 use crate::attrs::attr_lines;
+use crate::eval_view::{EvalRunRef, run_picker};
 use crate::item_table::{ItemTable, scrollbar};
-use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
+use crate::picker::{Picker, PickerAction};
 use crate::{app, session, styles};
 
 pub struct ScanEvalModel {
     pub run_id: String,
+    /// Eval runs for the open dialog, newest first
+    pub runs: Vec<EvalRunRef>,
     pub scan_id: String,
     /// Overview attributes, already formatted (label, value)
     pub attrs: Vec<(&'static str, String)>,
@@ -47,18 +50,12 @@ pub struct ScanSessionItem {
     pub path: Option<PathBuf>,
 }
 
-pub fn run(model: ScanEvalModel) -> io::Result<()> {
-    let mut terminal = ratatui::init();
-    let enhanced_keys = push_keyboard_enhancements();
-    let result = event_loop(&mut terminal, model);
-    if enhanced_keys {
-        pop_keyboard_enhancements();
-    }
-    ratatui::restore();
-    result
-}
-
-fn event_loop(terminal: &mut DefaultTerminal, model: ScanEvalModel) -> io::Result<()> {
+/// Returns the run id to open next (`o` dialog), or None on quit.
+/// The caller (`eval_view::run_app`) owns the terminal.
+pub(crate) fn event_loop(
+    terminal: &mut DefaultTerminal,
+    model: ScanEvalModel,
+) -> io::Result<Option<String>> {
     let mut state = ViewState::new(model);
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -66,11 +63,19 @@ fn event_loop(terminal: &mut DefaultTerminal, model: ScanEvalModel) -> io::Resul
             && key.kind == KeyEventKind::Press
         {
             state.error = None;
-            if handle_key(&mut state, key) {
-                return Ok(());
+            match handle_key(&mut state, key) {
+                Some(ExitAction::Quit) => return Ok(None),
+                Some(ExitAction::Open(id)) => return Ok(Some(id)),
+                None => {}
             }
         }
     }
+}
+
+/// How the view exited: quit, or a request to open another run.
+enum ExitAction {
+    Quit,
+    Open(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,6 +100,8 @@ struct ViewState {
 
 enum Dialog {
     None,
+    /// Run-open picker (`o`)
+    OpenRun(Picker),
     /// An agent session in the shared session view component
     Session {
         index: usize,
@@ -110,7 +117,7 @@ impl ViewState {
         sessions.update(&ids);
         Self {
             model,
-            focus: Focus::Summary,
+            focus: Focus::Sessions,
             sessions,
             summary_scroll: 0,
             summary_max_scroll: 0,
@@ -227,16 +234,33 @@ impl ViewState {
     }
 }
 
-/// Returns true when the view should close.
-fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
+/// Returns the exit action when the view should close.
+fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
+    if let Dialog::OpenRun(picker) = &mut state.dialog {
+        match picker.handle_key(key.code) {
+            PickerAction::None => {}
+            PickerAction::Close => state.dialog = Dialog::None,
+            PickerAction::Open(id) => {
+                state.dialog = Dialog::None;
+                if id != state.model.run_id {
+                    return Some(ExitAction::Open(id));
+                }
+            }
+        }
+        return None;
+    }
     if let Dialog::Session { .. } = &state.dialog {
         state.handle_session_dialog_key(key);
-        return false;
+        return None;
     }
     let ids: Vec<String> = state.model.sessions.iter().map(|s| s.id.clone()).collect();
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('q') | KeyCode::Esc => return Some(ExitAction::Quit),
+        KeyCode::Char('o') => {
+            state.dialog =
+                Dialog::OpenRun(run_picker(&state.model.runs, Some(&state.model.run_id)));
+        }
         KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
         KeyCode::Down | KeyCode::Char('j') => match state.focus {
             Focus::Summary => state.summary_scroll_by(1),
@@ -269,7 +293,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> bool {
         KeyCode::Enter if state.focus == Focus::Sessions => state.open_selected_session(),
         _ => {}
     }
-    false
+    None
 }
 
 fn draw(frame: &mut Frame, state: &mut ViewState) {
@@ -282,6 +306,10 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     draw_summary(frame, summary_area, state);
     draw_sessions(frame, sessions_area, state);
     draw_footer(frame, footer_area, state);
+    if let Dialog::OpenRun(picker) = &mut state.dialog {
+        picker.draw(frame);
+        return;
+    }
     if let Dialog::Session { index, view, .. } = &mut state.dialog {
         let title = match state.model.sessions.get(*index) {
             Some(item) => format!(" Session {} ", item.id),
@@ -424,12 +452,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         return;
     }
     let help = match (&state.dialog, state.focus) {
+        (Dialog::OpenRun(_), _) => "",
         (Dialog::Session { .. }, _) => {
             "q back · Tab pane · j/k g/G · Enter/Space toggle · n note · ←/→ prev/next"
         }
-        (Dialog::None, Focus::Summary) => "q quit · Tab pane · j/k g/G PgUp/PgDn scroll",
+        (Dialog::None, Focus::Summary) => {
+            "q quit · Tab pane · j/k g/G PgUp/PgDn scroll · o open run"
+        }
         (Dialog::None, Focus::Sessions) => {
-            "q quit · Tab pane · j/k g/G select · Enter open session"
+            "q quit · Tab pane · j/k g/G select · Enter open · o change run"
         }
     };
     let help_width = help.width() as u16;
