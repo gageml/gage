@@ -351,11 +351,15 @@ enum Dialog {
         /// `<Session>` row or one of its notes selected)
         entry_index: Option<usize>,
         editor: TextArea,
+        /// Dialog caption, fixed at open per the note kind
+        title: &'static str,
     },
     EditNote {
         note_id: String,
         original: String,
         editor: TextArea,
+        /// Dialog caption, fixed at open per the note kind
+        title: &'static str,
     },
     /// Sub-dialog layered over the editor when the user pressed Esc with
     /// non-empty content. `y` discards `pending`; anything else restores it.
@@ -395,6 +399,9 @@ pub(crate) struct AppState {
     highlighter: Highlighter,
     dialog: Dialog,
     turns: Option<Vec<Option<usize>>>,
+    /// Annotation mode: `n` writes `code.open` notes (one per node)
+    /// instead of `comment.{rand}`
+    annotate: bool,
     source: DocSource,
 }
 
@@ -423,6 +430,7 @@ impl AppState {
             highlighter: Highlighter::new(),
             dialog: Dialog::None,
             turns,
+            annotate: options.annotate,
             source,
         }
     }
@@ -692,32 +700,65 @@ impl AppState {
         if self.list_state.selected().is_none() {
             return;
         }
+        let entry_index = self.selected_entry_index();
+        // Annotation mode: one open code per node — a second `n` on an
+        // already-coded node edits the existing note
+        if self.annotate {
+            if let Some(note) = self.own_open_code(entry_index) {
+                let (note_id, text) = (note.id.clone(), note_text(note));
+                self.open_note_editor(note_id, text, "Edit open code");
+                return;
+            }
+            self.dialog = Dialog::AddNote {
+                entry_index,
+                editor: new_editor(""),
+                title: "Add open code",
+            };
+            return;
+        }
         self.dialog = Dialog::AddNote {
-            entry_index: self.selected_entry_index(),
+            entry_index,
             editor: new_editor(""),
+            title: "Add comment",
         };
+    }
+
+    /// The viewer's `code.open` note on the given node, if any.
+    fn own_open_code(&self, entry_index: Option<usize>) -> Option<&Note> {
+        let author = self.author();
+        let notes = match entry_index {
+            Some(i) => self.doc.notes_for_line(self.doc.entries.get(i)?.line),
+            None => self.doc.session_notes(),
+        };
+        notes
+            .into_iter()
+            .find(|n| n.author == author && n.name == "code.open")
     }
 
     fn begin_edit_note(&mut self) -> bool {
         let Some(note) = self.selected_note() else {
             return false;
         };
-        if note.author != self.author() || !is_comment(&note.name) {
+        if note.author != self.author() || !is_editable(&note.name) {
             return false;
         }
-        let text = note
-            .value
-            .0
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| note.value.to_json());
-        let note_id = note.id.clone();
+        let title = if is_comment(&note.name) {
+            "Edit comment"
+        } else {
+            "Edit open code"
+        };
+        let (note_id, text) = (note.id.clone(), note_text(note));
+        self.open_note_editor(note_id, text, title);
+        true
+    }
+
+    fn open_note_editor(&mut self, note_id: String, text: String, title: &'static str) {
         self.dialog = Dialog::EditNote {
             note_id,
             original: text.clone(),
             editor: new_editor(&text),
+            title,
         };
-        true
     }
 
     fn begin_delete_note(&mut self) {
@@ -800,6 +841,21 @@ fn note_projection(doc: &Document) -> (Vec<String>, Vec<Vec<String>>) {
     (session, entries)
 }
 
+/// A note's text for the editor: the plain string when the value is
+/// one, otherwise its JSON form.
+fn note_text(note: &Note) -> String {
+    note.value
+        .0
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| note.value.to_json())
+}
+
+/// User-editable note names: comments and the viewer's open codes.
+fn is_editable(name: &str) -> bool {
+    is_comment(name) || name == "code.open"
+}
+
 /// Stored note names are namespaced (e.g. `comment.abcd1234`) so multiple
 /// notes in the same family can coexist under the DB's (name, target, author)
 /// unique key.
@@ -866,6 +922,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
         Dialog::AddNote {
             entry_index,
             editor,
+            ..
         } => {
             let line = match entry_index {
                 Some(i) => match state.doc.entries.get(i) {
@@ -881,13 +938,20 @@ fn commit_note(state: &mut AppState, db: &Connection) {
                 target = target.with_line(line);
             }
             let target = NoteTarget::Session(target);
-            // Notes are keyed by (name, target, author) in the DB, so a literal
-            // "comment" name caps users at one comment per line. Suffix with a
-            // short slice of the note's own UUID to keep the key unique while
-            // the display layer renders the family name "comment".
             let mut note = Note::new(target, "comment", NoteValue::from(text), &state.author());
-            let suffix: String = note.id.chars().take(8).collect();
-            note.name = format!("comment.{suffix}");
+            if state.annotate {
+                // Annotation mode writes open codes; the fixed name
+                // holds the (name, target, author) key to one per node
+                note.name = "code.open".to_string();
+            } else {
+                // Notes are keyed by (name, target, author) in the DB, so a
+                // literal "comment" name caps users at one comment per line.
+                // Suffix with a short slice of the note's own UUID to keep the
+                // key unique while the display layer renders the family name
+                // "comment".
+                let suffix: String = note.id.chars().take(8).collect();
+                note.name = format!("comment.{suffix}");
+            }
             if let Ok(()) = note::insert(db, &note) {
                 let id = note.id.clone();
                 state.doc.add_note(note);
@@ -1025,7 +1089,7 @@ pub(crate) fn footer_hint(state: &AppState) -> Line<'static> {
         && let Some(note) = state.selected_note()
         && note.author == state.author()
     {
-        if is_comment(&note.name) {
+        if is_editable(&note.name) {
             hints.push(("e", "edit"));
         }
         hints.push(("d", "delete"));
@@ -1399,12 +1463,12 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, detail: bool, turns: bool
     match dialog {
         Dialog::None => {}
         Dialog::Options => draw_options(frame, detail, turns),
-        Dialog::AddNote { editor, .. } => draw_editor(frame, "Add note", editor),
-        Dialog::EditNote { editor, .. } => draw_editor(frame, "Edit note", editor),
+        Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor),
+        Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor),
         Dialog::ConfirmCancel { pending } => {
             match pending.as_mut() {
-                Dialog::AddNote { editor, .. } => draw_editor(frame, "Add note", editor),
-                Dialog::EditNote { editor, .. } => draw_editor(frame, "Edit note", editor),
+                Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor),
+                Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor),
                 _ => {}
             }
             draw_confirm(frame, "Cancel your changes?");

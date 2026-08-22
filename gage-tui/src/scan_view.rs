@@ -1586,6 +1586,7 @@ impl ViewState {
         }
         let options = crate::ViewOptions {
             show_turns: true,
+            annotate: self.annotate,
             ..Default::default()
         };
         let mut view = app::AppState::new(doc, &options, source);
