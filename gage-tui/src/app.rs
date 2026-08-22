@@ -453,6 +453,13 @@ impl AppState {
         format!("user:{}", self.username)
     }
 
+    /// Count of the viewer's own notes on the open session, for hosts
+    /// tracking annotation coverage.
+    pub(crate) fn own_note_count(&self) -> usize {
+        let author = self.author();
+        self.doc.notes.iter().filter(|n| n.author == author).count()
+    }
+
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Outline => Focus::Body,

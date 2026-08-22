@@ -10,6 +10,7 @@ gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-index = { path = "../gage-index" }
 gage-query = { path = "../gage-query" }
+rand = "0.9"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 serde_json = { workspace = true }
 serde_yml = "0.0.12"

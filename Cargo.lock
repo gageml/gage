@@ -2878,6 +2878,7 @@ dependencies = [
  "gage-index",
  "gage-query",
  "pulldown-cmark",
+ "rand 0.9.4",
  "ratatui",
  "serde_json",
  "serde_yml",

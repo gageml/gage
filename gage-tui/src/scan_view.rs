@@ -468,10 +468,19 @@ pub async fn run(
     model: ScanModel,
     mut events: UnboundedReceiver<Event>,
     on_cancel: impl Fn(),
+    annotate: bool,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = event_loop(&mut terminal, model, &mut events, &on_cancel, None).await;
+    let result = event_loop(
+        &mut terminal,
+        model,
+        &mut events,
+        &on_cancel,
+        None,
+        annotate,
+    )
+    .await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -485,10 +494,11 @@ pub async fn run(
 pub async fn view(
     model: Option<ScanModel>,
     load: impl Fn(&str) -> io::Result<ScanModel>,
+    annotate: bool,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = view_inner(&mut terminal, model, &load).await;
+    let result = view_inner(&mut terminal, model, &load, annotate).await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -500,6 +510,7 @@ async fn view_inner(
     terminal: &mut DefaultTerminal,
     model: Option<ScanModel>,
     load: ScanLoader<'_>,
+    annotate: bool,
 ) -> io::Result<()> {
     let mut model = match model {
         Some(m) => m,
@@ -512,7 +523,7 @@ async fn view_inner(
     let (tx, mut events) = unbounded_channel();
     drop(tx);
     // A finished model never opens the cancel path
-    event_loop(terminal, model, &mut events, &|| {}, Some(load)).await
+    event_loop(terminal, model, &mut events, &|| {}, Some(load), annotate).await
 }
 
 /// Run the open dialog on a blank background until the user picks a
@@ -524,7 +535,7 @@ fn standalone_scan_pick(
     let mut picker = scan_picker(None)?;
     // Empty panels behind the picker, so picking renders in place
     // with no flash.
-    let mut shell = ViewState::new(ScanModel::default());
+    let mut shell = ViewState::new(ScanModel::default(), false);
     loop {
         terminal.draw(|frame| {
             draw(frame, &mut shell);
@@ -582,8 +593,9 @@ async fn event_loop(
     events: &mut UnboundedReceiver<Event>,
     on_cancel: &impl Fn(),
     loader: Option<ScanLoader<'_>>,
+    annotate: bool,
 ) -> io::Result<()> {
-    let mut state = ViewState::new(model);
+    let mut state = ViewState::new(model, annotate);
     let mut stop_input = Arc::new(AtomicBool::new(false));
     let mut input = spawn_input_thread(Arc::clone(&stop_input));
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -789,6 +801,10 @@ fn handle_key(
         KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
         KeyCode::Char('a') if state.focus == Focus::Issues => state.actions_for_selected_issue(),
         KeyCode::Enter if state.focus == Focus::Sessions => state.open_selected_session(),
+        KeyCode::Char('R') if state.annotate && state.focus == Focus::Sessions => {
+            state.shuffle_sessions()
+        }
+        KeyCode::Char('A') if state.annotate => state.toggle_show_all_notes(),
         KeyCode::Enter if state.focus == Focus::Tasks => state.enter_task_row(),
         KeyCode::Right if state.focus == Focus::Tasks => state.expand_task_row(),
         KeyCode::Left if state.focus == Focus::Tasks => state.collapse_task_row(),
@@ -976,6 +992,20 @@ const LOG_CAP: usize = 500;
 
 struct ViewState {
     model: ScanModel,
+    /// Annotation mode: the human open-coding pass. Hides foreign
+    /// notes, drops the issues pane, and orders sessions by id.
+    annotate: bool,
+    /// Annotation-mode opt out: reveal notes from all authors
+    show_all_notes: bool,
+    /// The viewer's author value (`user:{username}`), the annotate
+    /// note filter
+    user_author: String,
+    /// Unfiltered notes backing `model.notes` under the annotate
+    /// filter
+    all_notes: Vec<NoteItem>,
+    /// Annotate-mode per-session own-note counts, shown in place of
+    /// the scan's note counts
+    own_counts: HashMap<String, usize>,
     focus: Focus,
     tasks: ItemTable,
     /// Task keys whose agent rows are shown. Stored as the expanded
@@ -1098,8 +1128,25 @@ enum SessionNav {
 }
 
 impl ViewState {
-    fn new(model: ScanModel) -> Self {
+    fn new(mut model: ScanModel, annotate: bool) -> Self {
+        if annotate {
+            model.sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+        let all_notes = model.notes.clone();
+        let own_counts = model
+            .sessions
+            .iter()
+            .map(|s| (s.id.clone(), s.notes))
+            .collect();
         let mut state = Self {
+            annotate,
+            show_all_notes: false,
+            user_author: format!(
+                "user:{}",
+                std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+            ),
+            all_notes,
+            own_counts,
             tasks: ItemTable::new(),
             expanded: HashSet::new(),
             sessions: ItemTable::new(),
@@ -1117,15 +1164,46 @@ impl ViewState {
             session_ui: HashMap::new(),
             model,
         };
+        state.resync_notes();
         state.sync_tables();
         state
+    }
+
+    /// Rebuild `model.notes` from the unfiltered set per the annotate
+    /// filter state.
+    fn resync_notes(&mut self) {
+        self.model.notes = if self.annotate && !self.show_all_notes {
+            self.all_notes
+                .iter()
+                .filter(|n| n.author == self.user_author)
+                .cloned()
+                .collect()
+        } else {
+            self.all_notes.clone()
+        };
+    }
+
+    /// Annotation-mode reveal toggle: show notes from all authors
+    /// (the deliberate opt out of the bias protections).
+    fn toggle_show_all_notes(&mut self) {
+        self.show_all_notes = !self.show_all_notes;
+        self.resync_notes();
+        self.sync_tables();
+    }
+
+    /// Annotation-mode shuffle of the session list (`r`), for
+    /// random-order review.
+    fn shuffle_sessions(&mut self) {
+        use rand::seq::SliceRandom;
+        self.model.sessions.shuffle(&mut rand::rng());
+        self.sync_tables();
     }
 
     /// Swap in a different scan's model (historical only), resetting
     /// the view.
     fn replace_model(&mut self, mut model: ScanModel) {
         model.finished = true;
-        *self = ViewState::new(model);
+        *self = ViewState::new(model, self.annotate);
     }
 
     /// Route a key to the scan-open picker; Enter loads the picked
@@ -1495,13 +1573,17 @@ impl ViewState {
                 return;
             }
         };
-        let (doc, source) = match load_session_doc(item, &db) {
+        let (mut doc, source) = match load_session_doc(item, &db) {
             Ok(loaded) => loaded,
             Err(e) => {
                 self.push_log(format!("Open session {}: {e}", item.id));
                 return;
             }
         };
+        // Annotation mode: the reviewer sees only their own notes
+        if self.annotate && !self.show_all_notes {
+            doc.notes.retain(|n| n.author == self.user_author);
+        }
         let options = crate::ViewOptions {
             show_turns: true,
             ..Default::default()
@@ -1526,6 +1608,7 @@ impl ViewState {
         let mut close = false;
         let mut step: isize = 0;
         let mut error: Option<String> = None;
+        let mut annotated: Option<(String, usize)> = None;
         if let Dialog::Session { id, view, db, .. } = &mut self.dialog {
             match app::handle_key(view, key, db) {
                 Ok(app::KeyOutcome::Consumed) => {}
@@ -1544,6 +1627,15 @@ impl ViewState {
                     }
                 }
                 Err(e) => error = Some(format!("Session view: {e}")),
+            }
+            annotated = Some((id.clone(), view.own_note_count()));
+        }
+        if let Some((id, count)) = annotated
+            && self.annotate
+        {
+            self.own_counts.insert(id.clone(), count);
+            if let Some(s) = self.model.sessions.iter_mut().find(|s| s.id == id) {
+                s.notes = count;
             }
         }
         if let Some(msg) = error {
@@ -1802,6 +1894,29 @@ impl ViewState {
 
     fn apply(&mut self, event: Event) {
         self.model.apply(&event);
+        if matches!(event, Event::Results { .. }) {
+            // A results refresh replaces the model's notes and counts
+            // with the scan's; annotate keeps the user's own notes in
+            // the unfiltered set and the own-note counts on display
+            let prior_own: Vec<NoteItem> = self
+                .all_notes
+                .iter()
+                .filter(|n| n.author == self.user_author)
+                .cloned()
+                .collect();
+            self.all_notes = self.model.notes.clone();
+            for n in prior_own {
+                if !self.all_notes.iter().any(|m| m.id == n.id) {
+                    self.all_notes.push(n);
+                }
+            }
+            self.resync_notes();
+            if self.annotate {
+                for s in &mut self.model.sessions {
+                    s.notes = self.own_counts.get(&s.id).copied().unwrap_or(0);
+                }
+            }
+        }
         self.sync_tables();
         match event {
             Event::Log(line) => self.push_log(line),
@@ -1836,6 +1951,17 @@ impl ViewState {
     }
 
     fn cycle_focus(&mut self, dir: isize) {
+        // Annotation mode has no issues pane
+        if self.annotate {
+            self.focus = match (self.focus, dir >= 0) {
+                (Focus::Tasks, true) | (Focus::Notes, false) | (Focus::Issues, _) => {
+                    Focus::Sessions
+                }
+                (Focus::Sessions, true) | (Focus::Tasks, false) => Focus::Notes,
+                (Focus::Notes, true) | (Focus::Sessions, false) => Focus::Tasks,
+            };
+            return;
+        }
         self.focus = match (self.focus, dir >= 0) {
             (Focus::Tasks, true) | (Focus::Issues, false) => Focus::Sessions,
             (Focus::Sessions, true) | (Focus::Notes, false) => Focus::Issues,
@@ -1985,6 +2111,24 @@ fn now_ms() -> i64 {
 }
 
 fn draw(frame: &mut Frame, state: &mut ViewState) {
+    if state.annotate {
+        // Annotation mode: no issues pane, sessions get the space
+        let [progress, tasks, sessions, notes, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Fill(2),
+            Constraint::Fill(4),
+            Constraint::Fill(2),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
+        draw_progress(frame, progress, state);
+        draw_tasks(frame, tasks, state);
+        draw_sessions(frame, sessions, state);
+        draw_notes(frame, notes, state);
+        draw_footer(frame, footer, state);
+        draw_dialogs(frame, state);
+        return;
+    }
     let [progress, tasks, sessions, issues, notes, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(3),
@@ -2000,6 +2144,10 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     draw_issues(frame, issues, state);
     draw_notes(frame, notes, state);
     draw_footer(frame, footer, state);
+    draw_dialogs(frame, state);
+}
+
+fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
     // Split borrows: the dialog holds the content, the scroll view
     // holds position and layout cache
     let ViewState {
@@ -2862,36 +3010,53 @@ fn split_at_width(s: &str, cols: usize) -> (&str, &str) {
 
 fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let selected = state.sessions.selected_index();
+    // Annotation mode drops the issue count; the note count is the
+    // viewer's own notes
+    let annotate = state.annotate;
     let rows: Vec<Row> = state
         .model
         .sessions
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(id_span(&s.id, selected == Some(i))),
                 Cell::from(s.title.clone()),
                 Cell::from(s.notes.to_string()),
-                Cell::from(s.issues.to_string()),
-            ])
+            ];
+            if !annotate {
+                cells.push(Cell::from(s.issues.to_string()));
+            }
+            Row::new(cells)
         })
         .collect();
     let count = rows.len();
-    let table = Table::new(
-        rows,
-        [
+    let widths: Vec<Constraint> = if annotate {
+        vec![
+            Constraint::Length(8),
+            Constraint::Fill(1),
+            Constraint::Length(6),
+        ]
+    } else {
+        vec![
             Constraint::Length(8),
             Constraint::Fill(1),
             Constraint::Length(6),
             Constraint::Length(7),
-        ],
-    )
-    .header(header_row(["Id", "Title", "Notes", "Issues"]))
-    .row_highlight_style(styles::Panel::selection(state.focus == Focus::Sessions))
-    .block(panel_block(
-        format!(" Sessions ({count}) "),
-        state.focus == Focus::Sessions,
-    ));
+        ]
+    };
+    let header = if annotate {
+        header_row(["Id", "Title", "Notes"])
+    } else {
+        header_row(["Id", "Title", "Notes", "Issues"])
+    };
+    let table = Table::new(rows, widths)
+        .header(header)
+        .row_highlight_style(styles::Panel::selection(state.focus == Focus::Sessions))
+        .block(panel_block(
+            format!(" Sessions ({count}) "),
+            state.focus == Focus::Sessions,
+        ));
     state
         .sessions
         .render(frame, area, table, count, state.focus == Focus::Sessions);
@@ -3094,19 +3259,37 @@ fn footer_help(state: &ViewState) -> Line<'static> {
                 ])
             }
         }
-        Dialog::None if state.model.finished => hint::help_line(&[
-            ("q", "quit"),
-            ("Tab", "cycle"),
-            ("↑/↓", "select"),
-            ("l", "log"),
-            ("o", "open"),
-        ]),
-        Dialog::None => hint::help_line(&[
-            ("q", "cancel scan"),
-            ("Tab", "cycle"),
-            ("↑/↓", "select"),
-            ("l", "log"),
-        ]),
+        Dialog::None if state.model.finished => {
+            let mut items = vec![
+                ("q", "quit"),
+                ("Tab", "cycle"),
+                ("↑/↓", "select"),
+                ("l", "log"),
+                ("o", "open"),
+            ];
+            if state.annotate {
+                if state.focus == Focus::Sessions {
+                    items.push(("R", "shuffle"));
+                }
+                items.push(("A", "all notes"));
+            }
+            hint::help_line(&items)
+        }
+        Dialog::None => {
+            let mut items = vec![
+                ("q", "cancel scan"),
+                ("Tab", "cycle"),
+                ("↑/↓", "select"),
+                ("l", "log"),
+            ];
+            if state.annotate {
+                if state.focus == Focus::Sessions {
+                    items.push(("R", "shuffle"));
+                }
+                items.push(("A", "all notes"));
+            }
+            hint::help_line(&items)
+        }
     }
 }
 

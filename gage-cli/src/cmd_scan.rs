@@ -64,6 +64,13 @@ pub enum ScanCommand {
 pub struct ScanViewArgs {
     /// Scan ID (or prefix)
     scan_id: Option<String>,
+
+    /// Annotation mode: review sessions and add open code notes
+    ///
+    /// Hides notes from other authors, drops the issues pane, and
+    /// orders sessions by Id (`R` shuffles).
+    #[arg(short, long)]
+    annotate: bool,
 }
 
 #[derive(Args)]
@@ -365,11 +372,12 @@ fn scan_summary(run: &scan::Scan) -> anyhow::Result<Option<scan::ScanSummary>> {
 }
 
 async fn view(args: ScanViewArgs) {
+    let annotate = args.annotate;
     // No scan arg: the view opens with its scan picker dialog.
     let model = match args.scan_id {
         Some(id) => {
             let conn = db::open_db().unwrap();
-            match load_scan_model(&conn, &id) {
+            match load_view_model(&conn, &id, annotate) {
                 Ok(m) => Some(m),
                 Err(e) => {
                     eprintln!("gage scan view: {e}");
@@ -379,14 +387,37 @@ async fn view(args: ScanViewArgs) {
         }
         None => None,
     };
-    let load = |id: &str| -> std::io::Result<gage_tui::scan_view::ScanModel> {
+    let load = move |id: &str| -> std::io::Result<gage_tui::scan_view::ScanModel> {
         let conn = db::open_db().map_err(std::io::Error::other)?;
-        load_scan_model(&conn, id).map_err(std::io::Error::other)
+        load_view_model(&conn, id, annotate).map_err(std::io::Error::other)
     };
-    if let Err(e) = gage_tui::scan_view::view(model, load).await {
+    if let Err(e) = gage_tui::scan_view::view(model, load, args.annotate).await {
         eprintln!("gage scan view: {e}");
         std::process::exit(1);
     }
+}
+
+/// [`load_scan_model`] with the annotate-mode adjustment: the session
+/// note counts become the viewer's own-note counts, seeding the
+/// annotation coverage display.
+fn load_view_model(
+    conn: &gage_db::rusqlite::Connection,
+    prefix: &str,
+    annotate: bool,
+) -> anyhow::Result<gage_tui::scan_view::ScanModel> {
+    let mut model = load_scan_model(conn, prefix, annotate)?;
+    if annotate {
+        let author = crate::author::resolve_author(None);
+        let counts: std::collections::HashMap<String, usize> =
+            gage_db::note::session_counts_for_author(conn, &author)
+                .map_err(|e| anyhow::anyhow!("own note counts: {e}"))?
+                .into_iter()
+                .collect();
+        for s in &mut model.sessions {
+            s.notes = counts.get(&s.id).copied().unwrap_or(0);
+        }
+    }
+    Ok(model)
 }
 
 /// Assemble a [`ScanModel`] for a completed scan from the db: tasks
@@ -397,6 +428,7 @@ async fn view(args: ScanViewArgs) {
 fn load_scan_model(
     conn: &gage_db::rusqlite::Connection,
     prefix: &str,
+    include_session_notes: bool,
 ) -> anyhow::Result<gage_tui::scan_view::ScanModel> {
     use gage_tui::scan_view::{ScanModel, SessionItem, TaskId, TaskItem, TaskState};
     use std::collections::HashMap;
@@ -406,7 +438,13 @@ fn load_scan_model(
 
     let mut agent_times = AgentTimes::default();
     let mut session_displays = SessionDisplays::default();
-    let results = load_scan_results(conn, &run.id, &mut agent_times, &mut session_displays)?;
+    let results = load_scan_results(
+        conn,
+        &run.id,
+        &mut agent_times,
+        &mut session_displays,
+        include_session_notes,
+    )?;
 
     let mut tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
         .into_iter()
@@ -518,12 +556,19 @@ fn reconcile_results(
     scan_id: &str,
     agent_times: &Mutex<AgentTimes>,
     session_displays: &Mutex<SessionDisplays>,
+    include_session_notes: bool,
 ) -> gage_tui::scan_view::Event {
     let results = {
         let conn = db.lock().unwrap();
         let mut times = agent_times.lock().unwrap();
         let mut displays = session_displays.lock().unwrap();
-        load_scan_results(&conn, scan_id, &mut times, &mut displays)
+        load_scan_results(
+            &conn,
+            scan_id,
+            &mut times,
+            &mut displays,
+            include_session_notes,
+        )
     };
     match results {
         Ok(r) => gage_tui::scan_view::Event::Results {
@@ -555,17 +600,36 @@ fn load_scan_results(
     scan_id: &str,
     agent_times: &mut AgentTimes,
     session_displays: &mut SessionDisplays,
+    include_session_notes: bool,
 ) -> anyhow::Result<ScanResults> {
     use gage_tui::scan_view::{EventItem, EvidenceItem, IssueItem, NoteItem, SessionCounts};
     use std::collections::{HashMap, HashSet};
 
-    let notes = gage_db::note::find(
+    let mut notes = gage_db::note::find(
         conn,
         &gage_db::note::NoteFilters {
             scan: Some(scan_id.to_string()),
             ..Default::default()
         },
     )?;
+    if include_session_notes {
+        // Annotation mode: notes target sessions, from any write
+        // mechanism over time — show every note on the scan's
+        // sessions, not just the scan-linked ones
+        let session_ids = scan::session_ids_for_scan(conn, scan_id)?;
+        let extra = gage_db::note::find(
+            conn,
+            &gage_db::note::NoteFilters {
+                sessions: session_ids,
+                ..Default::default()
+            },
+        )?;
+        for n in extra {
+            if !notes.iter().any(|m| m.id == n.id) {
+                notes.push(n);
+            }
+        }
+    }
     let issue_ids: HashSet<String> = scan::issue_ids_for_scan(conn, scan_id)?
         .into_iter()
         .collect();
@@ -1635,6 +1699,7 @@ async fn run_dialog(
             agent_jobs,
             cancel.clone(),
             streams,
+            args.scan.is_some(),
         )
         .await
     };
@@ -1710,6 +1775,7 @@ async fn run_scan_tui(
     agent_jobs: usize,
     cancel: tokio_util::sync::CancellationToken,
     mut streams: ScanStreams,
+    annotate: bool,
 ) -> Result<gage_scan::event::RunSummary, gage_scan::runner::RunError> {
     use gage_tui::scan_view::{self, ScanSetup, SessionEntry, TaskId};
 
@@ -1770,7 +1836,7 @@ async fn run_scan_tui(
                             break;
                         }
                         if tx
-                            .send(reconcile_results(&db, &scan_id, &agent_times, &session_displays))
+                            .send(reconcile_results(&db, &scan_id, &agent_times, &session_displays, annotate))
                             .is_err()
                         {
                             break;
@@ -1805,7 +1871,7 @@ async fn run_scan_tui(
         scan_done.store(true, std::sync::atomic::Ordering::Relaxed);
         send_view_event(
             &event_tx,
-            reconcile_results(&db, &scan_id, &agent_times, &session_displays),
+            reconcile_results(&db, &scan_id, &agent_times, &session_displays, annotate),
         );
         send_view_event(&event_tx, scan_view::Event::Finished);
         result
@@ -1819,7 +1885,7 @@ async fn run_scan_tui(
     let ui_fut = async move {
         // The in-view cancel request cancels the run; the view stays up
         // and closes its Canceling dialog on the runner's Finished event.
-        let result = scan_view::run(model, rx, move || run_cancel.cancel()).await;
+        let result = scan_view::run(model, rx, move || run_cancel.cancel(), annotate).await;
         // Closing the view mid-scan stops the run; after the scan
         // completes this is a no-op.
         ui_cancel.cancel();
