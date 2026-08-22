@@ -694,7 +694,7 @@ fn text_lines(text: &str) -> Vec<Line<'static>> {
 /// use, with the shared session view drawn inside.
 fn draw_session_dialog(frame: &mut Frame, title: String, view: &mut app::AppState) {
     let area = frame.area();
-    let margin_x = (area.width / 10).clamp(2, 6);
+    let margin_x = (area.width / 10).clamp(1, 4);
     let margin_y = (area.height / 10).clamp(1, 3);
     let rect = area.inner(Margin {
         horizontal: margin_x,
