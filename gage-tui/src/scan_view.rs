@@ -3041,9 +3041,7 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
         Dialog::Note { .. } => "q back · ↑/↓ scroll · [/] prev/next",
         Dialog::Issue { .. } => "q back · ↑/↓ scroll · [/] prev/next · a action",
-        Dialog::Session { .. } => {
-            "q back · Tab pane · j/k g/G · Enter/Space ◂ ▸ · n note · [/] prev/next"
-        }
+        Dialog::Session { .. } => "q back · Tab pane · j/k g/G · n note · [/] prev/next",
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::OpenScan(_) => "",
         Dialog::None if state.focus == Focus::Issues => {

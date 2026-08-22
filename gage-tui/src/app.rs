@@ -902,7 +902,6 @@ pub(crate) fn footer_hint(state: &AppState) -> String {
             "q quit",
             "Tab pane",
             "j/k g/G PgUp/PgDn",
-            "Enter/Space toggle",
             "n note",
             "o open",
         ],

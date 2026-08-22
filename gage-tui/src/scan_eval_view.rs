@@ -452,9 +452,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     }
     let help = match (&state.dialog, state.focus) {
         (Dialog::OpenRun(_), _) => "",
-        (Dialog::Session { .. }, _) => {
-            "q back · Tab pane · j/k g/G · Enter/Space ◂ ▸ · n note · [/] prev/next"
-        }
+        (Dialog::Session { .. }, _) => "q back · Tab pane · j/k g/G · n note · [/] prev/next",
         (Dialog::None, Focus::Summary) => {
             "q quit · Tab pane · j/k g/G PgUp/PgDn scroll · o open run"
         }
