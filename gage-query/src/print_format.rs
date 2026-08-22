@@ -310,7 +310,7 @@ mod tests {
     fn capped_writes_all_rows_under_cap() {
         let b = batch(&[(1, "a"), (2, "b")]);
         let mut capped = Vec::new();
-        let rows = write_yaml_capped(&mut capped, &[b.clone()], 10_000).unwrap();
+        let rows = write_yaml_capped(&mut capped, std::slice::from_ref(&b), 10_000).unwrap();
         assert_eq!(rows, 2);
         let mut full = Vec::new();
         write_yaml(&mut full, &[b]).unwrap();

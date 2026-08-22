@@ -1,7 +1,7 @@
-//! Discover evals from `*.toml` files under `<crate>/evals/`, searched
-//! recursively (subdirs group related evals, e.g. `tools/`, `scans/`).
-//! One file = one eval, named by file stem; each holds a `[[test]]`
-//! array.
+//! Discover evals from `*.toml` files under `<crate>/tests/`, searched
+//! recursively (subdirs group related evals, e.g. `tools/`,
+//! `scanners/`). One file = one eval, named by file stem; each holds a
+//! `[[test]]` array.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,11 +10,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// Crate-relative paths baked at compile time. Internal-tool simplicity.
-const EVALS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/evals");
+const EVALS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
 
 /// Where eval files and their fixtures load from. The default is the
-/// in-repo `gage-eval/evals/` + `gage-eval/fixtures/` pair; an ad hoc
+/// in-repo `gage-eval/tests/` + `gage-eval/fixtures/` pair; an ad hoc
 /// root (`--evals-dir`) holds `*.toml` files with a `fixtures/` subdir.
 #[derive(Debug, Clone)]
 pub struct Root {

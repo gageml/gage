@@ -32,8 +32,8 @@ pub struct EvalModel {
     pub runs: Vec<EvalRunRef>,
 }
 
-/// A row in the run-open picker, shared by the eval and scan eval
-/// views. The caller (the CLI) supplies the display description.
+/// A row in the run-open picker. The caller (the CLI) supplies the
+/// display description.
 pub struct EvalRunRef {
     pub id: String,
     pub started_ms: i64,
@@ -62,20 +62,13 @@ pub(crate) fn run_picker(runs: &[EvalRunRef], current: Option<&str>) -> Picker {
     Picker::new("Open eval run", items, current)
 }
 
-/// An eval run's view model, by run kind.
-pub enum EvalKindModel {
-    Tests(EvalModel),
-    Scan(crate::scan_eval_view::ScanEvalModel),
-}
-
-/// The eval view app: one terminal session hosting the test and scan
-/// eval views, switching between them as `o` opens runs of either
-/// kind. With no initial model, the run picker shows over an empty
-/// shell; canceling it exits.
+/// The eval view app: one terminal session hosting the test eval
+/// view, switching runs as `o` opens them. With no initial model, the
+/// run picker shows over an empty shell; canceling it exits.
 pub fn run_app(
-    initial: Option<EvalKindModel>,
+    initial: Option<EvalModel>,
     runs: Vec<EvalRunRef>,
-    load: impl Fn(&str) -> io::Result<EvalKindModel>,
+    load: impl Fn(&str) -> io::Result<EvalModel>,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
@@ -89,9 +82,9 @@ pub fn run_app(
 
 fn run_app_inner(
     terminal: &mut DefaultTerminal,
-    initial: Option<EvalKindModel>,
+    initial: Option<EvalModel>,
     runs: &[EvalRunRef],
-    load: &dyn Fn(&str) -> io::Result<EvalKindModel>,
+    load: &dyn Fn(&str) -> io::Result<EvalModel>,
 ) -> io::Result<()> {
     let mut model = match initial {
         Some(model) => model,
@@ -101,11 +94,7 @@ fn run_app_inner(
         },
     };
     loop {
-        let next = match model {
-            EvalKindModel::Tests(m) => event_loop(terminal, m)?,
-            EvalKindModel::Scan(m) => crate::scan_eval_view::event_loop(terminal, m)?,
-        };
-        match next {
+        match event_loop(terminal, model)? {
             Some(id) => model = load(&id)?,
             None => return Ok(()),
         }
@@ -726,9 +715,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     }
     let help = match state.dialog {
         Dialog::Test { .. } => "q close · ↑/↓ scroll · [/] prev/next",
-        Dialog::Session { .. } => {
-            "q back · Tab pane · j/k g/G · n note · [/] prev/next"
-        }
+        Dialog::Session { .. } => "q back · Tab pane · j/k g/G · n note · [/] prev/next",
         Dialog::OpenRun(_) => "",
         Dialog::None => "q quit · ↑/↓ select · Space/◂ ▸ expand · Enter open · o open run",
     };

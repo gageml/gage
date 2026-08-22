@@ -138,12 +138,6 @@ pub fn results_path(run: &Path) -> PathBuf {
     run.join("results.json")
 }
 
-/// Scan eval measurements, at the run root (see `scan`). Present only
-/// on scan-type runs — the file is the run-type sentinel.
-pub fn scan_json_path(run: &Path) -> PathBuf {
-    run.join("scan.json")
-}
-
 pub fn error_exit_code_path(run: &Path, test_name: &str) -> PathBuf {
     test_dir(run, test_name).join("ERROR_EXIT_CODE")
 }

@@ -5,7 +5,6 @@
 pub mod eval;
 pub mod results;
 pub mod run;
-pub mod scan;
 pub mod score;
 pub mod storage;
 pub mod tokens;

@@ -14,7 +14,7 @@ use tabled::{
     },
 };
 
-use gage_eval::{eval, results, run as runner, scan as scan_eval, storage, view};
+use gage_eval::{eval, results, run as runner, storage, view};
 
 use crate::dialog::{self, DialogError};
 use crate::{limit, style};
@@ -91,7 +91,7 @@ const DEFAULT_SAMPLE_JOBS: usize = 4;
 #[command(group = clap::ArgGroup::new("selection")
     .required(true)
     .multiple(false)
-    .args(["test", "all_tests", "scan"]))]
+    .args(["test", "all_tests"]))]
 pub struct RunArgs {
     /// Test to run (repeatable)
     ///
@@ -104,10 +104,6 @@ pub struct RunArgs {
     /// Run all tests
     #[arg(short, long)]
     all_tests: bool,
-
-    /// Evaluate a scan (creates a scan eval run)
-    #[arg(short, long, value_name = "SCAN_ID")]
-    scan: Option<String>,
 
     /// Print selected tests and exit
     #[arg(short, long = "list-tests")]
@@ -222,7 +218,7 @@ async fn cmd_view(args: ViewArgs) {
     // switches runs (and view kinds) without leaving the TUI.
     let initial = args.run_id.as_deref().map(|prefix| {
         let run = resolve_run(prefix);
-        match build_kind_model(&run) {
+        match eval_model(&run, eval_run_refs()) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("failed to load run: {e}");
@@ -235,30 +231,13 @@ async fn cmd_view(args: ViewArgs) {
         println!("No runs found");
         return;
     }
-    let load = |id: &str| -> std::io::Result<gage_tui::eval_view::EvalKindModel> {
+    let load = |id: &str| -> std::io::Result<gage_tui::eval_view::EvalModel> {
         let run = view::resolve(id)?;
-        build_kind_model(&run)
+        eval_model(&run, eval_run_refs())
     };
     if let Err(e) = gage_tui::eval_view::run_app(initial, runs, load) {
         eprintln!("view failed: {e}");
         std::process::exit(2);
-    }
-}
-
-/// Build the run's view model according to its kind (test vs scan
-/// eval, per the `scan.json` sentinel).
-fn build_kind_model(
-    run: &storage::RunSummary,
-) -> std::io::Result<gage_tui::eval_view::EvalKindModel> {
-    let runs = eval_run_refs();
-    if storage::scan_json_path(&storage::run_dir(&run.run_id)).exists() {
-        Ok(gage_tui::eval_view::EvalKindModel::Scan(scan_eval_model(
-            run, runs,
-        )?))
-    } else {
-        Ok(gage_tui::eval_view::EvalKindModel::Tests(eval_model(
-            run, runs,
-        )?))
     }
 }
 
@@ -294,9 +273,7 @@ fn eval_run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
     };
     runs.into_iter()
         .map(|r| {
-            let descr = if storage::scan_json_path(&storage::run_dir(&r.run_id)).exists() {
-                "scan eval".to_string()
-            } else if r.total > 0 {
+            let descr = if r.total > 0 {
                 let pct = (r.passed as f64 / r.total as f64 * 100.0).round() as u32;
                 format!("{} tests · {pct}%", r.total)
             } else {
@@ -313,132 +290,6 @@ fn eval_run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
             }
         })
         .collect()
-}
-
-/// Build the view model for a scan eval run from its `scan.json`.
-fn scan_eval_model(
-    run: &storage::RunSummary,
-    runs: Vec<gage_tui::eval_view::EvalRunRef>,
-) -> std::io::Result<gage_tui::scan_eval_view::ScanEvalModel> {
-    let se = scan_eval::read(&storage::run_dir(&run.run_id))?;
-
-    let tool_calls: u32 = se
-        .sessions
-        .iter()
-        .flat_map(|s| s.tool_use.values())
-        .map(|t| t.calls)
-        .sum();
-    let tool_errors: u32 = se
-        .sessions
-        .iter()
-        .flat_map(|s| s.tool_use.values())
-        .map(|t| t.errors)
-        .sum();
-    let notes: u32 = se.sessions.iter().map(|s| s.notes_written).sum();
-    let issues: u32 = se.sessions.iter().map(|s| s.issues_written).sum();
-    let zero_output: Vec<&scan_eval::AgentSession> = se
-        .sessions
-        .iter()
-        .filter(|s| s.notes_written + s.issues_written == 0)
-        .collect();
-    let zero_cost: f64 = zero_output.iter().filter_map(|s| s.cost).sum();
-
-    let mut attrs: Vec<(&'static str, String)> = vec![
-        ("Sessions", se.sessions.len().to_string()),
-        (
-            "Wall time",
-            se.wall_time_ms
-                .map(|ms| format_ms(ms as i64))
-                .unwrap_or_else(|| "-".to_string()),
-        ),
-        (
-            "Parallelism",
-            se.parallelism
-                .map(|p| format!("{p:.1}x"))
-                .unwrap_or_else(|| "-".to_string()),
-        ),
-        ("Cost", format!("${:.2}", se.reported_cost)),
-        ("Tool calls", format!("{tool_calls} ({tool_errors} errors)")),
-        ("Output", format!("{notes} notes, {issues} issues")),
-        (
-            "Zero output",
-            format!("{} sessions (${zero_cost:.2})", zero_output.len()),
-        ),
-    ];
-    if se.cost_gap.abs() >= 0.01 {
-        attrs.push(("Cost gap", format!("${:.2}", se.cost_gap)));
-    }
-
-    // Per (scanner, task) aggregates, in first-seen order
-    let mut order: Vec<String> = Vec::new();
-    let mut agg: std::collections::HashMap<String, (u32, f64, u64, u64, u64)> =
-        std::collections::HashMap::new();
-    for s in &se.sessions {
-        let key = format!("{}/{}", s.scanner, s.task);
-        if !agg.contains_key(&key) {
-            order.push(key.clone());
-        }
-        let e = agg.entry(key).or_default();
-        e.0 += 1;
-        e.1 += s.cost.unwrap_or(0.0);
-        e.2 += u64::from(s.turns.unwrap_or(0));
-        e.3 += s.tokens.cache_read;
-        e.4 += s.tokens.cache_read + s.tokens.input;
-    }
-    let scanner_lines: Vec<String> = order
-        .iter()
-        .filter_map(|key| {
-            let (runs, cost, turns, cache_read, denom) = agg.get(key)?;
-            let avg_turns = *turns as f64 / (*runs).max(1) as f64;
-            let cache = if *denom > 0 {
-                format!("{:.0}%", *cache_read as f64 / *denom as f64 * 100.0)
-            } else {
-                "-".to_string()
-            };
-            Some(format!(
-                "{key}  ·  {runs} sessions  ·  ${cost:.2}  ·  ⌀{avg_turns:.1} turns  ·  cache {cache}"
-            ))
-        })
-        .collect();
-
-    let cluster_lines: Vec<String> = se
-        .error_clusters
-        .iter()
-        .map(|c| {
-            format!(
-                "{}x in {} session(s)  ·  {}",
-                c.count,
-                c.sessions.len(),
-                c.shape
-            )
-        })
-        .collect();
-
-    let mut sessions: Vec<gage_tui::scan_eval_view::ScanSessionItem> = se
-        .sessions
-        .into_iter()
-        .map(|s| gage_tui::scan_eval_view::ScanSessionItem {
-            tool_errors: s.tool_use.values().map(|t| t.errors).sum(),
-            output: s.notes_written + s.issues_written,
-            id: s.session_id,
-            scanner: s.scanner,
-            task: s.task,
-            turns: s.turns,
-            cost: s.cost,
-            path: s.path,
-        })
-        .collect();
-    sessions.sort_by(|a, b| a.id.cmp(&b.id));
-
-    Ok(gage_tui::scan_eval_view::ScanEvalModel {
-        run_id: run.run_id.clone(),
-        runs,
-        scan_id: se.scan_id,
-        attrs,
-        scanner_lines,
-        cluster_lines,
-        sessions,
-    })
 }
 
 /// Build the view model for a test eval run from its structured
@@ -572,10 +423,6 @@ fn delete_runs(runs: &[storage::RunSummary]) -> usize {
 }
 
 fn cmd_run(args: RunArgs) {
-    if let Some(scan_id) = &args.scan {
-        cmd_run_scan(scan_id, args.note.as_deref());
-        return;
-    }
     // `-a` selects everything: an empty spec list is `select`'s "all".
     let specs = if args.all_tests {
         Vec::new()
@@ -754,45 +601,6 @@ fn one_line(s: &str, max: usize) -> String {
     out
 }
 
-/// Evaluate a scan into a new scan eval run and print a recap.
-fn cmd_run_scan(scan_id: &str, note: Option<&str>) {
-    cliclack::intro(console::style("Scan eval").bold()).unwrap();
-    let (run, eval) = match gage_eval::scan::run_scan_eval(scan_id, note) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("scan eval failed: {e}");
-            std::process::exit(2);
-        }
-    };
-    let tool_errors: u32 = eval
-        .sessions
-        .iter()
-        .flat_map(|s| s.tool_use.values())
-        .map(|t| t.errors)
-        .sum();
-    let cost: f64 = eval.reported_cost;
-    let wall = eval
-        .wall_time_ms
-        .map(|ms| format_elapsed(std::time::Duration::from_millis(ms)))
-        .unwrap_or_else(|| "-".to_string());
-    cliclack::log::remark(format!(
-        "Scan {}\nAgent sessions: {}\nTool errors: {}\nCost: ${cost:.2}\nWall time: {wall}",
-        short_uuid(&eval.scan_id),
-        eval.sessions.len(),
-        tool_errors,
-    ))
-    .unwrap();
-    let run_id = short_uuid(&run.run_id);
-    cliclack::outro(
-        console::style(format!(
-            "Run {run_id} completed — view with `gage eval view {run_id}`"
-        ))
-        .green()
-        .bright(),
-    )
-    .unwrap();
-}
-
 fn show_run_intro(tests: &[&eval::Test], args: &RunArgs) -> std::io::Result<()> {
     cliclack::intro(console::style("Run eval").bold())?;
 
@@ -884,7 +692,6 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
     let highlighter = IdHighlighter::new(peers);
     let header: Vec<String> = [
         "Run",
-        "Type",
         "Started",
         "Tests",
         "Pass",
@@ -900,7 +707,6 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
         .map(|r| {
             vec![
                 highlighter.short(&r.run_id),
-                run_kind(&r.run_id).to_string(),
                 format_elapsed_ms(r.started_at_ms),
                 format_tests(r.total),
                 format_pass_pct(r.passed, r.total),
@@ -920,7 +726,7 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
             Columns::new(1..col_count - 1).not(Rows::first()),
             style::dim(),
         )
-        .modify(Columns::new(5..6), Alignment::right());
+        .modify(Columns::new(4..5), Alignment::right());
     let term_width = console::Term::stdout().size().1 as usize;
     table.with(
         Width::truncate(term_width)
@@ -928,15 +734,6 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
             .priority(OnlyColumn::new(col_count - 1)),
     );
     format!("{table}\n")
-}
-
-/// A run's kind for the listing, per the `scan.json` sentinel.
-fn run_kind(run_id: &str) -> &'static str {
-    if storage::scan_json_path(&storage::run_dir(run_id)).exists() {
-        "scan"
-    } else {
-        "test"
-    }
 }
 
 struct OnlyColumn {

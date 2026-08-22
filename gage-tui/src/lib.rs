@@ -9,7 +9,6 @@ mod message;
 mod options;
 mod outline;
 mod picker;
-pub mod scan_eval_view;
 pub mod scan_view;
 mod scroll;
 mod session;
