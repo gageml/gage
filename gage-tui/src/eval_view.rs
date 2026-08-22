@@ -17,13 +17,12 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
-use unicode_width::UnicodeWidthStr;
 
 use crate::item_table::ItemTable;
 use crate::picker::{self, PickItem, Picker, PickerAction};
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
-use crate::{app, attrs::attr_lines, session, styles};
+use crate::{app, attrs::attr_lines, hint, session, styles};
 
 pub struct EvalModel {
     pub run_id: String,
@@ -714,12 +713,25 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         return;
     }
     let help = match state.dialog {
-        Dialog::Test { .. } => "q close · ↑/↓ scroll · [/] prev/next",
-        Dialog::Session { .. } => {
-            "q back · Tab pane · j/k g/G · n note · r refresh · [/] prev/next"
+        Dialog::Test { .. } => {
+            hint::help_line(&[("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")])
         }
-        Dialog::OpenRun(_) => "",
-        Dialog::None => "q quit · ↑/↓ select · Space/◂ ▸ expand · Enter open · o open run",
+        Dialog::Session { .. } => hint::help_line(&[
+            ("q", "back"),
+            ("Tab", "pane"),
+            ("j/k g/G", ""),
+            ("n", "note"),
+            ("r", "refresh"),
+            ("[/]", "prev/next"),
+        ]),
+        Dialog::OpenRun(_) => Line::default(),
+        Dialog::None => hint::help_line(&[
+            ("q", "quit"),
+            ("↑/↓", "select"),
+            ("Space/◂ ▸", "expand"),
+            ("Enter", "open"),
+            ("o", "open run"),
+        ]),
     };
     let help_width = help.width() as u16;
     let [_, help_area, _] = Layout::horizontal([
@@ -729,7 +741,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new(Span::styled(help, styles::Panel::footer())),
+        Paragraph::new(help).style(styles::Panel::footer()),
         help_area,
     );
 }

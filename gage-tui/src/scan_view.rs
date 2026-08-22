@@ -46,7 +46,7 @@ type ScanLoader<'a> = &'a dyn Fn(&str) -> io::Result<ScanModel>;
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::textarea::TextArea;
-use crate::{app, markdown, session, styles};
+use crate::{app, hint, markdown, session, styles};
 
 /// A scan task identity, `{scanner}::{task}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3014,7 +3014,7 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     let help = footer_help(state);
-    if help.is_empty() {
+    if help.width() == 0 {
         return;
     }
     let help_width = help.width() as u16;
@@ -3025,7 +3025,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new(Span::styled(help, styles::Panel::footer())),
+        Paragraph::new(help).style(styles::Panel::footer()),
         help_area,
     );
 }
@@ -3033,32 +3033,69 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
 /// Help text for the keys active in the current dialog state. Dialogs
 /// and prompts that show their key options inline (confirm, scan-done,
 /// issue prompts) get an empty footer.
-fn footer_help(state: &ViewState) -> &'static str {
+fn footer_help(state: &ViewState) -> Line<'static> {
     if state.prompt.is_some() {
-        return "";
+        return Line::default();
     }
     match state.dialog {
-        Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
-        Dialog::Note { .. } => "q back · ↑/↓ scroll · [/] prev/next",
-        Dialog::Issue { .. } => "q back · ↑/↓ scroll · [/] prev/next · a action",
-        Dialog::Session { nav, .. } => {
-            if session_step_targets(state, nav) > 1 {
-                "q back · Tab pane · j/k g/G · n note · r refresh · [/] prev/next"
-            } else {
-                "q back · Tab pane · j/k g/G · n note · r refresh"
-            }
+        Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => Line::default(),
+        Dialog::Note { .. } => {
+            hint::help_line(&[("q", "back"), ("↑/↓", "scroll"), ("[/]", "prev/next")])
         }
-        Dialog::Log { .. } => "q back · ↑/↓ scroll",
-        Dialog::OpenScan(_) => "",
+        Dialog::Issue { .. } => hint::help_line(&[
+            ("q", "back"),
+            ("↑/↓", "scroll"),
+            ("[/]", "prev/next"),
+            ("a", "action"),
+        ]),
+        Dialog::Session { nav, .. } => {
+            let mut items = vec![
+                ("q", "back"),
+                ("Tab", "pane"),
+                ("j/k g/G", ""),
+                ("n", "note"),
+                ("r", "refresh"),
+            ];
+            if session_step_targets(state, nav) > 1 {
+                items.push(("[/]", "prev/next"));
+            }
+            hint::help_line(&items)
+        }
+        Dialog::Log { .. } => hint::help_line(&[("q", "back"), ("↑/↓", "scroll")]),
+        Dialog::OpenScan(_) => Line::default(),
         Dialog::None if state.focus == Focus::Issues => {
             if state.model.finished {
-                "q quit · Tab cycle · ↑/↓ select · a action · l log · o open"
+                hint::help_line(&[
+                    ("q", "quit"),
+                    ("Tab", "cycle"),
+                    ("↑/↓", "select"),
+                    ("a", "action"),
+                    ("l", "log"),
+                    ("o", "open"),
+                ])
             } else {
-                "q cancel scan · Tab cycle · ↑/↓ select · a action · l log"
+                hint::help_line(&[
+                    ("q", "cancel scan"),
+                    ("Tab", "cycle"),
+                    ("↑/↓", "select"),
+                    ("a", "action"),
+                    ("l", "log"),
+                ])
             }
         }
-        Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log · o open",
-        Dialog::None => "q cancel scan · Tab cycle · ↑/↓ select · l log",
+        Dialog::None if state.model.finished => hint::help_line(&[
+            ("q", "quit"),
+            ("Tab", "cycle"),
+            ("↑/↓", "select"),
+            ("l", "log"),
+            ("o", "open"),
+        ]),
+        Dialog::None => hint::help_line(&[
+            ("q", "cancel scan"),
+            ("Tab", "cycle"),
+            ("↑/↓", "select"),
+            ("l", "log"),
+        ]),
     }
 }
 

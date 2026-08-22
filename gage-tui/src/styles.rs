@@ -51,6 +51,12 @@ impl Panel {
         Style::new().add_modifier(Modifier::DIM)
     }
 
+    /// Key characters in footer help hints. Undims so the keys stand
+    /// out against the dim footer text around them.
+    pub fn footer_key() -> Style {
+        Style::new().fg(Color::Cyan).remove_modifier(Modifier::DIM)
+    }
+
     pub fn gauge() -> Style {
         Style::new().fg(Color::Green)
     }

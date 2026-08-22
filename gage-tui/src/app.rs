@@ -26,6 +26,7 @@ use ratatui::widgets::{
 use serde_json::Value;
 
 use crate::doc::Document;
+use crate::hint;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::picker::{self, PickItem, Picker, PickerAction};
@@ -880,8 +881,7 @@ fn draw(frame: &mut Frame, state: &mut AppState) {
 
     draw_in(frame, middle_area, state);
 
-    let footer =
-        Paragraph::new(Line::from(footer_hint(state)).centered()).style(styles::Panel::footer());
+    let footer = Paragraph::new(footer_hint(state).centered()).style(styles::Panel::footer());
     frame.render_widget(footer, footer_area);
 }
 
@@ -896,34 +896,31 @@ pub(crate) fn draw_in(frame: &mut Frame, area: Rect, state: &mut AppState) {
     draw_dialog(frame, &mut state.dialog);
 }
 
-pub(crate) fn footer_hint(state: &AppState) -> String {
-    let mut hints = match state.focus {
-        Focus::Outline => vec![
-            "q quit",
-            "Tab pane",
+pub(crate) fn footer_hint(state: &AppState) -> Line<'static> {
+    let mut hints: Vec<(&str, &str)> = vec![
+        ("q", "quit"),
+        ("Tab", "pane"),
+        (
             "j/k g/G PgUp/PgDn",
-            "n note",
-            "o open",
-        ],
-        Focus::Body => vec![
-            "q quit",
-            "Tab pane",
-            "j/k g/G PgUp/PgDn scroll",
-            "n note",
-            "o open",
-        ],
-    };
+            match state.focus {
+                Focus::Outline => "",
+                Focus::Body => "scroll",
+            },
+        ),
+        ("n", "note"),
+        ("o", "open"),
+    ];
     if state.focus == Focus::Outline
         && let Some(note) = state.selected_note()
         && note.author == state.author()
     {
         if is_comment(&note.name) {
-            hints.push("e edit");
+            hints.push(("e", "edit"));
         }
-        hints.push("d delete");
+        hints.push(("d", "delete"));
     }
-    hints.push("r refresh");
-    hints.join(" · ")
+    hints.push(("r", "refresh"));
+    hint::help_line(&hints)
 }
 
 fn draw_outline(frame: &mut Frame, state: &mut AppState, area: Rect) {

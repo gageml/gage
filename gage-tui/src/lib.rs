@@ -3,6 +3,7 @@ mod attrs;
 mod dialog;
 mod doc;
 pub mod eval_view;
+mod hint;
 mod item_table;
 mod markdown;
 mod message;
