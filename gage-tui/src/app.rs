@@ -50,7 +50,7 @@ pub fn run(
             None => return Ok(()),
         },
     };
-    let mut state = AppState::new(doc, options.show_turns, DocSource::Query);
+    let mut state = AppState::new(doc, options, DocSource::Query);
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
         if let Event::Key(key) = event::read()?
@@ -199,6 +199,23 @@ pub(crate) fn handle_key(
             }
             return Ok(KeyOutcome::Consumed);
         }
+        Dialog::Options => {
+            match key.code {
+                KeyCode::Char('d') => {
+                    state.dialog = Dialog::None;
+                    state.toggle_detail();
+                }
+                KeyCode::Char('t') => {
+                    state.dialog = Dialog::None;
+                    state.toggle_turns();
+                }
+                KeyCode::Char('q') | KeyCode::Char('v') | KeyCode::Esc => {
+                    state.dialog = Dialog::None;
+                }
+                _ => {}
+            }
+            return Ok(KeyOutcome::Consumed);
+        }
         Dialog::None => {}
     }
     let outcome = match key.code {
@@ -277,6 +294,10 @@ pub(crate) fn handle_key(
             state.begin_add_note();
             KeyOutcome::Consumed
         }
+        KeyCode::Char('v') => {
+            state.dialog = Dialog::Options;
+            KeyOutcome::Consumed
+        }
         KeyCode::Char('o') => {
             state.dialog = Dialog::OpenSession(session_picker(Some(&state.doc.session.id))?);
             KeyOutcome::Consumed
@@ -346,6 +367,8 @@ enum Dialog {
     },
     /// Session-open picker (`o`)
     OpenSession(Picker),
+    /// View-options toggles (`v`)
+    Options,
 }
 
 fn new_editor(text: &str) -> TextArea {
@@ -376,12 +399,17 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    pub(crate) fn new(doc: Document, show_turns: bool, source: DocSource) -> Self {
+    pub(crate) fn new(doc: Document, options: &ViewOptions, source: DocSource) -> Self {
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
-        let outline = Outline::new(session_note_ids, entry_note_ids);
+        let outline = Outline::new(
+            session_note_ids,
+            entry_note_ids,
+            entry_hidden(&doc),
+            options.show_detail,
+        );
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let turns = show_turns.then(|| compute_turns(&doc));
+        let turns = options.show_turns.then(|| compute_turns(&doc));
         Self {
             doc,
             username: resolve_username(),
@@ -543,25 +571,54 @@ impl AppState {
             self.turns = Some(compute_turns(&doc));
         }
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
+        let hidden = entry_hidden(&doc);
         self.doc = doc;
-        self.outline.reload(session_note_ids, entry_note_ids);
+        self.outline
+            .reload(session_note_ids, entry_note_ids, hidden);
         let new_sel = prior
             .and_then(|kind| {
                 self.outline
                     .rows()
                     .iter()
-                    .position(|r| match (&r.kind, &kind) {
-                        (RowKind::Session, RowKind::Session) => true,
-                        (RowKind::Entry { index: a }, RowKind::Entry { index: b }) => a == b,
-                        (RowKind::Note { note_id: a, .. }, RowKind::Note { note_id: b, .. }) => {
-                            a == b
-                        }
-                        _ => false,
-                    })
+                    .position(|r| same_row(&r.kind, &kind))
             })
             .or(Some(0));
         self.list_state.select(new_sel);
         Ok(())
+    }
+
+    /// Toggle the entry filter, keeping the selection when its row
+    /// survives the rebuild.
+    fn toggle_detail(&mut self) {
+        let prior = self
+            .list_state
+            .selected()
+            .and_then(|i| self.outline.row(i))
+            .map(|r| r.kind.clone());
+        let detail = !self.outline.detail();
+        self.outline.set_detail(detail);
+        // Reselect the same row; a filtered-out entry falls back to
+        // the nearest preceding visible entry
+        let new_sel = prior
+            .and_then(|kind| {
+                self.outline
+                    .rows()
+                    .iter()
+                    .position(|r| same_row(&r.kind, &kind))
+                    .or_else(|| match kind {
+                        RowKind::Entry { index } => nearest_prev_entry(&self.outline, index),
+                        _ => None,
+                    })
+            })
+            .or(Some(0));
+        self.list_state.select(new_sel);
+    }
+
+    fn toggle_turns(&mut self) {
+        self.turns = match self.turns.take() {
+            Some(_) => None,
+            None => Some(compute_turns(&self.doc)),
+        };
     }
 
     /// Swap in a different session's document, resetting the UI to the
@@ -571,8 +628,10 @@ impl AppState {
             self.turns = Some(compute_turns(&doc));
         }
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
+        let hidden = entry_hidden(&doc);
         self.doc = doc;
-        self.outline.reload(session_note_ids, entry_note_ids);
+        self.outline
+            .reload(session_note_ids, entry_note_ids, hidden);
         self.list_state.select(Some(0));
         *self.list_state.offset_mut() = 0;
         self.body_scroll = 0;
@@ -669,6 +728,48 @@ impl AppState {
 
 fn resolve_username() -> String {
     std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Visible-row position of the entry nearest to (at or before)
+/// `target`, for reselecting after a filter hides the selected entry.
+/// Entry rows appear in ascending index order, so the last qualifying
+/// row is the nearest.
+fn nearest_prev_entry(outline: &Outline, target: usize) -> Option<usize> {
+    outline
+        .rows()
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, r)| matches!(r.kind, RowKind::Entry { index } if index <= target))
+        .map(|(i, _)| i)
+}
+
+/// Row-identity comparison for reselecting after an outline rebuild.
+fn same_row(a: &RowKind, b: &RowKind) -> bool {
+    match (a, b) {
+        (RowKind::Session, RowKind::Session) => true,
+        (RowKind::Entry { index: a }, RowKind::Entry { index: b }) => a == b,
+        (RowKind::Note { note_id: a, .. }, RowKind::Note { note_id: b, .. }) => a == b,
+        _ => false,
+    }
+}
+
+/// Low-signal entries hidden by the default view filter: user meta
+/// entries, attachments, and session bookkeeping types. Everything
+/// else — user and assistant text, thinking, tool use, tool results (a
+/// successful result can contain the actual error) — shows.
+fn entry_hidden(doc: &Document) -> Vec<bool> {
+    const HIDDEN_TYPES: &[&str] = &[
+        "attachment",
+        "queue-operation",
+        "file-history-snapshot",
+        "ai-title",
+        "last-prompt",
+    ];
+    doc.entries
+        .iter()
+        .map(|e| e.label() == "meta" || HIDDEN_TYPES.contains(&e.entry_type()))
+        .collect()
 }
 
 /// Outline projection of the document's notes — session-level note ids, then
@@ -893,7 +994,9 @@ pub(crate) fn draw_in(frame: &mut Frame, area: Rect, state: &mut AppState) {
         Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(area);
     draw_outline(frame, state, outline_area);
     draw_body(frame, state, body_area);
-    draw_dialog(frame, &mut state.dialog);
+    let detail = state.outline.detail();
+    let turns = state.turns.is_some();
+    draw_dialog(frame, &mut state.dialog, detail, turns);
 }
 
 pub(crate) fn footer_hint(state: &AppState) -> Line<'static> {
@@ -908,6 +1011,7 @@ pub(crate) fn footer_hint(state: &AppState) -> Line<'static> {
             },
         ),
         ("n", "note"),
+        ("v", "options"),
         ("o", "open"),
     ];
     if state.focus == Focus::Outline
@@ -937,12 +1041,20 @@ fn draw_outline(frame: &mut Frame, state: &mut AppState, area: Rect) {
         .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, state.turns.as_deref()))
         .collect();
 
+    let title = if state.outline.detail() {
+        Line::from("Entries")
+    } else {
+        Line::from(vec![
+            Span::raw("Entries "),
+            Span::styled("(filtered)", styles::Text::dim()),
+        ])
+    };
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(styles::Panel::border(active))
-                .title("Entries"),
+                .title(title),
         )
         .highlight_style(styles::Panel::selection(true));
     frame.render_stateful_widget(list, area, &mut state.list_state);
@@ -1169,20 +1281,28 @@ struct EntrySnap {
 
 fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: Rect) {
     let mut sections: Vec<Section> = Vec::new();
+    // Filtered view hides the raw YAML behind the rendered message;
+    // entries with no message keep it, or the pane would be blank
+    let show_raw = state.outline.detail() || entry.message.is_none();
     if let Some(message) = &entry.message {
         let panel = Paragraph::new(message::render(message))
             .wrap(Wrap { trim: false })
             .block(Block::default().padding(Padding::uniform(1)));
         sections.push(Section::from_paragraph(panel, area.width));
+        if show_raw {
+            sections.push(Section::from_paragraph(
+                Paragraph::new(Line::from(Span::styled("--- raw ---", styles::Text::dim()))),
+                area.width,
+            ));
+        }
+    }
+    if show_raw {
         sections.push(Section::from_paragraph(
-            Paragraph::new(Line::from(Span::styled("--- raw ---", styles::Text::dim()))),
+            Paragraph::new(state.highlighter.highlight(&entry.yaml, "yaml"))
+                .wrap(Wrap { trim: false }),
             area.width,
         ));
     }
-    sections.push(Section::from_paragraph(
-        Paragraph::new(state.highlighter.highlight(&entry.yaml, "yaml")).wrap(Wrap { trim: false }),
-        area.width,
-    ));
 
     draw_stack(frame, state, sections, area);
 }
@@ -1268,9 +1388,10 @@ fn draw_body_scrollbar(frame: &mut Frame, state: &AppState, active: bool, area: 
     );
 }
 
-fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog) {
+fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, detail: bool, turns: bool) {
     match dialog {
         Dialog::None => {}
+        Dialog::Options => draw_options(frame, detail, turns),
         Dialog::AddNote { editor, .. } => draw_editor(frame, "Add note", editor),
         Dialog::EditNote { editor, .. } => draw_editor(frame, "Edit note", editor),
         Dialog::ConfirmCancel { pending } => {
@@ -1286,6 +1407,17 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog) {
         }
         Dialog::OpenSession(picker) => picker.draw(frame),
     }
+}
+
+/// View-options toggles: each key's label names the action it takes
+/// from the current state.
+fn draw_options(frame: &mut Frame, detail: bool, turns: bool) {
+    let label = |on: bool| if on { "hide" } else { "show" };
+    let lines = vec![
+        Line::raw(format!("  d {} session detail", label(detail))).left_aligned(),
+        Line::raw(format!("  t {} turns", label(turns))).left_aligned(),
+    ];
+    crate::dialog::draw_lines_titled(frame, Some("View options"), lines, "q back");
 }
 
 const EDITOR_BODY_HEIGHT: u16 = 8;

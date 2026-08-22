@@ -70,6 +70,16 @@ pub(crate) fn draw_wrapped(frame: &mut Frame, paragraphs: &[&str], hint: &str) {
 /// Draw centered content lines with a key-hint footer below the
 /// dialog border. The dialog is sized to fit the widest line.
 pub(crate) fn draw_lines(frame: &mut Frame, lines: Vec<Line>, hint: &str) {
+    draw_lines_titled(frame, None, lines, hint);
+}
+
+/// [`draw_lines`] with an optional title in the border.
+pub(crate) fn draw_lines_titled(
+    frame: &mut Frame,
+    title: Option<&str>,
+    lines: Vec<Line>,
+    hint: &str,
+) {
     let frame_area = frame.area();
     let content_width = lines
         .iter()
@@ -92,7 +102,10 @@ pub(crate) fn draw_lines(frame: &mut Frame, lines: Vec<Line>, hint: &str) {
     frame.render_widget(Block::new().style(styles::Dialog::surface()), area);
     let [border_area, hint_row] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
-    let block = Block::bordered();
+    let mut block = Block::bordered();
+    if let Some(title) = title {
+        block = block.title(Span::styled(title.to_string(), styles::Dialog::dim()));
+    }
     let inner = block.inner(border_area);
     frame.render_widget(block, border_area);
     let [_, content, _] = Layout::vertical([

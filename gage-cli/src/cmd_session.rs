@@ -56,8 +56,9 @@ pub struct SessionViewArgs {
     /// View options (comma-separated)
     ///
     /// Options:
-    ///   turns - show model turns in outline
-    #[arg(short, long, value_delimiter = ',')]
+    ///   turns  - show model turns in outline
+    ///   detail - show all entries (default hides low-signal entries)
+    #[arg(short = 'v', long, value_delimiter = ',')]
     pub options: Vec<String>,
 }
 

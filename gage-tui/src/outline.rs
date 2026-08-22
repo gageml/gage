@@ -16,6 +16,11 @@ pub struct Outline {
     /// `i`'s line. Mutated when notes are added or removed; outline rebuilds
     /// from this projection.
     entry_note_ids: Vec<Vec<String>>,
+    /// `entry_hidden[i]` marks entry `i` as low signal, omitted from the
+    /// rows unless `detail` is on or the entry carries notes.
+    entry_hidden: Vec<bool>,
+    /// Show all entries, overriding `entry_hidden`.
+    detail: bool,
     visible: Vec<Row>,
 }
 
@@ -46,16 +51,32 @@ pub enum CollapseOutcome {
 }
 
 impl Outline {
-    pub fn new(session_note_ids: Vec<String>, entry_note_ids: Vec<Vec<String>>) -> Self {
+    pub fn new(
+        session_note_ids: Vec<String>,
+        entry_note_ids: Vec<Vec<String>>,
+        entry_hidden: Vec<bool>,
+        detail: bool,
+    ) -> Self {
         let mut o = Self {
             session_expanded: false,
             entry_expanded: HashSet::new(),
             session_note_ids,
             entry_note_ids,
+            entry_hidden,
+            detail,
             visible: Vec::new(),
         };
         o.rebuild();
         o
+    }
+
+    pub fn detail(&self) -> bool {
+        self.detail
+    }
+
+    pub fn set_detail(&mut self, detail: bool) {
+        self.detail = detail;
+        self.rebuild();
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -110,10 +131,16 @@ impl Outline {
     /// Replace the entry/note projection in place. Preserves expansion state
     /// (session + per-entry) so a reload doesn't collapse the tree. Entry
     /// indices that no longer exist drop out of the expanded set.
-    pub fn reload(&mut self, session_note_ids: Vec<String>, entry_note_ids: Vec<Vec<String>>) {
+    pub fn reload(
+        &mut self,
+        session_note_ids: Vec<String>,
+        entry_note_ids: Vec<Vec<String>>,
+        entry_hidden: Vec<bool>,
+    ) {
         self.entry_expanded.retain(|i| *i < entry_note_ids.len());
         self.session_note_ids = session_note_ids;
         self.entry_note_ids = entry_note_ids;
+        self.entry_hidden = entry_hidden;
         self.rebuild();
     }
 
@@ -220,6 +247,14 @@ impl Outline {
             }
         }
         for (i, notes) in self.entry_note_ids.iter().enumerate() {
+            // A noted entry always shows: a note declares the entry
+            // mattered to someone
+            if !self.detail
+                && self.entry_hidden.get(i).copied().unwrap_or(false)
+                && notes.is_empty()
+            {
+                continue;
+            }
             let has_children = !notes.is_empty();
             let expanded = has_children && self.entry_expanded.contains(&i);
             rows.push(Row {
@@ -243,5 +278,46 @@ impl Outline {
             }
         }
         self.visible = rows;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_indices(o: &Outline) -> Vec<usize> {
+        o.rows()
+            .iter()
+            .filter_map(|r| match r.kind {
+                RowKind::Entry { index } => Some(index),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filter_hides_marked_entries() {
+        let notes = vec![Vec::new(), Vec::new(), Vec::new()];
+        let hidden = vec![false, true, false];
+        let o = Outline::new(Vec::new(), notes, hidden, false);
+        assert_eq!(entry_indices(&o), [0, 2]);
+    }
+
+    #[test]
+    fn detail_shows_all_entries() {
+        let notes = vec![Vec::new(), Vec::new()];
+        let hidden = vec![true, true];
+        let mut o = Outline::new(Vec::new(), notes, hidden, false);
+        assert_eq!(entry_indices(&o), [] as [usize; 0]);
+        o.set_detail(true);
+        assert_eq!(entry_indices(&o), [0, 1]);
+    }
+
+    #[test]
+    fn noted_entry_survives_filter() {
+        let notes = vec![vec!["n1".to_string()], Vec::new()];
+        let hidden = vec![true, true];
+        let o = Outline::new(Vec::new(), notes, hidden, false);
+        assert_eq!(entry_indices(&o), [0]);
     }
 }

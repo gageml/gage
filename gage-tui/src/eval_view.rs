@@ -402,7 +402,11 @@ impl ViewState {
                         return;
                     }
                 };
-                let view = app::AppState::new(doc, true, app::DocSource::Path(path));
+                let options = crate::ViewOptions {
+                    show_turns: true,
+                    ..Default::default()
+                };
+                let view = app::AppState::new(doc, &options, app::DocSource::Path(path));
                 self.dialog = Dialog::Session {
                     node,
                     view: Box::new(view),

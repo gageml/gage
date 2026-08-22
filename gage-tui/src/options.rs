@@ -1,10 +1,12 @@
-//! View options parsed from the `-o/--options` CLI flag.
+//! View options parsed from the `-v/--options` CLI flag.
 
 use std::fmt;
 
 #[derive(Default, Debug, Clone)]
 pub struct ViewOptions {
     pub show_turns: bool,
+    /// Show every entry, overriding the default high-signal filter.
+    pub show_detail: bool,
 }
 
 impl ViewOptions {
@@ -17,6 +19,7 @@ impl ViewOptions {
             }
             match t {
                 "turns" => opts.show_turns = true,
+                "detail" => opts.show_detail = true,
                 other => return Err(UnknownOption(other.to_string())),
             }
         }

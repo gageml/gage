@@ -1502,7 +1502,11 @@ impl ViewState {
                 return;
             }
         };
-        let mut view = app::AppState::new(doc, true, source);
+        let options = crate::ViewOptions {
+            show_turns: true,
+            ..Default::default()
+        };
+        let mut view = app::AppState::new(doc, &options, source);
         if let Some(saved) = self.session_ui.get(&item.id) {
             view.restore_ui(saved);
         }
