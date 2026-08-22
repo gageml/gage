@@ -3041,8 +3041,12 @@ fn footer_help(state: &ViewState) -> &'static str {
         Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => "",
         Dialog::Note { .. } => "q back · ↑/↓ scroll · [/] prev/next",
         Dialog::Issue { .. } => "q back · ↑/↓ scroll · [/] prev/next · a action",
-        Dialog::Session { .. } => {
-            "q back · Tab pane · j/k g/G · n note · r refresh · [/] prev/next"
+        Dialog::Session { nav, .. } => {
+            if session_step_targets(state, nav) > 1 {
+                "q back · Tab pane · j/k g/G · n note · r refresh · [/] prev/next"
+            } else {
+                "q back · Tab pane · j/k g/G · n note · r refresh"
+            }
         }
         Dialog::Log { .. } => "q back · ↑/↓ scroll",
         Dialog::OpenScan(_) => "",
@@ -3055,6 +3059,19 @@ fn footer_help(state: &ViewState) -> &'static str {
         }
         Dialog::None if state.model.finished => "q quit · Tab cycle · ↑/↓ select · l log · o open",
         Dialog::None => "q cancel scan · Tab cycle · ↑/↓ select · l log",
+    }
+}
+
+/// Number of items `[`/`]` step through for a session dialog opened
+/// from `nav` — the sessions table's rows, or the tasks panel's
+/// visible agent rows.
+fn session_step_targets(state: &ViewState, nav: SessionNav) -> usize {
+    match nav {
+        SessionNav::Sessions => state.model.sessions.len(),
+        SessionNav::Agents => flat_task_rows(&state.model, &state.expanded)
+            .iter()
+            .filter(|row| matches!(row, TaskRow::Agent(..)))
+            .count(),
     }
 }
 
