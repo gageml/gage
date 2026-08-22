@@ -267,7 +267,7 @@ fn register_scan(
         },
     )?;
     for s in selected.iter() {
-        insert_scan_session(&conn, &scan_id, &s.id)?;
+        insert_scan_session(&conn, &scan_id, &s.id, crate::runner::is_agent_session(s))?;
     }
     Ok(scan_id)
 }

@@ -19,6 +19,13 @@ pub fn gage_home() -> PathBuf {
     }
 }
 
+/// Returns the agent session corpus root: `<gage_home>/claude`. Agent
+/// session JSONLs are archived here per agent name, in the same layout
+/// as the Claude projects dir.
+pub fn agent_sessions_dir() -> PathBuf {
+    gage_home().join("claude")
+}
+
 /// Returns the user config file path: `<gage_home>/config.toml`.
 pub fn user_config_path() -> PathBuf {
     gage_home().join("config.toml")

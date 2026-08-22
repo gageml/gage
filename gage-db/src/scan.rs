@@ -354,17 +354,66 @@ pub fn set_scan_summary(
     Ok(())
 }
 
-/// Record that `session_id` was selected for `scan_id`.
+/// Record that `session_id` was selected for `scan_id`. `agent_corpus`
+/// marks a session living in the agent corpus (`<gage_home>/claude`)
+/// rather than the default Claude projects corpus; the location is
+/// encoded into `scan_session.metadata` here and decoded by
+/// [`scan_session_rows`].
 pub fn insert_scan_session(
     conn: &Connection,
     scan_id: &str,
     session_id: &str,
+    agent_corpus: bool,
 ) -> Result<(), ScanError> {
+    let metadata = agent_corpus.then_some(AGENT_SESSION_METADATA);
     conn.execute(
-        "INSERT INTO scan_session (scan_id, session_id) VALUES (?1, ?2)",
-        params![scan_id, session_id],
+        "INSERT INTO scan_session (scan_id, session_id, metadata) VALUES (?1, ?2, ?3)",
+        params![scan_id, session_id, metadata],
     )?;
     Ok(())
+}
+
+/// One `scan_session` row: a session selected for a scan, with where
+/// the session lives decoded from the row's metadata.
+#[derive(Debug, Clone)]
+pub struct ScanSessionRow {
+    pub session_id: String,
+    /// The session lives in the agent corpus
+    pub agent: bool,
+}
+
+/// The sessions selected for `scan_id`, ordered by session id.
+pub fn scan_session_rows(
+    conn: &Connection,
+    scan_id: &str,
+) -> Result<Vec<ScanSessionRow>, ScanError> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, metadata FROM scan_session WHERE scan_id = ?1 ORDER BY session_id",
+    )?;
+    let rows = stmt
+        .query_map(params![scan_id], |row| {
+            let metadata: Option<String> = row.get(1)?;
+            Ok(ScanSessionRow {
+                session_id: row.get(0)?,
+                agent: session_metadata_is_agent(metadata.as_deref()),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// `scan_session.metadata` payload for an agent-corpus session. Absent
+/// metadata means the default Claude projects corpus.
+const AGENT_SESSION_METADATA: &str = r#"{"corpus":"agent"}"#;
+
+/// Unparseable or unrecognized metadata decodes as the default corpus —
+/// the same fallback as absent metadata, surfacing as a session lookup
+/// miss rather than an error.
+fn session_metadata_is_agent(metadata: Option<&str>) -> bool {
+    metadata
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        .and_then(|v| v.get("corpus").and_then(|c| c.as_str().map(String::from)))
+        .is_some_and(|c| c == "agent")
 }
 
 /// How a scan is linked to a note: the scan wrote the note's value, or
@@ -927,7 +976,13 @@ mod tests {
         let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
-        insert_scan_session(&conn, &scan.id, "11111111-1111-1111-1111-111111111111").unwrap();
+        insert_scan_session(
+            &conn,
+            &scan.id,
+            "11111111-1111-1111-1111-111111111111",
+            false,
+        )
+        .unwrap();
 
         insert_task(&conn, &test_task(&scan.id)).unwrap();
 
@@ -967,8 +1022,20 @@ mod tests {
         let conn = open_db_in_memory().unwrap();
         let scan = test_scan();
         insert_scan(&conn, &scan).unwrap();
-        insert_scan_session(&conn, &scan.id, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
-        insert_scan_session(&conn, &scan.id, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        insert_scan_session(
+            &conn,
+            &scan.id,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            false,
+        )
+        .unwrap();
+        insert_scan_session(
+            &conn,
+            &scan.id,
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            false,
+        )
+        .unwrap();
         let ids = session_ids_for_scan(&conn, &scan.id).unwrap();
         assert_eq!(
             ids,

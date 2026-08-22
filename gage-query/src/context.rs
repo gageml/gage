@@ -53,6 +53,14 @@ pub fn default_index_store() -> IndexStore {
     let cache_dir = default_cache_dir(&root);
     IndexStore::new(root, cache_dir)
 }
+/// The text-index handle for the agent corpus, cached separately from
+/// the default corpus (see `default_cache_dir`).
+pub fn agent_index_store() -> IndexStore {
+    let root = gage_core::config::agent_sessions_dir();
+    let cache_dir = default_cache_dir(&root);
+    IndexStore::new(root, cache_dir)
+}
+
 pub async fn create_context_default() -> SessionContext {
     let root = default_root();
     let cache_dir = default_cache_dir(&root);

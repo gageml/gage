@@ -434,13 +434,27 @@ fn load_scan_model(
         .map(|c| (c.id.as_str(), (c.notes, c.issues)))
         .collect();
 
+    // Per-corpus lookup: `scan_session.metadata` says where each
+    // session lives, independent of the process's `-A` mode
+    let rows = scan::scan_session_rows(conn, &run.id)?;
     let store = gage_query::default_index_store();
     let paths: HashMap<String, std::path::PathBuf> = session::ls_sessions().into_iter().collect();
-    let mut sessions: Vec<SessionItem> = scan::session_ids_for_scan(conn, &run.id)?
+    let (agent_store, agent_paths) = if rows.iter().any(|r| r.agent) {
+        (Some(gage_query::agent_index_store()), agent_session_paths())
+    } else {
+        (None, HashMap::new())
+    };
+    let mut sessions: Vec<SessionItem> = rows
         .into_iter()
-        .map(|id| {
-            let title = stat_session(&paths, &id)
-                .map(|info| session_title(&store, &info))
+        .map(|row| {
+            let (store, paths) = if row.agent {
+                (agent_store.as_ref().unwrap(), &agent_paths)
+            } else {
+                (&store, &paths)
+            };
+            let id = row.session_id;
+            let title = stat_session(paths, &id)
+                .map(|info| session_title(store, &info))
                 .unwrap_or_else(|| "(unavailable)".to_string());
             let (notes, issues) = counts.get(id.as_str()).copied().unwrap_or((0, 0));
             SessionItem {
@@ -866,6 +880,17 @@ impl AgentTimes {
             }
         }
     }
+}
+
+/// Session (id, path) pairs from the agent corpus, for scans whose
+/// `scan_session` rows are marked `corpus=agent`.
+fn agent_session_paths() -> std::collections::HashMap<String, std::path::PathBuf> {
+    SessionListBuilder::new()
+        .root(gage_core::config::agent_sessions_dir())
+        .build()
+        .into_iter()
+        .map(|s| (s.id, s.src))
+        .collect()
 }
 
 /// Locate and stat a session file for title resolution. None when the

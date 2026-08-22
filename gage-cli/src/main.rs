@@ -312,7 +312,7 @@ async fn main() {
 /// Point session resolution at the agent corpus (`<gage_home>/claude`)
 /// for `-A --agent` invocations.
 fn set_agent_projects_dir() {
-    let dir = gage_core::config::gage_home().join("claude");
+    let dir = gage_core::config::agent_sessions_dir();
     // SAFETY: set_var is unsafe in edition 2024; we set this once at
     // startup, before any command work reads the variable.
     unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &dir) };

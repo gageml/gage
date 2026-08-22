@@ -91,11 +91,10 @@ pub async fn run(
 ) -> Result<RunSummary, RunError> {
     let run_started = std::time::Instant::now();
 
-    // Init scan + per-scanner records, recording the selected session ids
-    let session_ids: Vec<&str> = selected.iter().map(|s| s.id.as_str()).collect();
+    // Init scan + per-scanner records, recording the selected sessions
     {
         let conn = db.lock().unwrap();
-        init_run(&scan_id, &session_ids, &conn)?;
+        init_run(&scan_id, &selected, &conn)?;
     }
 
     // Resolve distinct projects from `~/.claude.json`. Sessions key
@@ -269,7 +268,7 @@ fn persist_run_summary(
     Ok(())
 }
 
-fn init_run(scan_id: &str, session_ids: &[&str], db: &Connection) -> Result<(), RunError> {
+fn init_run(scan_id: &str, selected: &[SessionInfo], db: &Connection) -> Result<(), RunError> {
     insert_scan(
         db,
         &Scan {
@@ -281,11 +280,17 @@ fn init_run(scan_id: &str, session_ids: &[&str], db: &Connection) -> Result<(), 
         },
     )?;
 
-    for sid in session_ids {
-        insert_scan_session(db, scan_id, sid)?;
+    for s in selected {
+        insert_scan_session(db, scan_id, &s.id, is_agent_session(s))?;
     }
 
     Ok(())
+}
+
+/// A session living in the agent corpus, recorded on its `scan_session`
+/// row so readers outside the scan's `-A` mode can find it.
+pub(crate) fn is_agent_session(s: &SessionInfo) -> bool {
+    s.src.starts_with(gage_core::config::agent_sessions_dir())
 }
 
 /// Compile every scanner and verify its declared tasks, in the order

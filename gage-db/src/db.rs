@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -109,7 +109,13 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if version >= CURRENT_VERSION {
         return Ok(());
     }
-    init_schema(&tx)?;
+    if version == 0 {
+        // Fresh database: init_schema creates the current schema
+        init_schema(&tx)?;
+    }
+    if version == 1 {
+        tx.execute_batch("ALTER TABLE scan_session ADD COLUMN metadata TEXT")?;
+    }
     set_version(&tx, CURRENT_VERSION)?;
     tx.commit()
 }
@@ -221,6 +227,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE scan_session (
             scan_id    TEXT NOT NULL REFERENCES scan(id),
             session_id TEXT NOT NULL,
+            metadata   TEXT,
             PRIMARY KEY (scan_id, session_id)
         );
         CREATE INDEX idx_scan_session_session_id ON scan_session(session_id);
