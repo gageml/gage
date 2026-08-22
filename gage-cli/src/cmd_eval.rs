@@ -14,8 +14,9 @@ use tabled::{
     },
 };
 
-use gage_eval::{eval, results, run as runner, scan as scan_eval, storage, tokens, view};
+use gage_eval::{eval, results, run as runner, scan as scan_eval, storage, view};
 
+use crate::dialog::{self, DialogError};
 use crate::{limit, style};
 
 #[derive(Subcommand)]
@@ -26,6 +27,8 @@ pub enum EvalCommand {
     List(ListArgs),
     /// View an eval run report
     View(ViewArgs),
+    /// Set an evan run note
+    Note(NoteArgs),
     /// Delete one or more eval runs
     Delete(DeleteArgs),
 }
@@ -58,6 +61,24 @@ pub struct DeleteArgs {
 pub struct ViewArgs {
     /// Run UUID or unique prefix
     run_id: Option<String>,
+}
+
+#[derive(Args)]
+pub struct NoteArgs {
+    /// Run UUID or unique prefix
+    run_id: String,
+
+    /// Note text
+    #[arg(short, long, value_name = "TEXT", conflicts_with = "delete")]
+    message: Option<String>,
+
+    /// Delete the note
+    #[arg(short, long)]
+    delete: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 const DEFAULT_MODEL: &str = "sonnet";
@@ -137,7 +158,61 @@ pub async fn run(command: EvalCommand) {
         EvalCommand::Run(args) => cmd_run(args),
         EvalCommand::List(args) => cmd_list(args),
         EvalCommand::View(args) => cmd_view(args).await,
+        EvalCommand::Note(args) => cmd_note(args),
         EvalCommand::Delete(args) => cmd_delete(args),
+    }
+}
+
+fn cmd_note(args: NoteArgs) {
+    let run = resolve_run(&args.run_id);
+    let run_dir = storage::run_dir(&run.run_id);
+    if args.delete {
+        if run.note.is_none() {
+            println!("Run {} has no note", short_uuid(&run.run_id));
+            return;
+        }
+        if args.yes {
+            if let Err(e) = runner::set_note(&run_dir, None) {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+            println!("Note deleted");
+            return;
+        }
+        dialog::run("Delete note", || {
+            if let Some(note) = &run.note {
+                cliclack::log::remark(note)?;
+            }
+            let confirmed = cliclack::confirm("Delete this note?")
+                .initial_value(true)
+                .interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+            runner::set_note(&run_dir, None)
+                .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+            Ok("Note deleted".into())
+        });
+        return;
+    }
+    match &args.message {
+        Some(message) => {
+            if let Err(e) = runner::set_note(&run_dir, Some(message)) {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+            println!("Note set");
+        }
+        None => dialog::run("Eval note", || {
+            let mut input = cliclack::input("Note");
+            if let Some(existing) = &run.note {
+                input = input.default_input(existing);
+            }
+            let message: String = input.interact()?;
+            runner::set_note(&run_dir, Some(&message))
+                .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+            Ok("Note set".into())
+        }),
     }
 }
 
@@ -809,11 +884,11 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
     let highlighter = IdHighlighter::new(peers);
     let header: Vec<String> = [
         "Run",
+        "Type",
         "Started",
         "Tests",
         "Pass",
         "Time · ⌀test",
-        "Output",
         "Model",
         "Note",
     ]
@@ -825,11 +900,11 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
         .map(|r| {
             vec![
                 highlighter.short(&r.run_id),
+                run_kind(&r.run_id).to_string(),
                 format_elapsed_ms(r.started_at_ms),
                 format_tests(r.total),
                 format_pass_pct(r.passed, r.total),
                 format_run_time(r.duration_ms, r.test_count),
-                fmt_tokens_compact(&r.tokens),
                 fmt_model(r.model.as_deref()),
                 r.note.clone().unwrap_or_default(),
             ]
@@ -845,7 +920,7 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
             Columns::new(1..col_count - 1).not(Rows::first()),
             style::dim(),
         )
-        .modify(Columns::new(4..5), Alignment::right());
+        .modify(Columns::new(5..6), Alignment::right());
     let term_width = console::Term::stdout().size().1 as usize;
     table.with(
         Width::truncate(term_width)
@@ -853,6 +928,15 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
             .priority(OnlyColumn::new(col_count - 1)),
     );
     format!("{table}\n")
+}
+
+/// A run's kind for the listing, per the `scan.json` sentinel.
+fn run_kind(run_id: &str) -> &'static str {
+    if storage::scan_json_path(&storage::run_dir(run_id)).exists() {
+        "scan"
+    } else {
+        "test"
+    }
 }
 
 struct OnlyColumn {
@@ -882,19 +966,9 @@ fn fmt_model(model: Option<&str>) -> String {
     model.unwrap_or("").to_string()
 }
 
-/// Output token count for the runs table — the cleanest single proxy
-/// for work the model did, since input/cached tokens mostly reflect
-/// context size rather than effort.
-fn fmt_tokens_compact(t: &tokens::Tokens) -> String {
-    if t.output == 0 {
-        return String::new();
-    }
-    tokens::format_count(t.output)
-}
-
 fn format_tests(total: usize) -> String {
     if total == 0 {
-        return "\x1b[3mnone\x1b[23m".to_string();
+        return String::new();
     }
     total.to_string()
 }

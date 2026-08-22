@@ -16,7 +16,7 @@ use crate::score::{self, Score};
 use crate::storage;
 use gage_claude::plugin;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct Manifest {
     pub run_id: String,
     pub started_at: String,
@@ -36,6 +36,14 @@ pub struct Manifest {
 
 pub struct RunResult {
     pub run_id: String,
+}
+
+/// Update a run's recorded note; `None` deletes it.
+pub fn set_note(run_dir: &Path, note: Option<&str>) -> io::Result<()> {
+    let bytes = fs::read(storage::manifest_path(run_dir))?;
+    let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    manifest.note = note.map(str::to_string);
+    write_manifest(run_dir, &manifest)
 }
 
 /// Lifecycle event a caller can observe to drive a progress UI.
