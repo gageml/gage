@@ -236,10 +236,7 @@ async fn main() {
             },
             Command::Session { agent, command } => {
                 if agent {
-                    let dir = gage_core::config::gage_home().join("claude");
-                    // SAFETY: set_var is unsafe in edition 2024; we set
-                    // this once at startup, before any threads spawn.
-                    unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &dir) };
+                    set_agent_projects_dir();
                 }
                 match command {
                     cmd_session::SessionCommand::List(args) => cmd_session::list(args, agent).await,
@@ -259,7 +256,12 @@ async fn main() {
             },
             Command::Test(args) => cmd_test::run(args).await,
             Command::Eval { command } => cmd_eval::run(command).await,
-            Command::Scan(args) => cmd_scan::run(args).await,
+            Command::Scan(args) => {
+                if args.agent {
+                    set_agent_projects_dir();
+                }
+                cmd_scan::run(args).await
+            }
             Command::Review(args) => cmd_review::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
                 McpCommand::Stdio => {
@@ -285,7 +287,12 @@ async fn main() {
                     shutdown_tx.send(()).ok();
                 }
             },
-            Command::Query(args) => cmd_query::main(args).await,
+            Command::Query(args) => {
+                if args.agent {
+                    set_agent_projects_dir();
+                }
+                cmd_query::main(args).await
+            }
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_sync::push(args).await,
             Command::Pull(args) => cmd_sync::pull(args).await,
@@ -300,4 +307,13 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Point session resolution at the agent corpus (`<gage_home>/claude`)
+/// for `-A --agent` invocations.
+fn set_agent_projects_dir() {
+    let dir = gage_core::config::gage_home().join("claude");
+    // SAFETY: set_var is unsafe in edition 2024; we set this once at
+    // startup, before any command work reads the variable.
+    unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &dir) };
 }

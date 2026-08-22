@@ -53,7 +53,6 @@ pub fn default_index_store() -> IndexStore {
     let cache_dir = default_cache_dir(&root);
     IndexStore::new(root, cache_dir)
 }
-
 pub async fn create_context_default() -> SessionContext {
     let root = default_root();
     let cache_dir = default_cache_dir(&root);

@@ -32,6 +32,10 @@ const DEFAULT_AGENT_JOBS: usize = 8;
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct ScanArgs {
+    /// Operate on agent sessions instead of Claude Code sessions
+    #[arg(short = 'A', long)]
+    pub agent: bool,
+
     #[command(subcommand)]
     pub command: Option<ScanCommand>,
 
