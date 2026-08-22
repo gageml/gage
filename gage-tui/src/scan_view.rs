@@ -1625,39 +1625,46 @@ impl ViewState {
         self.open_session_dialog(item, SessionNav::Agents);
     }
 
-    /// Step the session dialog to the previous/next agent row of the
-    /// tasks panel, moving the panel selection with it.
+    /// Step the session dialog to the previous/next agent session in
+    /// task-list order, across every task regardless of expansion.
+    /// The target's task is expanded when collapsed so the panel
+    /// selection can follow the dialog.
     fn step_agent_dialog(&mut self, delta: isize) {
-        let Some(i) = self.tasks.selected_index() else {
+        let Dialog::Session { id, .. } = &self.dialog else {
             return;
         };
+        let current_id = id.clone();
         let stepped = {
-            let rows = flat_task_rows(&self.model, &self.expanded);
-            let agent_indexes: Vec<usize> = rows
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, row)| matches!(row, TaskRow::Agent(..)).then_some(idx))
-                .collect();
-            let pos = agent_indexes.iter().position(|idx| *idx == i);
+            let mut agents: Vec<(&TaskItem, &AgentItem)> = Vec::new();
+            for t in self.model.sorted_tasks() {
+                for a in &t.agents {
+                    agents.push((t, a));
+                }
+            }
+            let pos = agents.iter().position(|(_, a)| a.session_id == current_id);
             pos.and_then(|pos| {
-                let next =
-                    (pos as isize + delta).clamp(0, agent_indexes.len() as isize - 1) as usize;
+                let next = (pos as isize + delta).clamp(0, agents.len() as isize - 1) as usize;
                 if next == pos {
                     return None;
                 }
-                let target = *agent_indexes.get(next).expect("next is clamped in bounds");
-                match rows.get(target) {
-                    Some(TaskRow::Agent(t, a)) => Some((target, agent_session_item(t, a))),
-                    _ => None,
-                }
+                let (t, a) = *agents.get(next).expect("next is clamped in bounds");
+                Some((task_key(&t.id), agent_session_item(t, a)))
             })
         };
-        let Some((target, item)) = stepped else {
+        let Some((parent_key, item)) = stepped else {
             return;
         };
+        if self.expanded.insert(parent_key) {
+            self.sync_tables();
+        }
         let ids = flat_task_ids(&self.model, &self.expanded);
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        self.tasks.select_by(target as isize - i as isize, &refs);
+        if let (Some(cur), Some(target)) = (
+            self.tasks.selected_index(),
+            refs.iter().position(|id| *id == item.id),
+        ) {
+            self.tasks.select_by(target as isize - cur as isize, &refs);
+        }
         self.open_agent_session(&item);
     }
 
