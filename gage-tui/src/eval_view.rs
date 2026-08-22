@@ -715,7 +715,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
     }
     let help = match state.dialog {
         Dialog::Test { .. } => "q close · ↑/↓ scroll · [/] prev/next",
-        Dialog::Session { .. } => "q back · Tab pane · j/k g/G · n note · [/] prev/next",
+        Dialog::Session { .. } => {
+            "q back · Tab pane · j/k g/G · n note · r refresh · [/] prev/next"
+        }
         Dialog::OpenRun(_) => "",
         Dialog::None => "q quit · ↑/↓ select · Space/◂ ▸ expand · Enter open · o open run",
     };
