@@ -475,6 +475,20 @@ pub fn session_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<Stri
     Ok(ids)
 }
 
+/// Session ids of the agent runs a scan's tasks spawned, ordered by
+/// session id.
+pub fn agent_session_ids_for_scan(
+    conn: &Connection,
+    scan_id: &str,
+) -> Result<Vec<String>, ScanError> {
+    let mut stmt =
+        conn.prepare("SELECT session_id FROM task_agent WHERE scan_id = ?1 ORDER BY session_id")?;
+    let ids = stmt
+        .query_map(params![scan_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 pub fn note_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String>, ScanError> {
     let mut stmt = conn.prepare("SELECT note_id FROM scan_note WHERE scan_id = ?1")?;
     let ids = stmt
