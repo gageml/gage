@@ -1,0 +1,146 @@
+use gage::tools::Query;
+use gage::{
+    AgentRunner,
+    Template,
+    call_agent,
+    query,
+    scan,
+    write_note,
+};
+
+pub const SCANNER = #{
+    name: "open-code",
+    description: "Annotate sessions with open codes for error analysis",
+    tasks: #{
+        annotate: #{
+            notes: #{
+                writes: #{ "code.open": include_str!("code-open-doc.md") },
+            },
+        },
+    },
+};
+
+/// Submit each session to an agent that writes open code notes.
+///
+/// Every target session is annotated on every run: repeat runs are
+/// independent annotation passes, distinguished by scan-qualified
+/// authors.
+pub async fn annotate() {
+    // Init template for agent prompts
+    let t = Template::new(include_str!("open-code-prompt.md.j2")).await?;
+
+    // Use agent runner to annotate sessions concurrently
+    let runner = AgentRunner::new();
+    for s in scan().sessions() {
+        // Skip sessions without annotatable content
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            continue
+        }
+        // Queue agent
+        let prompt = t.render(#{ session_id: s.id }).await?;
+        runner.add(
+            call_agent(prompt)
+                .name("open-code")
+                // The agent sees this session only
+                .gage_tools([Query::new().sessions([s])])
+                .tools(#{ open_code: open_code_tooldef() })
+                .model("medium"),
+            #{ session: s.id },
+        );
+    }
+
+    // Run agents
+    let results = runner.start();
+
+    // Collect results
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!(
+                    "open-code: {:?}",
+                    #{
+                        session,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+            }
+            None => break,
+        }
+    }
+
+    Ok(())
+}
+
+/// Min total text length to annotate session
+const SESSION_MIN_TEXT_LEN = 200;
+
+async fn skip_session(s) {
+    // Use query instead of iterating over messages to keep scanner
+    // memory use down. Limit sum to 50 messages for same reason.
+    let result = query(
+        format!(
+            "SELECT sum(length(text)) AS text_len FROM \
+            (SELECT text FROM message WHERE session_id = '{}' LIMIT 50)",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ text_len } = result.get(0).expect("should return one row");
+    match text_len {
+        () => Ok(Some("empty session")),
+        text_len if text_len < SESSION_MIN_TEXT_LEN => {
+            let reason = format!(
+                "text len {text_len} < min {SESSION_MIN_TEXT_LEN}"
+            );
+            Ok(Some(reason))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn open_code_tooldef() {
+    #{
+        name: "OpenCode",
+        description: "Write an open code note for the session",
+        inputs: #{
+            text: #{
+                type: "string",
+                description: "The open code: a brief note on what is wrong or surprising",
+            },
+            session: #{ type: "string", description: "Session ID" },
+            line: #{
+                type: "integer",
+                description: "Session line the observation anchors to",
+                required: false,
+            },
+        },
+    }
+}
+
+pub async fn open_code(inputs, meta) {
+    let target = #{ session: inputs.session };
+    if let Some(line) = inputs.get("line") {
+        target.insert("line", line)
+    }
+    // Record the calling tool-use id; the author carries the run, not
+    // the call
+    let metadata = #{};
+    if let Some(call) = meta.get("claudecode/toolUseId") {
+        metadata.insert("call", call)
+    }
+    let scan_short = scan().id.chars().take(8).collect::<String>();
+    let note = write_note(
+        #{
+            name: "code.open",
+            author: `agent:open-code:${scan_short}`,
+            value: inputs.text,
+            target,
+            metadata,
+        },
+    )
+    .replace_prev()
+    .await?;
+    Ok(format!("Wrote open code note {}", note.id))
+}

@@ -1,0 +1,44 @@
+Write open code notes for session {{ session_id }}
+
+You are one annotator in an error analysis over recorded sessions. Read
+session {{ session_id }} and write open codes: brief, unstructured notes on
+what is wrong or surprising in the record.
+
+Follow this discipline:
+
+- Note each causally independent failure, anchored at the earliest line where
+  the failure is visible. Do not note lines that are consequences or recovery
+  attempts of a failure you already noted. A "chain" is one failure plus its
+  causal consequences; a session can contain several chains.
+
+- Avoid generic labels ("hallucination", "verbosity"). Describe the specific
+  behavior you observed.
+
+- The evidence must be in the record itself. Do not infer or assume conditions
+  beyond what the record shows.
+
+- Surprising behavior is worth noting even when it's not a failure.
+
+- Many sessions have nothing worth noting. Do not force observations onto a
+  session.
+
+Read the conversation by querying the `message` table via `mcp__gage__Query`,
+filtering by `session_id = '{{ session_id }}'`. `message` table columns:
+(session_id, line, uuid, type, subtype, text, timestamp, attachments,
+ide_tags, raw)
+
+Write open codes using the `mcp__gage__OpenCode` tool:
+
+- Use a session-level note (no `line`) for observations about the session as a
+  whole, and line-level notes (with `line`) to anchor specific chains at the
+  line where each failure first shows.
+
+- Write at most one note per line and at most one session-level note. Writing
+  again to the same target replaces the earlier note, so combine multiple
+  observations for one target into a single note.
+
+If you found nothing to note, do not write a note. Do not use the tool to
+report "nothing found".
+
+In your reply, state how many open codes you wrote. If you wrote none, say so.
+Do not restate the notes in your reply.
