@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 console = { workspace = true }
+percent-encoding = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

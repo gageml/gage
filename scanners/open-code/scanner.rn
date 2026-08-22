@@ -134,7 +134,7 @@ pub async fn open_code(inputs, meta) {
     let note = write_note(
         #{
             name: "code.open",
-            author: `agent:open-code:${scan_short}`,
+            author: `agent:open-code?scan=${scan_short}`,
             value: inputs.text,
             target,
             metadata,

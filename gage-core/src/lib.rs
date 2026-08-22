@@ -1,3 +1,4 @@
+pub mod author;
 pub mod config;
 pub mod datetime;
 pub mod fs;

@@ -314,14 +314,19 @@ impl ToolMeta {
         }
     }
 
-    /// Author of this tool call: `agent:{scanner}?call={toolUseId}`.
-    /// The author is the authoring call — the tool-use id ties the
-    /// written item to the exact transcript entry that wrote it.
-    /// Errors when the client sent no tool-use id.
+    /// Author of this tool call: `agent:{scanner}?call={toolUseId}`,
+    /// per the convention in [`gage_core::author`]. The author is the
+    /// authoring call — the tool-use id ties the written item to the
+    /// exact transcript entry that wrote it. Errors when the client
+    /// sent no tool-use id.
     #[rune::function(instance)]
     fn agent_tool_use(&self) -> Result<String, VmError> {
         match self.entries.get(TOOL_USE_ID_KEY).and_then(|v| v.as_str()) {
-            Some(id) => Ok(format!("agent:{}?call={id}", self.scanner_name)),
+            Some(id) => Ok(gage_core::author::compose(
+                "agent",
+                &self.scanner_name,
+                &[("call", id)],
+            )),
             None => Err(VmError::panic(format!(
                 "meta has no `{TOOL_USE_ID_KEY}`; cannot derive an author"
             ))),

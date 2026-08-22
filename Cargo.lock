@@ -2648,6 +2648,7 @@ name = "gage-core"
 version = "0.0.1"
 dependencies = [
  "console 0.16.3",
+ "percent-encoding",
  "serde",
  "serde_json",
  "toml 0.8.23",
