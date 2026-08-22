@@ -110,6 +110,10 @@ pub struct ScannerDef {
     /// the default run set, not explicitly selectable, and scheduled
     /// only when a task's `required_by` pulls it into a plan.
     pub library: bool,
+    /// Group memberships declared via `SCANNER.groups`. The
+    /// distinguished group `default` marks scanners run when none are
+    /// specified; `-g --group` selects by any group name.
+    pub groups: Vec<String>,
     pub tasks: BTreeMap<String, TaskDef>,
     /// Agent defs declared via `SCANNER.agents`: fn name → description.
     /// Each names a public function returning an un-awaited `CallAgent`
@@ -599,6 +603,15 @@ impl ScannerRegistry {
             .collect()
     }
 
+    /// Visible scanners declaring membership in `group`, sorted by
+    /// name.
+    pub fn group_members(&self, group: &str) -> Vec<&ScannerDef> {
+        self.list_visible()
+            .into_iter()
+            .filter(|d| d.groups.iter().any(|g| g == group))
+            .collect()
+    }
+
     /// True if `name` is a known library scanner. Library scanners are
     /// not explicitly selectable — selection treats them as unknown.
     pub fn is_library(&self, name: &str) -> bool {
@@ -707,6 +720,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
     let mut version = String::new();
     let mut hidden = false;
     let mut library = false;
+    let mut groups: Vec<String> = Vec::new();
     let mut tasks_obj: Option<&ast::ExprObject> = None;
     let mut agents_obj: Option<&ast::ExprObject> = None;
 
@@ -741,6 +755,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
                     }
                     Some("hidden") => hidden = expr_bool(source, expr),
                     Some("library") => library = expr_bool(source, expr),
+                    Some("groups") => groups = expr_str_vec(source, expr),
                     Some("tasks") => {
                         if let ast::Expr::Object(obj) = expr {
                             tasks_obj = Some(obj);
@@ -777,6 +792,7 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
         version,
         hidden,
         library,
+        groups,
         tasks,
         agents,
         ast: file,
@@ -1145,6 +1161,19 @@ fn expr_str(source: &str, expr: &ast::Expr) -> Option<String> {
         return None;
     }
     Some(stripped.trim().to_string())
+}
+
+/// String elements of a vec literal; non-vec expressions and
+/// non-string elements yield nothing.
+fn expr_str_vec(source: &str, expr: &ast::Expr) -> Vec<String> {
+    let ast::Expr::Vec(vec_expr) = expr else {
+        return Vec::new();
+    };
+    vec_expr
+        .items
+        .iter()
+        .filter_map(|(item_expr, _)| expr_str(source, item_expr))
+        .collect()
 }
 
 fn strip_quotes(s: &str) -> String {

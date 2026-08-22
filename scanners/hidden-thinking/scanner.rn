@@ -2,6 +2,7 @@ use gage::{Ignore, write_note, write_issue, user, scan};
 
 pub const SCANNER = #{
     name: "hidden-thinking",
+    groups: ["default"],
     description: "
 Detect sessions where model thinking is hidden
 

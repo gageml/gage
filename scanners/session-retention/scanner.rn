@@ -3,6 +3,7 @@ use gage::{write_note, write_issue, scan, user};
 pub const SCANNER = #{
     name: "session-retention",
     description: "Highlight unset session retention policy",
+    groups: ["default"],
     tasks: #{
         note_and_issue: #{
             notes: #{

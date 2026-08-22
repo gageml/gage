@@ -11,6 +11,7 @@ use gage::{
 pub const SCANNER = #{
     name: "open-code",
     description: "Annotate sessions with open codes for error analysis",
+    groups: ["eval"],
     tasks: #{
         annotate: #{
             notes: #{

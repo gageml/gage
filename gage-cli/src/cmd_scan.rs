@@ -112,6 +112,10 @@ pub struct ScanRunArgs {
     #[arg(short, long = "scanner", value_name = "NAME")]
     scanners: Vec<String>,
 
+    /// Run the scanners in a group (repeatable)
+    #[arg(short, long = "group", value_name = "NAME")]
+    groups: Vec<String>,
+
     /// Scanner file to run (repeatable)
     #[arg(short = 'f', long = "file", value_name = "PATH")]
     files: Vec<String>,
@@ -1239,37 +1243,87 @@ async fn run_dialog(
     let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     names.sort();
 
-    let selected_names: Vec<String> = if args.scanners.is_empty() && !args.yes {
-        let mut prompt = cli::multiselect("Scanners");
-        for (i, name) in names.iter().enumerate() {
-            prompt = prompt.item(i, (*name).to_string(), "");
+    // `-g` expands to the group's enabled members, unioned with `-s`
+    let mut group_names: Vec<String> = Vec::new();
+    for group in &args.groups {
+        let members: Vec<&str> = registry
+            .group_members(group)
+            .into_iter()
+            .filter(|d| config.is_scanner_enabled(&d.name))
+            .map(|d| d.name.as_str())
+            .collect();
+        if members.is_empty() {
+            cli::log::error(format!("No scanners for group '{group}'"))?;
+            return Err(DialogError::Canceled);
         }
-        let indices: Vec<usize> = prompt.interact()?;
-        indices
-            .iter()
-            .map(|&i| {
-                names
-                    .get(i)
-                    .expect("selected holds positions in names")
-                    .to_string()
-            })
-            .collect()
-    } else if args.scanners.is_empty() {
-        names.iter().map(|n| n.to_string()).collect()
-    } else {
-        for name in &args.scanners {
-            let bare = name.split("#{").next().unwrap();
-            // Library scanners are not selectable — same error as an
-            // unknown name
-            if !registry.is_known(bare) || registry.is_library(bare) {
-                cli::log::error(format!("Unknown scanner: {bare}"))?;
-                return Err(DialogError::Canceled);
+        for name in members {
+            if !group_names.iter().any(|n| n == name) {
+                group_names.push(name.to_string());
             }
         }
-        args.scanners.clone()
-    };
+    }
 
-    if !args.scanners.is_empty() || args.yes {
+    let selected_names: Vec<String> =
+        if args.scanners.is_empty() && group_names.is_empty() && !args.yes {
+            // No selection args: pick interactively, `default` group
+            // members pre-selected
+            let default_names: Vec<usize> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| {
+                    registry
+                        .group_members("default")
+                        .iter()
+                        .any(|d| d.name == **n)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            let mut prompt = cli::multiselect("Scanners").initial_values(default_names);
+            for (i, name) in names.iter().enumerate() {
+                prompt = prompt.item(i, (*name).to_string(), "");
+            }
+            let indices: Vec<usize> = prompt.interact()?;
+            indices
+                .iter()
+                .map(|&i| {
+                    names
+                        .get(i)
+                        .expect("selected holds positions in names")
+                        .to_string()
+                })
+                .collect()
+        } else if args.scanners.is_empty() && group_names.is_empty() {
+            // `-y` with no selection args: the `default` group
+            names
+                .iter()
+                .filter(|n| {
+                    registry
+                        .group_members("default")
+                        .iter()
+                        .any(|d| d.name == **n)
+                })
+                .map(|n| n.to_string())
+                .collect()
+        } else {
+            for name in &args.scanners {
+                let bare = name.split("#{").next().unwrap();
+                // Library scanners are not selectable — same error as an
+                // unknown name
+                if !registry.is_known(bare) || registry.is_library(bare) {
+                    cli::log::error(format!("Unknown scanner: {bare}"))?;
+                    return Err(DialogError::Canceled);
+                }
+            }
+            let mut out = group_names;
+            for name in &args.scanners {
+                if !out.iter().any(|n| n == name) {
+                    out.push(name.clone());
+                }
+            }
+            out
+        };
+
+    if !args.scanners.is_empty() || !args.groups.is_empty() || args.yes {
         let display: Vec<&str> = selected_names
             .iter()
             .map(|n| n.split("#{").next().unwrap())
@@ -1895,7 +1949,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn list_scanners(registry: &ScannerRegistry) {
-    let header: Vec<String> = ["Scanner", "Description"]
+    let header: Vec<String> = ["Scanner", "Groups", "Description"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -1925,14 +1979,17 @@ fn list_scanners(registry: &ScannerRegistry) {
     let rows: Vec<Vec<String>> = defs
         .into_iter()
         .map(|d| {
+            let groups = style(d.groups.join(", ")).dim().to_string();
             if config.is_scanner_enabled(&d.name) {
                 vec![
                     style(&d.name).yellow().to_string(),
+                    groups,
                     style(&d.description).dim().to_string(),
                 ]
             } else {
                 vec![
                     style(format!("{} (disabled)", d.name)).dim().to_string(),
+                    groups,
                     style(&d.description).dim().to_string(),
                 ]
             }

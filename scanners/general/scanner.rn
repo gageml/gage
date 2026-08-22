@@ -11,6 +11,7 @@ use gage::{
 pub const SCANNER = #{
     name: "general",
     description: "Scan sessions for general findings",
+    groups: ["default"],
     tasks: #{
         findings: #{
             notes: #{
