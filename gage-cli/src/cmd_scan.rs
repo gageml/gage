@@ -112,8 +112,14 @@ pub struct ScanInvalidateArgs {
 #[derive(Args)]
 pub struct ScanRunArgs {
     /// Session IDs to scan (or prefix)
-    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "today", "all", "sample"])]
+    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "today", "all", "sample", "project"])]
     sessions: Vec<String>,
+
+    /// Limit sessions to a project
+    ///
+    /// PATH is the project's working directory, relative or absolute.
+    #[arg(short, long, value_name = "PATH", conflicts_with_all = ["rerun", "scan"])]
+    project: Option<std::path::PathBuf>,
 
     /// Scanner to run (repeatable)
     #[arg(short, long = "scanner", value_name = "NAME")]
@@ -1547,7 +1553,20 @@ async fn run_dialog(
             Some(Duration::from_secs(u64::from(d) * 86_400))
         };
 
-        let label = if args.all {
+        // Canonicalized so the label and the builder's slug encoding
+        // both see the real path; a path not on disk passes through
+        // resolved and matches whatever it encodes to (the builder
+        // applies the same fallback).
+        let project = match &args.project {
+            Some(p) => {
+                let resolved = gage_core::config::resolve_local_path(p)
+                    .with_context(|| format!("resolving project path {}", p.display()))?;
+                Some(resolved.canonicalize().unwrap_or(resolved))
+            }
+            None => None,
+        };
+
+        let mut label = if args.all {
             "all".to_string()
         } else if let Some(n) = args.limit {
             format!("{n} latest")
@@ -1563,9 +1582,15 @@ async fn run_dialog(
                 None => window,
             }
         };
+        if let Some(p) = &project {
+            label = format!("{label} in {}", shorten_home_path(p));
+        }
         cli::log::step(format!("Sessions\n{}", style(label).dim()))?;
 
         let mut builder = SessionListBuilder::new();
+        if let Some(p) = &project {
+            builder = builder.project(p);
+        }
         if let Some(d) = since {
             builder = builder.since(d);
         }
