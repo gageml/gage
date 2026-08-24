@@ -138,11 +138,11 @@ pub struct ScanRunArgs {
     #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     sample: Option<usize>,
 
-    /// Scan sessions modified in past N days (default 30)
+    /// Scan sessions from past N days (default 30)
     #[arg(short, long, value_name = "N", conflicts_with = "all")]
     days: Option<u32>,
 
-    /// Scan sessions modified today
+    /// Scan sessions from today
     ///
     /// Selects sessions modified since midnight local time.
     #[arg(short, long, conflicts_with_all = ["days", "all"])]
