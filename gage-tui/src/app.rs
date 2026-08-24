@@ -457,6 +457,22 @@ impl AppState {
         };
     }
 
+    /// Select entry `index`'s outline row and scroll it into view, for
+    /// hosts opening the view at a specific entry.
+    pub(crate) fn select_entry(&mut self, index: usize) {
+        let Some(row) = self
+            .outline
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Entry { index: i } if i == index))
+        else {
+            return;
+        };
+        self.list_state.select(Some(row));
+        self.body_scroll = 0;
+        self.center_selected();
+    }
+
     fn author(&self) -> String {
         format!("user:{}", self.username)
     }

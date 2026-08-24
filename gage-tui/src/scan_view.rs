@@ -760,12 +760,26 @@ fn handle_key(
             state.handle_open_scan_key(key.code, loader);
             return false;
         }
+        Dialog::Notice { .. } => {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q'))
+                && let Dialog::Notice { return_to, .. } =
+                    std::mem::replace(&mut state.dialog, Dialog::None)
+            {
+                state.dialog = *return_to;
+            }
+            return false;
+        }
         Dialog::Note { .. } | Dialog::Issue { .. } | Dialog::Log { .. } => {
             let page = state.scroll_view.page() as isize;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
                 KeyCode::Char('a') if matches!(state.dialog, Dialog::Issue { .. }) => {
                     state.open_actions_prompt();
+                }
+                KeyCode::Char('t')
+                    if matches!(state.dialog, Dialog::Note { .. } | Dialog::Issue { .. }) =>
+                {
+                    state.open_tool_use_session();
                 }
                 KeyCode::Char('l') if matches!(state.dialog, Dialog::Log { .. }) => {
                     state.dialog = Dialog::None
@@ -1058,12 +1072,20 @@ enum Dialog {
     /// what `[`/`]` steps through — the sessions table
     /// or the tasks panel's agent rows — and titles the dialog
     /// accordingly. The connection serves the view's note operations
-    /// for the dialog's lifetime.
+    /// for the dialog's lifetime. `return_to` layers the dialog over
+    /// another one (the note/issue dialog a tool-use jump came from):
+    /// closing restores it instead of the bare view.
     Session {
         id: String,
         view: Box<app::AppState>,
         nav: SessionNav,
         db: Connection,
+        return_to: Option<Box<Dialog>>,
+    },
+    /// Pure notification over another dialog; Enter restores it
+    Notice {
+        message: String,
+        return_to: Box<Dialog>,
     },
     /// Captured scan streams (`{scan_id}.{err,out,log}`), reloaded
     /// from the files while a live scan runs.
@@ -1125,6 +1147,9 @@ enum SessionNav {
     Sessions,
     /// The tasks panel's agent rows
     Agents,
+    /// A single agent session opened by a tool-use jump; stepping is
+    /// disabled
+    Pinned,
 }
 
 impl ViewState {
@@ -1265,6 +1290,94 @@ impl ViewState {
                 issue: Box::new(issue.clone()),
             };
         }
+    }
+
+    /// Open the session view over the agent session holding the
+    /// tool-use entry named by the open note/issue dialog's author,
+    /// layered so closing it restores the dialog. When the entry
+    /// cannot be located, a notice overlays the dialog instead.
+    fn open_tool_use_session(&mut self) {
+        let (author, kind) = match &self.dialog {
+            Dialog::Note { note } => (note.author.clone(), "note"),
+            Dialog::Issue { issue } => (issue.author.clone(), "issue"),
+            _ => return,
+        };
+        let Some(call_id) = author_call_id(&author) else {
+            return;
+        };
+        let hit = self.find_tool_use_entry(call_id);
+        let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
+        self.dialog = match hit {
+            Some(mut hit) => {
+                // Annotation mode: the reviewer sees only their own
+                // notes, matching open_session_dialog
+                if self.annotate && !self.show_all_notes {
+                    hit.doc.notes.retain(|n| n.author == self.user_author);
+                }
+                let options = crate::ViewOptions {
+                    show_turns: true,
+                    annotate: self.annotate,
+                    ..Default::default()
+                };
+                let mut view = app::AppState::new(hit.doc, &options, hit.source);
+                view.select_entry(hit.entry_index);
+                Dialog::Session {
+                    id: hit.item.id,
+                    view: Box::new(view),
+                    nav: SessionNav::Pinned,
+                    db: hit.db,
+                    return_to: Some(return_to),
+                }
+            }
+            None => Dialog::Notice {
+                message: format!("Cannot find tool use entry for {kind} author."),
+                return_to,
+            },
+        };
+    }
+
+    /// Search the scan's agent sessions for the entry making tool-use
+    /// call `call_id`. Agent JSONL files are text-scanned first so only
+    /// candidate sessions are parsed; a file that cannot be read falls
+    /// through to the full document load, which surfaces the error.
+    /// Load errors go to the scan log and the search continues.
+    fn find_tool_use_entry(&mut self, call_id: &str) -> Option<ToolUseHit> {
+        let items: Vec<SessionItem> = self
+            .model
+            .tasks
+            .iter()
+            .flat_map(|t| t.agents.iter().map(|a| agent_session_item(t, a)))
+            .collect();
+        let db = match gage_db::db::open_db() {
+            Ok(db) => db,
+            Err(e) => {
+                self.push_log(format!("Find tool use {call_id}: {e}"));
+                return None;
+            }
+        };
+        for item in items {
+            if let Some(path) = &item.path
+                && let Ok(text) = std::fs::read_to_string(path)
+                && !text.contains(call_id)
+            {
+                continue;
+            }
+            match load_session_doc(&item, &db) {
+                Ok((doc, source)) => {
+                    if let Some(entry_index) = tool_use_entry_index(&doc, call_id) {
+                        return Some(ToolUseHit {
+                            item,
+                            doc,
+                            source,
+                            entry_index,
+                            db,
+                        });
+                    }
+                }
+                Err(e) => self.push_log(format!("Open session {}: {e}", item.id)),
+            }
+        }
+        None
     }
 
     /// Open the actions menu over the issue dialog's issue
@@ -1546,6 +1659,7 @@ impl ViewState {
                     }
                 }
                 SessionNav::Agents => self.step_agent_dialog(delta),
+                SessionNav::Pinned => {}
             },
             _ => {}
         }
@@ -1598,13 +1712,15 @@ impl ViewState {
             view: Box::new(view),
             nav,
             db,
+            return_to: None,
         };
     }
 
     /// Route a key to the embedded session view, then apply what the
-    /// outcome means at this level: `Close` dismisses the dialog and
-    /// `[`/`]` (`Ignored` by the view) steps to the neighboring
-    /// session, remembering the current one's UI position.
+    /// outcome means at this level: `Close` dismisses the dialog
+    /// (restoring the dialog beneath, when layered) and `[`/`]`
+    /// (`Ignored` by the view) steps to the neighboring session,
+    /// remembering the current one's UI position.
     fn handle_session_dialog_key(&mut self, key: KeyEvent) {
         let mut close = false;
         let mut step: isize = 0;
@@ -1643,7 +1759,13 @@ impl ViewState {
             self.push_log(msg);
         }
         if close {
-            self.dialog = Dialog::None;
+            self.dialog = match std::mem::replace(&mut self.dialog, Dialog::None) {
+                Dialog::Session {
+                    return_to: Some(back),
+                    ..
+                } => *back,
+                _ => Dialog::None,
+            };
         } else if step != 0 {
             self.step_dialog_item(step);
         }
@@ -2088,6 +2210,41 @@ fn agent_session_item(task: &TaskItem, agent: &AgentItem) -> SessionItem {
     }
 }
 
+/// A located tool-use entry: the agent session it was found in, the
+/// session's loaded document, and the entry's position in it. The
+/// connection is handed on to the session dialog.
+struct ToolUseHit {
+    item: SessionItem,
+    doc: crate::doc::Document,
+    source: app::DocSource,
+    entry_index: usize,
+    db: Connection,
+}
+
+/// The tool-use call id embedded in an author of the form
+/// `{name}?call=toolu_{rest}`.
+fn author_call_id(author: &str) -> Option<&str> {
+    let (_, call) = author.split_once("?call=")?;
+    call.starts_with("toolu_").then_some(call)
+}
+
+/// Index of the entry whose message content holds the tool_use block
+/// with id `call_id`.
+fn tool_use_entry_index(doc: &crate::doc::Document, call_id: &str) -> Option<usize> {
+    use serde_json::Value;
+    doc.entries.iter().position(|e| {
+        e.message()
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|b| {
+                    b.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && b.get("id").and_then(Value::as_str) == Some(call_id)
+                })
+            })
+    })
+}
+
 /// An agent's duration: last minus first session timestamp once both
 /// are known, otherwise first timestamp to now (a live agent still
 /// writing). None without a start, or when the scan is over and no
@@ -2175,10 +2332,11 @@ fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
         Dialog::Session { id, view, nav, .. } => {
             let title = match nav {
                 SessionNav::Sessions => format!(" Session {id} "),
-                SessionNav::Agents => format!(" Agent {id} "),
+                SessionNav::Agents | SessionNav::Pinned => format!(" Agent {id} "),
             };
             draw_session_dialog(frame, title, view);
         }
+        Dialog::Notice { message, .. } => dialog::draw_message(frame, message, "Enter dismiss"),
         Dialog::Log { content, .. } => {
             scroll_view.render_modal(frame, " Log ".to_string(), |_| vec![content.clone()]);
         }
@@ -3214,17 +3372,25 @@ fn footer_help(state: &ViewState) -> Line<'static> {
     if state.prompt.is_some() {
         return Line::default();
     }
-    match state.dialog {
-        Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone => Line::default(),
-        Dialog::Note { .. } => {
-            hint::help_line(&[("q", "back"), ("↑/↓", "scroll"), ("[/]", "prev/next")])
+    match &state.dialog {
+        Dialog::ConfirmQuit | Dialog::Canceling | Dialog::ScanDone | Dialog::Notice { .. } => {
+            Line::default()
         }
-        Dialog::Issue { .. } => hint::help_line(&[
-            ("q", "back"),
-            ("↑/↓", "scroll"),
-            ("[/]", "prev/next"),
-            ("a", "action"),
-        ]),
+        Dialog::Note { note } => {
+            let mut items = vec![("q", "back"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
+            if author_call_id(&note.author).is_some() {
+                items.push(("t", "tool use"));
+            }
+            hint::help_line(&items)
+        }
+        Dialog::Issue { issue } => {
+            let mut items = vec![("q", "back"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
+            if author_call_id(&issue.author).is_some() {
+                items.push(("t", "tool use"));
+            }
+            items.push(("a", "action"));
+            hint::help_line(&items)
+        }
         Dialog::Session { nav, .. } => {
             let mut items = vec![
                 ("q", "back"),
@@ -3233,7 +3399,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
                 ("n", "note"),
                 ("r", "refresh"),
             ];
-            if session_step_targets(state, nav) > 1 {
+            if session_step_targets(state, *nav) > 1 {
                 items.push(("[/]", "prev/next"));
             }
             hint::help_line(&items)
@@ -3296,7 +3462,8 @@ fn footer_help(state: &ViewState) -> Line<'static> {
 
 /// Number of items `[`/`]` step through for a session dialog opened
 /// from `nav` — the sessions table's rows, or the tasks panel's
-/// visible agent rows.
+/// visible agent rows. A pinned dialog steps through nothing but
+/// itself.
 fn session_step_targets(state: &ViewState, nav: SessionNav) -> usize {
     match nav {
         SessionNav::Sessions => state.model.sessions.len(),
@@ -3304,6 +3471,7 @@ fn session_step_targets(state: &ViewState, nav: SessionNav) -> usize {
             .iter()
             .filter(|row| matches!(row, TaskRow::Agent(..)))
             .count(),
+        SessionNav::Pinned => 1,
     }
 }
 
