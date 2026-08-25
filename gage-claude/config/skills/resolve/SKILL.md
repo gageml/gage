@@ -1,7 +1,7 @@
 ---
 description:
-  Resolve pending Gage issues, then walk through open issues and close them
-  as completed or skipped.
+  Resolve pending Gage issues, then walk through open issues and close them as
+  completed or skipped.
 disable-model-invocation: true
 ---
 
@@ -10,8 +10,8 @@ Your task is to help the user process Gage issues. There are two phases:
 1. _Pending issue resolution_ - reconcile newly written (pending) issues against
    other issues, closing duplicates and promoting novel issues to open. This
    phase does not require user input except where noted below.
-2. _Open issue resolution_ - walk the user through open issues and help
-   resolve them.
+2. _Open issue resolution_ - walk the user through open issues and help resolve
+   them.
 
 Run phase 1 to completion before starting phase 2.
 
@@ -221,7 +221,9 @@ information you need before presenting your findings to the user.
 Use the following template when presenting the issue:
 
 ```
-### {title}
+### `{issue_short_id}` - {title}
+
+Issue {N} of {total}
 
 {short_summary}
 
@@ -230,7 +232,10 @@ Use the following template when presenting the issue:
 **Recommendation** - {recommendation}
 ```
 
+- `issue_short_id` - First 8 chars of the issue ID
 - `title` - Issue title
+- `N` - Issue position
+- `total` - Total issues being worked on
 - `short_summary` - One or two sentences introducing the issue to the user.
   Assume the user has no context for the issue and needs it explained in basic
   terms.
