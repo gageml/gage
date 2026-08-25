@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rusqlite::{Connection, params};
 
 #[derive(Debug, Clone)]
@@ -503,6 +505,36 @@ pub fn issue_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String
         .query_map(params![scan_id], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ids)
+}
+
+/// Per-scan row counts for list displays, keyed by scan id. Scans
+/// with no task or session rows are absent from the map.
+pub fn counts_by_scan(conn: &Connection) -> Result<HashMap<String, ScanCounts>, ScanError> {
+    let mut out: HashMap<String, ScanCounts> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT scan_id, COUNT(*) FROM scan_task GROUP BY scan_id")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+    })?;
+    for row in rows {
+        let (id, n) = row?;
+        out.entry(id).or_default().tasks = n;
+    }
+    let mut stmt = conn.prepare("SELECT scan_id, COUNT(*) FROM scan_session GROUP BY scan_id")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+    })?;
+    for row in rows {
+        let (id, n) = row?;
+        out.entry(id).or_default().sessions = n;
+    }
+    Ok(out)
+}
+
+/// Tasks recorded and sessions touched by one scan.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanCounts {
+    pub tasks: u32,
+    pub sessions: u32,
 }
 
 pub fn all(conn: &Connection) -> Result<Vec<Scan>, ScanError> {

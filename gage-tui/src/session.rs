@@ -33,6 +33,8 @@ pub async fn load(session_id: &str, db: &Connection) -> Result<Document, Box<dyn
 /// A row in the session-open picker.
 pub struct SessionListItem {
     pub id: String,
+    /// Encoded project directory name; empty when unrecorded
+    pub project: String,
     pub title: String,
     pub mtime_ms: i64,
 }
@@ -43,7 +45,8 @@ pub async fn list_recent(limit: usize) -> Result<Vec<SessionListItem>, Box<dyn E
     use datafusion::arrow::array::TimestampMillisecondArray;
 
     let ctx = gage_query::create_context_default().await;
-    let sql = format!("SELECT id, mtime, title FROM session ORDER BY mtime DESC LIMIT {limit}");
+    let sql =
+        format!("SELECT id, mtime, title, project FROM session ORDER BY mtime DESC LIMIT {limit}");
     let batches = ctx.sql(&sql).await?.collect().await?;
     let mut items = Vec::new();
     for batch in &batches {
@@ -62,9 +65,19 @@ pub async fn list_recent(limit: usize) -> Result<Vec<SessionListItem>, Box<dyn E
             .as_any()
             .downcast_ref::<StringArray>()
             .expect("session.title is a Utf8 column");
+        let projects = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("session.project is a Utf8 column");
         for i in 0..batch.num_rows() {
             items.push(SessionListItem {
                 id: ids.value(i).to_string(),
+                project: if projects.is_null(i) {
+                    String::new()
+                } else {
+                    projects.value(i).to_string()
+                },
                 title: if titles.is_null(i) {
                     String::new()
                 } else {

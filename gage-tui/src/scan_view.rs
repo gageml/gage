@@ -38,13 +38,14 @@ use gage_db::rusqlite::Connection;
 use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::item_table::ItemTable;
-use crate::picker::{self, PickItem, Picker, PickerAction};
+use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 
 /// Loader used by the open-scan dialog to rebuild the model for a
 /// picked scan id. Absent for live-scan views, where `o` is disabled.
 type ScanLoader<'a> = &'a dyn Fn(&str) -> io::Result<ScanModel>;
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
+use crate::text::ellipsize;
 use crate::textarea::TextArea;
 use crate::{app, hint, markdown, session, styles};
 
@@ -546,11 +547,13 @@ fn standalone_scan_pick(
 fn scan_picker(current: Option<&str>) -> io::Result<Picker> {
     let conn = gage_db::db::open_db().map_err(io::Error::other)?;
     let mut scans = gage_db::scan::all(&conn).map_err(io::Error::other)?;
+    let counts = gage_db::scan::counts_by_scan(&conn).map_err(io::Error::other)?;
     scans.sort_by_key(|s| std::cmp::Reverse(s.created));
     let items = scans
         .into_iter()
         .map(|scan| {
-            let status = match scan.parse_metadata() {
+            let metadata = scan.parse_metadata();
+            let status = match &metadata {
                 Ok(Some(gage_db::scan::ScanMetadata::Scan(s))) if s.canceled => "canceled",
                 Ok(Some(gage_db::scan::ScanMetadata::Scan(_)))
                 | Ok(Some(gage_db::scan::ScanMetadata::Agent(_))) => "completed",
@@ -559,21 +562,37 @@ fn scan_picker(current: Option<&str>) -> io::Result<Picker> {
                 // unparseable metadata read the same: incomplete.
                 Ok(None) | Err(_) => "incomplete",
             };
+            let duration = match metadata {
+                Ok(Some(m)) => m
+                    .elapsed_ms()
+                    .map(|ms| fmt_duration(Duration::from_millis(ms)))
+                    .unwrap_or_default(),
+                Ok(None) | Err(_) => String::new(),
+            };
+            let count = counts.get(&scan.id).copied().unwrap_or_default();
             let short = gage_core::uuid::short_uuid(&scan.id).to_string();
             PickItem {
-                line: Line::from(vec![
+                cells: vec![
                     Span::styled(short, styles::Text::id()),
-                    Span::styled(
-                        format!("  {:>4}  ", picker::ago(scan.created)),
-                        styles::Text::dim(),
-                    ),
+                    Span::raw(count.tasks.to_string()),
+                    Span::raw(count.sessions.to_string()),
                     Span::raw(status),
-                ]),
+                    Span::raw(duration),
+                    Span::styled(picker::ago(scan.created), styles::Text::dim()),
+                ],
                 id: scan.id,
             }
         })
         .collect();
-    Ok(Picker::new("Open scan", items, current))
+    let columns = vec![
+        PickColumn::new("Id", 8),
+        PickColumn::right("Tasks", 5),
+        PickColumn::right("Sessions", 8),
+        PickColumn::new("Status", 10),
+        PickColumn::right("Duration", 8),
+        PickColumn::right("Created", 7),
+    ];
+    Ok(Picker::new("Open scan", columns, items, current))
 }
 
 async fn event_loop(
@@ -3296,22 +3315,6 @@ fn panel_block(title: String, active: bool) -> Block<'static> {
 
 fn header_row<const N: usize>(names: [&'static str; N]) -> Row<'static> {
     Row::new(names.map(|n| Cell::from(Span::styled(n, styles::Text::dim()))))
-}
-
-/// Truncate to `width` cells, marking the cut with a trailing ellipsis.
-fn ellipsize(s: &str, width: usize) -> String {
-    if s.width() <= width {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    for c in s.chars() {
-        if out.width() + c.width().unwrap_or(0) > width.saturating_sub(1) {
-            break;
-        }
-        out.push(c);
-    }
-    out.push('…');
-    out
 }
 
 fn short_id(id: &str) -> String {

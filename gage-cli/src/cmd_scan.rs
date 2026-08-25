@@ -15,7 +15,7 @@ use tabled::{
 };
 
 use gage_claude::home::ClaudeHome;
-use gage_claude::project::project_for_session_name;
+use gage_claude::project::{project_display, shorten_home_path};
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
@@ -764,36 +764,6 @@ impl SessionDisplays {
         };
         self.map.insert(id.to_string(), display.clone());
         display
-    }
-}
-
-/// Display path for an encoded project directory name: the first
-/// recorded project cwd that encodes to it, `~`-substituted. Falls
-/// back to the encoded name — the encoding is lossy and the registry
-/// may not know the cwd, and the raw name still identifies the storage
-/// directory.
-fn project_display(home: Option<&ClaudeHome>, encoded: &str) -> String {
-    home.and_then(|h| project_for_session_name(h, encoded).ok().flatten())
-        .map(|p| shorten_home_path(&p.path))
-        .unwrap_or_else(|| encoded.to_string())
-}
-
-/// The path with a leading `$HOME` replaced by `~`, for display
-fn shorten_home_path(path: &std::path::Path) -> String {
-    let s = path.to_string_lossy();
-    let Some(home) = std::env::var_os("HOME") else {
-        return s.into_owned();
-    };
-    let home = home.to_string_lossy();
-    if s == home {
-        "~".to_string()
-    } else if let Some(rest) = s
-        .strip_prefix(home.as_ref())
-        .and_then(|r| r.strip_prefix('/'))
-    {
-        format!("~/{rest}")
-    } else {
-        s.into_owned()
     }
 }
 

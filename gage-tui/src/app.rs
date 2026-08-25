@@ -7,8 +7,12 @@
 //! the parent at a terminus). `[`/`]` are deliberately unbound so a host
 //! embedding the view can step between sessions with them.
 
+use std::collections::HashMap;
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use gage_claude::home::ClaudeHome;
+use gage_claude::project::project_display;
 
 use gage_db::note::{self, Note, NoteValue};
 use gage_db::rusqlite::Connection;
@@ -29,7 +33,7 @@ use crate::doc::Document;
 use crate::hint;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
-use crate::picker::{self, PickItem, Picker, PickerAction};
+use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session;
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
@@ -126,24 +130,34 @@ fn session_picker(current: Option<&str>) -> io::Result<Picker> {
         tokio::runtime::Handle::current().block_on(session::list_recent(200))
     })
     .map_err(|e| io::Error::other(e.to_string()))?;
-    let items = items
+    let home = ClaudeHome::from_env().ok();
+    let mut displays: HashMap<String, String> = HashMap::new();
+    let items: Vec<PickItem> = items
         .into_iter()
         .map(|item| {
             let short = gage_core::uuid::short_uuid(&item.id).to_string();
+            let project = displays
+                .entry(item.project)
+                .or_insert_with_key(|encoded| project_display(home.as_ref(), encoded))
+                .clone();
             PickItem {
-                line: Line::from(vec![
+                cells: vec![
                     Span::styled(short, styles::Text::id()),
-                    Span::styled(
-                        format!("  {:>4}  ", picker::ago(item.mtime_ms)),
-                        styles::Text::dim(),
-                    ),
+                    Span::raw(project),
                     Span::raw(item.title),
-                ]),
+                    Span::styled(picker::ago(item.mtime_ms), styles::Text::dim()),
+                ],
                 id: item.id,
             }
         })
         .collect();
-    Ok(Picker::new("Open session", items, current))
+    let columns = vec![
+        PickColumn::new("Id", 8),
+        PickColumn::fit("Project", 24),
+        PickColumn::fill("Title"),
+        PickColumn::right("Modified", 8),
+    ];
+    Ok(Picker::new("Open session", columns, items, current))
 }
 
 /// Load a session document from the sync event loop.

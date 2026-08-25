@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::item_table::ItemTable;
-use crate::picker::{self, PickItem, Picker, PickerAction};
+use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::{app, attrs::attr_lines, hint, session, styles};
@@ -46,19 +46,21 @@ pub(crate) fn run_picker(runs: &[EvalRunRef], current: Option<&str>) -> Picker {
         .map(|run| {
             let short = gage_core::uuid::short_uuid(&run.id).to_string();
             PickItem {
-                line: Line::from(vec![
+                cells: vec![
                     Span::styled(short, styles::Text::id()),
-                    Span::styled(
-                        format!("  {:>4}  ", picker::ago(run.started_ms)),
-                        styles::Text::dim(),
-                    ),
+                    Span::styled(picker::ago(run.started_ms), styles::Text::dim()),
                     Span::raw(run.descr.clone()),
-                ]),
+                ],
                 id: run.id.clone(),
             }
         })
         .collect();
-    Picker::new("Open eval run", items, current)
+    let columns = vec![
+        PickColumn::new("Id", 8),
+        PickColumn::right("Age", 4),
+        PickColumn::fill("Description"),
+    ];
+    Picker::new("Open eval run", columns, items, current)
 }
 
 /// The eval view app: one terminal session hosting the test eval

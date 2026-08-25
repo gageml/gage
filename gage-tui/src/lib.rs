@@ -17,6 +17,7 @@ pub mod session_view;
 mod stack;
 mod styles;
 mod syntax;
+mod text;
 mod textarea;
 
 pub use options::ViewOptions;
