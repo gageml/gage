@@ -32,8 +32,16 @@ info() {
 detect_target() {
     os="$(uname -s)"
     arch="$(uname -m)"
+    # Under Rosetta 2 `uname -m` reports x86_64 on Apple Silicon; sysctl
+    # reports the actual hardware. Borrowed from cargo-dist's installer.
+    if [ "$os" = Darwin ] && [ "$arch" = x86_64 ]; then
+        if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+            arch="arm64"
+        fi
+    fi
     case "${os}/${arch}" in
         Linux/x86_64 | Linux/amd64) echo "x86_64-unknown-linux-gnu" ;;
+        Darwin/arm64)               echo "aarch64-apple-darwin" ;;
         *) err "unsupported platform: ${os} ${arch}" ;;
     esac
 }
@@ -86,8 +94,17 @@ get_archive() {
     info "Verifying archive"
     expected="$(awk -v f="$archive" '$2 == f || $2 == "*" f {print $1}' "${tmp}/SHA256SUMS")"
     [ -n "$expected" ] || err "no checksum for ${archive} in SHA256SUMS"
-    printf '%s  %s\n' "$expected" "${tmp}/${archive}" | sha256sum -c - >/dev/null 2>&1 \
+    [ "$(sha256 "${tmp}/${archive}")" = "$expected" ] \
         || err "checksum mismatch for ${archive}"
+}
+
+# Print the SHA-256 of $1. sha256sum is coreutils; macOS ships shasum.
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
 }
 
 check_path() {
@@ -99,7 +116,9 @@ check_path() {
 }
 
 main() {
-    need curl tar sha256sum
+    need curl tar
+    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 \
+        || err "required command not found: sha256sum or shasum"
 
     target="$(detect_target)"
     version="${GAGE_VERSION:-$(latest_version)}"
