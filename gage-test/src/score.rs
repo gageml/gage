@@ -11,8 +11,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::eval::Test;
 use crate::storage;
+use crate::suite::Test;
 use gage_claude::session_reader::SessionReader;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

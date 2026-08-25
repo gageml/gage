@@ -1,5 +1,5 @@
 [package]
-name = "gage-eval"
+name = "gage-test"
 version.workspace = true
 edition.workspace = true
 

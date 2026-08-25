@@ -1,11 +1,11 @@
-//! Eval run view — a tree of the run's tests and their sessions.
+//! Test run view — a tree of the run's tests and their sessions.
 //! Enter on a test opens the test dialog; Enter on a session child
 //! opens the shared session viewer; Space and ←/→ collapse/expand.
 //! `[`/`]` in a dialog step depth-first through the tree's nodes,
 //! switching dialog
 //! kind between test and session as needed. Follows the
 //! pane/table/footer structure of `gage scan view`; the caller builds
-//! an [`EvalModel`] from the eval run's structured results.
+//! a [`TestRunModel`] from the test run's structured results.
 
 use std::collections::HashSet;
 use std::io;
@@ -24,23 +24,23 @@ use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::{app, attrs::attr_lines, hint, session, styles};
 
-pub struct EvalModel {
+pub struct TestRunModel {
     pub run_id: String,
     pub tests: Vec<TestItem>,
-    /// Eval runs for the open dialog, newest first
-    pub runs: Vec<EvalRunRef>,
+    /// Test runs for the open dialog, newest first
+    pub runs: Vec<TestRunRef>,
 }
 
 /// A row in the run-open picker. The caller (the CLI) supplies the
 /// display description.
-pub struct EvalRunRef {
+pub struct TestRunRef {
     pub id: String,
     pub started_ms: i64,
     pub descr: String,
 }
 
 /// Build the run-open picker, preselecting the active run.
-pub(crate) fn run_picker(runs: &[EvalRunRef], current: Option<&str>) -> Picker {
+pub(crate) fn run_picker(runs: &[TestRunRef], current: Option<&str>) -> Picker {
     let items = runs
         .iter()
         .map(|run| {
@@ -60,16 +60,16 @@ pub(crate) fn run_picker(runs: &[EvalRunRef], current: Option<&str>) -> Picker {
         PickColumn::right("Age", 4),
         PickColumn::fill("Description"),
     ];
-    Picker::new("Open eval run", columns, items, current)
+    Picker::new("Open test run", columns, items, current)
 }
 
-/// The eval view app: one terminal session hosting the test eval
+/// The test-run view app: one terminal session hosting the test run
 /// view, switching runs as `o` opens them. With no initial model, the
 /// run picker shows over an empty shell; canceling it exits.
 pub fn run_app(
-    initial: Option<EvalModel>,
-    runs: Vec<EvalRunRef>,
-    load: impl Fn(&str) -> io::Result<EvalModel>,
+    initial: Option<TestRunModel>,
+    runs: Vec<TestRunRef>,
+    load: impl Fn(&str) -> io::Result<TestRunModel>,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
@@ -83,9 +83,9 @@ pub fn run_app(
 
 fn run_app_inner(
     terminal: &mut DefaultTerminal,
-    initial: Option<EvalModel>,
-    runs: &[EvalRunRef],
-    load: &dyn Fn(&str) -> io::Result<EvalModel>,
+    initial: Option<TestRunModel>,
+    runs: &[TestRunRef],
+    load: &dyn Fn(&str) -> io::Result<TestRunModel>,
 ) -> io::Result<()> {
     let mut model = match initial {
         Some(model) => model,
@@ -106,7 +106,7 @@ fn run_app_inner(
 /// run renders in place with no flash.
 fn pick_over_shell(
     terminal: &mut DefaultTerminal,
-    runs: &[EvalRunRef],
+    runs: &[TestRunRef],
 ) -> io::Result<Option<String>> {
     let mut picker = run_picker(runs, None);
     loop {
@@ -130,7 +130,7 @@ fn pick_over_shell(
 fn draw_empty_shell(frame: &mut Frame) {
     let [tests_area, footer_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    frame.render_widget(panel_block(" Eval ".to_string(), false), tests_area);
+    frame.render_widget(panel_block(" Run ".to_string(), false), tests_area);
     frame.render_widget(
         Paragraph::new(Span::styled("", styles::Panel::footer())),
         footer_area,
@@ -144,7 +144,7 @@ pub(crate) enum ExitAction {
 }
 
 pub struct TestItem {
-    /// Test id, `{eval}/{test}`
+    /// Test id, `{suite}/{test}`
     pub name: String,
     /// Pass/fail from the test's score; None when the test was not
     /// scored (no `expect`, or scoring did not run)
@@ -169,7 +169,7 @@ pub struct TestSession {
     pub path: PathBuf,
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, model: EvalModel) -> io::Result<Option<String>> {
+fn event_loop(terminal: &mut DefaultTerminal, model: TestRunModel) -> io::Result<Option<String>> {
     let mut state = ViewState::new(model);
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -194,7 +194,7 @@ struct Node {
 }
 
 struct ViewState {
-    model: EvalModel,
+    model: TestRunModel,
     table: ItemTable,
     /// Test indexes whose session children are shown
     expanded: HashSet<usize>,
@@ -223,7 +223,7 @@ enum Dialog {
 }
 
 impl ViewState {
-    fn new(model: EvalModel) -> Self {
+    fn new(model: TestRunModel) -> Self {
         let mut state = Self {
             model,
             table: ItemTable::new(),
@@ -616,7 +616,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .row_highlight_style(styles::Panel::selection(true))
         .block(panel_block(
             format!(
-                " Eval {} · Tests ({}) ",
+                " Run {} · Tests ({}) ",
                 gage_core::uuid::short_uuid(&state.model.run_id),
                 state.model.tests.len()
             ),

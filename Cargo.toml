@@ -6,7 +6,7 @@ members = [
     "gage-claude",
     "gage-core",
     "gage-db",
-    "gage-eval",
+    "gage-test",
     "gage-index",
     "gage-log",
     "gage-lsp",

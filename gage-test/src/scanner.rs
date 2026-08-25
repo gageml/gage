@@ -4,7 +4,7 @@
 //! test's `score.json`; per-sample artifacts are kept for post-mortem:
 //!
 //! ```text
-//! results/{eval}/{test}/
+//! results/{suite}/{test}/
 //! ├── score.json
 //! └── sample{n}/
 //!     ├── gage-home/          # sandbox, kept for post-mortem
@@ -28,9 +28,9 @@ use gage_agent::AgentBuilder;
 use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
 
-use crate::eval::{Expect, ExpectEntry, Root, Test};
 use crate::score::{MatchResult, Score};
 use crate::storage;
+use crate::suite::{Expect, ExpectEntry, Root, Test};
 
 /// Run one scanner test: `test.samples` sandboxed scans (up to `jobs`
 /// concurrent), each judged, aggregated into a written `score.json`.
@@ -305,7 +305,7 @@ fn expect_entries(expect: &Expect) -> impl Iterator<Item = (&'static str, &Expec
 /// session JSONL under `<sample_dir>/judge-sessions/`.
 fn run_judge(prompt: &str, model: &str, sample_dir: &Path) -> io::Result<String> {
     let agent = AgentBuilder::new()
-        .name("eval-judge")
+        .name("test-judge")
         .model(model)
         .archive_dir(sample_dir.join("judge-sessions"))
         .build();
@@ -492,7 +492,7 @@ mod tests {
 
     fn scanner_test(expect: Expect, samples: u32) -> Test {
         Test {
-            eval: "e".to_string(),
+            suite: "e".to_string(),
             index: 1,
             name: Some("t".to_string()),
             prompt: None,

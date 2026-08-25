@@ -10,10 +10,10 @@ use std::sync::{Mutex, mpsc};
 
 use serde::Serialize;
 
-use crate::eval::{Root, Test};
 use crate::scanner;
 use crate::score::{self, Score};
 use crate::storage;
+use crate::suite::{Root, Test};
 use gage_claude::plugin;
 
 #[derive(Debug, Serialize, serde::Deserialize)]
@@ -26,9 +26,10 @@ pub struct Manifest {
     pub test_names: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Ad hoc evals dir (`--evals-dir`), when not the in-repo default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub evals_dir: Option<String>,
+    /// Ad hoc tests dir (`--tests-dir`), when not the in-repo default.
+    /// The alias reads manifests written before the eval → test rename.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "evals_dir")]
+    pub tests_dir: Option<String>,
     /// Judge model, recorded when the run includes scanner tests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judge_model: Option<String>,
@@ -77,9 +78,9 @@ pub struct BatchConfig<'a> {
     pub effort: &'a str,
     pub note: Option<&'a str>,
     pub root: &'a Root,
-    /// Ad hoc evals dir to record in the manifest; `None` for the
+    /// Ad hoc tests dir to record in the manifest; `None` for the
     /// in-repo default.
-    pub evals_dir: Option<&'a Path>,
+    pub tests_dir: Option<&'a Path>,
     /// Concurrent tests.
     pub jobs: usize,
     /// Concurrent samples within a scanner test.
@@ -97,7 +98,7 @@ pub fn run_batch(
     let names: Vec<String> = tests.iter().map(|t| t.id()).collect();
 
     // Runs execute in a short-pathed /tmp workspace and are copied to
-    // ~/.gage/evals on finish; see the storage module doc for why the
+    // ~/.gage/tests on finish; see the storage module doc for why the
     // short path matters. A failed run leaves the workspace behind.
     let run = storage::workspace_dir(&run_id);
     fs::create_dir_all(&run)?;
@@ -126,7 +127,7 @@ pub fn run_batch(
         effort: config.effort.to_string(),
         test_names: names.clone(),
         note: config.note.map(str::to_string),
-        evals_dir: config.evals_dir.map(|p| p.to_string_lossy().into_owned()),
+        tests_dir: config.tests_dir.map(|p| p.to_string_lossy().into_owned()),
         judge_model: has_scanner.then(|| config.judge_model.to_string()),
     };
     write_manifest(&run, &manifest)?;
@@ -268,7 +269,7 @@ fn run_single(
 
 /// Stage the Gage plugin marketplace under the run dir and install it
 /// into the shared `claude_home`. Mirrors what `gage init` does, but
-/// scoped entirely to this eval's uuid dir.
+/// scoped entirely to this run's uuid dir.
 fn install_gage_plugin(claude_bin: &Path, claude_home: &Path, run: &Path) -> io::Result<()> {
     let marketplace = storage::plugin_marketplace_dir(run);
     let gage_bin = sibling_gage_bin()?;
@@ -383,7 +384,7 @@ fn write_test_json(run: &Path, test: &Test) -> io::Result<()> {
 }
 
 /// Resolve the `gage` binary as the currently-running executable's
-/// sibling — which, with evals embedded in the CLI, is the running
+/// sibling — which, with the tests embedded in the CLI, is the running
 /// `gage` itself. The plugin's MCP server and scanner tests invoke it.
 pub fn sibling_gage_bin() -> io::Result<PathBuf> {
     std::env::current_exe()?

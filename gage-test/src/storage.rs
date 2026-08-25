@@ -1,21 +1,21 @@
-//! On-disk layout for eval runs.
+//! On-disk layout for suite runs.
 //!
 //! A run executes in a short-pathed workspace under the system temp dir
-//! (`/tmp/gage-eval-{run-prefix}/`) and is copied to its archival home
-//! under `~/.gage/evals/{run-uuid}/` when it finishes. The short
+//! (`/tmp/gage-test-{run-prefix}/`) and is copied to its archival home
+//! under `~/.gage/tests/{run-uuid}/` when it finishes. The short
 //! workspace path matters: claude silently skips session persistence
 //! when an agent's cwd path gets too long (observed cutoff ~143 chars),
 //! and agent cwds nest under the per-test gage-home. A run that dies
 //! mid-flight leaves its workspace in place for inspection.
 //!
 //! ```text
-//! ~/.gage/evals/
+//! ~/.gage/tests/
 //! └── {run-uuid}/
 //!     ├── manifest.json              # run-level
 //!     ├── claude-home/               # CLAUDE_CONFIG_DIR shared by all tests
 //!     ├── plugin-marketplace/        # staged Gage plugin (installed into claude-home)
 //!     └── results/
-//!         └── {eval-name}/           # `/` in name becomes nested dir
+//!         └── {suite-name}/           # `/` in name becomes nested dir
 //!             ├── test.json          # serialized toml entry
 //!             ├── score.json         # pass/fail (only when expect is set)
 //!             ├── output.txt         # claude stdout
@@ -31,18 +31,18 @@ use std::path::{Path, PathBuf};
 use gage_core::config::gage_home;
 use gage_core::uuid::short_uuid;
 
-pub fn evals_root() -> PathBuf {
-    gage_home().join("evals")
+pub fn runs_root() -> PathBuf {
+    gage_home().join("tests")
 }
 
 /// Archival home of a finished run.
 pub fn run_dir(run_id: &str) -> PathBuf {
-    evals_root().join(run_id)
+    runs_root().join(run_id)
 }
 
 /// Short-pathed working dir a run executes in before archival.
 pub fn workspace_dir(run_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("gage-eval-{}", short_uuid(run_id)))
+    std::env::temp_dir().join(format!("gage-test-{}", short_uuid(run_id)))
 }
 
 /// Copy the finished workspace to its archival home and remove the
@@ -211,7 +211,7 @@ pub fn prepare_claude_home(run: &Path, model: &str, effort: &str) -> io::Result<
 
 /// List past run UUIDs, newest first.
 pub fn list_runs() -> io::Result<Vec<RunSummary>> {
-    let root = evals_root();
+    let root = runs_root();
     if !root.exists() {
         return Ok(Vec::new());
     }

@@ -2623,7 +2623,6 @@ dependencies = [
  "gage-claude",
  "gage-core",
  "gage-db",
- "gage-eval",
  "gage-index",
  "gage-log",
  "gage-mcp",
@@ -2631,6 +2630,7 @@ dependencies = [
  "gage-registry",
  "gage-scan",
  "gage-sync",
+ "gage-test",
  "gage-tui",
  "humantime",
  "indicatif",
@@ -2672,26 +2672,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
-]
-
-[[package]]
-name = "gage-eval"
-version = "0.0.1"
-dependencies = [
- "chrono",
- "gage-agent",
- "gage-claude",
- "gage-core",
- "gage-db",
- "minijinja",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "toml 0.8.23",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2872,6 +2852,26 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "walkdir",
+]
+
+[[package]]
+name = "gage-test"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "gage-agent",
+ "gage-claude",
+ "gage-core",
+ "gage-db",
+ "minijinja",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

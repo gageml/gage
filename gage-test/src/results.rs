@@ -1,4 +1,4 @@
-//! Structured results for an eval run — `results.json` at the run
+//! Structured results for an suite run — `results.json` at the run
 //! root, aggregated from the per-test artifacts (test.json, score.json,
 //! streams). Written when a run finishes; built on demand for runs
 //! recorded before this file existed. The TUI renders this directly.
@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::eval::Test;
 use crate::score::{self, Score};
 use crate::storage;
+use crate::suite::Test;
 
 /// Bumped when the structure gains fields older files lack; `ensure`
 /// rebuilds any file with an older version.
@@ -26,7 +26,7 @@ pub struct Results {
 
 #[derive(Serialize, Deserialize)]
 pub struct TestResult {
-    /// Test id, `{eval}/{test}`
+    /// Test id, `{suite}/{test}`
     pub name: String,
     /// Pass/fail; None when the test was not scored
     pub passed: Option<bool>,

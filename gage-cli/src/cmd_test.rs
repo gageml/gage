@@ -1,5 +1,5 @@
 //! The `gage test` command: run and view model-directed tests (prompt
-//! tests and scanner tests). The test engine lives in the `gage-eval`
+//! tests and scanner tests). The test engine lives in the `gage-test`
 //! crate; this module is its command layer.
 
 use clap::{Args, Subcommand};
@@ -15,7 +15,7 @@ use tabled::{
     },
 };
 
-use gage_eval::{eval, results, run as runner, storage, view};
+use gage_test::{results, run as runner, storage, suite, view};
 
 use crate::dialog::{self, DialogError};
 use crate::{limit, style};
@@ -234,11 +234,11 @@ async fn cmd_view(args: ViewArgs) {
         println!("No runs found");
         return;
     }
-    let load = |id: &str| -> std::io::Result<gage_tui::eval_view::EvalModel> {
+    let load = |id: &str| -> std::io::Result<gage_tui::test_view::TestRunModel> {
         let run = view::resolve(id)?;
         run_model(&run, run_refs())
     };
-    if let Err(e) = gage_tui::eval_view::run_app(initial, runs, load) {
+    if let Err(e) = gage_tui::test_view::run_app(initial, runs, load) {
         eprintln!("view failed: {e}");
         std::process::exit(2);
     }
@@ -266,7 +266,7 @@ fn resolve_run(prefix: &str) -> storage::RunSummary {
 
 /// Rows for the run-open picker: every test run, newest first, with a
 /// kind-appropriate description.
-fn run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
+fn run_refs() -> Vec<gage_tui::test_view::TestRunRef> {
     let runs = match storage::list_runs() {
         Ok(r) => r,
         Err(e) => {
@@ -286,7 +286,7 @@ fn run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
                 Some(n) => format!("{descr} · {n}"),
                 None => descr,
             };
-            gage_tui::eval_view::EvalRunRef {
+            gage_tui::test_view::TestRunRef {
                 id: r.run_id,
                 started_ms: r.started_at_ms,
                 descr,
@@ -299,19 +299,19 @@ fn run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
 /// (building `results.json` on demand for older runs).
 fn run_model(
     run: &storage::RunSummary,
-    runs: Vec<gage_tui::eval_view::EvalRunRef>,
-) -> std::io::Result<gage_tui::eval_view::EvalModel> {
+    runs: Vec<gage_tui::test_view::TestRunRef>,
+) -> std::io::Result<gage_tui::test_view::TestRunModel> {
     let run_dir = storage::run_dir(&run.run_id);
     let results = results::ensure(&run_dir)?;
     let tests = results.tests.into_iter().map(test_item).collect();
-    Ok(gage_tui::eval_view::EvalModel {
+    Ok(gage_tui::test_view::TestRunModel {
         run_id: run.run_id.clone(),
         tests,
         runs,
     })
 }
 
-fn test_item(t: results::TestResult) -> gage_tui::eval_view::TestItem {
+fn test_item(t: results::TestResult) -> gage_tui::test_view::TestItem {
     let input = match &t.prompt {
         Some(p) => p.trim().to_string(),
         None => {
@@ -334,14 +334,14 @@ fn test_item(t: results::TestResult) -> gage_tui::eval_view::TestItem {
                 Some(n) => format!("s{n} {} {short}", s.kind),
                 None => format!("{} {short}", s.kind),
             };
-            gage_tui::eval_view::TestSession {
+            gage_tui::test_view::TestSession {
                 label,
                 id: s.id,
                 path: s.path,
             }
         })
         .collect();
-    gage_tui::eval_view::TestItem {
+    gage_tui::test_view::TestItem {
         name: t.name,
         passed: t.passed,
         checks: t.checks.into_iter().map(|c| (c.label, c.passed)).collect(),
@@ -433,17 +433,17 @@ fn cmd_run(args: RunArgs) {
         args.test.clone()
     };
     let root = match &args.tests_dir {
-        Some(dir) => eval::Root::at(dir),
-        None => eval::Root::repo(),
+        Some(dir) => suite::Root::at(dir),
+        None => suite::Root::repo(),
     };
-    let all = match eval::load_all(&root) {
+    let all = match suite::load_all(&root) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("failed to load tests: {e}");
             std::process::exit(2);
         }
     };
-    let tests = match eval::select(&all, &specs) {
+    let tests = match suite::select(&all, &specs) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -469,7 +469,7 @@ fn cmd_run(args: RunArgs) {
         std::process::exit(1);
     }
 
-    if let Err(missing) = eval::validate(&root, &tests) {
+    if let Err(missing) = suite::validate(&root, &tests) {
         eprintln!("missing fixtures:");
         for (test_id, fixture) in &missing {
             eprintln!("  {test_id}: fixture `{fixture}` not found");
@@ -523,7 +523,7 @@ fn cmd_run(args: RunArgs) {
         effort: &args.effort,
         note: args.note.as_deref(),
         root: &root,
-        evals_dir: args.tests_dir.as_deref(),
+        tests_dir: args.tests_dir.as_deref(),
         jobs: args.jobs,
         sample_jobs: args.jobs_samples,
         judge_model: &args.judge_model,
@@ -609,14 +609,14 @@ fn one_line(s: &str, max: usize) -> String {
     out
 }
 
-fn show_run_intro(tests: &[&eval::Test], args: &RunArgs) -> std::io::Result<()> {
+fn show_run_intro(tests: &[&suite::Test], args: &RunArgs) -> std::io::Result<()> {
     cliclack::intro(console::style("Run tests").bold())?;
 
     let mut by_suite: std::collections::BTreeMap<&str, Vec<String>> =
         std::collections::BTreeMap::new();
     for t in tests {
         by_suite
-            .entry(t.eval.as_str())
+            .entry(t.suite.as_str())
             .or_default()
             .push(t.test_id());
     }

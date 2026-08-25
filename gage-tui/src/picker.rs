@@ -4,7 +4,7 @@
 //! host-defined columns; the picker resolves each column's display
 //! width (fixed, content-fit, or fill) and ellipsizes overlong cells.
 //! Hosts supply the columns and row cells and act on the returned
-//! action. Used by the session, scan, and eval open dialogs.
+//! action. Used by the session, scan, and test-run open dialogs.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;

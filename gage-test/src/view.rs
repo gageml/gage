@@ -1,4 +1,4 @@
-//! Resolve run-id prefixes to eval runs.
+//! Resolve run-id prefixes to suite runs.
 
 use std::io;
 

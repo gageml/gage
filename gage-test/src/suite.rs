@@ -1,6 +1,6 @@
-//! Discover evals from `*.toml` files under `<crate>/tests/`, searched
-//! recursively (subdirs group related evals, e.g. `tools/`,
-//! `scanners/`). One file = one eval, named by file stem; each holds a
+//! Discover suites from `*.toml` files under `<crate>/tests/`, searched
+//! recursively (subdirs group related suites, e.g. `tools/`,
+//! `scanners/`). One file = one suite, named by file stem; each holds a
 //! `[[test]]` array.
 
 use std::fs;
@@ -10,29 +10,29 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// Crate-relative paths baked at compile time. Internal-tool simplicity.
-const EVALS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
+const TESTS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
 
-/// Where eval files and their fixtures load from. The default is the
-/// in-repo `gage-eval/tests/` + `gage-eval/fixtures/` pair; an ad hoc
-/// root (`--evals-dir`) holds `*.toml` files with a `fixtures/` subdir.
+/// Where suite files and their fixtures load from. The default is the
+/// in-repo `gage-test/tests/` + `gage-test/fixtures/` pair; an ad hoc
+/// root (`--tests-dir`) holds `*.toml` files with a `fixtures/` subdir.
 #[derive(Debug, Clone)]
 pub struct Root {
-    pub evals_dir: PathBuf,
+    pub tests_dir: PathBuf,
     pub fixtures_dir: PathBuf,
 }
 
 impl Root {
     pub fn repo() -> Self {
         Self {
-            evals_dir: PathBuf::from(EVALS_DIR),
+            tests_dir: PathBuf::from(TESTS_DIR),
             fixtures_dir: PathBuf::from(FIXTURES_DIR),
         }
     }
 
     pub fn at(dir: &Path) -> Self {
         Self {
-            evals_dir: dir.to_path_buf(),
+            tests_dir: dir.to_path_buf(),
             fixtures_dir: dir.join("fixtures"),
         }
     }
@@ -45,20 +45,20 @@ impl Root {
     }
 }
 
-/// One eval file: a named group of related test prompts. The name
-/// lives on each `Test.eval` rather than here.
+/// One suite file: a named group of related test prompts. The name
+/// lives on each `Test.suite` rather than here.
 #[derive(Debug, Clone)]
-pub struct EvalFile {
+pub struct Suite {
     pub tests: Vec<Test>,
 }
 
-/// One test within an eval file: either a prompt test (spawn claude
+/// One test within a suite file: either a prompt test (spawn claude
 /// with `prompt`) or a scanner test (run `scanners` over `fixture`'s
 /// sessions and judge the written notes/issues). Exactly one of
 /// `prompt` / `scanners` is set; see [`validate_test`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Test {
-    pub eval: String,
+    pub suite: String,
     pub index: usize,
     pub name: Option<String>,
     #[serde(default)]
@@ -76,7 +76,7 @@ pub struct Test {
     /// interpret it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude: Option<toml::Value>,
-    /// Name of a subdir under `gage-eval/fixtures/` whose `projects/`
+    /// Name of a subdir under `gage-test/fixtures/` whose `projects/`
     /// dir is exposed as `CLAUDE_PROJECTS_DIR`. `None` → an empty
     /// per-test projects dir.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,13 +172,13 @@ impl Test {
         !self.scanners.is_empty()
     }
 
-    /// `<eval>/<name-or-1-based-index>`. Used as the path-safe
+    /// `<suite>/<name-or-1-based-index>`. Used as the path-safe
     /// identifier for results.
     pub fn id(&self) -> String {
-        format!("{}/{}", self.eval, self.test_id())
+        format!("{}/{}", self.suite, self.test_id())
     }
 
-    /// The portion after the eval prefix: the `name` field if set,
+    /// The portion after the suite prefix: the `name` field if set,
     /// else the 1-based index.
     pub fn test_id(&self) -> String {
         match &self.name {
@@ -218,11 +218,11 @@ struct TestEntry {
     db_init: Option<String>,
 }
 
-/// Discover and load every eval file under the root's evals dir,
-/// searching subdirectories recursively. Eval names come from file
+/// Discover and load every suite file under the root's suites dir,
+/// searching subdirectories recursively. Suite names come from file
 /// stems regardless of depth, so stems must be unique across the tree.
-pub fn load_all(root: &Root) -> std::io::Result<Vec<EvalFile>> {
-    let dir = &root.evals_dir;
+pub fn load_all(root: &Root) -> std::io::Result<Vec<Suite>> {
+    let dir = &root.tests_dir;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -240,7 +240,7 @@ pub fn load_all(root: &Root) -> std::io::Result<Vec<EvalFile>> {
             .to_string();
         if let Some(prev) = seen.insert(stem.clone(), path.clone()) {
             return Err(std::io::Error::other(format!(
-                "duplicate eval name `{stem}`: {} and {}",
+                "duplicate suite name `{stem}`: {} and {}",
                 prev.display(),
                 path.display()
             )));
@@ -251,7 +251,7 @@ pub fn load_all(root: &Root) -> std::io::Result<Vec<EvalFile>> {
 }
 
 /// Collect `*.toml` under `dir`, skipping `fixtures_dir` (an ad hoc
-/// root holds its fixtures inside the evals dir).
+/// root holds its fixtures inside the suites dir).
 fn collect_toml_files(
     dir: &Path,
     fixtures_dir: &Path,
@@ -271,7 +271,7 @@ fn collect_toml_files(
     Ok(())
 }
 
-fn load_file(path: &Path) -> std::io::Result<EvalFile> {
+fn load_file(path: &Path) -> std::io::Result<Suite> {
     let body = fs::read_to_string(path)?;
     let file: File = toml::from_str(&body).map_err(std::io::Error::other)?;
     let name = path
@@ -284,7 +284,7 @@ fn load_file(path: &Path) -> std::io::Result<EvalFile> {
         .into_iter()
         .enumerate()
         .map(|(i, t)| Test {
-            eval: name.clone(),
+            suite: name.clone(),
             index: i + 1,
             name: t.name,
             prompt: t.prompt,
@@ -304,7 +304,7 @@ fn load_file(path: &Path) -> std::io::Result<EvalFile> {
             std::io::Error::other(format!("{}: test `{}`: {msg}", path.display(), t.test_id()))
         })?;
     }
-    Ok(EvalFile { tests })
+    Ok(Suite { tests })
 }
 
 /// Schema rules that cross field boundaries. A test is either a prompt
@@ -380,20 +380,20 @@ fn check_unique_names(path: &Path, tests: &[Test]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Select tests across all evals according to a list of SPEC patterns.
+/// Select tests across all suites according to a list of SPEC patterns.
 ///
 /// A SPEC is a glob with `*` matching any run of characters that does
-/// not cross `/`. SPECs containing `/` match against `eval/test-id`;
+/// not cross `/`. SPECs containing `/` match against `suite/test-id`;
 /// SPECs without `/` match against either the `test-id` (the part
-/// after the eval prefix) or the eval name, so a bare `query` selects
-/// every test in the `query` eval and a bare `session-count` selects
+/// after the suite prefix) or the suite name, so a bare `query` selects
+/// every test in the `query` suite and a bare `session-count` selects
 /// that test wherever it lives. A leading `!` makes it an exclude.
 ///
 /// With no SPECs, or only excludes, the base set is every test.
 /// Otherwise the base set is the union of tests matching any include.
 /// Excludes are then removed from the base set. Disabled tests are
 /// dropped last and SPECs cannot override that.
-pub fn select<'a>(evals: &'a [EvalFile], specs: &[String]) -> Result<Vec<&'a Test>, String> {
+pub fn select<'a>(suites: &'a [Suite], specs: &[String]) -> Result<Vec<&'a Test>, String> {
     let mut includes: Vec<CompiledSpec> = Vec::new();
     let mut excludes: Vec<CompiledSpec> = Vec::new();
     for spec in specs {
@@ -408,7 +408,7 @@ pub fn select<'a>(evals: &'a [EvalFile], specs: &[String]) -> Result<Vec<&'a Tes
         if negate { &mut excludes } else { &mut includes }.push(compiled);
     }
 
-    let all_tests: Vec<&Test> = evals.iter().flat_map(|e| e.tests.iter()).collect();
+    let all_tests: Vec<&Test> = suites.iter().flat_map(|e| e.tests.iter()).collect();
     let base: Vec<&Test> = if includes.is_empty() {
         all_tests
     } else {
@@ -449,7 +449,7 @@ pub fn validate(root: &Root, tests: &[&Test]) -> Result<(), Vec<(String, String)
 
 /// A SPEC compiled into a regex plus the bookkeeping needed to know
 /// whether the original source contained `/` (which decides whether
-/// the regex matches against `eval/test-id` or just `test-id`).
+/// the regex matches against `suite/test-id` or just `test-id`).
 struct CompiledSpec {
     re: Regex,
     has_slash: bool,
@@ -480,7 +480,7 @@ impl CompiledSpec {
         if self.has_slash {
             self.re.is_match(&test.id())
         } else {
-            self.re.is_match(&test.test_id()) || self.re.is_match(&test.eval)
+            self.re.is_match(&test.test_id()) || self.re.is_match(&test.suite)
         }
     }
 }
@@ -491,22 +491,22 @@ mod tests {
 
     #[test]
     fn catalog_discovers_files() {
-        let evals = load_all(&Root::repo()).unwrap();
+        let suites = load_all(&Root::repo()).unwrap();
         assert!(
-            !evals.is_empty(),
-            "expected at least one eval file in evals/"
+            !suites.is_empty(),
+            "expected at least one suite file in suites/"
         );
-        for e in &evals {
+        for e in &suites {
             for t in &e.tests {
                 assert_ne!(t.prompt.is_some(), t.is_scanner(), "exactly one kind");
-                assert!(!t.eval.is_empty(), "eval name non-empty");
+                assert!(!t.suite.is_empty(), "suite name non-empty");
             }
         }
     }
 
-    fn fixture() -> Vec<EvalFile> {
-        let mk = |eval: &str, name: Option<&str>, index: usize, disabled: bool| Test {
-            eval: eval.to_string(),
+    fn fixture() -> Vec<Suite> {
+        let mk = |suite: &str, name: Option<&str>, index: usize, disabled: bool| Test {
+            suite: suite.to_string(),
             index,
             name: name.map(str::to_string),
             prompt: Some("p".to_string()),
@@ -520,7 +520,7 @@ mod tests {
             db_init: None,
         };
         vec![
-            EvalFile {
+            Suite {
                 tests: vec![
                     mk("query", Some("session-count"), 1, false),
                     mk("query", Some("list-tools"), 2, false),
@@ -528,7 +528,7 @@ mod tests {
                     mk("query", Some("off"), 4, true),
                 ],
             },
-            EvalFile {
+            Suite {
                 tests: vec![
                     mk("notes", Some("session-count"), 1, false),
                     mk("notes", Some("write"), 2, false),
@@ -545,8 +545,8 @@ mod tests {
 
     #[test]
     fn no_specs_returns_all_active_tests() {
-        let evals = fixture();
-        let got = select(&evals, &[]).unwrap();
+        let suites = fixture();
+        let got = select(&suites, &[]).unwrap();
         assert_eq!(
             ids(&got),
             vec![
@@ -561,15 +561,15 @@ mod tests {
 
     #[test]
     fn star_matches_everything_active() {
-        let evals = fixture();
-        let got = select(&evals, &["*".to_string()]).unwrap();
+        let suites = fixture();
+        let got = select(&suites, &["*".to_string()]).unwrap();
         assert_eq!(got.len(), 5);
     }
 
     #[test]
-    fn bare_name_matches_test_id_across_evals() {
-        let evals = fixture();
-        let got = select(&evals, &["session-count".to_string()]).unwrap();
+    fn bare_name_matches_test_id_across_suites() {
+        let suites = fixture();
+        let got = select(&suites, &["session-count".to_string()]).unwrap();
         assert_eq!(
             ids(&got),
             vec!["notes/session-count", "query/session-count"]
@@ -577,9 +577,9 @@ mod tests {
     }
 
     #[test]
-    fn bare_name_matches_eval_name() {
-        let evals = fixture();
-        let got = select(&evals, &["query".to_string()]).unwrap();
+    fn bare_name_matches_suite_name() {
+        let suites = fixture();
+        let got = select(&suites, &["query".to_string()]).unwrap();
         assert_eq!(
             ids(&got),
             vec!["query/3", "query/list-tools", "query/session-count"]
@@ -587,39 +587,39 @@ mod tests {
     }
 
     #[test]
-    fn bare_name_unions_eval_and_test_id() {
-        let evals = fixture();
-        let got = select(&evals, &["write".to_string()]).unwrap();
+    fn bare_name_unions_suite_and_test_id() {
+        let suites = fixture();
+        let got = select(&suites, &["write".to_string()]).unwrap();
         assert_eq!(ids(&got), vec!["notes/write"]);
     }
 
     #[test]
-    fn eval_slash_test_matches_exactly_one() {
-        let evals = fixture();
-        let got = select(&evals, &["query/list-tools".to_string()]).unwrap();
+    fn suite_slash_test_matches_exactly_one() {
+        let suites = fixture();
+        let got = select(&suites, &["query/list-tools".to_string()]).unwrap();
         assert_eq!(ids(&got), vec!["query/list-tools"]);
     }
 
     #[test]
-    fn eval_slash_index_reaches_unnamed_test() {
-        let evals = fixture();
-        let got = select(&evals, &["query/3".to_string()]).unwrap();
+    fn suite_slash_index_reaches_unnamed_test() {
+        let suites = fixture();
+        let got = select(&suites, &["query/3".to_string()]).unwrap();
         assert_eq!(ids(&got), vec!["query/3"]);
     }
 
     #[test]
-    fn glob_in_eval_segment() {
-        let evals = fixture();
-        let got = select(&evals, &["q*/session-count".to_string()]).unwrap();
+    fn glob_in_suite_segment() {
+        let suites = fixture();
+        let got = select(&suites, &["q*/session-count".to_string()]).unwrap();
         assert_eq!(ids(&got), vec!["query/session-count"]);
     }
 
     #[test]
     fn glob_does_not_cross_slash() {
-        let evals = fixture();
-        let got = select(&evals, &["*".to_string()]).unwrap();
+        let suites = fixture();
+        let got = select(&suites, &["*".to_string()]).unwrap();
         assert!(!got.is_empty());
-        let got = select(&evals, &["*-count".to_string()]).unwrap();
+        let got = select(&suites, &["*-count".to_string()]).unwrap();
         assert_eq!(
             ids(&got),
             vec!["notes/session-count", "query/session-count"]
@@ -628,8 +628,8 @@ mod tests {
 
     #[test]
     fn exclude_only_starts_from_all() {
-        let evals = fixture();
-        let got = select(&evals, &["!session-count".to_string()]).unwrap();
+        let suites = fixture();
+        let got = select(&suites, &["!session-count".to_string()]).unwrap();
         assert_eq!(
             ids(&got),
             vec!["notes/write", "query/3", "query/list-tools"]
@@ -638,9 +638,9 @@ mod tests {
 
     #[test]
     fn include_then_exclude() {
-        let evals = fixture();
+        let suites = fixture();
         let got = select(
-            &evals,
+            &suites,
             &["query/*".to_string(), "!query/list-tools".to_string()],
         )
         .unwrap();
@@ -649,15 +649,15 @@ mod tests {
 
     #[test]
     fn disabled_tests_are_always_dropped() {
-        let evals = fixture();
-        let got = select(&evals, &["query/off".to_string()]).unwrap();
+        let suites = fixture();
+        let got = select(&suites, &["query/off".to_string()]).unwrap();
         assert!(got.is_empty());
     }
 
     #[test]
     fn empty_spec_errors() {
-        let evals = fixture();
-        assert!(select(&evals, &["".to_string()]).is_err());
-        assert!(select(&evals, &["!".to_string()]).is_err());
+        let suites = fixture();
+        assert!(select(&suites, &["".to_string()]).is_err());
+        assert!(select(&suites, &["!".to_string()]).is_err());
     }
 }

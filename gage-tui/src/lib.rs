@@ -2,7 +2,6 @@ mod app;
 mod attrs;
 mod dialog;
 mod doc;
-pub mod eval_view;
 mod hint;
 mod item_table;
 mod markdown;
@@ -17,6 +16,7 @@ pub mod session_view;
 mod stack;
 mod styles;
 mod syntax;
+pub mod test_view;
 mod text;
 mod textarea;
 
