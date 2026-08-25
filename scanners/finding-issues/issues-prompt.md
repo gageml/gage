@@ -48,9 +48,9 @@ an issue. However, if the same error-detection-and-fix cycle repeats itself, it
 may represent an underlying issue that should be reported.
 
 Investigate further as needed by reading the session content directly. Select
-from the `message` table via `mcp__gage__Query`, filtering by
-`session_id = '{{ session_id }}'`. `message` table columns: (session_id, line,
-uuid, type, subtype, text, timestamp, attachments, ide_tags, raw)
+from the `message` table via `mcp__gage__Query`, filtering on `session_id` with
+the ID from the finding's `target` column. `message` table columns: (session_id,
+line, uuid, type, subtype, text, timestamp, attachments, ide_tags, raw)
 
 When you have enough solid information to identify an issue, use the
 `mcp__gage__IssueWrite` tool to write an issue. Describe the issue with enough
