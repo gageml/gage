@@ -271,9 +271,10 @@ issues. Do not make any changes without approval from the user.
 Present any recommended options along with the option to defer or close the
 issue as skipped.
 
-Always confirm (or ask the user to confirm) fixes before closing the issue. User
-commentary about the issue, context about a failure mode, or agreement with my
-analysis is not a directive to close.
+Before closing, ask the user to confirm a fix only when they can verify
+something the tests do not already cover. If their check would just repeat the
+tests, close without asking. User commentary about the issue, context about a
+failure mode, or agreement with my analysis is not a directive to close.
 
 Use `mcp__plugin_gage_gage__IssueUpdate` with `status=closed` and
 `status_reason=completed` to close an issue that's been verified as fixed.
