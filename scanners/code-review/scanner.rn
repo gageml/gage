@@ -1,6 +1,7 @@
 use gage::tools::Query;
 use gage::{
     AgentRunner,
+    Progress,
     Template,
     call_agent,
     files_valid,
@@ -42,8 +43,12 @@ const STACK_KEY = ("code-review", "project_summary", "stack", 1);
 /// entirely.
 pub async fn project_summary() {
     let t = Template::new(include_str!("project-summary-prompt.md.j2")).await?;
+    let projects = scan().sessions().projects()?;
+    // One tick per project: unchanged projects tick during queueing,
+    // summarized projects tick as their agents complete
+    let progress = Progress::new(projects.len());
     let runner = AgentRunner::new();
-    for project in scan().sessions().projects()? {
+    for project in projects {
         let sections = [];
         let validates = [];
         add_section(
@@ -65,6 +70,7 @@ pub async fn project_summary() {
         )
         .await?;
         if sections.is_empty() {
+            progress.tick();
             continue
         }
         let prompt = t.render(#{ project: project.path, sections }).await?;
@@ -92,6 +98,7 @@ pub async fn project_summary() {
                 for v in validates {
                     v().await?;
                 }
+                progress.tick();
             }
             None => break,
         }
@@ -168,11 +175,15 @@ pub async fn findings() {
         .await?;
 
     let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
+    // One tick per session: skipped sessions tick during queueing,
+    // reviewed sessions tick as their agents complete
+    let progress = Progress::new(new_sessions.len());
     let runner = AgentRunner::new();
     for s in new_sessions {
         if let Some(reason) = skip_session(s).await? {
             log::info!("Skipping session {}: {}", s.id, reason);
             validate(s).await?;
+            progress.tick();
             continue
         }
         // An unrecorded project is a normal state (deleted project,
@@ -207,6 +218,7 @@ pub async fn findings() {
                     },
                 );
                 validate(session).await?;
+                progress.tick();
             }
             None => break,
         }

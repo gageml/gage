@@ -1,5 +1,5 @@
 use gage::tools::Query;
-use gage::{AgentRunner, Template, call_agent, query, scan, write_note};
+use gage::{AgentRunner, Progress, Template, call_agent, query, scan, write_note};
 
 pub const SCANNER = #{
     name: "eval-annotation",
@@ -22,12 +22,18 @@ pub async fn annotate() {
     // Init template for agent prompts
     let t = Template::new(include_str!("annotate-prompt.md.j2")).await?;
 
+    // One tick per session: skipped sessions tick during queueing,
+    // annotated sessions tick as their agents complete
+    let sessions = scan().sessions();
+    let progress = Progress::new(sessions.len());
+
     // Use agent runner to annotate sessions concurrently
     let runner = AgentRunner::new();
-    for s in scan().sessions() {
+    for s in sessions {
         // Skip sessions without annotatable content
         if let Some(reason) = skip_session(s).await? {
             log::info!("Skipping session {}: {}", s.id, reason);
+            progress.tick();
             continue
         }
         // Queue agent
@@ -60,6 +66,7 @@ pub async fn annotate() {
                         metadata: result.as_metadata(),
                     },
                 );
+                progress.tick();
             }
             None => break,
         }

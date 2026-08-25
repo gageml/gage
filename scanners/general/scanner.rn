@@ -1,6 +1,7 @@
 use gage::tools::Query;
 use gage::{
     AgentRunner,
+    Progress,
     Template,
     call_agent,
     query,
@@ -38,6 +39,10 @@ pub async fn findings() {
     // Init template for agent prompts
     let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
 
+    // One tick per session: skipped sessions tick during queueing,
+    // scanned sessions tick as their agents complete
+    let progress = Progress::new(new_sessions.len());
+
     // Use agent runner to scan sessions concurrently
     let runner = AgentRunner::new();
     for s in new_sessions {
@@ -45,6 +50,7 @@ pub async fn findings() {
         if let Some(reason) = skip_session(s).await? {
             log::info!("Skipping session {}: {}", s.id, reason);
             validate(s).await?;
+            progress.tick();
             continue
         }
         // Queue agent
@@ -78,6 +84,7 @@ pub async fn findings() {
                 );
                 // Ensure that valid sessions aren't re-scanned
                 validate(session).await?;
+                progress.tick();
             }
             None => break,
         }
