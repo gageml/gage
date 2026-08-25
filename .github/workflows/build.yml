@@ -30,11 +30,21 @@ jobs:
       matrix:
         include:
           # target is the value used by cargo --target and corresponds
-          # to the release triple arch-vendor-os[-env]
+          # to the release triple arch-vendor-os[-env]; bin_file is the
+          # built binary's file name on that platform
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
+            bin_file: gage
           - target: aarch64-apple-darwin
             runner: macos-15
+            bin_file: gage
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            bin_file: gage.exe
+    defaults:
+      run:
+        # Windows runners default to PowerShell; the steps are bash
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -71,7 +81,7 @@ jobs:
         uses: actions/cache@v5
         with:
           key: build-${{ steps.version.outputs.version }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release-small/${{ env.BIN }}
+          path: target/${{ matrix.target }}/release-small/${{ matrix.bin_file }}
 
       - name: Rust
         if:
@@ -89,16 +99,17 @@ jobs:
           # Take `gage --version` from Cargo.toml rather than the git
           # commit (see gage-cli/build.rs)
           RELEASE: "1"
-        run: cargo build --profile release-small --target ${{ matrix.target }} --bin "$BIN"
+        run:
+          cargo build --profile release-small --target ${{ matrix.target }}
+          --bin "$BIN"
 
       - name: Package
         if: steps.artifact.outputs.exists != 'yes'
         id: package
-        shell: bash
         run: |
           version="${{ steps.version.outputs.version }}"
           archive="${PKGNAME}-${version}-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release-small" -czf "$archive" "$BIN"
+          tar -C "target/${{ matrix.target }}/release-small" -czf "$archive" "${{ matrix.bin_file }}"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Artifact
