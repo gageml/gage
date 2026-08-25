@@ -1655,11 +1655,19 @@ impl ViewState {
         let mut close = false;
         let mut step: isize = 0;
         let mut error: Option<String> = None;
-        if let Dialog::Session { id, view, db, .. } = &mut self.dialog {
+        if let Dialog::Session {
+            id, view, nav, db, ..
+        } = &mut self.dialog
+        {
+            // Pinned views are transient peeks positioned at a tool-use
+            // entry; saving them would clobber the browsed position.
+            let remember = !matches!(nav, SessionNav::Pinned);
             match app::handle_key(view, key, db) {
                 Ok(app::KeyOutcome::Consumed) => {}
                 Ok(app::KeyOutcome::Close) => {
-                    self.session_ui.insert(id.clone(), view.save_ui());
+                    if remember {
+                        self.session_ui.insert(id.clone(), view.save_ui());
+                    }
                     close = true;
                 }
                 Ok(app::KeyOutcome::Ignored) => {
@@ -1668,7 +1676,7 @@ impl ViewState {
                         KeyCode::Char(']') => 1,
                         _ => 0,
                     };
-                    if step != 0 {
+                    if step != 0 && remember {
                         self.session_ui.insert(id.clone(), view.save_ui());
                     }
                 }
@@ -3351,5 +3359,66 @@ fn id_span(id: &str, selected: bool) -> Span<'static> {
         Span::raw(short_id(id))
     } else {
         Span::styled(short_id(id), styles::Text::dim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::{Document, Session};
+
+    fn state_with_session_dialog(nav: SessionNav) -> ViewState {
+        let model = ScanModel {
+            scan_id: "scan1".into(),
+            tasks: Vec::new(),
+            sessions: Vec::new(),
+            notes: Vec::new(),
+            issues: Vec::new(),
+            total: 0,
+            progress: 0,
+            errors: 0,
+            cost: None,
+            finished: true,
+            elapsed: None,
+            out_path: None,
+        };
+        let mut state = ViewState::new(model);
+        let doc = Document {
+            session: Session {
+                id: "s1".into(),
+                value: serde_json::json!({}),
+            },
+            entries: Vec::new(),
+            notes: Vec::new(),
+        };
+        let view = app::AppState::new(doc, &crate::ViewOptions::default(), app::DocSource::Query);
+        state.dialog = Dialog::Session {
+            id: "s1".into(),
+            view: Box::new(view),
+            nav,
+            db: Connection::open_in_memory().unwrap(),
+            return_to: None,
+        };
+        state
+    }
+
+    fn close_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn pinned_session_close_leaves_session_ui_untouched() {
+        let mut state = state_with_session_dialog(SessionNav::Pinned);
+        state.handle_session_dialog_key(close_key());
+        assert!(matches!(state.dialog, Dialog::None));
+        assert!(state.session_ui.is_empty());
+    }
+
+    #[test]
+    fn session_close_saves_session_ui() {
+        let mut state = state_with_session_dialog(SessionNav::Sessions);
+        state.handle_session_dialog_key(close_key());
+        assert!(matches!(state.dialog, Dialog::None));
+        assert!(state.session_ui.contains_key("s1"));
     }
 }
