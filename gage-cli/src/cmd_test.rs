@@ -280,6 +280,8 @@ fn run_refs() -> Vec<gage_tui::test_view::TestRunRef> {
             started_ms: r.started_at_ms,
             tests: r.total,
             passed: r.passed,
+            duration_ms: r.duration_ms,
+            model: r.model,
             note: r.note,
         })
         .collect()

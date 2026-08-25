@@ -166,8 +166,8 @@ impl Picker {
         let area = frame.area();
         let max_width = area.width.saturating_sub(8).clamp(40, 100);
         let width = self.content_width().map_or(max_width, |w| {
-            // + block padding, borders, and the scrollbar column
-            (w + 5).clamp(40, max_width)
+            // + block padding, borders, and the gap + scrollbar columns
+            (w + 6).clamp(40, max_width)
         });
         // Keep at least a two-row margin above and below the dialog so
         // a long list never presses the frame against the screen edge.
@@ -193,10 +193,15 @@ impl Picker {
         ])
         .areas(inner);
         // Reserve the rightmost column for the scrollbar so it never
-        // covers table content — the pane tables get this shield from
-        // their panel border.
-        let [table_area, scrollbar_area] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body_area);
+        // covers table content, plus a one-cell gap so the last column
+        // keeps the same breathing room the left padding gives the
+        // first.
+        let [table_area, _scroll_gap, scrollbar_area] = Layout::horizontal([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(body_area);
         // The header row occupies one line of the body
         self.viewport = table_area.height.saturating_sub(1);
 

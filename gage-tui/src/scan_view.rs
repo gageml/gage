@@ -45,7 +45,7 @@ use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 type ScanLoader<'a> = &'a dyn Fn(&str) -> io::Result<ScanModel>;
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
-use crate::text::ellipsize;
+use crate::text::{ellipsize, fmt_duration};
 use crate::textarea::TextArea;
 use crate::{app, hint, markdown, session, styles};
 
@@ -3328,19 +3328,5 @@ fn id_span(id: &str, selected: bool) -> Span<'static> {
         Span::raw(short_id(id))
     } else {
         Span::styled(short_id(id), styles::Text::dim())
-    }
-}
-
-fn fmt_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs == 0 {
-        match d.as_millis() {
-            0 => "<1ms".to_string(),
-            ms => format!("{ms}ms"),
-        }
-    } else if secs < 60 {
-        format!("{secs}s")
-    } else {
-        format!("{}m{:02}s", secs / 60, secs % 60)
     }
 }

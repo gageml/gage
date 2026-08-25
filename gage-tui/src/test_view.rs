@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gage_db::rusqlite::Connection;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -22,6 +23,7 @@ use crate::item_table::ItemTable;
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
+use crate::text::fmt_duration;
 use crate::{app, attrs::attr_lines, hint, session, styles};
 
 pub struct TestRunModel {
@@ -40,6 +42,9 @@ pub struct TestRunRef {
     pub tests: usize,
     /// Passed tests, shown as a percentage of `tests`
     pub passed: usize,
+    /// Total wall-clock duration; None renders as `-`
+    pub duration_ms: Option<i64>,
+    pub model: Option<String>,
     pub note: Option<String>,
 }
 
@@ -56,11 +61,17 @@ pub(crate) fn run_picker(runs: &[TestRunRef], current: Option<&str>) -> Picker {
                     (n.to_string(), format!("{pct:.0}%"))
                 }
             };
+            let time = match run.duration_ms {
+                Some(ms) => fmt_duration(Duration::from_millis(ms.max(0) as u64)),
+                None => "-".to_string(),
+            };
             PickItem {
                 cells: vec![
                     Span::styled(short, styles::Text::id()),
                     Span::raw(tests),
                     Span::raw(pass),
+                    Span::raw(time),
+                    Span::raw(run.model.clone().unwrap_or_default()),
                     Span::raw(run.note.clone().unwrap_or_default()),
                     Span::styled(picker::ago(run.started_ms), styles::Text::dim()),
                 ],
@@ -72,7 +83,9 @@ pub(crate) fn run_picker(runs: &[TestRunRef], current: Option<&str>) -> Picker {
         PickColumn::new("Run", 8),
         PickColumn::right("Tests", 5),
         PickColumn::right("Pass", 4),
-        PickColumn::fill("Note"),
+        PickColumn::right("Time", 7),
+        PickColumn::fit("Model", 12),
+        PickColumn::fit("Note", 40),
         PickColumn::right("Started", 7),
     ];
     Picker::new("Open test run", columns, items, current)
