@@ -27,7 +27,6 @@ fn install_panic_hook() {
 mod author;
 mod cmd_agent;
 mod cmd_config;
-mod cmd_eval;
 mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
@@ -37,6 +36,7 @@ mod cmd_review;
 mod cmd_scan;
 mod cmd_session;
 mod cmd_sync;
+mod cmd_test;
 mod dialog;
 mod human;
 mod limit;
@@ -145,10 +145,10 @@ enum Command {
         command: Option<McpCommand>,
     },
 
-    /// Run and view evals
-    Eval {
+    /// Run and view tests
+    Test {
         #[command(subcommand)]
-        command: cmd_eval::EvalCommand,
+        command: cmd_test::TestCommand,
     },
 }
 
@@ -250,7 +250,7 @@ async fn main() {
                 cmd_issue::IssueCommand::Open(args) => cmd_issue::open(args),
                 cmd_issue::IssueCommand::Comment(args) => cmd_issue::comment(args),
             },
-            Command::Eval { command } => cmd_eval::run(command).await,
+            Command::Test { command } => cmd_test::run(command).await,
             Command::Scan(args) => {
                 if args.agent {
                     set_agent_projects_dir();

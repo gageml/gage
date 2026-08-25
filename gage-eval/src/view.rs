@@ -24,7 +24,7 @@ pub fn resolve(prefix: &str) -> io::Result<RunSummary> {
 }
 
 /// Carries the matched runs so the CLI can render them in the same
-/// table style as `gage eval list`.
+/// table style as `gage test list`.
 pub struct AmbiguousError {
     pub matches: Vec<RunSummary>,
 }

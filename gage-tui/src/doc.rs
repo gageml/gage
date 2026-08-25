@@ -75,7 +75,7 @@ impl Entry {
 
     /// Outline label — the subtype when meaningful (e.g. `tool_use`,
     /// `thinking`, `tool_result`, `meta`), otherwise the raw type. Mirrors
-    /// the labeling used by `gage eval view`.
+    /// the labeling used by `gage test view`.
     pub fn label(&self) -> &str {
         match gage_claude::entry::message_subtype(&self.value) {
             Some("text") | None => self.entry_type(),

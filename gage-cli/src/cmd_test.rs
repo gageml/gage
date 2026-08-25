@@ -1,5 +1,6 @@
-//! The `gage eval` command: run and view evals. The eval engine lives
-//! in the `gage-eval` crate; this module is its command layer.
+//! The `gage test` command: run and view model-directed tests (prompt
+//! tests and scanner tests). The test engine lives in the `gage-eval`
+//! crate; this module is its command layer.
 
 use clap::{Args, Subcommand};
 use gage_core::style::IdHighlighter;
@@ -20,16 +21,16 @@ use crate::dialog::{self, DialogError};
 use crate::{limit, style};
 
 #[derive(Subcommand)]
-pub enum EvalCommand {
-    /// Run an eval
+pub enum TestCommand {
+    /// Run tests
     Run(RunArgs),
-    /// List eval runs
+    /// List test runs
     List(ListArgs),
-    /// View an eval run report
+    /// View a test run report
     View(ViewArgs),
-    /// Set an evan run note
+    /// Set a test run note
     Note(NoteArgs),
-    /// Delete one or more eval runs
+    /// Delete one or more test runs
     Delete(DeleteArgs),
 }
 
@@ -95,8 +96,8 @@ const DEFAULT_SAMPLE_JOBS: usize = 4;
 pub struct RunArgs {
     /// Test to run (repeatable)
     ///
-    /// A name or pattern: `eval/test` matches one test; a bare token
-    /// matches that test-id in any eval, or every test in an eval of
+    /// A name or pattern: `suite/test` matches one test; a bare token
+    /// matches that test-id in any suite, or every test in a suite of
     /// that name; `*` matches within a segment but does not cross `/`.
     #[arg(short, long = "test", value_name = "TEST")]
     test: Vec<String>,
@@ -119,18 +120,18 @@ pub struct RunArgs {
 
     /// Note recorded with the run
     ///
-    /// Stored in manifest.json and shown in `gage eval list`. Useful for
+    /// Stored in manifest.json and shown in `gage test list`. Useful for
     /// labeling what you were varying.
     #[arg(short, long)]
     note: Option<String>,
 
-    /// Load evals from a directory instead of the repo's evals
+    /// Load tests from a directory instead of the repo's tests
     ///
-    /// The directory holds eval `*.toml` files and a `fixtures/` subdir.
+    /// The directory holds suite `*.toml` files and a `fixtures/` subdir.
     /// Use for ad hoc tests staged outside source control (e.g. under
-    /// ~/.gage/tmp/evals).
+    /// ~/.gage/tmp/tests).
     #[arg(short = 'd', long, value_name = "DIR")]
-    evals_dir: Option<std::path::PathBuf>,
+    tests_dir: Option<std::path::PathBuf>,
 
     /// Concurrent tests
     #[arg(short, long, value_name = "N", default_value_t = DEFAULT_JOBS)]
@@ -149,13 +150,13 @@ pub struct RunArgs {
     yes: bool,
 }
 
-pub async fn run(command: EvalCommand) {
+pub async fn run(command: TestCommand) {
     match command {
-        EvalCommand::Run(args) => cmd_run(args),
-        EvalCommand::List(args) => cmd_list(args),
-        EvalCommand::View(args) => cmd_view(args).await,
-        EvalCommand::Note(args) => cmd_note(args),
-        EvalCommand::Delete(args) => cmd_delete(args),
+        TestCommand::Run(args) => cmd_run(args),
+        TestCommand::List(args) => cmd_list(args),
+        TestCommand::View(args) => cmd_view(args).await,
+        TestCommand::Note(args) => cmd_note(args),
+        TestCommand::Delete(args) => cmd_delete(args),
     }
 }
 
@@ -199,7 +200,7 @@ fn cmd_note(args: NoteArgs) {
             }
             println!("Note set");
         }
-        None => dialog::run("Eval note", || {
+        None => dialog::run("Test note", || {
             let mut input = cliclack::input("Note");
             if let Some(existing) = &run.note {
                 input = input.default_input(existing);
@@ -213,12 +214,12 @@ fn cmd_note(args: NoteArgs) {
 }
 
 async fn cmd_view(args: ViewArgs) {
-    // The eval view app runs in one terminal session: with no run arg
-    // the run picker chooses the initial run, and `o` inside a view
+    // The view app runs in one terminal session: with no run arg the
+    // run picker chooses the initial run, and `o` inside a view
     // switches runs (and view kinds) without leaving the TUI.
     let initial = args.run_id.as_deref().map(|prefix| {
         let run = resolve_run(prefix);
-        match eval_model(&run, eval_run_refs()) {
+        match run_model(&run, run_refs()) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("failed to load run: {e}");
@@ -226,14 +227,14 @@ async fn cmd_view(args: ViewArgs) {
             }
         }
     });
-    let runs = eval_run_refs();
+    let runs = run_refs();
     if initial.is_none() && runs.is_empty() {
         println!("No runs found");
         return;
     }
     let load = |id: &str| -> std::io::Result<gage_tui::eval_view::EvalModel> {
         let run = view::resolve(id)?;
-        eval_model(&run, eval_run_refs())
+        run_model(&run, run_refs())
     };
     if let Err(e) = gage_tui::eval_view::run_app(initial, runs, load) {
         eprintln!("view failed: {e}");
@@ -261,9 +262,9 @@ fn resolve_run(prefix: &str) -> storage::RunSummary {
     }
 }
 
-/// Rows for the run-open picker: every eval run, newest first, with a
+/// Rows for the run-open picker: every test run, newest first, with a
 /// kind-appropriate description.
-fn eval_run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
+fn run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
     let runs = match storage::list_runs() {
         Ok(r) => r,
         Err(e) => {
@@ -292,9 +293,9 @@ fn eval_run_refs() -> Vec<gage_tui::eval_view::EvalRunRef> {
         .collect()
 }
 
-/// Build the view model for a test eval run from its structured
-/// results (building `results.json` on demand for older runs).
-fn eval_model(
+/// Build the view model for a test run from its structured results
+/// (building `results.json` on demand for older runs).
+fn run_model(
     run: &storage::RunSummary,
     runs: Vec<gage_tui::eval_view::EvalRunRef>,
 ) -> std::io::Result<gage_tui::eval_view::EvalModel> {
@@ -429,14 +430,14 @@ fn cmd_run(args: RunArgs) {
     } else {
         args.test.clone()
     };
-    let root = match &args.evals_dir {
+    let root = match &args.tests_dir {
         Some(dir) => eval::Root::at(dir),
         None => eval::Root::repo(),
     };
     let all = match eval::load_all(&root) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("failed to load evals: {e}");
+            eprintln!("failed to load tests: {e}");
             std::process::exit(2);
         }
     };
@@ -515,7 +516,7 @@ fn cmd_run(args: RunArgs) {
         effort: &args.effort,
         note: args.note.as_deref(),
         root: &root,
-        evals_dir: args.evals_dir.as_deref(),
+        evals_dir: args.tests_dir.as_deref(),
         jobs: args.jobs,
         sample_jobs: args.jobs_samples,
         judge_model: &args.judge_model,
@@ -602,18 +603,18 @@ fn one_line(s: &str, max: usize) -> String {
 }
 
 fn show_run_intro(tests: &[&eval::Test], args: &RunArgs) -> std::io::Result<()> {
-    cliclack::intro(console::style("Run eval").bold())?;
+    cliclack::intro(console::style("Run tests").bold())?;
 
-    let mut by_eval: std::collections::BTreeMap<&str, Vec<String>> =
+    let mut by_suite: std::collections::BTreeMap<&str, Vec<String>> =
         std::collections::BTreeMap::new();
     for t in tests {
-        by_eval
+        by_suite
             .entry(t.eval.as_str())
             .or_default()
             .push(t.test_id());
     }
-    let mut evals_line = String::from("Selected\n");
-    for (name, ids) in &mut by_eval {
+    let mut suites_line = String::from("Selected\n");
+    for (name, ids) in &mut by_suite {
         ids.sort();
         let shown = ids.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
         let extra = ids.len().saturating_sub(3);
@@ -623,12 +624,12 @@ fn show_run_intro(tests: &[&eval::Test], args: &RunArgs) -> std::io::Result<()> 
             shown
         };
         let list = console::style(list).dim();
-        evals_line.push_str(&format!("  {name}: {list}\n"));
+        suites_line.push_str(&format!("  {name}: {list}\n"));
     }
-    cliclack::log::remark(evals_line.trim_end())?;
+    cliclack::log::remark(suites_line.trim_end())?;
 
-    if let Some(dir) = &args.evals_dir {
-        cliclack::log::remark(format!("Evals dir: {}", dir.display()))?;
+    if let Some(dir) = &args.tests_dir {
+        cliclack::log::remark(format!("Tests dir: {}", dir.display()))?;
     }
 
     if tests.iter().any(|t| !t.is_scanner()) {
