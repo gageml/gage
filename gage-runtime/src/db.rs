@@ -429,7 +429,9 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
         ..DbNote::new(target, &name, value_db, &author)
     };
 
-    tracing::info!(
+    // Debug, not info: the db row is the record; restating written
+    // note content in the log is diagnostic detail
+    tracing::debug!(
         id = db_note.id,
         name = db_note.name,
         target = ?db_note.target,

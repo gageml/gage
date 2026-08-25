@@ -58,7 +58,9 @@ pub async fn annotate() {
     loop {
         match results.next().await {
             Some(Ok((result, #{ session }))) => {
-                log::info!(
+                // Debug, not info: the agent's reply restates its
+                // written notes
+                log::debug!(
                     "eval-annotation: {:?}",
                     #{
                         session,
