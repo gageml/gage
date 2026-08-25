@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gage_claude::resolve::resolve_command;
 use gage_core::task::{task_display, task_name_display};
 use gage_db::issue::{self, IssueStatus, StatusReason};
+use gage_db::target::{NoteTarget, SessionTarget};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -783,10 +784,14 @@ fn handle_key(
                 KeyCode::Char('a') if matches!(state.dialog, Dialog::Issue { .. }) => {
                     state.open_actions_prompt();
                 }
-                KeyCode::Char('t')
-                    if matches!(state.dialog, Dialog::Note { .. } | Dialog::Issue { .. }) =>
-                {
+                KeyCode::Char('a') if matches!(state.dialog, Dialog::Note { .. }) => {
                     state.open_tool_use_session();
+                }
+                KeyCode::Char('t') if matches!(state.dialog, Dialog::Issue { .. }) => {
+                    state.open_tool_use_session();
+                }
+                KeyCode::Char('t') if matches!(state.dialog, Dialog::Note { .. }) => {
+                    state.open_target_session();
                 }
                 KeyCode::Char('l') if matches!(state.dialog, Dialog::Log { .. }) => {
                     state.dialog = Dialog::None
@@ -1313,6 +1318,76 @@ impl ViewState {
             }
         }
         None
+    }
+
+    /// Open the session view over the note dialog's target session,
+    /// selected at the target's line, layered so closing it restores
+    /// the dialog. When the session cannot be loaded, a notice
+    /// overlays the dialog instead.
+    fn open_target_session(&mut self) {
+        let Dialog::Note { note } = &self.dialog else {
+            return;
+        };
+        let Some(target) = session_target(&note.target) else {
+            return;
+        };
+        let item = self.target_session_item(&target.session_id);
+        let loaded = match gage_db::db::open_db() {
+            Ok(db) => match load_session_doc(&item, &db) {
+                Ok((doc, source)) => Some((doc, source, db)),
+                Err(e) => {
+                    self.push_log(format!("Open session {}: {e}", item.id));
+                    None
+                }
+            },
+            Err(e) => {
+                self.push_log(format!("Open session {}: {e}", item.id));
+                None
+            }
+        };
+        let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
+        self.dialog = match loaded {
+            Some((doc, source, db)) => {
+                let entry_index = target.line.and_then(|l| entry_index_for_line(&doc, l));
+                let options = crate::ViewOptions {
+                    show_turns: true,
+                    ..Default::default()
+                };
+                let mut view = app::AppState::new(doc, &options, source);
+                if let Some(i) = entry_index {
+                    view.select_entry(i);
+                }
+                Dialog::Session {
+                    id: item.id,
+                    view: Box::new(view),
+                    nav: SessionNav::Pinned,
+                    db,
+                    return_to: Some(return_to),
+                }
+            }
+            None => Dialog::Notice {
+                message: "Cannot open note target session.".to_string(),
+                return_to,
+            },
+        };
+    }
+
+    /// The sessions-table item for `session_id`, or a minimal
+    /// stand-in when the target session is not in the scan's session
+    /// list — the dialog then loads it from the indexed corpus.
+    fn target_session_item(&self, session_id: &str) -> SessionItem {
+        self.model
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .unwrap_or_else(|| SessionItem {
+                id: session_id.to_string(),
+                title: String::new(),
+                path: None,
+                notes: 0,
+                issues: 0,
+            })
     }
 
     /// Open the actions menu over the issue dialog's issue
@@ -2137,6 +2212,22 @@ fn tool_use_entry_index(doc: &crate::doc::Document, call_id: &str) -> Option<usi
                 })
             })
     })
+}
+
+/// The session target parsed from a note's target URI, when it is
+/// one. Scan and project targets name nothing the session dialog can
+/// show.
+fn session_target(uri: &str) -> Option<SessionTarget> {
+    match NoteTarget::from_uri(uri).ok()? {
+        NoteTarget::Session(t) => Some(t),
+        _ => None,
+    }
+}
+
+/// Index of the entry at JSONL line `line`, or of the nearest entry
+/// before it when that line is not among the document's entries.
+fn entry_index_for_line(doc: &crate::doc::Document, line: u32) -> Option<usize> {
+    doc.entries.iter().rposition(|e| e.line <= line)
 }
 
 /// An agent's duration: last minus first session timestamp once both
@@ -3260,7 +3351,10 @@ fn footer_help(state: &ViewState) -> Line<'static> {
         Dialog::Note { note } => {
             let mut items = vec![("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
             if author_call_id(&note.author).is_some() {
-                items.push(("t", "tool use"));
+                items.push(("a", "author"));
+            }
+            if session_target(&note.target).is_some() {
+                items.push(("t", "target"));
             }
             hint::help_line(&items)
         }
