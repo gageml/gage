@@ -88,11 +88,13 @@ const DEFAULT_JUDGE_MODEL: &str = "sonnet";
 const DEFAULT_JOBS: usize = 4;
 const DEFAULT_SAMPLE_JOBS: usize = 4;
 
+// The selection group is not `required`: `--list-tests` works without
+// a selection (like `--help`, it answers before options are enforced);
+// cmd_run checks the requirement for actual runs.
 #[derive(Args)]
 #[command(group = clap::ArgGroup::new("selection")
-    .required(true)
     .multiple(false)
-    .args(["test", "all_tests"]))]
+    .args(["test", "all"]))]
 pub struct RunArgs {
     /// Test to run (repeatable)
     ///
@@ -104,7 +106,7 @@ pub struct RunArgs {
 
     /// Run all tests
     #[arg(short, long)]
-    all_tests: bool,
+    all: bool,
 
     /// Print selected tests and exit
     #[arg(short, long = "list-tests")]
@@ -425,7 +427,7 @@ fn delete_runs(runs: &[storage::RunSummary]) -> usize {
 
 fn cmd_run(args: RunArgs) {
     // `-a` selects everything: an empty spec list is `select`'s "all".
-    let specs = if args.all_tests {
+    let specs = if args.all {
         Vec::new()
     } else {
         args.test.clone()
@@ -449,6 +451,19 @@ fn cmd_run(args: RunArgs) {
         }
     };
 
+    if args.list {
+        println!("Selected {} test(s):", tests.len());
+        for t in &tests {
+            println!("  {}", t.id());
+        }
+        return;
+    }
+
+    if !args.all && args.test.is_empty() {
+        eprintln!("specify tests with --test or --all-tests");
+        std::process::exit(1);
+    }
+
     if tests.is_empty() {
         eprintln!("No tests matched.");
         std::process::exit(1);
@@ -460,14 +475,6 @@ fn cmd_run(args: RunArgs) {
             eprintln!("  {test_id}: fixture `{fixture}` not found");
         }
         std::process::exit(1);
-    }
-
-    if args.list {
-        println!("Selected {} test(s):", tests.len());
-        for t in &tests {
-            println!("  {}", t.id());
-        }
-        return;
     }
 
     let has_prompt_tests = tests.iter().any(|t| !t.is_scanner());
