@@ -31,12 +31,16 @@ pub struct TestRunModel {
     pub runs: Vec<TestRunRef>,
 }
 
-/// A row in the run-open picker. The caller (the CLI) supplies the
-/// display description.
+/// A row in the run-open picker, mirroring the `gage test list`
+/// columns.
 pub struct TestRunRef {
     pub id: String,
     pub started_ms: i64,
-    pub descr: String,
+    /// Scored tests in the run; 0 renders blank
+    pub tests: usize,
+    /// Passed tests, shown as a percentage of `tests`
+    pub passed: usize,
+    pub note: Option<String>,
 }
 
 /// Build the run-open picker, preselecting the active run.
@@ -45,20 +49,31 @@ pub(crate) fn run_picker(runs: &[TestRunRef], current: Option<&str>) -> Picker {
         .iter()
         .map(|run| {
             let short = gage_core::uuid::short_uuid(&run.id).to_string();
+            let (tests, pass) = match run.tests {
+                0 => (String::new(), String::new()),
+                n => {
+                    let pct = (run.passed as f64 / n as f64 * 100.0).round();
+                    (n.to_string(), format!("{pct:.0}%"))
+                }
+            };
             PickItem {
                 cells: vec![
                     Span::styled(short, styles::Text::id()),
+                    Span::raw(tests),
+                    Span::raw(pass),
+                    Span::raw(run.note.clone().unwrap_or_default()),
                     Span::styled(picker::ago(run.started_ms), styles::Text::dim()),
-                    Span::raw(run.descr.clone()),
                 ],
                 id: run.id.clone(),
             }
         })
         .collect();
     let columns = vec![
-        PickColumn::new("Id", 8),
-        PickColumn::right("Age", 4),
-        PickColumn::fill("Description"),
+        PickColumn::new("Run", 8),
+        PickColumn::right("Tests", 5),
+        PickColumn::right("Pass", 4),
+        PickColumn::fill("Note"),
+        PickColumn::right("Started", 7),
     ];
     Picker::new("Open test run", columns, items, current)
 }

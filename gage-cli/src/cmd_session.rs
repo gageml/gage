@@ -313,7 +313,7 @@ pub async fn list(args: SessionListArgs, agent: bool) {
             } else {
                 format_model(models.value(i))
             };
-            let mut row = vec![id_display, project, title, model, modified, size, count];
+            let mut row = vec![id_display, project, title, model, size, count];
             if args.stats {
                 let (time, tin, tout, tcache, turns) =
                     match gage_claude::stats::compute_session_stats(std::path::Path::new(
@@ -334,16 +334,15 @@ pub async fn list(args: SessionListArgs, agent: bool) {
                 row.push(tcache);
                 row.push(turns);
             }
+            row.push(modified);
             table_rows.push(row);
         }
     }
 
-    let mut header: Vec<String> = [
-        "Id", "Project", "Title", "Model", "Modified", "Size", "Messages",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut header: Vec<String> = ["Id", "Project", "Title", "Model", "Size", "Messages"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     if args.stats {
         header.push("Model time".into());
         header.push("Tk in".into());
@@ -351,6 +350,7 @@ pub async fn list(args: SessionListArgs, agent: bool) {
         header.push("Tk cache".into());
         header.push("Turns".into());
     }
+    header.push("Modified".into());
 
     let col_count = header.len();
     let mut table = Table::from_iter(std::iter::once(header).chain(table_rows));
@@ -358,10 +358,10 @@ pub async fn list(args: SessionListArgs, agent: bool) {
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
-        .modify(Columns::last(), Alignment::right())
-        .modify(Columns::new(6..7), Alignment::right());
+        .modify(Columns::new(5..6), Alignment::right());
     if args.stats {
-        table.modify(Columns::new(7..col_count), Alignment::right());
+        // The stats columns, between Messages and Modified
+        table.modify(Columns::new(6..col_count - 1), Alignment::right());
     }
     let term_width = console::Term::stdout().size().1 as usize;
     table.with(

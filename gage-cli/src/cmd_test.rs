@@ -275,22 +275,12 @@ fn run_refs() -> Vec<gage_tui::test_view::TestRunRef> {
         }
     };
     runs.into_iter()
-        .map(|r| {
-            let descr = if r.total > 0 {
-                let pct = (r.passed as f64 / r.total as f64 * 100.0).round() as u32;
-                format!("{} tests · {pct}%", r.total)
-            } else {
-                "tests".to_string()
-            };
-            let descr = match &r.note {
-                Some(n) => format!("{descr} · {n}"),
-                None => descr,
-            };
-            gage_tui::test_view::TestRunRef {
-                id: r.run_id,
-                started_ms: r.started_at_ms,
-                descr,
-            }
+        .map(|r| gage_tui::test_view::TestRunRef {
+            id: r.run_id,
+            started_ms: r.started_at_ms,
+            tests: r.total,
+            passed: r.passed,
+            note: r.note,
         })
         .collect()
 }
@@ -700,12 +690,12 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
     let highlighter = IdHighlighter::new(peers);
     let header: Vec<String> = [
         "Run",
-        "Started",
         "Tests",
         "Pass",
         "Time · ⌀test",
         "Model",
         "Note",
+        "Started",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -715,31 +705,35 @@ fn runs_table(runs: &[storage::RunSummary]) -> String {
         .map(|r| {
             vec![
                 highlighter.short(&r.run_id),
-                format_elapsed_ms(r.started_at_ms),
                 format_tests(r.total),
                 format_pass_pct(r.passed, r.total),
                 format_run_time(r.duration_ms, r.test_count),
                 fmt_model(r.model.as_deref()),
                 r.note.clone().unwrap_or_default(),
+                format_elapsed_ms(r.started_at_ms),
             ]
         })
         .collect();
 
     let col_count = header.len();
+    // Note (free text) stays undimmed and absorbs width truncation
+    let note_col = col_count - 2;
     let mut table = Table::from_iter(std::iter::once(header).chain(rows));
     table
         .with(Style::rounded())
         .modify(Rows::first(), Color::FG_BRIGHT_YELLOW)
         .modify(
-            Columns::new(1..col_count - 1).not(Rows::first()),
+            Columns::new(1..col_count)
+                .not(Columns::new(note_col..note_col + 1))
+                .not(Rows::first()),
             style::dim(),
         )
-        .modify(Columns::new(4..5), Alignment::right());
+        .modify(Columns::new(3..4), Alignment::right());
     let term_width = console::Term::stdout().size().1 as usize;
     table.with(
         Width::truncate(term_width)
             .suffix("…")
-            .priority(OnlyColumn::new(col_count - 1)),
+            .priority(OnlyColumn::new(note_col)),
     );
     format!("{table}\n")
 }
