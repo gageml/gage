@@ -2720,8 +2720,24 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     ])
     .areas(area);
 
+    // Each task owns an equal 1/total share of the bar. A completed
+    // task contributes its full share; a running task that reports
+    // progress contributes the reported fraction of its share.
     let ratio = if model.total > 0 {
-        (model.progress as f64 / model.total as f64).min(1.0)
+        let running: f64 = model
+            .tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Running)
+            .filter_map(|t| t.progress)
+            .map(|(pos, total)| {
+                if total > 0 {
+                    (pos as f64 / total as f64).min(1.0)
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        ((model.progress as f64 + running) / model.total as f64).min(1.0)
     } else {
         0.0
     };
