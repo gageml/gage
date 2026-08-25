@@ -120,6 +120,13 @@ impl SessionListBuilder {
         self
     }
 
+    /// Filter by an already-encoded project directory name, as
+    /// recorded in the session table's `project` column.
+    pub fn project_slug(mut self, slug: impl Into<String>) -> Self {
+        self.projects.push(slug.into());
+        self
+    }
+
     pub fn since(mut self, duration: Duration) -> Self {
         self.since = SystemTime::now().checked_sub(duration);
         self

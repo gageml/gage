@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use tabled::{
 };
 
 use gage_claude::home::ClaudeHome;
-use gage_claude::project::{project_display, shorten_home_path};
+use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
@@ -110,9 +111,10 @@ pub struct ScanRunArgs {
 
     /// Limit sessions to a project
     ///
-    /// PATH is the project's working directory, relative or absolute.
-    #[arg(short, long, value_name = "PATH", conflicts_with_all = ["rerun", "scan"])]
-    project: Option<std::path::PathBuf>,
+    /// PROJECT is a project directory path (absolute, relative, or
+    /// ~-prefixed) or a project slug as shown by 'gage session list'.
+    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true, conflicts_with_all = ["rerun", "scan"])]
+    project: Option<String>,
 
     /// Scanner to run (repeatable)
     #[arg(short, long = "scanner", value_name = "NAME")]
@@ -1469,15 +1471,19 @@ async fn run_dialog(
         };
         let limit = if no_selection { Some(50) } else { args.limit };
 
-        // Canonicalized so the label and the builder's slug encoding
-        // both see the real path; a path not on disk passes through
-        // resolved and matches whatever it encodes to (the builder
-        // applies the same fallback).
         let project = match &args.project {
             Some(p) => {
-                let resolved = gage_core::config::resolve_local_path(p)
-                    .with_context(|| format!("resolving project path {}", p.display()))?;
-                Some(resolved.canonicalize().unwrap_or(resolved))
+                let projects = known_projects()
+                    .await
+                    .context("querying session projects")?;
+                let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+                match resolve_project(p, &home, &cwd, &projects) {
+                    Some(slug) => Some(slug),
+                    None => {
+                        cli::log::error(format!("No sessions for project '{p}'"))?;
+                        return Err(DialogError::Failed("Nothing to scan".to_string()));
+                    }
+                }
             }
             None => None,
         };
@@ -1502,14 +1508,14 @@ async fn run_dialog(
                 (None, None) => window,
             }
         };
-        if let Some(p) = &project {
-            label = format!("{label} in {}", shorten_home_path(p));
+        if let Some(slug) = &project {
+            label = format!("{label} in {}", project_slug_display(slug));
         }
         cli::log::step(format!("Sessions\n{}", style(label).dim()))?;
 
         let mut builder = SessionListBuilder::new();
-        if let Some(p) = &project {
-            builder = builder.project(p);
+        if let Some(slug) = &project {
+            builder = builder.project_slug(slug.clone());
         }
         if let Some(d) = since {
             builder = builder.since(d);
@@ -1686,6 +1692,83 @@ async fn run_dialog(
             anyhow::anyhow!("{e}").context("scan runner"),
         )),
     }
+}
+
+/// Encoded project slugs recorded in the session corpus.
+async fn known_projects() -> anyhow::Result<std::collections::HashSet<String>> {
+    use datafusion::arrow::array::{Array, StringArray};
+
+    let ctx = gage_query::create_context_default().await;
+    let batches = ctx
+        .sql("SELECT DISTINCT project FROM session")
+        .await?
+        .collect()
+        .await?;
+    let mut out = std::collections::HashSet::new();
+    for batch in &batches {
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("session.project should be a Utf8 column");
+        for i in 0..batch.num_rows() {
+            if !col.is_null(i) {
+                out.insert(col.value(i).to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve a `-p` value to an encoded project slug recorded in the
+/// session corpus. A leading `-` names a slug exactly. A value with no
+/// path separator is tried as a slug first: as the home-relative
+/// abbreviation `gage session list` shows, then with a leading `-`
+/// prepended. Anything else — or a slug miss — resolves as a path
+/// (`~` against `home`, relative against `cwd`), canonicalized and
+/// encoded. None when no candidate matches a recorded project.
+fn resolve_project(
+    value: &str,
+    home: &Path,
+    cwd: &Path,
+    projects: &std::collections::HashSet<String>,
+) -> Option<String> {
+    if value.starts_with('-') {
+        return projects.contains(value).then(|| value.to_string());
+    }
+    if !value.contains('/') && !value.starts_with('~') {
+        let abbreviated = format!("{}-{value}", session::encode_project_dir(home));
+        if projects.contains(&abbreviated) {
+            return Some(abbreviated);
+        }
+        let full = format!("-{value}");
+        if projects.contains(&full) {
+            return Some(full);
+        }
+    }
+    let expanded = if value == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        std::path::PathBuf::from(value)
+    };
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    let canonical = resolved.canonicalize().unwrap_or(resolved);
+    let slug = session::encode_project_dir(&canonical);
+    projects.contains(&slug).then_some(slug)
+}
+
+/// Slug with the home prefix stripped — the form `gage session list`
+/// shows.
+fn project_slug_display(slug: &str) -> String {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    let prefix = format!("{}-", session::encode_project_dir(Path::new(&home)));
+    slug.strip_prefix(&prefix).unwrap_or(slug).to_string()
 }
 
 /// Elapsed time since midnight local time, for the --today window.
@@ -2093,4 +2176,83 @@ fn list_scanners(registry: &ScannerRegistry) {
         .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    use super::resolve_project;
+
+    const HOME: &str = "/home/tester";
+    const CWD: &str = "/work";
+
+    fn resolve(value: &str, known: &[&str]) -> Option<String> {
+        let projects: HashSet<String> = known.iter().map(|s| s.to_string()).collect();
+        resolve_project(value, Path::new(HOME), Path::new(CWD), &projects)
+    }
+
+    #[test]
+    fn full_slug_matches_exactly() {
+        assert_eq!(
+            resolve("-home-tester-Code-gage", &["-home-tester-Code-gage"]).as_deref(),
+            Some("-home-tester-Code-gage")
+        );
+    }
+
+    #[test]
+    fn unknown_full_slug_is_none() {
+        assert_eq!(
+            resolve("-home-tester-nope", &["-home-tester-Code-gage"]),
+            None
+        );
+    }
+
+    #[test]
+    fn abbreviation_prepends_home_slug() {
+        assert_eq!(
+            resolve("Code-gage", &["-home-tester-Code-gage"]).as_deref(),
+            Some("-home-tester-Code-gage")
+        );
+    }
+
+    #[test]
+    fn slug_missing_leading_dash_matches() {
+        assert_eq!(
+            resolve("home-tester-Code-gage", &["-home-tester-Code-gage"]).as_deref(),
+            Some("-home-tester-Code-gage")
+        );
+    }
+
+    #[test]
+    fn tilde_path_resolves_against_home() {
+        assert_eq!(
+            resolve("~/proj", &["-home-tester-proj"]).as_deref(),
+            Some("-home-tester-proj")
+        );
+    }
+
+    #[test]
+    fn relative_path_resolves_against_cwd() {
+        assert_eq!(
+            resolve("proj", &["-work-proj"]).as_deref(),
+            Some("-work-proj")
+        );
+    }
+
+    #[test]
+    fn abbreviation_wins_over_path() {
+        // "proj" matches both the abbreviation and a cwd-relative path;
+        // the slug interpretation is checked first
+        assert_eq!(
+            resolve("proj", &["-home-tester-proj", "-work-proj"]).as_deref(),
+            Some("-home-tester-proj")
+        );
+    }
+
+    #[test]
+    fn no_match_is_none() {
+        assert_eq!(resolve("nonexistent", &["-home-tester-Code-gage"]), None);
+    }
 }

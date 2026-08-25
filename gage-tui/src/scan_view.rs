@@ -1043,6 +1043,10 @@ struct ViewState {
     /// Last UI position per viewed session, restored when a session
     /// dialog re-opens (including `[`/`]` stepping away and back).
     session_ui: HashMap<String, app::SavedUi>,
+    /// High-water mark for the progress gauge; keeps the bar from
+    /// moving backward when a running task resets its reported
+    /// position for a second phase.
+    max_ratio: f64,
 }
 
 enum Dialog {
@@ -1164,6 +1168,7 @@ impl ViewState {
             scroll_view: ScrollView::new(),
             pending_resolve: None,
             session_ui: HashMap::new(),
+            max_ratio: 0.0,
             model,
         };
         state.sync_tables();
@@ -1175,6 +1180,34 @@ impl ViewState {
     fn replace_model(&mut self, mut model: ScanModel) {
         model.finished = true;
         *self = ViewState::new(model);
+    }
+
+    /// Overall progress ratio for the gauge. Each task owns an equal
+    /// 1/total share of the bar. A completed task contributes its full
+    /// share; a running task that reports progress contributes the
+    /// reported fraction of its share. Clamped to its own high-water
+    /// mark so a task's mid-run `reset()` never moves the bar backward.
+    fn progress_ratio(&mut self) -> f64 {
+        let model = &self.model;
+        if model.total == 0 {
+            return 0.0;
+        }
+        let running: f64 = model
+            .tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Running)
+            .filter_map(|t| t.progress)
+            .map(|(pos, total)| {
+                if total > 0 {
+                    (pos as f64 / total as f64).min(1.0)
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        let raw = ((model.progress as f64 + running) / model.total as f64).min(1.0);
+        self.max_ratio = raw.max(self.max_ratio);
+        self.max_ratio
     }
 
     /// Route a key to the scan-open picker; Enter loads the picked
@@ -2795,7 +2828,8 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel, canceled: bool) {
     dialog::draw_lines(frame, lines, hint);
 }
 
-fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
+fn draw_progress(frame: &mut Frame, area: Rect, state: &mut ViewState) {
+    let ratio = state.progress_ratio();
     let model = &state.model;
     let mut count_spans = vec![
         Span::styled("  Issues ", styles::Text::dim()),
@@ -2826,27 +2860,6 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &ViewState) {
     ])
     .areas(area);
 
-    // Each task owns an equal 1/total share of the bar. A completed
-    // task contributes its full share; a running task that reports
-    // progress contributes the reported fraction of its share.
-    let ratio = if model.total > 0 {
-        let running: f64 = model
-            .tasks
-            .iter()
-            .filter(|t| t.state == TaskState::Running)
-            .filter_map(|t| t.progress)
-            .map(|(pos, total)| {
-                if total > 0 {
-                    (pos as f64 / total as f64).min(1.0)
-                } else {
-                    0.0
-                }
-            })
-            .sum();
-        ((model.progress as f64 + running) / model.total as f64).min(1.0)
-    } else {
-        0.0
-    };
     if model.finished {
         // A finished model without a duration (a historical scan that
         // never completed) shows no time rather than a ticking one.
@@ -3498,6 +3511,43 @@ mod tests {
 
     fn close_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+    }
+
+    // Regression: a running task's reset() for a second phase lowers
+    // its reported (pos, total); the overall bar must hold its peak
+    // rather than move backward.
+    #[test]
+    fn progress_ratio_never_moves_backward() {
+        let model = ScanModel {
+            scan_id: "scan1".into(),
+            tasks: vec![TaskItem {
+                id: TaskId {
+                    scanner: "s".into(),
+                    task: "t".into(),
+                },
+                state: TaskState::Running,
+                cost: None,
+                elapsed: None,
+                started: None,
+                progress: Some((5, 10)),
+                agents: Vec::new(),
+            }],
+            sessions: Vec::new(),
+            notes: Vec::new(),
+            issues: Vec::new(),
+            total: 2,
+            progress: 0,
+            errors: 0,
+            cost: None,
+            finished: false,
+            elapsed: None,
+            out_path: None,
+        };
+        let mut state = ViewState::new(model);
+        let before = state.progress_ratio();
+        state.model.tasks.first_mut().unwrap().progress = Some((0, 4));
+        let after = state.progress_ratio();
+        assert!(after >= before, "ratio retreated: {before} -> {after}");
     }
 
     #[test]
