@@ -20,6 +20,7 @@ pub(crate) fn ellipsize(s: &str, width: usize) -> String {
     out
 }
 
+/// Format a finished duration, keeping sub-second and tenths detail.
 pub fn fmt_duration(d: Duration) -> String {
     let ms = d.as_millis();
     if ms < 1000 {
@@ -28,5 +29,16 @@ pub fn fmt_duration(d: Duration) -> String {
         format!("{:.1}s", ms as f64 / 1000.0)
     } else {
         format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
+    }
+}
+
+/// Format a still-ticking elapsed time at whole-second resolution, so
+/// a live display advances once per second instead of every redraw.
+pub(crate) fn fmt_duration_live(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{}s", secs / 60, secs % 60)
     }
 }

@@ -24,7 +24,7 @@ describe its rules and stack. Read them first via `mcp__gage__Query`:
 `SELECT name, value FROM note WHERE target = 'project:{{ project }}' AND name LIKE 'project-summary.%'`
 
 Judge the session's code against these summaries. A rule violation finding
-must quote the project-defined rule it violates.
+must quote a rule that appears in the query results above.
 {% endif %}
 
 If the code violates a generally accepted best practice --- use your judgement --- state

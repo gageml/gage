@@ -47,7 +47,7 @@ use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 type ScanLoader<'a> = &'a dyn Fn(&str) -> io::Result<ScanModel>;
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
-use crate::text::{ellipsize, fmt_duration};
+use crate::text::{ellipsize, fmt_duration, fmt_duration_live};
 use crate::textarea::TextArea;
 use crate::{app, hint, markdown, session, styles};
 
@@ -2883,7 +2883,7 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             "{}/{} · {}",
             model.progress,
             model.total,
-            fmt_duration(state.started.elapsed())
+            fmt_duration_live(state.started.elapsed())
         );
         let id_width = model.scan_id.width() as u16;
         let [id_area, _gap, gauge_area] = Layout::horizontal([
@@ -2934,18 +2934,9 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                     TaskState::Canceled => ("canceled", styles::RunStatus::skipped()),
                 };
                 let time = match t.state {
-                    // Read a stable "0s" during the first second rather than
-                    // showing the sub-second ramp up on each refresh
                     TaskState::Running => t
                         .started
-                        .map(|s| {
-                            let e = s.elapsed();
-                            if e < Duration::from_secs(1) {
-                                "0s".to_string()
-                            } else {
-                                fmt_duration(e)
-                            }
-                        })
+                        .map(|s| fmt_duration_live(s.elapsed()))
                         .unwrap_or_default(),
                     _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
                 };
@@ -2955,9 +2946,8 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 let (label, style, _) = agent_status(a, t, finished);
                 let time = agent_duration(a, finished)
                     .map(|e| {
-                        // Same sub-second hold as running tasks
-                        if a.ended_ms.is_none() && e < Duration::from_secs(1) {
-                            "0s".to_string()
+                        if a.ended_ms.is_none() {
+                            fmt_duration_live(e)
                         } else {
                             fmt_duration(e)
                         }
