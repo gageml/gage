@@ -7,8 +7,9 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisec
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_claude::home::claude_home;
-use gage_claude::session::{delete_session, encode_project_dir};
+use gage_claude::session::{delete_session, encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
+use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
     settings::{
@@ -492,7 +493,7 @@ pub async fn delete(args: SessionDeleteArgs) {
 pub async fn view(args: SessionViewArgs) {
     // No session arg: the view opens with its session picker dialog.
     let session_id = match args.session {
-        Some(prefix) => match gage_claude::session::one_session(&prefix) {
+        Some(prefix) => match one_session(&prefix) {
             Ok(s) => Some(s.id),
             Err(e) => {
                 eprintln!("{e}");
@@ -501,14 +502,14 @@ pub async fn view(args: SessionViewArgs) {
         },
         None => None,
     };
-    let options = match gage_tui::ViewOptions::parse(&args.options) {
+    let options = match ViewOptions::parse(&args.options) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("gage session view: {e}");
             std::process::exit(1);
         }
     };
-    if let Err(e) = gage_tui::session_view::run(session_id.as_deref(), options).await {
+    if let Err(e) = session_view::run(session_id.as_deref(), options).await {
         eprintln!("gage session view: {e}");
         std::process::exit(1);
     }

@@ -38,6 +38,7 @@ use gage_db::rusqlite::Connection;
 
 use crate::attrs::attr_lines;
 use crate::dialog;
+use crate::doc::Document;
 use crate::item_table::ItemTable;
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 
@@ -2217,7 +2218,7 @@ fn agent_session_item(task: &TaskItem, agent: &AgentItem) -> SessionItem {
 /// connection is handed on to the session dialog.
 struct ToolUseHit {
     item: SessionItem,
-    doc: crate::doc::Document,
+    doc: Document,
     source: app::DocSource,
     entry_index: usize,
     db: Connection,
@@ -2232,7 +2233,7 @@ fn author_call_id(author: &str) -> Option<&str> {
 
 /// Index of the entry whose message content holds the tool_use block
 /// with id `call_id`.
-fn tool_use_entry_index(doc: &crate::doc::Document, call_id: &str) -> Option<usize> {
+fn tool_use_entry_index(doc: &Document, call_id: &str) -> Option<usize> {
     use serde_json::Value;
     doc.entries.iter().position(|e| {
         e.message()
@@ -2259,7 +2260,7 @@ fn session_target(uri: &str) -> Option<SessionTarget> {
 
 /// Index of the entry at JSONL line `line`, or of the nearest entry
 /// before it when that line is not among the document's entries.
-fn entry_index_for_line(doc: &crate::doc::Document, line: u32) -> Option<usize> {
+fn entry_index_for_line(doc: &Document, line: u32) -> Option<usize> {
     doc.entries.iter().rposition(|e| e.line <= line)
 }
 
@@ -2571,7 +2572,7 @@ fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<
 fn load_session_doc(
     item: &SessionItem,
     db: &Connection,
-) -> Result<(crate::doc::Document, app::DocSource), String> {
+) -> Result<(Document, app::DocSource), String> {
     let indexed = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(session::load(&item.id, db))
     });

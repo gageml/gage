@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -410,7 +411,6 @@ fn load_scan_model(
     prefix: &str,
 ) -> anyhow::Result<gage_tui::scan_view::ScanModel> {
     use gage_tui::scan_view::{ScanModel, SessionItem, TaskId, TaskItem, TaskState};
-    use std::collections::HashMap;
 
     let run = scan::get_scan(conn, prefix)?;
     let summary = scan_summary(&run)?;
@@ -465,7 +465,7 @@ fn load_scan_model(
     // session lives, independent of the process's `-A` mode
     let rows = scan::scan_session_rows(conn, &run.id)?;
     let store = gage_query::default_index_store();
-    let paths: HashMap<String, std::path::PathBuf> = session::ls_sessions().into_iter().collect();
+    let paths: HashMap<String, PathBuf> = session::ls_sessions().into_iter().collect();
     let (agent_store, agent_paths) = if rows.iter().any(|r| r.agent) {
         (Some(gage_query::agent_index_store()), agent_session_paths())
     } else {
@@ -723,12 +723,12 @@ fn issue_session_items(
 /// while a view is open, so each session resolves once.
 #[derive(Default)]
 struct SessionDisplays {
-    map: std::collections::HashMap<String, SessionDisplay>,
+    map: HashMap<String, SessionDisplay>,
     /// Session walk from the last unknown id; sessions can appear
     /// while a scan runs, so an id missing from it refreshes the walk
-    paths: std::collections::HashMap<String, std::path::PathBuf>,
+    paths: HashMap<String, PathBuf>,
     /// Resolved project display per encoded directory name
-    projects: std::collections::HashMap<String, String>,
+    projects: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -832,7 +832,7 @@ fn agent_item(row: &scan::TaskAgent, times: &mut AgentTimes) -> gage_tui::scan_v
 /// agent's duration is measured against now, not its last write.
 #[derive(Default)]
 struct AgentTimes {
-    map: std::collections::HashMap<String, AgentTimesEntry>,
+    map: HashMap<String, AgentTimesEntry>,
 }
 
 struct AgentTimesEntry {
@@ -847,7 +847,7 @@ impl AgentTimes {
     fn resolve(
         &mut self,
         session_id: &str,
-        path: Option<&std::path::Path>,
+        path: Option<&Path>,
         terminal: bool,
     ) -> (Option<i64>, Option<i64>) {
         if let Some(e) = self.map.get(session_id)
@@ -881,7 +881,7 @@ impl AgentTimes {
 
 /// Session (id, path) pairs from the agent corpus, for scans whose
 /// `scan_session` rows are marked `corpus=agent`.
-fn agent_session_paths() -> std::collections::HashMap<String, std::path::PathBuf> {
+fn agent_session_paths() -> HashMap<String, PathBuf> {
     SessionListBuilder::new()
         .root(gage_core::config::agent_sessions_dir())
         .build()
@@ -892,10 +892,7 @@ fn agent_session_paths() -> std::collections::HashMap<String, std::path::PathBuf
 
 /// Locate and stat a session file for title resolution. None when the
 /// session no longer exists on disk — expected for old scans.
-fn stat_session(
-    paths: &std::collections::HashMap<String, std::path::PathBuf>,
-    id: &str,
-) -> Option<SessionInfo> {
+fn stat_session(paths: &HashMap<String, PathBuf>, id: &str) -> Option<SessionInfo> {
     let src = paths.get(id)?;
     let meta = std::fs::metadata(src).ok()?;
     Some(SessionInfo {
@@ -1089,7 +1086,7 @@ async fn run_scan(mut args: ScanRunArgs) {
             Some(pos) => (&raw[..pos], &raw[pos..]),
             None => (raw.as_str(), ""),
         };
-        match registry.register_file(std::path::Path::new(path_str)) {
+        match registry.register_file(Path::new(path_str)) {
             Ok(name) => {
                 // The same file given twice (paths canonicalize to one
                 // composite name) runs once per distinct config override.
@@ -1109,7 +1106,7 @@ async fn run_scan(mut args: ScanRunArgs) {
     }
     args.scanners.extend(file_specs);
 
-    let explicit_sessions: Option<Vec<(String, std::path::PathBuf)>> = if args.sessions.is_empty() {
+    let explicit_sessions: Option<Vec<(String, PathBuf)>> = if args.sessions.is_empty() {
         None
     } else {
         let mut resolved = Vec::new();
@@ -1244,7 +1241,7 @@ impl ScanStreams {
     }
 
     /// Path of the `.out` capture, for the scan view's log dialog.
-    fn out_path(scan_id: &str) -> std::path::PathBuf {
+    fn out_path(scan_id: &str) -> PathBuf {
         gage_log::role_dir("scan").join(format!("{scan_id}.out"))
     }
 }
@@ -1264,7 +1261,7 @@ fn write_stream(file: &mut Option<std::fs::File>, s: &str) {
 async fn run_dialog(
     args: ScanRunArgs,
     registry: ScannerRegistry,
-    explicit_sessions: Option<Vec<(String, std::path::PathBuf)>>,
+    explicit_sessions: Option<Vec<(String, PathBuf)>>,
     scan_id: String,
 ) -> Result<DialogResult, DialogError> {
     // Scanner selection — default set excludes disabled scanners.
@@ -1476,7 +1473,7 @@ async fn run_dialog(
                 let projects = known_projects()
                     .await
                     .context("querying session projects")?;
-                let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+                let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
                 match resolve_project(p, &home, &cwd, &projects) {
                     Some(slug) => Some(slug),
                     None => {
@@ -1523,7 +1520,7 @@ async fn run_dialog(
         if let Some(n) = limit {
             builder = builder.limit(n);
         }
-        let mut sessions: Vec<(String, std::path::PathBuf)> =
+        let mut sessions: Vec<(String, PathBuf)> =
             builder.build().into_iter().map(|s| (s.id, s.src)).collect();
         if let Some(n) = args.sample {
             sessions.shuffle(&mut rand::rng());
@@ -1751,7 +1748,7 @@ fn resolve_project(
     } else if let Some(rest) = value.strip_prefix("~/") {
         home.join(rest)
     } else {
-        std::path::PathBuf::from(value)
+        PathBuf::from(value)
     };
     let resolved = if expanded.is_absolute() {
         expanded
