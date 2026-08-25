@@ -1309,25 +1309,20 @@ async fn run_dialog(
     }
 
     let selected_names: Vec<String> =
-        if args.scanners.is_empty() && group_names.is_empty() && !args.yes {
+        if args.scanners.is_empty() && group_names.is_empty() && !args.yes && !eval_mode {
             // No selection args: pick interactively — `default` group
-            // members pre-selected, or the whole (eval-only) list
-            // under `--scan`
-            let default_names: Vec<usize> = if eval_mode {
-                (0..names.len()).collect()
-            } else {
-                names
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| {
-                        registry
-                            .group_members("default")
-                            .iter()
-                            .any(|d| d.name == **n)
-                    })
-                    .map(|(i, _)| i)
-                    .collect()
-            };
+            // members pre-selected
+            let default_names: Vec<usize> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| {
+                    registry
+                        .group_members("default")
+                        .iter()
+                        .any(|d| d.name == **n)
+                })
+                .map(|(i, _)| i)
+                .collect();
             let mut prompt = cli::multiselect("Scanners").initial_values(default_names);
             for (i, name) in names.iter().enumerate() {
                 prompt = prompt.item(i, (*name).to_string(), "");
@@ -1343,8 +1338,8 @@ async fn run_dialog(
                 })
                 .collect()
         } else if args.scanners.is_empty() && group_names.is_empty() {
-            // `-y` with no selection args: the `default` group, or the
-            // whole (eval-only) list under `--scan`
+            // `-y` or `--scan` with no selection args: the `default`
+            // group, or the whole (eval-only) list under `--scan`
             if eval_mode {
                 names.iter().map(|n| n.to_string()).collect()
             } else {

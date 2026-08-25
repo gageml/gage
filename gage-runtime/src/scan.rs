@@ -30,6 +30,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(Sessions::next_back__meta)?;
     m.implement_trait::<Sessions>(rune::item!(::std::iter::Iterator))?;
     m.implement_trait::<Sessions>(rune::item!(::std::iter::DoubleEndedIterator))?;
+    m.implement_trait::<Sessions>(rune::item!(::std::iter::ExactSizeIterator))?;
 
     super::progress::register_types(&mut m)?;
     super::validate::register_types(&mut m)?;
@@ -192,5 +193,49 @@ fn params() -> Value {
     match &ctx.params {
         Some(json_val) => json_to_value(json_val),
         None => rune::to_value(Object::new()).unwrap(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use rune::runtime::Vm;
+    use rune::sync::Arc as RuneArc;
+    use rune::{Diagnostics, Source, Sources};
+
+    use super::{Session, Sessions, types_module};
+    use crate::datetime::DateTime;
+
+    // Regression: a script's `sessions.len()` call resolves through the
+    // ExactSizeIterator trait. Registering `len__meta` alone binds only
+    // the LEN protocol hash; without `implement_trait` the named call
+    // fails with "Missing instance function ... for `::gage::Sessions`".
+    #[test]
+    fn sessions_len_is_callable_by_name() {
+        let mut context = rune_modules::default_context().unwrap();
+        context.install(types_module().unwrap()).unwrap();
+        let runtime = RuneArc::try_new(context.runtime().unwrap()).unwrap();
+
+        let mut sources = Sources::new();
+        sources
+            .insert(Source::new("test", "pub fn check(sessions) { sessions.len() }").unwrap())
+            .unwrap();
+        let mut diagnostics = Diagnostics::new();
+        let unit = rune::prepare(&mut sources)
+            .with_context(&context)
+            .with_diagnostics(&mut diagnostics)
+            .build()
+            .unwrap();
+
+        let mut vm = Vm::new(runtime, RuneArc::try_new(unit).unwrap());
+        let sessions = Sessions::new(vec![Session {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            modified: DateTime::from_millis(0),
+            src: PathBuf::from("/tmp/session.jsonl"),
+            range: None,
+        }]);
+        let output = vm.call(["check"], (sessions,)).unwrap();
+        assert_eq!(output.as_integer::<i64>().unwrap(), 1);
     }
 }

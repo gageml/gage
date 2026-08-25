@@ -603,13 +603,19 @@ impl ScannerRegistry {
             .collect()
     }
 
-    /// Visible scanners declaring membership in `group`, sorted by
-    /// name.
+    /// Scanners declaring membership in `group`, sorted by name.
+    /// Hidden scanners are included — `hidden` affects listing only,
+    /// not group expansion. Library and file-loaded scanners are
+    /// excluded.
     pub fn group_members(&self, group: &str) -> Vec<&ScannerDef> {
-        self.list_visible()
-            .into_iter()
+        let mut defs: Vec<_> = self
+            .defs
+            .values()
+            .filter(|d| !d.library && !d.from_file)
             .filter(|d| d.groups.iter().any(|g| g == group))
-            .collect()
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// True if `name` is a known library scanner. Library scanners are
