@@ -87,8 +87,8 @@ mod tests {
     #[test]
     fn compose_sorts_attrs() {
         assert_eq!(
-            compose("agent", "open-code", &[("ver", "2"), ("call", "abc")]),
-            "agent:open-code?call=abc&ver=2"
+            compose("agent", "eval-annotation", &[("ver", "2"), ("call", "abc")]),
+            "agent:eval-annotation?call=abc&ver=2"
         );
     }
 
@@ -111,8 +111,8 @@ mod tests {
     #[test]
     fn append_keeps_sorted_order() {
         assert_eq!(
-            append_attr("agent:open-code?scan=s1", "call", "t1"),
-            "agent:open-code?call=t1&scan=s1"
+            append_attr("agent:eval-annotation?scan=s1", "call", "t1"),
+            "agent:eval-annotation?call=t1&scan=s1"
         );
     }
 }

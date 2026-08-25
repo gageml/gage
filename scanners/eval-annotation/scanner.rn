@@ -9,13 +9,13 @@ use gage::{
 };
 
 pub const SCANNER = #{
-    name: "open-code",
+    name: "eval-annotation",
     description: "Annotate sessions with open codes for error analysis",
     groups: ["eval"],
     tasks: #{
         annotate: #{
             notes: #{
-                writes: #{ "code.open": include_str!("code-open-doc.md") },
+                writes: #{ open: include_str!("open-doc.md") },
             },
         },
     },
@@ -28,7 +28,7 @@ pub const SCANNER = #{
 /// authors.
 pub async fn annotate() {
     // Init template for agent prompts
-    let t = Template::new(include_str!("open-code-prompt.md.j2")).await?;
+    let t = Template::new(include_str!("annotate-prompt.md.j2")).await?;
 
     // Use agent runner to annotate sessions concurrently
     let runner = AgentRunner::new();
@@ -42,7 +42,7 @@ pub async fn annotate() {
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
             call_agent(prompt)
-                .name("open-code")
+                .name("eval-annotation")
                 // The agent sees this session only
                 .gage_tools([Query::new().sessions([s])])
                 .tools(#{ open_code: open_code_tooldef() })
@@ -59,7 +59,7 @@ pub async fn annotate() {
         match results.next().await {
             Some(Ok((result, #{ session }))) => {
                 log::info!(
-                    "open-code: {:?}",
+                    "eval-annotation: {:?}",
                     #{
                         session,
                         result: result.text,
@@ -134,8 +134,8 @@ pub async fn open_code(inputs, meta) {
     let scan_short = scan().id.chars().take(8).collect::<String>();
     let note = write_note(
         #{
-            name: "code.open",
-            author: `agent:open-code?scan=${scan_short}`,
+            name: "open",
+            author: `agent:eval-annotation?scan=${scan_short}`,
             value: inputs.text,
             target,
             metadata,

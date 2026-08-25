@@ -399,7 +399,7 @@ pub(crate) struct AppState {
     highlighter: Highlighter,
     dialog: Dialog,
     turns: Option<Vec<Option<usize>>>,
-    /// Annotation mode: `n` writes `code.open` notes (one per node)
+    /// Annotation mode: `n` writes `open` notes (one per node)
     /// instead of `comment.{rand}`
     annotate: bool,
     source: DocSource,
@@ -739,7 +739,7 @@ impl AppState {
         };
     }
 
-    /// The viewer's `code.open` note on the given node, if any.
+    /// The viewer's `open` note on the given node, if any.
     fn own_open_code(&self, entry_index: Option<usize>) -> Option<&Note> {
         let author = self.author();
         let notes = match entry_index {
@@ -748,7 +748,7 @@ impl AppState {
         };
         notes
             .into_iter()
-            .find(|n| n.author == author && n.name == "code.open")
+            .find(|n| n.author == author && n.name == "open")
     }
 
     fn begin_edit_note(&mut self) -> bool {
@@ -869,7 +869,7 @@ fn note_text(note: &Note) -> String {
 
 /// User-editable note names: comments and the viewer's open codes.
 fn is_editable(name: &str) -> bool {
-    is_comment(name) || name == "code.open"
+    is_comment(name) || name == "open"
 }
 
 /// Stored note names are namespaced (e.g. `comment.abcd1234`) so multiple
@@ -958,7 +958,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
             if state.annotate {
                 // Annotation mode writes open codes; the fixed name
                 // holds the (name, target, author) key to one per node
-                note.name = "code.open".to_string();
+                note.name = "open".to_string();
             } else {
                 // Notes are keyed by (name, target, author) in the DB, so a
                 // literal "comment" name caps users at one comment per line.

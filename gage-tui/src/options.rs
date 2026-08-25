@@ -7,7 +7,7 @@ pub struct ViewOptions {
     pub show_turns: bool,
     /// Show every entry, overriding the default high-signal filter.
     pub show_detail: bool,
-    /// Annotation mode: `n` writes `code.open` notes (one per node)
+    /// Annotation mode: `n` writes `open` notes (one per node)
     /// instead of `comment.{rand}`. Set by hosts (scan view), not
     /// parsed from the CLI.
     pub annotate: bool,
