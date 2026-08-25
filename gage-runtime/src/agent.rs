@@ -16,7 +16,7 @@ use gage_agent::{AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgent
 use gage_mcp::{CustomToolCallback, GageTool, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Mut, Object, Protocol, Value, VmError};
+use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
 use rune::{ContextError, Module};
 use serde_json::Value as JsonValue;
 
@@ -874,7 +874,7 @@ fn tool_result_output(block: &JsonValue) -> String {
 }
 
 #[rune::function(instance)]
-async fn send(this: Mut<Agent>, msg: String) -> super::Result<()> {
+async fn send(this: Mut<Agent>, msg: Ref<str>) -> super::Result<()> {
     let inner = Arc::clone(&this.inner);
     let mut session = inner
         .lock()
@@ -892,7 +892,7 @@ async fn send(this: Mut<Agent>, msg: String) -> super::Result<()> {
 /// user message — stdin stays open so the session continues past
 /// the interrupt.
 #[rune::function(instance)]
-async fn send_now(this: Mut<Agent>, msg: String) -> super::Result<()> {
+async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> super::Result<()> {
     let inner = Arc::clone(&this.inner);
     let mut session = inner
         .lock()
@@ -936,8 +936,8 @@ async fn kill(this: Mut<Agent>, grace_secs: i64) -> super::Result<()> {
 
 impl CallAgent {
     #[rune::function(instance)]
-    fn model(mut self, model: String) -> Self {
-        self.model = Some(model);
+    fn model(mut self, model: Ref<str>) -> Self {
+        self.model = Some(model.to_owned());
         self
     }
 
@@ -954,20 +954,20 @@ impl CallAgent {
     }
 
     #[rune::function(instance)]
-    fn system_prompt(mut self, s: String) -> Self {
-        self.system_prompt = Some(s);
+    fn system_prompt(mut self, s: Ref<str>) -> Self {
+        self.system_prompt = Some(s.to_owned());
         self
     }
 
     #[rune::function(instance)]
-    fn append_system_prompt(mut self, s: String) -> Self {
-        self.append_system_prompt = Some(s);
+    fn append_system_prompt(mut self, s: Ref<str>) -> Self {
+        self.append_system_prompt = Some(s.to_owned());
         self
     }
 
     #[rune::function(instance)]
-    fn name(mut self, name: String) -> Self {
-        self.name = Some(name);
+    fn name(mut self, name: Ref<str>) -> Self {
+        self.name = Some(name.to_owned());
         self
     }
 
@@ -1147,9 +1147,9 @@ fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<In
 }
 
 #[rune::function]
-fn call_agent(prompt: String) -> CallAgent {
+fn call_agent(prompt: Ref<str>) -> CallAgent {
     CallAgent {
-        prompt,
+        prompt: prompt.to_owned(),
         model: None,
         max_turns: None,
         timeout_secs: None,
@@ -1619,6 +1619,7 @@ pub fn interactive_spec(v: rune::Value) -> Result<InteractiveSpec, Error> {
 mod tests {
     use rune::Module;
     use rune::runtime::Object;
+    use rune::sync::Arc as RuneArc;
 
     use super::{GageTool, GageTools, parse_custom_tools, parse_gage_tools};
 
@@ -1626,6 +1627,53 @@ mod tests {
     fn registers_into_module() {
         let mut m = Module::with_crate("gage").unwrap();
         super::register(&mut m).unwrap();
+    }
+
+    /// Runs `expr` as the body of `main` with the gage module installed
+    /// and returns the result value.
+    fn eval(expr: &str) -> Result<rune::runtime::Value, rune::runtime::VmError> {
+        let context = crate::lsp_context().unwrap();
+        let runtime = RuneArc::try_new(context.runtime().unwrap()).unwrap();
+
+        let mut sources = rune::Sources::new();
+        sources
+            .insert(rune::Source::memory(format!("pub fn main() {{ {expr} }}")).unwrap())
+            .unwrap();
+        let unit = rune::prepare(&mut sources)
+            .with_context(&context)
+            .build()
+            .unwrap();
+        let mut vm = rune::Vm::new(runtime, RuneArc::try_new(unit).unwrap());
+        vm.call(["main"], ())
+    }
+
+    #[test]
+    fn call_agent_leaves_caller_prompt_readable() {
+        let val = eval(
+            "let p = \"find bugs\";
+             let c = gage::call_agent(p);
+             p",
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "find bugs");
+    }
+
+    #[test]
+    fn call_agent_builders_leave_caller_strings_readable() {
+        let val = eval(
+            "let m = \"sonnet\";
+             let sp = \"sys\";
+             let ap = \"extra\";
+             let n = \"worker\";
+             let c = gage::call_agent(\"p\")
+                 .model(m)
+                 .system_prompt(sp)
+                 .append_system_prompt(ap)
+                 .name(n);
+             m + sp + ap + n",
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "sonnetsysextraworker");
     }
 
     // Regression: the builder's parse helpers must borrow the caller's

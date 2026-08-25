@@ -120,14 +120,14 @@ impl IssuesQuery {
     }
 
     #[rune::function(instance)]
-    fn status(mut self, status: String) -> Self {
-        self.status = Some(status);
+    fn status(mut self, status: Ref<str>) -> Self {
+        self.status = Some(status.to_owned());
         self
     }
 
     #[rune::function(instance)]
-    fn name(mut self, name: String) -> Self {
-        self.name = Some(name);
+    fn name(mut self, name: Ref<str>) -> Self {
+        self.name = Some(name.to_owned());
         self
     }
 }
@@ -212,16 +212,20 @@ fn scan_notes(scan: Ref<Scan>) -> NotesQuery {
 
 impl NotesQuery {
     #[rune::function(instance)]
-    fn name(mut self, name: String) -> Self {
-        self.name = Some(name);
+    fn name(mut self, name: Ref<str>) -> Self {
+        self.name = Some(name.to_owned());
         self
     }
 
     /// Filter to notes matching any of `names` exactly.
     #[rune::function(instance)]
-    fn names(mut self, names: Vec<String>) -> Self {
-        self.names = names;
-        self
+    fn names(mut self, names: Ref<RuneVec>) -> Result<Self, VmError> {
+        let mut out = Vec::with_capacity(names.len());
+        for v in names.iter() {
+            out.push(v.borrow_string_ref()?.to_owned());
+        }
+        self.names = out;
+        Ok(self)
     }
 }
 
@@ -1095,6 +1099,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(&*val.borrow_string_ref().unwrap(), "i1open");
+    }
+
+    /// Like `eval`, but the script body runs as `main(a)` with `arg`
+    /// bound to `a`.
+    fn eval_arg(expr: &str, arg: Value) -> Result<Value, rune::runtime::VmError> {
+        let context = crate::lsp_context().unwrap();
+        let runtime = Arc::try_new(context.runtime().unwrap()).unwrap();
+
+        let mut sources = rune::Sources::new();
+        sources
+            .insert(rune::Source::memory(format!("pub fn main(a) {{ {expr} }}")).unwrap())
+            .unwrap();
+        let unit = rune::prepare(&mut sources)
+            .with_context(&context)
+            .build()
+            .unwrap();
+        let mut vm = Vm::new(runtime, Arc::try_new(unit).unwrap());
+        vm.call(["main"], (arg,))
+    }
+
+    fn test_session_value() -> Value {
+        rune::to_value(crate::scan::Session {
+            id: "s1".to_string(),
+            modified: crate::datetime::DateTime::from_millis(0),
+            src: std::path::PathBuf::from("/tmp/session.jsonl"),
+            range: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn issues_query_status_leaves_caller_string_readable() {
+        let val = eval(
+            "let s = \"pending\";
+             let q = gage::global().issues().status(s);
+             s",
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "pending");
+    }
+
+    #[test]
+    fn issues_query_name_leaves_caller_string_readable() {
+        let val = eval(
+            "let n = \"findings\";
+             let q = gage::global().issues().name(n);
+             n",
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "findings");
+    }
+
+    #[test]
+    fn notes_query_name_leaves_caller_string_readable() {
+        let val = eval_arg(
+            "let n = \"finding\";
+             let q = a.notes().name(n);
+             n",
+            test_session_value(),
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "finding");
+    }
+
+    #[test]
+    fn notes_query_names_leaves_caller_list_readable() {
+        let val = eval_arg(
+            "let ns = [\"finding\", \"summary\"];
+             let q = a.notes().names(ns);
+             ns[0]",
+            test_session_value(),
+        )
+        .unwrap();
+        assert_eq!(&*val.borrow_string_ref().unwrap(), "finding");
     }
 
     fn existing(
