@@ -99,9 +99,6 @@ enum Command {
     /// then walks through open issues as directed.
     Review(cmd_review::ReviewArgs),
 
-    /// Run a scanner agent
-    Agent(cmd_agent::AgentArgs),
-
     /// Manage sessions
     Session {
         /// Operate on agent sessions instead of Claude Code sessions
@@ -112,26 +109,17 @@ enum Command {
         command: cmd_session::SessionCommand,
     },
 
-    /// Manage notes
-    Note {
-        #[command(subcommand)]
-        command: cmd_note::NoteCommand,
-    },
-
     /// Manage issues
     Issue {
         #[command(subcommand)]
         command: cmd_issue::IssueCommand,
     },
 
-    /// Query sessions with SQL
-    Query(cmd_query::QueryArgs),
-
-    /// Copy Gage data to remotes
-    Push(cmd_sync::PushArgs),
-
-    /// Copy Gage data from remotes
-    Pull(cmd_sync::PullArgs),
+    /// Manage notes
+    Note {
+        #[command(subcommand)]
+        command: cmd_note::NoteCommand,
+    },
 
     /// Manage Gage configuration
     Config {
@@ -139,19 +127,31 @@ enum Command {
         command: cmd_config::ConfigCommand,
     },
 
+    /// Copy Gage data to remotes
+    Push(cmd_sync::PushArgs),
+
+    /// Copy Gage data from remotes
+    Pull(cmd_sync::PullArgs),
+
+    /// Query sessions with SQL
+    Query(cmd_query::QueryArgs),
+
     /// Update the Gage index
     Index(cmd_index::IndexArgs),
 
-    /// Start the MCP server
-    Mcp {
-        #[command(subcommand)]
-        command: Option<McpCommand>,
-    },
+    /// Run a scanner agent
+    Agent(cmd_agent::AgentArgs),
 
     /// Run and view tests
     Test {
         #[command(subcommand)]
         command: cmd_test::TestCommand,
+    },
+
+    /// Start the MCP server
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommand>,
     },
 }
 
