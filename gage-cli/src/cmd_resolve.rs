@@ -1,13 +1,13 @@
-//! `gage review` — review issues in an interactive Claude Code session.
+//! `gage resolve` — resolve issues in an interactive Claude Code session.
 
 use clap::Args;
-use gage_claude::review::review_command;
+use gage_claude::resolve::resolve_command;
 use gage_db::db;
 use gage_db::issue;
 
 #[derive(Args)]
-pub struct ReviewArgs {
-    /// Issue IDs (or prefixes) to scope the review
+pub struct ResolveArgs {
+    /// Issue IDs (or prefixes) to scope the session
     ///
     /// If omitted, all pending and open issues are in scope.
     ids: Vec<String>,
@@ -21,7 +21,7 @@ pub struct ReviewArgs {
     claude_args: Vec<String>,
 }
 
-pub fn run(args: ReviewArgs) {
+pub fn run(args: ResolveArgs) {
     let conn = db::open_db().unwrap();
     let mut ids: Vec<String> = Vec::new();
     let mut errors = 0;
@@ -38,7 +38,7 @@ pub fn run(args: ReviewArgs) {
         std::process::exit(1);
     }
 
-    let mut cmd = match review_command(&ids, args.model.as_deref(), &args.claude_args) {
+    let mut cmd = match resolve_command(&ids, args.model.as_deref(), &args.claude_args) {
         Ok(cmd) => cmd,
         Err(e) => {
             eprintln!("Error: {e}");

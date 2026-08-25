@@ -1,7 +1,7 @@
 ---
 description:
-  Resolve pending Gage issues, then review open issues and close them as
-  completed or skipped.
+  Resolve pending Gage issues, then walk through open issues and close them
+  as completed or skipped.
 disable-model-invocation: true
 ---
 
@@ -10,7 +10,8 @@ Your task is to help the user process Gage issues. There are two phases:
 1. _Pending issue resolution_ - reconcile newly written (pending) issues against
    other issues, closing duplicates and promoting novel issues to open. This
    phase does not require user input except where noted below.
-2. _Review_ - walk the user through open issues and help resolve them.
+2. _Open issue resolution_ - walk the user through open issues and help
+   resolve them.
 
 Run phase 1 to completion before starting phase 2.
 
@@ -19,7 +20,7 @@ Run phase 1 to completion before starting phase 2.
 Arguments to this skill, when present, are issue IDs that restrict scope:
 
 - Phase 1 resolves only the pending issues among them.
-- Phase 2 reviews only the open issues among them.
+- Phase 2 processes only the open issues among them.
 - An ID matching neither a pending nor an open issue is reported to the user and
   otherwise ignored.
 
@@ -120,7 +121,7 @@ before using the `IssuePendingResolve` tool to finally resolve pending issues.
 8. Briefly report what was resolved: how many issues were promoted, how many
    closed as duplicates, and against what.
 
-## Phase 2: Review
+## Phase 2: Open issue resolution
 
 Each open issue identifies something the user should attend to. A well written
 issue describes an underlying condition and provides evidence where available.

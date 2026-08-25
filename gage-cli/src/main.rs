@@ -32,7 +32,7 @@ mod cmd_init;
 mod cmd_issue;
 mod cmd_note;
 mod cmd_query;
-mod cmd_review;
+mod cmd_resolve;
 mod cmd_scan;
 mod cmd_session;
 mod cmd_sync;
@@ -93,11 +93,11 @@ enum Command {
     /// last 30 days, up to 50.
     Scan(cmd_scan::ScanArgs),
 
-    /// Review issues in a Claude Code session
+    /// Resolve issues in a Claude Code session
     ///
     /// Starts an interactive session that resolves pending issues,
     /// then walks through open issues as directed.
-    Review(cmd_review::ReviewArgs),
+    Resolve(cmd_resolve::ResolveArgs),
 
     /// Manage sessions
     Session {
@@ -260,7 +260,7 @@ async fn main() {
                 }
                 cmd_scan::run(args).await
             }
-            Command::Review(args) => cmd_review::run(args),
+            Command::Resolve(args) => cmd_resolve::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
                 McpCommand::Stdio => {
                     if let Err(e) = gage_mcp::serve_stdio().await {

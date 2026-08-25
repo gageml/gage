@@ -4,8 +4,8 @@ disable-model-invocation: true
 ---
 
 Your task is to help the user maintain and run scanner tests. This skill is
-typically run after `gage:review`, while the review's judgments about scanner
-output are fresh.
+typically run after `gage:resolve`, while that session's judgments about
+scanner output are fresh.
 
 ## Background
 
@@ -51,8 +51,8 @@ record the policy the label encodes and where the case came from.
 
 ## Authoring tests
 
-Identify candidate sessions. The strongest candidates come from the review the
-user just completed: issues closed as bogus (scanner over-reported), issues
+Identify candidate sessions. The strongest candidates come from the resolve
+session the user just completed: issues closed as bogus (scanner over-reported), issues
 closed as legitimate (true positives worth preserving), and sessions where the
 scanner missed something. Query recently closed issues and their evidence:
 

@@ -98,7 +98,7 @@ mod tests {
         assert!(mcp_content.contains("/usr/local/bin/gage"));
         assert!(!mcp_content.contains("%GAGE_BIN%"));
 
-        let skill = dir.path().join("skills").join("review").join("SKILL.md");
+        let skill = dir.path().join("skills").join("resolve").join("SKILL.md");
         assert!(skill.exists());
 
         assert!(

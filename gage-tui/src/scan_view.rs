@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gage_claude::review::review_command;
+use gage_claude::resolve::resolve_command;
 use gage_core::task::{task_display, task_name_display};
 use gage_db::issue::{self, IssueStatus, StatusReason};
 use ratatui::buffer::Buffer;
@@ -631,8 +631,8 @@ async fn event_loop(
                         if handle_key(&mut state, key, on_cancel, loader) {
                             break;
                         }
-                        if state.pending_review.is_some() {
-                            run_review_session(terminal, &mut state, &mut input, &mut stop_input)
+                        if state.pending_resolve.is_some() {
+                            run_resolve_session(terminal, &mut state, &mut input, &mut stop_input)
                                 .await?;
                         }
                     }
@@ -650,18 +650,18 @@ async fn event_loop(
     Ok(())
 }
 
-/// Hand the terminal to an interactive `/gage:review` session for the
+/// Hand the terminal to an interactive `/gage:resolve` session for the
 /// staged issue, then restore the view. The input thread is stopped
 /// first so the child owns stdin, and restarted with a fresh stop flag
 /// once the session ends. The issue is re-read afterwards — the
 /// session may have closed or commented it.
-async fn run_review_session(
+async fn run_resolve_session(
     terminal: &mut DefaultTerminal,
     state: &mut ViewState,
     input: &mut UnboundedReceiver<TermEvent>,
     stop_input: &mut Arc<AtomicBool>,
 ) -> io::Result<()> {
-    let Some(issue_id) = state.pending_review.take() else {
+    let Some(issue_id) = state.pending_resolve.take() else {
         return Ok(());
     };
     stop_input.store(true, Ordering::Relaxed);
@@ -670,8 +670,8 @@ async fn run_review_session(
     while input.recv().await.is_some() {}
     pop_keyboard_enhancements();
     ratatui::restore();
-    let result =
-        review_command(std::slice::from_ref(&issue_id), None, &[]).and_then(|mut cmd| cmd.status());
+    let result = resolve_command(std::slice::from_ref(&issue_id), None, &[])
+        .and_then(|mut cmd| cmd.status());
     *terminal = ratatui::init();
     push_keyboard_enhancements();
     terminal.clear()?;
@@ -680,10 +680,10 @@ async fn run_review_session(
     match result {
         Ok(status) if status.success() => {}
         Ok(status) => state.push_log(format!(
-            "Review session exited with status {}",
+            "Resolve session exited with status {}",
             status.code().unwrap_or(1)
         )),
-        Err(e) => state.push_log(format!("Review session failed: {e}")),
+        Err(e) => state.push_log(format!("Resolve session failed: {e}")),
     }
     state.refresh_issue(&issue_id);
     Ok(())
@@ -844,7 +844,7 @@ fn handle_prompt_key(state: &mut ViewState, key: KeyEvent) {
         Some(Prompt::Actions { issue }) => {
             let closed = issue.closed;
             match key.code {
-                KeyCode::Char('r') => state.start_review(),
+                KeyCode::Char('r') => state.start_resolve(),
                 KeyCode::Char('c') if !closed => state.start_close(StatusReason::Completed),
                 KeyCode::Char('s') if !closed => state.start_close(StatusReason::Skipped),
                 KeyCode::Char('d') if !closed => state.start_close(StatusReason::Duplicate),
@@ -858,8 +858,8 @@ fn handle_prompt_key(state: &mut ViewState, key: KeyEvent) {
         Some(Prompt::Close { .. }) | Some(Prompt::Open { .. }) | Some(Prompt::Comment { .. }) => {
             handle_comment_key(state, key)
         }
-        Some(Prompt::Review { .. }) => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => state.confirm_review(),
+        Some(Prompt::Resolve { .. }) => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => state.confirm_resolve(),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
                 state.back_to_actions();
             }
@@ -1030,11 +1030,11 @@ struct ViewState {
     cancel_requested: bool,
     /// Scroll state and layout cache for the open content dialog
     scroll_view: ScrollView,
-    /// Issue whose confirmed review session the event loop should
-    /// launch. Set by the review dialog's `y`; the loop takes it after
+    /// Issue whose confirmed resolve session the event loop should
+    /// launch. Set by the resolve dialog's `y`; the loop takes it after
     /// key handling, since only the loop owns the terminal and input
     /// thread the launch must suspend.
-    pending_review: Option<String>,
+    pending_resolve: Option<String>,
     /// Last UI position per viewed session, restored when a session
     /// dialog re-opens (including `[`/`]` stepping away and back).
     session_ui: HashMap<String, app::SavedUi>,
@@ -1096,7 +1096,7 @@ enum Dialog {
 /// issue dialog beneath.
 enum Prompt {
     /// Menu of the actions available for an issue, keyed by letter.
-    /// Review and comment are always offered; the close reasons show
+    /// Resolve and comment are always offered; the close reasons show
     /// for an open issue and the reopen statuses for a closed one.
     /// Every other prompt is entered from here, and backing out of one
     /// returns to this menu.
@@ -1108,10 +1108,10 @@ enum Prompt {
         reason: StatusReason,
         editor: TextArea,
     },
-    /// Confirm launching an interactive Claude Code review session for
-    /// an issue. `y` suspends the view and hands the terminal to
+    /// Confirm launching an interactive Claude Code resolve session
+    /// for an issue. `y` suspends the view and hands the terminal to
     /// claude; the view resumes when the session ends.
-    Review { issue: Box<IssueItem> },
+    Resolve { issue: Box<IssueItem> },
     /// Reopen a closed issue with the status picked in the actions
     /// menu; the counterpart of `Close`
     Open {
@@ -1157,7 +1157,7 @@ impl ViewState {
             scan_done_pending: false,
             cancel_requested: false,
             scroll_view: ScrollView::new(),
-            pending_review: None,
+            pending_resolve: None,
             session_ui: HashMap::new(),
             model,
         };
@@ -1349,9 +1349,9 @@ impl ViewState {
         }
     }
 
-    fn start_review(&mut self) {
+    fn start_resolve(&mut self) {
         if let Some(issue) = self.take_actions_issue() {
-            self.prompt = Some(Prompt::Review { issue });
+            self.prompt = Some(Prompt::Resolve { issue });
         }
     }
 
@@ -1391,7 +1391,7 @@ impl ViewState {
             Some(Prompt::Close { issue, .. })
             | Some(Prompt::Open { issue, .. })
             | Some(Prompt::Comment { issue, .. })
-            | Some(Prompt::Review { issue }) => issue,
+            | Some(Prompt::Resolve { issue }) => issue,
             other => {
                 self.prompt = other;
                 return;
@@ -1530,17 +1530,17 @@ impl ViewState {
         self.push_log(format!("Commented on issue {}", issue.id));
     }
 
-    /// Confirm the review: stage the issue for the event loop's launch
-    /// and dismiss the prompt.
-    fn confirm_review(&mut self) {
-        let Some(Prompt::Review { issue }) = self.prompt.take() else {
+    /// Confirm the resolve action: stage the issue for the event
+    /// loop's launch and dismiss the prompt.
+    fn confirm_resolve(&mut self) {
+        let Some(Prompt::Resolve { issue }) = self.prompt.take() else {
             return;
         };
-        self.pending_review = Some(issue.id.clone());
+        self.pending_resolve = Some(issue.id.clone());
     }
 
     /// Re-read an issue's status and history from the db after the
-    /// review session, which may have changed either. Updates the
+    /// resolve session, which may have changed either. Updates the
     /// results table and any open issue dialog; a read failure keeps
     /// the stale snapshot and goes to the scan log.
     fn refresh_issue(&mut self, issue_id: &str) {
@@ -2235,10 +2235,10 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 editor,
             );
         }
-        Prompt::Review { .. } => dialog::draw_wrapped(
+        Prompt::Resolve { .. } => dialog::draw_wrapped(
             frame,
             &[
-                "You are about to start a review session in Claude Code. \
+                "You are about to start a resolve session in Claude Code. \
                  When finished, exit the session to return here.",
                 "Start Claude Code?",
             ],
@@ -2281,7 +2281,7 @@ fn draw_session_dialog(frame: &mut Frame, title: String, view: &mut app::AppStat
 /// The actions menu: one left-aligned row per available action. Close
 /// reasons show for an open issue, reopen statuses for a closed one.
 fn draw_actions(frame: &mut Frame, issue: &IssueItem) {
-    let mut actions = vec![("r", "review (starts interactive agent)")];
+    let mut actions = vec![("r", "resolve (starts interactive agent)")];
     if issue.closed {
         actions.push(("o", "reopen"));
         actions.push(("p", "set as pending"));

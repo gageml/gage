@@ -4,7 +4,7 @@ pub mod home;
 pub mod plugin;
 pub mod proc;
 pub mod project;
-pub mod review;
+pub mod resolve;
 pub mod session;
 pub mod session_reader;
 pub mod stats;

@@ -13,7 +13,7 @@ Select the scanners to run and the number of sessions to scan.
 
 Gage scans the sessions and reports any issues it finds.
 
-To resolve issues, run `/gage:review` in Claude Code (requires `gage init` to
+To resolve issues, run `/gage:resolve` in Claude Code (requires `gage init` to
 install plugin --- see below).
 
 ## Install
@@ -107,11 +107,11 @@ gage issue list
 ### Resolve issues
 
 Gage is designed to use Claude Code to evaluate and resolve issues. To resolve
-issues, run the `/gage:review` command in Claude Code. This command work in any
+issues, run the `/gage:resolve` command in Claude Code. This command work in any
 standard Claude Code interface (e.g. CLI, VS Code extension, etc.)
 
 ```
-> /gage:review
+> /gage:resolve
 ```
 
 Claude uses the available Gage tools to list and read open issues. You're free
