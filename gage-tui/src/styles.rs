@@ -93,6 +93,13 @@ impl Dialog {
     pub fn error() -> Style {
         Style::new().bg(Color::Red)
     }
+
+    /// Key characters in action lists — the same cyan as
+    /// [`Panel::footer_key`]; the bg color renders as the text color,
+    /// as with [`Dialog::dim`].
+    pub fn key() -> Style {
+        Style::new().bg(Color::Cyan)
+    }
 }
 
 /// Tracing log levels, as rendered in the scan log dialog. The `.err`

@@ -2293,7 +2293,14 @@ fn draw_actions(frame: &mut Frame, issue: &IssueItem) {
     actions.push(("t", "comment"));
     let lines = actions
         .into_iter()
-        .map(|(key, label)| Line::raw(format!("  {key} {label}")).left_aligned())
+        .map(|(key, label)| {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(key, styles::Dialog::key()),
+                Span::raw(format!(" {label}")),
+            ])
+            .left_aligned()
+        })
         .collect();
     dialog::draw_lines(frame, lines, "q back");
 }
