@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 
 /// What a note is attached to. Always exactly one variant when set;
 /// a note may also have no target (`Note.target = None`).
+///
+/// A target is an advisory reference, not a foreign key: nothing
+/// couples a note's lifetime to its target's. Deleting a session or
+/// scan never cascades to notes; a note whose target no longer exists
+/// is valid by design.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NoteTarget {

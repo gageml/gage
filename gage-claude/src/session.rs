@@ -374,6 +374,10 @@ fn is_empty_session(path: &Path) -> bool {
     true
 }
 
+/// Delete a session's JSONL file and sidecar directory. Gage notes
+/// targeting the session are untouched: note targets are advisory
+/// references with no lifetime coupling, so the notes outlive the
+/// session by design.
 pub fn delete_session(path: &Path) -> io::Result<()> {
     std::fs::remove_file(path)?;
     let sidecar = path.with_extension("");

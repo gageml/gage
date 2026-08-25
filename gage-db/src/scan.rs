@@ -676,9 +676,10 @@ pub fn scanner_names_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<St
 }
 
 /// Delete a scan's run metadata: the `scan` row plus its `scan_task`,
-/// `task_agent`, and `scan_session` rows. Notes and issues are
-/// refreshed across scans and are not owned by any one scan, so they
-/// are never deleted here.
+/// `task_agent`, and `scan_session` rows. Notes and issues are never
+/// deleted here — note targets are advisory references with no
+/// lifetime coupling (see [`NoteTarget`](crate::target::NoteTarget)), so even a note targeting
+/// this scan outlives it by design.
 pub fn delete_scan(conn: &Connection, scan_id: &str) -> Result<(), ScanError> {
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM scan WHERE id = ?1",
