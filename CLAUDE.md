@@ -182,6 +182,21 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 [Rust API Guidelines C-CONV]:
   https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
 
+## TUI rules
+
+- Key-hint vocabulary for the key that exits an overlay. The term names the
+  effect on the pending action or viewed item, not the navigation direction
+  ("back" is never used):
+  - `cancel` - action-related dialogs: key-option menus (actions menu, view
+    options), pickers, and editor prompts. The key abandons a pending choice or
+    discards in-progress input (`q cancel`, `Esc cancel`).
+  - `close` - item-view overlays showing content with footer help (note, issue,
+    session, log, test dialogs): `q close`.
+  - `dismiss` - message dialogs (notices, announcements) with no pending action
+    or item: `Enter dismiss`.
+  - App level names its object where bare `cancel` would be ambiguous:
+    `q quit`, `q cancel scan`.
+
 ## Other rules
 
 - Do NOT edit files under /docs in this project unless instructed to do so. User

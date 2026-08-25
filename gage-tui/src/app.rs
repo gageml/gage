@@ -1474,7 +1474,7 @@ fn draw_options(frame: &mut Frame, detail: bool, turns: bool) {
         Line::raw(format!("  d {} session detail", label(detail))).left_aligned(),
         Line::raw(format!("  t {} turns", label(turns))).left_aligned(),
     ];
-    crate::dialog::draw_lines_titled(frame, Some("View options"), lines, "q back");
+    crate::dialog::draw_lines_titled(frame, Some("View options"), lines, "q cancel");
 }
 
 const EDITOR_BODY_HEIGHT: u16 = 8;

@@ -2231,7 +2231,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 frame,
                 format!(" Close issue ({}) ", reason.as_str()),
                 comment_prompt,
-                "Enter close · Shift-Enter newline · Esc back",
+                "Enter close · Shift-Enter newline · Esc cancel",
                 editor,
             );
         }
@@ -2248,14 +2248,14 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
             frame,
             format!(" Open issue ({}) ", status.as_str()),
             "Comment (optional)",
-            "Enter open · Shift-Enter newline · Esc back",
+            "Enter open · Shift-Enter newline · Esc cancel",
             editor,
         ),
         Prompt::Comment { editor, .. } => draw_status_comment(
             frame,
             " Comment issue ".to_string(),
             "Comment",
-            "Enter comment · Shift-Enter newline · Esc back",
+            "Enter comment · Shift-Enter newline · Esc cancel",
             editor,
         ),
     }
@@ -2302,7 +2302,7 @@ fn draw_actions(frame: &mut Frame, issue: &IssueItem) {
             .left_aligned()
         })
         .collect();
-    dialog::draw_lines(frame, lines, "q back");
+    dialog::draw_lines(frame, lines, "q cancel");
 }
 
 /// Note detail content: caption/value header columns (with an optional
@@ -3250,14 +3250,14 @@ fn footer_help(state: &ViewState) -> Line<'static> {
             Line::default()
         }
         Dialog::Note { note } => {
-            let mut items = vec![("q", "back"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
+            let mut items = vec![("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
             if author_call_id(&note.author).is_some() {
                 items.push(("t", "tool use"));
             }
             hint::help_line(&items)
         }
         Dialog::Issue { issue } => {
-            let mut items = vec![("q", "back"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
+            let mut items = vec![("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
             if author_call_id(&issue.author).is_some() {
                 items.push(("t", "tool use"));
             }
@@ -3266,7 +3266,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
         }
         Dialog::Session { nav, .. } => {
             let mut items = vec![
-                ("q", "back"),
+                ("q", "close"),
                 ("Tab", "pane"),
                 ("j/k g/G", ""),
                 ("n", "note"),
@@ -3277,7 +3277,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
             }
             hint::help_line(&items)
         }
-        Dialog::Log { .. } => hint::help_line(&[("q", "back"), ("↑/↓", "scroll")]),
+        Dialog::Log { .. } => hint::help_line(&[("q", "close"), ("↑/↓", "scroll")]),
         Dialog::OpenScan(_) => Line::default(),
         Dialog::None if state.focus == Focus::Issues => {
             if state.model.finished {

@@ -751,7 +751,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
             hint::help_line(&[("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")])
         }
         Dialog::Session { .. } => hint::help_line(&[
-            ("q", "back"),
+            ("q", "close"),
             ("Tab", "pane"),
             ("j/k g/G", ""),
             ("n", "note"),
