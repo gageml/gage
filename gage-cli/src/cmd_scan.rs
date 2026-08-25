@@ -1438,20 +1438,6 @@ async fn run_dialog(
         let selected_defs: Vec<_> = scanners.iter().map(|s| s.def).collect();
         registry.required_tasks(&selected_defs, &config)
     };
-    if !required.is_empty() {
-        let lines: String = required
-            .iter()
-            .flat_map(|(def, tasks)| {
-                tasks.iter().map(|t| {
-                    format!(
-                        "\n{}",
-                        style(gage_core::task::task_display(&def.name, t)).dim()
-                    )
-                })
-            })
-            .collect();
-        cli::log::step(format!("Required tasks{lines}"))?;
-    }
     for (def, tasks) in required {
         scanners.push(Scanner::with_tasks(def, tasks));
     }
