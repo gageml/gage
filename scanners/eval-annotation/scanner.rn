@@ -1,22 +1,14 @@
 use gage::tools::Query;
-use gage::{
-    AgentRunner,
-    Template,
-    call_agent,
-    query,
-    scan,
-    write_note,
-};
+use gage::{AgentRunner, Template, call_agent, query, scan, write_note};
 
 pub const SCANNER = #{
     name: "eval-annotation",
     description: "Annotate sessions with open codes for error analysis",
+    hidden: true,
     groups: ["eval"],
     tasks: #{
         annotate: #{
-            notes: #{
-                writes: #{ open: include_str!("open-doc.md") },
-            },
+            notes: #{ writes: #{ open: include_str!("open-doc.md") } },
         },
     },
 };
@@ -43,10 +35,10 @@ pub async fn annotate() {
         runner.add(
             call_agent(prompt)
                 .name("eval-annotation")
-                // The agent sees this session only
                 .gage_tools([Query::new().sessions([s])])
                 .tools(#{ open_code: open_code_tooldef() })
                 .model("medium"),
+            // The agent sees this session only
             #{ session: s.id },
         );
     }
