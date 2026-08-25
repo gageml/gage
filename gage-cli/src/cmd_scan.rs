@@ -127,7 +127,10 @@ pub struct ScanRunArgs {
     files: Vec<String>,
 
     /// Scan the latest N sessions
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["days", "today", "all", "sample"])]
+    ///
+    /// Combines with --days or --today to cap the sessions selected
+    /// from the window.
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "sample"])]
     limit: Option<usize>,
 
     /// Scan N sessions selected at random
@@ -137,7 +140,7 @@ pub struct ScanRunArgs {
     #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     sample: Option<usize>,
 
-    /// Scan sessions from past N days (default 30)
+    /// Scan sessions from past N days
     #[arg(short, long, value_name = "N", conflicts_with = "all")]
     days: Option<u32>,
 
@@ -1442,14 +1445,29 @@ async fn run_dialog(
         cli::log::step(format!("Sessions{session_lines}"))?;
         resolved
     } else {
-        let since = if args.all || args.limit.is_some() {
+        // Any selection option means the user chose the selection:
+        // only what they specified applies. With no selection options
+        // the default is the last 30 days, up to 50 sessions.
+        let no_selection = !args.all
+            && !args.today
+            && args.days.is_none()
+            && args.limit.is_none()
+            && args.sample.is_none();
+        let since = if args.all {
             None
         } else if args.today {
             Some(since_local_midnight())
-        } else {
-            let d = args.days.unwrap_or(30);
+        } else if let Some(d) = args.days {
             Some(Duration::from_secs(u64::from(d) * 86_400))
+        } else if args.sample.is_some() || no_selection {
+            // --sample's documented default window; also the bare-
+            // invocation default
+            Some(Duration::from_secs(30 * 86_400))
+        } else {
+            // --limit alone: latest N across all time
+            None
         };
+        let limit = if no_selection { Some(50) } else { args.limit };
 
         // Canonicalized so the label and the builder's slug encoding
         // both see the real path; a path not on disk passes through
@@ -1466,7 +1484,10 @@ async fn run_dialog(
 
         let mut label = if args.all {
             "all".to_string()
-        } else if let Some(n) = args.limit {
+        } else if since.is_none() {
+            let n = args
+                .limit
+                .expect("limit is the only capless windowless selection");
             format!("{n} latest")
         } else {
             let window = if args.today {
@@ -1475,9 +1496,10 @@ async fn run_dialog(
                 let d = args.days.unwrap_or(30);
                 format!("last {d} day{}", if d == 1 { "" } else { "s" })
             };
-            match args.sample {
-                Some(n) => format!("{n} sampled from {window}"),
-                None => window,
+            match (args.sample, limit) {
+                (Some(n), _) => format!("{n} sampled from {window}"),
+                (None, Some(n)) => format!("{window}, max {n}"),
+                (None, None) => window,
             }
         };
         if let Some(p) = &project {
@@ -1492,7 +1514,7 @@ async fn run_dialog(
         if let Some(d) = since {
             builder = builder.since(d);
         }
-        if let Some(n) = args.limit {
+        if let Some(n) = limit {
             builder = builder.limit(n);
         }
         let mut sessions: Vec<(String, std::path::PathBuf)> =

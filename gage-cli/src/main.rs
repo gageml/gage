@@ -88,6 +88,9 @@ enum Command {
     Init(cmd_init::InitArgs),
 
     /// Run scanners on sessions
+    ///
+    /// With no session selection options, scans sessions from the
+    /// last 30 days, up to 50.
     Scan(cmd_scan::ScanArgs),
 
     /// Review issues in a Claude Code session
