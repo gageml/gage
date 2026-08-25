@@ -821,21 +821,18 @@ fn same_row(a: &RowKind, b: &RowKind) -> bool {
     }
 }
 
-/// Low-signal entries hidden by the default view filter: user meta
-/// entries, attachments, and session bookkeeping types. Everything
-/// else — user and assistant text, thinking, tool use, tool results (a
-/// successful result can contain the actual error) — shows.
+/// Entries hidden by the default view filter. Only content-bearing
+/// types show — user and assistant text, thinking, tool use, tool
+/// results (a successful result can contain the actual error), system
+/// entries, and continuation summaries — minus user meta entries.
+/// Everything else is session bookkeeping (queue-operation,
+/// file-history-snapshot, atis-latch, ...), a set that grows with each
+/// Claude Code release.
 fn entry_hidden(doc: &Document) -> Vec<bool> {
-    const HIDDEN_TYPES: &[&str] = &[
-        "attachment",
-        "queue-operation",
-        "file-history-snapshot",
-        "ai-title",
-        "last-prompt",
-    ];
+    const VISIBLE_TYPES: &[&str] = &["user", "assistant", "system", "summary"];
     doc.entries
         .iter()
-        .map(|e| e.label() == "meta" || HIDDEN_TYPES.contains(&e.entry_type()))
+        .map(|e| e.label() == "meta" || !VISIBLE_TYPES.contains(&e.entry_type()))
         .collect()
 }
 
