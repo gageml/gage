@@ -80,5 +80,5 @@ not overclaim.
 
 Include the applicable note IDs as evidence in the tool use.
 
-In your reply, simply state whether you wrote issues. Do not state a count and
-do not re-state the written issues in your reply.
+In your reply, simply state whether you wrote issues. Do not re-state the
+written issues in your reply.
