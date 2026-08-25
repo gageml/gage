@@ -508,25 +508,6 @@ pub fn count(conn: &Connection) -> Result<u32, NoteError> {
     Ok(n)
 }
 
-/// Per-session counts of notes authored by `author`. Sessions with no
-/// such note are absent.
-pub fn session_counts_for_author(
-    conn: &Connection,
-    author: &str,
-) -> Result<Vec<(String, usize)>, NoteError> {
-    let mut stmt = conn.prepare(
-        "SELECT sn.session_id, COUNT(*) FROM session_note sn \
-         JOIN note n ON n.id = sn.note_id \
-         WHERE n.author = ?1 GROUP BY sn.session_id",
-    )?;
-    let counts = stmt
-        .query_map([author], |row| {
-            Ok((row.get(0)?, row.get::<_, i64>(1)? as usize))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(counts)
-}
-
 pub fn find_raw(conn: &Connection, filters: &NoteFilters) -> Result<Vec<NoteRaw>, NoteError> {
     let (sql, values) = find_query(filters);
     let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();

@@ -399,9 +399,6 @@ pub(crate) struct AppState {
     highlighter: Highlighter,
     dialog: Dialog,
     turns: Option<Vec<Option<usize>>>,
-    /// Annotation mode: `n` writes `open` notes (one per node)
-    /// instead of `comment.{rand}`
-    annotate: bool,
     source: DocSource,
 }
 
@@ -430,7 +427,6 @@ impl AppState {
             highlighter: Highlighter::new(),
             dialog: Dialog::None,
             turns,
-            annotate: options.annotate,
             source,
         }
     }
@@ -475,13 +471,6 @@ impl AppState {
 
     fn author(&self) -> String {
         format!("user:{}", self.username)
-    }
-
-    /// Count of the viewer's own notes on the open session, for hosts
-    /// tracking annotation coverage.
-    pub(crate) fn own_note_count(&self) -> usize {
-        let author = self.author();
-        self.doc.notes.iter().filter(|n| n.author == author).count()
     }
 
     fn toggle_focus(&mut self) {
@@ -717,38 +706,11 @@ impl AppState {
             return;
         }
         let entry_index = self.selected_entry_index();
-        // Annotation mode: one open code per node — a second `n` on an
-        // already-coded node edits the existing note
-        if self.annotate {
-            if let Some(note) = self.own_open_code(entry_index) {
-                let (note_id, text) = (note.id.clone(), note_text(note));
-                self.open_note_editor(note_id, text, "Edit open code");
-                return;
-            }
-            self.dialog = Dialog::AddNote {
-                entry_index,
-                editor: new_editor(""),
-                title: "Add open code",
-            };
-            return;
-        }
         self.dialog = Dialog::AddNote {
             entry_index,
             editor: new_editor(""),
             title: "Add comment",
         };
-    }
-
-    /// The viewer's `open` note on the given node, if any.
-    fn own_open_code(&self, entry_index: Option<usize>) -> Option<&Note> {
-        let author = self.author();
-        let notes = match entry_index {
-            Some(i) => self.doc.notes_for_line(self.doc.entries.get(i)?.line),
-            None => self.doc.session_notes(),
-        };
-        notes
-            .into_iter()
-            .find(|n| n.author == author && n.name == "open")
     }
 
     fn begin_edit_note(&mut self) -> bool {
@@ -867,9 +829,9 @@ fn note_text(note: &Note) -> String {
         .unwrap_or_else(|| note.value.to_json())
 }
 
-/// User-editable note names: comments and the viewer's open codes.
+/// User-editable note names: comments only.
 fn is_editable(name: &str) -> bool {
-    is_comment(name) || name == "open"
+    is_comment(name)
 }
 
 /// Stored note names are namespaced (e.g. `comment.abcd1234`) so multiple
@@ -955,19 +917,13 @@ fn commit_note(state: &mut AppState, db: &Connection) {
             }
             let target = NoteTarget::Session(target);
             let mut note = Note::new(target, "comment", NoteValue::from(text), &state.author());
-            if state.annotate {
-                // Annotation mode writes open codes; the fixed name
-                // holds the (name, target, author) key to one per node
-                note.name = "open".to_string();
-            } else {
-                // Notes are keyed by (name, target, author) in the DB, so a
-                // literal "comment" name caps users at one comment per line.
-                // Suffix with a short slice of the note's own UUID to keep the
-                // key unique while the display layer renders the family name
-                // "comment".
-                let suffix: String = note.id.chars().take(8).collect();
-                note.name = format!("comment.{suffix}");
-            }
+            // Notes are keyed by (name, target, author) in the DB, so a
+            // literal "comment" name caps users at one comment per line.
+            // Suffix with a short slice of the note's own UUID to keep the
+            // key unique while the display layer renders the family name
+            // "comment".
+            let suffix: String = note.id.chars().take(8).collect();
+            note.name = format!("comment.{suffix}");
             if let Ok(()) = note::insert(db, &note) {
                 let id = note.id.clone();
                 state.doc.add_note(note);
