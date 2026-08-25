@@ -20,16 +20,13 @@ pub(crate) fn ellipsize(s: &str, width: usize) -> String {
     out
 }
 
-pub(crate) fn fmt_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs == 0 {
-        match d.as_millis() {
-            0 => "<1ms".to_string(),
-            ms => format!("{ms}ms"),
-        }
-    } else if secs < 60 {
-        format!("{secs}s")
+pub fn fmt_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
     } else {
-        format!("{}m{:02}s", secs / 60, secs % 60)
+        format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
     }
 }

@@ -17,7 +17,7 @@ mod stack;
 mod styles;
 mod syntax;
 pub mod test_view;
-mod text;
+pub mod text;
 mod textarea;
 
 pub use options::ViewOptions;

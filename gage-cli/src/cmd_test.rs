@@ -2,9 +2,12 @@
 //! tests and scanner tests). The test engine lives in the `gage-test`
 //! crate; this module is its command layer.
 
+use std::time::Duration;
+
 use clap::{Args, Subcommand};
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
+use gage_tui::text::fmt_duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use tabled::{
     Table,
@@ -795,13 +798,7 @@ fn format_run_time(duration_ms: Option<i64>, test_count: usize) -> String {
 }
 
 fn format_ms(ms: i64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
-    }
+    fmt_duration(Duration::from_millis(ms.max(0) as u64))
 }
 
 fn format_elapsed(d: std::time::Duration) -> String {
