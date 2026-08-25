@@ -5581,6 +5581,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "anyhow",
  "base64",
@@ -5621,6 +5622,7 @@ dependencies = [
 [[package]]
 name = "rune-alloc"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "ahash 0.8.12",
  "musli-core",
@@ -5632,6 +5634,7 @@ dependencies = [
 [[package]]
 name = "rune-alloc-macros"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5641,6 +5644,7 @@ dependencies = [
 [[package]]
 name = "rune-core"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "rune-alloc",
  "serde",
@@ -5650,6 +5654,7 @@ dependencies = [
 [[package]]
 name = "rune-macros"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5660,6 +5665,7 @@ dependencies = [
 [[package]]
 name = "rune-modules"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "rand 0.9.4",
  "rune",
@@ -5669,6 +5675,7 @@ dependencies = [
 [[package]]
 name = "rune-tracing"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "rune-tracing-macros",
 ]
@@ -5676,6 +5683,7 @@ dependencies = [
 [[package]]
 name = "rune-tracing-macros"
 version = "0.14.0"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
 dependencies = [
  "proc-macro2",
  "quote",
