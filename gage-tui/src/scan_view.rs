@@ -3295,7 +3295,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
                     ("↑/↓", "select"),
                     ("a", "action"),
                     ("l", "log"),
-                    ("o", "open"),
+                    ("o", "open scan"),
                 ])
             } else {
                 hint::help_line(&[
@@ -3312,7 +3312,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
             ("Tab", "cycle"),
             ("↑/↓", "select"),
             ("l", "log"),
-            ("o", "open"),
+            ("o", "open scan"),
         ]),
         Dialog::None => hint::help_line(&[
             ("q", "cancel scan"),

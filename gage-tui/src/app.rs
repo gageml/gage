@@ -1291,7 +1291,7 @@ fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
         .modified
         .map(|m| format!(" · edited {}", format_ms(m)))
         .unwrap_or_default();
-    let header = Line::from(Span::styled(
+    let mut header_spans = vec![Span::styled(
         format!(
             "{} · {}{}",
             note.author,
@@ -1299,7 +1299,15 @@ fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
             modified_suffix
         ),
         styles::Text::dim(),
-    ));
+    )];
+    if let Some(n) = target_span_lines(&note.target) {
+        header_spans.push(Span::styled(" · ", styles::Text::dim()));
+        header_spans.push(Span::styled(
+            format!("spans {n} lines"),
+            Style::new().add_modifier(Modifier::REVERSED),
+        ));
+    }
+    let header = Line::from(header_spans);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(header);
     lines.push(Line::from(""));
@@ -1319,6 +1327,18 @@ fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
         .wrap(Wrap { trim: false })
         .block(Block::default().padding(Padding::uniform(1)));
     frame.render_widget(p, area);
+}
+
+/// The line count of a session target's range, when it has one. A
+/// single-line or whole-session target yields `None` — no span label.
+fn target_span_lines(target: &NoteTarget) -> Option<u32> {
+    match target {
+        NoteTarget::Session(t) => match (t.line, t.line_end) {
+            (Some(line), Some(end)) if end > line => Some(end - line + 1),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn format_ms(ms: i64) -> String {

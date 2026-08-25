@@ -20,11 +20,13 @@ impl Document {
         self.notes.iter().find(|n| n.id == id)
     }
 
-    /// Notes attached to a specific line — exact match only, never a range.
+    /// Notes anchored at a specific line. A range target anchors at
+    /// its first line; the range's extent shows in the note body's
+    /// header instead.
     pub fn notes_for_line(&self, line: u32) -> Vec<&Note> {
         self.notes
             .iter()
-            .filter(|n| matches!(&n.target, NoteTarget::Session(t) if t.line == Some(line) && t.line_end.is_none()))
+            .filter(|n| matches!(&n.target, NoteTarget::Session(t) if t.line == Some(line)))
             .collect()
     }
 

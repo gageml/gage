@@ -133,7 +133,9 @@ fn write_finding_tooldef() {
             session: #{ type: "string", description: "Session ID" },
             lines: #{
                 type: "string",
-                description: "Session line numbers associated with the finding",
+                description: "Session line numbers associated with the finding: \
+                              a line (`112`), a range (`61-72`), or a \
+                              comma-separated list (`28,31`)",
                 required: false,
             },
         },
@@ -142,18 +144,89 @@ fn write_finding_tooldef() {
 
 pub async fn write_finding(inputs, meta) {
     let metadata = #{};
+    let target = #{ session: inputs.session };
     if let Some(lines) = inputs.get("lines") {
-        metadata.insert("lines", lines)
+        let (line, line_end) = parse_lines(lines)?;
+        target.insert("line", line);
+        if let Some(end) = line_end {
+            target.insert("line_end", end);
+        }
+        metadata.insert("lines", lines);
     }
     let note = write_note(
         #{
             name: "finding.general",
             author: meta.agent_tool_use(),
             value: inputs.description,
-            target: #{ session: inputs.session },
+            target,
             metadata,
         },
     )
     .await?;
     Ok(format!("Wrote finding note {}", note.id))
+}
+
+/// Reduce the tool's `lines` input to the target span: the min line
+/// and, when the input covers more than one line, the max. A list
+/// collapses to its min-max envelope.
+fn parse_lines(lines) {
+    let nums = [];
+    for part in lines.split(',') {
+        match part.trim().split_once('-') {
+            Some((start, end)) => {
+                nums.push(parse_num(start, lines)?);
+                nums.push(parse_num(end, lines)?);
+            }
+            None => nums.push(parse_num(part, lines)?),
+        }
+    }
+    nums.sort();
+    let line = nums[0];
+    let line_end = nums[nums.len() - 1];
+    if line_end > line {
+        Ok((line, Some(line_end)))
+    } else {
+        Ok((line, None))
+    }
+}
+
+/// One number from the `lines` input. The error names the accepted
+/// formats so the agent can rephrase and retry.
+fn parse_num(part, lines) {
+    match part.trim().parse::<i64>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "unparseable lines `{lines}`: expected a line (`112`), a range \
+             (`61-72`), or a comma-separated list (`28,31`)"
+        )),
+    }
+}
+
+#[test]
+fn test_parse_lines_single() {
+    assert_eq!(parse_lines("112"), Ok((112, None)));
+}
+
+#[test]
+fn test_parse_lines_range() {
+    assert_eq!(parse_lines("61-72"), Ok((61, Some(72))));
+}
+
+#[test]
+fn test_parse_lines_list_collapses_to_span() {
+    assert_eq!(parse_lines("28,31"), Ok((28, Some(31))));
+    assert_eq!(parse_lines("80, 28, 31-40"), Ok((28, Some(80))));
+}
+
+#[test]
+fn test_parse_lines_single_valued_inputs_have_no_end() {
+    assert_eq!(parse_lines("7,7"), Ok((7, None)));
+    assert_eq!(parse_lines("7-7"), Ok((7, None)));
+}
+
+#[test]
+fn test_parse_lines_unparseable() {
+    for bad in ["", "abc", "12-", "-12", "1;2", "0"] {
+        assert!(parse_lines(bad).is_err(), "expected error for `{}`", bad);
+    }
 }
