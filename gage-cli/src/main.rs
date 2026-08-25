@@ -37,7 +37,6 @@ mod cmd_review;
 mod cmd_scan;
 mod cmd_session;
 mod cmd_sync;
-mod cmd_test;
 mod dialog;
 mod human;
 mod limit;
@@ -146,9 +145,6 @@ enum Command {
         command: Option<McpCommand>,
     },
 
-    /// Run scanner tests
-    Test(cmd_test::TestArgs),
-
     /// Run and view evals
     Eval {
         #[command(subcommand)]
@@ -254,7 +250,6 @@ async fn main() {
                 cmd_issue::IssueCommand::Open(args) => cmd_issue::open(args),
                 cmd_issue::IssueCommand::Comment(args) => cmd_issue::comment(args),
             },
-            Command::Test(args) => cmd_test::run(args).await,
             Command::Eval { command } => cmd_eval::run(command).await,
             Command::Scan(args) => {
                 if args.agent {

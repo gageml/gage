@@ -272,16 +272,17 @@ async fn test_carry_forward_does_not_consume_args() {
 #[test]
 async fn test_pending_issue_lifecycle() {
     gage::write_issue(
-        #{
-            name: "test.pending",
-            title: "A staged issue",
-            pending: true,
-        },
+        #{ name: "test.pending", title: "A staged issue", pending: true },
     )
     .await
     .unwrap();
 
-    let pending = gage::global().issues().status("pending").name("test.pending").await.unwrap();
+    let pending = gage::global()
+        .issues()
+        .status("pending")
+        .name("test.pending")
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
     let issue = pending.get(0).unwrap();
     assert_eq!(issue.status, "pending");
@@ -296,19 +297,32 @@ async fn test_pending_issue_lifecycle() {
     let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 1);
 
-    gage::update_issue(issue.id, #{ status: "closed", status_reason: "duplicate", message: "dup of x" })
+    gage::update_issue(
+        issue.id,
+        #{ status: "closed", status_reason: "duplicate", message: "dup of x" },
+    )
+    .await
+    .unwrap();
+    let closed = gage::global()
+        .issues()
+        .status("closed")
+        .name("test.pending")
         .await
         .unwrap();
-    let closed = gage::global().issues().status("closed").name("test.pending").await.unwrap();
     assert_eq!(closed.len(), 1);
-    assert_eq!(closed.get(0).unwrap().status_reason, Some("duplicate"));
+    assert_eq!(
+        closed.get(0).unwrap().status_reason,
+        Some("duplicate")
+    );
 
     gage::update_issue(issue.id, #{ status: "open" }).await.unwrap();
     let open = gage::global().issues().name("test.pending").await.unwrap();
     assert_eq!(open.len(), 1);
 
     // Invalid status and missing status are errors
-    assert!(gage::update_issue(issue.id, #{ status: "bogus" }).await.is_err());
+    assert!(
+        gage::update_issue(issue.id, #{ status: "bogus" }).await.is_err()
+    );
     assert!(gage::update_issue(issue.id, #{}).await.is_err());
 }
 
@@ -330,7 +344,14 @@ async fn test_note_issue_debug_fmt() {
     gage::write_issue(#{ name: "test.debug-issue", title: "T", pending: true })
         .await
         .unwrap();
-    let issue = gage::global().issues().status("pending").name("test.debug-issue").await.unwrap().get(0).unwrap();
+    let issue = gage::global()
+        .issues()
+        .status("pending")
+        .name("test.debug-issue")
+        .await
+        .unwrap()
+        .get(0)
+        .unwrap();
     let s = format!("{:?}", issue);
     assert!(s.contains("Issue {"));
     assert!(s.contains("status: \"pending\""));
