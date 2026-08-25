@@ -33,6 +33,8 @@ jobs:
           # to the release triple arch-vendor-os[-env]
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
+          - target: aarch64-apple-darwin
+            runner: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -83,6 +85,10 @@ jobs:
         if:
           steps.artifact.outputs.exists != 'yes' &&
           steps.cache.outputs.cache-hit != 'true'
+        env:
+          # Take `gage --version` from Cargo.toml rather than the git
+          # commit (see gage-cli/build.rs)
+          RELEASE: "1"
         run: cargo build --profile release-small --target ${{ matrix.target }} --bin "$BIN"
 
       - name: Package
