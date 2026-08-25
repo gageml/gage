@@ -1537,10 +1537,16 @@ async fn run_dialog(
 
     // Session selection
     let sessions = if let Some(resolved) = explicit_sessions {
-        let session_lines: String = resolved
+        let mut session_lines: String = resolved
             .iter()
+            .take(5)
             .map(|(id, _)| format!("\n{}", style(id).dim()))
             .collect();
+        let more = resolved.len().saturating_sub(5);
+        if more > 0 {
+            let label = format!("{more} more session{}", if more == 1 { "" } else { "s" });
+            session_lines.push_str(&format!("\n{}", style(label).dim().italic()));
+        }
         cli::log::step(format!("Sessions{session_lines}"))?;
         resolved
     } else {
