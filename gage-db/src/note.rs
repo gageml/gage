@@ -502,6 +502,25 @@ pub fn ids_for_session_by_name(
     Ok(ids)
 }
 
+/// Ids of notes targeting the project at `project_path` whose name
+/// matches `name` exactly.
+pub fn ids_for_project_by_name(
+    conn: &Connection,
+    project_path: &str,
+    name: &str,
+) -> Result<Vec<String>, NoteError> {
+    let mut stmt = conn.prepare(
+        "SELECT n.id FROM note n
+         JOIN project_note pn ON pn.note_id = n.id
+         WHERE pn.project_path = ?1 AND n.name = ?2
+         ORDER BY n.created, n.id",
+    )?;
+    let ids = stmt
+        .query_map(params![project_path, name], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Total number of notes in the table.
 pub fn count(conn: &Connection) -> Result<u32, NoteError> {
     let n: u32 = conn.query_row("SELECT COUNT(*) FROM note", [], |row| row.get(0))?;
@@ -645,6 +664,40 @@ mod tests {
 
         // No match
         let ids = ids_for_session_by_name(&conn, SESSION_A, "nothing").unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn ids_for_project_by_name_exact() {
+        let conn = open_db_in_memory().unwrap();
+        let project = "/home/me/proj";
+        let project_target = |path: &str| {
+            NoteTarget::Project(ProjectTarget {
+                project_path: path.to_string(),
+            })
+        };
+        for (id, name) in [
+            ("n1", "project-summary.rules"),
+            ("n2", "project-summary.stack"),
+        ] {
+            insert(&conn, &note_with(id, name, project_target(project))).unwrap();
+        }
+        // Same name, different project
+        insert(
+            &conn,
+            &note_with(
+                "n3",
+                "project-summary.rules",
+                project_target("/home/me/other"),
+            ),
+        )
+        .unwrap();
+
+        // Exact name, scoped to the project; no prefix matching
+        let ids = ids_for_project_by_name(&conn, project, "project-summary.rules").unwrap();
+        assert_eq!(ids, vec!["n1".to_string()]);
+
+        let ids = ids_for_project_by_name(&conn, project, "nothing").unwrap();
         assert!(ids.is_empty());
     }
 

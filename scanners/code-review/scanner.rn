@@ -4,6 +4,7 @@ use gage::{
     Progress,
     Template,
     call_agent,
+    carry_forward_notes,
     files_valid,
     query,
     scan,
@@ -39,8 +40,8 @@ const STACK_KEY = ("code-review", "project_summary", "stack", 1);
 ///
 /// One agent call per project writes the summary notes its files
 /// support. A note type whose file set is unchanged since the last
-/// run is skipped; a project with nothing to summarize is skipped
-/// entirely.
+/// run carries its existing note forward instead of re-summarizing;
+/// a project with nothing to summarize is skipped entirely.
 pub async fn project_summary() {
     let t = Template::new(include_str!("project-summary-prompt.md.j2")).await?;
     let projects = scan().sessions().projects()?;
@@ -107,14 +108,21 @@ pub async fn project_summary() {
 }
 
 /// Queue a prompt section for a summary note type when its file set
-/// exists and has changed since the digest was last recorded.
+/// exists and has changed since the digest was last recorded. An
+/// unchanged file set carries the existing note into the scan instead;
+/// a valid digest whose note is gone (deleted) falls through to
+/// regeneration.
 async fn add_section(sections, validates, key, project, files, kind) {
     if files.is_empty() {
         return Ok(());
     }
     let (valid, validate) = files_valid(key, project, files).await?;
     if valid {
-        return Ok(());
+        let carried =
+            carry_forward_notes([project], [format!("project-summary.{}", kind)]).await?;
+        if carried > 0 {
+            return Ok(());
+        }
     }
     let contents = [];
     for f in files {

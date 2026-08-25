@@ -184,11 +184,35 @@ async fn test_carry_forward_notes() {
     .unwrap();
 
     // A matching name links the note; an unknown name links nothing
-    let n = gage::carry_forward_notes([session], ["test.carry.finding"])
+    let n = gage::carry_forward_notes([#{ session: session }], ["test.carry.finding"])
         .await
         .unwrap();
     assert_eq!(n, 1);
-    let n = gage::carry_forward_notes([session], ["test.carry.other"])
+    let n = gage::carry_forward_notes([#{ session: session }], ["test.carry.other"])
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
+async fn test_carry_forward_project_notes() {
+    let project = "/test/carry/project";
+    gage::write_note(
+        #{
+            name: "test.carry.summary",
+            value: "a summary",
+            target: #{ project: project },
+        },
+    )
+    .await
+    .unwrap();
+
+    // A matching name links the note; an unknown name links nothing
+    let n = gage::carry_forward_notes([#{ project: project }], ["test.carry.summary"])
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let n = gage::carry_forward_notes([#{ project: project }], ["test.carry.other"])
         .await
         .unwrap();
     assert_eq!(n, 0);
@@ -259,13 +283,13 @@ async fn test_files_valid_does_not_consume_files() {
 
 #[test]
 async fn test_carry_forward_does_not_consume_args() {
-    // `carry_forward_notes` must only read its `sessions` and `names`
+    // `carry_forward_notes` must only read its `targets` and `names`
     // arguments; callers may reuse both lists after the call.
-    let sessions = ["55555555-5555-5555-5555-555555555555"];
+    let targets = [#{ session: "55555555-5555-5555-5555-555555555555" }];
     let names = ["test.carry.keep"];
-    let n = gage::carry_forward_notes(sessions, names).await.unwrap();
+    let n = gage::carry_forward_notes(targets, names).await.unwrap();
     assert_eq!(n, 0);
-    assert_eq!(sessions.len(), 1);
+    assert_eq!(targets[0].session, "55555555-5555-5555-5555-555555555555");
     assert_eq!(names.len(), 1);
 }
 

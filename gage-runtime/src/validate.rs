@@ -12,12 +12,13 @@ use std::path::{Path, PathBuf};
 
 use gage_db::note;
 use gage_db::scan::{ScanNoteRole, insert_scan_note};
+use gage_db::target::NoteTarget;
 use gage_db::task_validate::{self, note_ref, project_ref, session_ref};
 use rune::runtime::{Function, Protocol, Ref, Value, Vec as RuneVec};
 use rune::{Any, ContextError, Module};
 
 use crate::config::{Config, Project};
-use crate::db::{Note, NotesQuery, fetch_notes};
+use crate::db::{Note, NotesQuery, fetch_notes, target_from_value};
 use crate::error::Error;
 use crate::scan::{Range, Session, Sessions};
 use crate::state::current_scan_ctx;
@@ -474,35 +475,35 @@ fn files_digest(paths: &[PathBuf]) -> crate::Result<String> {
     Ok(format!("{:016x}", h.finish()))
 }
 
-/// Builder returned by `carry_forward_notes(sessions, names)`. The link
+/// Builder returned by `carry_forward_notes(targets, names)`. The link
 /// runs when the value is awaited.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub(crate) struct CarryForward {
     #[rune(skip)]
-    sessions: Value,
+    targets: Value,
     #[rune(skip)]
     names: Value,
 }
 
 impl CarryForward {
-    fn new(sessions: Value, names: Value) -> Self {
-        Self { sessions, names }
+    fn new(targets: Value, names: Value) -> Self {
+        Self { targets, names }
     }
 }
 
-/// Link each session's prior notes matching `names` (exactly) into the
+/// Link each target's prior notes matching `names` (exactly) into the
 /// current scan's `scan_note` rows, making them visible to downstream
 /// tasks as if written by this scan. Returns the number of notes
 /// linked.
 fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
     let items = q
-        .sessions
+        .targets
         .borrow_ref::<RuneVec>()
-        .map_err(|e| Error::Args(format!("'sessions' must be a list: {e}")))?;
-    let mut session_ids = Vec::with_capacity(items.len());
+        .map_err(|e| Error::Args(format!("'targets' must be a list: {e}")))?;
+    let mut anchors = Vec::with_capacity(items.len());
     for item in items.iter() {
-        session_ids.push(session_id(item)?);
+        anchors.push(anchor(item)?);
     }
 
     let items = q
@@ -520,10 +521,13 @@ fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
     let ctx = current_scan_ctx();
     let db = ctx.db.lock().unwrap();
     let mut count = 0i64;
-    for sid in &session_ids {
+    for a in &anchors {
         for name in &names {
-            let ids = note::ids_for_session_by_name(&db, sid, name)
-                .map_err(|e| Error::Db(e.to_string()))?;
+            let ids = match a {
+                Anchor::Session(id) => note::ids_for_session_by_name(&db, id, name),
+                Anchor::Project(path) => note::ids_for_project_by_name(&db, path, name),
+            }
+            .map_err(|e| Error::Db(e.to_string()))?;
             for id in &ids {
                 insert_scan_note(&db, &ctx.run.scan_id, id, ScanNoteRole::Carried)
                     .map_err(|e| Error::Db(e.to_string()))?;
@@ -532,6 +536,39 @@ fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
         }
     }
     Ok(count)
+}
+
+/// What a carry-forward entry anchors to: the session or project a
+/// prior note targets.
+enum Anchor {
+    Session(String),
+    Project(String),
+}
+
+/// A `Session`, a `Project`, or a target object (`#{ session: id }` /
+/// `#{ project: path }`), the same target shape `write_note` accepts.
+fn anchor(v: &Value) -> crate::Result<Anchor> {
+    if let Ok(s) = v.borrow_ref::<Session>() {
+        return Ok(Anchor::Session(s.id.clone()));
+    }
+    if let Ok(p) = v.borrow_ref::<Project>() {
+        return Ok(Anchor::Project(p.path.to_string_lossy().into_owned()));
+    }
+    let target = target_from_value(v).map_err(|e| {
+        Error::Args(format!(
+            "expected a Session, Project, or target object: {e}"
+        ))
+    })?;
+    match target {
+        NoteTarget::Session(t) if t.line.is_some() => Err(Error::Args(
+            "carry-forward session target does not accept 'line'".into(),
+        )),
+        NoteTarget::Session(t) => Ok(Anchor::Session(t.session_id)),
+        NoteTarget::Project(t) => Ok(Anchor::Project(t.project_path)),
+        NoteTarget::Scan(_) => Err(Error::Args(
+            "carry-forward target must be a session or project".into(),
+        )),
+    }
 }
 
 #[cfg(test)]

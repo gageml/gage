@@ -874,7 +874,7 @@ fn evidence_spec_from_value(item: &Value, now: i64) -> super::Result<EvidenceSpe
 /// `line_end` requires `line`. Fields from more than one group, or
 /// fields we don't recognize, are errors. The target field is required
 /// at the call site; this function rejects empty / unspecified objects.
-fn target_from_value(v: &Value) -> super::Result<NoteTarget> {
+pub(crate) fn target_from_value(v: &Value) -> super::Result<NoteTarget> {
     let obj_ref = v
         .borrow_ref::<Object>()
         .map_err(|e| Error::Args(format!("target must be an object: {e}")))?;
