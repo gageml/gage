@@ -144,6 +144,22 @@ impl Outline {
         self.rebuild();
     }
 
+    /// Snapshot of the expansion state (session + per-entry), for hosts
+    /// that restore a previously viewed session's tree shape.
+    pub fn expansion(&self) -> (bool, HashSet<usize>) {
+        (self.session_expanded, self.entry_expanded.clone())
+    }
+
+    /// Replace the expansion state and rebuild. Entry indices beyond the
+    /// current projection drop out, as in [`Outline::reload`].
+    pub fn set_expansion(&mut self, session_expanded: bool, entry_expanded: HashSet<usize>) {
+        self.session_expanded = session_expanded;
+        self.entry_expanded = entry_expanded;
+        self.entry_expanded
+            .retain(|i| *i < self.entry_note_ids.len());
+        self.rebuild();
+    }
+
     /// Append a note id under `entry_index` (`None` targets the session row),
     /// ensure the parent is expanded so the new note is visible, and rebuild.
     /// Returns the visible-row index of the new note row.
@@ -311,6 +327,33 @@ mod tests {
         assert_eq!(entry_indices(&o), [] as [usize; 0]);
         o.set_detail(true);
         assert_eq!(entry_indices(&o), [0, 1]);
+    }
+
+    #[test]
+    fn expansion_round_trips() {
+        let notes = vec![vec!["n1".to_string()], vec!["n2".to_string()]];
+        let hidden = vec![false, false];
+        let mut o = Outline::new(vec!["s1".to_string()], notes.clone(), hidden.clone(), false);
+        let session_row = 0;
+        let entry1_row = 2;
+        o.toggle(session_row);
+        o.toggle(entry1_row);
+        let (session_expanded, entry_expanded) = o.expansion();
+
+        let mut fresh = Outline::new(vec!["s1".to_string()], notes, hidden, false);
+        fresh.set_expansion(session_expanded, entry_expanded);
+        let expanded: Vec<bool> = fresh.rows().iter().map(|r| r.expanded).collect();
+        // session (expanded), s1, entry 0 (expanded), n1, entry 1
+        assert_eq!(expanded, [true, false, true, false, false]);
+    }
+
+    #[test]
+    fn set_expansion_drops_stale_entries() {
+        let notes = vec![vec!["n1".to_string()]];
+        let mut o = Outline::new(Vec::new(), notes, vec![false], false);
+        o.set_expansion(false, HashSet::from([0, 5]));
+        let (_, entry_expanded) = o.expansion();
+        assert_eq!(entry_expanded, HashSet::from([0]));
     }
 
     #[test]

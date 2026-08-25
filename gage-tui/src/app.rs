@@ -7,7 +7,7 @@
 //! the parent at a terminus). `[`/`]` are deliberately unbound so a host
 //! embedding the view can step between sessions with them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -349,13 +349,18 @@ pub(crate) enum DocSource {
 }
 
 /// Snapshot of the view's UI position, for hosts that re-open sessions
-/// and restore where the user left off.
-#[derive(Clone, Copy)]
+/// and restore where the user left off. Selection is saved by row
+/// identity, and the tree's expansion state alongside it, so the
+/// restore lands on the same node even though the host rebuilds the
+/// view (and its outline) from scratch.
+#[derive(Clone)]
 pub(crate) struct SavedUi {
-    selected: Option<usize>,
+    selected: Option<RowKind>,
     offset: usize,
     body_scroll: u16,
     focus_body: bool,
+    session_expanded: bool,
+    entry_expanded: HashSet<usize>,
 }
 
 enum Dialog {
@@ -446,25 +451,47 @@ impl AppState {
     }
 
     pub(crate) fn save_ui(&self) -> SavedUi {
+        let (session_expanded, entry_expanded) = self.outline.expansion();
         SavedUi {
-            selected: self.list_state.selected(),
+            selected: self
+                .list_state
+                .selected()
+                .and_then(|i| self.outline.row(i))
+                .map(|r| r.kind.clone()),
             offset: self.list_state.offset(),
             body_scroll: self.body_scroll,
             focus_body: self.focus == Focus::Body,
+            session_expanded,
+            entry_expanded,
         }
     }
 
+    /// Re-apply a [`SavedUi`]: seed the outline's expansion state, then
+    /// find the saved row by identity in the rebuilt rows. When the row
+    /// is gone (e.g. its note was deleted between views), selection
+    /// falls back to the top and the saved body position is dropped.
     pub(crate) fn restore_ui(&mut self, saved: &SavedUi) {
-        let max = self.outline.len().saturating_sub(1);
-        self.list_state
-            .select(saved.selected.map(|i| i.min(max)).or(Some(0)));
-        *self.list_state.offset_mut() = saved.offset;
-        self.body_scroll = saved.body_scroll;
-        self.focus = if saved.focus_body {
-            Focus::Body
+        self.outline
+            .set_expansion(saved.session_expanded, saved.entry_expanded.clone());
+        let found = saved.selected.as_ref().and_then(|kind| {
+            self.outline
+                .rows()
+                .iter()
+                .position(|r| same_row(&r.kind, kind))
+        });
+        self.list_state.select(found.or(Some(0)));
+        *self.list_state.offset_mut() = saved.offset.min(self.outline.len().saturating_sub(1));
+        if found.is_some() {
+            self.body_scroll = saved.body_scroll;
+            self.focus = if saved.focus_body {
+                Focus::Body
+            } else {
+                Focus::Outline
+            };
         } else {
-            Focus::Outline
-        };
+            self.body_scroll = 0;
+            self.focus = Focus::Outline;
+        }
     }
 
     /// Select entry `index`'s outline row and scroll it into view, for
