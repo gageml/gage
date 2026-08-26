@@ -23,7 +23,9 @@ pub(crate) fn ellipsize(s: &str, width: usize) -> String {
 /// Format a finished duration, keeping sub-second and tenths detail.
 pub fn fmt_duration(d: Duration) -> String {
     let ms = d.as_millis();
-    if ms < 1000 {
+    if ms == 0 {
+        "<1ms".to_string()
+    } else if ms < 1000 {
         format!("{ms}ms")
     } else if ms < 60_000 {
         format!("{:.1}s", ms as f64 / 1000.0)
