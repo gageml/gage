@@ -76,8 +76,25 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 
 - All tests must pass.
 
-- Prefer imports over fully qualified references in the interest of keeping
-  symbol use short, therefore improving readability.
+- **Prefer imports over fully qualified references.** Keep symbol use short to
+  improve readability. The test: before writing `a::b::C` inline, look at the
+  file's `use` block. If the module or item is already imported, use the short
+  form; if not, add the import alongside the existing ones - the import block
+  is the file's established convention and new code follows it.
+
+  For std modules, import the module, not the item, when the item name would
+  collide with the prelude: `use std::io;` then `io::Result<T>`, never
+  `use std::io::Result;`.
+
+  - WRONG: `fn prompt_window(initial: Window) -> std::io::Result<Window>` in a
+    file whose header already imports four other `std` modules
+  - RIGHT: `use std::io;` in the import block, `io::Result<Window>` at use
+
+  Not violations: trait imports scoped to a function body
+  (`use std::io::Write;` inside the one function that writes), and aliased
+  imports for disambiguation (`use crate::style as s;`). Existing
+  fully-qualified references elsewhere in the codebase are fixed
+  opportunistically when the surrounding code is being edited, not swept.
 
 - Use the _Stepdown Rule_ when ordering functions. Define functions below where
   they are first called, so code reads top-down like a narrative. This takes
