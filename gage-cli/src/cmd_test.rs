@@ -455,7 +455,7 @@ fn cmd_run(args: RunArgs) {
     }
 
     if !args.all && args.test.is_empty() {
-        eprintln!("specify tests with --test or --all-tests");
+        eprintln!("specify tests with --test or --all");
         std::process::exit(1);
     }
 
