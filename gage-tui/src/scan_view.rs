@@ -2809,8 +2809,8 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel, canceled: bool) {
     }
     let counts = [
         ("Sessions:", model.sessions.len()),
-        ("Notes:", model.notes.len()),
         ("Issues:", model.issues.len()),
+        ("Notes:", model.notes.len()),
         ("Errors:", model.errors),
     ];
     let value_width = counts
