@@ -120,6 +120,21 @@ const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 /// Default [`StreamingAgentSession::wait_exit`] timeout when no agent timeout was set.
 pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// System prompt for a headless child claude. `Empty` (the default)
+/// passes `--system-prompt ""` so the model runs without Claude Code's
+/// interactive-assistant guidance (code style rules, tone, etc.),
+/// which otherwise leaks into analysis output.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum SystemPrompt {
+    /// `--system-prompt ""` — no system prompt at all.
+    #[default]
+    Empty,
+    /// Omit the flag — the child uses Claude Code's default prompt.
+    ClaudeDefault,
+    /// `--system-prompt <s>` — replace with a caller-supplied prompt.
+    Custom(String),
+}
+
 /// Fluent configuration for an [`Agent`]. All fields are optional;
 /// `name` defaults to `"default"`; `tools` to empty (the caller must
 /// list every tool to expose).
@@ -136,6 +151,10 @@ pub struct AgentBuilder {
     /// server via `--mcp-config`. When `None` the child runs with no
     /// MCP servers at all.
     mcp_url: Option<String>,
+    system_prompt: SystemPrompt,
+    /// `--append-system-prompt` value; composes with Claude Code's
+    /// default prompt.
+    system_prompt_append: Option<String>,
 }
 
 impl AgentBuilder {
@@ -199,6 +218,26 @@ impl AgentBuilder {
         self
     }
 
+    /// `--system-prompt` value, replacing the default empty prompt.
+    pub fn system_prompt(mut self, s: impl Into<String>) -> Self {
+        self.system_prompt = SystemPrompt::Custom(s.into());
+        self
+    }
+
+    /// Use Claude Code's default system prompt (omit `--system-prompt`).
+    pub fn default_system_prompt(mut self) -> Self {
+        self.system_prompt = SystemPrompt::ClaudeDefault;
+        self
+    }
+
+    /// `--append-system-prompt` value; implies the Claude Code default
+    /// prompt, which the flag appends to.
+    pub fn default_system_prompt_append(mut self, s: impl Into<String>) -> Self {
+        self.system_prompt = SystemPrompt::ClaudeDefault;
+        self.system_prompt_append = Some(s.into());
+        self
+    }
+
     pub fn build(self) -> Agent {
         Agent {
             name: self.name.unwrap_or_else(|| "default".to_string()),
@@ -209,6 +248,8 @@ impl AgentBuilder {
             prompt: self.prompt,
             mcp_url: self.mcp_url,
             archive_dir: self.archive_dir,
+            system_prompt: self.system_prompt,
+            system_prompt_append: self.system_prompt_append,
             prep: None,
         }
     }
@@ -229,6 +270,8 @@ pub struct Agent {
     prompt: Option<String>,
     mcp_url: Option<String>,
     archive_dir: Option<PathBuf>,
+    system_prompt: SystemPrompt,
+    system_prompt_append: Option<String>,
     prep: Option<PreparedRun>,
 }
 
@@ -266,7 +309,13 @@ impl Agent {
             self.prep = Some(prepare_run(self.archive_dir(), &self.tools)?);
         }
         let prep = self.prep.take().unwrap();
-        run_print(prep, self.model, prompt)
+        run_print(
+            prep,
+            self.model,
+            &self.system_prompt,
+            &self.system_prompt_append,
+            prompt,
+        )
     }
 
     /// Spawn the child claude non-interactively with stream-json input
@@ -295,6 +344,8 @@ impl Agent {
             self.max_turns,
             self.timeout,
             self.mcp_url,
+            self.system_prompt,
+            self.system_prompt_append,
             prompt,
         )
         .await
@@ -372,10 +423,28 @@ fn run_interactive(
     Ok(status)
 }
 
-fn run_print(prep: PreparedRun, model: Option<String>, prompt: &str) -> io::Result<Output> {
+fn run_print(
+    prep: PreparedRun,
+    model: Option<String>,
+    system_prompt: &SystemPrompt,
+    system_prompt_append: &Option<String>,
+    prompt: &str,
+) -> io::Result<Output> {
     let projects_dir = prep.claude_home.join("projects");
     let mut cmd = Command::new(&prep.claude_bin);
     cmd.args(["-p", prompt, "--tools", ""]);
+    match system_prompt {
+        SystemPrompt::Empty => {
+            cmd.args(["--system-prompt", ""]);
+        }
+        SystemPrompt::Custom(s) => {
+            cmd.args(["--system-prompt", s]);
+        }
+        SystemPrompt::ClaudeDefault => {}
+    }
+    if let Some(s) = system_prompt_append {
+        cmd.args(["--append-system-prompt", s]);
+    }
     // No --mcp-config: strict mode alone shuts out plugin-installed
     // servers and account-level claude.ai connectors.
     cmd.arg("--strict-mcp-config");
@@ -466,6 +535,8 @@ async fn start_streaming_session_inner(
     max_turns: Option<u32>,
     timeout: Option<usize>,
     mcp_url: Option<String>,
+    system_prompt: SystemPrompt,
+    system_prompt_append: Option<String>,
     prompt: &str,
 ) -> io::Result<StreamingAgentSession> {
     let mut cmd = TokioCommand::new(&prep.claude_bin);
@@ -480,6 +551,18 @@ async fn start_streaming_session_inner(
     cmd.arg("--verbose");
     cmd.args(["--thinking-display", "summarized"]);
     cmd.arg("--disable-slash-commands");
+    match &system_prompt {
+        SystemPrompt::Empty => {
+            cmd.args(["--system-prompt", ""]);
+        }
+        SystemPrompt::Custom(s) => {
+            cmd.args(["--system-prompt", s]);
+        }
+        SystemPrompt::ClaudeDefault => {}
+    }
+    if let Some(s) = &system_prompt_append {
+        cmd.args(["--append-system-prompt", s]);
+    }
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
     }

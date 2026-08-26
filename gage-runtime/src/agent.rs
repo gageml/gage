@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use gage_agent::{AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgentSession};
+use gage_agent::{
+    AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgentSession, SystemPrompt,
+};
 use gage_mcp::{CustomToolCallback, GageTool, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
@@ -37,9 +39,9 @@ pub(crate) struct CallAgent {
     #[rune(skip)]
     timeout_secs: Option<u64>,
     #[rune(skip)]
-    system_prompt: Option<String>,
+    system_prompt: SystemPrompt,
     #[rune(skip)]
-    append_system_prompt: Option<String>,
+    system_prompt_append: Option<String>,
     #[rune(skip)]
     name: Option<String>,
     /// Deferred parse outcome for `.gage_tools(...)`. Stored as a
@@ -58,8 +60,8 @@ pub(crate) struct CallSpec {
     pub model: Option<String>,
     pub max_turns: Option<u32>,
     pub timeout_secs: Option<u64>,
-    pub system_prompt: Option<String>,
-    pub append_system_prompt: Option<String>,
+    pub system_prompt: SystemPrompt,
+    pub system_prompt_append: Option<String>,
     pub gage_tools: GageTools,
     pub custom_tools: Vec<CustomToolDef>,
     /// Sandbox name passed to [`GageAgentBuilder::name`]. `None`
@@ -955,13 +957,23 @@ impl CallAgent {
 
     #[rune::function(instance)]
     fn system_prompt(mut self, s: Ref<str>) -> Self {
-        self.system_prompt = Some(s.to_owned());
+        self.system_prompt = SystemPrompt::Custom(s.to_owned());
         self
     }
 
+    /// Use Claude Code's default system prompt instead of the empty
+    /// default.
     #[rune::function(instance)]
-    fn append_system_prompt(mut self, s: Ref<str>) -> Self {
-        self.append_system_prompt = Some(s.to_owned());
+    fn default_system_prompt(mut self) -> Self {
+        self.system_prompt = SystemPrompt::ClaudeDefault;
+        self
+    }
+
+    /// Append to Claude Code's default system prompt (implies it).
+    #[rune::function(instance)]
+    fn default_system_prompt_append(mut self, s: Ref<str>) -> Self {
+        self.system_prompt = SystemPrompt::ClaudeDefault;
+        self.system_prompt_append = Some(s.to_owned());
         self
     }
 
@@ -1153,8 +1165,8 @@ fn call_agent(prompt: Ref<str>) -> CallAgent {
         model: None,
         max_turns: None,
         timeout_secs: None,
-        system_prompt: None,
-        append_system_prompt: None,
+        system_prompt: SystemPrompt::Empty,
+        system_prompt_append: None,
         name: None,
         gage_tools: None,
         custom_tools: None,
@@ -1169,7 +1181,7 @@ fn resolve_spec(c: CallAgent) -> super::Result<Arc<CallSpec>> {
         max_turns,
         timeout_secs,
         system_prompt,
-        append_system_prompt,
+        system_prompt_append,
         name,
         gage_tools,
         custom_tools,
@@ -1188,7 +1200,7 @@ fn resolve_spec(c: CallAgent) -> super::Result<Arc<CallSpec>> {
         max_turns,
         timeout_secs,
         system_prompt,
-        append_system_prompt,
+        system_prompt_append,
         gage_tools,
         custom_tools,
         name,
@@ -1265,6 +1277,14 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     }
     if let Some(t) = spec.timeout_secs {
         builder = builder.timeout(t as usize);
+    }
+    builder = match &spec.system_prompt {
+        SystemPrompt::Empty => builder,
+        SystemPrompt::ClaudeDefault => builder.default_system_prompt(),
+        SystemPrompt::Custom(s) => builder.system_prompt(s.clone()),
+    };
+    if let Some(s) = &spec.system_prompt_append {
+        builder = builder.default_system_prompt_append(s.clone());
     }
     let session = builder
         .build()
@@ -1544,7 +1564,8 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(CallAgent::max_turns)?;
     m.function_meta(CallAgent::timeout)?;
     m.function_meta(CallAgent::system_prompt)?;
-    m.function_meta(CallAgent::append_system_prompt)?;
+    m.function_meta(CallAgent::default_system_prompt)?;
+    m.function_meta(CallAgent::default_system_prompt_append)?;
     m.function_meta(CallAgent::name)?;
     m.function_meta(CallAgent::gage_tools)?;
     m.function_meta(CallAgent::tools)?;
@@ -1668,7 +1689,7 @@ mod tests {
              let c = gage::call_agent(\"p\")
                  .model(m)
                  .system_prompt(sp)
-                 .append_system_prompt(ap)
+                 .default_system_prompt_append(ap)
                  .name(n);
              m + sp + ap + n",
         )
