@@ -511,30 +511,40 @@ pub fn issue_ids_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<String
 /// with no task or session rows are absent from the map.
 pub fn counts_by_scan(conn: &Connection) -> Result<HashMap<String, ScanCounts>, ScanError> {
     let mut out: HashMap<String, ScanCounts> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT scan_id, COUNT(*) FROM scan_task GROUP BY scan_id")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
-    })?;
-    for row in rows {
-        let (id, n) = row?;
-        out.entry(id).or_default().tasks = n;
-    }
-    let mut stmt = conn.prepare("SELECT scan_id, COUNT(*) FROM scan_session GROUP BY scan_id")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
-    })?;
-    for row in rows {
-        let (id, n) = row?;
-        out.entry(id).or_default().sessions = n;
-    }
+    count_by_scan(conn, "scan_task", &mut out, |c, n| c.tasks = n)?;
+    count_by_scan(conn, "scan_session", &mut out, |c, n| c.sessions = n)?;
+    count_by_scan(conn, "scan_note", &mut out, |c, n| c.notes = n)?;
+    count_by_scan(conn, "scan_issue", &mut out, |c, n| c.issues = n)?;
     Ok(out)
 }
 
-/// Tasks recorded and sessions touched by one scan.
+/// Fold `table`'s per-scan row counts into `out` via `set`.
+fn count_by_scan(
+    conn: &Connection,
+    table: &str,
+    out: &mut HashMap<String, ScanCounts>,
+    set: impl Fn(&mut ScanCounts, u32),
+) -> Result<(), ScanError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT scan_id, COUNT(*) FROM {table} GROUP BY scan_id"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+    })?;
+    for row in rows {
+        let (id, n) = row?;
+        set(out.entry(id).or_default(), n);
+    }
+    Ok(())
+}
+
+/// Tasks recorded, sessions touched, and notes/issues linked by one scan.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScanCounts {
     pub tasks: u32,
     pub sessions: u32,
+    pub notes: u32,
+    pub issues: u32,
 }
 
 pub fn all(conn: &Connection) -> Result<Vec<Scan>, ScanError> {
