@@ -1439,29 +1439,68 @@ async fn run_dialog(
         cli::log::step(format!("Sessions{session_lines}"))?;
         resolved
     } else {
-        // Any selection option means the user chose the selection:
-        // only what they specified applies. With no selection options
-        // the default is the last 30 days, up to 50 sessions.
-        let no_selection = !args.all
-            && !args.today
-            && args.days.is_none()
-            && args.limit.is_none()
-            && args.sample.is_none();
-        let since = if args.all {
-            None
+        // Each selection axis — timeframe and session cap — resolves
+        // independently: an option pins its axis (shown as a step), a
+        // missing axis is prompted for, and -y falls back to the
+        // defaults (last 30 days, up to 50 sessions, or unbounded when
+        // the other axis was pinned), also shown as steps.
+        let window_given = args.all || args.today || args.days.is_some();
+        let pinned_window = if args.all {
+            Some(Window::All)
         } else if args.today {
-            Some(since_local_midnight())
-        } else if let Some(d) = args.days {
-            Some(Duration::from_secs(u64::from(d) * 86_400))
-        } else if args.sample.is_some() || no_selection {
-            // --sample's documented default window; also the bare-
-            // invocation default
-            Some(Duration::from_secs(30 * 86_400))
+            Some(Window::Today)
         } else {
-            // --limit alone: latest N across all time
-            None
+            args.days.map(Window::Days)
         };
-        let limit = if no_selection { Some(50) } else { args.limit };
+        let window = if let Some(w) = pinned_window {
+            selection_step("Timeframe", window_display(w))?;
+            w
+        } else if !args.yes {
+            // --limit alone means all time, so it moves the prompt's
+            // starting choice; --sample keeps its documented 30-day
+            // default window
+            let initial = if args.limit.is_some() {
+                Window::All
+            } else {
+                Window::Days(30)
+            };
+            prompt_window(initial)?
+        } else {
+            let w = if args.limit.is_some() {
+                Window::All
+            } else {
+                Window::Days(30)
+            };
+            selection_step("Timeframe", window_display(w))?;
+            w
+        };
+        let limit = if args.all {
+            selection_step("Session limit", "All available")?;
+            None
+        } else if let Some(n) = args.sample {
+            selection_step("Session limit", format!("{n} sampled"))?;
+            None
+        } else if let Some(n) = args.limit {
+            selection_step("Session limit", n)?;
+            Some(n)
+        } else if !args.yes {
+            // A pinned timeframe alone means no cap, so it moves the
+            // prompt's starting choice
+            let initial = if window_given { None } else { Some(50) };
+            prompt_limit(initial)?
+        } else {
+            let v = if window_given { None } else { Some(50) };
+            match v {
+                Some(n) => selection_step("Session limit", n)?,
+                None => selection_step("Session limit", "All available")?,
+            }
+            v
+        };
+        let since = match window {
+            Window::All => None,
+            Window::Today => Some(since_local_midnight()),
+            Window::Days(d) => Some(Duration::from_secs(u64::from(d) * 86_400)),
+        };
 
         let project = match &args.project {
             Some(p) => {
@@ -1480,30 +1519,9 @@ async fn run_dialog(
             None => None,
         };
 
-        let mut label = if args.all {
-            "all".to_string()
-        } else if since.is_none() {
-            let n = args
-                .limit
-                .expect("limit is the only capless windowless selection");
-            format!("{n} latest")
-        } else {
-            let window = if args.today {
-                "today".to_string()
-            } else {
-                let d = args.days.unwrap_or(30);
-                format!("last {d} day{}", if d == 1 { "" } else { "s" })
-            };
-            match (args.sample, limit) {
-                (Some(n), _) => format!("{n} sampled from {window}"),
-                (None, Some(n)) => format!("{window}, max {n}"),
-                (None, None) => window,
-            }
-        };
         if let Some(slug) = &project {
-            label = format!("{label} in {}", project_slug_display(slug));
+            selection_step("Project", project_slug_display(slug))?;
         }
-        cli::log::step(format!("Sessions\n{}", style(label).dim()))?;
 
         let mut builder = SessionListBuilder::new();
         if let Some(slug) = &project {
@@ -1687,6 +1705,50 @@ async fn run_dialog(
 }
 
 /// Encoded project slugs recorded in the session corpus.
+/// Session-selection timeframe, resolved from options or the
+/// Timeframe prompt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Window {
+    Today,
+    Days(u32),
+    All,
+}
+
+/// Prints a completed-step line for a selection axis whose value was
+/// pinned by an option or resolved to a default, mirroring how an
+/// answered prompt renders.
+fn selection_step(title: &str, value: impl std::fmt::Display) -> std::io::Result<()> {
+    cli::log::step(format!("{title}\n{}", style(value).dim()))
+}
+
+fn window_display(window: Window) -> String {
+    match window {
+        Window::Today => "Today".to_string(),
+        Window::Days(d) => format!("{d} day{}", if d == 1 { "" } else { "s" }),
+        Window::All => "All available".to_string(),
+    }
+}
+
+fn prompt_window(initial: Window) -> std::io::Result<Window> {
+    cli::select("Timeframe")
+        .item(Window::Today, "Today", "")
+        .item(Window::Days(7), "This week", "")
+        .item(Window::Days(30), "30 days", "")
+        .item(Window::All, "All available", "")
+        .initial_value(initial)
+        .interact()
+}
+
+fn prompt_limit(initial: Option<usize>) -> std::io::Result<Option<usize>> {
+    cli::select("Session limit")
+        .item(Some(20), "20", "")
+        .item(Some(50), "50", "")
+        .item(Some(100), "100", "")
+        .item(None, "All available", "")
+        .initial_value(initial)
+        .interact()
+}
+
 async fn known_projects() -> anyhow::Result<std::collections::HashSet<String>> {
     use datafusion::arrow::array::{Array, StringArray};
 
