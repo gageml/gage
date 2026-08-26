@@ -11,6 +11,13 @@ Rules:
 - `detect_target` maps only platforms with published release assets;
   everything else fails with a clear "unsupported platform" error
 - Checksum verification is mandatory - never skipped, never a warning
+- No pipelines where the first command's failure matters. POSIX sh has no
+  `pipefail` (dash and other /bin/sh implementations reject `set -o
+  pipefail`), so a pipeline's status is the last command's and an upstream
+  failure is masked. Capture the output in a variable with `|| err ...`,
+  then post-process. Same for command substitution inside `[ ]` - its exit
+  status is discarded there; assign to a variable first so `set -e` sees
+  the failure.
 - When a new build target is added to .github/workflows/build.yml, add the
   corresponding mapping to `detect_target`
 

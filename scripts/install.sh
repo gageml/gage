@@ -94,17 +94,20 @@ get_archive() {
     info "Verifying archive"
     expected="$(awk -v f="$archive" '$2 == f || $2 == "*" f {print $1}' "${tmp}/SHA256SUMS")"
     [ -n "$expected" ] || err "no checksum for ${archive} in SHA256SUMS"
-    [ "$(sha256 "${tmp}/${archive}")" = "$expected" ] \
-        || err "checksum mismatch for ${archive}"
+    actual="$(sha256 "${tmp}/${archive}")"
+    [ "$actual" = "$expected" ] || err "checksum mismatch for ${archive}"
 }
 
 # Print the SHA-256 of $1. sha256sum is coreutils; macOS ships shasum.
+# Capture output before extracting the hash field: in a pipeline the hash
+# command's failure would be masked by the filter's exit status.
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
+        out="$(sha256sum "$1")" || err "sha256sum failed for $1"
     else
-        shasum -a 256 "$1" | awk '{print $1}'
+        out="$(shasum -a 256 "$1")" || err "shasum failed for $1"
     fi
+    printf '%s\n' "${out%% *}"
 }
 
 check_path() {
