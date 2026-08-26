@@ -38,9 +38,10 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-15
             bin_file: gage
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            bin_file: gage.exe
+          # Windows support deferred
+          # - target: x86_64-pc-windows-msvc
+          #   runner: windows-2025
+          #   bin_file: gage.exe
     defaults:
       run:
         # Windows runners default to PowerShell; the steps are bash

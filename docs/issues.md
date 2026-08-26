@@ -27,8 +27,8 @@ yourself and close it by running:
 gage issue close <ISSUE_ID>
 ```
 
-This marks the issue _completed_. If you want to skip the issue (i.e. mark it
-as a non-issue) use the `--skipped` option.
+This marks the issue _completed_. If you want to skip the issue (i.e. mark it as
+a non-issue) use the `--skipped` option.
 
 ```shell
 gage issue close <ISSUE_ID>
@@ -46,8 +46,8 @@ permission to use.
 ## Authors and duplicate detection
 
 Like notes, every issue records an `author`, and the issue duplicate key is
-`(name, author)` — the same writer opening the same issue twice is detected
-at write time. Author values follow the scheme described in
-[Notes](notes.md): `scanner:<name>` for deterministic writers,
-`agent:...` values carrying per-run instance identity for model writers,
-and `user:<username>` for people.
+`(name, author)` — the same writer opening the same issue twice is detected at
+write time. Author values follow the scheme described in
+[Notes](/docs/notes.md): `scanner:<name>` for deterministic writers, `agent:...`
+values carrying per-run instance identity for model writers, and
+`user:<username>` for people.
