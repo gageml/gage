@@ -25,6 +25,8 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
+use ratatui::crossterm::terminal::{Clear as ClearTerm, ClearType};
+use ratatui::crossterm::{cursor, execute};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -657,17 +659,17 @@ async fn event_loop(
 }
 
 /// Hand the terminal to an interactive `/gage:resolve` session for the
-/// staged issue, then restore the view. The input thread is stopped
+/// staged scope, then restore the view. The input thread is stopped
 /// first so the child owns stdin, and restarted with a fresh stop flag
-/// once the session ends. The issue is re-read afterwards — the
-/// session may have closed or commented it.
+/// once the session ends. The scoped issues are re-read afterwards —
+/// the session may have closed or commented them.
 async fn run_resolve_session(
     terminal: &mut DefaultTerminal,
     state: &mut ViewState,
     input: &mut UnboundedReceiver<TermEvent>,
     stop_input: &mut Arc<AtomicBool>,
 ) -> io::Result<()> {
-    let Some(issue_id) = state.pending_resolve.take() else {
+    let Some(scope) = state.pending_resolve.take() else {
         return Ok(());
     };
     stop_input.store(true, Ordering::Relaxed);
@@ -676,8 +678,20 @@ async fn run_resolve_session(
     while input.recv().await.is_some() {}
     pop_keyboard_enhancements();
     ratatui::restore();
-    let result = resolve_command(std::slice::from_ref(&issue_id), None, &[])
-        .and_then(|mut cmd| cmd.status());
+    // Leaving the alternate screen reveals the base terminal; clear it
+    // and show a startup line so shell scrollback isn't visible while
+    // claude starts.
+    execute!(
+        io::stdout(),
+        ClearTerm(ClearType::All),
+        cursor::MoveTo(0, 0)
+    )?;
+    println!("Starting Claude Code…");
+    let issue_ids: &[String] = match &scope {
+        ResolveScope::Issue(id) => std::slice::from_ref(id),
+        ResolveScope::All => &[],
+    };
+    let result = resolve_command(issue_ids, None, &[]).and_then(|mut cmd| cmd.status());
     *terminal = ratatui::init();
     push_keyboard_enhancements();
     terminal.clear()?;
@@ -691,7 +705,10 @@ async fn run_resolve_session(
         )),
         Err(e) => state.push_log(format!("Resolve session failed: {e}")),
     }
-    state.refresh_issue(&issue_id);
+    match &scope {
+        ResolveScope::Issue(id) => state.refresh_issue(id),
+        ResolveScope::All => state.refresh_all_issues(),
+    }
     Ok(())
 }
 
@@ -870,6 +887,7 @@ fn handle_prompt_key(state: &mut ViewState, key: KeyEvent) {
         }
         Some(Prompt::Resolve { .. }) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => state.confirm_resolve(),
+            KeyCode::Char('a') | KeyCode::Char('A') => state.confirm_resolve_all(),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
                 state.back_to_actions();
             }
@@ -1040,11 +1058,11 @@ struct ViewState {
     cancel_requested: bool,
     /// Scroll state and layout cache for the open content dialog
     scroll_view: ScrollView,
-    /// Issue whose confirmed resolve session the event loop should
-    /// launch. Set by the resolve dialog's `y`; the loop takes it after
-    /// key handling, since only the loop owns the terminal and input
-    /// thread the launch must suspend.
-    pending_resolve: Option<String>,
+    /// Scope of the confirmed resolve session the event loop should
+    /// launch. Set by the resolve dialog's `y`/`a`; the loop takes it
+    /// after key handling, since only the loop owns the terminal and
+    /// input thread the launch must suspend.
+    pending_resolve: Option<ResolveScope>,
     /// Last UI position per viewed session, restored when a session
     /// dialog re-opens (including `[`/`]` stepping away and back).
     session_ui: HashMap<String, app::SavedUi>,
@@ -1122,9 +1140,11 @@ enum Prompt {
         reason: StatusReason,
         editor: TextArea,
     },
-    /// Confirm launching an interactive Claude Code resolve session
-    /// for an issue. `y` suspends the view and hands the terminal to
-    /// claude; the view resumes when the session ends.
+    /// Confirm launching an interactive Claude Code resolve session.
+    /// `y` scopes the session to the issue, `a` leaves it unscoped
+    /// (all pending and open issues); either suspends the view and
+    /// hands the terminal to claude, and the view resumes when the
+    /// session ends.
     Resolve { issue: Box<IssueItem> },
     /// Reopen a closed issue with the status picked in the actions
     /// menu; the counterpart of `Close`
@@ -1140,6 +1160,14 @@ enum Prompt {
         issue: Box<IssueItem>,
         editor: TextArea,
     },
+}
+
+/// Scope of a confirmed resolve session, staged in `pending_resolve`
+enum ResolveScope {
+    /// A single issue, by ID
+    Issue(String),
+    /// All pending and open issues (the session gets no issue IDs)
+    All,
 }
 
 /// What a session dialog was opened from, and therefore what `[`/`]`
@@ -1649,7 +1677,16 @@ impl ViewState {
         let Some(Prompt::Resolve { issue }) = self.prompt.take() else {
             return;
         };
-        self.pending_resolve = Some(issue.id.clone());
+        self.pending_resolve = Some(ResolveScope::Issue(issue.id.clone()));
+    }
+
+    /// Confirm the resolve-all option: stage an unscoped session and
+    /// dismiss the prompt.
+    fn confirm_resolve_all(&mut self) {
+        let Some(Prompt::Resolve { .. }) = self.prompt.take() else {
+            return;
+        };
+        self.pending_resolve = Some(ResolveScope::All);
     }
 
     /// Re-read an issue's status and history from the db after the
@@ -1672,6 +1709,16 @@ impl ViewState {
         {
             loaded.apply(issue);
             self.scroll_view.invalidate();
+        }
+    }
+
+    /// [`refresh_issue`](Self::refresh_issue) for every issue in the
+    /// results, after an unscoped resolve session that may have
+    /// changed any of them
+    fn refresh_all_issues(&mut self) {
+        let ids: Vec<String> = self.model.issues.iter().map(|i| i.id.clone()).collect();
+        for id in &ids {
+            self.refresh_issue(id);
         }
     }
 
@@ -2372,15 +2419,33 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 editor,
             );
         }
-        Prompt::Resolve { .. } => dialog::draw_wrapped(
-            frame,
-            &[
-                "You are about to start a resolve session in Claude Code. \
-                 When finished, exit the session to return here.",
-                "Start Claude Code?",
-            ],
-            "y / n",
-        ),
+        Prompt::Resolve { issue } => {
+            let options = [
+                ("y", format!("yes, resolve issue {}", short_id(&issue.id))),
+                ("a", "yes, resolve all issues".to_string()),
+                ("n", "cancel".to_string()),
+            ];
+            let rows = options
+                .into_iter()
+                .map(|(key, label)| {
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(key, styles::Dialog::key()),
+                        Span::raw(format!("  {label}")),
+                    ])
+                    .left_aligned()
+                })
+                .collect();
+            dialog::draw_wrapped_options(
+                frame,
+                &[
+                    "You are about to start a resolve session in Claude Code. \
+                     When finished, exit the session to return here.",
+                    "Start Claude Code?",
+                ],
+                rows,
+            );
+        }
         Prompt::Open { status, editor, .. } => draw_status_comment(
             frame,
             format!(" Open issue ({}) ", status.as_str()),

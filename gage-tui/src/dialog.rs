@@ -18,10 +18,14 @@ pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
     draw_lines(frame, vec![Line::raw(message.to_string())], hint);
 }
 
-/// Draw a centered dialog whose text wraps to a readable width, with
-/// a key-hint footer. `paragraphs` are separated by blank lines and
-/// rendered left-aligned.
-pub(crate) fn draw_wrapped(frame: &mut Frame, paragraphs: &[&str], hint: &str) {
+/// Draw a centered dialog whose text wraps to a readable width,
+/// followed by a blank line and left-aligned option rows. The rows
+/// carry their keys inline, so there is no key-hint footer.
+pub(crate) fn draw_wrapped_options(
+    frame: &mut Frame,
+    paragraphs: &[&str],
+    options: Vec<Line<'static>>,
+) {
     let frame_area = frame.area();
     let text_width = frame_area.width.saturating_sub(8).clamp(20, 52);
     let mut lines: Vec<Line> = Vec::new();
@@ -31,10 +35,15 @@ pub(crate) fn draw_wrapped(frame: &mut Frame, paragraphs: &[&str], hint: &str) {
         }
         lines.push(Line::raw(p.to_string()));
     }
-    let para = Paragraph::new(lines).wrap(Wrap { trim: true });
+    if !options.is_empty() {
+        lines.push(Line::raw(""));
+        lines.extend(options);
+    }
+    // trim: false keeps the option rows' leading indent
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     let content_height = (para.line_count(text_width) as u16).max(1);
     let width = (text_width + 6).min(frame_area.width.saturating_sub(2));
-    let height = (content_height + 5).min(frame_area.height.saturating_sub(2));
+    let height = (content_height + 4).min(frame_area.height.saturating_sub(2));
     let area = Rect {
         x: frame_area.x + (frame_area.width.saturating_sub(width)) / 2,
         y: frame_area.y + (frame_area.height.saturating_sub(height)) / 2,
@@ -43,11 +52,9 @@ pub(crate) fn draw_wrapped(frame: &mut Frame, paragraphs: &[&str], hint: &str) {
     };
     frame.render_widget(Clear, area);
     frame.render_widget(Block::new().style(styles::Dialog::surface()), area);
-    let [border_area, hint_row] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
     let block = Block::bordered();
-    let inner = block.inner(border_area);
-    frame.render_widget(block, border_area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let [_, content_rows, _] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(content_height),
@@ -61,10 +68,6 @@ pub(crate) fn draw_wrapped(frame: &mut Frame, paragraphs: &[&str], hint: &str) {
     ])
     .areas(content_rows);
     frame.render_widget(para, content);
-    frame.render_widget(
-        Paragraph::new(Span::styled(hint.to_string(), styles::Dialog::dim())).centered(),
-        hint_row,
-    );
 }
 
 /// Draw centered content lines with a key-hint footer below the
