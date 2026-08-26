@@ -3,24 +3,49 @@
 Gage is a tool to analyze Claude Code transcripts to find issues and help
 resolve them.
 
-To scan your sessions for issue, run:
+Requirements:
+
+- Local `gage` binary install on Linux or macOS (Windows planned)
+- Local Claude Code plugin install
+- Active Claude Code login status (Pro plans recommended)
+
+**IMPORTANT:** Gage uses Claude Code to scan sessions and resolve issues. Token
+usage is handled through Claude Code according to your Anthropic plan. Gage does
+not require an Anthropic SDK key.
+
+## Quick start
+
+1. Install Gage (see steps below)
+
+2. Initialize Gage
+
+```shell
+gage init
+```
+
+3. Run a scan
 
 ```shell
 gage scan
 ```
 
-Select the scanners to run and the number of sessions to scan.
+Adjust the scan settings and confirm. When the scan is complete and you've had a
+chance to review the results, press `q` to exit.
 
-Gage scans the sessions and reports any issues it finds.
+4. Resolve issues
 
-To resolve issues, run `/gage:resolve` in Claude Code (requires `gage init` to
-install plugin --- see below).
+```shell
+gage resolve
+```
 
 ## Install
 
-Supported plateforms:
+Supported platforms:
 
-- Linux only (macOS and Windows planned)
+- Linux
+- macOS
+
+Windows support is planned.
 
 ### Install prebuilt binary
 
@@ -30,8 +55,8 @@ To run the install script, use:
 curl https://raw.githubusercontent.com/gageml/gage/refs/heads/main/scripts/install.sh | sh
 ```
 
-This installs the `gage` binary for your system to `~/.local/bin/gage`. It does
-not require elevated privileges.
+This installs the `gage` binary for your system (Linux or macOS only) to
+`~/.local/bin/gage`. It does not require elevated privileges.
 
 ### Install with `cargo binstall`
 
@@ -68,7 +93,7 @@ cargo install --path gage-cli
 
 ### Claude Code plugin
 
-Install the Gage Claude plugin:
+Gage requires a Claude Code plugin. Install it by running:
 
 ```shell
 gage init
@@ -76,27 +101,39 @@ gage init
 
 ## Features
 
-### Scan Claude Code transcripts (session)
+### Scan Claude Code sessions
 
-`gage scan` runs _scanners_ on your Claude Code sessions. Scanners are self
-contained programs written in the [Rune](https://rune-rs.github.io/)
-programming language. You can examine their source code under
-[scanners](/scanners) in this repository.
+`gage scan` runs _scanners_ on your Claude Code sessions. Scanners are self-contained
+programs written in the [Rune](https://rune-rs.github.io/) programming
+language. You can read their source code under [scanners](/scanners) in this
+repository.
 
-When you run `gage scan` you can select the scanners you want to run.
-Alternatively, you can specify each scanner using the `-s/--scanner` option. By
-default, Gage runs all available scanners.
+`gage scan` lets you select the scanners to run. Alternatively, you can specify
+each scanner using the `-s/--scanner` option. By default, Gage runs all scanners
+in the `default` group. Use `--list-scanners` to show available scanners.
 
 You can also specify how many sessions you want to scan. By default Gage scans
-the last 20 sessions. To scan all available sessions, use the `-a/--all`
-option. Otherwise you can set the number with `-l/--limit`.
+the last 20 sessions. To scan all available sessions, use the `-a/--all` option.
+Otherwise you can set the number with `-l/--limit`.
 
-Scanners look at Claude session files (under `~/.claude/projects/`) as well as
-Claude configuration for scanned sessions. Scanners report _evidence_ by
-writing notes and open _issues_ when there's enough evidence.
+During a scan you can view the active scan tasks, session, issues, and notes.
 
-Issues call your attention to something. Issues are meant to be resolved by
-either completing them or by skipping them.
+### Issues and notes
+
+Scanners write issues and notes. An _issue_ is a concern that warrants your
+attention. Issues are initially written as open or pending and are intended to
+be closed once resolved. An issue is closed as `completed`, `skipped`, or noted
+as a `duplicate`.
+
+A _note_ is any sort of information attached to a session, project, or other
+scan. Think of a note as a sticky note that points to something of interest.
+Notes are cited as evidence for opening issues.
+
+You can see issues and notes as they are written during a scan.
+
+### Resolve issues
+
+Gage is designed to use Claude Code to evaluate and resolve issues.
 
 List unresolved issues:
 
@@ -104,60 +141,23 @@ List unresolved issues:
 gage issue list
 ```
 
-### Resolve issues
+You can alternatively view issues written during a scan using `gage scan view`.
 
-Gage is designed to use Claude Code to evaluate and resolve issues. To resolve
-issues, run the `/gage:resolve` command in Claude Code. This command work in any
-standard Claude Code interface (e.g. CLI, VS Code extension, etc.)
-
-```
-> /gage:resolve
-```
-
-Claude uses the available Gage tools to list and read open issues. You're free
-to work through issues with Claude's help as you see fit. Each issue provides
-information to confirm the problem and advice on fixing it. If you decide it's
-not a problem, skip it --- Claude can close the issue as `skipped`. If you
-resolve the issue, Claude can close the issue as `completed`.
-
-To review open issues, run:
+To resolve issues, run:
 
 ```shell
-gage issue list
+gage resolve
 ```
 
-View issue details:
+This opens an interactive Claude Code session that reviews open issues and helps
+you resolve them. You can alternatively run the `/gage:resolve` command in any
+Claude Code session.
 
-```shell
-gage issue show <ISSUE ID>
-```
-
-Close an issue:
-
-```shell
-gage issue close <ISSUE ID> [--skipped]
-```
-
-Delete an issue:
-
-```shell
-gage issue delete <ISSUE ID>
-```
-
-## Notes
-
-_Notes_ are values associated to sessions, session lines, and project config.
-Scanners write notes as evidence for issues.
-
-List notes:
-
-```shell
-gage note list
-```
-
-Some scanners require a certain amount of evidence before opening an issue. For
-this reason, notes are generally retained over time. Notes are useful as
-factual records both for issues (evidence) and for session analysis.
+During an issue resolution session, Claude uses Gage tools to list and read open
+issues. Work through issues with Claude's help as you see fit. Each issue
+provides information to confirm the problem and advice on fixing it. If you
+decide it's not a problem, skip it --- Claude can close the issue as `skipped`.
+If you resolve the issue, Claude can close the issue as `completed`.
 
 ## Gage Query
 
@@ -174,13 +174,12 @@ Use `gage query -c SQL` to run queries yourself. This is useful for analysis
 you'd like to perform on sessions, notes, or issues.
 
 Gage Query provides a PostgreSQL compatible interface. The REPL supports
-commands using the syntax `\COMMAND`. Run `\?` from the REPL to list availble
+commands using the syntax `\COMMAND`. Run `\?` from the REPL to list available
 commands.
 
-Note that Gage Query reads some data from local files (e.g. sessions and
-project config). Some queries will cause full file system scans, which are
-surprisingly slow and memory intensive. In general, avoid running unbounded
-queries
+Note that Gage Query reads some data from local files (e.g. sessions and project
+config). Some queries will cause full file system scans, which are surprisingly
+slow and memory intensive. In general, avoid running unbounded queries.
 
 Avoid:
 
@@ -188,12 +187,12 @@ Avoid:
 SELECT * FROM entry;
 ```
 
-This will read every sesion line into memory.
+This will read every session line into memory.
 
 Instead, use `WHERE` and `LIMIT` clauses:
 
 ```sql
-SELECT * FROM entry WHERE session_id LIKE 'abc123%' LIMIT 10`;
+SELECT * FROM entry WHERE session_id LIKE 'abc123%' LIMIT 10;
 ```
 
 ## FAQ
@@ -206,16 +205,18 @@ SELECT * FROM entry WHERE session_id LIKE 'abc123%' LIMIT 10`;
 
 Gage writes all of its data to files under `~/.gage/`. These include:
 
-- Settings (`settings.json`)
-- Installed scanners (`lib/scanners/`)
-- Data incuding notes and issues (`data/gage.db`)
+- Settings (`~/.gage/settings.json`)
+- Installed scanners (`~/.gage/lib/scanners/`)
+- Data including notes and issues (`~/.gage/data/`)
+- Cache and temporary files (`~/.gage/cache/`, `~/.gage/tmp/`)
+- Logs (`~/.gage/log/`)
 
 ### Does Gage "phone home" for any reason?
 
-No. Gage runs locally and writes notes and all data under `~/.gage/data/`.
+No. Gage runs locally and writes all state under `~/.gage/`.
 
 Gage provides tools to Claude Code over a local MCP server. Claude is free to
-use these tools within the constraints of user-defined premissions (allow and
+use these tools within the constraints of user-defined permissions (allow and
 deny). Gage tools do not open network connections or otherwise write outside of
 `~/.gage/`. Claude, however, may. This is the normal risk profile of running an
 agent. To minimize the risk of sensitive data exfiltration, follow the
