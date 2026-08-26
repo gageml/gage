@@ -238,7 +238,7 @@ fn list(args: ScanListArgs) {
     });
 
     let header: Vec<String> = [
-        "Id", "Tasks", "Sessions", "Notes", "Issues", "Errors", "Cost", "Status", "Duration",
+        "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
         "Created",
     ]
     .iter()
@@ -306,8 +306,8 @@ fn list_row(
         highlighter.short(&run.id),
         tasks.len().to_string(),
         sessions.to_string(),
-        notes.to_string(),
         issues.to_string(),
+        notes.to_string(),
         errors.to_string(),
         cost,
         status.to_string(),
