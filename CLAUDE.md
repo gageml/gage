@@ -68,13 +68,9 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - `.is_ok()` / `.is_err()` to discard a `Result` - same rule as above; if you
     actually need the boolean (rare), name the discarded variant
 
-- `cargo clippy` must pass with no warnings before the change is done. Clippy
-  runs the compiler too, so it covers what `cargo build` would catch. Do not
-  proceed until clippy is satisfied.
-
-- Run `cargo fmt` only after clippy passes.
-
-- All tests must pass.
+- Run `just check` before declaring any change complete. It runs the full
+  gate — clippy (no warnings), fmt, tests — as one command; partial
+  verification is not an option.
 
 - **Prefer imports over fully qualified references.** Keep symbol use short to
   improve readability. The test: before writing `a::b::C` inline, look at the

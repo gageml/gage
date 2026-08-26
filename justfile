@@ -10,6 +10,12 @@ build:
 clippy:
     cargo clippy
 
+# Full verification gate: clippy, fmt, tests
+check:
+    cargo clippy -- -D warnings
+    cargo fmt
+    cargo test
+
 # Run tests
 test:
     cargo test
