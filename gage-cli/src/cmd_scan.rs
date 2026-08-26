@@ -23,7 +23,7 @@ use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
-use gage_db::{db, scan};
+use gage_db::{db, scan, task_validate};
 use gage_query::ScanSessionContext;
 use gage_registry::scanner::{Scanner, ScannerRegistry};
 use rand::seq::SliceRandom;
@@ -181,6 +181,13 @@ pub struct ScanRunArgs {
         conflicts_with_all = ["sessions", "scanners", "files", "groups", "rerun", "days", "today", "all"]
     )]
     scan: Option<String>,
+
+    /// Invalidate the selected sessions before scanning
+    ///
+    /// Clears the sessions' validation state so tasks re-run for
+    /// them. Applies to the selected sessions only.
+    #[arg(short, long)]
+    invalidate: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -1552,6 +1559,21 @@ async fn run_dialog(
         if !confirmed {
             return Err(DialogError::Canceled);
         }
+    }
+
+    // Only after the run is confirmed: a canceled dialog must leave
+    // validation state untouched
+    if args.invalidate {
+        let refs: Vec<String> = sessions
+            .iter()
+            .map(|(id, _)| task_validate::session_ref(id))
+            .collect();
+        let n = {
+            let conn = db.lock().unwrap();
+            task_validate::delete_refs(&conn, &refs).context("deleting session validation rows")?
+        };
+        let plural = if n == 1 { "entry" } else { "entries" };
+        cli::log::step(format!("Invalidated {n} validation {plural}"))?;
     }
 
     // Run

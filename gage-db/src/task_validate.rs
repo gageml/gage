@@ -69,6 +69,26 @@ pub fn existing_refs(
     Ok(found)
 }
 
+/// Delete all rows for `refs`, across keys. Returns the number of
+/// rows deleted.
+pub fn delete_refs(conn: &Connection, refs: &[String]) -> Result<usize, rusqlite::Error> {
+    let mut deleted = 0;
+    // Chunked to stay under SQLite's bound-parameter limit
+    for chunk in refs.chunks(500) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "DELETE FROM task_validate WHERE ref IN ({})",
+            placeholders.join(", ")
+        );
+        let values: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|r| r as &dyn rusqlite::types::ToSql)
+            .collect();
+        deleted += conn.execute(&sql, values.as_slice())?;
+    }
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +129,27 @@ mod tests {
         // But the row exists for membership
         let found = existing_refs(&conn, "k", &["note:n1".to_string()]).unwrap();
         assert_eq!(found, vec!["note:n1".to_string()]);
+    }
+
+    #[test]
+    fn delete_refs_removes_all_keys_for_refs() {
+        let conn = open_db_in_memory().unwrap();
+        put(&conn, "k1", "session:a", Some("100")).unwrap();
+        put(&conn, "k2", "session:a", None).unwrap();
+        put(&conn, "k1", "session:b", Some("200")).unwrap();
+        put(&conn, "k1", "note:n1", None).unwrap();
+
+        let n = delete_refs(&conn, &["session:a".to_string()]).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(value(&conn, "k1", "session:a").unwrap(), None);
+        assert_eq!(
+            value(&conn, "k1", "session:b").unwrap(),
+            Some("200".to_string())
+        );
+        let found = existing_refs(&conn, "k1", &["note:n1".to_string()]).unwrap();
+        assert_eq!(found, vec!["note:n1".to_string()]);
+
+        assert_eq!(delete_refs(&conn, &[]).unwrap(), 0);
     }
 
     #[test]
