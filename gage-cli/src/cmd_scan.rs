@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -391,9 +393,9 @@ async fn view(args: ScanViewArgs) {
         }
         None => None,
     };
-    let load = move |id: &str| -> std::io::Result<gage_tui::scan_view::ScanModel> {
-        let conn = db::open_db().map_err(std::io::Error::other)?;
-        load_scan_model(&conn, id).map_err(std::io::Error::other)
+    let load = move |id: &str| -> io::Result<gage_tui::scan_view::ScanModel> {
+        let conn = db::open_db().map_err(io::Error::other)?;
+        load_scan_model(&conn, id).map_err(io::Error::other)
     };
     if let Err(e) = gage_tui::scan_view::view(model, load).await {
         eprintln!("gage scan view: {e}");
@@ -1619,7 +1621,7 @@ async fn run_dialog(
                 use std::io::Write;
                 match &event {
                     gage_scan::event::ScanEvent::Print { s } => {
-                        std::io::stdout()
+                        io::stdout()
                             .write_all(s.as_bytes())
                             .expect("write to stdout");
                     }
@@ -1717,7 +1719,7 @@ enum Window {
 /// Prints a completed-step line for a selection axis whose value was
 /// pinned by an option or resolved to a default, mirroring how an
 /// answered prompt renders.
-fn selection_step(title: &str, value: impl std::fmt::Display) -> std::io::Result<()> {
+fn selection_step(title: &str, value: impl fmt::Display) -> io::Result<()> {
     cli::log::step(format!("{title}\n{}", style(value).dim()))
 }
 
@@ -1729,7 +1731,7 @@ fn window_display(window: Window) -> String {
     }
 }
 
-fn prompt_window(initial: Window) -> std::io::Result<Window> {
+fn prompt_window(initial: Window) -> io::Result<Window> {
     cli::select("Timeframe")
         .item(Window::Today, "Today", "")
         .item(Window::Days(7), "This week", "")
@@ -1739,7 +1741,7 @@ fn prompt_window(initial: Window) -> std::io::Result<Window> {
         .interact()
 }
 
-fn prompt_limit(initial: Option<usize>) -> std::io::Result<Option<usize>> {
+fn prompt_limit(initial: Option<usize>) -> io::Result<Option<usize>> {
     cli::select("Session limit")
         .item(Some(20), "20", "")
         .item(Some(50), "50", "")
@@ -2103,7 +2105,7 @@ fn remove_scan_logs(scan_id: &str) {
         for name in [format!("{scan_id}.{ext}"), format!("{scan_id}.{ext}.gz")] {
             match std::fs::remove_file(dir.join(&name)) {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => eprintln!("warning: failed to remove log {name}: {e}"),
             }
         }
