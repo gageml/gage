@@ -5,17 +5,20 @@ resolve them.
 
 Requirements:
 
-- Local `gage` binary install on Linux or macOS (Windows planned)
+- Local `gage` binary install on Linux or macOS
 - Local Claude Code plugin install
 - Active Claude Code login status (Pro plans recommended)
 
 **IMPORTANT:** Gage uses Claude Code to scan sessions and resolve issues. Token
-usage is handled through Claude Code according to your Anthropic plan. Gage does
-not require an Anthropic SDK key.
+usage is handled through Claude Code according to your Anthropic plan.
 
 ## Quick start
 
-1. Install Gage (see steps below)
+1. Install Gage
+
+```shell
+curl https://raw.githubusercontent.com/gageml/gage/refs/heads/release/scripts/install.sh | sh
+```
 
 2. Initialize Gage
 
@@ -52,7 +55,7 @@ Windows support is planned.
 To run the install script, use:
 
 ```shell
-curl https://raw.githubusercontent.com/gageml/gage/refs/heads/main/scripts/install.sh | sh
+curl https://raw.githubusercontent.com/gageml/gage/refs/heads/release/scripts/install.sh | sh
 ```
 
 This installs the `gage` binary for your system (Linux or macOS only) to
@@ -103,10 +106,10 @@ gage init
 
 ### Scan Claude Code sessions
 
-`gage scan` runs _scanners_ on your Claude Code sessions. Scanners are self-contained
-programs written in the [Rune](https://rune-rs.github.io/) programming
-language. You can read their source code under [scanners](/scanners) in this
-repository.
+`gage scan` runs _scanners_ on your Claude Code sessions. Scanners are
+self-contained programs written in the [Rune](https://rune-rs.github.io/)
+programming language. You can read their source code under [scanners](/scanners)
+in this repository.
 
 `gage scan` lets you select the scanners to run. Alternatively, you can specify
 each scanner using the `-s/--scanner` option. By default, Gage runs all scanners

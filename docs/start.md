@@ -13,7 +13,7 @@ but more are coming soon! To help with development please visit our
 Install Gage:
 
 ```shell
-curl https://raw.githubusercontent.com/gageml/gage/refs/heads/main/scripts/install.sh | sh
+curl https://raw.githubusercontent.com/gageml/gage/refs/heads/release/scripts/install.sh | sh
 ```
 
 Initialize the Claude Code plugin:
@@ -28,16 +28,16 @@ Run a scan:
 gage scan
 ```
 
-View any open issues:
+List open issues:
 
 ```shell
 gage issue list
 ```
 
-User Claude to review and resolve issues:
+Resolve issues:
 
 ```shell
-claude /gage:review
+gage resolve
 ```
 
 For steps to uninstall, see [_Uninstall Gage_](/docs/uninstall).
