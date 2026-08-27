@@ -42,6 +42,9 @@ Tables:
 - issue_evidence (issue_id, note_id, name, timestamp, digest) - link table from
   issues to the notes that support them
 
+- session_issue (session_id, issue_id) - links issues to the sessions they
+  apply to
+
 TVF for full-text search over message text:
 
 - message_text(query [, snippet_len]) -> (session_id, line, type, subtype,
@@ -53,8 +56,6 @@ Hints:
 - Users often refer to sessions using their prefix ID
 - `message.text` is convenient for message text content in one value
 - `entry.raw` is same as reading session JSONL at `line`
-- Join `issue` to `note` through `issue_evidence` to inspect the evidence behind
-  an issue
 
 The tool may be scoped to sessions and per-session line ranges; rows outside
 the scope do not exist from this tool's point of view.
