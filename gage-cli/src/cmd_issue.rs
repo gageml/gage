@@ -4,6 +4,7 @@ use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
 use gage_db::issue::{self, Issue, IssueFilters, IssueStatus, IssueStatusFilter, StatusReason};
+use gage_db::scan::{self, ScanError};
 use gage_registry::scanner::ScannerRegistry;
 use gage_registry::scheme::{ErrorScheme, ScannerScheme};
 
@@ -239,6 +240,34 @@ pub fn show(args: IssueShowArgs) {
 
     let description_display = resolve_description(&issue);
 
+    let session_ids = match issue::issue_sessions(&conn, &issue.id) {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut displays = crate::cmd_scan::SessionDisplays::default();
+    let session_displays: Vec<_> = session_ids
+        .iter()
+        .map(|id| (id.as_str(), displays.resolve(id)))
+        .collect();
+
+    let scan_display = match issue.scan.as_deref() {
+        Some(scan_id) => {
+            let created = match scan::get_scan(&conn, scan_id) {
+                Ok(s) => crate::human::format_elapsed_ms(s.created),
+                Err(ScanError::NotFound(_)) => "(unavailable)".to_string(),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            format!("{} · {}", short_uuid(scan_id), created)
+        }
+        None => String::new(),
+    };
+
     let attrs = vec![
         ("id", issue.id.clone()),
         ("name", issue.name.clone()),
@@ -259,6 +288,10 @@ pub fn show(args: IssueShowArgs) {
                 .map(|t| t.to_uri())
                 .unwrap_or_default(),
         ),
+        // Placeholder — styled after value_width is known, like the
+        // evidence and events sections.
+        ("sessions", String::new()),
+        ("scan", scan_display),
         ("author", issue.author.clone()),
         ("created", gage_core::datetime::ms_to_iso8601(issue.created)),
         (
@@ -321,11 +354,29 @@ pub fn show(args: IssueShowArgs) {
         .saturating_sub(label_width + 8)
         .max(20);
 
+    let sessions_display = session_displays
+        .iter()
+        .map(|(id, d)| {
+            let header = console::style(textwrap::fill(
+                &format!("{} · {}", short_uuid(id), d.project),
+                value_width,
+            ))
+            .dim();
+            let title = console::style(textwrap::fill(&d.title, value_width))
+                .cyan()
+                .bright();
+            format!("{header}\n{title}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
     let mut rows: Vec<Vec<String>> = attrs
         .into_iter()
         .map(|(k, v)| {
             let value = if k == "description" {
                 crate::markdown::render(&v, value_width)
+            } else if k == "sessions" {
+                sessions_display.clone()
             } else {
                 textwrap::fill(&v, value_width)
             };
