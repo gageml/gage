@@ -1,7 +1,68 @@
 # Gage
 
-Gage is a tool to analyze Claude Code transcripts to find issues and help
-resolve them.
+**Scan Claude sessions to find and fix hidden issues.**
+
+[Website](https://gage.io) ·
+[Report an issue](https://github.com/gageml/gage/issues)
+
+Coding agents do a lot of work you never see. Buried in your Claude Code
+transcripts are diagnosed-but-unfixed bugs, quietly violated project rules, and
+agent behavior that worked against you. Gage scans those transcripts, turns what
+it finds into actionable issues, and uses Claude Code itself to help you resolve
+them.
+
+## Find issues
+
+Scanners read your Claude Code sessions and surface issues you would otherwise
+never see: bugs left unfixed, agent behavior that worked against you, settings
+that cost you data.
+
+<p align="center">
+  <img width="80%" alt="Scan view" src="docs/scan.png" />
+  <br />
+  <em>Scan your Claude sessions</em>
+</p>
+
+<p align="center">
+  <img width="80%" alt="An opened issue" src="docs/issue.png" />
+  <br />
+  <em>Find real issues backed by evidence</em>
+</p>
+
+## Fix issues
+
+`gage resolve` opens an interactive Claude Code session that works through open
+issues with you. You decide what gets fixed and what gets skipped.
+
+<p align="center">
+  <img width="80%" alt="Resolve prompt" src="docs/issue-resolve.png" />
+  <br />
+  <em>Use Claude to resolve issues</em>
+</p>
+
+<p align="center">
+  <img width="80%" alt="Resolve session" src="docs/resolve-session.png" />
+  <br />
+  <em>Work interactively to apply fixes</em>
+</p>
+
+## Trace everything
+
+Every issue cites its evidence. Walk from an issue to its notes to the exact
+session content behind it --- thinking blocks included --- or query everything
+directly with SQL.
+
+<p align="center">
+  <img width="80%" alt="Issue target session" src="docs/issue-target.png" />
+  <br />
+  <em>Trace the issue to the offending entry</em>
+</p>
+
+<p align="center">
+  <img width="80%" alt="Issue author session" src="docs/issue-author.png" />
+  <br />
+  <em>Trace the logic that wrote the issue</em>
+</p>
 
 Requirements:
 
@@ -40,6 +101,48 @@ chance to review the results, press `q` to exit.
 ```shell
 gage resolve
 ```
+
+## Scanners
+
+Gage ships these scanners in the `default` group. Their source is under
+[scanners](/scanners) in this repository.
+
+<table>
+  <tr>
+    <th>Scanner</th>
+    <th>What it finds</th>
+  </tr>
+  <tr>
+    <td><a href="/scanners/general"><code>general</code></a></td>
+    <td>
+      Session-level problems worth your attention: unresolved errors, agent
+      behavior that worked against you, work left in a broken state
+    </td>
+  </tr>
+  <tr>
+    <td><a href="/scanners/code-review"><code>code-review</code></a></td>
+    <td>
+      Code quality problems in work performed during sessions, checked against
+      your project's own rules
+    </td>
+  </tr>
+  <tr>
+    <td><a href="/scanners/hidden-thinking"><code>hidden-thinking</code></a></td>
+    <td>
+      Sessions where Claude Code settings hid the model's thinking blocks, with
+      a recommended fix
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <a href="/scanners/session-retention"><code>session-retention</code></a>
+    </td>
+    <td>
+      An unset session retention policy, which risks silent loss of session
+      history
+    </td>
+  </tr>
+</table>
 
 ## Install
 
@@ -190,7 +293,7 @@ Avoid:
 SELECT * FROM entry;
 ```
 
-This will read every session line into memory.
+This will read every session line into memory!
 
 Instead, use `WHERE` and `LIMIT` clauses:
 

@@ -4,8 +4,7 @@ title: Quick start
 
 :::note
 
-Gage is in early and active development. There are only a few scanners &mdash;
-but more are coming soon! To help with development please visit our
+Gage is in early and active development. To provide feedback or PRs, visit our
 [GitHub project](https://github.com/gageml/gage).
 
 :::
