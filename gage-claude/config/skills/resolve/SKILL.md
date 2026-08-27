@@ -225,6 +225,8 @@ Use the following template when presenting the issue:
 
 Issue {N} of {total}
 
+Applies to `{project_1}`, `{project_2}`
+
 {short_summary}
 
 **Status** - {status}
@@ -236,6 +238,8 @@ Issue {N} of {total}
 - `title` - Issue title
 - `N` - Issue position
 - `total` - Total issues being worked on
+- `project_1`, `project_2` - List of projects the issue applies to. Use
+  `SELECT DISTINCT s.project FROM session_issue si JOIN session s ON s.id = si.session_id WHERE si.issue_id = '<issue_id>'`
 - `short_summary` - One or two sentences introducing the issue to the user.
   Assume the user has no context for the issue and needs it explained in basic
   terms.
