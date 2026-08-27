@@ -190,8 +190,6 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - When describing content DO NOT describe implementation details. This is user
     facing help text, NOT code docs.
 
-- When
-
 [Rust API Guidelines C-CONV]:
   https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
 
