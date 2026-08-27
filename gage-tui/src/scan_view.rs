@@ -689,7 +689,7 @@ async fn run_resolve_session(
     println!("Starting Claude Code…");
     let issue_ids: &[String] = match &scope {
         ResolveScope::Issue(id) => std::slice::from_ref(id),
-        ResolveScope::All => &[],
+        ResolveScope::Issues(ids) => ids,
     };
     let result = resolve_command(issue_ids, None, &[]).and_then(|mut cmd| cmd.status());
     *terminal = ratatui::init();
@@ -707,7 +707,11 @@ async fn run_resolve_session(
     }
     match &scope {
         ResolveScope::Issue(id) => state.refresh_issue(id),
-        ResolveScope::All => state.refresh_all_issues(),
+        ResolveScope::Issues(ids) => {
+            for id in ids {
+                state.refresh_issue(id);
+            }
+        }
     }
     Ok(())
 }
@@ -1166,8 +1170,8 @@ enum Prompt {
 enum ResolveScope {
     /// A single issue, by ID
     Issue(String),
-    /// All pending and open issues (the session gets no issue IDs)
-    All,
+    /// Every issue in the scan's results, by ID
+    Issues(Vec<String>),
 }
 
 /// What a session dialog was opened from, and therefore what `[`/`]`
@@ -1680,13 +1684,14 @@ impl ViewState {
         self.pending_resolve = Some(ResolveScope::Issue(issue.id.clone()));
     }
 
-    /// Confirm the resolve-all option: stage an unscoped session and
-    /// dismiss the prompt.
+    /// Confirm the resolve-all option: stage every scan issue for the
+    /// event loop's launch and dismiss the prompt.
     fn confirm_resolve_all(&mut self) {
         let Some(Prompt::Resolve { .. }) = self.prompt.take() else {
             return;
         };
-        self.pending_resolve = Some(ResolveScope::All);
+        let ids = self.model.issues.iter().map(|i| i.id.clone()).collect();
+        self.pending_resolve = Some(ResolveScope::Issues(ids));
     }
 
     /// Re-read an issue's status and history from the db after the
@@ -1709,16 +1714,6 @@ impl ViewState {
         {
             loaded.apply(issue);
             self.scroll_view.invalidate();
-        }
-    }
-
-    /// [`refresh_issue`](Self::refresh_issue) for every issue in the
-    /// results, after an unscoped resolve session that may have
-    /// changed any of them
-    fn refresh_all_issues(&mut self) {
-        let ids: Vec<String> = self.model.issues.iter().map(|i| i.id.clone()).collect();
-        for id in &ids {
-            self.refresh_issue(id);
         }
     }
 
@@ -2422,7 +2417,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
         Prompt::Resolve { issue } => {
             let options = [
                 ("y", format!("yes, resolve issue {}", short_id(&issue.id))),
-                ("a", "yes, resolve all issues".to_string()),
+                ("a", "yes, resolve all scan issues".to_string()),
                 ("n", "cancel".to_string()),
             ];
             let rows = options

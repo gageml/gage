@@ -731,7 +731,7 @@ fn issue_session_items(
 /// ticks like [`AgentTimes`] — titles and project paths do not change
 /// while a view is open, so each session resolves once.
 #[derive(Default)]
-struct SessionDisplays {
+pub struct SessionDisplays {
     map: HashMap<String, SessionDisplay>,
     /// Session walk from the last unknown id; sessions can appear
     /// while a scan runs, so an id missing from it refreshes the walk
@@ -741,15 +741,15 @@ struct SessionDisplays {
 }
 
 #[derive(Clone)]
-struct SessionDisplay {
-    project: String,
-    title: String,
+pub struct SessionDisplay {
+    pub project: String,
+    pub title: String,
 }
 
 impl SessionDisplays {
     /// A session's display fields. Both fall back to a placeholder
     /// when the session is not on disk.
-    fn resolve(&mut self, id: &str) -> SessionDisplay {
+    pub fn resolve(&mut self, id: &str) -> SessionDisplay {
         if let Some(display) = self.map.get(id) {
             return display.clone();
         }
