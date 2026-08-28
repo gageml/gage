@@ -810,13 +810,11 @@ fn handle_key(
                 KeyCode::Char('a') if matches!(state.dialog, Dialog::Issue { .. }) => {
                     state.open_actions_prompt();
                 }
-                KeyCode::Char('a') if matches!(state.dialog, Dialog::Note { .. }) => {
-                    state.open_tool_use_session();
+                KeyCode::Char('A') => state.open_tool_use_session(),
+                KeyCode::Char('T') if matches!(state.dialog, Dialog::Issue { .. }) => {
+                    state.open_issue_target_session();
                 }
-                KeyCode::Char('t') if matches!(state.dialog, Dialog::Issue { .. }) => {
-                    state.open_tool_use_session();
-                }
-                KeyCode::Char('t') if matches!(state.dialog, Dialog::Note { .. }) => {
+                KeyCode::Char('T') if matches!(state.dialog, Dialog::Note { .. }) => {
                     state.open_target_session();
                 }
                 KeyCode::Char('l') if matches!(state.dialog, Dialog::Log { .. }) => {
@@ -1184,7 +1182,10 @@ enum SessionNav {
     Agents,
     /// A single agent session opened by a tool-use jump; stepping is
     /// disabled
-    Pinned,
+    PinnedAgent,
+    /// A single Claude Code session opened by a target jump; stepping
+    /// is disabled
+    PinnedSession,
 }
 
 impl ViewState {
@@ -1334,7 +1335,7 @@ impl ViewState {
                 Dialog::Session {
                     id: hit.item.id,
                     view: Box::new(view),
-                    nav: SessionNav::Pinned,
+                    nav: SessionNav::PinnedAgent,
                     db: hit.db,
                     return_to: Some(return_to),
                 }
@@ -1390,10 +1391,7 @@ impl ViewState {
         None
     }
 
-    /// Open the session view over the note dialog's target session,
-    /// selected at the target's line, layered so closing it restores
-    /// the dialog. When the session cannot be loaded, a notice
-    /// overlays the dialog instead.
+    /// Open the session view over the note dialog's target session.
     fn open_target_session(&mut self) {
         let Dialog::Note { note } = &self.dialog else {
             return;
@@ -1401,6 +1399,27 @@ impl ViewState {
         let Some(target) = session_target(&note.target) else {
             return;
         };
+        self.open_session_at_target(target);
+    }
+
+    /// Open the session view over the issue dialog's target session:
+    /// the first evidence note with a session target, else the first
+    /// linked session.
+    fn open_issue_target_session(&mut self) {
+        let Dialog::Issue { issue } = &self.dialog else {
+            return;
+        };
+        let Some(target) = issue_session_target(issue) else {
+            return;
+        };
+        self.open_session_at_target(target);
+    }
+
+    /// Open the session view over `target`, selected at the target's
+    /// line when it names one, layered so closing it restores the
+    /// dialog. When the session cannot be loaded, a notice overlays
+    /// the dialog instead.
+    fn open_session_at_target(&mut self, target: SessionTarget) {
         let item = self.target_session_item(&target.session_id);
         let loaded = match gage_db::db::open_db() {
             Ok(db) => match load_session_doc(&item, &db) {
@@ -1430,13 +1449,13 @@ impl ViewState {
                 Dialog::Session {
                     id: item.id,
                     view: Box::new(view),
-                    nav: SessionNav::Pinned,
+                    nav: SessionNav::PinnedSession,
                     db,
                     return_to: Some(return_to),
                 }
             }
             None => Dialog::Notice {
-                message: "Cannot open note target session.".to_string(),
+                message: "Cannot open target session.".to_string(),
                 return_to,
             },
         };
@@ -1749,7 +1768,7 @@ impl ViewState {
                     }
                 }
                 SessionNav::Agents => self.step_agent_dialog(delta),
-                SessionNav::Pinned => {}
+                SessionNav::PinnedAgent | SessionNav::PinnedSession => {}
             },
             _ => {}
         }
@@ -1816,7 +1835,7 @@ impl ViewState {
         {
             // Pinned views are transient peeks positioned at a tool-use
             // entry; saving them would clobber the browsed position.
-            let remember = !matches!(nav, SessionNav::Pinned);
+            let remember = !matches!(nav, SessionNav::PinnedAgent | SessionNav::PinnedSession);
             match app::handle_key(view, key, db) {
                 Ok(app::KeyOutcome::Consumed) => {}
                 Ok(app::KeyOutcome::Close) => {
@@ -2304,6 +2323,16 @@ fn session_target(uri: &str) -> Option<SessionTarget> {
     }
 }
 
+/// The session target for an issue: the first evidence note with a
+/// session target, else the first linked session (default view).
+fn issue_session_target(issue: &IssueItem) -> Option<SessionTarget> {
+    issue
+        .evidence
+        .iter()
+        .find_map(|e| session_target(&e.target))
+        .or_else(|| issue.sessions.first().map(|s| SessionTarget::new(&s.id)))
+}
+
 /// Index of the entry at JSONL line `line`, or of the nearest entry
 /// before it when that line is not among the document's entries.
 fn entry_index_for_line(doc: &Document, line: u32) -> Option<usize> {
@@ -2378,8 +2407,8 @@ fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
         }
         Dialog::Session { id, view, nav, .. } => {
             let title = match nav {
-                SessionNav::Sessions => format!(" Session {id} "),
-                SessionNav::Agents | SessionNav::Pinned => format!(" Agent {id} "),
+                SessionNav::Sessions | SessionNav::PinnedSession => format!(" Session {id} "),
+                SessionNav::Agents | SessionNav::PinnedAgent => format!(" Agent {id} "),
             };
             draw_session_dialog(frame, title, view);
         }
@@ -3236,8 +3265,8 @@ fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             Row::new(vec![
                 Cell::from(id_span(&s.id, selected == Some(i))),
                 Cell::from(s.title.clone()),
-                Cell::from(s.notes.to_string()),
                 Cell::from(s.issues.to_string()),
+                Cell::from(s.notes.to_string()),
             ])
         })
         .collect();
@@ -3245,10 +3274,10 @@ fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let widths: Vec<Constraint> = vec![
         Constraint::Length(8),
         Constraint::Fill(1),
-        Constraint::Length(6),
         Constraint::Length(7),
+        Constraint::Length(6),
     ];
-    let header = header_row(["Id", "Title", "Notes", "Issues"]);
+    let header = header_row(["Id", "Title", "Issues", "Notes"]);
     let table = Table::new(rows, widths)
         .header(header)
         .row_highlight_style(styles::Panel::selection(state.focus == Focus::Sessions))
@@ -3330,17 +3359,12 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .unwrap_or(0)
         .max("Sessions".width())
         .min(SESSIONS_CAP);
-    let name_col = fit_col(
-        "Name",
-        state.model.issues.iter().map(|i| i.name.as_str()),
-        area,
-    );
     let status_col = fit_col(
         "Status",
         state.model.issues.iter().map(|i| i.status_cell.as_str()),
         area,
     );
-    let title_width = fill_width(area, &[8, name_col, 5, sessions_width as u16, status_col]);
+    let title_width = fill_width(area, &[8, 5, sessions_width as u16, status_col]);
     let rows: Vec<Row> = state
         .model
         .issues
@@ -3354,7 +3378,6 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             };
             Row::new(vec![
                 Cell::from(id_span(&i.id, selected == Some(idx))),
-                Cell::from(i.name.clone()),
                 Cell::from(ellipsize(&i.title, title_width)),
                 Cell::from(notes),
                 Cell::from(ellipsize(sessions, sessions_width)),
@@ -3367,16 +3390,13 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         rows,
         [
             Constraint::Length(8),
-            Constraint::Length(name_col),
             Constraint::Fill(1),
             Constraint::Length(5),
             Constraint::Length(sessions_width as u16),
             Constraint::Length(status_col),
         ],
     )
-    .header(header_row([
-        "Id", "Name", "Title", "Notes", "Sessions", "Status",
-    ]))
+    .header(header_row(["Id", "Title", "Notes", "Sessions", "Status"]))
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Issues))
     .block(panel_block(
         format!(" Issues ({count}) "),
@@ -3419,17 +3439,20 @@ fn footer_help(state: &ViewState) -> Line<'static> {
         Dialog::Note { note } => {
             let mut items = vec![("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
             if author_call_id(&note.author).is_some() {
-                items.push(("a", "author"));
+                items.push(("A", "author"));
             }
             if session_target(&note.target).is_some() {
-                items.push(("t", "target"));
+                items.push(("T", "target"));
             }
             hint::help_line(&items)
         }
         Dialog::Issue { issue } => {
             let mut items = vec![("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
             if author_call_id(&issue.author).is_some() {
-                items.push(("t", "tool use"));
+                items.push(("A", "author"));
+            }
+            if issue_session_target(issue).is_some() {
+                items.push(("T", "target"));
             }
             items.push(("a", "action"));
             hint::help_line(&items)
@@ -3496,7 +3519,7 @@ fn session_step_targets(state: &ViewState, nav: SessionNav) -> usize {
             .iter()
             .filter(|row| matches!(row, TaskRow::Agent(..)))
             .count(),
-        SessionNav::Pinned => 1,
+        SessionNav::PinnedAgent | SessionNav::PinnedSession => 1,
     }
 }
 
@@ -3607,7 +3630,7 @@ mod tests {
 
     #[test]
     fn pinned_session_close_leaves_session_ui_untouched() {
-        let mut state = state_with_session_dialog(SessionNav::Pinned);
+        let mut state = state_with_session_dialog(SessionNav::PinnedAgent);
         state.handle_session_dialog_key(close_key());
         assert!(matches!(state.dialog, Dialog::None));
         assert!(state.session_ui.is_empty());
