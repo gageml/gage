@@ -34,13 +34,13 @@ pub enum IssueCommand {
     /// Delete issues
     Delete(IssueDeleteArgs),
 
-    /// Close an issue
+    /// Close issues
     Close(IssueCloseArgs),
 
-    /// Open a pending or closed issue
+    /// Open pending or closed issues
     Open(IssueOpenArgs),
 
-    /// Comment on an issue
+    /// Comment on issues
     Comment(IssueCommentArgs),
 }
 
@@ -80,8 +80,8 @@ pub struct IssueDeleteArgs {
 
 #[derive(Args)]
 pub struct IssueOpenArgs {
-    /// Issue ID (or prefix)
-    id: String,
+    /// Issue IDs (or prefix)
+    ids: Vec<String>,
 
     /// Message explaining issue open
     #[arg(short, long)]
@@ -94,8 +94,8 @@ pub struct IssueOpenArgs {
 
 #[derive(Args)]
 pub struct IssueCommentArgs {
-    /// Issue ID (or prefix)
-    id: String,
+    /// Issue IDs (or prefix)
+    ids: Vec<String>,
 
     /// Comment text (prompted if omitted)
     #[arg(short, long)]
@@ -108,8 +108,8 @@ pub struct IssueCommentArgs {
 
 #[derive(Args)]
 pub struct IssueCloseArgs {
-    /// Issue ID (or prefix)
-    id: String,
+    /// Issue IDs (or prefix)
+    ids: Vec<String>,
 
     /// Close as 'skipped' instead of the default 'completed'
     #[arg(short, long)]
@@ -568,17 +568,35 @@ pub fn delete(args: IssueDeleteArgs) {
 }
 
 pub fn close(args: IssueCloseArgs) {
-    let conn = db::open_db().unwrap();
-    let target_issue = match issue::get(&conn, &args.id) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
+    if args.ids.is_empty() {
+        eprintln!(
+            "gage issue close: provide one or more issue IDs\n\n\
+             Use 'gage issue list' to show issues"
+        );
+        std::process::exit(1);
+    }
 
-    if target_issue.status == IssueStatus::Closed {
-        eprintln!("Issue {} is already closed", short_uuid(&target_issue.id));
+    let conn = db::open_db().unwrap();
+
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match issue::get(&conn, prefix) {
+            Ok(i) => {
+                if i.status == IssueStatus::Closed {
+                    eprintln!("Issue {} is already closed", short_uuid(&i.id));
+                    errors += 1;
+                } else {
+                    issues.push(i);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
         std::process::exit(1);
     }
 
@@ -590,12 +608,16 @@ pub fn close(args: IssueCloseArgs) {
         StatusReason::Completed
     };
 
-    dialog::run("Close issue", || {
-        cli::log::step(format!(
-            "Issue\n{} {}",
-            console::style(short_uuid(&target_issue.id)).dim(),
-            target_issue.title,
-        ))?;
+    let count = issues.len();
+
+    dialog::run("Close issues", || {
+        let listing = issues
+            .iter()
+            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let label = if count == 1 { "Issue" } else { "Issues" };
+        cli::log::step(format!("{label}\n{listing}"))?;
         cli::log::step(format!("Reason\n{}", console::style(reason.as_str()).dim()))?;
 
         let message: Option<String> = match args.message {
@@ -613,96 +635,153 @@ pub fn close(args: IssueCloseArgs) {
         };
 
         if !args.yes {
-            let confirmed = cli::confirm("Close this issue?")
-                .initial_value(true)
-                .interact()?;
+            let prompt = if count == 1 {
+                "Close this issue?".to_string()
+            } else {
+                format!("Close {count} issues?")
+            };
+            let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
         }
 
         let author = crate::author::resolve_author(None);
-        issue::set_status(
-            &conn,
-            &target_issue.id,
-            IssueStatus::Closed,
-            Some(reason),
-            &author,
-            message.as_deref(),
-        )
-        .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+        let mut closed = 0;
+        for issue in &issues {
+            if let Err(e) = issue::set_status(
+                &conn,
+                &issue.id,
+                IssueStatus::Closed,
+                Some(reason),
+                &author,
+                message.as_deref(),
+            ) {
+                eprintln!("warning: failed to close {}: {e}", short_uuid(&issue.id));
+            } else {
+                closed += 1;
+            }
+        }
 
-        Ok(format!(
-            "Closed issue {} ({})",
-            short_uuid(&target_issue.id),
-            reason.as_str()
-        )
-        .into())
+        let plural = if closed == 1 { "issue" } else { "issues" };
+        Ok(format!("Closed {closed} {plural} ({})", reason.as_str()).into())
     });
 }
 
 pub fn open(args: IssueOpenArgs) {
-    let conn = db::open_db().unwrap();
-    let target_issue = match issue::get(&conn, &args.id) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    if target_issue.status == IssueStatus::Open {
-        eprintln!("Issue {} is already open", short_uuid(&target_issue.id));
+    if args.ids.is_empty() {
+        eprintln!(
+            "gage issue open: provide one or more issue IDs\n\n\
+             Use 'gage issue list' to show issues"
+        );
         std::process::exit(1);
     }
 
-    dialog::run("Open issue", || {
-        cli::log::step(format!(
-            "Issue\n{} {}",
-            console::style(short_uuid(&target_issue.id)).dim(),
-            target_issue.title,
-        ))?;
+    let conn = db::open_db().unwrap();
+
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match issue::get(&conn, prefix) {
+            Ok(i) => {
+                if i.status == IssueStatus::Open {
+                    eprintln!("Issue {} is already open", short_uuid(&i.id));
+                    errors += 1;
+                } else {
+                    issues.push(i);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let count = issues.len();
+
+    dialog::run("Open issues", || {
+        let listing = issues
+            .iter()
+            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let label = if count == 1 { "Issue" } else { "Issues" };
+        cli::log::step(format!("{label}\n{listing}"))?;
 
         if !args.yes {
-            let confirmed = cli::confirm("Open this issue?")
-                .initial_value(true)
-                .interact()?;
+            let prompt = if count == 1 {
+                "Open this issue?".to_string()
+            } else {
+                format!("Open {count} issues?")
+            };
+            let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
         }
 
         let author = crate::author::resolve_author(None);
-        issue::set_status(
-            &conn,
-            &target_issue.id,
-            IssueStatus::Open,
-            None,
-            &author,
-            args.message.as_deref(),
-        )
-        .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+        let mut opened = 0;
+        for issue in &issues {
+            if let Err(e) = issue::set_status(
+                &conn,
+                &issue.id,
+                IssueStatus::Open,
+                None,
+                &author,
+                args.message.as_deref(),
+            ) {
+                eprintln!("warning: failed to open {}: {e}", short_uuid(&issue.id));
+            } else {
+                opened += 1;
+            }
+        }
 
-        Ok(format!("Opened issue {}", short_uuid(&target_issue.id)).into())
+        let plural = if opened == 1 { "issue" } else { "issues" };
+        Ok(format!("Opened {opened} {plural}").into())
     });
 }
 
 pub fn comment(args: IssueCommentArgs) {
-    let conn = db::open_db().unwrap();
-    let target_issue = match issue::get(&conn, &args.id) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
+    if args.ids.is_empty() {
+        eprintln!(
+            "gage issue comment: provide one or more issue IDs\n\n\
+             Use 'gage issue list' to show issues"
+        );
+        std::process::exit(1);
+    }
 
-    dialog::run("Comment on issue", || {
-        cli::log::step(format!(
-            "Issue\n{} {}",
-            console::style(short_uuid(&target_issue.id)).dim(),
-            target_issue.title,
-        ))?;
+    let conn = db::open_db().unwrap();
+
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match issue::get(&conn, prefix) {
+            Ok(i) => issues.push(i),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let count = issues.len();
+
+    dialog::run("Comment on issues", || {
+        let listing = issues
+            .iter()
+            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let label = if count == 1 { "Issue" } else { "Issues" };
+        cli::log::step(format!("{label}\n{listing}"))?;
 
         let message: String = match args.message {
             Some(ref m) => m.clone(),
@@ -712,19 +791,32 @@ pub fn comment(args: IssueCommentArgs) {
         };
 
         if !args.yes {
-            let confirmed = cli::confirm("Add this comment?")
-                .initial_value(true)
-                .interact()?;
+            let prompt = if count == 1 {
+                "Add this comment?".to_string()
+            } else {
+                format!("Add this comment to {count} issues?")
+            };
+            let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
         }
 
         let author = crate::author::resolve_author(None);
-        issue::comment(&conn, &target_issue.id, &author, &message)
-            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+        let mut commented = 0;
+        for issue in &issues {
+            if let Err(e) = issue::comment(&conn, &issue.id, &author, &message) {
+                eprintln!(
+                    "warning: failed to comment on {}: {e}",
+                    short_uuid(&issue.id)
+                );
+            } else {
+                commented += 1;
+            }
+        }
 
-        Ok(format!("Commented on issue {}", short_uuid(&target_issue.id)).into())
+        let plural = if commented == 1 { "issue" } else { "issues" };
+        Ok(format!("Commented on {commented} {plural}").into())
     });
 }
 
