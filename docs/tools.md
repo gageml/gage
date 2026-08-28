@@ -1,7 +1,8 @@
 # Tools
 
-- IssueClose
 - IssueComment
+- IssuePendingResolve
+- IssueUpdate
 - IssueWrite
 - NoteWrite
 - Query

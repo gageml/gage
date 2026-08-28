@@ -6,7 +6,7 @@ A _scan_ (or scan _run_) is the process of scanning sessions.
 
 To start a scan, run:
 
-```shell
+```cli
 gage scan
 ```
 
@@ -16,7 +16,7 @@ Gage runs each scanner over each of the selected sessions to find issues.
 
 Gage maintains a record of each scan. To list scans, run:
 
-```shell
+```cli
 gage scan list
 ```
 

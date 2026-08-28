@@ -1,8 +1,8 @@
 ---
-title: Review
+title: Resolve
 ---
 
-TODO - docs on the `gage:review` command
+TODO - docs on the `gage:resolve` command
 
 - Include rationale for making this a command. We want this work to be reflected
   in the session record as it often involves changes to projects, which should

@@ -3,7 +3,7 @@
 To install the Gage LSP (language support for Gage scanners), install the
 `gage-lsp` crate using cargo.
 
-```shell
+```cli
 cargo install --path gage-lsp
 ```
 
@@ -17,11 +17,11 @@ Install the [Rune extension for VS Code].
   https://marketplace.visualstudio.com/items?itemName=udoprog.rune-vscode
 
 Set the `rune.server.path` VS Code config to the full path to `gage-lsp`
-(installed under `~/.car/bin` by default).
+(installed under `~/.cargo/bin` by default).
 
 ```json
 {
-  "rune.server.path": "/home/garrett/.cargo/bin/gage-lsp"
+  "rune.server.path": "/home/user/.cargo/bin/gage-lsp"
 }
 ```
 

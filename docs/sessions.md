@@ -7,17 +7,17 @@ located under `~/.claude/projects/`.
 
 List Claude sessions:
 
-```shell
+```cli
 gage session list
 ```
 
 Gage scans sessions by running small programs (called _scanners_) that look for
 specific issues and provide help for resolving them.
 
-You can view any Claude sessio file by running:
+You can view any Claude session file by running:
 
-```shell
-gage vession view [<SESSION_ID>]
+```cli
+gage session view [<SESSION_ID>]
 ```
 
 If you omit the ID, Gage lets you pick from a list.

@@ -11,31 +11,42 @@ Gage is in early and active development. To provide feedback or PRs, visit our
 
 Install Gage:
 
+:::tab[Linux/macOS]{group=platform}
+
 ```shell
 curl https://raw.githubusercontent.com/gageml/gage/refs/heads/release/scripts/install.sh | sh
 ```
 
+:::
+
+:::tab[Windows]
+
+Windows support planned ---
+[upvote here](https://github.com/gageml/gage/issues/14)
+
+:::
+
 Initialize the Claude Code plugin:
 
-```shell
+```cli
 gage init
 ```
 
 Run a scan:
 
-```shell
+```cli
 gage scan
 ```
 
 List open issues:
 
-```shell
+```cli
 gage issue list
 ```
 
 Resolve issues:
 
-```shell
+```cli
 gage resolve
 ```
 

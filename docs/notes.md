@@ -11,13 +11,13 @@ issue worth reporting.
 
 List notes:
 
-```shell
+```cli
 gage note list
 ```
 
 To view note details, run:
 
-```shell
+```cli
 gage note show <NOTE_ID>
 ```
 
@@ -54,7 +54,7 @@ wrote it*. Author values follow a small scheme:
   same authoring-call semantics, with the caller named by its client
   info.
 - `user:<username>` — a person writing through the CLI. Where each write
-  is its own event (e.g. `gage issue create`), a `?call=<id>` qualifier
+  is its own event (e.g. `gage issue add`), a `?call=<id>` qualifier
   carries the event identity.
 
 Because agent authors carry instance identity, note names stay purely
