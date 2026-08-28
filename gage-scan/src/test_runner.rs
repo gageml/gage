@@ -173,6 +173,7 @@ pub async fn run_test(case: TestCase) -> TestOutcome {
         mcp_host: None,
         dispatcher: std::sync::OnceLock::new(),
         agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+        agent_fault: std::sync::OnceLock::new(),
     });
     let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
     // Seed the stub scan row so note/issue writes that link to the

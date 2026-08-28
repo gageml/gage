@@ -141,6 +141,7 @@ pub async fn run(
         mcp_host,
         dispatcher: std::sync::OnceLock::new(),
         agent_pool: Arc::new(tokio::sync::Semaphore::new(agent_jobs)),
+        agent_fault: std::sync::OnceLock::new(),
     });
     // Start the Rune tool dispatcher. Held by `RunContext` so scanners
     // can reach it through `current_scan_ctx().run.dispatcher`. The
@@ -467,6 +468,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
             agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+            agent_fault: std::sync::OnceLock::new(),
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -689,6 +691,7 @@ impl TestRuntime {
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
             agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+            agent_fault: std::sync::OnceLock::new(),
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         // Stub rt/unit/sources. Tests built through `with_scope` don't

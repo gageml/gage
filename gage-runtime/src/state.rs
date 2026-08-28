@@ -44,6 +44,13 @@ pub struct RunContext {
     /// [`crate::agent::Agent`]. Configured via the CLI's
     /// `--agent-jobs` flag.
     pub agent_pool: Arc<tokio::sync::Semaphore>,
+    /// Run-wide agent-facility fault, set at most once. Installed when
+    /// a condition makes every agent call pointless for the rest of the
+    /// run (claude not logged in). Once set, every Rune-visible agent
+    /// entry point raises the message as an uncatchable VM panic
+    /// without spawning or contacting a claude child — see
+    /// `agent::with_fault_barrier`.
+    pub agent_fault: OnceLock<String>,
 }
 
 /// Per-task state injected via `tokio::task_local!`.

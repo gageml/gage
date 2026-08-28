@@ -455,9 +455,9 @@ fn url(this: &Agent) -> Option<String> {
 }
 
 #[rune::function(instance)]
-async fn poll(this: Mut<Agent>) -> super::Result<Event> {
+async fn poll(this: Mut<Agent>) -> Result<super::Result<Event>, VmError> {
     let inner = Arc::clone(&this.inner);
-    do_poll(inner).await
+    with_fault_barrier(do_poll(inner)).await
 }
 
 /// Block to the session-level terminal. `Result` (a per-turn end)
@@ -467,8 +467,8 @@ async fn poll(this: Mut<Agent>) -> super::Result<Event> {
 /// `stop` themselves; calling `wait()` after `stop()` returns the
 /// cached `AgentResult` immediately.
 #[rune::function(instance)]
-async fn wait(this: Mut<Agent>) -> super::Result<AgentResult> {
-    wait_inner(Arc::clone(&this.inner)).await
+async fn wait(this: Mut<Agent>) -> Result<super::Result<AgentResult>, VmError> {
+    with_fault_barrier(wait_inner(Arc::clone(&this.inner))).await
 }
 
 async fn wait_inner(inner: Arc<Mutex<AgentInner>>) -> super::Result<AgentResult> {
@@ -537,10 +537,15 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
             "agent.poll received stream message",
         );
 
+        let mut auth_failure = None;
         let eof = {
             let mut g = inner.lock().unwrap();
             g.session = Some(session);
             match msg {
+                Some(StreamMessage::Assistant(v)) if is_auth_failure(&v) => {
+                    auth_failure = Some(v);
+                    false
+                }
                 Some(StreamMessage::Result(v)) => {
                     let reason = v
                         .get("stop_reason")
@@ -585,10 +590,80 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
                 }
             }
         };
+        if let Some(raw) = auth_failure {
+            return handle_auth_failure(inner, raw).await;
+        }
         if eof {
             do_stop(Arc::clone(&inner)).await?;
         }
     }
+}
+
+/// Message installed as the run-wide agent fault, and carried by every
+/// error the disabled facility raises afterward.
+const AUTH_FAULT_MSG: &str =
+    "claude is not logged in (run `claude /login`); agent calls are disabled for this scan";
+
+/// True when `v` is the stream message Claude Code synthesizes on an
+/// authentication failure: an `assistant` message whose *top-level*
+/// fields carry `"error": "authentication_failed"` and
+/// `"is_api_error_message": true`. Only these envelope fields are
+/// inspected — the same text quoted inside `message.content` (session
+/// transcripts, tool results, model replies) never reaches them, so
+/// quoted occurrences cannot trigger a false positive.
+fn is_auth_failure(v: &JsonValue) -> bool {
+    v.get("error").and_then(|e| e.as_str()) == Some("authentication_failed")
+        && v.get("is_api_error_message").and_then(|b| b.as_bool()) == Some(true)
+}
+
+/// Install the run-wide agent fault, shut this session down, and
+/// return the login error. The registered-function barrier upgrades
+/// the error to an uncatchable VM panic, so no scanner code can
+/// observe the auth failure as an ordinary value.
+async fn handle_auth_failure(
+    inner: Arc<Mutex<AgentInner>>,
+    raw: JsonValue,
+) -> super::Result<Event> {
+    let first = current_scan_ctx()
+        .run
+        .agent_fault
+        .set(AUTH_FAULT_MSG.to_string())
+        .is_ok();
+    if first {
+        tracing::error!(
+            "disabling agent calls for this scan: claude is not logged in; run `claude /login`"
+        );
+    }
+    tracing::debug!(message = %raw, "authentication failure reported by claude");
+    // The auth failure is the primary fault and is returned below; a
+    // secondary failure while reaping the already-exiting child adds
+    // nothing actionable beyond its log line.
+    if let Err(e) = do_stop(inner).await {
+        tracing::warn!(error = %e, "agent stop after authentication failure failed");
+    }
+    Err(Error::Agent(AUTH_FAULT_MSG.into()))
+}
+
+/// Gate a Rune-visible agent entry point on the run-wide agent fault.
+/// When the fault is set — before the call (nothing is touched) or
+/// during it (the outcome is superseded) — the fault message is raised
+/// as a VM panic, which no scanner `match` or `?` can intercept. The
+/// task aborts, the scheduler records it failed with this message, and
+/// no validation runs.
+async fn with_fault_barrier<T>(fut: impl std::future::Future<Output = T>) -> Result<T, VmError> {
+    fn fault() -> Option<VmError> {
+        let msg = current_scan_ctx().run.agent_fault.get()?.clone();
+        tracing::debug!("agent call refused: run-wide agent fault is set");
+        Some(VmError::panic(msg))
+    }
+    if let Some(e) = fault() {
+        return Err(e);
+    }
+    let out = fut.await;
+    if let Some(e) = fault() {
+        return Err(e);
+    }
+    Ok(out)
 }
 
 /// Send interrupt + EOF on stdin, reap the child, run the gage-agent
@@ -876,17 +951,20 @@ fn tool_result_output(block: &JsonValue) -> String {
 }
 
 #[rune::function(instance)]
-async fn send(this: Mut<Agent>, msg: Ref<str>) -> super::Result<()> {
+async fn send(this: Mut<Agent>, msg: Ref<str>) -> Result<super::Result<()>, VmError> {
     let inner = Arc::clone(&this.inner);
-    let mut session = inner
-        .lock()
-        .unwrap()
-        .session
-        .take()
-        .ok_or_else(|| Error::Agent("agent.send: session not available".into()))?;
-    let res = session.send_user_message(&msg).await;
-    inner.lock().unwrap().session = Some(session);
-    res.map_err(|e| Error::Agent(format!("agent.send: {e}")))
+    with_fault_barrier(async move {
+        let mut session = inner
+            .lock()
+            .unwrap()
+            .session
+            .take()
+            .ok_or_else(|| Error::Agent("agent.send: session not available".into()))?;
+        let res = session.send_user_message(&msg).await;
+        inner.lock().unwrap().session = Some(session);
+        res.map_err(|e| Error::Agent(format!("agent.send: {e}")))
+    })
+    .await
 }
 
 /// Interrupt the current turn and queue `msg` as the next user
@@ -894,21 +972,24 @@ async fn send(this: Mut<Agent>, msg: Ref<str>) -> super::Result<()> {
 /// user message — stdin stays open so the session continues past
 /// the interrupt.
 #[rune::function(instance)]
-async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> super::Result<()> {
+async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> Result<super::Result<()>, VmError> {
     let inner = Arc::clone(&this.inner);
-    let mut session = inner
-        .lock()
-        .unwrap()
-        .session
-        .take()
-        .ok_or_else(|| Error::Agent("agent.send_now: session not available".into()))?;
-    let res = async {
-        session.send_interrupt().await?;
-        session.send_user_message(&msg).await
-    }
-    .await;
-    inner.lock().unwrap().session = Some(session);
-    res.map_err(|e| Error::Agent(format!("agent.send_now: {e}")))
+    with_fault_barrier(async move {
+        let mut session = inner
+            .lock()
+            .unwrap()
+            .session
+            .take()
+            .ok_or_else(|| Error::Agent("agent.send_now: session not available".into()))?;
+        let res = async {
+            session.send_interrupt().await?;
+            session.send_user_message(&msg).await
+        }
+        .await;
+        inner.lock().unwrap().session = Some(session);
+        res.map_err(|e| Error::Agent(format!("agent.send_now: {e}")))
+    })
+    .await
 }
 
 /// End the session: send an `interrupt` control-request, close
@@ -917,23 +998,26 @@ async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> super::Result<()> {
 /// Idempotent — calling `stop` after the session has already ended
 /// is a no-op. `result()` returns `Some` once this completes.
 #[rune::function(instance)]
-async fn stop(this: Mut<Agent>) -> super::Result<()> {
-    do_stop(Arc::clone(&this.inner)).await
+async fn stop(this: Mut<Agent>) -> Result<super::Result<()>, VmError> {
+    with_fault_barrier(do_stop(Arc::clone(&this.inner))).await
 }
 
 #[rune::function(instance)]
-async fn kill(this: Mut<Agent>, grace_secs: i64) -> super::Result<()> {
+async fn kill(this: Mut<Agent>, grace_secs: i64) -> Result<super::Result<()>, VmError> {
     let inner = Arc::clone(&this.inner);
-    let mut session = inner
-        .lock()
-        .unwrap()
-        .session
-        .take()
-        .ok_or_else(|| Error::Agent("agent.kill: session not available".into()))?;
-    let grace = std::time::Duration::from_secs(grace_secs.max(0) as u64);
-    let res = session.kill(grace).await;
-    inner.lock().unwrap().session = Some(session);
-    res.map_err(|e| Error::Agent(format!("agent.kill: {e}")))
+    with_fault_barrier(async move {
+        let mut session = inner
+            .lock()
+            .unwrap()
+            .session
+            .take()
+            .ok_or_else(|| Error::Agent("agent.kill: session not available".into()))?;
+        let grace = std::time::Duration::from_secs(grace_secs.max(0) as u64);
+        let res = session.kill(grace).await;
+        inner.lock().unwrap().session = Some(session);
+        res.map_err(|e| Error::Agent(format!("agent.kill: {e}")))
+    })
+    .await
 }
 
 impl CallAgent {
@@ -1245,6 +1329,14 @@ fn register_service(
 }
 
 async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
+    // Refuse before any setup work — once the run-wide agent fault is
+    // set, no call may spawn or contact a claude child. Queued
+    // `AgentRunner` futures reach here directly (not through a
+    // barriered entry point), so the check must live in this function.
+    if let Some(msg) = current_scan_ctx().run.agent_fault.get() {
+        tracing::debug!("call_agent refused: run-wide agent fault is set");
+        return Err(Error::Agent(msg.clone()));
+    }
     let spec = resolve_spec(c)?;
 
     // Acquire a slot from the run-wide agent pool BEFORE doing any
@@ -1499,9 +1591,9 @@ fn runner_start(this: AgentRunner) -> AgentRunnerResults {
 #[rune::function(instance, path = next)]
 async fn runner_results_next(
     mut this: Mut<AgentRunnerResults>,
-) -> Option<super::Result<(AgentResult, Object)>> {
+) -> Result<Option<super::Result<(AgentResult, Object)>>, VmError> {
     use futures::stream::StreamExt;
-    this.futures.next().await
+    with_fault_barrier(this.futures.next()).await
 }
 
 /// Drive a `CallAgent` from start to its terminal `AgentResult`. Mirrors
@@ -1571,7 +1663,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(CallAgent::tools)?;
     m.function_meta(call_agent)?;
     m.associated_function(&Protocol::INTO_FUTURE, |c: CallAgent| async move {
-        do_call_agent(c).await
+        with_fault_barrier(do_call_agent(c)).await
     })?;
 
     Ok(())
@@ -1642,7 +1734,66 @@ mod tests {
     use rune::runtime::Object;
     use rune::sync::Arc as RuneArc;
 
-    use super::{GageTool, GageTools, parse_custom_tools, parse_gage_tools};
+    use super::{GageTool, GageTools, is_auth_failure, parse_custom_tools, parse_gage_tools};
+
+    // Captured from a real logged-out run: `claude -p` with stream-json
+    // output emits this synthetic assistant message before the terminal
+    // result. The detector keys on the top-level envelope fields.
+    #[test]
+    fn auth_failure_matches_top_level_envelope() {
+        let v = serde_json::json!({
+            "type": "assistant",
+            "error": "authentication_failed",
+            "is_api_error_message": true,
+            "message": {
+                "model": "<synthetic>",
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "Not logged in · Please run /login" }
+                ],
+            },
+        });
+        assert!(is_auth_failure(&v));
+    }
+
+    #[test]
+    fn auth_failure_ignores_signature_quoted_in_content() {
+        // A transcript or model reply quoting the signature lands in a
+        // content block, not the envelope, and must not trigger.
+        let quoted = r#"{"error":"authentication_failed","is_api_error_message":true,
+                         "text":"Not logged in · Please run /login"}"#;
+        let v = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "claude-opus-5",
+                "role": "assistant",
+                "content": [{ "type": "text", "text": quoted }],
+            },
+        });
+        assert!(!is_auth_failure(&v));
+    }
+
+    #[test]
+    fn auth_failure_requires_both_envelope_fields() {
+        let error_only = serde_json::json!({
+            "type": "assistant",
+            "error": "authentication_failed",
+        });
+        assert!(!is_auth_failure(&error_only));
+
+        let flag_only = serde_json::json!({
+            "type": "assistant",
+            "is_api_error_message": true,
+        });
+        assert!(!is_auth_failure(&flag_only));
+
+        let other_error = serde_json::json!({
+            "type": "assistant",
+            "error": "overloaded",
+            "is_api_error_message": true,
+        });
+        assert!(!is_auth_failure(&other_error));
+    }
 
     #[test]
     fn registers_into_module() {
