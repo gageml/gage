@@ -1,0 +1,223 @@
+use gage::tools::Query;
+use gage::{
+    AgentRunner,
+    Progress,
+    Template,
+    call_agent,
+    query,
+    scan,
+    write_note,
+};
+
+pub const SCANNER = #{
+    name: "general-roadmap",
+    description: "Scan sessions for general findings from an abbreviated session roadmap",
+    groups: ["experiment"],
+    tasks: #{
+        findings: #{
+            notes: #{
+                writes: #{ "finding.general-roadmap": include_str!("finding-doc.md") },
+            },
+        },
+    },
+};
+
+const FINDINGS_KEY = ("general-roadmap", "findings", 1);
+
+/// Submit each session to an agent to write finding notes.
+///
+/// The whole session goes into the agent prompt as an abbreviated
+/// roadmap; the agent retrieves full message text selectively through
+/// its session-scoped Query view. Sessions already processed under the
+/// current findings key are skipped. A grown session carries the range
+/// of its unscanned lines; the roadmap and Query view are constrained
+/// to that range.
+pub async fn findings() {
+    // Skip previously scanned sessions per key
+    let (_prev_sessions, new_sessions, validate) = scan()
+        .sessions()
+        .split_valid_range(FINDINGS_KEY)
+        .await?;
+
+    // Init template for agent prompts
+    let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
+
+    // One tick per session: skipped sessions tick during queueing,
+    // scanned sessions tick as their agents complete
+    let progress = Progress::new(new_sessions.len());
+
+    // Use agent runner to scan sessions concurrently
+    let runner = AgentRunner::new();
+    for s in new_sessions {
+        // Skip sessions that are not likely to have scannable content
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            validate(s).await?;
+            progress.tick();
+            continue
+        }
+        // Default abbreviation heuristics; tune per comparison runs
+        let roadmap = s.roadmap(#{}).await?;
+        let prompt = t.render(#{ session_id: s.id, roadmap }).await?;
+        runner.add(
+            call_agent(prompt)
+                .name("session-finding-roadmap")
+                // The agent sees this session only, clipped to
+                // s.range when it is Some
+                .gage_tools([Query::new().sessions([s])])
+                .tools(#{ write_finding: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s.id },
+        );
+    }
+
+    // Run agents
+    let results = runner.start();
+
+    // Collect results
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!(
+                    "roadmap findings: {:?}",
+                    #{
+                        session,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                // Ensure that valid sessions aren't re-scanned
+                validate(session).await?;
+                progress.tick();
+            }
+            None => break,
+        }
+    }
+
+    Ok(())
+}
+
+/// Min total text length to scan session
+const SESSION_MIN_TEXT_LEN = 200;
+
+async fn skip_session(s) {
+    // Use query instead of iterating over messages to keep scanner
+    // memory use down for this test. Limit sum to 50 messages for
+    // same reason.
+    let result = query(
+        format!(
+            "SELECT sum(length(text)) AS text_len FROM \
+            (SELECT text FROM message WHERE session_id = '{}' LIMIT 50)",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ text_len } = result.get(0).expect("should return one row");
+    match text_len {
+        () => Ok(Some("empty session")),
+        text_len if text_len < SESSION_MIN_TEXT_LEN => {
+            let reason = format!(
+                "text len {text_len} < min {SESSION_MIN_TEXT_LEN}"
+            );
+            Ok(Some(reason))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn write_finding_tooldef() {
+    #{
+        name: "Finding",
+        description: "Write a finding about the session",
+        inputs: #{
+            description: #{
+                type: "string",
+                description: "Finding description",
+            },
+            session: #{ type: "string", description: "Session ID" },
+            lines: #{
+                type: "string",
+                description: "Session line numbers associated with the finding: \
+                              a line (`112`), a range (`61-72`), or a \
+                              comma-separated list (`28,31`)",
+                required: false,
+            },
+        },
+    }
+}
+
+pub async fn write_finding(inputs, meta) {
+    let metadata = #{};
+    let target = #{ session: inputs.session };
+    if let Some(lines) = inputs.get("lines") {
+        let (line, line_end) = parse_lines(lines)?;
+        target.insert("line", line);
+        if let Some(end) = line_end {
+            target.insert("line_end", end);
+        }
+        metadata.insert("lines", lines);
+    }
+    let note = write_note(
+        #{
+            name: "finding.general-roadmap",
+            author: meta.agent_tool_use(),
+            value: inputs.description,
+            target,
+            metadata,
+        },
+    )
+    .await?;
+    Ok(format!("Wrote finding note {}", note.id))
+}
+
+/// Reduce the tool's `lines` input to the target span: the min line
+/// and, when the input covers more than one line, the max. A list
+/// collapses to its min-max envelope.
+fn parse_lines(lines) {
+    let nums = [];
+    for part in lines.split(',') {
+        match part.trim().split_once('-') {
+            Some((start, end)) => {
+                nums.push(parse_num(start, lines)?);
+                nums.push(parse_num(end, lines)?);
+            }
+            None => nums.push(parse_num(part, lines)?),
+        }
+    }
+    nums.sort();
+    let line = nums[0];
+    let line_end = nums[nums.len() - 1];
+    if line_end > line {
+        Ok((line, Some(line_end)))
+    } else {
+        Ok((line, None))
+    }
+}
+
+/// One number from the `lines` input. The error names the accepted
+/// formats so the agent can rephrase and retry.
+fn parse_num(part, lines) {
+    match part.trim().parse::<i64>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "unparseable lines `{lines}`: expected a line (`112`), a range \
+             (`61-72`), or a comma-separated list (`28,31`)"
+        )),
+    }
+}
+
+#[test]
+fn test_parse_lines_single() {
+    assert_eq!(parse_lines("112"), Ok((112, None)));
+}
+
+#[test]
+fn test_parse_lines_range() {
+    assert_eq!(parse_lines("61-72"), Ok((61, Some(72))));
+}
+
+#[test]
+fn test_parse_lines_list_collapses_to_span() {
+    assert_eq!(parse_lines("28,31"), Ok((28, Some(31))));
+    assert_eq!(parse_lines("80, 28, 31-40"), Ok((28, Some(80))));
+}

@@ -7,14 +7,9 @@ pub const SCANNER = #{
     library: true,
     tasks: #{
         issues: #{
-            notes: #{
-                wants: ["finding.*"],
-                required_by: ["finding.*", "finding"],
-            },
+            notes: #{ wants: ["finding.*"] },
             issues: #{
-                writes: #{
-                    "findings": "Issue derived from session findings",
-                },
+                writes: #{ "findings": "Issue derived from session findings" },
             },
         },
     },

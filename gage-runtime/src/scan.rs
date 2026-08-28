@@ -36,6 +36,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     super::validate::register_types(&mut m)?;
     super::datetime::register_types(&mut m)?;
     super::query::register_types(&mut m)?;
+    super::view::register_types(&mut m)?;
     super::error::register_types(&mut m)?;
     super::ignore::register_types(&mut m)?;
     super::db::register_types(&mut m)?;

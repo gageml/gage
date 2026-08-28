@@ -20,6 +20,7 @@ pub mod template;
 pub mod tools;
 pub mod validate;
 pub mod value;
+pub mod view;
 
 pub(crate) use result::Result;
 
@@ -70,6 +71,7 @@ pub fn gage_module() -> std::result::Result<Module, ContextError> {
     validate::register(&mut m)?;
     config::register(&mut m)?;
     query::register(&mut m)?;
+    view::register(&mut m)?;
     db::register(&mut m)?;
     agent::register(&mut m)?;
     dispatcher::register(&mut m)?;

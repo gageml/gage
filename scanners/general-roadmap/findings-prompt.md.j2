@@ -1,0 +1,80 @@
+Write finding notes for session {{ session_id }}
+
+An abbreviated roadmap of the full session record is included at the end of
+this prompt. Every message appears under a `[L<line> <type> <subtype>]`
+header, where `<line>` is the message's session line number; use these
+numbers when citing lines in findings. Message content is truncated:
+
+- `… [+N chars]` marks content cut at a cap, with the omitted char count
+- `… [N chars omitted] …` marks the elided middle of a thinking block
+- `<ide tags: N chars>` marks out-of-band harness tags not shown
+- `tool_use <name>: …` shows a tool call with its input truncated
+- `tool_result <name>: …` shows a result's first output line; `(error)`
+  flags a failed call
+
+Look for issues in the session. An issue is something wrong or costly that the
+session gives evidence of that the user would likely want to address after the
+session.
+
+Examples (non-exhaustive):
+
+- A tool or integration that misbehaved
+- Friction the user faced
+- Assistant misbehaving or asserting something wrong without correction
+- A question or issue the user raised that was left unaddressed
+- Concerns or important questions mentioned in assistant thinking blocks that
+  the assistant did not address or surface to the user
+
+The evidence must be in the record itself. Do not infer or assume conditions
+beyond what the record shows. The roadmap is often evidence enough; when a
+truncated message looks relevant to a possible finding, read its full text
+before writing the finding by querying the `message` table via
+`mcp__gage__Query`, filtering by `session_id = '{{ session_id }}'` and the
+line numbers of interest:
+
+`SELECT line, text FROM message WHERE session_id = '{{ session_id }}' AND line BETWEEN 40 AND 45`
+
+Keep queries targeted at specific lines or narrow ranges. Do not page through
+the whole session — the roadmap already covers all of it.
+
+Note that sessions exist to raise and address issues. Sessions therefore
+normally contain errors, bugs, and confusion. Do not report issues that the
+session itself diagnoses, fixes, or answers.
+
+Many sessions do not contain issues. Do not force issues onto a session.
+
+## User interrupts
+
+User interrupts are sometimes useful for identifying issues. A user interrupt
+occurs when the user presses the Escape key during an assistant turn. This may
+indicate that the user is unhappy with something. It may indicate the user wants
+to revise their last message (e.g. mis-typed, missing content, etc.). Not all
+user interrupts indicate underlying issues worth reporting. Use your best
+judgement.
+
+## Tool errors
+
+A tool use error may imply that the assistant has bad instructions or has made a
+mistake. It may imply that the tool itself has issues.
+
+Note that it's common to see mechanical file-state feedback from the Edit and
+Write tools: "File has not been read yet", "file has been modified, re-read it",
+"String to replace not found in file". These are part of the normal edit cycle
+and normally do not imply issues. A tool error is evidence of an issue when it
+repeats without recovery, blocks the session, reveals a defect/bug in the tool, or
+is a result of incorrect or ambiguous tool documentation.
+
+## Writing findings
+
+Write found issues using the `mcp__gage__Finding` tool using a single request
+rather than one tool use per finding. This saves time and tokens.
+
+If you did not find issues for the session, do not use `mcp__gage__Finding` to
+report "no issues found". Only use the tool to report found issues.
+
+In your reply, simply state whether you wrote findings. Do not re-state the
+findings in your reply.
+
+## Session roadmap
+
+{{ roadmap }}
