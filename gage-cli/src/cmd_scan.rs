@@ -430,37 +430,44 @@ fn load_scan_model(
 
     let mut tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
         .into_iter()
-        .map(|t| TaskItem {
-            cost: results
-                .task_costs
-                .iter()
-                .find(|tc| tc.id.scanner == t.scanner_name && tc.id.task == t.task_name)
-                .map(|tc| tc.cost),
-            id: TaskId {
-                scanner: t.scanner_name,
-                task: t.task_name,
-            },
-            state: match t.status {
-                scan::TaskStatus::Pending => TaskState::Pending,
-                scan::TaskStatus::Started => TaskState::Running,
-                scan::TaskStatus::Completed => TaskState::Completed,
-                scan::TaskStatus::Failed => TaskState::Error,
-                scan::TaskStatus::Skipped => TaskState::Skipped,
-                scan::TaskStatus::Canceled => TaskState::Canceled,
-            },
-            elapsed: match (t.started, t.stopped) {
-                (Some(a), Some(b)) => Some(Duration::from_millis(b.saturating_sub(a) as u64)),
-                _ => None,
-            },
-            started: None,
-            progress: None,
-            // Historical rows record wall-clock only; pool-blocked
-            // time is a live-scan measure and renders as zero here.
-            pool_blocked: false,
-            blocked: Duration::ZERO,
-            agents: Vec::new(),
+        .map(|t| {
+            // Recorded worked time when the row has it; wall clock
+            // from the row's timestamps for rows predating the field
+            // (and canceled rows, which record no metadata).
+            let elapsed = match t.parse_metadata()? {
+                Some(m) => Some(Duration::from_millis(m.worked_ms)),
+                None => match (t.started, t.stopped) {
+                    (Some(a), Some(b)) => Some(Duration::from_millis(b.saturating_sub(a) as u64)),
+                    _ => None,
+                },
+            };
+            anyhow::Ok(TaskItem {
+                cost: results
+                    .task_costs
+                    .iter()
+                    .find(|tc| tc.id.scanner == t.scanner_name && tc.id.task == t.task_name)
+                    .map(|tc| tc.cost),
+                id: TaskId {
+                    scanner: t.scanner_name,
+                    task: t.task_name,
+                },
+                state: match t.status {
+                    scan::TaskStatus::Pending => TaskState::Pending,
+                    scan::TaskStatus::Started => TaskState::Running,
+                    scan::TaskStatus::Completed => TaskState::Completed,
+                    scan::TaskStatus::Failed => TaskState::Error,
+                    scan::TaskStatus::Skipped => TaskState::Skipped,
+                    scan::TaskStatus::Canceled => TaskState::Canceled,
+                },
+                elapsed,
+                progress: None,
+                pool_blocked: false,
+                worked: Duration::ZERO,
+                working_since: None,
+                agents: Vec::new(),
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     for ta in &results.agents {
         if let Some(item) = tasks.iter_mut().find(|t| t.id == ta.task) {
             item.agents.push(ta.agent.clone());
@@ -2081,7 +2088,8 @@ fn forward_scan_event(
                     },
                     progress: t.progress,
                     pool_blocked: t.pool_blocked(),
-                    blocked: t.blocked_total(),
+                    worked: t.worked,
+                    working_since: t.working_since,
                 })
                 .collect(),
         },

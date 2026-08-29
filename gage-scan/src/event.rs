@@ -4,6 +4,8 @@
 //! implement an event sink. Each `Status` event is a self-contained
 //! snapshot — never reassemble state from partial deltas.
 
+use std::time::{Duration, Instant};
+
 /// The task a worker is currently running, with any task-reported
 /// progress.
 #[derive(Debug, Clone)]
@@ -17,13 +19,13 @@ pub struct ActiveTask {
     pub agents_waiting: u64,
     /// Agents holding a pool permit (running).
     pub agents_active: u64,
-    /// Completed spells of pool blockage: time spent with at least one
-    /// agent waiting and none active. Excludes the current spell; use
-    /// [`ActiveTask::blocked_total`] for display.
-    pub agent_blocked: std::time::Duration,
-    /// Start of the current fully-blocked spell; `None` when the task
-    /// is not currently blocked on the pool.
-    pub blocked_since: Option<std::time::Instant>,
+    /// Completed working spells: time spent not blocked on the agent
+    /// pool. Excludes the open spell; use [`ActiveTask::worked_total`]
+    /// for display.
+    pub worked: Duration,
+    /// Start of the open working spell; `None` while the task is
+    /// blocked on the pool.
+    pub working_since: Option<Instant>,
 }
 
 impl ActiveTask {
@@ -33,10 +35,9 @@ impl ActiveTask {
         self.agents_active == 0 && self.agents_waiting > 0
     }
 
-    /// Total time blocked on the agent pool, including the current
-    /// spell.
-    pub fn blocked_total(&self) -> std::time::Duration {
-        self.agent_blocked + self.blocked_since.map(|s| s.elapsed()).unwrap_or_default()
+    /// Total time worked, including the open spell.
+    pub fn worked_total(&self) -> Duration {
+        self.worked + self.working_since.map(|s| s.elapsed()).unwrap_or_default()
     }
 }
 

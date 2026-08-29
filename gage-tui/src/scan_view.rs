@@ -130,19 +130,28 @@ pub struct TaskItem {
     /// Recorded agent spend; None when the task has no agent data.
     pub cost: Option<ScanCost>,
     pub elapsed: Option<Duration>,
-    /// Live-scan dispatch time; drives the ticking elapsed display.
-    pub started: Option<Instant>,
     /// Latest task-reported `(pos, total)` while running; None renders
     /// as indeterminate.
     pub progress: Option<(u64, u64)>,
     /// The task is currently blocked on the agent pool: agents queued,
     /// none running. Renders as `waiting`.
     pub pool_blocked: bool,
-    /// Cumulative time blocked on the agent pool. Subtracted from the
-    /// wall clock so the displayed duration is time actually working.
-    pub blocked: Duration,
+    /// Completed working spells while running, from the scheduler's
+    /// stopwatch. Excludes the open spell; see [`TaskItem::worked_total`].
+    pub worked: Duration,
+    /// Start of the open working spell; None while the task is blocked
+    /// on the agent pool (the displayed duration holds still).
+    pub working_since: Option<Instant>,
     /// Agent sessions spawned by this task, in recorded order
     pub agents: Vec<AgentItem>,
+}
+
+impl TaskItem {
+    /// Time worked so far, including the open spell. Drives the live
+    /// duration display and becomes `elapsed` at the terminal state.
+    fn worked_total(&self) -> Duration {
+        self.worked + self.working_since.map(|s| s.elapsed()).unwrap_or_default()
+    }
 }
 
 /// One agent session spawned by a task.
@@ -286,11 +295,11 @@ impl ScanModel {
                 id,
                 state: TaskState::Pending,
                 cost: None,
-                started: None,
                 elapsed: None,
                 progress: None,
                 pool_blocked: false,
-                blocked: Duration::ZERO,
+                worked: Duration::ZERO,
+                working_since: None,
                 agents: Vec::new(),
             })
             .collect();
@@ -327,14 +336,14 @@ impl ScanModel {
                     match item.state {
                         TaskState::Pending if entry.is_some() => {
                             item.state = TaskState::Running;
-                            item.started = Some(Instant::now());
                         }
                         // No explicit completion event yet: a task that
                         // leaves the worker set without a Failed event
                         // is inferred completed.
                         TaskState::Running if entry.is_none() => {
                             item.state = TaskState::Completed;
-                            item.elapsed = item.started.map(|t| t.elapsed());
+                            item.elapsed = Some(item.worked_total());
+                            item.working_since = None;
                             item.progress = None;
                         }
                         _ => {}
@@ -342,7 +351,8 @@ impl ScanModel {
                     if let Some(entry) = entry {
                         item.progress = entry.progress;
                         item.pool_blocked = entry.pool_blocked;
-                        item.blocked = entry.blocked;
+                        item.worked = entry.worked;
+                        item.working_since = entry.working_since;
                     } else {
                         item.pool_blocked = false;
                     }
@@ -356,7 +366,8 @@ impl ScanModel {
                     .find(|t| t.id.scanner == *scanner && t.id.task == *task)
                 {
                     item.state = TaskState::Error;
-                    item.elapsed = item.started.map(|t| t.elapsed());
+                    item.elapsed = Some(item.worked_total());
+                    item.working_since = None;
                 }
             }
             Event::Results {
@@ -437,8 +448,10 @@ pub struct RunningTask {
     pub progress: Option<(u64, u64)>,
     /// The task is blocked on the agent pool right now.
     pub pool_blocked: bool,
-    /// Cumulative time the task has spent blocked on the agent pool.
-    pub blocked: Duration,
+    /// Completed working spells: time worked excluding the open spell.
+    pub worked: Duration,
+    /// Start of the open working spell; None while blocked on the pool.
+    pub working_since: Option<Instant>,
 }
 
 /// Events the view consumes while a live scan runs.
@@ -2104,8 +2117,12 @@ impl ViewState {
         if self.cancel_requested {
             for item in &mut self.model.tasks {
                 if matches!(item.state, TaskState::Running | TaskState::Pending) {
+                    // A pending task never ran; its duration stays blank
+                    if item.state == TaskState::Running {
+                        item.elapsed = Some(item.worked_total());
+                        item.working_since = None;
+                    }
                     item.state = TaskState::Canceled;
-                    item.elapsed = item.started.map(|t| t.elapsed());
                     item.progress = None;
                 }
             }
@@ -3047,18 +3064,12 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                     TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
                     TaskState::Canceled => ("canceled", styles::RunStatus::skipped()),
                 };
-                // Time working: wall clock minus time blocked on the
-                // agent pool, so queue position doesn't inflate a
-                // task's clock.
+                // Time working: the stopwatch runs while the task has
+                // the pool's attention and holds still while blocked,
+                // so queue position doesn't inflate a task's clock.
                 let time = match t.state {
-                    TaskState::Running => t
-                        .started
-                        .map(|s| fmt_duration_live(s.elapsed().saturating_sub(t.blocked)))
-                        .unwrap_or_default(),
-                    _ => t
-                        .elapsed
-                        .map(|e| fmt_duration(e.saturating_sub(t.blocked)))
-                        .unwrap_or_default(),
+                    TaskState::Running => fmt_duration_live(t.worked_total()),
+                    _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
                 };
                 (label, style, time)
             }
@@ -3635,10 +3646,10 @@ mod tests {
                 state: TaskState::Running,
                 cost: None,
                 elapsed: None,
-                started: None,
                 progress: Some((5, 10)),
                 pool_blocked: false,
-                blocked: Duration::ZERO,
+                worked: Duration::ZERO,
+                working_since: None,
                 agents: Vec::new(),
             }],
             sessions: Vec::new(),

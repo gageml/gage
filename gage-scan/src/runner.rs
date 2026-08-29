@@ -240,6 +240,7 @@ fn insert_plan_tasks(
                 started: None,
                 stopped: None,
                 error: None,
+                metadata: None,
             },
         )?;
     }

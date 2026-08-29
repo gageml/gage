@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -112,6 +112,9 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if version == 0 {
         // Fresh database: init_schema creates the current schema
         init_schema(&tx)?;
+    }
+    if version == 1 {
+        tx.execute_batch("ALTER TABLE scan_task ADD COLUMN metadata TEXT")?;
     }
     set_version(&tx, CURRENT_VERSION)?;
     tx.commit()
@@ -238,6 +241,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             started         INTEGER,
             stopped         INTEGER,
             error           TEXT,
+            metadata        TEXT,
             PRIMARY KEY (scan_id, scanner_name, task_name)
         );
 

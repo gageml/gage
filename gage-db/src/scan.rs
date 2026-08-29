@@ -26,6 +26,27 @@ pub struct ScanTask {
     /// Epoch milliseconds; None when the task never finished.
     pub stopped: Option<i64>,
     pub error: Option<String>,
+    /// JSON [`TaskMetadata`] payload written at completion; NULL for
+    /// tasks that never finished normally or predate the field.
+    pub metadata: Option<String>,
+}
+
+impl ScanTask {
+    /// Parse `metadata` into its payload. None when the column is NULL.
+    pub fn parse_metadata(&self) -> Result<Option<TaskMetadata>, serde_json::Error> {
+        self.metadata
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+    }
+}
+
+/// Payload persisted to `scan_task.metadata` when a task finishes.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaskMetadata {
+    /// Time spent working: wall time excluding spells blocked waiting
+    /// on the run-wide agent pool.
+    pub worked_ms: u64,
 }
 
 /// One `call_agent` invocation made by a task. Inserted when the
@@ -85,8 +106,8 @@ pub fn insert_scan(conn: &Connection, scan: &Scan) -> Result<(), ScanError> {
 pub fn insert_task(conn: &Connection, task: &ScanTask) -> Result<(), ScanError> {
     conn.execute(
         "INSERT INTO scan_task (scan_id, scanner_name, scanner_version, task_name, \
-                                status, started, stopped, error) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                status, started, stopped, error, metadata) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             task.scan_id,
             task.scanner_name,
@@ -96,6 +117,7 @@ pub fn insert_task(conn: &Connection, task: &ScanTask) -> Result<(), ScanError> 
             task.started,
             task.stopped,
             task.error,
+            task.metadata,
         ],
     )?;
     Ok(())
@@ -123,6 +145,16 @@ pub fn start_task(
     Ok(())
 }
 
+/// Terminal outcome recorded by [`finish_task`].
+#[derive(Debug, Clone)]
+pub struct TaskFinish<'a> {
+    pub status: TaskStatus,
+    /// Epoch milliseconds; None for skipped tasks, which never ran.
+    pub stopped_ms: Option<i64>,
+    pub error: Option<&'a str>,
+    pub metadata: Option<&'a TaskMetadata>,
+}
+
 /// Record a task's terminal outcome. A skipped task never ran, so its
 /// `started` is cleared along with `stopped` staying NULL.
 pub fn finish_task(
@@ -130,27 +162,28 @@ pub fn finish_task(
     scan_id: &str,
     scanner_name: &str,
     task_name: &str,
-    status: TaskStatus,
-    stopped_ms: Option<i64>,
-    error: Option<&str>,
+    finish: TaskFinish<'_>,
 ) -> Result<(), ScanError> {
-    if status == TaskStatus::Skipped {
+    if finish.status == TaskStatus::Skipped {
         conn.execute(
-            "UPDATE scan_task SET status = ?4, started = NULL, stopped = NULL, error = NULL \
+            "UPDATE scan_task SET status = ?4, started = NULL, stopped = NULL, error = NULL, \
+                                  metadata = NULL \
              WHERE scan_id = ?1 AND scanner_name = ?2 AND task_name = ?3",
-            params![scan_id, scanner_name, task_name, status.as_str()],
+            params![scan_id, scanner_name, task_name, finish.status.as_str()],
         )?;
     } else {
+        let json = finish.metadata.map(|m| serde_json::to_string(m).unwrap());
         conn.execute(
-            "UPDATE scan_task SET status = ?4, stopped = ?5, error = ?6 \
+            "UPDATE scan_task SET status = ?4, stopped = ?5, error = ?6, metadata = ?7 \
              WHERE scan_id = ?1 AND scanner_name = ?2 AND task_name = ?3",
             params![
                 scan_id,
                 scanner_name,
                 task_name,
-                status.as_str(),
-                stopped_ms,
-                error,
+                finish.status.as_str(),
+                finish.stopped_ms,
+                finish.error,
+                json,
             ],
         )?;
     }
@@ -564,7 +597,8 @@ pub fn all(conn: &Connection) -> Result<Vec<Scan>, ScanError> {
 /// Tasks recorded for a scan, in (scanner_name, task_name) order.
 pub fn tasks_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<ScanTask>, ScanError> {
     let mut stmt = conn.prepare(
-        "SELECT scan_id, scanner_name, scanner_version, task_name, status, started, stopped, error \
+        "SELECT scan_id, scanner_name, scanner_version, task_name, status, started, stopped, \
+                error, metadata \
          FROM scan_task WHERE scan_id = ?1 ORDER BY scanner_name, task_name",
     )?;
     let tasks = stmt
@@ -585,6 +619,7 @@ pub fn tasks_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<ScanTask>,
                 started: row.get(5)?,
                 stopped: row.get(6)?,
                 error: row.get(7)?,
+                metadata: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -778,6 +813,7 @@ mod tests {
             started: None,
             stopped: None,
             error: None,
+            metadata: None,
         }
     }
 
@@ -887,9 +923,12 @@ mod tests {
             &scan.id,
             "user_friction",
             "friction",
-            TaskStatus::Completed,
-            Some(2500),
-            None,
+            TaskFinish {
+                status: TaskStatus::Completed,
+                stopped_ms: Some(2500),
+                error: None,
+                metadata: Some(&TaskMetadata { worked_ms: 900 }),
+            },
         )
         .unwrap();
 
@@ -900,6 +939,7 @@ mod tests {
         assert_eq!(tasks[0].status, TaskStatus::Completed);
         assert_eq!(tasks[0].started, Some(1000));
         assert_eq!(tasks[0].stopped, Some(2500));
+        assert_eq!(tasks[0].parse_metadata().unwrap().unwrap().worked_ms, 900);
 
         assert_eq!(
             scanner_names_for_scan(&conn, &scan.id).unwrap(),
@@ -920,9 +960,12 @@ mod tests {
             &scan.id,
             "user_friction",
             "friction",
-            TaskStatus::Skipped,
-            None,
-            None,
+            TaskFinish {
+                status: TaskStatus::Skipped,
+                stopped_ms: None,
+                error: None,
+                metadata: None,
+            },
         )
         .unwrap();
 
@@ -930,6 +973,7 @@ mod tests {
         assert_eq!(tasks[0].status, TaskStatus::Skipped);
         assert_eq!(tasks[0].started, None);
         assert_eq!(tasks[0].stopped, None);
+        assert_eq!(tasks[0].metadata, None);
     }
 
     #[test]

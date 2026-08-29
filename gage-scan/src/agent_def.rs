@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
 use gage_db::scan::{
-    AgentRunSummary, Scan, ScanTask, TaskStatus, finish_task, insert_scan, insert_scan_session,
-    insert_task, set_agent_summary,
+    AgentRunSummary, Scan, ScanTask, TaskFinish, TaskStatus, finish_task, insert_scan,
+    insert_scan_session, insert_task, set_agent_summary,
 };
 use gage_query::ScanSessionContext;
 use gage_registry::scanner::Scanner;
@@ -57,13 +57,18 @@ impl InteractiveRun {
             &self.scan_id,
             &self.scanner_name,
             &self.task_name,
-            if is_error {
-                TaskStatus::Failed
-            } else {
-                TaskStatus::Completed
+            TaskFinish {
+                status: if is_error {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Completed
+                },
+                stopped_ms: Some(gage_core::datetime::now_ms()),
+                error: None,
+                // Agent runs have no pool accounting; readers fall
+                // back to the row's wall-clock timestamps
+                metadata: None,
             },
-            Some(gage_core::datetime::now_ms()),
-            None,
         )?;
         set_agent_summary(&conn, &self.scan_id, &summary)
     }
@@ -162,6 +167,7 @@ pub async fn run_agent_def(
                 started: Some(gage_core::datetime::now_ms()),
                 stopped: None,
                 error: None,
+                metadata: None,
             },
         )?;
     }
@@ -238,13 +244,18 @@ pub async fn run_agent_def(
             &run.scan_id,
             &slot.name,
             &task_name,
-            if is_error {
-                TaskStatus::Failed
-            } else {
-                TaskStatus::Completed
+            TaskFinish {
+                status: if is_error {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Completed
+                },
+                stopped_ms: Some(gage_core::datetime::now_ms()),
+                error: None,
+                // Agent runs have no pool accounting; readers fall
+                // back to the row's wall-clock timestamps
+                metadata: None,
             },
-            Some(gage_core::datetime::now_ms()),
-            None,
         )?;
         set_agent_summary(&conn, &run.scan_id, &summary)?;
     }

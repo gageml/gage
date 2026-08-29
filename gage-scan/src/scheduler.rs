@@ -42,7 +42,7 @@ use tracing::debug;
 use crate::event::{ActiveTask, RunStatus, RunSummary, ScanEvent, WorkerStatus};
 use gage_core::glob::glob_match;
 use gage_core::task::task_display;
-use gage_db::scan::{ScanError, TaskStatus, finish_task, start_task};
+use gage_db::scan::{ScanError, TaskFinish, TaskMetadata, TaskStatus, finish_task, start_task};
 use gage_registry::scanner::TaskDef;
 use gage_runtime::state::{Fault, RunContext, SCAN_CTX, ScanContext, ScannerSlot};
 
@@ -468,9 +468,10 @@ async fn run_tasks(
                     } => {
                         // Fold pool occupancy into the worker slot, as
                         // for Progress; a report from a task no longer
-                        // on a worker is stale and dropped. Blocked
-                        // time accrues over spells where every one of
-                        // the task's agents is waiting on the pool.
+                        // on a worker is stale and dropped. Worked time
+                        // is a stopwatch: it runs except over spells
+                        // where every one of the task's agents is
+                        // waiting on the pool.
                         let slot = status.workers.iter_mut().find_map(|w| {
                             w.current
                                 .as_mut()
@@ -489,13 +490,13 @@ async fn run_tasks(
                                     current.agents_active = current.agents_active.saturating_sub(1);
                                 }
                             }
-                            match (current.pool_blocked(), current.blocked_since) {
-                                (true, None) => {
-                                    current.blocked_since = Some(std::time::Instant::now());
+                            match (current.pool_blocked(), current.working_since) {
+                                (true, Some(since)) => {
+                                    current.worked += since.elapsed();
+                                    current.working_since = None;
                                 }
-                                (false, Some(since)) => {
-                                    current.agent_blocked += since.elapsed();
-                                    current.blocked_since = None;
+                                (false, None) => {
+                                    current.working_since = Some(std::time::Instant::now());
                                 }
                                 _ => {}
                             }
@@ -527,8 +528,8 @@ async fn run_tasks(
                     progress: None,
                     agents_waiting: 0,
                     agents_active: 0,
-                    agent_blocked: std::time::Duration::ZERO,
-                    blocked_since: None,
+                    worked: std::time::Duration::ZERO,
+                    working_since: Some(std::time::Instant::now()),
                 });
                 let now_ms = gage_core::datetime::now_ms();
                 {
@@ -544,7 +545,7 @@ async fn run_tasks(
                 outcome,
             } => {
                 let task = &tasks[task_idx];
-                status.workers[worker_id].current = None;
+                let active = status.workers[worker_id].current.take();
                 match &outcome {
                     TaskResult::Ok => {
                         accounting.completed += 1;
@@ -580,6 +581,12 @@ async fn run_tasks(
                     TaskStatus::Skipped => None,
                     _ => Some(gage_core::datetime::now_ms()),
                 };
+                let metadata = match task_status {
+                    TaskStatus::Skipped => None,
+                    _ => active.map(|a| TaskMetadata {
+                        worked_ms: a.worked_total().as_millis() as u64,
+                    }),
+                };
                 {
                     let slot = &scanners[task.scanner_idx];
                     let conn = slot.db.lock().unwrap();
@@ -588,9 +595,12 @@ async fn run_tasks(
                         &run.scan_id,
                         &slot.name,
                         &task.task_name,
-                        task_status,
-                        stopped_ms,
-                        error,
+                        TaskFinish {
+                            status: task_status,
+                            stopped_ms,
+                            error,
+                            metadata: metadata.as_ref(),
+                        },
                     )
                     .map_err(RunError::Db)?;
                 }
