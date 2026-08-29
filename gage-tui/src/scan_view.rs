@@ -135,6 +135,12 @@ pub struct TaskItem {
     /// Latest task-reported `(pos, total)` while running; None renders
     /// as indeterminate.
     pub progress: Option<(u64, u64)>,
+    /// The task is currently blocked on the agent pool: agents queued,
+    /// none running. Renders as `waiting`.
+    pub pool_blocked: bool,
+    /// Cumulative time blocked on the agent pool. Subtracted from the
+    /// wall clock so the displayed duration is time actually working.
+    pub blocked: Duration,
     /// Agent sessions spawned by this task, in recorded order
     pub agents: Vec<AgentItem>,
 }
@@ -283,6 +289,8 @@ impl ScanModel {
                 started: None,
                 elapsed: None,
                 progress: None,
+                pool_blocked: false,
+                blocked: Duration::ZERO,
                 agents: Vec::new(),
             })
             .collect();
@@ -333,6 +341,10 @@ impl ScanModel {
                     }
                     if let Some(entry) = entry {
                         item.progress = entry.progress;
+                        item.pool_blocked = entry.pool_blocked;
+                        item.blocked = entry.blocked;
+                    } else {
+                        item.pool_blocked = false;
                     }
                 }
             }
@@ -423,6 +435,10 @@ pub struct SessionCounts {
 pub struct RunningTask {
     pub id: TaskId,
     pub progress: Option<(u64, u64)>,
+    /// The task is blocked on the agent pool right now.
+    pub pool_blocked: bool,
+    /// Cumulative time the task has spent blocked on the agent pool.
+    pub blocked: Duration,
 }
 
 /// Events the view consumes while a live scan runs.
@@ -3020,18 +3036,29 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             TaskRow::Task(t) => {
                 let (label, style) = match t.state {
                     TaskState::Pending => ("pending", styles::RunStatus::pending()),
+                    // Blocked on the agent pool: agents queued, none
+                    // running. The clock below holds still with it.
+                    TaskState::Running if t.pool_blocked => {
+                        ("waiting", styles::RunStatus::pending())
+                    }
                     TaskState::Running => ("running", styles::RunStatus::running()),
                     TaskState::Completed => ("done", styles::RunStatus::completed()),
                     TaskState::Error => ("error", styles::RunStatus::error()),
                     TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
                     TaskState::Canceled => ("canceled", styles::RunStatus::skipped()),
                 };
+                // Time working: wall clock minus time blocked on the
+                // agent pool, so queue position doesn't inflate a
+                // task's clock.
                 let time = match t.state {
                     TaskState::Running => t
                         .started
-                        .map(|s| fmt_duration_live(s.elapsed()))
+                        .map(|s| fmt_duration_live(s.elapsed().saturating_sub(t.blocked)))
                         .unwrap_or_default(),
-                    _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
+                    _ => t
+                        .elapsed
+                        .map(|e| fmt_duration(e.saturating_sub(t.blocked)))
+                        .unwrap_or_default(),
                 };
                 (label, style, time)
             }
@@ -3054,11 +3081,13 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     // the labels on screen, so the column doesn't jitter as states
     // change. One space each side: the label aligns under the padded
     // header and the time doesn't touch the panel border.
-    let label_width = ["pending", "running", "done", "error", "skipped", "canceled"]
-        .iter()
-        .map(|l| l.width())
-        .max()
-        .unwrap();
+    let label_width = [
+        "pending", "waiting", "running", "done", "error", "skipped", "canceled",
+    ]
+    .iter()
+    .map(|l| l.width())
+    .max()
+    .unwrap();
     // Time field floor: room for sub-hour durations ("59m59s") so the
     // column doesn't widen as times tick up; longer runs still grow it
     let min_time_width = "59m59s".width();
@@ -3608,6 +3637,8 @@ mod tests {
                 elapsed: None,
                 started: None,
                 progress: Some((5, 10)),
+                pool_blocked: false,
+                blocked: Duration::ZERO,
                 agents: Vec::new(),
             }],
             sessions: Vec::new(),

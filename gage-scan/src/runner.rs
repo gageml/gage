@@ -490,6 +490,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
                 rt: rt.clone(),
                 unit: unit.clone(),
                 sources: stub_sources.clone(),
+                task_fault: Mutex::new(None),
             });
             let result = runtime::state::SCAN_CTX
                 .scope(ctx, async move {
@@ -710,6 +711,7 @@ impl TestRuntime {
             rt: stub_rt,
             unit: stub_unit,
             sources: stub_sources,
+            task_fault: Mutex::new(None),
         });
         runtime::state::SCAN_CTX.scope(ctx, f()).await
     }

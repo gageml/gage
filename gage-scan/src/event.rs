@@ -13,6 +13,31 @@ pub struct ActiveTask {
     /// Latest task-reported `(pos, total)`; `None` means the task has
     /// not reported and renders as indeterminate.
     pub progress: Option<(u64, u64)>,
+    /// Agents queued waiting on the run-wide agent pool.
+    pub agents_waiting: u64,
+    /// Agents holding a pool permit (running).
+    pub agents_active: u64,
+    /// Completed spells of pool blockage: time spent with at least one
+    /// agent waiting and none active. Excludes the current spell; use
+    /// [`ActiveTask::blocked_total`] for display.
+    pub agent_blocked: std::time::Duration,
+    /// Start of the current fully-blocked spell; `None` when the task
+    /// is not currently blocked on the pool.
+    pub blocked_since: Option<std::time::Instant>,
+}
+
+impl ActiveTask {
+    /// The task is blocked on the agent pool right now: at least one
+    /// agent is waiting for a permit and none holds one.
+    pub fn pool_blocked(&self) -> bool {
+        self.agents_active == 0 && self.agents_waiting > 0
+    }
+
+    /// Total time blocked on the agent pool, including the current
+    /// spell.
+    pub fn blocked_total(&self) -> std::time::Duration {
+        self.agent_blocked + self.blocked_since.map(|s| s.elapsed()).unwrap_or_default()
+    }
 }
 
 /// One worker slot. `current` reflects what that worker is doing right

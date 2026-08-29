@@ -42,6 +42,27 @@ pub enum RuntimeOutput {
         pos: u64,
         total: u64,
     },
+    /// A `call_agent` crossing an agent-pool boundary: queued waiting
+    /// for a run-wide permit, permit acquired, or permit released.
+    /// Consumers fold these into per-task pool occupancy so waiting on
+    /// the pool is distinguishable from agents running. Identity comes
+    /// from the sending task's [`state::ScanContext`].
+    AgentPool {
+        scanner: String,
+        task: String,
+        delta: AgentPoolDelta,
+    },
+}
+
+/// One agent's transition through the run-wide agent pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPoolDelta {
+    /// Waiting on a permit.
+    Queued,
+    /// Permit acquired; the agent is running.
+    Acquired,
+    /// Permit released; the agent is done.
+    Released,
 }
 
 /// Build a Rune context for the language server: the same native modules the

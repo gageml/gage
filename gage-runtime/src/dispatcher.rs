@@ -211,6 +211,7 @@ async fn handle_one(req: DispatchRequest, registry: Registry, run: Weak<RunConte
         rt: module.rt.clone(),
         unit: module.unit.clone(),
         sources: module.sources.clone(),
+        task_fault: Mutex::new(None),
     });
 
     let result = SCAN_CTX

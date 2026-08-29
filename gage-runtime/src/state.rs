@@ -74,6 +74,13 @@ pub struct ScanContext {
     pub rt: rune::sync::Arc<rune::runtime::RuntimeContext>,
     pub unit: rune::sync::Arc<rune::runtime::Unit>,
     pub sources: Arc<rune::Sources>,
+    /// Fault the runtime detected while this task ran (claude not
+    /// logged in). The runtime records the message here and then
+    /// aborts the task's VM; the abort is only the unwind vehicle, so
+    /// the dispatcher reports this message as the task's failure and
+    /// discards the VM error's own rendering. `None` when the task
+    /// ended without a detected fault.
+    pub task_fault: Mutex<Option<String>>,
 }
 
 tokio::task_local! {

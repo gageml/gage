@@ -137,8 +137,9 @@ pub async fn run_agent_def(
             match out {
                 runtime::RuntimeOutput::Print(s) => print!("{s}"),
                 runtime::RuntimeOutput::Println(s) => println!("{s}"),
-                // Agent defs run without a progress consumer
+                // Agent defs run without a progress or pool consumer
                 runtime::RuntimeOutput::Progress { .. } => {}
+                runtime::RuntimeOutput::AgentPool { .. } => {}
             }
         }
     });
@@ -175,6 +176,7 @@ pub async fn run_agent_def(
         rt: slot.rt.clone(),
         unit: slot.unit.clone(),
         sources: slot.sources.clone(),
+        task_fault: Mutex::new(None),
     });
 
     let agent = format!("{}::{fn_name}", slot.name);

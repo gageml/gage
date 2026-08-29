@@ -139,11 +139,34 @@ pub(crate) struct Agent {
     /// Permit from the run-wide `agent_pool` semaphore. Held for the
     /// lifetime of this `Agent` (acquired in `do_call_agent` before
     /// spawning the claude child); drop releases the slot for the next
-    /// queued `call_agent` invocation.
+    /// queued `call_agent` invocation and reports the release.
     #[rune(skip)]
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: PoolPermit,
     #[rune(skip)]
     inner: Arc<Mutex<AgentInner>>,
+}
+
+/// The run-wide agent-pool permit plus the reporting needed to keep
+/// pool occupancy legible: drop releases the slot and sends the
+/// balancing [`AgentPoolDelta::Released`] for the `Acquired` sent when
+/// the permit was granted. Send is fire-and-forget — a closed channel
+/// means no consumer, same contract as `Progress`.
+struct PoolPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    scanner: String,
+    task: String,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::RuntimeOutput>,
+}
+
+impl Drop for PoolPermit {
+    fn drop(&mut self) {
+        #[allow(clippy::let_underscore_must_use)]
+        let _ = self.tx.send(crate::RuntimeOutput::AgentPool {
+            scanner: std::mem::take(&mut self.scanner),
+            task: std::mem::take(&mut self.task),
+            delta: crate::AgentPoolDelta::Released,
+        });
+    }
 }
 
 /// Mutable agent state. `poll`/`wait` briefly lock to take the session
@@ -646,14 +669,18 @@ async fn handle_auth_failure(
 
 /// Gate a Rune-visible agent entry point on the run-wide agent fault.
 /// When the fault is set — before the call (nothing is touched) or
-/// during it (the outcome is superseded) — the fault message is raised
-/// as a VM panic, which no scanner `match` or `?` can intercept. The
-/// task aborts, the scheduler records it failed with this message, and
-/// no validation runs.
+/// during it (the outcome is superseded) — the fault message is
+/// recorded on the task's `ScanContext` and the VM is aborted with an
+/// error no scanner `match` or `?` can intercept. The abort is only
+/// the unwind vehicle: the dispatcher reads the recorded message back
+/// and reports it as the task's failure, discarding the VM error's
+/// own rendering. No validation runs after the abort.
 async fn with_fault_barrier<T>(fut: impl std::future::Future<Output = T>) -> Result<T, VmError> {
     fn fault() -> Option<VmError> {
-        let msg = current_scan_ctx().run.agent_fault.get()?.clone();
+        let ctx = current_scan_ctx();
+        let msg = ctx.run.agent_fault.get()?.clone();
         tracing::debug!("agent call refused: run-wide agent fault is set");
+        *ctx.task_fault.lock().unwrap() = Some(msg.clone());
         Some(VmError::panic(msg))
     }
     if let Some(e) = fault() {
@@ -1343,12 +1370,31 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     // expensive setup (MCP register, sandbox materialization, child
     // spawn). If the pool is saturated this awaits until a previously
     // running agent finishes; resource use stays bounded by the user's
-    // `--agent-jobs`.
-    let pool = current_scan_ctx().run.agent_pool.clone();
+    // `--agent-jobs`. Queued/Acquired/Released events let consumers
+    // distinguish a task waiting on the pool from one whose agents are
+    // running; sends are fire-and-forget (no-consumer is fine).
+    let ctx = current_scan_ctx();
+    let pool_event = |delta| {
+        #[allow(clippy::let_underscore_must_use)]
+        let _ = ctx.runtime_tx.send(crate::RuntimeOutput::AgentPool {
+            scanner: ctx.scanner_name.clone(),
+            task: ctx.task_name.clone(),
+            delta,
+        });
+    };
+    let pool = ctx.run.agent_pool.clone();
+    pool_event(crate::AgentPoolDelta::Queued);
     let permit = pool
         .acquire_owned()
         .await
         .expect("agent_pool is closed only at process shutdown");
+    pool_event(crate::AgentPoolDelta::Acquired);
+    let permit = PoolPermit {
+        _permit: permit,
+        scanner: ctx.scanner_name.clone(),
+        task: ctx.task_name.clone(),
+        tx: ctx.runtime_tx.clone(),
+    };
 
     let (mcp_url, service, auto_allow) = register_service(&spec)?;
     let mut builder = GageAgentBuilder::new().tools(auto_allow);

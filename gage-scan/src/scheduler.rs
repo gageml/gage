@@ -29,8 +29,8 @@
 //! Tasks are independent invocations and communicate via notes.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use petgraph::Graph;
 use petgraph::algo::tarjan_scc;
@@ -461,6 +461,47 @@ async fn run_tasks(
                             on_event(ScanEvent::Status(status.clone()));
                         }
                     }
+                    gage_runtime::RuntimeOutput::AgentPool {
+                        scanner,
+                        task,
+                        delta,
+                    } => {
+                        // Fold pool occupancy into the worker slot, as
+                        // for Progress; a report from a task no longer
+                        // on a worker is stale and dropped. Blocked
+                        // time accrues over spells where every one of
+                        // the task's agents is waiting on the pool.
+                        let slot = status.workers.iter_mut().find_map(|w| {
+                            w.current
+                                .as_mut()
+                                .filter(|c| c.scanner == scanner && c.task == task)
+                        });
+                        if let Some(current) = slot {
+                            use gage_runtime::AgentPoolDelta as Delta;
+                            match delta {
+                                Delta::Queued => current.agents_waiting += 1,
+                                Delta::Acquired => {
+                                    current.agents_waiting =
+                                        current.agents_waiting.saturating_sub(1);
+                                    current.agents_active += 1;
+                                }
+                                Delta::Released => {
+                                    current.agents_active = current.agents_active.saturating_sub(1);
+                                }
+                            }
+                            match (current.pool_blocked(), current.blocked_since) {
+                                (true, None) => {
+                                    current.blocked_since = Some(std::time::Instant::now());
+                                }
+                                (false, Some(since)) => {
+                                    current.agent_blocked += since.elapsed();
+                                    current.blocked_since = None;
+                                }
+                                _ => {}
+                            }
+                            on_event(ScanEvent::Status(status.clone()));
+                        }
+                    }
                 }
                 continue;
             }
@@ -484,6 +525,10 @@ async fn run_tasks(
                     scanner: slot.name.clone(),
                     task: task.task_name.clone(),
                     progress: None,
+                    agents_waiting: 0,
+                    agents_active: 0,
+                    agent_blocked: std::time::Duration::ZERO,
+                    blocked_since: None,
                 });
                 let now_ms = gage_core::datetime::now_ms();
                 {
@@ -567,6 +612,7 @@ async fn run_tasks(
             gage_runtime::RuntimeOutput::Println(s) => on_event(ScanEvent::Println { s }),
             // Every task is terminal at this point; progress is stale
             gage_runtime::RuntimeOutput::Progress { .. } => {}
+            gage_runtime::RuntimeOutput::AgentPool { .. } => {}
         }
     }
     drop(ready_tx);
@@ -622,8 +668,10 @@ async fn dispatch_task(
         rt: rt.clone(),
         unit: unit.clone(),
         sources: sources.clone(),
+        task_fault: Mutex::new(None),
     });
     let label_task = task_name.clone();
+    let ctx_probe = ctx.clone();
     let outcome = SCAN_CTX
         .scope(ctx, async move {
             let vm = rune::Vm::new(rt, unit);
@@ -649,6 +697,15 @@ async fn dispatch_task(
             }
         })
         .await;
+
+    // A fault the runtime detected (claude not logged in) aborts the
+    // task's VM only as an unwind vehicle; the recorded message is the
+    // task's real failure. Report it as a plain task error and discard
+    // the VM error's panic-shaped rendering.
+    let outcome = match ctx_probe.task_fault.lock().unwrap().take() {
+        Some(msg) => TaskResult::Error(msg),
+        None => outcome,
+    };
 
     if let TaskResult::Error(msg) | TaskResult::VmError(msg) = &outcome {
         let mut fault = slot.fault.lock().unwrap();

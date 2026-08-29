@@ -454,6 +454,10 @@ fn load_scan_model(
             },
             started: None,
             progress: None,
+            // Historical rows record wall-clock only; pool-blocked
+            // time is a live-scan measure and renders as zero here.
+            pool_blocked: false,
+            blocked: Duration::ZERO,
             agents: Vec::new(),
         })
         .collect();
@@ -2076,6 +2080,8 @@ fn forward_scan_event(
                         task: t.task.clone(),
                     },
                     progress: t.progress,
+                    pool_blocked: t.pool_blocked(),
+                    blocked: t.blocked_total(),
                 })
                 .collect(),
         },

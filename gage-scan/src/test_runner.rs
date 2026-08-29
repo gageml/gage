@@ -199,6 +199,7 @@ pub async fn run_test(case: TestCase) -> TestOutcome {
         rt: test.rt.clone(),
         unit: test.unit.clone(),
         sources: stub_sources,
+        task_fault: Mutex::new(None),
     });
     let hash = test.hash;
     let result = SCAN_CTX
