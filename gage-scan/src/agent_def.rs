@@ -105,6 +105,7 @@ pub async fn run_agent_def(
         mcp_host,
         dispatcher: std::sync::OnceLock::new(),
         agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+        invalidate: false,
         agent_fault: std::sync::OnceLock::new(),
     });
     let dispatcher = runtime::dispatcher::ToolDispatcher::start(Arc::downgrade(&run));

@@ -155,6 +155,15 @@ fn split_by_size(sessions: Vec<Session>, key: &str) -> crate::Result<SizeSplit> 
         let size = *sizes
             .get(s.id.as_str())
             .ok_or_else(|| Error::Args(format!("session {} not in scan selection", s.id)))?;
+        if ctx.run.invalidate {
+            // Deleted rather than bypassed: an interrupted run must
+            // not leave the old row to validate a later scan
+            task_validate::delete(&db, key, &session_ref(&s.id))
+                .map_err(|e| Error::Db(e.to_string()))?;
+            entries.insert(s.id.clone(), size.to_string());
+            new.push(s);
+            continue;
+        }
         let recorded = task_validate::value(&db, key, &session_ref(&s.id))
             .map_err(|e| Error::Db(e.to_string()))?;
         if recorded.as_deref() == Some(size.to_string().as_str()) {
@@ -333,10 +342,17 @@ fn do_notes_split_valid(q: NotesSplitValid) -> crate::Result<(Vec<Note>, Vec<Not
     let refs: Vec<String> = notes.iter().map(|n| note_ref(&n.id)).collect();
     let existing: HashSet<String> = {
         let db = ctx.db.lock().unwrap();
-        task_validate::existing_refs(&db, &key, &refs)
-            .map_err(|e| Error::Db(e.to_string()))?
-            .into_iter()
-            .collect()
+        if ctx.run.invalidate {
+            for r in &refs {
+                task_validate::delete(&db, &key, r).map_err(|e| Error::Db(e.to_string()))?;
+            }
+            HashSet::new()
+        } else {
+            task_validate::existing_refs(&db, &key, &refs)
+                .map_err(|e| Error::Db(e.to_string()))?
+                .into_iter()
+                .collect()
+        }
     };
 
     let mut prev = Vec::new();
@@ -405,10 +421,15 @@ fn do_files_valid(q: FilesValid) -> crate::Result<(bool, Function)> {
     let ctx = current_scan_ctx();
     let valid = {
         let db = ctx.db.lock().unwrap();
-        task_validate::value(&db, &key, &ref_)
-            .map_err(|e| Error::Db(e.to_string()))?
-            .as_deref()
-            == Some(digest.as_str())
+        if ctx.run.invalidate {
+            task_validate::delete(&db, &key, &ref_).map_err(|e| Error::Db(e.to_string()))?;
+            false
+        } else {
+            task_validate::value(&db, &key, &ref_)
+                .map_err(|e| Error::Db(e.to_string()))?
+                .as_deref()
+                == Some(digest.as_str())
+        }
     };
 
     let validate = Function::new(move || {

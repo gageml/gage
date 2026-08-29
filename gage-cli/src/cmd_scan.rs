@@ -23,7 +23,7 @@ use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
-use gage_db::{db, scan, task_validate};
+use gage_db::{db, scan};
 use gage_query::ScanSessionContext;
 use gage_registry::scanner::{Scanner, ScannerRegistry};
 use rand::seq::SliceRandom;
@@ -182,10 +182,10 @@ pub struct ScanRunArgs {
     )]
     scan: Option<String>,
 
-    /// Invalidate the selected sessions before scanning
+    /// Invalidate prior results before scanning
     ///
-    /// Clears the sessions' validation state so tasks re-run for
-    /// them. Applies to the selected sessions only.
+    /// Tasks re-run instead of reusing prior results. Applies to the
+    /// sessions and scanners selected for this scan.
     #[arg(short, long)]
     invalidate: bool,
 
@@ -1572,21 +1572,6 @@ async fn run_dialog(
         }
     }
 
-    // Only after the run is confirmed: a canceled dialog must leave
-    // validation state untouched
-    if args.invalidate {
-        let refs: Vec<String> = sessions
-            .iter()
-            .map(|(id, _)| task_validate::session_ref(id))
-            .collect();
-        let n = {
-            let conn = db.lock().unwrap();
-            task_validate::delete_refs(&conn, &refs).context("deleting session validation rows")?
-        };
-        let plural = if n == 1 { "entry" } else { "entries" };
-        cli::log::step(format!("Invalidated {n} validation {plural}"))?;
-    }
-
     // Run
     let started = std::time::Instant::now();
     let jobs = args.jobs.unwrap_or_else(num_cpus::get).max(1);
@@ -1648,6 +1633,7 @@ async fn run_dialog(
             scan_ctx,
             jobs,
             agent_jobs,
+            args.invalidate,
             cancel.clone(),
             |event| {
                 capture_event(&mut streams, &event);
@@ -1693,6 +1679,7 @@ async fn run_dialog(
             scan_ctx,
             jobs,
             agent_jobs,
+            args.invalidate,
             cancel.clone(),
             streams,
         )
@@ -1889,6 +1876,7 @@ async fn run_scan_tui(
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
     agent_jobs: usize,
+    invalidate: bool,
     cancel: tokio_util::sync::CancellationToken,
     mut streams: ScanStreams,
 ) -> Result<gage_scan::event::RunSummary, gage_scan::runner::RunError> {
@@ -1974,6 +1962,7 @@ async fn run_scan_tui(
             scan_ctx,
             jobs,
             agent_jobs,
+            invalidate,
             cancel.clone(),
             |event| {
                 capture_event(&mut streams, &event);

@@ -44,6 +44,13 @@ pub struct RunContext {
     /// [`crate::agent::Agent`]. Configured via the CLI's
     /// `--agent-jobs` flag.
     pub agent_pool: Arc<tokio::sync::Semaphore>,
+    /// Invalidate prior validation state. When set, the `split_valid`
+    /// / `split_valid_range` / `notes.split_valid` / `files_valid`
+    /// entry points delete the recorded rows for the keys and refs
+    /// they present and classify every item as new, forcing the run's
+    /// tasks to redo their work. Set from the CLI's `--invalidate`
+    /// flag.
+    pub invalidate: bool,
     /// Run-wide agent-facility fault, set at most once. Installed when
     /// a condition makes every agent call pointless for the rest of the
     /// run (claude not logged in). Once set, every Rune-visible agent

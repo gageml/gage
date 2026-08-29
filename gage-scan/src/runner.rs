@@ -86,6 +86,7 @@ pub async fn run(
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
     agent_jobs: usize,
+    invalidate: bool,
     cancel: CancellationToken,
     on_event: impl FnMut(ScanEvent) + Send,
 ) -> Result<RunSummary, RunError> {
@@ -141,6 +142,7 @@ pub async fn run(
         mcp_host,
         dispatcher: std::sync::OnceLock::new(),
         agent_pool: Arc::new(tokio::sync::Semaphore::new(agent_jobs)),
+        invalidate,
         agent_fault: std::sync::OnceLock::new(),
     });
     // Start the Rune tool dispatcher. Held by `RunContext` so scanners
@@ -469,6 +471,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
             agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+            invalidate: false,
             agent_fault: std::sync::OnceLock::new(),
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
@@ -693,6 +696,7 @@ impl TestRuntime {
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
             agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+            invalidate: false,
             agent_fault: std::sync::OnceLock::new(),
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
