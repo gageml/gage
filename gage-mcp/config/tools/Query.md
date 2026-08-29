@@ -35,6 +35,8 @@ Tables:
   notes whose `target` is `session:<id>[:<line>[-<end>]]`. Use to join `note` to
   `session` / `message` / `entry` without parsing `target`
 
+- scan_note (scan_id, note_id, role) - a scan's notes
+
 - issue (id, name, author, title, description, target, status, status_reason,
   metadata, created, modified) - issues raised from notes; `target` is advisory,
   as on `note`

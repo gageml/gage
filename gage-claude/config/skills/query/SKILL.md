@@ -9,6 +9,21 @@ user-invocable: false
 Extends the `mcp__plugin_gage_gage__Query` tool help. See that tool's
 description for the table catalog and column lists.
 
+## Scan-scoped notes: `scan_note`
+
+`scan_note (scan_id, note_id, role)` links a scan to the notes in its visible
+set. `role` is `wrote` (the scan wrote the note's current value; a replace
+relinks the replacing scan) or `carried` (the note predates the scan and was
+carried forward). To select exactly the notes a scan produced, join on
+`scan_note` with `role = 'wrote'`:
+
+```sql
+SELECT n.*
+FROM note n
+JOIN scan_note sc ON sc.note_id = n.id
+WHERE sc.scan_id = '<SCAN_ID>' AND sc.role = 'wrote';
+```
+
 ## Full-text search: `message_text(query [, snippet_len])`
 
 Table-valued function. One call = one Tantivy search over indexed message text.

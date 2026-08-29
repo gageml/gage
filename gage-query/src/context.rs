@@ -286,6 +286,7 @@ async fn register_sqlite_tables(ctx: &SessionContext, agent_scan_id: Option<&str
 const SCOPED_SQLITE_TABLES: &[(&str, &str, ScopeEdge)] = &[
     ("note", "id", ScopeEdge::Note),
     ("session_note", "note_id", ScopeEdge::Note),
+    ("scan_note", "note_id", ScopeEdge::Note),
     ("issue", "id", ScopeEdge::Issue),
     ("issue_evidence", "issue_id", ScopeEdge::Issue),
     ("session_issue", "issue_id", ScopeEdge::Issue),

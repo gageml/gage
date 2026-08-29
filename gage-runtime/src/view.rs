@@ -1,6 +1,5 @@
-//! Prompt-ready session views: `pages` splits a session into
-//! full-fidelity pages and `roadmap` renders the whole session as an
-//! abbreviated facsimile. Both are prompt-construction helpers for
+//! Prompt-ready session views: `roadmap` renders the whole session as
+//! an abbreviated facsimile. It is a prompt-construction helper for
 //! scanners that deliver session content in the agent's initial prompt
 //! instead of having the agent page it through tool results.
 
@@ -20,11 +19,6 @@ use crate::scan::Session;
 use crate::state::current_scan_ctx;
 
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function_meta(pages)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionPages| async move {
-        do_session_pages(q).await
-    })?;
-
     m.function_meta(roadmap)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionRoadmap| async move {
         do_session_roadmap(q).await
@@ -34,117 +28,8 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 }
 
 pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
-    m.ty::<SessionPages>()?;
     m.ty::<SessionRoadmap>()?;
-    m.ty::<Page>()?;
     Ok(())
-}
-
-/// One full-fidelity page of a session: a contiguous run of messages
-/// rendered as prompt text. `start`/`end` are the inclusive session
-/// line numbers the page covers; `index` is 1-based.
-#[derive(Any, Clone)]
-#[rune(item = ::gage)]
-pub struct Page {
-    #[rune(get)]
-    pub index: u64,
-    #[rune(get)]
-    pub start: u64,
-    #[rune(get)]
-    pub end: u64,
-    #[rune(get)]
-    pub text: String,
-}
-
-#[derive(Any)]
-#[rune(item = ::gage)]
-pub struct SessionPages {
-    #[rune(skip)]
-    session_id: String,
-    #[rune(skip)]
-    lines: Option<(u64, u64)>,
-    #[rune(skip)]
-    opts: Value,
-}
-
-/// Split the session into full-fidelity pages for per-page agent
-/// prompts. Options: `size` — target page size in chars (a single
-/// message larger than `size` becomes its own oversized page).
-#[rune::function(instance)]
-fn pages(session: Ref<Session>, opts: Value) -> SessionPages {
-    SessionPages {
-        session_id: session.id.clone(),
-        lines: session.range.map(|r| (r.start, r.end)),
-        opts,
-    }
-}
-
-async fn do_session_pages(q: SessionPages) -> super::Result<Vec<Page>> {
-    let opts: PageOpts = parse_opts(&q.opts, "pages")?;
-    let rows = fetch_rows(&q.session_id, q.lines).await?;
-    Ok(build_pages(&rows, &opts))
-}
-
-#[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PageOpts {
-    /// Target page size in chars. Pages close at the first message
-    /// boundary past this size.
-    pub size: usize,
-}
-
-impl Default for PageOpts {
-    fn default() -> Self {
-        PageOpts { size: 120_000 }
-    }
-}
-
-fn build_pages(rows: &[MessageRow], opts: &PageOpts) -> Vec<Page> {
-    let mut pages: Vec<Page> = Vec::new();
-    let mut text = String::new();
-    let mut span: Option<(u64, u64)> = None;
-    for row in rows {
-        let rendered = render_full(row);
-        if !text.is_empty() && text.chars().count() + rendered.chars().count() > opts.size {
-            flush_page(&mut pages, &mut text, &mut span);
-        }
-        if !text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&rendered);
-        span = match span {
-            Some((start, _)) => Some((start, row.line)),
-            None => Some((row.line, row.line)),
-        };
-    }
-    flush_page(&mut pages, &mut text, &mut span);
-    pages
-}
-
-fn flush_page(pages: &mut Vec<Page>, text: &mut String, span: &mut Option<(u64, u64)>) {
-    if let Some((start, end)) = span.take() {
-        pages.push(Page {
-            index: pages.len() as u64 + 1,
-            start,
-            end,
-            text: std::mem::take(text),
-        });
-    }
-}
-
-/// Render one message at full fidelity: a `[L<line> <type> <subtype>]`
-/// header, any out-of-band ide tags, then the message text.
-fn render_full(row: &MessageRow) -> String {
-    let mut s = header(row);
-    if let Some(tags) = &row.ide_tags {
-        s.push('\n');
-        s.push_str(tags);
-    }
-    if !row.text.is_empty() {
-        s.push('\n');
-        s.push_str(&row.text);
-    }
-    s
 }
 
 fn header(row: &MessageRow) -> String {
@@ -466,42 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn pages_split_at_message_boundaries() {
-        let rows = vec![
-            user_row(1, &"a".repeat(50)),
-            user_row(2, &"b".repeat(50)),
-            user_row(3, &"c".repeat(50)),
-        ];
-        let pages = build_pages(&rows, &PageOpts { size: 130 });
-        assert_eq!(pages.len(), 2);
-        assert_eq!((pages[0].index, pages[0].start, pages[0].end), (1, 1, 2));
-        assert_eq!((pages[1].index, pages[1].start, pages[1].end), (2, 3, 3));
-        assert!(pages[0].text.contains(&"a".repeat(50)));
-        assert!(pages[0].text.contains(&"b".repeat(50)));
-        assert!(pages[1].text.contains(&"c".repeat(50)));
-    }
-
-    #[test]
-    fn pages_keep_oversized_message_whole() {
-        let rows = vec![user_row(1, &"a".repeat(500)), user_row(2, "small")];
-        let pages = build_pages(&rows, &PageOpts { size: 100 });
-        assert_eq!(pages.len(), 2);
-        assert!(pages[0].text.contains(&"a".repeat(500)));
-    }
-
-    #[test]
-    fn pages_render_headers_and_full_text() {
-        let pages = build_pages(&[user_row(7, "hello")], &PageOpts::default());
-        assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].text, "[L7 user text]\nhello");
-    }
-
-    #[test]
-    fn pages_empty_session_yields_no_pages() {
-        assert!(build_pages(&[], &PageOpts::default()).is_empty());
-    }
-
-    #[test]
     fn roadmap_truncates_user_text() {
         let long = "x".repeat(600);
         let out = build_roadmap(&[user_row(1, &long)], &RoadmapOpts::default());
@@ -587,7 +436,7 @@ mod tests {
 
     #[test]
     fn opts_reject_unknown_fields() {
-        let err = serde_json::from_value::<PageOpts>(serde_json::json!({ "sizes": 1 }));
+        let err = serde_json::from_value::<RoadmapOpts>(serde_json::json!({ "user_texts": 1 }));
         assert!(err.is_err(), "unknown field should be rejected");
     }
 
@@ -606,24 +455,24 @@ mod tests {
         let sv = rune::to_value(session).unwrap();
         let mut obj = rune::runtime::Object::new();
         obj.insert(
-            rune::alloc::String::try_from("size").unwrap(),
+            rune::alloc::String::try_from("user_text").unwrap(),
             rune::to_value(64_i64).unwrap(),
         )
         .unwrap();
         let opts = rune::to_value(obj).unwrap();
 
-        let q = SessionPages {
+        let q = SessionRoadmap {
             session_id: sv.borrow_ref::<Session>().unwrap().id.clone(),
             lines: Some((3, 9)),
             opts: opts.clone(),
         };
-        let parsed: PageOpts = parse_opts(&q.opts, "pages").unwrap();
-        assert_eq!(parsed.size, 64);
+        let parsed: RoadmapOpts = parse_opts(&q.opts, "roadmap").unwrap();
+        assert_eq!(parsed.user_text, 64);
 
         // The caller's values are reads, not takes: both stay readable
         let s = sv.borrow_ref::<Session>().unwrap();
         assert_eq!(s.id, "11111111-1111-1111-1111-111111111111");
         let o = opts.borrow_ref::<rune::runtime::Object>().unwrap();
-        assert!(o.contains_key("size"));
+        assert!(o.contains_key("user_text"));
     }
 }
