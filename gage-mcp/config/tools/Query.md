@@ -24,7 +24,7 @@ Tables:
   session
 
 - message (session_id, line, uuid, type, subtype, text, timestamp, attachments,
-  ide_tags, raw) - conversation text (user and assistant) per session
+  ide_tags, raw) - conversation text per session (user, assistant, system)
 
 - note (id, author, created, modified, target, name, value, metadata) - notes
   written by scanners; `name` is the scanner output kind, `value` its payload.

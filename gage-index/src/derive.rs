@@ -152,14 +152,16 @@ fn entry_has_content(entry: &serde_json::Value) -> bool {
 /// Extract the text representation of a raw session entry.
 ///
 /// Extracts text from `message.content` blocks (text, thinking,
-/// tool_use, tool_result) and joins them with `\n\n`. Returns `None`
-/// for non-message entries or messages with no text content.
+/// tool_use, tool_result) and joins them with `\n\n`. System entries
+/// with a promoted subtype render per `system_entry_text`. Returns
+/// `None` for non-message entries or messages with no text content.
 ///
 /// The returned text may contain leading IDE tags — callers that need
 /// them separated should pass the result through `split_ide_tags`.
 pub fn entry_text(entry: &serde_json::Value) -> Option<String> {
     let type_str = match entry.get("type").and_then(|v| v.as_str()) {
         Some(t @ ("user" | "assistant")) => t,
+        Some("system") => return system_entry_text(entry),
         _ => return None,
     };
 
@@ -210,6 +212,30 @@ pub fn entry_text(entry: &serde_json::Value) -> Option<String> {
         None
     } else {
         Some(texts.join("\n\n"))
+    }
+}
+
+/// Text for a promoted system entry, hard-coded per subtype. The
+/// content-bearing subtypes (`compact_boundary`, `away_summary`,
+/// `informational`, `local_command`) use their `content` string
+/// verbatim — tags included, as tool results do. `api_error` has no
+/// `content`; it renders its error and retry fields as a YAML mapping,
+/// the same shape as a tool call. Non-promoted subtypes return `None`.
+fn system_entry_text(entry: &serde_json::Value) -> Option<String> {
+    match message_subtype(entry)? {
+        "api_error" => {
+            let mut fields = serde_json::Map::new();
+            for key in ["error", "retryAttempt", "retryInMs", "maxRetries"] {
+                if let Some(v) = entry.get(key) {
+                    fields.insert(key.to_string(), v.clone());
+                }
+            }
+            Some(format_tool_call_text("api_error", &fields))
+        }
+        _ => entry
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     }
 }
 
@@ -326,19 +352,19 @@ impl RowBuilders {
 }
 
 /// Whether an entry qualifies as a `message` table row: a user or
-/// assistant entry whose `message.content` is an array or a string.
-/// Malformed content shapes are entry rows but not message rows.
-/// True when an entry is a message row — the same predicate the query
-/// layer's `message` table uses: `type IN ('user','assistant')` with a
-/// well-formed `message.content`.
+/// assistant entry whose `message.content` is an array or a string,
+/// or a system entry whose subtype is promoted to the message flow
+/// (see `SYSTEM_MESSAGE_SUBTYPES` in gage-claude). Malformed content
+/// shapes are entry rows but not message rows.
 pub fn is_message_row(entry: &serde_json::Value) -> bool {
-    matches!(
-        entry.get("type").and_then(|v| v.as_str()),
-        Some("user" | "assistant")
-    ) && matches!(
-        entry.get("message").and_then(|m| m.get("content")),
-        Some(serde_json::Value::Array(_)) | Some(serde_json::Value::String(_))
-    )
+    match entry.get("type").and_then(|v| v.as_str()) {
+        Some("user" | "assistant") => matches!(
+            entry.get("message").and_then(|m| m.get("content")),
+            Some(serde_json::Value::Array(_)) | Some(serde_json::Value::String(_))
+        ),
+        Some("system") => message_subtype(entry).is_some(),
+        _ => false,
+    }
 }
 
 /// Parse one session file and derive its rows and aggregates.
@@ -512,4 +538,76 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         summary,
         fingerprint,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn system_entry(subtype: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut entry = json!({ "type": "system", "subtype": subtype });
+        entry
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        entry
+    }
+
+    #[test]
+    fn promoted_system_subtypes_are_message_rows() {
+        for subtype in [
+            "api_error",
+            "away_summary",
+            "compact_boundary",
+            "informational",
+            "local_command",
+        ] {
+            let entry = system_entry(subtype, json!({}));
+            assert!(is_message_row(&entry), "{subtype} should be a message row");
+        }
+    }
+
+    #[test]
+    fn bookkeeping_system_subtypes_stay_entry_only() {
+        for subtype in ["turn_duration", "stop_hook_summary", "never_heard_of_it"] {
+            let entry = system_entry(subtype, json!({ "content": "x" }));
+            assert!(!is_message_row(&entry), "{subtype} should stay entry-only");
+            assert_eq!(entry_text(&entry), None);
+        }
+    }
+
+    #[test]
+    fn system_content_subtypes_use_content_verbatim() {
+        let compact = system_entry(
+            "compact_boundary",
+            json!({ "content": "Conversation compacted" }),
+        );
+        assert_eq!(
+            entry_text(&compact).as_deref(),
+            Some("Conversation compacted")
+        );
+
+        // Wrapper tags are content, as they are for tool results
+        let stdout = "<local-command-stdout>## Context Usage</local-command-stdout>";
+        let cmd = system_entry("local_command", json!({ "content": stdout }));
+        assert_eq!(entry_text(&cmd).as_deref(), Some(stdout));
+    }
+
+    #[test]
+    fn api_error_text_renders_like_tool_call() {
+        let entry = system_entry(
+            "api_error",
+            json!({
+                "error": { "formatted": "529 Overloaded", "status": 529 },
+                "retryAttempt": 1,
+                "maxRetries": 10,
+            }),
+        );
+        let text = entry_text(&entry).unwrap();
+        assert!(text.starts_with("api_error:"), "yaml mapping key: {text}");
+        assert!(text.contains("formatted: 529 Overloaded"), "{text}");
+        assert!(text.contains("retryAttempt: 1"), "{text}");
+        assert!(text.contains("maxRetries: 10"), "{text}");
+    }
 }

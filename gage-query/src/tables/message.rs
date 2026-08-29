@@ -33,8 +33,10 @@ use crate::cache::SessionCache;
 use crate::filter;
 
 /// The derived columns serving the `message` table, in table-column
-/// order. `text` is non-null exactly for message rows (`type IN
-/// ('user','assistant') AND message.content well-formed`).
+/// order. `text` is non-null exactly for message rows: user/assistant
+/// entries with well-formed `message.content`, plus system entries
+/// whose subtype is promoted into the message flow (see
+/// `is_message_row` in gage-index).
 pub(crate) const PROJECTION: &[usize] = &[
     COL_SESSION_ID,
     COL_LINE,

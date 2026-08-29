@@ -63,12 +63,28 @@ pub fn entry_subtype(entry: &Value) -> Option<&str> {
     entry.get("subtype").and_then(Value::as_str)
 }
 
+/// System entry subtypes promoted to message rows. Each carries
+/// content that is a meaningful injection into the user/assistant
+/// message flow, and each has hard-coded text rendering in the
+/// derivation (gage-index). Unknown system subtypes stay entry-only;
+/// bookkeeping subtypes (`turn_duration`, `stop_hook_summary`) are
+/// deliberately excluded.
+pub const SYSTEM_MESSAGE_SUBTYPES: &[&str] = &[
+    "api_error",
+    "away_summary",
+    "compact_boundary",
+    "informational",
+    "local_command",
+];
+
 /// Infer the subtype of a message-shaped session entry.
 ///
 /// - `assistant` → `tool_use` if any content block is `tool_use`,
 ///   else `thinking` if any is `thinking`, else `text`.
 /// - `user` → `tool_result` if any content block is `tool_result`,
 ///   else `meta` if `entry.isMeta` is true, else `text`.
+/// - `system` → the raw subtype when it is one of
+///   [`SYSTEM_MESSAGE_SUBTYPES`].
 /// - `attachment` → the inner `attachment.type`
 ///   (e.g. `deferred_tools_delta`, `skill_listing`).
 /// - Other entry types have no message subtype.
@@ -102,6 +118,10 @@ pub fn message_subtype(entry: &Value) -> Option<&'static str> {
             } else {
                 Some("text")
             }
+        }
+        "system" => {
+            let sub = entry_subtype(entry)?;
+            SYSTEM_MESSAGE_SUBTYPES.iter().find(|s| **s == sub).copied()
         }
         "attachment" => {
             let inner = entry
