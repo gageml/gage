@@ -171,7 +171,12 @@ async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>)
         || Arc::new(MessageTable::new(store.clone())),
     );
 
-    register_sqlite_tables(&ctx, agent.as_ref().map(|a| a.scan_id.as_str())).await;
+    register_sqlite_tables(
+        &ctx,
+        agent.as_ref().map(|a| a.scan_id.as_str()),
+        &session_scope,
+    )
+    .await;
 
     // `root` is `<claude_home>/projects`; recover the claude_home dir
     // for the `config` table. Tests that pass a non-standard `root`
@@ -245,15 +250,21 @@ fn register_disk_table(
     ctx.register_table(name, provider).unwrap();
 }
 
-/// Register the sqlite-backed tables (`note`, `session_note`, `issue`,
-/// `issue_evidence`, `session_issue`) via `SqliteTableFactory`. Each provider uses the
+/// Register the sqlite-backed tables ([`SCOPED_SQLITE_TABLES`]) via
+/// `SqliteTableFactory`. Each provider uses the
 /// standard DataFusion pushdown surface — filters, projection, and
 /// limit reach sqlite as `WHERE` / `SELECT col…` / `LIMIT` in the
 /// per-scan SQL. When `agent_scan_id` is `Some`, each provider is
 /// wrapped in [`ScopedTable`] with the matching `scan_xxx` edge; the
 /// wrapper prepends `id IN (…)` to every scan and the sqlite provider
 /// unparses it into the pushed-down SQL alongside any caller filters.
-async fn register_sqlite_tables(ctx: &SessionContext, agent_scan_id: Option<&str>) {
+/// Session-edge tables reuse `session_scope` — the same (possibly
+/// session-narrowed) scope the disk tables filter by.
+async fn register_sqlite_tables(
+    ctx: &SessionContext,
+    agent_scan_id: Option<&str>,
+    session_scope: &Option<Scope>,
+) {
     let factory = SqliteTableFactory::new(Arc::new(
         SqliteConnectionPoolFactory::new(
             gage_db::db::db_path().to_string_lossy().as_ref(),
@@ -270,11 +281,17 @@ async fn register_sqlite_tables(ctx: &SessionContext, agent_scan_id: Option<&str
             .await
             .unwrap_or_else(|e| panic!("sqlite table provider for {name}: {e}"));
         let provider: Arc<dyn TableProvider> = match agent_scan_id {
-            Some(scan_id) => Arc::new(ScopedTable::new(
-                inner,
-                id_col,
-                Scope::resolve(scan_id, *edge).expect("resolve scope"),
-            )),
+            Some(scan_id) => {
+                let scope = match edge {
+                    ScopeEdge::Session => session_scope
+                        .clone()
+                        .expect("agent-scoped context should carry a session scope"),
+                    ScopeEdge::Note | ScopeEdge::Issue => {
+                        Scope::resolve(scan_id, *edge).expect("resolve scope")
+                    }
+                };
+                Arc::new(ScopedTable::new(inner, id_col, scope))
+            }
             None => inner,
         };
         ctx.register_table(*name, provider).unwrap();
@@ -284,10 +301,12 @@ async fn register_sqlite_tables(ctx: &SessionContext, agent_scan_id: Option<&str
 /// The sqlite-backed tables, with the column used for scope filtering
 /// and the `scan_xxx` edge that supplies the in-scope id set.
 const SCOPED_SQLITE_TABLES: &[(&str, &str, ScopeEdge)] = &[
+    ("scan_session", "session_id", ScopeEdge::Session),
     ("note", "id", ScopeEdge::Note),
     ("session_note", "note_id", ScopeEdge::Note),
     ("scan_note", "note_id", ScopeEdge::Note),
     ("issue", "id", ScopeEdge::Issue),
     ("issue_evidence", "issue_id", ScopeEdge::Issue),
     ("session_issue", "issue_id", ScopeEdge::Issue),
+    ("scan_issue", "issue_id", ScopeEdge::Issue),
 ];

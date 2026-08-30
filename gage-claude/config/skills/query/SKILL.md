@@ -9,7 +9,11 @@ user-invocable: false
 Extends the `mcp__plugin_gage_gage__Query` tool help. See that tool's
 description for the table catalog and column lists.
 
-## Scan-scoped notes: `scan_note`
+## Scan link tables: `scan_session`, `scan_note`, `scan_issue`
+
+`scan_session (scan_id, session_id, metadata)` links a scan to the sessions it
+covered — its cohort, recorded at selection time. A scan with zero notes still
+has its cohort rows here, so this is also the existence check for a scan id.
 
 `scan_note (scan_id, note_id, role)` links a scan to the notes in its visible
 set. `role` is `wrote` (the scan wrote the note's current value; a replace
@@ -23,6 +27,9 @@ FROM note n
 JOIN scan_note sc ON sc.note_id = n.id
 WHERE sc.scan_id = '<SCAN_ID>' AND sc.role = 'wrote';
 ```
+
+`scan_issue (scan_id, issue_id)` links a scan to the issues in its visible
+set.
 
 ## Full-text search: `message_text(query [, snippet_len])`
 

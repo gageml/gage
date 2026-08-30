@@ -31,11 +31,11 @@ Tables:
   `target` is advisory; do not parse it. To resolve a note to its session and
   line, join through `session_note` (see below)
 
-- session_note (session_id, line, line_end, note_id) - link table resolving
-  notes whose `target` is `session:<id>[:<line>[-<end>]]`. Use to join `note` to
-  `session` / `message` / `entry` without parsing `target`
+- session_note (session_id, line, line_end, note_id) - links notes to session
+  lines; join `note` to `session` / `message` / `entry` here
 
-- scan_note (scan_id, note_id, role) - a scan's notes
+- scan_session (scan_id, session_id, metadata), scan_note (scan_id, note_id,
+  role), scan_issue (scan_id, issue_id) - a scan's sessions, notes, and issues
 
 - issue (id, name, author, title, description, target, status, status_reason,
   metadata, created, modified) - issues raised from notes; `target` is advisory,
@@ -55,9 +55,9 @@ TVF for full-text search over message text:
 
 Hints:
 
-- Users often refer to sessions using their prefix ID
-- `message.text` is convenient for message text content in one value
-- `entry.raw` is same as reading session JSONL at `line`
+- Users often refer to sessions by prefix ID
+- `message.text` holds a message's text in one value
+- `entry.raw` equals the session JSONL line
 
 The tool may be scoped to sessions and per-session line ranges; rows outside
 the scope do not exist from this tool's point of view.
