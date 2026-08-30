@@ -1713,7 +1713,7 @@ async fn run_dialog(
                 "{} tasks in {}{skipped_suffix}, {new_notes} new notes (scan {})",
                 summary.completed,
                 crate::human::format_duration(elapsed),
-                &summary.scan_id[..8],
+                summary.scan_id,
             )))
         }
         Err(gage_scan::runner::RunError::Emitted) => Err(DialogError::Failed(
