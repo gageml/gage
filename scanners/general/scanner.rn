@@ -4,6 +4,7 @@ use gage::{
     Progress,
     Template,
     call_agent,
+    params,
     query,
     scan,
     write_note,
@@ -13,23 +14,45 @@ pub const SCANNER = #{
     name: "general",
     description: "Scan sessions for general findings",
     groups: ["default"],
+    config: #{
+        mode: #{ value: "default" },
+    },
     tasks: #{
         findings: #{
             notes: #{
-                writes: #{ "finding.general": include_str!("finding-general-doc.md") },
+                writes: #{
+                    "finding.general": include_str!("finding-general-doc.md"),
+                    "finding.general[roadmap]": include_str!("finding-roadmap-doc.md"),
+                },
             },
         },
     },
 };
 
 const FINDINGS_KEY = ("general", "findings", 1);
+const FINDINGS_ROADMAP_KEY = ("general", "findings[roadmap]", 1);
 
 /// Submit each session to an agent to write finding notes.
+///
+/// The `mode` param selects the scan variant. Each mode validates
+/// sessions under its own key and writes its own note type, so modes
+/// never mask each other's work.
+pub async fn findings() {
+    match params().mode {
+        "default" => findings_default().await,
+        "roadmap" => findings_roadmap().await,
+        other => Err(format!(
+            "unsupported mode `{other}`: expected `default` or `roadmap`"
+        )),
+    }
+}
+
+/// Default mode: the agent reads the session through its Query view.
 ///
 /// Sessions already processed under the current findings key are
 /// skipped. A grown session carries the range of its unscanned lines;
 /// the agent's Query view is constrained to that range.
-pub async fn findings() {
+async fn findings_default() {
     // Skip previously scanned sessions per key
     let (_prev_sessions, new_sessions, validate) = scan()
         .sessions()
@@ -76,6 +99,78 @@ pub async fn findings() {
             Some(Ok((result, #{ session }))) => {
                 log::info!(
                     "findings: {:?}",
+                    #{
+                        session,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                // Ensure that valid sessions aren't re-scanned
+                validate(session).await?;
+                progress.tick();
+            }
+            None => break,
+        }
+    }
+
+    Ok(())
+}
+
+/// Roadmap mode: the whole session goes into the agent prompt as an
+/// abbreviated roadmap; the agent retrieves full message text
+/// selectively through its session-scoped Query view.
+///
+/// Sessions already processed under the current findings key are
+/// skipped. A grown session carries the range of its unscanned lines;
+/// the roadmap and Query view are constrained to that range.
+async fn findings_roadmap() {
+    // Skip previously scanned sessions per key
+    let (_prev_sessions, new_sessions, validate) = scan()
+        .sessions()
+        .split_valid_range(FINDINGS_ROADMAP_KEY)
+        .await?;
+
+    // Init template for agent prompts
+    let t = Template::new(include_str!("findings-roadmap-prompt.md.j2")).await?;
+
+    // One tick per session: skipped sessions tick during queueing,
+    // scanned sessions tick as their agents complete
+    let progress = Progress::new(new_sessions.len());
+
+    // Use agent runner to scan sessions concurrently
+    let runner = AgentRunner::new();
+    for s in new_sessions {
+        // Skip sessions that are not likely to have scannable content
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            validate(s).await?;
+            progress.tick();
+            continue
+        }
+        // Default abbreviation heuristics; tune per comparison runs
+        let roadmap = s.roadmap(#{}).await?;
+        let prompt = t.render(#{ session_id: s.id, roadmap }).await?;
+        runner.add(
+            call_agent(prompt)
+                .name("session-finding-roadmap")
+                // The agent sees this session only, clipped to
+                // s.range when it is Some
+                .gage_tools([Query::new().sessions([s])])
+                .tools(#{ write_finding_roadmap: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s.id },
+        );
+    }
+
+    // Run agents
+    let results = runner.start();
+
+    // Collect results
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!(
+                    "roadmap findings: {:?}",
                     #{
                         session,
                         result: result.text,
@@ -142,7 +237,18 @@ fn write_finding_tooldef() {
     }
 }
 
+// Tool callbacks run without task params (the dispatcher clears them),
+// so each mode registers its own callback carrying its note type.
+
 pub async fn write_finding(inputs, meta) {
+    write_finding_note("finding.general", inputs, meta).await
+}
+
+pub async fn write_finding_roadmap(inputs, meta) {
+    write_finding_note("finding.general[roadmap]", inputs, meta).await
+}
+
+async fn write_finding_note(name, inputs, meta) {
     let metadata = #{};
     let target = #{ session: inputs.session };
     if let Some(lines) = inputs.get("lines") {
@@ -155,7 +261,7 @@ pub async fn write_finding(inputs, meta) {
     }
     let note = write_note(
         #{
-            name: "finding.general",
+            name,
             author: meta.agent_tool_use(),
             value: inputs.description,
             target,
