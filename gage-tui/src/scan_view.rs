@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use gage_claude::model::resolved_model;
 use gage_claude::resolve::resolve_command;
 use gage_core::task::{task_display, task_name_display};
 use gage_db::issue::{self, IssueStatus, StatusReason};
@@ -720,7 +721,8 @@ async fn run_resolve_session(
         ResolveScope::Issue(id) => std::slice::from_ref(id),
         ResolveScope::Issues(ids) => ids,
     };
-    let result = resolve_command(issue_ids, None, &[]).and_then(|mut cmd| cmd.status());
+    let result =
+        resolve_command(issue_ids, &resolved_model(None), &[]).and_then(|mut cmd| cmd.status());
     *terminal = ratatui::init();
     push_keyboard_enhancements();
     terminal.clear()?;

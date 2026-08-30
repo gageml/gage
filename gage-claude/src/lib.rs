@@ -1,6 +1,7 @@
 pub mod config;
 pub mod entry;
 pub mod home;
+pub mod model;
 pub mod plugin;
 pub mod proc;
 pub mod project;

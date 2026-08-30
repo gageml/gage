@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use gage_agent::{
     AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgentSession, SystemPrompt,
 };
+use gage_claude::model::resolved_model;
 use gage_mcp::{CustomToolCallback, GageTool, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
@@ -1404,12 +1405,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     if let Some(url) = &mcp_url {
         builder = builder.mcp_url(url.clone());
     }
-    if let Some(m) = &spec.model {
-        // Preserve `call_llm`'s alias support — `"small"`/`"medium"`/
-        // `"large"` round-trip to concrete claude model ids so existing
-        // scanner code keeps working unchanged.
-        builder = builder.model(crate::model::resolve_model(m).to_string());
-    }
+    builder = builder.model(resolved_model(spec.model.as_deref()));
     if let Some(n) = spec.max_turns {
         builder = builder.max_turns(n);
     }
@@ -1745,7 +1741,7 @@ pub async fn run_def_headless(v: rune::Value) -> Result<AgentResult, Error> {
 /// session's lifetime.
 pub struct InteractiveSpec {
     pub prompt: String,
-    pub model: Option<String>,
+    pub model: String,
     /// Sandbox/archive name from `.name(..)`.
     pub name: Option<String>,
     /// Tool allowlist for the child's `settings.json` (built-in Gage
@@ -1763,10 +1759,7 @@ pub fn interactive_spec(v: rune::Value) -> Result<InteractiveSpec, Error> {
     let (mcp_url, service, tools) = register_service(&spec)?;
     Ok(InteractiveSpec {
         prompt: spec.prompt.clone(),
-        model: spec
-            .model
-            .as_deref()
-            .map(|m| crate::model::resolve_model(m).to_string()),
+        model: resolved_model(spec.model.as_deref()),
         name: spec.name.clone(),
         tools,
         mcp_url,

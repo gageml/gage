@@ -155,9 +155,7 @@ async fn run_dialog(
             if let Some(name) = &spec.name {
                 builder = builder.name(name.clone());
             }
-            if let Some(model) = &spec.model {
-                builder = builder.model(model.clone());
-            }
+            builder = builder.model(spec.model.clone());
             if let Some(url) = &spec.mcp_url {
                 builder = builder.mcp_url(url.clone());
             }

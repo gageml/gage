@@ -9,7 +9,6 @@ pub mod io;
 pub mod json;
 pub mod log;
 pub mod macros;
-pub(crate) mod model;
 pub mod progress;
 pub mod query;
 mod result;

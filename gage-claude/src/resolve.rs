@@ -10,11 +10,12 @@ use crate::proc::find_claude;
 /// gage resolve skill, scoped to `issue_ids` (all pending and open
 /// issues when empty). The session gets a fresh session ID up front so
 /// its display name can carry the short form. `model` maps to
-/// `--model`; `extra_args` pass to claude verbatim, ahead of the
-/// prompt.
+/// `--model` and is required — a claude session never starts on the
+/// user's default model; `extra_args` pass to claude verbatim, ahead
+/// of the prompt.
 pub fn resolve_command(
     issue_ids: &[String],
-    model: Option<&str>,
+    model: &str,
     extra_args: &[String],
 ) -> io::Result<Command> {
     let claude_bin = find_claude()?;
@@ -30,9 +31,7 @@ pub fn resolve_command(
     cmd.arg("--session-id").arg(&session_id);
     cmd.arg("-n")
         .arg(format!("Resolve Gage issues {}", &session_id[..8]));
-    if let Some(model) = model {
-        cmd.arg("--model").arg(model);
-    }
+    cmd.arg("--model").arg(model);
     cmd.args(extra_args);
     cmd.arg(prompt);
     Ok(cmd)
