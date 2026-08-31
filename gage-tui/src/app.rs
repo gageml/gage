@@ -213,6 +213,22 @@ pub(crate) fn handle_key(
             }
             return Ok(KeyOutcome::Consumed);
         }
+        Dialog::NoteType { entry_index } => {
+            let entry_index = *entry_index;
+            match key.code {
+                KeyCode::Char('c') => {
+                    state.open_add_editor(entry_index, "comment", "Add comment");
+                }
+                KeyCode::Char('o') => {
+                    state.open_add_editor(entry_index, "open", "Add open code");
+                }
+                KeyCode::Char('q') | KeyCode::Char('n') | KeyCode::Esc => {
+                    state.dialog = Dialog::None;
+                }
+                _ => {}
+            }
+            return Ok(KeyOutcome::Consumed);
+        }
         Dialog::Options => {
             match key.code {
                 KeyCode::Char('d') => {
@@ -365,6 +381,12 @@ pub(crate) struct SavedUi {
 
 enum Dialog {
     None,
+    /// Note-type chooser (`n`), layered before the add editor
+    NoteType {
+        /// Target entry; None for a session-level note (the
+        /// `<Session>` row or one of its notes selected)
+        entry_index: Option<usize>,
+    },
     AddNote {
         /// Target entry; None for a session-level note (the
         /// `<Session>` row or one of its notes selected)
@@ -372,6 +394,8 @@ enum Dialog {
         editor: TextArea,
         /// Dialog caption, fixed at open per the note kind
         title: &'static str,
+        /// Note name to write, fixed at open per the note kind
+        name: &'static str,
     },
     EditNote {
         note_id: String,
@@ -747,10 +771,20 @@ impl AppState {
             return;
         }
         let entry_index = self.selected_entry_index();
+        self.dialog = Dialog::NoteType { entry_index };
+    }
+
+    fn open_add_editor(
+        &mut self,
+        entry_index: Option<usize>,
+        name: &'static str,
+        title: &'static str,
+    ) {
         self.dialog = Dialog::AddNote {
             entry_index,
             editor: new_editor(""),
-            title: "Add comment",
+            title,
+            name,
         };
     }
 
@@ -761,8 +795,13 @@ impl AppState {
         if note.author != self.author() || !is_editable(&note.name) {
             return false;
         }
+        let title = if note.name == "open" {
+            "Edit open code"
+        } else {
+            "Edit comment"
+        };
         let (note_id, text) = (note.id.clone(), note_text(note));
-        self.open_note_editor(note_id, text, "Edit comment");
+        self.open_note_editor(note_id, text, title);
         true
     }
 
@@ -862,9 +901,9 @@ fn note_text(note: &Note) -> String {
         .unwrap_or_else(|| note.value.to_json())
 }
 
-/// User-editable note names: comments only.
+/// User-editable note names: comments and open codes.
 fn is_editable(name: &str) -> bool {
-    name == "comment"
+    matches!(name, "comment" | "open")
 }
 
 fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
@@ -926,6 +965,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
         Dialog::AddNote {
             entry_index,
             editor,
+            name,
             ..
         } => {
             let line = match entry_index {
@@ -942,7 +982,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
                 target = target.with_line(line);
             }
             let target = NoteTarget::Session(target);
-            let note = Note::new(target, "comment", NoteValue::from(text), &state.author());
+            let note = Note::new(target, name, NoteValue::from(text), &state.author());
             if let Ok(()) = note::insert(db, &note) {
                 let id = note.id.clone();
                 state.doc.add_note(note);
@@ -1474,6 +1514,7 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, detail: bool, turns: bool
     match dialog {
         Dialog::None => {}
         Dialog::Options => draw_options(frame, detail, turns),
+        Dialog::NoteType { .. } => draw_note_type(frame),
         Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor),
         Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor),
         Dialog::ConfirmCancel { pending } => {
@@ -1500,6 +1541,15 @@ fn draw_options(frame: &mut Frame, detail: bool, turns: bool) {
         Line::raw(format!("  t {} turns", label(turns))).left_aligned(),
     ];
     crate::dialog::draw_lines_titled(frame, Some("View options"), lines, "q cancel");
+}
+
+/// Note-type chooser: which kind of note `n` will add.
+fn draw_note_type(frame: &mut Frame) {
+    let lines = vec![
+        Line::raw("  c comment (general note)").left_aligned(),
+        Line::raw("  o open code (qualitative analysis)").left_aligned(),
+    ];
+    crate::dialog::draw_lines_titled(frame, Some("Note type"), lines, "q cancel");
 }
 
 const EDITOR_BODY_HEIGHT: u16 = 8;
