@@ -1,13 +1,20 @@
-//! Prompt-ready session views: `roadmap` renders the whole session as
-//! an abbreviated facsimile. It is a prompt-construction helper for
-//! scanners that deliver session content in the agent's initial prompt
-//! instead of having the agent page it through tool results.
-
-use std::collections::HashMap;
+//! Prompt-ready session views: `compress` renders the whole session
+//! as a compressed session --- a text rendering that fits a token
+//! budget. It is a prompt-construction helper for scanners that
+//! deliver session content in the agent's initial prompt instead of
+//! having the agent page it through tool results.
+//!
+//! `Session::compress(budget, rules)` takes a token budget (or
+//! `"unlimited"`) and an ordered list of rules. Each rule is a
+//! `(selector, attributes)` tuple; a message takes the first rule
+//! whose selector matches it. Attributes give per-message `min` and
+//! `max` chars and a `priority` list naming the content parts to keep
+//! when a message is cut (`"start"`, `"end"`, `"line1"`). A message
+//! matched by no rule behaves as if matched by a trailing `("*", #{})`
+//! rule. See `.local.design/roadmap-scan.md` for the algorithm.
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::common::ScalarValue;
-use gage_claude::entry::block_to_text;
 use rune::runtime::{Protocol, Ref, Value};
 use rune::{Any, ContextError, Module};
 use serde::Deserialize;
@@ -18,18 +25,399 @@ use crate::error::Error;
 use crate::scan::Session;
 use crate::state::current_scan_ctx;
 
+/// Chars per token used to convert a token budget to a working char
+/// count. From the token ratio experiments in the roadmap-scan design
+/// doc: the dense end of realistic session content. May be exposed to
+/// configuration later.
+const CHARS_PER_TOKEN: f64 = 2.2;
+
 pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function_meta(roadmap)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionRoadmap| async move {
-        do_session_roadmap(q).await
+    m.function_meta(compress)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionCompress| async move {
+        do_session_compress(q).await
     })?;
 
     Ok(())
 }
 
 pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
-    m.ty::<SessionRoadmap>()?;
+    m.ty::<SessionCompress>()?;
     Ok(())
+}
+
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct SessionCompress {
+    #[rune(skip)]
+    session_id: String,
+    #[rune(skip)]
+    lines: Option<(u64, u64)>,
+    #[rune(skip)]
+    budget: Value,
+    #[rune(skip)]
+    rules: Value,
+}
+
+/// Render the session as a compressed session for an agent prompt:
+/// every message under its `[L<line> …]` header with its text cut per
+/// the matching rule, sized to fit the token budget. Truncation
+/// markers carry the omitted char counts so the agent can judge what
+/// to retrieve in full.
+#[rune::function(instance)]
+fn compress(session: Ref<Session>, budget: Value, rules: Value) -> SessionCompress {
+    SessionCompress {
+        session_id: session.id.clone(),
+        lines: session.range.map(|r| (r.start, r.end)),
+        budget,
+        rules,
+    }
+}
+
+async fn do_session_compress(q: SessionCompress) -> super::Result<String> {
+    let budget = parse_budget(&q.budget)?;
+    let rules = parse_rules(&q.rules)?;
+    let rows = fetch_rows(&q.session_id, q.lines).await?;
+    build_compressed(&q.session_id, &rows, budget, &rules)
+}
+
+enum Budget {
+    /// Working char count converted from the token budget.
+    Chars(usize),
+    Unlimited,
+}
+
+fn parse_budget(v: &Value) -> super::Result<Budget> {
+    let json = serde_json::to_value(v)
+        .map_err(|e| Error::Args(format!("`budget` could not be read: {e}")))?;
+    match json {
+        Json::String(s) if s == "unlimited" => Ok(Budget::Unlimited),
+        Json::Number(n) => {
+            let tokens = n
+                .as_f64()
+                .filter(|t| t.is_finite() && *t >= 0.0)
+                .ok_or_else(|| Error::Args(format!("invalid `budget` {n}")))?;
+            Ok(Budget::Chars((tokens * CHARS_PER_TOKEN) as usize))
+        }
+        other => Err(Error::Args(format!(
+            "`budget` must be a token count or \"unlimited\", got {other}"
+        ))),
+    }
+}
+
+/// One parsed rule: selector plus attributes.
+struct Rule {
+    selector: Selector,
+    min: usize,
+    max: Option<usize>,
+    parts: Vec<Part>,
+}
+
+struct Selector {
+    pattern: Pattern,
+    /// Bracketed qualifier, resolved by peeking at the message `raw`.
+    error_only: bool,
+}
+
+enum Pattern {
+    /// `*` — every message.
+    Any,
+    /// `type.subtype`
+    TypeSubtype(String, String),
+    /// Bare token — matches the message type or subtype.
+    Token(String),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    Start,
+    End,
+    Line1,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RuleAttrs {
+    min: Option<u64>,
+    max: Option<u64>,
+    priority: Option<Vec<String>>,
+}
+
+fn parse_rules(v: &Value) -> super::Result<Vec<Rule>> {
+    let entries: Vec<(String, RuleAttrs)> = parse_json(v, "rules")?;
+    entries
+        .into_iter()
+        .map(|(sel, attrs)| {
+            Ok(Rule {
+                selector: parse_selector(&sel)?,
+                min: attrs.min.unwrap_or(0) as usize,
+                max: attrs.max.map(|m| m as usize),
+                parts: parse_parts(&sel, attrs.priority)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_selector(sel: &str) -> super::Result<Selector> {
+    let (base, error_only) = match sel.strip_suffix("[error]") {
+        Some(base) => (base, true),
+        None => (sel, false),
+    };
+    if base.is_empty() || base.contains(['[', ']']) {
+        return Err(Error::Args(format!("invalid rule selector `{sel}`")));
+    }
+    let pattern = if base == "*" {
+        Pattern::Any
+    } else {
+        match base.split_once('.') {
+            Some((ty, sub)) => Pattern::TypeSubtype(ty.to_string(), sub.to_string()),
+            None => Pattern::Token(base.to_string()),
+        }
+    };
+    Ok(Selector {
+        pattern,
+        error_only,
+    })
+}
+
+fn parse_parts(sel: &str, priority: Option<Vec<String>>) -> super::Result<Vec<Part>> {
+    let Some(names) = priority else {
+        return Ok(vec![Part::Start]);
+    };
+    if names.is_empty() {
+        return Err(Error::Args(format!(
+            "rule `{sel}`: `priority` must name at least one part"
+        )));
+    }
+    names
+        .iter()
+        .map(|n| match n.as_str() {
+            "start" => Ok(Part::Start),
+            "end" => Ok(Part::End),
+            "line1" => Ok(Part::Line1),
+            other => Err(Error::Args(format!(
+                "rule `{sel}`: unknown priority part `{other}`: \
+                 expected `start`, `end`, or `line1`"
+            ))),
+        })
+        .collect()
+}
+
+fn parse_json<T: DeserializeOwned>(v: &Value, what: &str) -> super::Result<T> {
+    let json = serde_json::to_value(v)
+        .map_err(|e| Error::Args(format!("`{what}` could not be read: {e}")))?;
+    serde_json::from_value(json).map_err(|e| Error::Args(format!("invalid `{what}`: {e}")))
+}
+
+/// The implicit trailing rule for messages no rule matches: no `min`,
+/// no `max`, keep the start.
+fn fallback_rule() -> Rule {
+    Rule {
+        selector: Selector {
+            pattern: Pattern::Any,
+            error_only: false,
+        },
+        min: 0,
+        max: None,
+        parts: vec![Part::Start],
+    }
+}
+
+/// One message paired with its matched rule and current allocation.
+struct Msg<'a> {
+    row: &'a MessageRow,
+    text: Vec<char>,
+    /// Index into the rule list (fallback rule last).
+    rule: usize,
+    /// Kept chars for the final render.
+    alloc: usize,
+}
+
+impl Msg<'_> {
+    fn cost(&self, rule: &Rule, alloc: usize) -> usize {
+        message_len(self.row, &self.text, alloc, &rule.parts)
+    }
+
+    fn max_alloc(&self, rule: &Rule) -> usize {
+        rule.max.unwrap_or(usize::MAX).min(self.text.len())
+    }
+
+    fn min_alloc(&self, rule: &Rule) -> usize {
+        rule.min.min(self.text.len())
+    }
+}
+
+fn build_compressed(
+    session_id: &str,
+    rows: &[MessageRow],
+    budget: Budget,
+    rules: &[Rule],
+) -> super::Result<String> {
+    let fallback = fallback_rule();
+    let all_rules: Vec<&Rule> = rules.iter().chain([&fallback]).collect();
+
+    // Pair each message with its first matching rule
+    let mut msgs: Vec<Msg> = rows
+        .iter()
+        .map(|row| {
+            let rule = all_rules
+                .iter()
+                .position(|r| selector_matches(&r.selector, row))
+                .expect("trailing fallback rule matches every message");
+            Msg {
+                row,
+                text: row.text.chars().collect(),
+                rule,
+                alloc: 0,
+            }
+        })
+        .collect();
+
+    match budget {
+        Budget::Unlimited => {
+            for m in &mut msgs {
+                m.alloc = m.max_alloc(rule_of(&all_rules, m.rule));
+            }
+        }
+        Budget::Chars(budget) => fit_to_budget(session_id, &mut msgs, &all_rules, budget)?,
+    }
+
+    let out: Vec<String> = msgs
+        .iter()
+        .map(|m| render_message(m.row, &m.text, m.alloc, &rule_of(&all_rules, m.rule).parts))
+        .collect();
+    Ok(out.join("\n\n"))
+}
+
+fn rule_of<'a>(all_rules: &'a [&'a Rule], idx: usize) -> &'a Rule {
+    all_rules.get(idx).expect("msg rule index is in range")
+}
+
+/// Set each message's allocation honoring the budget: every message
+/// at its rule's `min`, rules demoted from the back if that alone
+/// exceeds the budget, then expansion toward `max` in rule order,
+/// document order within a rule.
+fn fit_to_budget(
+    session_id: &str,
+    msgs: &mut [Msg],
+    all_rules: &[&Rule],
+    budget: usize,
+) -> super::Result<()> {
+    let sep_total = msgs.len().saturating_sub(1) * 2; // "\n\n" joins
+
+    // Demote rules (from the last) until the minimum representation fits
+    let mut demoted = vec![false; all_rules.len()];
+    let mut base = loop {
+        let base: usize = sep_total
+            + msgs
+                .iter()
+                .map(|m| {
+                    let rule = rule_of(all_rules, m.rule);
+                    let min = if demoted_of(&demoted, m.rule) {
+                        0
+                    } else {
+                        m.min_alloc(rule)
+                    };
+                    m.cost(rule, min)
+                })
+                .sum::<usize>();
+        if base <= budget {
+            break base;
+        }
+        match demoted.iter().rposition(|d| !d) {
+            Some(rule) => *demoted.get_mut(rule).expect("rposition index is in range") = true,
+            None => {
+                return Err(Error::Args(format!(
+                    "session {session_id} exceeds the budget at {base} chars \
+                     with every rule demoted to marker-only (budget {budget})"
+                )));
+            }
+        }
+    };
+
+    for m in msgs.iter_mut() {
+        m.alloc = if demoted_of(&demoted, m.rule) {
+            0
+        } else {
+            m.min_alloc(rule_of(all_rules, m.rule))
+        };
+    }
+
+    // Expand toward max, rule order then document order
+    'expand: for (rule_idx, rule) in all_rules.iter().enumerate() {
+        if demoted_of(&demoted, rule_idx) {
+            continue;
+        }
+        for m in msgs.iter_mut().filter(|m| m.rule == rule_idx) {
+            let full = m.max_alloc(rule);
+            if full <= m.alloc {
+                continue;
+            }
+            let full_delta = m.cost(rule, full) - m.cost(rule, m.alloc);
+            let remaining = budget - base;
+            if full_delta <= remaining {
+                m.alloc = full;
+                base += full_delta;
+                continue;
+            }
+            // Partial expansion: grow by the remaining budget, then
+            // walk back the marker-length drift so the total stays
+            // within budget
+            let mut alloc = (m.alloc + remaining).min(full);
+            while alloc > m.alloc && m.cost(rule, alloc) - m.cost(rule, m.alloc) > remaining {
+                alloc -= 1;
+            }
+            m.alloc = alloc;
+            break 'expand;
+        }
+    }
+
+    Ok(())
+}
+
+fn demoted_of(demoted: &[bool], idx: usize) -> bool {
+    *demoted.get(idx).expect("msg rule index is in range")
+}
+
+fn selector_matches(sel: &Selector, row: &MessageRow) -> bool {
+    let matched = match &sel.pattern {
+        Pattern::Any => true,
+        Pattern::TypeSubtype(ty, sub) => {
+            row.type_ == *ty && row.subtype.as_deref() == Some(sub.as_str())
+        }
+        Pattern::Token(tok) => row.type_ == *tok || row.subtype.as_deref() == Some(tok.as_str()),
+    };
+    matched && (!sel.error_only || is_error_result(row))
+}
+
+/// Qualifier peek into `raw`: any tool_result block with
+/// `is_error: true`.
+fn is_error_result(row: &MessageRow) -> bool {
+    let Ok(raw) = serde_json::from_str::<Json>(&row.raw) else {
+        return false;
+    };
+    let Some(Json::Array(blocks)) = raw.get("message").and_then(|m| m.get("content")) else {
+        return false;
+    };
+    blocks.iter().any(|b| {
+        b.get("type").and_then(Json::as_str) == Some("tool_result")
+            && b.get("is_error").and_then(Json::as_bool) == Some(true)
+    })
+}
+
+fn render_message(row: &MessageRow, text: &[char], alloc: usize, parts: &[Part]) -> String {
+    let mut s = header(row);
+    let body = render_body(text, alloc, parts);
+    if !body.is_empty() {
+        s.push('\n');
+        s.push_str(&body);
+    }
+    s
+}
+
+/// Rendered char length of a message at the given allocation. Kept in
+/// step with `render_message` (measured, not estimated).
+fn message_len(row: &MessageRow, text: &[char], alloc: usize, parts: &[Part]) -> usize {
+    render_message(row, text, alloc, parts).chars().count()
 }
 
 fn header(row: &MessageRow) -> String {
@@ -39,216 +427,81 @@ fn header(row: &MessageRow) -> String {
     }
 }
 
-#[derive(Any)]
-#[rune(item = ::gage)]
-pub struct SessionRoadmap {
-    #[rune(skip)]
-    session_id: String,
-    #[rune(skip)]
-    lines: Option<(u64, u64)>,
-    #[rune(skip)]
-    opts: Value,
-}
-
-/// Render the whole session as an abbreviated roadmap for an agent
-/// prompt. Every message appears under its `[L<line> …]` header with
-/// its content truncated by per-kind char caps; truncation markers
-/// carry the omitted char counts so the agent can judge what to
-/// retrieve in full.
-///
-/// Options (all char caps): `user_text`, `meta_text`,
-/// `assistant_text`, `thinking_head`, `thinking_tail`, `tool_input`,
-/// `result_line`.
-#[rune::function(instance)]
-fn roadmap(session: Ref<Session>, opts: Value) -> SessionRoadmap {
-    SessionRoadmap {
-        session_id: session.id.clone(),
-        lines: session.range.map(|r| (r.start, r.end)),
-        opts,
+/// Cut the text to `alloc` kept chars, spending them on the listed
+/// parts in order, and mark every cut with its omitted char count.
+fn render_body(text: &[char], alloc: usize, parts: &[Part]) -> String {
+    if alloc == 0 || text.is_empty() {
+        return String::new();
     }
+    let spans = keep_spans(text, alloc, parts);
+    let mut out = String::new();
+    let mut pos = 0;
+    for (a, b) in spans {
+        if a > pos {
+            out.push_str(&format!("… [{} chars omitted] …", a - pos));
+        }
+        out.extend(text.iter().skip(a).take(b - a));
+        pos = b;
+    }
+    if pos < text.len() {
+        out.push_str(&format!("… [+{} chars]", text.len() - pos));
+    }
+    out
 }
 
-async fn do_session_roadmap(q: SessionRoadmap) -> super::Result<String> {
-    let opts: RoadmapOpts = parse_opts(&q.opts, "roadmap")?;
-    let rows = fetch_rows(&q.session_id, q.lines).await?;
-    Ok(build_roadmap(&rows, &opts))
-}
-
-#[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RoadmapOpts {
-    pub user_text: usize,
-    pub meta_text: usize,
-    pub assistant_text: usize,
-    pub thinking_head: usize,
-    pub thinking_tail: usize,
-    pub tool_input: usize,
-    pub result_line: usize,
-}
-
-impl Default for RoadmapOpts {
-    fn default() -> Self {
-        RoadmapOpts {
-            user_text: 500,
-            meta_text: 200,
-            assistant_text: 500,
-            thinking_head: 300,
-            thinking_tail: 200,
-            tool_input: 200,
-            result_line: 200,
+/// The kept spans of `text`, in position order. `alloc` chars are
+/// divided across the parts in listed order; a part with intrinsic
+/// size (`line1`) takes only what it needs and the remainder flows to
+/// the other listed parts.
+fn keep_spans(text: &[char], alloc: usize, parts: &[Part]) -> Vec<(usize, usize)> {
+    let n = text.len();
+    let k = parts.len();
+    // Even division, remainder to the earlier parts
+    let mut shares: Vec<usize> = (0..k)
+        .map(|i| alloc / k + usize::from(i < alloc % k))
+        .collect();
+    // Sized parts release what they don't need to the other parts,
+    // in listed order
+    let line1_len = text.iter().position(|c| *c == '\n').unwrap_or(n);
+    let mut leftover = 0;
+    for (share, part) in shares.iter_mut().zip(parts) {
+        if *part == Part::Line1 && *share > line1_len {
+            leftover += *share - line1_len;
+            *share = line1_len;
         }
     }
-}
-
-fn build_roadmap(rows: &[MessageRow], opts: &RoadmapOpts) -> String {
-    // tool_use id → tool name, for labeling tool_result lines
-    let mut tool_names: HashMap<String, String> = HashMap::new();
-    let mut out: Vec<String> = Vec::new();
-    for row in rows {
-        out.push(render_abbrev(row, opts, &mut tool_names));
-    }
-    out.join("\n\n")
-}
-
-/// Render one message abbreviated: header, an ide-tags size marker,
-/// then each content block reduced per its kind's cap.
-fn render_abbrev(
-    row: &MessageRow,
-    opts: &RoadmapOpts,
-    tool_names: &mut HashMap<String, String>,
-) -> String {
-    let mut s = header(row);
-    if let Some(tags) = &row.ide_tags {
-        s.push_str(&format!("\n<ide tags: {} chars>", tags.chars().count()));
-    }
-    let body = match serde_json::from_str::<Json>(&row.raw) {
-        Ok(raw) => match raw.get("message").and_then(|m| m.get("content")) {
-            Some(Json::Array(blocks)) => blocks
-                .iter()
-                .map(|b| render_block(b, row, opts, tool_names))
-                .filter(|b| !b.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Some(Json::String(text)) => truncate_chars(text, text_cap(row, opts)),
-            _ => truncate_chars(&row.text, opts.meta_text),
-        },
-        // The message table serves raw straight from the session
-        // JSONL, so a parse failure is unexpected; surface it in the
-        // rendering rather than dropping the message.
-        Err(e) => format!(
-            "<raw unparsed: {e}>\n{}",
-            truncate_chars(&row.text, opts.meta_text)
-        ),
-    };
-    if !body.is_empty() {
-        s.push('\n');
-        s.push_str(&body);
-    }
-    s
-}
-
-fn render_block(
-    block: &Json,
-    row: &MessageRow,
-    opts: &RoadmapOpts,
-    tool_names: &mut HashMap<String, String>,
-) -> String {
-    let ty = block.get("type").and_then(Json::as_str).unwrap_or("");
-    match ty {
-        "text" => {
-            let text = block.get("text").and_then(Json::as_str).unwrap_or("");
-            truncate_chars(text, text_cap(row, opts))
+    for (share, part) in shares.iter_mut().zip(parts) {
+        if leftover == 0 {
+            break;
         }
-        "thinking" => {
-            let text = block.get("thinking").and_then(Json::as_str).unwrap_or("");
-            format!(
-                "thinking: {}",
-                head_tail(text, opts.thinking_head, opts.thinking_tail)
-            )
+        if *part != Part::Line1 {
+            *share += leftover;
+            leftover = 0;
         }
-        "tool_use" => {
-            let name = block.get("name").and_then(Json::as_str).unwrap_or("?");
-            if let Some(id) = block.get("id").and_then(Json::as_str) {
-                tool_names.insert(id.to_string(), name.to_string());
-            }
-            let input = block.get("input").map(Json::to_string).unwrap_or_default();
-            format!(
-                "tool_use {name}: {}",
-                truncate_chars(&input, opts.tool_input)
-            )
+    }
+
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(k);
+    for (part, share) in parts.iter().zip(&shares) {
+        if *share == 0 {
+            continue;
         }
-        "tool_result" => {
-            let name = block
-                .get("tool_use_id")
-                .and_then(Json::as_str)
-                .and_then(|id| tool_names.get(id))
-                .map(|n| format!(" {n}"))
-                .unwrap_or_default();
-            let error = match block.get("is_error").and_then(Json::as_bool) {
-                Some(true) => " (error)",
-                _ => "",
-            };
-            let text = block_to_text(block);
-            format!(
-                "tool_result{name}{error}: {}",
-                first_line(&text, opts.result_line)
-            )
+        let span = match part {
+            Part::Start => (0, (*share).min(n)),
+            Part::End => (n - (*share).min(n), n),
+            Part::Line1 => (0, (*share).min(line1_len)),
+        };
+        spans.push(span);
+    }
+    spans.sort_unstable();
+    // Merge overlaps so each kept char renders once
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (a, b) in spans {
+        match merged.last_mut() {
+            Some((_, prev_b)) if a <= *prev_b => *prev_b = (*prev_b).max(b),
+            _ => merged.push((a, b)),
         }
-        "image" => "<image>".into(),
-        "" => String::new(),
-        other => format!("<{other}>"),
     }
-}
-
-/// The text-block cap for a message's role: `meta_text` for meta user
-/// messages and non-conversation rows, else the role's cap.
-fn text_cap(row: &MessageRow, opts: &RoadmapOpts) -> usize {
-    match (row.type_.as_str(), row.subtype.as_deref()) {
-        ("user", Some("meta")) => opts.meta_text,
-        ("user", _) => opts.user_text,
-        ("assistant", _) => opts.assistant_text,
-        _ => opts.meta_text,
-    }
-}
-
-/// First `cap` chars, with an omitted-count marker when truncated.
-fn truncate_chars(s: &str, cap: usize) -> String {
-    let total = s.chars().count();
-    if total <= cap {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(cap).collect();
-    format!("{head}… [+{} chars]", total - cap)
-}
-
-/// First `head` and last `tail` chars with the omitted middle counted.
-fn head_tail(s: &str, head: usize, tail: usize) -> String {
-    let total = s.chars().count();
-    if total <= head + tail {
-        return s.to_string();
-    }
-    let h: String = s.chars().take(head).collect();
-    let t: String = s.chars().skip(total - tail).collect();
-    format!("{h}… [{} chars omitted] …{t}", total - head - tail)
-}
-
-/// First line of `s` capped at `cap` chars, with the rest counted.
-fn first_line(s: &str, cap: usize) -> String {
-    let total = s.chars().count();
-    let line = s.lines().next().unwrap_or("");
-    let shown = line.chars().count().min(cap);
-    let head: String = line.chars().take(cap).collect();
-    if total <= shown {
-        head
-    } else {
-        format!("{head}… [+{} chars]", total - shown)
-    }
-}
-
-fn parse_opts<T: DeserializeOwned>(opts: &Value, what: &str) -> super::Result<T> {
-    let json = serde_json::to_value(opts)
-        .map_err(|e| Error::Args(format!("`{what}` options could not be read: {e}")))?;
-    serde_json::from_value(json).map_err(|e| Error::Args(format!("invalid `{what}` options: {e}")))
+    merged
 }
 
 pub(crate) struct MessageRow {
@@ -256,7 +509,6 @@ pub(crate) struct MessageRow {
     pub type_: String,
     pub subtype: Option<String>,
     pub text: String,
-    pub ide_tags: Option<String>,
     pub raw: String,
 }
 
@@ -300,10 +552,6 @@ async fn fetch_rows(session_id: &str, lines: Option<(u64, u64)>) -> super::Resul
             .downcast_ref::<StringArray>()
             .unwrap();
         let text_arr = col("text").as_any().downcast_ref::<StringArray>().unwrap();
-        let ide_tags_arr = col("ide_tags")
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
         let raw_arr = col("raw").as_any().downcast_ref::<StringArray>().unwrap();
         for i in 0..batch.num_rows() {
             rows.push(MessageRow {
@@ -311,7 +559,6 @@ async fn fetch_rows(session_id: &str, lines: Option<(u64, u64)>) -> super::Resul
                 type_: type_arr.value(i).to_string(),
                 subtype: opt_str(subtype_arr, i),
                 text: text_arr.value(i).to_string(),
-                ide_tags: opt_str(ide_tags_arr, i),
                 raw: raw_arr.value(i).to_string(),
             });
         }
@@ -331,117 +578,280 @@ fn opt_str(arr: &StringArray, i: usize) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn row(line: u64, type_: &str, subtype: Option<&str>, text: &str, raw: &str) -> MessageRow {
+    fn row(line: u64, type_: &str, subtype: Option<&str>, text: &str) -> MessageRow {
         MessageRow {
             line,
             type_: type_.to_string(),
             subtype: subtype.map(str::to_string),
             text: text.to_string(),
-            ide_tags: None,
-            raw: raw.to_string(),
+            raw: "{}".to_string(),
         }
     }
 
-    fn user_row(line: u64, text: &str) -> MessageRow {
-        let raw = serde_json::json!({
-            "type": "user",
-            "message": { "content": [{ "type": "text", "text": text }] },
-        });
-        row(line, "user", Some("text"), text, &raw.to_string())
+    fn rule(selector: &str, min: usize, max: Option<usize>, parts: Vec<Part>) -> Rule {
+        Rule {
+            selector: parse_selector(selector).unwrap(),
+            min,
+            max,
+            parts,
+        }
+    }
+
+    fn compress(rows: &[MessageRow], budget: Budget, rules: &[Rule]) -> String {
+        build_compressed("test-session", rows, budget, rules).unwrap()
+    }
+
+    /// Allocations from `fit_to_budget` for a chars budget.
+    fn fit(rows: &[MessageRow], rules: &[Rule], budget: usize) -> Vec<usize> {
+        let fallback = fallback_rule();
+        let all: Vec<&Rule> = rules.iter().chain([&fallback]).collect();
+        let mut msgs: Vec<Msg> = rows
+            .iter()
+            .map(|row| Msg {
+                row,
+                text: row.text.chars().collect(),
+                rule: all
+                    .iter()
+                    .position(|r| selector_matches(&r.selector, row))
+                    .unwrap(),
+                alloc: 0,
+            })
+            .collect();
+        fit_to_budget("s", &mut msgs, &all, budget).unwrap();
+        msgs.iter().map(|m| m.alloc).collect()
     }
 
     #[test]
-    fn roadmap_truncates_user_text() {
+    fn cuts_text_at_max_keeping_start() {
         let long = "x".repeat(600);
-        let out = build_roadmap(&[user_row(1, &long)], &RoadmapOpts::default());
+        let rows = [row(1, "user", Some("text"), &long)];
+        let rules = [rule("user.text", 0, Some(500), vec![Part::Start])];
+        let out = compress(&rows, Budget::Unlimited, &rules);
         assert!(out.starts_with("[L1 user text]\n"));
         assert!(out.contains(&"x".repeat(500)));
-        assert!(out.contains("… [+100 chars]"));
+        assert!(out.ends_with("… [+100 chars]"));
         assert!(!out.contains(&"x".repeat(501)));
     }
 
     #[test]
-    fn roadmap_reduces_tool_traffic() {
-        let big_input = "y".repeat(400);
-        let use_raw = serde_json::json!({
-            "type": "assistant",
-            "message": { "content": [{
-                "type": "tool_use",
-                "id": "toolu_1",
-                "name": "Bash",
-                "input": { "command": big_input },
-            }] },
-        });
-        let result_raw = serde_json::json!({
-            "type": "user",
-            "message": { "content": [{
-                "type": "tool_result",
-                "tool_use_id": "toolu_1",
-                "is_error": true,
-                "content": "line one\nline two\nline three",
-            }] },
-        });
-        let rows = vec![
-            row(1, "assistant", Some("tool_use"), "", &use_raw.to_string()),
-            row(2, "user", Some("tool_result"), "", &result_raw.to_string()),
-        ];
-        let out = build_roadmap(&rows, &RoadmapOpts::default());
-        assert!(out.contains("tool_use Bash: "));
-        assert!(out.contains("… [+"));
-        assert!(!out.contains(&"y".repeat(300)));
-        assert!(out.contains("tool_result Bash (error): line one… [+"));
-        assert!(!out.contains("line two"));
-    }
-
-    #[test]
-    fn roadmap_thinking_keeps_head_and_tail() {
-        let thinking = format!("HEAD{}TAIL", "m".repeat(1000));
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "message": { "content": [{ "type": "thinking", "thinking": thinking }] },
-        });
-        let rows = vec![row(1, "assistant", Some("thinking"), "", &raw.to_string())];
-        let out = build_roadmap(&rows, &RoadmapOpts::default());
-        assert!(out.contains("thinking: HEAD"));
-        assert!(out.contains("chars omitted"));
+    fn priority_start_end_keeps_both_ends() {
+        let text = format!("HEAD{}TAIL", "m".repeat(1000));
+        let rows = [row(1, "assistant", Some("thinking"), &text)];
+        let rules = [rule(
+            "assistant.thinking",
+            0,
+            Some(500),
+            vec![Part::Start, Part::End],
+        )];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.contains("HEAD"));
+        assert!(out.contains("… [508 chars omitted] …"));
         assert!(out.ends_with("TAIL"));
     }
 
     #[test]
-    fn roadmap_notes_ide_tags_without_content() {
-        let mut r = user_row(1, "body");
-        r.ide_tags = Some("<system-reminder>secret stuff</system-reminder>".to_string());
-        let out = build_roadmap(&[r], &RoadmapOpts::default());
-        assert!(out.contains("<ide tags: 47 chars>"));
-        assert!(!out.contains("secret stuff"));
+    fn priority_line1_keeps_first_line_only() {
+        let rows = [row(
+            1,
+            "user",
+            Some("tool_result"),
+            "line one\nline two\nrest",
+        )];
+        let rules = [rule("tool_result", 0, Some(200), vec![Part::Line1])];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.contains("line one… [+14 chars]"));
+        assert!(!out.contains("line two"));
     }
 
     #[test]
-    fn truncate_chars_is_char_boundary_safe() {
-        assert_eq!(truncate_chars("日本語のテキスト", 3), "日本語… [+5 chars]");
-        assert_eq!(truncate_chars("short", 10), "short");
+    fn first_matching_rule_wins() {
+        let rows = [row(1, "user", Some("text"), &"a".repeat(100))];
+        let rules = [
+            rule("user.text", 0, Some(10), vec![Part::Start]),
+            rule("*", 0, Some(90), vec![Part::Start]),
+        ];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.contains("… [+90 chars]"));
     }
 
     #[test]
-    fn head_tail_short_input_unchanged() {
-        assert_eq!(head_tail("abc", 300, 200), "abc");
+    fn explicit_wildcard_rule_is_the_default() {
+        let rows = [row(1, "system", Some("compact_boundary"), &"b".repeat(300))];
+        let rules = [
+            rule("user.text", 0, Some(500), vec![Part::Start]),
+            rule("*", 0, Some(200), vec![Part::Start]),
+        ];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.contains(&"b".repeat(200)));
+        assert!(out.contains("… [+100 chars]"));
     }
 
     #[test]
-    fn first_line_counts_remaining_chars() {
-        assert_eq!(first_line("one\nrest", 10), "one… [+5 chars]");
-        assert_eq!(first_line("only", 10), "only");
-        assert_eq!(first_line("", 10), "");
+    fn unmatched_message_renders_whole_under_unlimited() {
+        let rows = [row(
+            1,
+            "system",
+            Some("local_command"),
+            "some command output",
+        )];
+        let rules = [rule("user.text", 0, Some(10), vec![Part::Start])];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert_eq!(out, "[L1 system local_command]\nsome command output");
     }
 
     #[test]
-    fn opts_reject_unknown_fields() {
-        let err = serde_json::from_value::<RoadmapOpts>(serde_json::json!({ "user_texts": 1 }));
-        assert!(err.is_err(), "unknown field should be rejected");
+    fn bare_token_selector_matches_subtype() {
+        let rows = [
+            row(1, "assistant", Some("tool_use"), &"u".repeat(100)),
+            row(2, "user", Some("tool_result"), &"r".repeat(100)),
+        ];
+        let rules = [
+            rule("tool_use", 0, Some(10), vec![Part::Start]),
+            rule("tool_result", 0, Some(20), vec![Part::Start]),
+        ];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.contains("… [+90 chars]"));
+        assert!(out.contains("… [+80 chars]"));
     }
 
     #[test]
-    fn view_builders_leave_caller_values_readable() {
+    fn error_qualifier_peeks_raw() {
+        let mk = |line, is_error: bool| {
+            let raw = serde_json::json!({
+                "message": { "content": [{
+                    "type": "tool_result",
+                    "is_error": is_error,
+                    "content": "boom",
+                }] },
+            });
+            MessageRow {
+                line,
+                type_: "user".to_string(),
+                subtype: Some("tool_result".to_string()),
+                text: "e".repeat(100),
+                raw: raw.to_string(),
+            }
+        };
+        let rows = [mk(1, true), mk(2, false)];
+        let rules = [
+            rule("tool_result[error]", 0, Some(50), vec![Part::Start]),
+            rule("tool_result", 0, Some(10), vec![Part::Start]),
+        ];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.contains("… [+50 chars]")); // error row at 50
+        assert!(out.contains("… [+90 chars]")); // plain row at 10
+    }
+
+    #[test]
+    fn budget_partial_expansion_stays_within_budget() {
+        let rows = [row(1, "user", Some("text"), &"a".repeat(1000))];
+        let rules = [rule("user.text", 0, None, vec![Part::Start])];
+        let budget_chars = 200;
+        let allocs = fit(&rows, &rules, budget_chars);
+        let out = render_message(
+            &rows[0],
+            &rows[0].text.chars().collect::<Vec<_>>(),
+            allocs.first().copied().unwrap(),
+            &rules[0].parts,
+        );
+        assert!(out.chars().count() <= budget_chars);
+        assert!(out.contains("… [+"));
+    }
+
+    #[test]
+    fn min_reserves_content_before_expansion() {
+        let rows = [
+            row(1, "user", Some("text"), &"a".repeat(500)),
+            row(2, "assistant", Some("text"), &"b".repeat(500)),
+        ];
+        let rules = [
+            rule("user.text", 0, None, vec![Part::Start]),
+            rule("assistant.text", 50, Some(60), vec![Part::Start]),
+        ];
+        // Budget covers mins plus a bit; the second rule's min must
+        // survive even though the first rule expands first
+        let allocs = fit(&rows, &rules, 200);
+        assert!(
+            allocs.get(1).copied().unwrap() >= 50,
+            "assistant min not reserved: {allocs:?}"
+        );
+    }
+
+    #[test]
+    fn demotion_drops_last_rule_first() {
+        let rows = [
+            row(1, "user", Some("text"), &"a".repeat(100)),
+            row(2, "assistant", Some("text"), &"b".repeat(100)),
+        ];
+        let rules = [
+            rule("user.text", 40, Some(40), vec![Part::Start]),
+            rule("assistant.text", 40, Some(40), vec![Part::Start]),
+        ];
+        // Headers ~15+19+2 sep = 36; two mins at 40 plus markers push
+        // past 100, so the assistant rule (listed last) demotes
+        let allocs = fit(&rows, &rules, 100);
+        assert_eq!(
+            allocs.get(1).copied().unwrap(),
+            0,
+            "last rule should demote first: {allocs:?}"
+        );
+    }
+
+    #[test]
+    fn over_budget_with_all_demoted_errors() {
+        let rows: Vec<MessageRow> = (1..=10)
+            .map(|i| row(i, "user", Some("text"), "content"))
+            .collect();
+        let rules = [rule("user.text", 0, None, vec![Part::Start])];
+        let err = build_compressed("big-session", &rows, Budget::Chars(10), &rules).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("big-session"), "{msg}");
+        assert!(msg.contains("marker-only"), "{msg}");
+    }
+
+    #[test]
+    fn budget_token_to_char_conversion() {
+        let b = parse_budget(&rune::to_value(100_i64).unwrap()).unwrap();
+        match b {
+            Budget::Chars(c) => assert_eq!(c, 220),
+            Budget::Unlimited => panic!("expected chars"),
+        }
+        let b = parse_budget(&rune::to_value(100.5_f64).unwrap()).unwrap();
+        match b {
+            Budget::Chars(c) => assert_eq!(c, 221),
+            Budget::Unlimited => panic!("expected chars"),
+        }
+        let unlimited = rune::to_value("unlimited").unwrap();
+        assert!(matches!(
+            parse_budget(&unlimited).unwrap(),
+            Budget::Unlimited
+        ));
+        assert!(parse_budget(&rune::to_value(-1_i64).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rules_reject_unknown_attributes() {
+        let rules = serde_json::json!([["user.text", { "mim": 10 }]]);
+        let v = crate::value::json_to_value(&rules);
+        assert!(parse_rules(&v).is_err());
+    }
+
+    #[test]
+    fn rules_reject_bad_priority_part() {
+        let rules = serde_json::json!([["user.text", { "priority": ["mid"] }]]);
+        let v = crate::value::json_to_value(&rules);
+        assert!(parse_rules(&v).is_err());
+    }
+
+    #[test]
+    fn render_body_char_boundary_safe() {
+        let text: Vec<char> = "日本語のテキスト".chars().collect();
+        let out = render_body(&text, 3, &[Part::Start]);
+        assert_eq!(out, "日本語… [+5 chars]");
+    }
+
+    #[test]
+    fn compress_builder_leaves_caller_values_readable() {
         use crate::datetime::DateTime;
         use crate::scan::Range;
         use std::path::PathBuf;
@@ -453,26 +863,26 @@ mod tests {
             range: Some(Range { start: 3, end: 9 }),
         };
         let sv = rune::to_value(session).unwrap();
-        let mut obj = rune::runtime::Object::new();
-        obj.insert(
-            rune::alloc::String::try_from("user_text").unwrap(),
-            rune::to_value(64_i64).unwrap(),
-        )
-        .unwrap();
-        let opts = rune::to_value(obj).unwrap();
+        let budget = rune::to_value(1000_i64).unwrap();
+        let rules_json = serde_json::json!([["user.text", { "max": 500 }]]);
+        let rules = crate::value::json_to_value(&rules_json);
 
-        let q = SessionRoadmap {
+        let q = SessionCompress {
             session_id: sv.borrow_ref::<Session>().unwrap().id.clone(),
             lines: Some((3, 9)),
-            opts: opts.clone(),
+            budget: budget.clone(),
+            rules: rules.clone(),
         };
-        let parsed: RoadmapOpts = parse_opts(&q.opts, "roadmap").unwrap();
-        assert_eq!(parsed.user_text, 64);
+        assert!(matches!(
+            parse_budget(&q.budget).unwrap(),
+            Budget::Chars(2200)
+        ));
+        assert_eq!(parse_rules(&q.rules).unwrap().len(), 1);
 
-        // The caller's values are reads, not takes: both stay readable
+        // The caller's values are reads, not takes: all stay readable
         let s = sv.borrow_ref::<Session>().unwrap();
         assert_eq!(s.id, "11111111-1111-1111-1111-111111111111");
-        let o = opts.borrow_ref::<rune::runtime::Object>().unwrap();
-        assert!(o.contains_key("user_text"));
+        assert!(matches!(parse_budget(&budget).unwrap(), Budget::Chars(_)));
+        assert_eq!(parse_rules(&rules).unwrap().len(), 1);
     }
 }

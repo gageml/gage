@@ -4,6 +4,7 @@ use gage::{
     Progress,
     Template,
     call_agent,
+    model_context,
     params,
     query,
     scan,
@@ -116,19 +117,36 @@ async fn findings_default() {
     Ok(())
 }
 
-/// Roadmap mode: the whole session goes into the agent prompt as an
-/// abbreviated roadmap; the agent retrieves full message text
+// Duplicates the value caps of the retired `Session::roadmap()`
+// renderer; tuning toward the evidence-based values is a later step
+// (see the agent query behavior appendix in the design doc)
+const ROADMAP_RULES = [
+    ("user.text",          #{ max: 500 }),
+    ("assistant.text",     #{ max: 500 }),
+    ("assistant.thinking", #{ max: 500, priority: ["start", "end"] }),
+    ("tool_use",           #{ max: 200 }),
+    ("tool_result",        #{ max: 200, priority: ["line1"] }),
+    ("*",                  #{ max: 200 }),
+];
+
+/// Roadmap mode: the whole session goes into the agent prompt as a
+/// compressed session; the agent retrieves full message text
 /// selectively through its session-scoped Query view.
 ///
 /// Sessions already processed under the current findings key are
 /// skipped. A grown session carries the range of its unscanned lines;
-/// the roadmap and Query view are constrained to that range.
+/// the compressed session and Query view are constrained to that
+/// range.
 async fn findings_roadmap() {
     // Skip previously scanned sessions per key
     let (_prev_sessions, new_sessions, validate) = scan()
         .sessions()
         .split_valid_range(FINDINGS_ROADMAP_KEY)
         .await?;
+
+    // Size the compression budget to the agent's free context
+    let context = model_context("medium").await?;
+    let budget = (context.free_tokens as f64) * 0.8;
 
     // Init template for agent prompts
     let t = Template::new(include_str!("findings-roadmap-prompt.md.j2")).await?;
@@ -147,8 +165,7 @@ async fn findings_roadmap() {
             progress.tick();
             continue
         }
-        // Default abbreviation heuristics; tune per comparison runs
-        let roadmap = s.roadmap(#{}).await?;
+        let roadmap = s.compress(budget, ROADMAP_RULES).await?;
         let prompt = t.render(#{ session_id: s.id, roadmap }).await?;
         runner.add(
             call_agent(prompt)

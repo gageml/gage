@@ -7,10 +7,10 @@ numbers when citing lines in findings. Message content is truncated:
 
 - `… [+N chars]` marks content cut at a cap, with the omitted char count
 - `… [N chars omitted] …` marks the elided middle of a thinking block
-- `<ide tags: N chars>` marks out-of-band harness tags not shown
-- `tool_use <name>: …` shows a tool call with its input truncated
-- `tool_result <name>: …` shows a result's first output line; `(error)`
-  flags a failed call
+- tool call messages (subtype `tool_use`) show the tool name and its input
+  fields, truncated
+- tool result messages (subtype `tool_result`) show only the result's
+  first line
 
 Look for issues in the session. An issue is something wrong or costly that the
 session gives evidence of that the user would likely want to address after the
