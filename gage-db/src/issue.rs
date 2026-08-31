@@ -679,12 +679,17 @@ pub struct IssueFilters {
     pub offset: Option<u32>,
 }
 
-// An issue has at most one scan_issue row (only creation links a scan;
-// see IssueWrite), so the join cannot multiply rows.
+// An issue can carry multiple scan_issue rows (creation plus later
+// evidence/reopen links; see IssueWrite in gage-runtime). The subquery
+// resolves the creating scan: the earliest linked scan by scan history.
 const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.title, i.description, i.status,
             i.status_reason, i.created, i.modified, i.author, i.target,
-            i.metadata, si.scan_id
-     FROM issue i LEFT JOIN scan_issue si ON si.issue_id = i.id";
+            i.metadata,
+            (SELECT si.scan_id FROM scan_issue si
+             JOIN scan s ON s.id = si.scan_id
+             WHERE si.issue_id = i.id
+             ORDER BY s.created LIMIT 1)
+     FROM issue i";
 
 pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, IssueError> {
     let mut clauses: Vec<String> = Vec::new();
