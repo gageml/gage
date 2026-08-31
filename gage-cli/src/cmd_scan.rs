@@ -75,6 +75,10 @@ pub struct ScanViewArgs {
 pub struct ScanListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
+
+    /// Show the full scan ID, never truncating it
+    #[arg(long)]
+    full_id: bool,
 }
 
 #[derive(Args)]
@@ -265,7 +269,7 @@ fn list(args: ScanListArgs) {
 
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(show);
     for run in runs.iter().take(show) {
-        match list_row(&conn, run, &highlighter) {
+        match list_row(&conn, run, &highlighter, args.full_id) {
             Ok(row) => rows.push(row),
             Err(e) => {
                 eprintln!("Error: {e}");
@@ -296,6 +300,7 @@ fn list_row(
     conn: &gage_db::rusqlite::Connection,
     run: &scan::Scan,
     highlighter: &s::IdHighlighter,
+    full_id: bool,
 ) -> anyhow::Result<Vec<String>> {
     let tasks = scan::tasks_for_scan(conn, &run.id)?;
     let errors = tasks
@@ -320,8 +325,13 @@ fn list_row(
         .and_then(|m| m.elapsed_ms())
         .map(|ms| crate::human::format_duration(Duration::from_millis(ms)))
         .unwrap_or_default();
+    let id_display = if full_id {
+        highlighter.full(&run.id)
+    } else {
+        highlighter.short(&run.id)
+    };
     Ok(vec![
-        highlighter.short(&run.id),
+        id_display,
         tasks.len().to_string(),
         sessions.to_string(),
         issues.to_string(),
