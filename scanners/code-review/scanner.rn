@@ -153,9 +153,9 @@ pub async fn write_summary(inputs, meta) {
         return Ok(format!("error: unknown note name `{}`", inputs.name));
     }
     // Scanner authorship (the default) rather than per-call authorship:
-    // the duplicate key (name, target, author) then matches across
-    // runs, so a re-summary replaces the prior note instead of
-    // accumulating alongside it.
+    // replace_prev then matches (name, target, author) across runs, so
+    // a re-summary replaces the prior note instead of accumulating
+    // alongside it.
     let note = write_note(
         #{
             name: inputs.name,

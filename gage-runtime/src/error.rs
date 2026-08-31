@@ -6,10 +6,8 @@
 //! `::gage::Error::<Variant>`.
 
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Value, VmError};
+use rune::runtime::{Formatter, VmError};
 use rune::{Any, ContextError, Module};
-
-use crate::db::{Issue, Note};
 
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
@@ -50,18 +48,6 @@ pub enum Error {
     /// Agent subprocess failure (spawn, wait timeout, sandbox merge).
     #[rune(constructor)]
     Agent(#[rune(get)] String),
-
-    /// A note or issue with the same duplication key already exists.
-    /// `prev` is the existing value; `new` is the value that would have
-    /// been written, carrying `prev`'s id (so it identifies the existing
-    /// row).
-    #[rune(constructor)]
-    Duplicate {
-        #[rune(get)]
-        prev: Value,
-        #[rune(get)]
-        new: Value,
-    },
 }
 
 impl Error {
@@ -83,17 +69,12 @@ impl std::fmt::Display for Error {
             Error::Decode(m) => write!(f, "decode: {m}"),
             Error::Template(m) => write!(f, "template: {m}"),
             Error::Agent(m) => write!(f, "agent: {m}"),
-            Error::Duplicate { prev, .. } => write!(f, "duplicate {}", describe_duplicate(prev)),
         }
     }
 }
 
 // Debug carries the detail a programmer needs when a task returns an
 // unexpected `Err`: `render_task_error` renders failed tasks with `{:?}`.
-// The `Duplicate` arm reaches into the wrapped value (a Rune `Issue` or
-// `Note`) for its identity — `Value`'s own `Debug` is an opaque object
-// pointer. This is Rust `Debug`, not Rune's `DEBUG_FMT` protocol, so it
-// is safe to call after the VM has stopped.
 impl std::fmt::Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -109,25 +90,7 @@ impl std::fmt::Debug for Error {
             Error::Decode(m) => write!(f, "Decode({m:?})"),
             Error::Template(m) => write!(f, "Template({m:?})"),
             Error::Agent(m) => write!(f, "Agent({m:?})"),
-            Error::Duplicate { prev, .. } => write!(f, "Duplicate({})", describe_duplicate(prev)),
         }
-    }
-}
-
-/// Identity summary of the value carried by a `Duplicate` error. Tries
-/// `Issue`, then `Note`; falls back to the Rune type name.
-fn describe_duplicate(v: &Value) -> String {
-    if let Ok(issue) = v.borrow_ref::<Issue>() {
-        format!("issue name={:?} id={:?}", issue.name, issue.id)
-    } else if let Ok(note) = v.borrow_ref::<Note>() {
-        format!(
-            "note name={:?} target={:?} id={:?}",
-            note.name,
-            note.target_uri(),
-            note.id
-        )
-    } else {
-        format!("<{:?}>", v.type_info())
     }
 }
 

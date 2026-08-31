@@ -380,3 +380,53 @@ async fn test_note_issue_debug_fmt() {
     assert!(s.contains("Issue {"));
     assert!(s.contains("status: \"pending\""));
 }
+
+#[test]
+async fn test_write_note_duplicate_policies() {
+    let session = "66666666-6666-6666-6666-666666666666";
+    let write = |value| {
+        gage::write_note(
+            #{
+                name: "test.policy",
+                value: value,
+                target: #{ session: session },
+            },
+        )
+    };
+
+    // No policy: same-key writes coexist
+    let a = write("first").await.unwrap();
+    let b = write("second").await.unwrap();
+    assert!(a.id != b.id);
+
+    // replace_prev collapses the key to one note carrying the new value
+    let c = write("third").replace_prev().await.unwrap();
+    assert!(c.id == a.id || c.id == b.id);
+    assert_eq!(c.value, "third");
+
+    // keep_prev returns the surviving note untouched
+    let d = write("fourth").keep_prev().await.unwrap();
+    assert_eq!(d.id, c.id);
+    assert_eq!(d.value, "third");
+}
+
+#[test]
+async fn test_write_issue_duplicate_policies() {
+    let write = |title| gage::write_issue(#{ name: "test.policy-issue", title: title });
+
+    // No policy: same-key writes coexist
+    let a = write("A").await.unwrap();
+    let b = write("B").await.unwrap();
+    assert!(a.id != b.id);
+
+    // A merge policy folds into the most recent prior issue
+    let c = write("C").keep_status().await.unwrap();
+    assert!(c.id == a.id || c.id == b.id);
+
+    let open = gage::global()
+        .issues()
+        .name("test.policy-issue")
+        .await
+        .unwrap();
+    assert_eq!(open.len(), 2);
+}

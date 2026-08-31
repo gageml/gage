@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use gage_db::issue::{
-    self, Issue as DbIssue, IssueError, IssueEvidence as DbIssueEvidence, IssueFilters,
-    IssueStatus, IssueStatusFilter, StatusReason,
+    self, Issue as DbIssue, IssueEvidence as DbIssueEvidence, IssueFilters, IssueStatus,
+    IssueStatusFilter, StatusReason,
 };
-use gage_db::note::{self, Note as DbNote, NoteError, NoteFilters, NoteValue};
+use gage_db::note::{self, Note as DbNote, NoteFilters, NoteValue};
+use gage_db::rusqlite::Connection;
 use gage_db::scan::{ScanNoteRole, insert_scan_issue, insert_scan_note};
 use gage_db::target::{NoteTarget, ProjectTarget, ScanTarget, SessionTarget};
 use rune::Any;
@@ -14,7 +15,7 @@ use rune::alloc::clone::TryClone;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{ContextError, Module};
-use tracing::{error, warn};
+use tracing::warn;
 
 use crate::error::Error;
 use crate::scan::{Scan, Session};
@@ -30,7 +31,6 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: NoteInsert| async move {
         do_write_note(q)
     })?;
-    m.associated_function("replace", |note: Note| async move { do_replace_note(note) })?;
 
     m.function("write_issue", |t: &Object| -> alloc::Result<IssueInsert> {
         Ok(IssueInsert::new(t.try_clone()?))
@@ -365,18 +365,23 @@ fn target_to_rune(t: &NoteTarget) -> RuneNoteTarget {
     }
 }
 
-/// What a duplicate `(name, target, author)` does at write time.
+/// How the write treats earlier notes with the same
+/// `(name, target, author)`. Nothing in the schema constrains the key;
+/// the policy is the writer's stated intent.
 enum DuplicatePolicy {
-    /// Surface the conflict as `Err(Error::Duplicate { prev, new })`.
-    Error,
-    /// Overwrite the existing note with the new one, return it.
+    /// Insert unconditionally; earlier notes coexist.
+    Insert,
+    /// Overwrite the most recent earlier note and delete any older
+    /// ones; insert when none exist.
     Replace,
-    /// Keep the existing note untouched, return it.
+    /// Keep the most recent earlier note untouched and return it;
+    /// insert when none exist.
     Ignore,
 }
 
 /// Builder returned by `write_note`. The insert runs when the value is
-/// awaited; the policy decides what happens on a duplicate.
+/// awaited; the policy decides how earlier notes with the same
+/// `(name, target, author)` are treated.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub(crate) struct NoteInsert {
@@ -390,19 +395,22 @@ impl NoteInsert {
     fn new(args: Object) -> Self {
         Self {
             args,
-            policy: DuplicatePolicy::Error,
+            policy: DuplicatePolicy::Insert,
         }
     }
 
-    /// On a duplicate, overwrite the existing note with this one and
-    /// return the updated note.
+    /// Replace earlier notes this writer wrote with the same name and
+    /// target: the most recent is overwritten and returned, older ones
+    /// are deleted.
     #[rune::function(instance)]
     fn replace_prev(mut self) -> Self {
         self.policy = DuplicatePolicy::Replace;
         self
     }
 
-    /// On a duplicate, keep the existing note untouched and return it.
+    /// Keep the most recent earlier note this writer wrote with the
+    /// same name and target: it is returned untouched and nothing is
+    /// written.
     #[rune::function(instance)]
     fn keep_prev(mut self) -> Self {
         self.policy = DuplicatePolicy::Ignore;
@@ -445,67 +453,39 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
         "write_note",
     );
     let db = ctx.db.lock().unwrap();
-    match note::insert(&db, &db_note) {
-        Ok(()) => {
-            insert_scan_note(&db, &ctx.run.scan_id, &db_note.id, ScanNoteRole::Wrote)
+    match q.policy {
+        DuplicatePolicy::Insert => insert_new_note(&db, &ctx.run.scan_id, db_note),
+        DuplicatePolicy::Replace => {
+            let prevs = note::find_by_key(&db, &db_note.name, &db_note.target, &db_note.author)
                 .map_err(|e| Error::Db(e.to_string()))?;
-            Ok(db_note.into())
+            let Some((latest, stale)) = prevs.split_first() else {
+                return insert_new_note(&db, &ctx.run.scan_id, db_note);
+            };
+            for s in stale {
+                note::delete(&db, &s.id).map_err(|e| Error::Db(e.to_string()))?;
+            }
+            let updated =
+                note::replace(&db, &latest.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
+            insert_scan_note(&db, &ctx.run.scan_id, &updated.id, ScanNoteRole::Wrote)
+                .map_err(|e| Error::Db(e.to_string()))?;
+            Ok(updated.into())
         }
-        Err(NoteError::Duplicate(prev)) => match q.policy {
-            DuplicatePolicy::Replace => {
-                let updated =
-                    note::replace(&db, &prev.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
-                insert_scan_note(&db, &ctx.run.scan_id, &updated.id, ScanNoteRole::Wrote)
-                    .map_err(|e| Error::Db(e.to_string()))?;
-                Ok(updated.into())
+        DuplicatePolicy::Ignore => {
+            let prevs = note::find_by_key(&db, &db_note.name, &db_note.target, &db_note.author)
+                .map_err(|e| Error::Db(e.to_string()))?;
+            match prevs.into_iter().next() {
+                Some(prev) => Ok(prev.into()),
+                None => insert_new_note(&db, &ctx.run.scan_id, db_note),
             }
-            DuplicatePolicy::Ignore => Ok((*prev).into()),
-            DuplicatePolicy::Error => {
-                error!(
-                    name = db_note.name,
-                    target = ?db_note.target,
-                    author = db_note.author,
-                    prev_id = prev.id,
-                    "duplicate note write rejected — same writer, name, and target"
-                );
-                // `new` carries prev's id so `new.replace()` targets the
-                // existing row, per the duplicate-key contract.
-                let mut new_db = db_note;
-                new_db.id = prev.id.clone();
-                let prev_note: Note = (*prev).into();
-                let new_note: Note = new_db.into();
-                Err(Error::Duplicate {
-                    prev: rune::to_value(prev_note).map_err(|e| Error::Db(e.to_string()))?,
-                    new: rune::to_value(new_note).map_err(|e| Error::Db(e.to_string()))?,
-                })
-            }
-        },
-        Err(e) => Err(Error::Db(e.to_string())),
+        }
     }
 }
 
-/// Commit a replace of the existing note row this `Note` identifies.
-/// Used to resolve `Err(Error::Duplicate { new, .. })` by hand:
-/// `new.replace().await`. Identity (`new.id`) is unchanged; only
-/// `value`/`metadata` and `modified` are written.
-fn do_replace_note(note: Note) -> super::Result<Note> {
-    let ctx = current_scan_ctx();
-    let db_note = DbNote {
-        id: note.id.clone(),
-        author: note.author.clone(),
-        created: note.created,
-        modified: None,
-        target: note.target_db.clone(),
-        name: note.name.clone(),
-        value: value_to_note_value(&note.value)?,
-        metadata: note.metadata_raw.clone(),
-        scan: None,
-    };
-    let db = ctx.db.lock().unwrap();
-    let updated = note::replace(&db, &note.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
-    insert_scan_note(&db, &ctx.run.scan_id, &updated.id, ScanNoteRole::Wrote)
+fn insert_new_note(db: &Connection, scan_id: &str, db_note: DbNote) -> super::Result<Note> {
+    note::insert(db, &db_note).map_err(|e| Error::Db(e.to_string()))?;
+    insert_scan_note(db, scan_id, &db_note.id, ScanNoteRole::Wrote)
         .map_err(|e| Error::Db(e.to_string()))?;
-    Ok(updated.into())
+    Ok(db_note.into())
 }
 
 #[derive(Any)]
@@ -560,25 +540,29 @@ impl From<DbIssue> for Issue {
     }
 }
 
-/// What a duplicate `name` does at write time.
+/// How the write treats an earlier issue with the same
+/// `(name, author)`. Nothing in the schema constrains the key; the
+/// merge policies act on the most recently created match.
 enum IssuePolicy {
-    /// Surface the conflict as `Err(Error::Duplicate { prev, new })`.
-    Error,
-    /// Add any new evidence; leave the issue status unchanged.
+    /// Insert unconditionally; earlier issues coexist.
+    Insert,
+    /// Merge into the prior issue: add any new evidence; leave the
+    /// issue status unchanged.
     KeepStatus,
-    /// Add any new evidence; reopen a closed issue when incoming evidence
-    /// is newer than recorded evidence of the same name.
+    /// Merge into the prior issue: add any new evidence; reopen a
+    /// closed issue when incoming evidence is newer than recorded
+    /// evidence of the same name.
     OpenOnNewEvidence,
-    /// Add any new evidence; reopen a closed issue when incoming evidence
-    /// differs (by digest) from the latest recorded evidence of the same
-    /// name.
+    /// Merge into the prior issue: add any new evidence; reopen a
+    /// closed issue when incoming evidence differs (by digest) from the
+    /// latest recorded evidence of the same name.
     OpenOnChangedEvidence,
 }
 
 /// Builder returned by `write_issue`. The insert runs when the value is
-/// awaited; the policy decides what happens on a duplicate. With no
-/// policy a duplicate `name` surfaces as
-/// `Err(Error::Duplicate { prev, new })`.
+/// awaited; the policy decides how an earlier issue with the same
+/// `(name, author)` is treated. The merge policies insert normally when
+/// no earlier issue exists.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub(crate) struct IssueInsert {
@@ -592,28 +576,31 @@ impl IssueInsert {
     fn new(args: Object) -> Self {
         Self {
             args,
-            policy: IssuePolicy::Error,
+            policy: IssuePolicy::Insert,
         }
     }
 
-    /// On a duplicate, add new evidence and leave the issue status as-is.
+    /// Merge into the prior issue this writer wrote with the same name:
+    /// add new evidence and leave the issue status as-is.
     #[rune::function(instance)]
     fn keep_status(mut self) -> Self {
         self.policy = IssuePolicy::KeepStatus;
         self
     }
 
-    /// On a duplicate, add new evidence and reopen a closed issue when the
-    /// incoming evidence is newer than recorded evidence of the same name.
+    /// Merge into the prior issue this writer wrote with the same name:
+    /// add new evidence and reopen a closed issue when the incoming
+    /// evidence is newer than recorded evidence of the same name.
     #[rune::function(instance)]
     fn open_on_new_evidence(mut self) -> Self {
         self.policy = IssuePolicy::OpenOnNewEvidence;
         self
     }
 
-    /// On a duplicate, add new evidence and reopen a closed issue when the
-    /// incoming evidence differs from the latest recorded evidence of the
-    /// same name.
+    /// Merge into the prior issue this writer wrote with the same name:
+    /// add new evidence and reopen a closed issue when the incoming
+    /// evidence differs from the latest recorded evidence of the same
+    /// name.
     #[rune::function(instance)]
     fn open_on_changed_evidence(mut self) -> Self {
         self.policy = IssuePolicy::OpenOnChangedEvidence;
@@ -666,8 +653,14 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
         "write_issue",
     );
     let db = ctx.db.lock().unwrap();
-    match issue::insert(&db, &db_issue) {
-        Ok(()) => {
+    let prev = match q.policy {
+        IssuePolicy::Insert => None,
+        _ => issue::latest_by_key(&db, &db_issue.name, &db_issue.author)
+            .map_err(|e| Error::Db(e.to_string()))?,
+    };
+    match prev {
+        None => {
+            issue::insert(&db, &db_issue).map_err(|e| Error::Db(e.to_string()))?;
             for ev in &evidence {
                 issue::insert_issue_evidence(&db, &ev.row(&db_issue.id))
                     .map_err(|e| Error::Db(e.to_string()))?;
@@ -680,25 +673,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
                 .map_err(|e| Error::Db(e.to_string()))?;
             Ok(db_issue.into())
         }
-        Err(IssueError::Duplicate(prev)) if matches!(q.policy, IssuePolicy::Error) => {
-            error!(
-                name = db_issue.name,
-                author = db_issue.author,
-                prev_id = prev.id,
-                "duplicate issue write rejected — same writer and name"
-            );
-            // `new` carries prev's id so it identifies the existing row,
-            // per the duplicate-key contract.
-            let mut new_db = db_issue;
-            new_db.id = prev.id.clone();
-            let prev_issue: Issue = (*prev).into();
-            let new_issue: Issue = new_db.into();
-            Err(Error::Duplicate {
-                prev: rune::to_value(prev_issue).map_err(|e| Error::Db(e.to_string()))?,
-                new: rune::to_value(new_issue).map_err(|e| Error::Db(e.to_string()))?,
-            })
-        }
-        Err(IssueError::Duplicate(prev)) => {
+        Some(prev) => {
             let existing =
                 issue::issue_evidence_for(&db, &prev.id).map_err(|e| Error::Db(e.to_string()))?;
 
@@ -742,14 +717,13 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
 
-            let mut result: Issue = (*prev).into();
+            let mut result: Issue = prev.into();
             if reopen {
                 result.status = IssueStatus::Open.as_str().to_string();
                 result.status_reason = None;
             }
             Ok(result)
         }
-        Err(e) => Err(Error::Db(e.to_string())),
     }
 }
 

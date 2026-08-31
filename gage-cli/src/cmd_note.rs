@@ -59,10 +59,7 @@ pub struct NoteAddArgs {
     #[arg(short, long)]
     target: Option<String>,
 
-    /// Note name
-    ///
-    /// Names must be unique for a target and author. Defaults to
-    /// "comment.<random>"
+    /// Note name (default: "comment")
     #[arg(short, long)]
     name: Option<String>,
 

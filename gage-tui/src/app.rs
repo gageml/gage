@@ -761,13 +761,8 @@ impl AppState {
         if note.author != self.author() || !is_editable(&note.name) {
             return false;
         }
-        let title = if is_comment(&note.name) {
-            "Edit comment"
-        } else {
-            "Edit open code"
-        };
         let (note_id, text) = (note.id.clone(), note_text(note));
-        self.open_note_editor(note_id, text, title);
+        self.open_note_editor(note_id, text, "Edit comment");
         true
     }
 
@@ -869,14 +864,7 @@ fn note_text(note: &Note) -> String {
 
 /// User-editable note names: comments only.
 fn is_editable(name: &str) -> bool {
-    is_comment(name)
-}
-
-/// Stored note names are namespaced (e.g. `comment.abcd1234`) so multiple
-/// notes in the same family can coexist under the DB's (name, target, author)
-/// unique key.
-fn is_comment(name: &str) -> bool {
-    name == "comment" || name.starts_with("comment.")
+    name == "comment"
 }
 
 fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
@@ -954,14 +942,7 @@ fn commit_note(state: &mut AppState, db: &Connection) {
                 target = target.with_line(line);
             }
             let target = NoteTarget::Session(target);
-            let mut note = Note::new(target, "comment", NoteValue::from(text), &state.author());
-            // Notes are keyed by (name, target, author) in the DB, so a
-            // literal "comment" name caps users at one comment per line.
-            // Suffix with a short slice of the note's own UUID to keep the
-            // key unique while the display layer renders the family name
-            // "comment".
-            let suffix: String = note.id.chars().take(8).collect();
-            note.name = format!("comment.{suffix}");
+            let note = Note::new(target, "comment", NoteValue::from(text), &state.author());
             if let Ok(()) = note::insert(db, &note) {
                 let id = note.id.clone();
                 state.doc.add_note(note);

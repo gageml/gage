@@ -140,9 +140,6 @@ pub struct NoteFilters {
 pub enum NoteError {
     NotFound(String),
     Ambiguous(String, Vec<String>),
-    /// A note with the same `(name, target, author)` already exists. The
-    /// existing note is returned so the caller can decide what to do.
-    Duplicate(Box<Note>),
     /// A session target carried a `session_id` that is not the expected
     /// UUID form. There is no FK on `session_note.session_id` (sessions
     /// live in the filesystem, not a table), so this is the cheap
@@ -168,14 +165,6 @@ impl std::fmt::Display for NoteError {
                 }
                 Ok(())
             }
-            NoteError::Duplicate(prev) => {
-                write!(
-                    f,
-                    "duplicate note (name={}, target={})",
-                    prev.name,
-                    prev.target.to_uri()
-                )
-            }
             NoteError::InvalidSessionId(id) => {
                 write!(f, "invalid session id: '{id}' (expected 36-char UUID)")
             }
@@ -187,9 +176,9 @@ impl std::fmt::Display for NoteError {
 impl std::error::Error for NoteError {}
 
 impl Note {
-    /// Build a new note. The name is used as provided; uniqueness
-    /// within the `(name, target, author)` duplicate key is the
-    /// caller's concern (see the author scheme in docs/notes.md).
+    /// Build a new note. Nothing constrains `(name, target, author)`;
+    /// a writer that wants to replace or keep an earlier note with the
+    /// same key does so explicitly (see [`find_by_key`]).
     pub fn new(target: NoteTarget, name: &str, value: impl Into<NoteValue>, author: &str) -> Self {
         let id = gage_core::uuid::new_uuid();
         Note {
@@ -209,15 +198,11 @@ impl Note {
 const NOTE_COLUMNS: &str = "id, created, modified, author, target,
     name, value, metadata";
 
-/// Insert a note.
-///
-/// Returns `NoteError::Duplicate(prev)` if a note with the same
-/// `(name, target, author)` already exists; the existing note is left
-/// untouched and returned so the caller can decide what to do.
+/// Insert a note. Duplicates of `(name, target, author)` are allowed;
+/// a writer with replace/keep semantics checks [`find_by_key`] first.
 pub fn insert(conn: &Connection, note: &Note) -> Result<(), NoteError> {
     let tx = conn.unchecked_transaction()?;
-    let target_uri = note.target.to_uri();
-    let insert_res = tx.execute(
+    tx.execute(
         &format!(
             "INSERT INTO note ({NOTE_COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
@@ -227,44 +212,34 @@ pub fn insert(conn: &Connection, note: &Note) -> Result<(), NoteError> {
             note.created,
             note.modified,
             note.author,
-            target_uri,
+            note.target.to_uri(),
             note.name,
             note.value,
             note.metadata,
         ],
-    );
-    if let Err(e) = insert_res {
-        if is_unique_violation(&e) {
-            drop(tx);
-            let prev = find_by_dup_key(conn, &note.name, &target_uri, &note.author)?;
-            return Err(NoteError::Duplicate(Box::new(prev)));
-        }
-        return Err(e.into());
-    }
+    )?;
     insert_target_relation(&tx, note)?;
     tx.commit()?;
     Ok(())
 }
 
-fn is_unique_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(err, _)
-            if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-    )
-}
-
-fn find_by_dup_key(
+/// Notes matching `(name, target, author)` exactly, most recent first.
+/// Backs the write policies (replace prev, keep prev); the key is not
+/// unique, so any number of rows may match.
+pub fn find_by_key(
     conn: &Connection,
     name: &str,
-    target_uri: &str,
+    target: &NoteTarget,
     author: &str,
-) -> Result<Note, NoteError> {
+) -> Result<Vec<Note>, NoteError> {
     let mut stmt = conn.prepare(&format!(
-        "{NOTE_SELECT} WHERE n.name = ?1 AND n.target = ?2 AND n.author = ?3"
+        "{NOTE_SELECT} WHERE n.name = ?1 AND n.target = ?2 AND n.author = ?3
+         ORDER BY n.created DESC, n.id"
     ))?;
-    stmt.query_row(params![name, target_uri, author], row_to_note)
-        .map_err(NoteError::from)
+    let notes = stmt
+        .query_map(params![name, target.to_uri(), author], row_to_note)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(notes)
 }
 
 /// Replace an existing note's mutable fields (`value`, `metadata`)
@@ -340,10 +315,14 @@ pub fn update(
     Ok(())
 }
 
+/// Delete a note and its target/scan links. Evidence links are left
+/// alone: deleting a note an issue cites fails on the FK rather than
+/// silently rewriting the issue.
 pub fn delete(conn: &Connection, id: &str) -> Result<(), NoteError> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM session_note WHERE note_id = ?1", [id])?;
     tx.execute("DELETE FROM project_note WHERE note_id = ?1", [id])?;
+    tx.execute("DELETE FROM scan_note WHERE note_id = ?1", [id])?;
     let rows = tx.execute("DELETE FROM note WHERE id = ?1", [id])?;
     if rows == 0 {
         return Err(NoteError::NotFound(id.to_string()));
@@ -892,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_key_returns_prev_and_keeps_one_row() {
+    fn same_key_inserts_coexist() {
         let conn = open_db_in_memory().unwrap();
         let a = Note::new(
             session_target_of(SESSION_A),
@@ -909,18 +888,37 @@ mod tests {
             NoteValue::from("second"),
             "scanner:user_friction",
         );
-        match insert(&conn, &b) {
-            Err(NoteError::Duplicate(prev)) => {
-                assert_eq!(prev.id, a.id);
-                assert_eq!(prev.value, NoteValue::from("first"));
-            }
-            other => panic!("expected Duplicate, got {other:?}"),
-        }
+        insert(&conn, &b).unwrap();
 
         let n: u32 = conn
             .query_row("SELECT COUNT(*) FROM note", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn find_by_key_matches_exactly_most_recent_first() {
+        let conn = open_db_in_memory().unwrap();
+        let target = session_target_of(SESSION_A);
+        let mut a = Note::new(target.clone(), "summary", NoteValue::from("old"), "user:g");
+        a.created = 100;
+        insert(&conn, &a).unwrap();
+        let mut b = Note::new(target.clone(), "summary", NoteValue::from("new"), "user:g");
+        b.created = 200;
+        insert(&conn, &b).unwrap();
+        // Different author: not part of the key match
+        insert(
+            &conn,
+            &Note::new(target.clone(), "summary", NoteValue::from("x"), "user:h"),
+        )
+        .unwrap();
+
+        let found = find_by_key(&conn, "summary", &target, "user:g").unwrap();
+        let ids: Vec<&str> = found.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec![b.id.as_str(), a.id.as_str()]);
+
+        let none = find_by_key(&conn, "other", &target, "user:g").unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]
@@ -941,12 +939,8 @@ mod tests {
             NoteValue::from("second"),
             "scanner:s",
         );
-        let prev = match insert(&conn, &b) {
-            Err(NoteError::Duplicate(prev)) => prev,
-            other => panic!("expected Duplicate, got {other:?}"),
-        };
 
-        let updated = replace(&conn, &prev.id, &b).unwrap();
+        let updated = replace(&conn, &a.id, &b).unwrap();
         assert_eq!(updated.value, NoteValue::from("second"));
         assert!(updated.modified.is_some());
         assert_eq!(updated.id, a.id);

@@ -57,12 +57,13 @@ The command prompts for the value when you omit `--value`.
 | Option                | Description                                            |
 | --------------------- | ------------------------------------------------------ |
 | `-t, --target <TARGET>` | Target session, as a full session ID. Append `:LINE` to specify a session line number. |
-| `-n, --name <NAME>`   | Note name (default: `comment.<random>`)                |
+| `-n, --name <NAME>`   | Note name (default: `comment`)                         |
 | `-v, --value <VALUE>` | Note value (prompted if omitted)                       |
 | `-u, --user <USER>`   | Author username (default: `$USER`)                     |
 
-Names must be unique for a target and author. See
-[Authors and duplicate detection](/docs/notes#authors-and-duplicate-detection).
+Names need not be unique; writing the same name for the same target adds
+another note. See
+[Authors and duplicate policies](/docs/notes#authors-and-duplicate-policies).
 
 ## note edit
 

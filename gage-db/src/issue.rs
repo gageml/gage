@@ -273,9 +273,6 @@ pub struct LoggedEvent {
 pub enum IssueError {
     NotFound(String),
     Ambiguous(String, Vec<String>),
-    /// An issue with the same `(name, author)` already exists. The
-    /// existing issue is returned so the caller can decide what to do.
-    Duplicate(Box<Issue>),
     /// A session target carried a `session_id` that is not the expected
     /// UUID form. Same shape check as `NoteError::InvalidSessionId`.
     InvalidSessionId(String),
@@ -299,13 +296,6 @@ impl std::fmt::Display for IssueError {
                 }
                 Ok(())
             }
-            IssueError::Duplicate(prev) => {
-                write!(
-                    f,
-                    "duplicate issue (name={}, author={})",
-                    prev.name, prev.author
-                )
-            }
             IssueError::InvalidSessionId(id) => {
                 write!(f, "invalid session id: '{id}' (expected 36-char UUID)")
             }
@@ -317,9 +307,9 @@ impl std::fmt::Display for IssueError {
 impl std::error::Error for IssueError {}
 
 impl Issue {
-    /// Build a new open issue. The name is used as provided; uniqueness
-    /// within the `(name, author)` duplicate key is the caller's concern
-    /// (see the author scheme in docs/issues.md).
+    /// Build a new open issue. Nothing constrains `(name, author)`; a
+    /// writer that wants to act on an earlier issue with the same key
+    /// looks it up explicitly (see [`latest_by_key`]).
     pub fn new(name: &str, title: String, description: Option<String>, author: &str) -> Self {
         let id = gage_core::uuid::new_uuid();
         Issue {
@@ -341,14 +331,11 @@ impl Issue {
 
 const ISSUE_COLUMNS: &str = "id, name, title, description, target, status, status_reason, metadata, created, modified, author";
 
-/// Insert an issue.
-///
-/// Returns `IssueError::Duplicate(prev)` if an issue with the same
-/// `(name, author)` already exists; the existing issue is left
-/// untouched and returned so the caller can decide what to do.
+/// Insert an issue. Duplicates of `(name, author)` are allowed; a
+/// writer with merge semantics checks [`latest_by_key`] first.
 pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
     let tx = conn.unchecked_transaction()?;
-    let res = tx.execute(
+    tx.execute(
         &format!(
             "INSERT INTO issue ({ISSUE_COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
@@ -366,14 +353,7 @@ pub fn insert(conn: &Connection, issue: &Issue) -> Result<(), IssueError> {
             issue.modified,
             issue.author,
         ],
-    );
-    if let Err(e) = res {
-        if is_unique_violation(&e) {
-            let prev = find_by_dup_key(conn, &issue.name, &issue.author)?;
-            return Err(IssueError::Duplicate(Box::new(prev)));
-        }
-        return Err(e.into());
-    }
+    )?;
     insert_target_relation(&tx, issue)?;
     insert_event(
         &tx,
@@ -403,20 +383,22 @@ fn insert_target_relation(conn: &Connection, issue: &Issue) -> Result<(), IssueE
     Ok(())
 }
 
-fn is_unique_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(err, _)
-            if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-    )
-}
-
-fn find_by_dup_key(conn: &Connection, name: &str, author: &str) -> Result<Issue, IssueError> {
+/// The most recently created issue matching `(name, author)` exactly,
+/// or `None`. Backs the write policies that merge into a prior issue;
+/// the key is not unique, so older siblings may exist and are ignored.
+pub fn latest_by_key(
+    conn: &Connection,
+    name: &str,
+    author: &str,
+) -> Result<Option<Issue>, IssueError> {
     let mut stmt = conn.prepare(&format!(
-        "{ISSUE_SELECT} WHERE i.name = ?1 AND i.author = ?2"
+        "{ISSUE_SELECT} WHERE i.name = ?1 AND i.author = ?2
+         ORDER BY i.created DESC, i.id LIMIT 1"
     ))?;
-    stmt.query_row(params![name, author], row_to_issue)
-        .map_err(IssueError::from)
+    let mut rows = stmt
+        .query_map(params![name, author], row_to_issue)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.pop())
 }
 
 /// Set an issue's status. Any transition is allowed; the caller is
@@ -990,23 +972,32 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_key_returns_prev_and_keeps_one_row() {
+    fn same_key_inserts_coexist_and_latest_by_key_picks_newest() {
         let conn = open_db_in_memory().unwrap();
-        let a = sample("issue-aaa", "thinking.empty");
+        let mut a = sample("issue-aaa", "thinking.empty");
+        a.created = 100;
         insert(&conn, &a).unwrap();
 
         // Same name, fresh id and different title
         let mut b = sample("issue-bbb", "thinking.empty");
         b.title = "different".to_string();
-        match insert(&conn, &b) {
-            Err(IssueError::Duplicate(prev)) => assert_eq!(prev.id, "issue-aaa"),
-            other => panic!("expected Duplicate, got {other:?}"),
-        }
+        b.created = 200;
+        insert(&conn, &b).unwrap();
 
         let n: u32 = conn
             .query_row("SELECT COUNT(*) FROM issue", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2);
+
+        let latest = latest_by_key(&conn, "thinking.empty", &a.author)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, "issue-bbb");
+
+        assert!(
+            latest_by_key(&conn, "nope", &a.author).unwrap().is_none(),
+            "no match for unknown name"
+        );
     }
 
     #[test]

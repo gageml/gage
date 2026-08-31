@@ -117,27 +117,6 @@ fn http_getters_accessible_without_destructure() {
     clippy::disallowed_methods,
     reason = "takes the VM execution's return value; the test holds the only live handle"
 )]
-fn duplicate_variant_carries_prev_and_new() {
-    let val = run_rune(
-        r#"
-        use gage::Error;
-        pub fn main() {
-            let e = Error::Duplicate { prev: "p", new: "n" };
-            match e {
-                Error::Duplicate { prev, new } => format!("{}-{}", prev, new),
-                _ => "wrong variant".to_string(),
-            }
-        }
-        "#,
-    );
-    assert_eq!(rune::from_value::<String>(val).unwrap(), "p-n");
-}
-
-#[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "takes the VM execution's return value; the test holds the only live handle"
-)]
 fn each_variant_constructs() {
     let val = run_rune(
         r#"

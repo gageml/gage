@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -112,9 +112,23 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if version == 0 {
         // Fresh database: init_schema creates the current schema
         init_schema(&tx)?;
-    }
-    if version == 1 {
-        tx.execute_batch("ALTER TABLE scan_task ADD COLUMN metadata TEXT")?;
+    } else {
+        if version < 2 {
+            tx.execute_batch("ALTER TABLE scan_task ADD COLUMN metadata TEXT")?;
+        }
+        if version < 3 {
+            // Duplicate-key uniqueness moved from the schema to write
+            // policies. The comment rename collapses the suffixes that
+            // existed only to dodge the dropped constraint; it must
+            // follow the index drops since it creates equal keys.
+            tx.execute_batch(
+                "DROP INDEX idx_note_duplicate_key;
+                 DROP INDEX idx_issue_duplicate_key;
+                 CREATE INDEX idx_note_key ON note(name, target, author);
+                 CREATE INDEX idx_issue_key ON issue(name, author);
+                 UPDATE note SET name = 'comment' WHERE name LIKE 'comment.%';",
+            )?;
+        }
     }
     set_version(&tx, CURRENT_VERSION)?;
     tx.commit()
@@ -157,7 +171,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             created     INTEGER NOT NULL,
             modified    INTEGER
         );
-        CREATE UNIQUE INDEX idx_note_duplicate_key ON note(name, target, author);
+        CREATE INDEX idx_note_key ON note(name, target, author);
         CREATE INDEX idx_note_target ON note(target);
         CREATE INDEX idx_note_name   ON note(name);
         CREATE INDEX idx_note_author ON note(author);
@@ -189,7 +203,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             created       INTEGER NOT NULL,
             modified      INTEGER
         );
-        CREATE UNIQUE INDEX idx_issue_duplicate_key ON issue(name, author);
+        CREATE INDEX idx_issue_key ON issue(name, author);
         CREATE INDEX idx_issue_status ON issue(status);
         CREATE INDEX idx_issue_target ON issue(target);
 
@@ -307,16 +321,16 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "missing note column target");
 
-        // the note dedup key is enforced by a unique index
+        // no unique constraint on the note key; dedup is write policy
         let n: u32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type='index' AND name='idx_note_duplicate_key'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                 AND name='idx_note_key' AND sql NOT LIKE '%UNIQUE%'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "missing unique dedup index");
+        assert_eq!(n, 1, "missing non-unique note key index");
 
         // scan-related and note target tables exist
         for tname in &[
@@ -349,6 +363,57 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "missing table {tname}");
         }
+    }
+
+    #[test]
+    fn migrate_v2_drops_unique_keys_and_renames_comments() {
+        // A v2 database: current schema except for the unique duplicate
+        // keys, plus a suffixed comment row predating the rename.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE note (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, target TEXT NOT NULL,
+                author TEXT NOT NULL, value TEXT NOT NULL, metadata TEXT,
+                created INTEGER NOT NULL, modified INTEGER
+            );
+            CREATE UNIQUE INDEX idx_note_duplicate_key ON note(name, target, author);
+            CREATE TABLE issue (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, author TEXT NOT NULL,
+                title TEXT NOT NULL, description TEXT, target TEXT,
+                status TEXT NOT NULL, status_reason TEXT, metadata TEXT,
+                created INTEGER NOT NULL, modified INTEGER
+            );
+            CREATE UNIQUE INDEX idx_issue_duplicate_key ON issue(name, author);
+            INSERT INTO note VALUES
+                ('n1', 'comment.abcd1234', 'session:s', 'user:g', '\"x\"', NULL, 1, NULL),
+                ('n2', 'summary', 'session:s', 'scanner:s', '\"y\"', NULL, 2, NULL);",
+        )
+        .unwrap();
+        set_version(&conn, 2).unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let name: String = conn
+            .query_row("SELECT name FROM note WHERE id = 'n1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "comment");
+        let unique_left: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                 AND name IN ('idx_note_duplicate_key', 'idx_issue_duplicate_key')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unique_left, 0);
+
+        // The dropped constraint no longer rejects an equal key
+        conn.execute(
+            "INSERT INTO note VALUES
+                ('n3', 'summary', 'session:s', 'scanner:s', '\"z\"', NULL, 3, NULL)",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

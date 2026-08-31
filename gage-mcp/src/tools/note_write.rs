@@ -87,17 +87,8 @@ async fn handle(
     let note = Note::new(target, &name, NoteValue::from(value), &author);
 
     let conn = open_db().unwrap();
-    note::insert(&conn, &note).map_err(|e| {
-        if let note::NoteError::Duplicate(prev) = &e {
-            tracing::error!(
-                name = note.name,
-                author = note.author,
-                prev_id = prev.id,
-                "duplicate note write rejected — same writer, name, and target"
-            );
-        }
-        McpError::internal_error(format!("insert note: {e}"), None)
-    })?;
+    note::insert(&conn, &note)
+        .map_err(|e| McpError::internal_error(format!("insert note: {e}"), None))?;
 
     if let Some(scan_id) = &scan_id {
         insert_scan_note(&conn, scan_id, &note.id, ScanNoteRole::Wrote)

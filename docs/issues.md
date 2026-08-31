@@ -43,11 +43,14 @@ installed with the Gage plugin.
 Claude has several Gage tools for resolving issues, which will require your
 permission to use.
 
-## Authors and duplicate detection
+## Authors and duplicate policies
 
-Like notes, every issue records an `author`, and the issue duplicate key is
-`(name, author)` — the same writer opening the same issue twice is detected at
-write time. Author values follow the scheme described in
-[Notes](/docs/notes): `scanner:<name>` for deterministic writers, `agent:...`
-values carrying per-run instance identity for model writers, and
-`user:<username>` for people.
+Like notes, every issue records an `author`, and a plain write always inserts —
+nothing constrains `(name, author)`. A writer that wants to fold a re-scan into
+its prior issue states a merge policy on the write (`keep_status`,
+`open_on_new_evidence`, `open_on_changed_evidence`), which acts on the most
+recent issue it wrote with the same name: new evidence is added, and the reopen
+policies reopen a closed issue when the evidence warrants it. Author values
+follow the scheme described in [Notes](/docs/notes): `scanner:<name>` for
+deterministic writers, `agent:...?call=<toolUseId>` values tying model writers
+to the authoring transcript entry, and `user:<username>` for people.

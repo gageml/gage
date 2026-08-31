@@ -86,25 +86,8 @@ async fn handle(
     issue_row.target = target;
     let now = issue_row.created;
 
-    issue::insert(&conn, &issue_row).map_err(|e| match e {
-        issue::IssueError::Duplicate(prev) => {
-            tracing::error!(
-                name = issue_row.name,
-                author = issue_row.author,
-                prev_id = prev.id,
-                "duplicate issue write rejected — same writer and name"
-            );
-            McpError::internal_error(
-                format!(
-                    "duplicate issue: this writer already wrote issue {} ({})",
-                    short_uuid(&prev.id),
-                    prev.title
-                ),
-                None,
-            )
-        }
-        _ => McpError::internal_error(format!("insert issue: {e}"), None),
-    })?;
+    issue::insert(&conn, &issue_row)
+        .map_err(|e| McpError::internal_error(format!("insert issue: {e}"), None))?;
 
     if let Some(scan_id) = &config.scan {
         insert_scan_issue(&conn, scan_id, &issue_row.id)
