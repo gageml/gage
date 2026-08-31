@@ -173,6 +173,7 @@ pub async fn run_test(case: TestCase) -> TestOutcome {
         mcp_host: None,
         dispatcher: std::sync::OnceLock::new(),
         agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+        model_map: Default::default(),
         invalidate: false,
         agent_fault: std::sync::OnceLock::new(),
     });

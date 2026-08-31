@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use gage_claude::model::ModelMap;
 use gage_claude::project::Project;
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
@@ -44,6 +45,10 @@ pub struct RunContext {
     /// [`crate::agent::Agent`]. Configured via the CLI's
     /// `--agent-jobs` flag.
     pub agent_pool: Arc<tokio::sync::Semaphore>,
+    /// Per-size model overrides for the run's agent calls, from the
+    /// CLI's `--model` values. Applied when resolving a spec's model;
+    /// empty when unset.
+    pub model_map: ModelMap,
     /// Invalidate prior validation state. When set, the `split_valid`
     /// / `split_valid_range` / `notes.split_valid` / `files_valid`
     /// entry points delete the recorded rows for the keys and refs

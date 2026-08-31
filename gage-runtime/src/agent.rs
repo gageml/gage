@@ -15,7 +15,6 @@ use std::sync::Mutex;
 use gage_agent::{
     AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgentSession, SystemPrompt,
 };
-use gage_claude::model::resolved_model;
 use gage_mcp::{CustomToolCallback, GageTool, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
@@ -1405,7 +1404,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     if let Some(url) = &mcp_url {
         builder = builder.mcp_url(url.clone());
     }
-    builder = builder.model(resolved_model(spec.model.as_deref()));
+    builder = builder.model(ctx.run.model_map.resolve(spec.model.as_deref()));
     if let Some(n) = spec.max_turns {
         builder = builder.max_turns(n);
     }
@@ -1757,9 +1756,10 @@ pub struct InteractiveSpec {
 pub fn interactive_spec(v: rune::Value) -> Result<InteractiveSpec, Error> {
     let spec = resolve_spec(call_from_value(v)?)?;
     let (mcp_url, service, tools) = register_service(&spec)?;
+    let ctx = current_scan_ctx();
     Ok(InteractiveSpec {
         prompt: spec.prompt.clone(),
-        model: resolved_model(spec.model.as_deref()),
+        model: ctx.run.model_map.resolve(spec.model.as_deref()),
         name: spec.name.clone(),
         tools,
         mcp_url,

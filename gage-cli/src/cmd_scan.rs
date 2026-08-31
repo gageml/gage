@@ -19,6 +19,7 @@ use tabled::{
 };
 
 use gage_claude::home::ClaudeHome;
+use gage_claude::model::ModelMap;
 use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
@@ -181,6 +182,14 @@ pub struct ScanRunArgs {
         conflicts_with_all = ["sessions", "scanners", "files", "groups", "rerun", "days", "today", "all"]
     )]
     scan: Option<String>,
+
+    /// Model for scan agents (repeatable)
+    ///
+    /// MODEL sets the model for every size alias a scanner may
+    /// request (small, medium, large). SIZE=MODEL sets one size.
+    /// Later values override earlier ones.
+    #[arg(short, long = "model", value_name = "[SIZE=]MODEL")]
+    models: Vec<String>,
 
     /// Invalidate prior results before scanning
     ///
@@ -1064,6 +1073,14 @@ async fn run_scan(mut args: ScanRunArgs) {
         return;
     }
 
+    let model_map = match ModelMap::from_args(&args.models) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("gage scan: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // --rerun expands into the explicit scanner and session lists, then
     // flows through the normal run path below.
     if let Some(prefix) = &args.rerun {
@@ -1158,7 +1175,7 @@ async fn run_scan(mut args: ScanRunArgs) {
     };
 
     dialog::run_async("Scan sessions", || {
-        run_dialog(args, registry, explicit_sessions, scan_id)
+        run_dialog(args, registry, explicit_sessions, scan_id, model_map)
     })
     .await;
 }
@@ -1283,6 +1300,7 @@ async fn run_dialog(
     registry: ScannerRegistry,
     explicit_sessions: Option<Vec<(String, PathBuf)>>,
     scan_id: String,
+    model_map: ModelMap,
 ) -> Result<DialogResult, DialogError> {
     // Scanner selection — default set excludes disabled scanners.
     // Explicit `-s name` (handled below) still runs disabled scanners.
@@ -1633,6 +1651,7 @@ async fn run_dialog(
             scan_ctx,
             jobs,
             agent_jobs,
+            model_map,
             args.invalidate,
             cancel.clone(),
             |event| {
@@ -1679,6 +1698,7 @@ async fn run_dialog(
             scan_ctx,
             jobs,
             agent_jobs,
+            model_map,
             args.invalidate,
             cancel.clone(),
             streams,
@@ -1876,6 +1896,7 @@ async fn run_scan_tui(
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
     agent_jobs: usize,
+    model_map: ModelMap,
     invalidate: bool,
     cancel: tokio_util::sync::CancellationToken,
     mut streams: ScanStreams,
@@ -1962,6 +1983,7 @@ async fn run_scan_tui(
             scan_ctx,
             jobs,
             agent_jobs,
+            model_map,
             invalidate,
             cancel.clone(),
             |event| {

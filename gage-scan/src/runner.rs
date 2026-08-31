@@ -4,6 +4,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use gage_claude::home::ClaudeHome;
+use gage_claude::model::ModelMap;
 use gage_claude::project::{Project, project_for_session_name};
 use gage_claude::session::SessionInfo;
 use gage_db::rusqlite::Connection;
@@ -86,6 +87,7 @@ pub async fn run(
     scan_ctx: Arc<ScanSessionContext>,
     jobs: usize,
     agent_jobs: usize,
+    model_map: ModelMap,
     invalidate: bool,
     cancel: CancellationToken,
     on_event: impl FnMut(ScanEvent) + Send,
@@ -142,6 +144,7 @@ pub async fn run(
         mcp_host,
         dispatcher: std::sync::OnceLock::new(),
         agent_pool: Arc::new(tokio::sync::Semaphore::new(agent_jobs)),
+        model_map,
         invalidate,
         agent_fault: std::sync::OnceLock::new(),
     });
@@ -471,6 +474,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
             agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+            model_map: Default::default(),
             invalidate: false,
             agent_fault: std::sync::OnceLock::new(),
         });
@@ -696,6 +700,7 @@ impl TestRuntime {
             mcp_host: None,
             dispatcher: std::sync::OnceLock::new(),
             agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
+            model_map: Default::default(),
             invalidate: false,
             agent_fault: std::sync::OnceLock::new(),
         });
