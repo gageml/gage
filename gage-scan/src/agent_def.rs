@@ -108,6 +108,7 @@ pub async fn run_agent_def(
         model_map: Default::default(),
         invalidate: false,
         agent_fault: std::sync::OnceLock::new(),
+        model_contexts: Default::default(),
     });
     let dispatcher = runtime::dispatcher::ToolDispatcher::start(Arc::downgrade(&run));
     run.dispatcher

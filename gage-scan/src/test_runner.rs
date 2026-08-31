@@ -176,6 +176,7 @@ pub async fn run_test(case: TestCase) -> TestOutcome {
         model_map: Default::default(),
         invalidate: false,
         agent_fault: std::sync::OnceLock::new(),
+        model_contexts: Default::default(),
     });
     let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
     // Seed the stub scan row so note/issue writes that link to the

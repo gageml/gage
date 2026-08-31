@@ -1,0 +1,26 @@
+use gage::model_context;
+
+pub const SCANNER = #{
+    name: "model-context",
+    description: "Probe model context windows",
+    tasks: #{
+        report: #{},
+    },
+};
+
+/// Print context probe results for the medium model under the empty
+/// system prompt (the agent default) and Claude Code's default
+/// system prompt. The second probe for a configuration hits the
+/// per-scan cache.
+pub async fn report() {
+    let empty = model_context("medium").await?;
+    println!("empty system prompt: {:?}", empty);
+
+    let with_default = model_context("medium").default_system_prompt().await?;
+    println!("default system prompt: {:?}", with_default);
+
+    let cached = model_context("medium").await?;
+    println!("cached: {:?}", cached);
+
+    Ok(())
+}

@@ -147,6 +147,7 @@ pub async fn run(
         model_map,
         invalidate,
         agent_fault: std::sync::OnceLock::new(),
+        model_contexts: Default::default(),
     });
     // Start the Rune tool dispatcher. Held by `RunContext` so scanners
     // can reach it through `current_scan_ctx().run.dispatcher`. The
@@ -477,6 +478,7 @@ pub async fn test_scanners(scanners: Vec<Scanner<'_>>) -> Result<(), RunError> {
             model_map: Default::default(),
             invalidate: false,
             agent_fault: std::sync::OnceLock::new(),
+            model_contexts: Default::default(),
         });
         let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
         let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -703,6 +705,7 @@ impl TestRuntime {
             model_map: Default::default(),
             invalidate: false,
             agent_fault: std::sync::OnceLock::new(),
+            model_contexts: Default::default(),
         });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         // Stub rt/unit/sources. Tests built through `with_scope` don't

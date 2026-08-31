@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::RuntimeOutput;
 use crate::dispatcher::ToolDispatcher;
+use crate::model_context::ModelContext;
 use std::sync::OnceLock;
 
 /// State shared by all scanners for a single scan run.
@@ -63,6 +64,10 @@ pub struct RunContext {
     /// without spawning or contacting a claude child — see
     /// `agent::with_fault_barrier`.
     pub agent_fault: OnceLock<String>,
+    /// Per-scan cache of `model_context` probe results, keyed by the
+    /// probe's resolved invocation shape (model + system prompt). The
+    /// numbers are meaningless outside this scan process.
+    pub model_contexts: Mutex<HashMap<String, ModelContext>>,
 }
 
 /// Per-task state injected via `tokio::task_local!`.

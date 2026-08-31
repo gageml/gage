@@ -675,7 +675,9 @@ async fn handle_auth_failure(
 /// the unwind vehicle: the dispatcher reads the recorded message back
 /// and reports it as the task's failure, discarding the VM error's
 /// own rendering. No validation runs after the abort.
-async fn with_fault_barrier<T>(fut: impl std::future::Future<Output = T>) -> Result<T, VmError> {
+pub(crate) async fn with_fault_barrier<T>(
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T, VmError> {
     fn fault() -> Option<VmError> {
         let ctx = current_scan_ctx();
         let msg = ctx.run.agent_fault.get()?.clone();
@@ -1404,21 +1406,18 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     if let Some(url) = &mcp_url {
         builder = builder.mcp_url(url.clone());
     }
-    builder = builder.model(ctx.run.model_map.resolve(spec.model.as_deref()));
     if let Some(n) = spec.max_turns {
         builder = builder.max_turns(n);
     }
     if let Some(t) = spec.timeout_secs {
         builder = builder.timeout(t as usize);
     }
-    builder = match &spec.system_prompt {
-        SystemPrompt::Empty => builder,
-        SystemPrompt::ClaudeDefault => builder.default_system_prompt(),
-        SystemPrompt::Custom(s) => builder.system_prompt(s.clone()),
-    };
-    if let Some(s) = &spec.system_prompt_append {
-        builder = builder.default_system_prompt_append(s.clone());
-    }
+    builder = apply_call_shape(
+        builder,
+        ctx.run.model_map.resolve(spec.model.as_deref()),
+        &spec.system_prompt,
+        &spec.system_prompt_append,
+    );
     let session = builder
         .build()
         .start_streaming_session(&spec.prompt)
@@ -1450,6 +1449,28 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
             record,
         })),
     })
+}
+
+/// Apply the invocation shape shared by agent spawns and the
+/// model-context probe: resolved model and system prompt handling.
+/// Sharing this keeps the probe measuring the exact `claude`
+/// invocation agents run with.
+pub(crate) fn apply_call_shape(
+    mut builder: GageAgentBuilder,
+    resolved_model: String,
+    system_prompt: &SystemPrompt,
+    system_prompt_append: &Option<String>,
+) -> GageAgentBuilder {
+    builder = builder.model(resolved_model);
+    builder = match system_prompt {
+        SystemPrompt::Empty => builder,
+        SystemPrompt::ClaudeDefault => builder.default_system_prompt(),
+        SystemPrompt::Custom(s) => builder.system_prompt(s.clone()),
+    };
+    if let Some(s) = system_prompt_append {
+        builder = builder.default_system_prompt_append(s.clone());
+    }
+    builder
 }
 
 /// Translate the resolved [`CallSpec`] into [`gage_mcp::ToolSpec`].

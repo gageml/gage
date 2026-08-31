@@ -9,6 +9,7 @@ pub mod io;
 pub mod json;
 pub mod log;
 pub mod macros;
+pub mod model_context;
 pub mod progress;
 pub mod query;
 mod result;
@@ -94,6 +95,7 @@ pub fn gage_module() -> std::result::Result<Module, ContextError> {
     view::register(&mut m)?;
     db::register(&mut m)?;
     agent::register(&mut m)?;
+    model_context::register(&mut m)?;
     dispatcher::register(&mut m)?;
     template::register(&mut m)?;
 
