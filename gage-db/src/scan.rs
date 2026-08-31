@@ -451,19 +451,20 @@ fn session_metadata_is_agent(metadata: Option<&str>) -> bool {
         .is_some_and(|c| c == "agent")
 }
 
-/// How a scan is linked to a note: the scan wrote the note's value, or
-/// it carried a prior note forward into its visible set.
+/// How a scan is linked to a note or issue: the scan wrote the
+/// record's content, or it carried a prior record forward into its
+/// visible set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScanNoteRole {
+pub enum ScanLinkRole {
     Wrote,
     Carried,
 }
 
-impl ScanNoteRole {
+impl ScanLinkRole {
     fn as_str(self) -> &'static str {
         match self {
-            ScanNoteRole::Wrote => "wrote",
-            ScanNoteRole::Carried => "carried",
+            ScanLinkRole::Wrote => "wrote",
+            ScanLinkRole::Carried => "carried",
         }
     }
 }
@@ -476,7 +477,7 @@ pub fn insert_scan_note(
     conn: &Connection,
     scan_id: &str,
     note_id: &str,
-    role: ScanNoteRole,
+    role: ScanLinkRole,
 ) -> Result<(), ScanError> {
     conn.execute(
         "INSERT INTO scan_note (scan_id, note_id, role) VALUES (?1, ?2, ?3)
@@ -487,16 +488,21 @@ pub fn insert_scan_note(
     Ok(())
 }
 
-/// Record that `issue_id` was written during `scan_id`. A repeat write of
-/// the same issue in the same scan is a no-op.
+/// Record that `issue_id` was written during (or carried forward into)
+/// `scan_id`. A repeat link in the same scan is a no-op that keeps the
+/// existing role. Unlike notes, no upgrade is needed: an issue's
+/// content is written once at creation, which is always its first
+/// link, so a `Carried` link can never precede the `Wrote` link in
+/// the same scan.
 pub fn insert_scan_issue(
     conn: &Connection,
     scan_id: &str,
     issue_id: &str,
+    role: ScanLinkRole,
 ) -> Result<(), ScanError> {
     conn.execute(
-        "INSERT OR IGNORE INTO scan_issue (scan_id, issue_id) VALUES (?1, ?2)",
-        params![scan_id, issue_id],
+        "INSERT OR IGNORE INTO scan_issue (scan_id, issue_id, role) VALUES (?1, ?2, ?3)",
+        params![scan_id, issue_id, role.as_str()],
     )?;
     Ok(())
 }
@@ -792,6 +798,7 @@ pub fn get_scan(conn: &Connection, id_prefix: &str) -> Result<Scan, ScanError> {
 mod tests {
     use super::*;
     use crate::db::open_db_in_memory;
+    use crate::issue;
     use crate::note::{self, Note, NoteValue};
     use crate::target::{NoteTarget, SessionTarget};
 
@@ -894,20 +901,51 @@ mod tests {
         note::insert(&conn, &note).unwrap();
         let scan_of = |note_id: &str| note::get(&conn, note_id).unwrap().scan;
 
-        insert_scan_note(&conn, "scan-a", &note.id, ScanNoteRole::Wrote).unwrap();
+        insert_scan_note(&conn, "scan-a", &note.id, ScanLinkRole::Wrote).unwrap();
         assert_eq!(scan_of(&note.id), Some("scan-a".to_string()));
 
         // A later scan replaces the value: attribution moves to it
-        insert_scan_note(&conn, "scan-b", &note.id, ScanNoteRole::Wrote).unwrap();
+        insert_scan_note(&conn, "scan-b", &note.id, ScanLinkRole::Wrote).unwrap();
         assert_eq!(scan_of(&note.id), Some("scan-b".to_string()));
 
         // A carried-forward link does not steal attribution
-        insert_scan_note(&conn, "scan-c", &note.id, ScanNoteRole::Carried).unwrap();
+        insert_scan_note(&conn, "scan-c", &note.id, ScanLinkRole::Carried).unwrap();
         assert_eq!(scan_of(&note.id), Some("scan-b".to_string()));
 
         // A write in the same scan upgrades its carried link
-        insert_scan_note(&conn, "scan-c", &note.id, ScanNoteRole::Wrote).unwrap();
+        insert_scan_note(&conn, "scan-c", &note.id, ScanLinkRole::Wrote).unwrap();
         assert_eq!(scan_of(&note.id), Some("scan-c".to_string()));
+    }
+
+    #[test]
+    fn issue_attribution_stays_with_writer() {
+        let conn = open_db_in_memory().unwrap();
+        for (id, created) in [("scan-a", 1000), ("scan-b", 2000)] {
+            let scan = Scan {
+                id: id.to_string(),
+                created,
+                metadata: None,
+            };
+            insert_scan(&conn, &scan).unwrap();
+        }
+        let issue = issue::Issue::new("finding", "title".to_string(), None, "scanner:test");
+        issue::insert(&conn, &issue).unwrap();
+        let scan_of = || issue::get(&conn, &issue.id).unwrap().scan;
+
+        insert_scan_issue(&conn, "scan-a", &issue.id, ScanLinkRole::Wrote).unwrap();
+        assert_eq!(scan_of(), Some("scan-a".to_string()));
+
+        // A carried-forward link (evidence/session/reopen merge) does
+        // not steal attribution, and find returns the issue once
+        insert_scan_issue(&conn, "scan-b", &issue.id, ScanLinkRole::Carried).unwrap();
+        assert_eq!(scan_of(), Some("scan-a".to_string()));
+        let found = issue::find(&conn, &Default::default()).unwrap();
+        assert_eq!(found.len(), 1);
+
+        // Deleting the writing scan orphans attribution; no other
+        // link is promoted
+        delete_scan(&conn, "scan-a").unwrap();
+        assert_eq!(scan_of(), None);
     }
 
     #[test]

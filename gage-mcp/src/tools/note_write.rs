@@ -4,7 +4,7 @@ use std::pin::Pin;
 use gage_core::uuid::short_uuid;
 use gage_db::db::open_db;
 use gage_db::note::{self, Note, NoteValue};
-use gage_db::scan::{ScanNoteRole, insert_scan_note};
+use gage_db::scan::{ScanLinkRole, insert_scan_note};
 use gage_db::target::{NoteTarget, ScanTarget, SessionTarget};
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
@@ -91,7 +91,7 @@ async fn handle(
         .map_err(|e| McpError::internal_error(format!("insert note: {e}"), None))?;
 
     if let Some(scan_id) = &scan_id {
-        insert_scan_note(&conn, scan_id, &note.id, ScanNoteRole::Wrote)
+        insert_scan_note(&conn, scan_id, &note.id, ScanLinkRole::Wrote)
             .map_err(|e| McpError::internal_error(format!("link note to scan: {e}"), None))?;
     }
 

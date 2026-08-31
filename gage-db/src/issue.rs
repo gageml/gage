@@ -235,9 +235,11 @@ pub struct Issue {
     /// `scanner:{path}` URIs in issue fields. With `name`, forms the
     /// duplication key.
     pub author: String,
-    /// Scan that created the issue; `None` when the issue was written
-    /// outside a scan (e.g. `gage issue add`). Derived from `scan_issue`
-    /// on read; not written by [`insert`].
+    /// Scan that created the issue — the link with role `wrote`;
+    /// carried-forward links don't affect attribution. `None` when the
+    /// issue was written outside a scan (e.g. `gage issue add`) or the
+    /// writing scan was deleted. Derived from `scan_issue` on read; not
+    /// written by [`insert`].
     pub scan: Option<String>,
 }
 
@@ -680,15 +682,15 @@ pub struct IssueFilters {
 }
 
 // An issue can carry multiple scan_issue rows (creation plus later
-// evidence/reopen links; see IssueWrite in gage-runtime). The subquery
-// resolves the creating scan: the earliest linked scan by scan history.
+// carried-forward links; see write_issue in gage-runtime). The
+// subquery resolves the creating scan: the single link with role
+// 'wrote'. Deleting that scan deletes its link, and no other link is
+// promoted — the scan resolves as NULL.
 const ISSUE_SELECT: &str = "SELECT i.id, i.name, i.title, i.description, i.status,
             i.status_reason, i.created, i.modified, i.author, i.target,
             i.metadata,
             (SELECT si.scan_id FROM scan_issue si
-             JOIN scan s ON s.id = si.scan_id
-             WHERE si.issue_id = i.id
-             ORDER BY s.created LIMIT 1)
+             WHERE si.issue_id = i.id AND si.role = 'wrote')
      FROM issue i";
 
 pub fn find(conn: &Connection, filters: &IssueFilters) -> Result<Vec<Issue>, IssueError> {

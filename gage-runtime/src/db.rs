@@ -7,7 +7,7 @@ use gage_db::issue::{
 };
 use gage_db::note::{self, Note as DbNote, NoteFilters, NoteValue};
 use gage_db::rusqlite::Connection;
-use gage_db::scan::{ScanNoteRole, insert_scan_issue, insert_scan_note};
+use gage_db::scan::{ScanLinkRole, insert_scan_issue, insert_scan_note};
 use gage_db::target::{NoteTarget, ProjectTarget, ScanTarget, SessionTarget};
 use rune::Any;
 use rune::alloc;
@@ -466,7 +466,7 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
             }
             let updated =
                 note::replace(&db, &latest.id, &db_note).map_err(|e| Error::Db(e.to_string()))?;
-            insert_scan_note(&db, &ctx.run.scan_id, &updated.id, ScanNoteRole::Wrote)
+            insert_scan_note(&db, &ctx.run.scan_id, &updated.id, ScanLinkRole::Wrote)
                 .map_err(|e| Error::Db(e.to_string()))?;
             Ok(updated.into())
         }
@@ -483,7 +483,7 @@ fn do_write_note(q: NoteInsert) -> super::Result<Note> {
 
 fn insert_new_note(db: &Connection, scan_id: &str, db_note: DbNote) -> super::Result<Note> {
     note::insert(db, &db_note).map_err(|e| Error::Db(e.to_string()))?;
-    insert_scan_note(db, scan_id, &db_note.id, ScanNoteRole::Wrote)
+    insert_scan_note(db, scan_id, &db_note.id, ScanLinkRole::Wrote)
         .map_err(|e| Error::Db(e.to_string()))?;
     Ok(db_note.into())
 }
@@ -669,7 +669,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
                 issue::insert_session_issue(&db, session_id, &db_issue.id)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
-            insert_scan_issue(&db, &ctx.run.scan_id, &db_issue.id)
+            insert_scan_issue(&db, &ctx.run.scan_id, &db_issue.id, ScanLinkRole::Wrote)
                 .map_err(|e| Error::Db(e.to_string()))?;
             Ok(db_issue.into())
         }
@@ -713,7 +713,7 @@ fn do_write_issue(q: IssueInsert) -> super::Result<Issue> {
             }
 
             if added_evidence || added_session || reopen {
-                insert_scan_issue(&db, &ctx.run.scan_id, &prev.id)
+                insert_scan_issue(&db, &ctx.run.scan_id, &prev.id, ScanLinkRole::Carried)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
 

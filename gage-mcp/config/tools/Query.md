@@ -35,7 +35,8 @@ Tables:
   lines; join `note` to `session` / `message` / `entry` here
 
 - scan_session (scan_id, session_id, metadata), scan_note (scan_id, note_id,
-  role), scan_issue (scan_id, issue_id) - a scan's sessions, notes, and issues
+  role), scan_issue (scan_id, issue_id, role) - a scan's sessions, notes, and
+  issues
 
 - issue (id, name, author, title, description, target, status, status_reason,
   metadata, created, modified) - issues raised from notes; `target` is advisory,

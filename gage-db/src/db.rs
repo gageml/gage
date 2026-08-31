@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 3;
+pub const CURRENT_VERSION: u32 = 4;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -127,6 +127,24 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
                  CREATE INDEX idx_note_key ON note(name, target, author);
                  CREATE INDEX idx_issue_key ON issue(name, author);
                  UPDATE note SET name = 'comment' WHERE name LIKE 'comment.%';",
+            )?;
+        }
+        if version < 4 {
+            // scan_issue gains an explicit link role. Backfill: an
+            // issue's earliest link is its creating scan (the only
+            // write path that could produce it before this version);
+            // any later link is a carry. The DEFAULT satisfies ALTER's
+            // NOT NULL requirement and is inert afterwards — every
+            // writer supplies a role. Migrated tables lack the CHECK
+            // constraint (ALTER cannot add one); same precedent as
+            // scan_note.role.
+            tx.execute_batch(
+                "ALTER TABLE scan_issue ADD COLUMN role TEXT NOT NULL DEFAULT 'carried';
+                 UPDATE scan_issue SET role = 'wrote'
+                 WHERE scan_id = (SELECT si.scan_id FROM scan_issue si
+                                  JOIN scan s ON s.id = si.scan_id
+                                  WHERE si.issue_id = scan_issue.issue_id
+                                  ORDER BY s.created LIMIT 1);",
             )?;
         }
     }
@@ -284,6 +302,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE scan_issue (
             scan_id  TEXT NOT NULL REFERENCES scan(id),
             issue_id TEXT NOT NULL REFERENCES issue(id),
+            role     TEXT NOT NULL CHECK (role IN ('wrote', 'carried')),
             PRIMARY KEY (scan_id, issue_id)
         );
         CREATE INDEX idx_scan_issue_issue_id ON scan_issue(issue_id);
@@ -384,6 +403,13 @@ mod tests {
                 created INTEGER NOT NULL, modified INTEGER
             );
             CREATE UNIQUE INDEX idx_issue_duplicate_key ON issue(name, author);
+            CREATE TABLE scan (
+                id TEXT PRIMARY KEY, created INTEGER NOT NULL, metadata TEXT
+            );
+            CREATE TABLE scan_issue (
+                scan_id TEXT NOT NULL, issue_id TEXT NOT NULL,
+                PRIMARY KEY (scan_id, issue_id)
+            );
             INSERT INTO note VALUES
                 ('n1', 'comment.abcd1234', 'session:s', 'user:g', '\"x\"', NULL, 1, NULL),
                 ('n2', 'summary', 'session:s', 'scanner:s', '\"y\"', NULL, 2, NULL);",
@@ -414,6 +440,39 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migrate_v4_backfills_scan_issue_roles() {
+        // A v3 database: scan_issue without the role column, one issue
+        // linked to its creating scan and a later carrying scan.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scan (
+                id TEXT PRIMARY KEY, created INTEGER NOT NULL, metadata TEXT
+            );
+            CREATE TABLE scan_issue (
+                scan_id TEXT NOT NULL, issue_id TEXT NOT NULL,
+                PRIMARY KEY (scan_id, issue_id)
+            );
+            INSERT INTO scan VALUES ('sc-old', 100, NULL), ('sc-new', 200, NULL);
+            INSERT INTO scan_issue VALUES ('sc-old', 'i1'), ('sc-new', 'i1');",
+        )
+        .unwrap();
+        set_version(&conn, 3).unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let role_of = |scan_id: &str| -> String {
+            conn.query_row(
+                "SELECT role FROM scan_issue WHERE scan_id = ?1 AND issue_id = 'i1'",
+                [scan_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(role_of("sc-old"), "wrote");
+        assert_eq!(role_of("sc-new"), "carried");
     }
 
     #[test]

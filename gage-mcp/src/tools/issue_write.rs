@@ -5,7 +5,7 @@ use gage_core::uuid::short_uuid;
 use gage_db::db::open_db;
 use gage_db::issue::{self, Issue, IssueEvidence};
 use gage_db::note;
-use gage_db::scan::insert_scan_issue;
+use gage_db::scan::{ScanLinkRole, insert_scan_issue};
 use gage_db::target::{NoteTarget, SessionTarget};
 use rmcp::{
     ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
@@ -90,7 +90,7 @@ async fn handle(
         .map_err(|e| McpError::internal_error(format!("insert issue: {e}"), None))?;
 
     if let Some(scan_id) = &config.scan {
-        insert_scan_issue(&conn, scan_id, &issue_row.id)
+        insert_scan_issue(&conn, scan_id, &issue_row.id, ScanLinkRole::Wrote)
             .map_err(|e| McpError::internal_error(format!("link issue to scan: {e}"), None))?;
     }
 

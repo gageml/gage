@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gage_db::note;
-use gage_db::scan::{ScanNoteRole, insert_scan_note};
+use gage_db::scan::{ScanLinkRole, insert_scan_note};
 use gage_db::target::NoteTarget;
 use gage_db::task_validate::{self, note_ref, project_ref, session_ref};
 use rune::runtime::{Function, Protocol, Ref, Value, Vec as RuneVec};
@@ -550,7 +550,7 @@ fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
             }
             .map_err(|e| Error::Db(e.to_string()))?;
             for id in &ids {
-                insert_scan_note(&db, &ctx.run.scan_id, id, ScanNoteRole::Carried)
+                insert_scan_note(&db, &ctx.run.scan_id, id, ScanLinkRole::Carried)
                     .map_err(|e| Error::Db(e.to_string()))?;
             }
             count += i64::try_from(ids.len()).unwrap();

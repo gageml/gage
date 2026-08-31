@@ -28,8 +28,10 @@ JOIN scan_note sc ON sc.note_id = n.id
 WHERE sc.scan_id = '<SCAN_ID>' AND sc.role = 'wrote';
 ```
 
-`scan_issue (scan_id, issue_id)` links a scan to the issues in its visible
-set.
+`scan_issue (scan_id, issue_id, role)` links a scan to the issues in its
+visible set. `role` is `wrote` (the scan created the issue) or `carried` (the
+issue predates the scan, which adopted it — adding evidence, linking a
+session, or reopening it). An issue has at most one `wrote` link.
 
 ## Full-text search: `message_text(query [, snippet_len])`
 
