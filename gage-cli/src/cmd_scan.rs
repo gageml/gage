@@ -1426,11 +1426,34 @@ async fn run_dialog(
                     return Err(DialogError::Canceled);
                 }
             }
-            let mut out = group_names;
+            // Reject the same scanner given twice under -s. Bare-name
+            // compare so `foo` and `foo#{...}` collide.
+            let mut seen: Vec<&str> = Vec::new();
             for name in &args.scanners {
-                if !out.iter().any(|n| n == name) {
-                    out.push(name.clone());
+                let bare = name.split("#{").next().unwrap();
+                if seen.contains(&bare) {
+                    cli::log::error(format!("Scanner '{bare}' specified more than once"))?;
+                    return Err(DialogError::Canceled);
                 }
+                seen.push(bare);
+            }
+            // -s wins over -g on the same bare name: drop the group
+            // entry so the -s spec (possibly with a config override)
+            // applies, avoiding a duplicate (scanner, task) pair.
+            let explicit_bare: Vec<&str> = args
+                .scanners
+                .iter()
+                .map(|n| n.split("#{").next().unwrap())
+                .collect();
+            let mut out: Vec<String> = group_names
+                .into_iter()
+                .filter(|g| {
+                    let gb = g.split("#{").next().unwrap();
+                    !explicit_bare.contains(&gb)
+                })
+                .collect();
+            for name in &args.scanners {
+                out.push(name.clone());
             }
             out
         };
