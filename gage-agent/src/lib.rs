@@ -432,7 +432,7 @@ fn run_print(
 ) -> io::Result<Output> {
     let projects_dir = prep.claude_home.join("projects");
     let mut cmd = Command::new(&prep.claude_bin);
-    cmd.args(["-p", prompt, "--tools", ""]);
+    cmd.args(["-p", prompt, "--tools", "", "--no-session-persistence"]);
     match system_prompt {
         SystemPrompt::Empty => {
             cmd.args(["--system-prompt", ""]);
