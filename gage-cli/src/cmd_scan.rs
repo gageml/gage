@@ -225,6 +225,10 @@ pub struct ScanRunArgs {
     /// Show available scanners and exit
     #[arg(long)]
     list_scanners: bool,
+
+    /// Run only the scanners named, without pulling in required_by dependents
+    #[arg(long)]
+    no_deps: bool,
 }
 
 pub async fn run(args: ScanArgs) {
@@ -1454,13 +1458,16 @@ async fn run_dialog(
     };
 
     // Pull in tasks that declare themselves `required_by` what the
-    // selection writes
-    let required = {
-        let selected_defs: Vec<_> = scanners.iter().map(|s| s.def).collect();
-        registry.required_tasks(&selected_defs, &config)
-    };
-    for (def, tasks) in required {
-        scanners.push(Scanner::with_tasks(def, tasks));
+    // selection writes. `--no-deps` skips the pull-in so only the
+    // named scanners run.
+    if !args.no_deps {
+        let required = {
+            let selected_defs: Vec<_> = scanners.iter().map(|s| s.def).collect();
+            registry.required_tasks(&selected_defs, &config)
+        };
+        for (def, tasks) in required {
+            scanners.push(Scanner::with_tasks(def, tasks));
+        }
     }
 
     // Compile all scanners up front. A scanner that does not compile
