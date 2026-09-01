@@ -117,17 +117,20 @@ async fn findings_query() {
     Ok(())
 }
 
-// Duplicates the value caps of the retired `Session::roadmap()`
-// renderer; tuning toward the evidence-based values is a later step
-// (see the agent query behavior appendix in the design doc)
-const ROADMAP_RULES = [
-    ("user.text",          #{ max: 500 }),
-    ("assistant.text",     #{ max: 500 }),
-    ("assistant.thinking", #{ max: 500, priority: ["start", "end"] }),
-    ("tool_use",           #{ max: 200 }),
-    ("tool_result",        #{ max: 200, priority: ["line1"] }),
-    ("*",                  #{ max: 200 }),
-];
+// Rules for the general (session-quality) roadmap. Ordering by
+// weight — human intent (user.text) and the assistant's reasoning
+// (thinking, text) carry the review's primary signal for session
+// quality; tool activity is context. No `max`: the budget is the
+// ceiling. `min` sets a floor that survives budget pressure
+// (demotion drops lowest-weight rules first). Message kinds not
+// listed here are excluded from the rendered roadmap entirely.
+const ROADMAP_RULES = #{
+    "user.text":           #{ min: 300, weight: 5 },
+    "assistant.thinking":  #{ min: 300, weight: 4, priority: ["start", "end"] },
+    "assistant.text":      #{ min: 300, weight: 4 },
+    "user.tool_result":    #{ min: 200, weight: 2 },
+    "assistant.tool_use":  #{ min: 200, weight: 2 },
+};
 
 /// Roadmap mode: the whole session goes into the agent prompt as a
 /// compressed session; the agent retrieves full message text

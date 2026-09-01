@@ -5,13 +5,19 @@
 //! having the agent page it through tool results.
 //!
 //! `Session::compress(budget, rules)` takes a token budget (or
-//! `"unlimited"`) and an ordered list of rules. Each rule is a
-//! `(selector, attributes)` tuple; a message takes the first rule
-//! whose selector matches it. Attributes give per-message `min` and
-//! `max` chars and a `priority` list naming the content parts to keep
-//! when a message is cut (`"start"`, `"end"`, `"line1"`). A message
-//! matched by no rule behaves as if matched by a trailing `("*", #{})`
-//! rule. See `.local.design/roadmap-scan.md` for the algorithm.
+//! `"unlimited"`) and a map from selector string to attributes.
+//! Attributes give per-message `min` and optional `max` chars, a
+//! `weight` (default 1) that governs slack-budget share when the
+//! budget is not exhausted by mins, and an optional `priority` list
+//! naming the content parts to keep when a message is cut (`"start"`,
+//! `"end"`, `"line1"`). A message whose type/subtype is not covered
+//! by any rule is excluded from the output entirely. When more than
+//! one rule matches, the most specific wins: a `type.subtype`
+//! selector beats a bare-token selector, and the `[error]` qualifier
+//! adds specificity within a matching pattern. See
+//! `.local.design/roadmap-scan.md` for the algorithm.
+
+use std::collections::BTreeMap;
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::common::ScalarValue;
@@ -109,6 +115,7 @@ struct Rule {
     selector: Selector,
     min: usize,
     max: Option<usize>,
+    weight: u64,
     parts: Vec<Part>,
 }
 
@@ -118,9 +125,20 @@ struct Selector {
     error_only: bool,
 }
 
+impl Selector {
+    /// Higher wins when more than one rule matches a message.
+    /// `type.subtype` (2) beats bare token (1), and the `[error]`
+    /// qualifier adds one within the same pattern kind.
+    fn specificity(&self) -> u32 {
+        let base = match self.pattern {
+            Pattern::TypeSubtype(_, _) => 2,
+            Pattern::Token(_) => 1,
+        };
+        base * 2 + u32::from(self.error_only)
+    }
+}
+
 enum Pattern {
-    /// `*` — every message.
-    Any,
     /// `type.subtype`
     TypeSubtype(String, String),
     /// Bare token — matches the message type or subtype.
@@ -139,18 +157,29 @@ enum Part {
 struct RuleAttrs {
     min: Option<u64>,
     max: Option<u64>,
+    weight: Option<u64>,
     priority: Option<Vec<String>>,
 }
 
 fn parse_rules(v: &Value) -> super::Result<Vec<Rule>> {
-    let entries: Vec<(String, RuleAttrs)> = parse_json(v, "rules")?;
+    let entries: BTreeMap<String, RuleAttrs> = parse_json(v, "rules")?;
     entries
         .into_iter()
         .map(|(sel, attrs)| {
+            let min = attrs.min.unwrap_or(0) as usize;
+            let max = attrs.max.map(|m| m as usize);
+            if let Some(m) = max
+                && min > m
+            {
+                return Err(Error::Args(format!(
+                    "rule `{sel}`: min ({min}) exceeds max ({m})"
+                )));
+            }
             Ok(Rule {
                 selector: parse_selector(&sel)?,
-                min: attrs.min.unwrap_or(0) as usize,
-                max: attrs.max.map(|m| m as usize),
+                min,
+                max,
+                weight: attrs.weight.unwrap_or(1),
                 parts: parse_parts(&sel, attrs.priority)?,
             })
         })
@@ -162,16 +191,15 @@ fn parse_selector(sel: &str) -> super::Result<Selector> {
         Some(base) => (base, true),
         None => (sel, false),
     };
-    if base.is_empty() || base.contains(['[', ']']) {
+    if base.is_empty() || base.contains(['[', ']', '*']) {
         return Err(Error::Args(format!("invalid rule selector `{sel}`")));
     }
-    let pattern = if base == "*" {
-        Pattern::Any
-    } else {
-        match base.split_once('.') {
-            Some((ty, sub)) => Pattern::TypeSubtype(ty.to_string(), sub.to_string()),
-            None => Pattern::Token(base.to_string()),
+    let pattern = match base.split_once('.') {
+        Some((ty, sub)) if !ty.is_empty() && !sub.is_empty() => {
+            Pattern::TypeSubtype(ty.to_string(), sub.to_string())
         }
+        Some(_) => return Err(Error::Args(format!("invalid rule selector `{sel}`"))),
+        None => Pattern::Token(base.to_string()),
     };
     Ok(Selector {
         pattern,
@@ -208,28 +236,17 @@ fn parse_json<T: DeserializeOwned>(v: &Value, what: &str) -> super::Result<T> {
     serde_json::from_value(json).map_err(|e| Error::Args(format!("invalid `{what}`: {e}")))
 }
 
-/// The implicit trailing rule for messages no rule matches: no `min`,
-/// no `max`, keep the start.
-fn fallback_rule() -> Rule {
-    Rule {
-        selector: Selector {
-            pattern: Pattern::Any,
-            error_only: false,
-        },
-        min: 0,
-        max: None,
-        parts: vec![Part::Start],
-    }
-}
-
 /// One message paired with its matched rule and current allocation.
 struct Msg<'a> {
     row: &'a MessageRow,
     text: Vec<char>,
-    /// Index into the rule list (fallback rule last).
+    /// Index into the rule list.
     rule: usize,
     /// Kept chars for the final render.
     alloc: usize,
+    /// Set once base cost is finalized so `cost` calls don't repeat
+    /// the header-only rendering.
+    demoted: bool,
 }
 
 impl Msg<'_> {
@@ -252,135 +269,185 @@ fn build_compressed(
     budget: Budget,
     rules: &[Rule],
 ) -> super::Result<String> {
-    let fallback = fallback_rule();
-    let all_rules: Vec<&Rule> = rules.iter().chain([&fallback]).collect();
-
-    // Pair each message with its first matching rule
+    // Drop messages no rule matches; carry the matched rule index
     let mut msgs: Vec<Msg> = rows
         .iter()
-        .map(|row| {
-            let rule = all_rules
-                .iter()
-                .position(|r| selector_matches(&r.selector, row))
-                .expect("trailing fallback rule matches every message");
-            Msg {
+        .filter_map(|row| {
+            match_rule(rules, row).map(|rule| Msg {
                 row,
                 text: row.text.chars().collect(),
                 rule,
                 alloc: 0,
-            }
+                demoted: false,
+            })
         })
         .collect();
 
     match budget {
         Budget::Unlimited => {
             for m in &mut msgs {
-                m.alloc = m.max_alloc(rule_of(&all_rules, m.rule));
+                m.alloc = m.max_alloc(rule_of(rules, m.rule));
             }
         }
-        Budget::Chars(budget) => fit_to_budget(session_id, &mut msgs, &all_rules, budget)?,
+        Budget::Chars(budget) => fit_to_budget(session_id, &mut msgs, rules, budget)?,
     }
 
     let out: Vec<String> = msgs
         .iter()
-        .map(|m| render_message(m.row, &m.text, m.alloc, &rule_of(&all_rules, m.rule).parts))
+        .map(|m| render_message(m.row, &m.text, m.alloc, &rule_of(rules, m.rule).parts))
         .collect();
     Ok(out.join("\n\n"))
 }
 
-fn rule_of<'a>(all_rules: &'a [&'a Rule], idx: usize) -> &'a Rule {
-    all_rules.get(idx).expect("msg rule index is in range")
+/// Highest-specificity matching rule for a row, or `None` if no rule
+/// matches.
+fn match_rule(rules: &[Rule], row: &MessageRow) -> Option<usize> {
+    rules
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| selector_matches(&r.selector, row))
+        .max_by_key(|(_, r)| r.selector.specificity())
+        .map(|(i, _)| i)
 }
 
 /// Set each message's allocation honoring the budget: every message
-/// at its rule's `min`, rules demoted from the back if that alone
-/// exceeds the budget, then expansion toward `max` in rule order,
-/// document order within a rule.
+/// at its rule's `min`, messages demoted (lowest rule weight first)
+/// if that alone exceeds the budget, then remaining budget
+/// distributed among non-demoted messages in proportion to their
+/// rule's `weight`, bounded by each rule's `max` and the message's
+/// content length.
 fn fit_to_budget(
     session_id: &str,
     msgs: &mut [Msg],
-    all_rules: &[&Rule],
+    rules: &[Rule],
     budget: usize,
 ) -> super::Result<()> {
     let sep_total = msgs.len().saturating_sub(1) * 2; // "\n\n" joins
 
-    // Demote rules (from the last) until the minimum representation fits
-    let mut demoted = vec![false; all_rules.len()];
-    let mut base = loop {
-        let base: usize = sep_total
-            + msgs
-                .iter()
-                .map(|m| {
-                    let rule = rule_of(all_rules, m.rule);
-                    let min = if demoted_of(&demoted, m.rule) {
-                        0
-                    } else {
-                        m.min_alloc(rule)
-                    };
-                    m.cost(rule, min)
-                })
-                .sum::<usize>();
-        if base <= budget {
-            break base;
+    // Demote messages (lowest rule weight first; tie: later document
+    // order) until the minimum representation fits.
+    loop {
+        for m in msgs.iter_mut() {
+            m.alloc = if m.demoted {
+                0
+            } else {
+                m.min_alloc(rule_of(rules, m.rule))
+            };
         }
-        match demoted.iter().rposition(|d| !d) {
-            Some(rule) => *demoted.get_mut(rule).expect("rposition index is in range") = true,
+        let total = sep_total + msg_body_cost(msgs, rules);
+        if total <= budget {
+            break;
+        }
+        let victim = msgs
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.demoted)
+            .min_by_key(|(i, m)| (rule_of(rules, m.rule).weight, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        match victim {
+            Some(i) => msg_at_mut(msgs, i).demoted = true,
             None => {
                 return Err(Error::Args(format!(
-                    "session {session_id} exceeds the budget at {base} chars \
+                    "session {session_id} exceeds the budget at {total} chars \
                      with every rule demoted to marker-only (budget {budget})"
                 )));
             }
         }
-    };
-
-    for m in msgs.iter_mut() {
-        m.alloc = if demoted_of(&demoted, m.rule) {
-            0
-        } else {
-            m.min_alloc(rule_of(all_rules, m.rule))
-        };
     }
 
-    // Expand toward max, rule order then document order
-    'expand: for (rule_idx, rule) in all_rules.iter().enumerate() {
-        if demoted_of(&demoted, rule_idx) {
-            continue;
+    // Weight-proportional expansion. In each round, distribute
+    // remaining budget across active messages by weight, bounded by
+    // each rule's max_alloc. Iterate until no active message can grow
+    // or budget is exhausted.
+    loop {
+        let active: Vec<usize> = msgs
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.demoted && m.alloc < m.max_alloc(rule_of(rules, m.rule)))
+            .map(|(i, _)| i)
+            .collect();
+        if active.is_empty() {
+            break;
         }
-        for m in msgs.iter_mut().filter(|m| m.rule == rule_idx) {
-            let full = m.max_alloc(rule);
-            if full <= m.alloc {
+        let used = sep_total + msg_body_cost(msgs, rules);
+        let remaining = budget.saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+        let total_weight: u64 = active
+            .iter()
+            .map(|&i| rule_of(rules, msg_at(msgs, i).rule).weight)
+            .sum();
+        if total_weight == 0 {
+            break;
+        }
+
+        let mut any_progress = false;
+        for &i in &active {
+            let (rule, m_alloc, ceiling) = {
+                let m = msg_at(msgs, i);
+                let rule = rule_of(rules, m.rule);
+                (rule, m.alloc, m.max_alloc(rule))
+            };
+            let cur_used = sep_total + msg_body_cost(msgs, rules);
+            let budget_left = budget.saturating_sub(cur_used);
+            if budget_left == 0 {
+                return Ok(());
+            }
+            let share = ((remaining as u64 * rule.weight) / total_weight).max(1) as usize;
+            let target = m_alloc.saturating_add(share).min(ceiling);
+            if target <= m_alloc {
                 continue;
             }
-            let full_delta = m.cost(rule, full) - m.cost(rule, m.alloc);
-            let remaining = budget - base;
-            if full_delta <= remaining {
-                m.alloc = full;
-                base += full_delta;
+            let m = msg_at(msgs, i);
+            // Cost can drop as alloc grows because the truncation
+            // marker ("… [+N chars]") shrinks and vanishes when alloc
+            // reaches text length. A non-positive delta means the
+            // expansion is free (or shortens the output), so it is
+            // always safe to take.
+            let cost_at = |a| m.cost(rule, a);
+            let delta = cost_at(target).saturating_sub(cost_at(m_alloc));
+            if delta <= budget_left {
+                msg_at_mut(msgs, i).alloc = target;
+                any_progress = true;
                 continue;
             }
-            // Partial expansion: grow by the remaining budget, then
-            // walk back the marker-length drift so the total stays
-            // within budget
-            let mut alloc = (m.alloc + remaining).min(full);
-            while alloc > m.alloc && m.cost(rule, alloc) - m.cost(rule, m.alloc) > remaining {
-                alloc -= 1;
+            // Partial expansion: back off until it fits, then stop.
+            let mut t = target;
+            while t > m_alloc && cost_at(t).saturating_sub(cost_at(m_alloc)) > budget_left {
+                t -= 1;
             }
-            m.alloc = alloc;
-            break 'expand;
+            msg_at_mut(msgs, i).alloc = t;
+            return Ok(());
+        }
+        if !any_progress {
+            break;
         }
     }
 
     Ok(())
 }
 
-fn demoted_of(demoted: &[bool], idx: usize) -> bool {
-    *demoted.get(idx).expect("msg rule index is in range")
+fn rule_of(rules: &[Rule], idx: usize) -> &Rule {
+    rules.get(idx).expect("msg rule index is in range")
+}
+
+fn msg_at<'a, 'b>(msgs: &'a [Msg<'b>], idx: usize) -> &'a Msg<'b> {
+    msgs.get(idx).expect("active msg index is in range")
+}
+
+fn msg_at_mut<'a, 'b>(msgs: &'a mut [Msg<'b>], idx: usize) -> &'a mut Msg<'b> {
+    msgs.get_mut(idx).expect("active msg index is in range")
+}
+
+fn msg_body_cost(msgs: &[Msg], rules: &[Rule]) -> usize {
+    msgs.iter()
+        .map(|m| m.cost(rule_of(rules, m.rule), m.alloc))
+        .sum()
 }
 
 fn selector_matches(sel: &Selector, row: &MessageRow) -> bool {
     let matched = match &sel.pattern {
-        Pattern::Any => true,
         Pattern::TypeSubtype(ty, sub) => {
             row.type_ == *ty && row.subtype.as_deref() == Some(sub.as_str())
         }
@@ -588,11 +655,12 @@ mod tests {
         }
     }
 
-    fn rule(selector: &str, min: usize, max: Option<usize>, parts: Vec<Part>) -> Rule {
+    fn rule(selector: &str, min: usize, max: Option<usize>, weight: u64, parts: Vec<Part>) -> Rule {
         Rule {
             selector: parse_selector(selector).unwrap(),
             min,
             max,
+            weight,
             parts,
         }
     }
@@ -601,23 +669,23 @@ mod tests {
         build_compressed("test-session", rows, budget, rules).unwrap()
     }
 
-    /// Allocations from `fit_to_budget` for a chars budget.
+    /// Allocations from `fit_to_budget` for a chars budget. Rows a
+    /// rule does not match are excluded, so the returned vector's
+    /// length matches the number of matched rows.
     fn fit(rows: &[MessageRow], rules: &[Rule], budget: usize) -> Vec<usize> {
-        let fallback = fallback_rule();
-        let all: Vec<&Rule> = rules.iter().chain([&fallback]).collect();
         let mut msgs: Vec<Msg> = rows
             .iter()
-            .map(|row| Msg {
-                row,
-                text: row.text.chars().collect(),
-                rule: all
-                    .iter()
-                    .position(|r| selector_matches(&r.selector, row))
-                    .unwrap(),
-                alloc: 0,
+            .filter_map(|row| {
+                match_rule(rules, row).map(|rule_idx| Msg {
+                    row,
+                    text: row.text.chars().collect(),
+                    rule: rule_idx,
+                    alloc: 0,
+                    demoted: false,
+                })
             })
             .collect();
-        fit_to_budget("s", &mut msgs, &all, budget).unwrap();
+        fit_to_budget("s", &mut msgs, rules, budget).unwrap();
         msgs.iter().map(|m| m.alloc).collect()
     }
 
@@ -625,7 +693,7 @@ mod tests {
     fn cuts_text_at_max_keeping_start() {
         let long = "x".repeat(600);
         let rows = [row(1, "user", Some("text"), &long)];
-        let rules = [rule("user.text", 0, Some(500), vec![Part::Start])];
+        let rules = [rule("user.text", 0, Some(500), 1, vec![Part::Start])];
         let out = compress(&rows, Budget::Unlimited, &rules);
         assert!(out.starts_with("[L1 user text]\n"));
         assert!(out.contains(&"x".repeat(500)));
@@ -641,6 +709,7 @@ mod tests {
             "assistant.thinking",
             0,
             Some(500),
+            1,
             vec![Part::Start, Part::End],
         )];
         let out = compress(&rows, Budget::Unlimited, &rules);
@@ -657,46 +726,34 @@ mod tests {
             Some("tool_result"),
             "line one\nline two\nrest",
         )];
-        let rules = [rule("tool_result", 0, Some(200), vec![Part::Line1])];
+        let rules = [rule("tool_result", 0, Some(200), 1, vec![Part::Line1])];
         let out = compress(&rows, Budget::Unlimited, &rules);
         assert!(out.contains("line one… [+14 chars]"));
         assert!(!out.contains("line two"));
     }
 
     #[test]
-    fn first_matching_rule_wins() {
+    fn most_specific_rule_wins() {
         let rows = [row(1, "user", Some("text"), &"a".repeat(100))];
+        // Both rules match: bare token `text` matches by subtype and
+        // `user.text` matches by type+subtype; the specific one wins
         let rules = [
-            rule("user.text", 0, Some(10), vec![Part::Start]),
-            rule("*", 0, Some(90), vec![Part::Start]),
+            rule("user.text", 0, Some(10), 1, vec![Part::Start]),
+            rule("text", 0, Some(90), 1, vec![Part::Start]),
         ];
         let out = compress(&rows, Budget::Unlimited, &rules);
-        assert!(out.contains("… [+90 chars]"));
+        assert!(out.contains("… [+90 chars]"), "{out}");
     }
 
     #[test]
-    fn explicit_wildcard_rule_is_the_default() {
-        let rows = [row(1, "system", Some("compact_boundary"), &"b".repeat(300))];
-        let rules = [
-            rule("user.text", 0, Some(500), vec![Part::Start]),
-            rule("*", 0, Some(200), vec![Part::Start]),
+    fn unmatched_message_is_excluded() {
+        let rows = [
+            row(1, "system", Some("local_command"), "sys content"),
+            row(2, "user", Some("text"), "kept content"),
         ];
+        let rules = [rule("user.text", 0, None, 1, vec![Part::Start])];
         let out = compress(&rows, Budget::Unlimited, &rules);
-        assert!(out.contains(&"b".repeat(200)));
-        assert!(out.contains("… [+100 chars]"));
-    }
-
-    #[test]
-    fn unmatched_message_renders_whole_under_unlimited() {
-        let rows = [row(
-            1,
-            "system",
-            Some("local_command"),
-            "some command output",
-        )];
-        let rules = [rule("user.text", 0, Some(10), vec![Part::Start])];
-        let out = compress(&rows, Budget::Unlimited, &rules);
-        assert_eq!(out, "[L1 system local_command]\nsome command output");
+        assert_eq!(out, "[L2 user text]\nkept content");
     }
 
     #[test]
@@ -706,8 +763,8 @@ mod tests {
             row(2, "user", Some("tool_result"), &"r".repeat(100)),
         ];
         let rules = [
-            rule("tool_use", 0, Some(10), vec![Part::Start]),
-            rule("tool_result", 0, Some(20), vec![Part::Start]),
+            rule("tool_use", 0, Some(10), 1, vec![Part::Start]),
+            rule("tool_result", 0, Some(20), 1, vec![Part::Start]),
         ];
         let out = compress(&rows, Budget::Unlimited, &rules);
         assert!(out.contains("… [+90 chars]"));
@@ -734,18 +791,18 @@ mod tests {
         };
         let rows = [mk(1, true), mk(2, false)];
         let rules = [
-            rule("tool_result[error]", 0, Some(50), vec![Part::Start]),
-            rule("tool_result", 0, Some(10), vec![Part::Start]),
+            rule("tool_result[error]", 0, Some(50), 1, vec![Part::Start]),
+            rule("tool_result", 0, Some(10), 1, vec![Part::Start]),
         ];
         let out = compress(&rows, Budget::Unlimited, &rules);
-        assert!(out.contains("… [+50 chars]")); // error row at 50
-        assert!(out.contains("… [+90 chars]")); // plain row at 10
+        assert!(out.contains("… [+50 chars]"), "{out}"); // error row at 50
+        assert!(out.contains("… [+90 chars]"), "{out}"); // plain row at 10
     }
 
     #[test]
     fn budget_partial_expansion_stays_within_budget() {
         let rows = [row(1, "user", Some("text"), &"a".repeat(1000))];
-        let rules = [rule("user.text", 0, None, vec![Part::Start])];
+        let rules = [rule("user.text", 0, None, 1, vec![Part::Start])];
         let budget_chars = 200;
         let allocs = fit(&rows, &rules, budget_chars);
         let out = render_message(
@@ -765,11 +822,11 @@ mod tests {
             row(2, "assistant", Some("text"), &"b".repeat(500)),
         ];
         let rules = [
-            rule("user.text", 0, None, vec![Part::Start]),
-            rule("assistant.text", 50, Some(60), vec![Part::Start]),
+            rule("user.text", 0, None, 10, vec![Part::Start]),
+            rule("assistant.text", 50, Some(60), 1, vec![Part::Start]),
         ];
-        // Budget covers mins plus a bit; the second rule's min must
-        // survive even though the first rule expands first
+        // The high-weight rule takes most of the slack, but the
+        // low-weight rule's `min` of 50 must still be honored
         let allocs = fit(&rows, &rules, 200);
         assert!(
             allocs.get(1).copied().unwrap() >= 50,
@@ -778,23 +835,64 @@ mod tests {
     }
 
     #[test]
-    fn demotion_drops_last_rule_first() {
+    fn slack_splits_by_weight() {
+        // Two messages of equal content length, differing only in
+        // rule weight. Under a budget that can not fit both fully,
+        // the higher-weighted message gets the larger share.
+        let rows = [
+            row(1, "user", Some("text"), &"a".repeat(1000)),
+            row(2, "assistant", Some("text"), &"b".repeat(1000)),
+        ];
+        let rules = [
+            rule("user.text", 0, None, 3, vec![Part::Start]),
+            rule("assistant.text", 0, None, 1, vec![Part::Start]),
+        ];
+        let allocs = fit(&rows, &rules, 400);
+        let (u, a) = (allocs[0], allocs[1]);
+        assert!(
+            u > a,
+            "weight 3 should outpace weight 1: user={u}, assistant={a}"
+        );
+        assert!(u as f64 / (u + a).max(1) as f64 > 0.6, "user share too low");
+    }
+
+    #[test]
+    fn demotion_drops_lowest_weight_first() {
         let rows = [
             row(1, "user", Some("text"), &"a".repeat(100)),
             row(2, "assistant", Some("text"), &"b".repeat(100)),
         ];
         let rules = [
-            rule("user.text", 40, Some(40), vec![Part::Start]),
-            rule("assistant.text", 40, Some(40), vec![Part::Start]),
+            rule("user.text", 40, Some(40), 1, vec![Part::Start]),
+            rule("assistant.text", 40, Some(40), 5, vec![Part::Start]),
         ];
-        // Headers ~15+19+2 sep = 36; two mins at 40 plus markers push
-        // past 100, so the assistant rule (listed last) demotes
+        // Both mins together push past the budget; the lower-weight
+        // (user.text, weight 1) demotes first
         let allocs = fit(&rows, &rules, 100);
         assert_eq!(
-            allocs.get(1).copied().unwrap(),
-            0,
-            "last rule should demote first: {allocs:?}"
+            allocs[0], 0,
+            "lowest-weight rule should demote first: {allocs:?}"
         );
+        assert_eq!(allocs[1], 40, "highest-weight min must survive: {allocs:?}");
+    }
+
+    #[test]
+    fn expansion_across_text_end_does_not_underflow() {
+        // Growing alloc past text.len() removes the "… [+N chars]"
+        // marker, so cost drops as alloc rises through that edge.
+        // The delta computation must not underflow.
+        let rows = [row(
+            1,
+            "assistant",
+            Some("text"),
+            &"a".repeat(505), // just over min
+        )];
+        let rules = [rule("assistant.text", 500, None, 1, vec![Part::Start])];
+        // Budget lets alloc grow from min=500 to text.len()=505;
+        // the marker "… [+5 chars]" disappears in that step
+        let out = compress(&rows, Budget::Chars(1000), &rules);
+        assert!(out.contains(&"a".repeat(505)));
+        assert!(!out.contains("chars]"));
     }
 
     #[test]
@@ -802,7 +900,7 @@ mod tests {
         let rows: Vec<MessageRow> = (1..=10)
             .map(|i| row(i, "user", Some("text"), "content"))
             .collect();
-        let rules = [rule("user.text", 0, None, vec![Part::Start])];
+        let rules = [rule("user.text", 0, None, 1, vec![Part::Start])];
         let err = build_compressed("big-session", &rows, Budget::Chars(10), &rules).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("big-session"), "{msg}");
@@ -831,14 +929,28 @@ mod tests {
 
     #[test]
     fn rules_reject_unknown_attributes() {
-        let rules = serde_json::json!([["user.text", { "mim": 10 }]]);
+        let rules = serde_json::json!({ "user.text": { "mim": 10 } });
         let v = crate::value::json_to_value(&rules);
         assert!(parse_rules(&v).is_err());
     }
 
     #[test]
     fn rules_reject_bad_priority_part() {
-        let rules = serde_json::json!([["user.text", { "priority": ["mid"] }]]);
+        let rules = serde_json::json!({ "user.text": { "priority": ["mid"] } });
+        let v = crate::value::json_to_value(&rules);
+        assert!(parse_rules(&v).is_err());
+    }
+
+    #[test]
+    fn rules_reject_wildcard_selector() {
+        let rules = serde_json::json!({ "*": { "min": 10 } });
+        let v = crate::value::json_to_value(&rules);
+        assert!(parse_rules(&v).is_err());
+    }
+
+    #[test]
+    fn rules_reject_min_over_max() {
+        let rules = serde_json::json!({ "user.text": { "min": 100, "max": 50 } });
         let v = crate::value::json_to_value(&rules);
         assert!(parse_rules(&v).is_err());
     }
@@ -864,7 +976,7 @@ mod tests {
         };
         let sv = rune::to_value(session).unwrap();
         let budget = rune::to_value(1000_i64).unwrap();
-        let rules_json = serde_json::json!([["user.text", { "max": 500 }]]);
+        let rules_json = serde_json::json!({ "user.text": { "max": 500 } });
         let rules = crate::value::json_to_value(&rules_json);
 
         let q = SessionCompress {

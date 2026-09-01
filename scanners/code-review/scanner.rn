@@ -257,20 +257,20 @@ async fn findings_query() {
     Ok(())
 }
 
-// Rules favor code-carrying messages, inverting the general scanner's
-// emphasis: Edit/Write tool calls keep most of their content while the
-// assistant's own narrative about its code is cut hard. Values are a
-// first guess pending eval-based tuning. Rule order doubles as
-// demotion order (last listed demoted first under budget pressure).
-const ROADMAP_RULES = [
-    ("tool_use",           #{ max: 2000 }),
-    ("tool_result[error]", #{ max: 500 }),
-    ("user.text",          #{ max: 500 }),
-    ("tool_result",        #{ max: 200, priority: ["line1"] }),
-    ("assistant.text",     #{ max: 200 }),
-    ("assistant.thinking", #{ max: 200, priority: ["start", "end"] }),
-    ("*",                  #{ max: 200 }),
-];
+// Rules for the code-review roadmap. Ordering by weight — Edit/Write
+// tool calls and their results carry the actual code changes and are
+// the primary review evidence; thinking and narrative are secondary.
+// No `max`: the budget is the ceiling. `min` sets a floor that
+// survives budget pressure (demotion drops lowest-weight rules
+// first). Message kinds not listed here are excluded from the
+// rendered roadmap entirely (system:*, user:meta, and so on).
+const ROADMAP_RULES = #{
+    "assistant.tool_use":  #{ min: 500, weight: 5 },
+    "user.tool_result":    #{ min: 400, weight: 4 },
+    "assistant.thinking":  #{ min: 200, weight: 3, priority: ["start", "end"] },
+    "assistant.text":      #{ min: 200, weight: 2 },
+    "user.text":           #{ min: 100, weight: 1 },
+};
 
 /// Roadmap mode: the whole session goes into the agent prompt as a
 /// compressed session; the agent retrieves full message text
