@@ -616,6 +616,7 @@ fn scan_picker(current: Option<&str>) -> io::Result<Picker> {
                     Span::raw(count.notes.to_string()),
                     Span::raw(status),
                     Span::raw(duration),
+                    Span::raw(scan.label.unwrap_or_default()),
                     Span::styled(picker::ago(scan.created), styles::Text::dim()),
                 ],
                 id: scan.id,
@@ -630,6 +631,7 @@ fn scan_picker(current: Option<&str>) -> io::Result<Picker> {
         PickColumn::right("Notes", 5),
         PickColumn::new("Status", 10),
         PickColumn::right("Duration", 8),
+        PickColumn::new("Label", 20),
         PickColumn::right("Created", 7),
     ];
     Ok(Picker::new("Open scan", columns, items, current))
@@ -3018,17 +3020,20 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             model.total,
             fmt_duration_live(state.started.elapsed())
         );
-        let id_width = model.scan_id.width() as u16;
+        let mut id_spans = vec![Span::styled(model.scan_id.clone(), styles::Text::id())];
+        if let Some(label) = &model.label {
+            id_spans.push(Span::styled(" · ", styles::Text::dim()));
+            id_spans.push(Span::styled(label.clone(), styles::Text::id()));
+        }
+        let id_line = Line::from(id_spans);
+        let id_width = id_line.width() as u16;
         let [id_area, _gap, gauge_area] = Layout::horizontal([
             Constraint::Length(id_width),
             Constraint::Length(1),
             Constraint::Fill(1),
         ])
         .areas(tasks);
-        frame.render_widget(
-            Paragraph::new(Span::styled(model.scan_id.clone(), styles::Text::id())),
-            id_area,
-        );
+        frame.render_widget(Paragraph::new(id_line), id_area);
         frame.render_widget(
             Gauge::default()
                 .gauge_style(styles::Panel::gauge())
