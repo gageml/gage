@@ -1,17 +1,14 @@
 Write code quality finding notes for session {{ session_id }}
 
-An abbreviated roadmap of the full session record is included at the end of
-this prompt. Every message appears under a `[L<line> <type> <subtype>]`
-header, where `<line>` is the message's session line number; use these
-numbers when citing lines in findings. Message content is truncated:
+A roadmap of the session record is included at the end of this prompt.
+Every message appears under a `[L<line> <type> <subtype>]` header, where
+`<line>` is the message's session line number; use these numbers when
+citing lines in findings. Two markers signal truncated content:
 
-- `… [+N chars]` marks content cut at a cap, with the omitted char count
-- `… [N chars omitted] …` marks the elided middle of a thinking block
-- tool call messages (subtype `tool_use`) show the tool name and its input
-  fields; code changes appear as Edit and Write tool calls and keep most of
-  their content
-- tool result messages (subtype `tool_result`) show only the result's
-  first line
+- `… [+N chars]` marks the tail of a message cut off, with the omitted
+  char count
+- `… [N chars omitted] …` marks the elided middle of a message shown at
+  both ends
 
 Review the code the assistant wrote or changed in session {{ session_id }} and
 look for code quality issues:
@@ -45,15 +42,29 @@ the best practice that you are applying in your finding.
 
 ## Reading truncated messages
 
-The roadmap is often evidence enough; when a truncated message looks relevant
-to a possible finding, read its full text before writing the finding by
-querying the `message` table via `mcp__gage__Query`, filtering by
-`session_id = '{{ session_id }}'` and the line numbers of interest:
+The roadmap is a compressed view of the session. Under budget pressure a
+message is cut down to its assigned floor and marked with `… [+N chars]`,
+naming the omitted char count. A message with no marker is shown in full.
 
-`SELECT line, text FROM message WHERE session_id = '{{ session_id }}' AND line BETWEEN 40 AND 45`
+When a `… [+N chars]` marker sits on a message whose full content would
+change your judgment on a specific candidate finding — the `new_string`
+of an Edit under review, the output of a test or build in a tool result,
+the reasoning of a thinking block that decided the change — fetch that
+message's full text before deciding. Query one line at a time by line
+number:
 
-Keep queries targeted at specific lines or narrow ranges. Do not page through
-the whole session — the roadmap already covers all of it.
+`SELECT line, text FROM message WHERE session_id = '{{ session_id }}' AND line = 42`
+
+Before dismissing a candidate finding as unfounded, if the evidence
+would come from a truncated message, fetch that message first. The
+roadmap's truncation is a signal to look, not a signal to conclude.
+
+Query only the specific lines whose truncation blocks a decision. Do
+not scan ranges, and do not fetch messages the roadmap already shows in
+full. The roadmap covers every message of the session's reviewed types
+(user prompts, assistant text and thinking, and both sides of tool
+calls); system and meta messages are deliberately omitted and do not
+carry code-review evidence worth chasing.
 
 ## Writing findings
 

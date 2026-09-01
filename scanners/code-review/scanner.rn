@@ -17,9 +17,7 @@ pub const SCANNER = #{
     name: "code-review",
     description: "Review sessions for code quality",
     groups: ["default"],
-    config: #{
-        mode: #{ value: "query" },
-    },
+    config: #{ mode: #{ value: "query" } },
     tasks: #{
         project_summary: #{
             notes: #{
@@ -32,7 +30,11 @@ pub const SCANNER = #{
         findings: #{
             notes: #{
                 wants: ["project-summary.*"],
-                writes: #{ "finding.code": include_str!("finding-code-doc.md") },
+                writes: #{
+                    "finding.code": include_str!(
+                        "finding-code-doc.md"
+                    ),
+                },
             },
         },
     },
@@ -48,7 +50,9 @@ const STACK_KEY = ("code-review", "project_summary", "stack", 1);
 /// run carries its existing note forward instead of re-summarizing;
 /// a project with nothing to summarize is skipped entirely.
 pub async fn project_summary() {
-    let t = Template::new(include_str!("project-summary-prompt.md.j2")).await?;
+    let t = Template::new(include_str!(
+        "project-summary-prompt.md.j2"
+    )).await?;
     let projects = scan().sessions().projects()?;
     // One tick per project: unchanged projects tick during queueing,
     // summarized projects tick as their agents complete
@@ -123,8 +127,11 @@ async fn add_section(sections, validates, key, project, files, kind) {
     }
     let (valid, validate) = files_valid(key, project, files).await?;
     if valid {
-        let carried =
-            carry_forward_notes([project], [format!("project-summary.{}", kind)]).await?;
+        let carried = carry_forward_notes(
+            [project],
+            [format!("project-summary.{}", kind)],
+        )
+        .await?;
         if carried > 0 {
             return Ok(());
         }
@@ -188,9 +195,11 @@ pub async fn findings() {
     match params().mode {
         "query" => findings_query().await,
         "roadmap" => findings_roadmap().await,
-        other => Err(format!(
-            "unsupported mode `{other}`: expected `query` or `roadmap`"
-        )),
+        other => Err(
+            format!(
+                "unsupported mode `{other}`: expected `query` or `roadmap`"
+            ),
+        ),
     }
 }
 
@@ -227,11 +236,11 @@ async fn findings_query() {
         runner.add(
             call_agent(prompt)
                 .name("code-review")
-                // The agent sees this session only, clipped to
-                // s.range when it is Some
                 .gage_tools([Query::new().sessions([s])])
                 .tools(#{ write_finding: write_finding_tooldef() })
                 .model("medium"),
+            // The agent sees this session only, clipped to
+            // s.range when it is Some
             #{ session: s.id },
         );
     }
@@ -265,12 +274,14 @@ async fn findings_query() {
 // first). Message kinds not listed here are excluded from the
 // rendered roadmap entirely (system:*, user:meta, and so on).
 const ROADMAP_RULES = #{
-    "assistant.tool_use":  #{ min: 500, weight: 5 },
-    "user.tool_result":    #{ min: 400, weight: 4 },
-    "assistant.thinking":  #{ min: 200, weight: 3, priority: ["start", "end"] },
-    "assistant.text":      #{ min: 200, weight: 2 },
-    "user.text":           #{ min: 100, weight: 1 },
+    "assistant.tool_use": #{ min: 500, weight: 5 },
+    "user.tool_result": #{ min: 400, weight: 4 },
+    "assistant.thinking": #{ min: 200, weight: 3, priority: ["start", "end"] },
+    "assistant.text": #{ min: 200, weight: 2 },
+    "user.text": #{ min: 100, weight: 1 },
 };
+
+const BUDGET_CAP = 300_000;
 
 /// Roadmap mode: the whole session goes into the agent prompt as a
 /// compressed session; the agent retrieves full message text
@@ -288,9 +299,14 @@ async fn findings_roadmap() {
 
     // Size the compression budget to the agent's free context
     let context = model_context("medium").await?;
-    let budget = (context.free_tokens as f64) * 0.8;
+    let budget = (((context.free_tokens as f64) * 0.8) as i64).min(BUDGET_CAP);
+    log::info!("model context: {:?}", context);
+    log::info!("budget: {:?}", budget);
 
-    let t = Template::new(include_str!("findings-roadmap-prompt.md.j2")).await?;
+    let t = Template::new(include_str!(
+        "findings-roadmap-prompt.md.j2"
+    ))
+        .await?;
     // One tick per session: skipped sessions tick during queueing,
     // reviewed sessions tick as their agents complete
     let progress = Progress::new(new_sessions.len());
@@ -313,11 +329,11 @@ async fn findings_roadmap() {
         runner.add(
             call_agent(prompt)
                 .name("code-review-roadmap")
-                // The agent sees this session only, clipped to
-                // s.range when it is Some
                 .gage_tools([Query::new().sessions([s])])
                 .tools(#{ write_finding_roadmap: write_finding_tooldef() })
                 .model("medium"),
+            // The agent sees this session only, clipped to
+            // s.range when it is Some
             #{ session: s.id },
         );
     }
@@ -449,10 +465,12 @@ fn parse_lines(lines) {
 fn parse_num(part, lines) {
     match part.trim().parse::<i64>() {
         Ok(n) if n >= 1 => Ok(n),
-        _ => Err(format!(
-            "unparseable lines `{lines}`: expected a line (`112`), a range \
+        _ => Err(
+            format!(
+                "unparseable lines `{lines}`: expected a line (`112`), a range \
              (`61-72`), or a comma-separated list (`28,31`)"
-        )),
+            ),
+        ),
     }
 }
 
@@ -480,7 +498,19 @@ fn test_parse_lines_single_valued_inputs_have_no_end() {
 
 #[test]
 fn test_parse_lines_unparseable() {
-    for bad in ["", "abc", "12-", "-12", "1;2", "0"] {
-        assert!(parse_lines(bad).is_err(), "expected error for `{}`", bad);
+    for bad in [
+        "",
+        "abc",
+        "12-",
+        "-12",
+        "1;2",
+        "0",
+    ]
+    {
+        assert!(
+            parse_lines(bad).is_err(),
+            "expected error for `{}`",
+            bad
+        );
     }
 }
