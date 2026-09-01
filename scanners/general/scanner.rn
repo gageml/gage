@@ -16,14 +16,13 @@ pub const SCANNER = #{
     description: "Scan sessions for general findings",
     groups: ["default"],
     config: #{
-        mode: #{ value: "default" },
+        mode: #{ value: "roadmap" },
     },
     tasks: #{
         findings: #{
             notes: #{
                 writes: #{
                     "finding.general": include_str!("finding-general-doc.md"),
-                    "finding.general[roadmap]": include_str!("finding-roadmap-doc.md"),
                 },
             },
         },
@@ -36,24 +35,25 @@ const FINDINGS_ROADMAP_KEY = ("general", "findings[roadmap]", 1);
 /// Submit each session to an agent to write finding notes.
 ///
 /// The `mode` param selects the scan variant. Each mode validates
-/// sessions under its own key and writes its own note type, so modes
-/// never mask each other's work.
+/// sessions under its own key, so modes never mask each other's work.
+/// Both modes write `finding.general` notes; the note's `mode`
+/// metadata records the variant.
 pub async fn findings() {
     match params().mode {
-        "default" => findings_default().await,
+        "query" => findings_query().await,
         "roadmap" => findings_roadmap().await,
         other => Err(format!(
-            "unsupported mode `{other}`: expected `default` or `roadmap`"
+            "unsupported mode `{other}`: expected `query` or `roadmap`"
         )),
     }
 }
 
-/// Default mode: the agent reads the session through its Query view.
+/// Query mode: the agent reads the session through its Query view.
 ///
 /// Sessions already processed under the current findings key are
 /// skipped. A grown session carries the range of its unscanned lines;
 /// the agent's Query view is constrained to that range.
-async fn findings_default() {
+async fn findings_query() {
     // Skip previously scanned sessions per key
     let (_prev_sessions, new_sessions, validate) = scan()
         .sessions()
@@ -255,18 +255,18 @@ fn write_finding_tooldef() {
 }
 
 // Tool callbacks run without task params (the dispatcher clears them),
-// so each mode registers its own callback carrying its note type.
+// so each mode registers its own callback carrying its mode.
 
 pub async fn write_finding(inputs, meta) {
-    write_finding_note("finding.general", inputs, meta).await
+    write_finding_note("query", inputs, meta).await
 }
 
 pub async fn write_finding_roadmap(inputs, meta) {
-    write_finding_note("finding.general[roadmap]", inputs, meta).await
+    write_finding_note("roadmap", inputs, meta).await
 }
 
-async fn write_finding_note(name, inputs, meta) {
-    let metadata = #{};
+async fn write_finding_note(mode, inputs, meta) {
+    let metadata = #{ mode };
     let target = #{ session: inputs.session };
     if let Some(lines) = inputs.get("lines") {
         let (line, line_end) = parse_lines(lines)?;
@@ -278,7 +278,7 @@ async fn write_finding_note(name, inputs, meta) {
     }
     let note = write_note(
         #{
-            name,
+            name: "finding.general",
             author: meta.agent_tool_use(),
             value: inputs.description,
             target,
