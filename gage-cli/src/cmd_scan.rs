@@ -1496,7 +1496,7 @@ async fn run_dialog(
         // Each selection axis — timeframe and session cap — resolves
         // independently: an option pins its axis (shown as a step), a
         // missing axis is prompted for, and -y falls back to the
-        // defaults (last 30 days, up to 50 sessions, or unbounded when
+        // defaults (last 30 days, up to 20 sessions, or unbounded when
         // the other axis was pinned), also shown as steps.
         let window_given = args.all || args.today || args.days.is_some();
         let pinned_window = if args.all {
@@ -1540,10 +1540,10 @@ async fn run_dialog(
         } else if !args.yes {
             // A pinned timeframe alone means no cap, so it moves the
             // prompt's starting choice
-            let initial = if window_given { None } else { Some(50) };
+            let initial = if window_given { None } else { Some(20) };
             prompt_limit(initial)?
         } else {
-            let v = if window_given { None } else { Some(50) };
+            let v = if window_given { None } else { Some(20) };
             match v {
                 Some(n) => selection_step("Session limit", n)?,
                 None => selection_step("Session limit", "All available")?,
