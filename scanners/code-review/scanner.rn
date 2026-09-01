@@ -6,6 +6,8 @@ use gage::{
     call_agent,
     carry_forward_notes,
     files_valid,
+    model_context,
+    params,
     query,
     scan,
     write_note,
@@ -15,6 +17,9 @@ pub const SCANNER = #{
     name: "code-review",
     description: "Review sessions for code quality",
     groups: ["default"],
+    config: #{
+        mode: #{ value: "query" },
+    },
     tasks: #{
         project_summary: #{
             notes: #{
@@ -169,14 +174,32 @@ pub async fn write_summary(inputs, meta) {
 }
 
 const FINDINGS_KEY = ("code-review", "findings", 1);
+const FINDINGS_ROADMAP_KEY = ("code-review", "findings[roadmap]", 1);
 
 /// Submit each session that edits files to a code review agent that
 /// writes finding notes, informed by the session project's summary
 /// notes.
 ///
-/// A grown session carries the range of its unscanned lines; the
-/// agent's Query view is constrained to that range.
+/// The `mode` param selects the scan variant. Each mode validates
+/// sessions under its own key, so modes never mask each other's work.
+/// Both modes write `finding.code` notes; the note's `mode` metadata
+/// records the variant.
 pub async fn findings() {
+    match params().mode {
+        "query" => findings_query().await,
+        "roadmap" => findings_roadmap().await,
+        other => Err(format!(
+            "unsupported mode `{other}`: expected `query` or `roadmap`"
+        )),
+    }
+}
+
+/// Query mode: the agent reads the session through its Query view.
+///
+/// Sessions already processed under the current findings key are
+/// skipped. A grown session carries the range of its unscanned lines;
+/// the agent's Query view is constrained to that range.
+async fn findings_query() {
     let (_prev_sessions, new_sessions, validate) = scan()
         .sessions()
         .split_valid_range(FINDINGS_KEY)
@@ -234,6 +257,92 @@ pub async fn findings() {
     Ok(())
 }
 
+// Rules favor code-carrying messages, inverting the general scanner's
+// emphasis: Edit/Write tool calls keep most of their content while the
+// assistant's own narrative about its code is cut hard. Values are a
+// first guess pending eval-based tuning. Rule order doubles as
+// demotion order (last listed demoted first under budget pressure).
+const ROADMAP_RULES = [
+    ("tool_use",           #{ max: 2000 }),
+    ("tool_result[error]", #{ max: 500 }),
+    ("user.text",          #{ max: 500 }),
+    ("tool_result",        #{ max: 200, priority: ["line1"] }),
+    ("assistant.text",     #{ max: 200 }),
+    ("assistant.thinking", #{ max: 200, priority: ["start", "end"] }),
+    ("*",                  #{ max: 200 }),
+];
+
+/// Roadmap mode: the whole session goes into the agent prompt as a
+/// compressed session; the agent retrieves full message text
+/// selectively through its session-scoped Query view.
+///
+/// Sessions already processed under the current findings key are
+/// skipped. A grown session carries the range of its unscanned lines;
+/// the compressed session and Query view are constrained to that
+/// range.
+async fn findings_roadmap() {
+    let (_prev_sessions, new_sessions, validate) = scan()
+        .sessions()
+        .split_valid_range(FINDINGS_ROADMAP_KEY)
+        .await?;
+
+    // Size the compression budget to the agent's free context
+    let context = model_context("medium").await?;
+    let budget = (context.free_tokens as f64) * 0.8;
+
+    let t = Template::new(include_str!("findings-roadmap-prompt.md.j2")).await?;
+    // One tick per session: skipped sessions tick during queueing,
+    // reviewed sessions tick as their agents complete
+    let progress = Progress::new(new_sessions.len());
+    let runner = AgentRunner::new();
+    for s in new_sessions {
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            validate(s).await?;
+            progress.tick();
+            continue
+        }
+        // An unrecorded project is a normal state (deleted project,
+        // scratchpad cwd); the review proceeds without summary notes.
+        let project = match s.project() {
+            Ok(p) => p.path,
+            Err(_) => "",
+        };
+        let roadmap = s.compress(budget, ROADMAP_RULES).await?;
+        let prompt = t.render(#{ session_id: s.id, project, roadmap }).await?;
+        runner.add(
+            call_agent(prompt)
+                .name("code-review-roadmap")
+                // The agent sees this session only, clipped to
+                // s.range when it is Some
+                .gage_tools([Query::new().sessions([s])])
+                .tools(#{ write_finding_roadmap: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s.id },
+        );
+    }
+
+    let results = runner.start();
+    loop {
+        match results.next().await {
+            Some(Ok((result, #{ session }))) => {
+                log::info!(
+                    "code-review roadmap findings: {:?}",
+                    #{
+                        session,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                validate(session).await?;
+                progress.tick();
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
 async fn skip_session(s) {
     // Use query instead of iterating over messages to keep scanner
     // memory use down. File edits show up as Edit/Write tool calls.
@@ -276,8 +385,19 @@ fn write_finding_tooldef() {
     }
 }
 
+// Tool callbacks run without task params (the dispatcher clears them),
+// so each mode registers its own callback carrying its mode.
+
 pub async fn write_finding(inputs, meta) {
-    let metadata = #{};
+    write_finding_note("query", inputs, meta).await
+}
+
+pub async fn write_finding_roadmap(inputs, meta) {
+    write_finding_note("roadmap", inputs, meta).await
+}
+
+async fn write_finding_note(mode, inputs, meta) {
+    let metadata = #{ mode };
     let target = #{ session: inputs.session };
     if let Some(lines) = inputs.get("lines") {
         let (line, line_end) = parse_lines(lines)?;

@@ -1,0 +1,71 @@
+Write code quality finding notes for session {{ session_id }}
+
+An abbreviated roadmap of the full session record is included at the end of
+this prompt. Every message appears under a `[L<line> <type> <subtype>]`
+header, where `<line>` is the message's session line number; use these
+numbers when citing lines in findings. Message content is truncated:
+
+- `… [+N chars]` marks content cut at a cap, with the omitted char count
+- `… [N chars omitted] …` marks the elided middle of a thinking block
+- tool call messages (subtype `tool_use`) show the tool name and its input
+  fields; code changes appear as Edit and Write tool calls and keep most of
+  their content
+- tool result messages (subtype `tool_result`) show only the result's
+  first line
+
+Review the code the assistant wrote or changed in session {{ session_id }} and
+look for code quality issues:
+
+- Project rule violations
+- Best practice violations
+- Poor stack alignment
+- Bugs the session did not detect
+
+The evidence must be in the record itself. Do not infer or assume conditions
+beyond what the record shows. Do not report issues the session itself
+diagnoses and fixes.
+
+Many sessions contain no code quality issues. Do not force findings onto a
+session.
+
+{% if project %}
+## Project context
+
+The session belongs to project `{{ project }}`. Summary notes for the project
+describe its rules and stack. Read them first via `mcp__gage__Query`:
+
+`SELECT name, value FROM note WHERE target = 'project:{{ project }}' AND name LIKE 'project-summary.%'`
+
+Judge the session's code against these summaries. A rule violation finding
+must quote a rule that appears in the query results above.
+{% endif %}
+
+If the code violates a generally accepted best practice --- use your judgement --- state
+the best practice that you are applying in your finding.
+
+## Reading truncated messages
+
+The roadmap is often evidence enough; when a truncated message looks relevant
+to a possible finding, read its full text before writing the finding by
+querying the `message` table via `mcp__gage__Query`, filtering by
+`session_id = '{{ session_id }}'` and the line numbers of interest:
+
+`SELECT line, text FROM message WHERE session_id = '{{ session_id }}' AND line BETWEEN 40 AND 45`
+
+Keep queries targeted at specific lines or narrow ranges. Do not page through
+the whole session — the roadmap already covers all of it.
+
+## Writing findings
+
+Write findings using the `mcp__gage__Finding` tool using a single request
+rather than one tool use per finding. This saves time and tokens.
+
+If you did not find issues for the session, do not use `mcp__gage__Finding`
+to report "no issues found". Only use the tool to report found issues.
+
+In your reply, simply state whether you wrote findings. Do not re-state the
+findings in your reply.
+
+## Session roadmap
+
+{{ roadmap }}
