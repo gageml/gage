@@ -124,6 +124,8 @@ pub struct NoteFilters {
     /// Scan-scoped filter; matches notes recorded in `scan_note` for the
     /// given scan id, regardless of the note's advisory target.
     pub scan: Option<String>,
+    /// Project-scoped filter (single project path).
+    pub project: Option<String>,
     pub author: Option<String>,
     pub name: Option<String>,
     /// Name filters, ORed; each match is exact.
@@ -398,6 +400,14 @@ fn where_clause(filters: &NoteFilters) -> (String, Vec<Box<dyn rusqlite::types::
             values.len() + 1
         ));
         values.push(Box::new(scan.clone()));
+    }
+    if let Some(project) = &filters.project {
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM project_note pn
+                     WHERE pn.note_id = n.id AND pn.project_path = ?{})",
+            values.len() + 1
+        ));
+        values.push(Box::new(project.clone()));
     }
     if let Some(author) = &filters.author {
         clauses.push(format!("n.author = ?{}", values.len() + 1));
@@ -678,6 +688,51 @@ mod tests {
 
         let ids = ids_for_project_by_name(&conn, project, "nothing").unwrap();
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn find_scoped_to_project() {
+        let conn = open_db_in_memory().unwrap();
+        let project_target = |path: &str| {
+            NoteTarget::Project(ProjectTarget {
+                project_path: path.to_string(),
+            })
+        };
+        for (id, name, path) in [
+            ("n1", "project-summary.rules", "/home/me/proj"),
+            ("n2", "project-summary.stack", "/home/me/proj"),
+            ("n3", "project-summary.rules", "/home/me/other"),
+        ] {
+            insert(&conn, &note_with(id, name, project_target(path))).unwrap();
+        }
+        // A session-targeted note of the same name is out of scope
+        insert(
+            &conn,
+            &note_with("n4", "project-summary.rules", session_target_of(SESSION_A)),
+        )
+        .unwrap();
+
+        let filters = NoteFilters {
+            project: Some("/home/me/proj".to_string()),
+            ..Default::default()
+        };
+        let mut names: Vec<String> = find(&conn, &filters)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["project-summary.rules", "project-summary.stack"]);
+
+        // Combines with the name filter rather than replacing it
+        let filters = NoteFilters {
+            project: Some("/home/me/proj".to_string()),
+            names: vec!["project-summary.stack".to_string()],
+            ..Default::default()
+        };
+        let found = find(&conn, &filters).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "project-summary.stack");
     }
 
     #[test]

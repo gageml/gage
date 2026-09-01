@@ -1,9 +1,19 @@
 Write code quality finding notes for session {{ session_id }}
 
 A roadmap of the session record is included at the end of this prompt.
-Every message appears under a `[L<line> <type> <subtype>]` header, where
+Every message appears under a header:
+
+`[L<line> <type> <subtype> <tool> ←L<call>]`
+
 `<line>` is the message's session line number; use these numbers when
-citing lines in findings. Two markers signal truncated content:
+citing lines in findings. `<tool>` appears on tool calls and their
+results, naming the tool. `←L<call>` appears on a tool result and
+gives the line of the call it answers. Trust that back-link, not
+position: an assistant turn issuing several tool calls at once emits
+every call before any result, so the result of an Edit is on the line
+after its call only about three quarters of the time.
+
+Two markers signal truncated content:
 
 - `… [+N chars]` marks the tail of a message cut off, with the omitted
   char count
@@ -25,46 +35,46 @@ diagnoses and fixes.
 Many sessions contain no code quality issues. Do not force findings onto a
 session.
 
-{% if project %}
+{% if summaries %}
 ## Project context
 
-The session belongs to project `{{ project }}`. Summary notes for the project
-describe its rules and stack. Read them first via `mcp__gage__Query`:
+The session belongs to project `{{ project }}`. Judge the session's code
+against the summaries below. A rule violation finding must quote a rule
+that appears here.
+{% for s in summaries %}
+### {{ s.name }}
 
-`SELECT name, value FROM note WHERE target = 'project:{{ project }}' AND name LIKE 'project-summary.%'`
-
-Judge the session's code against these summaries. A rule violation finding
-must quote a rule that appears in the query results above.
+{{ s.value }}
+{% endfor %}
 {% endif %}
 
-If the code violates a generally accepted best practice --- use your judgement --- state
-the best practice that you are applying in your finding.
+If the code violates a generally accepted best practice --- use your judgement ---
+state the best practice that you are applying in your finding.
 
-## Reading truncated messages
+## Reading the roadmap
 
-The roadmap is a compressed view of the session. Under budget pressure a
-message is cut down to its assigned floor and marked with `… [+N chars]`,
-naming the omitted char count. A message with no marker is shown in full.
+The roadmap is an index, not a transcript. Each entry carries enough to
+identify a message --- the tool and its file path, the opening of a reply
+or a prompt --- and almost every entry is truncated. A `… [+N chars]`
+marker is the normal case here, not a signal that something unusual was
+cut.
 
-When a `… [+N chars]` marker sits on a message whose full content would
-change your judgment on a specific candidate finding — the `new_string`
-of an Edit under review, the output of a test or build in a tool result,
-the reasoning of a thinking block that decided the change — fetch that
-message's full text before deciding. Query one line at a time by line
-number:
+So the roadmap tells you what happened and where; it does not carry the
+code. Work from it to pick the messages that matter, then fetch those in
+full. Query one line at a time by line number:
 
 `SELECT line, text FROM message WHERE session_id = '{{ session_id }}' AND line = 42`
 
-Before dismissing a candidate finding as unfounded, if the evidence
-would come from a truncated message, fetch that message first. The
-roadmap's truncation is a signal to look, not a signal to conclude.
+Fetch before you decide, in both directions: before writing a finding
+that rests on the content of a truncated message, and before dismissing
+a candidate finding whose evidence would come from one. An Edit's
+`new_string`, a test or build result, the reasoning of a thinking block
+--- none of these are in the roadmap, and none can be judged from the
+index entry alone.
 
-Query only the specific lines whose truncation blocks a decision. Do
-not scan ranges, and do not fetch messages the roadmap already shows in
-full. The roadmap covers every message of the session's reviewed types
-(user prompts, assistant text and thinking, and both sides of tool
-calls); system and meta messages are deliberately omitted and do not
-carry code-review evidence worth chasing.
+Query only the specific lines a decision turns on. Do not scan ranges.
+System and meta messages are deliberately absent from the roadmap and do
+not carry code-review evidence worth chasing.
 
 ## Writing findings
 

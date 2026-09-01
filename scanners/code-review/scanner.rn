@@ -266,22 +266,45 @@ async fn findings_query() {
     Ok(())
 }
 
-// Rules for the code-review roadmap. Ordering by weight — Edit/Write
-// tool calls and their results carry the actual code changes and are
-// the primary review evidence; thinking and narrative are secondary.
-// No `max`: the budget is the ceiling. `min` sets a floor that
-// survives budget pressure (demotion drops lowest-weight rules
-// first). Message kinds not listed here are excluded from the
-// rendered roadmap entirely (system:*, user:meta, and so on).
+// Rules for the code-review roadmap. The roadmap is an index, not a
+// transcript: each entry carries enough to identify the message and
+// decide whether to fetch it, and the agent queries full text by line
+// for anything it needs to judge. A tool call's first ~120 chars are
+// its name and file path; past that it starts dumping source, which
+// belongs in a targeted query rather than the prompt.
+//
+// The floors follow what review agents ask for when they have no
+// roadmap: a complete, line-ordered, uniformly truncated view with no
+// type filter, every time. Message kinds not listed here are excluded
+// from the rendered roadmap entirely (system:*, user:meta).
+//
+// `max` is what holds the index open. Without it the budget is the
+// only ceiling, and slack expansion spends all of it: on a 477-message
+// session the same floors rendered 659 chars per message, a
+// transcript. `max` near `min` pins each entry to index size; `min`
+// still sets the floor that survives budget pressure on a session
+// large enough to exhaust the budget.
 const ROADMAP_RULES = #{
-    "assistant.tool_use": #{ min: 500, weight: 5 },
-    "user.tool_result": #{ min: 400, weight: 4 },
-    "assistant.thinking": #{ min: 200, weight: 3, priority: ["start", "end"] },
-    "assistant.text": #{ min: 200, weight: 2 },
-    "user.text": #{ min: 100, weight: 1 },
+    "user.text": #{ min: 200, max: 400, weight: 5 },
+    "assistant.tool_use": #{ min: 120, max: 160, weight: 5 },
+    "assistant.text": #{ min: 120, max: 200, weight: 3 },
+    "assistant.thinking": #{ min: 100, max: 160, weight: 2 },
+    "user.tool_result": #{ min: 100, max: 140, weight: 2 },
+
+    // A failed command is index-worthy on its own; give it room to
+    // show what failed. `[error]` outranks the tool-scoped rules
+    // below, so a failed Read reports its error rather than
+    // collapsing to a header.
+    "user.tool_result[error]": #{ min: 300, max: 400, weight: 6 },
+
+    // File and search dumps. The header names the tool and back-links
+    // the call, which already carries the path.
+    "user.tool_result[tool=Read]": #{ header: true },
+    "user.tool_result[tool=Grep]": #{ header: true },
+    "user.tool_result[tool=Glob]": #{ header: true },
 };
 
-const BUDGET_CAP = 300_000;
+const BUDGET_CAP = 100_000;
 
 /// Roadmap mode: the whole session goes into the agent prompt as a
 /// compressed session; the agent retrieves full message text
@@ -320,12 +343,16 @@ async fn findings_roadmap() {
         }
         // An unrecorded project is a normal state (deleted project,
         // scratchpad cwd); the review proceeds without summary notes.
-        let project = match s.project() {
-            Ok(p) => p.path,
-            Err(_) => "",
-        };
+        let project = "";
+        let summaries = [];
+        if let Ok(p) = s.project() {
+            project = p.path;
+            summaries = project_summaries(p).await?;
+        }
         let roadmap = s.compress(budget, ROADMAP_RULES).await?;
-        let prompt = t.render(#{ session_id: s.id, project, roadmap }).await?;
+        let prompt = t
+            .render(#{ session_id: s.id, project, summaries, roadmap })
+            .await?;
         runner.add(
             call_agent(prompt)
                 .name("code-review-roadmap")
@@ -357,6 +384,23 @@ async fn findings_roadmap() {
         }
     }
     Ok(())
+}
+
+/// The project's summary notes, for inlining into the prompt.
+///
+/// Roadmap mode reads these itself rather than directing the agent to
+/// query them: the rules are needed for every finding, so one read
+/// here replaces one query per agent.
+async fn project_summaries(project) {
+    let notes = project
+        .notes()
+        .names(["project-summary.rules", "project-summary.stack"])
+        .await?;
+    let out = [];
+    for n in notes {
+        out.push(#{ name: n.name, value: n.value });
+    }
+    Ok(out)
 }
 
 async fn skip_session(s) {

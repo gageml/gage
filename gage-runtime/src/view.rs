@@ -6,15 +6,26 @@
 //!
 //! `Session::compress(budget, rules)` takes a token budget (or
 //! `"unlimited"`) and a map from selector string to attributes.
-//! Attributes give per-message `min` and optional `max` chars, a
-//! `weight` (default 1) that governs slack-budget share when the
-//! budget is not exhausted by mins, and an optional `priority` list
-//! naming the content parts to keep when a message is cut (`"start"`,
-//! `"end"`, `"line1"`). A message whose type/subtype is not covered
-//! by any rule is excluded from the output entirely. When more than
-//! one rule matches, the most specific wins: a `type.subtype`
-//! selector beats a bare-token selector, and the `[error]` qualifier
-//! adds specificity within a matching pattern. See
+//!
+//! Attributes come in two disjoint shapes. The sizing shape gives
+//! per-message `min` and optional `max` chars, a `weight` (default 1)
+//! that governs slack-budget share when the budget is not exhausted
+//! by mins, and an optional `priority` list naming the content parts
+//! to keep when a message is cut (`"start"`, `"end"`, `"line1"`). The
+//! selection-only shape is `header: true`, which renders the message
+//! header alone; a header is a fixed unit that renders whole or not
+//! at all, so it takes none of the sizing attributes.
+//!
+//! A message whose type/subtype is not covered by any rule is
+//! excluded from the output entirely. When more than one rule
+//! matches, the highest `(order, specificity)` wins. `order`
+//! (default 0) is explicit precedence, for overriding the ranking
+//! below. Specificity ranks a `type.subtype` selector over a
+//! bare-token one, and within a pattern ranks `[error]` over
+//! `[tool=<name>]`, since an error describes the individual message
+//! where a tool name describes a category. Rules naming different
+//! tools cannot match the same message, so the ranking is total: no
+//! two rules that match a message ever tie. See
 //! `.local.design/roadmap-scan.md` for the algorithm.
 
 use std::collections::BTreeMap;
@@ -82,7 +93,8 @@ fn compress(session: Ref<Session>, budget: Value, rules: Value) -> SessionCompre
 async fn do_session_compress(q: SessionCompress) -> super::Result<String> {
     let budget = parse_budget(&q.budget)?;
     let rules = parse_rules(&q.rules)?;
-    let rows = fetch_rows(&q.session_id, q.lines).await?;
+    let mut rows = fetch_rows(&q.session_id, q.lines).await?;
+    link_tool_calls(&mut rows);
     build_compressed(&q.session_id, &rows, budget, &rules)
 }
 
@@ -117,27 +129,45 @@ struct Rule {
     max: Option<usize>,
     weight: u64,
     parts: Vec<Part>,
+    /// Render the header alone. A header is a fixed unit, so a header
+    /// rule carries no sizing attributes and never grows or demotes.
+    header_only: bool,
+    /// Explicit precedence, ranked ahead of specificity.
+    order: i64,
+}
+
+impl Rule {
+    /// Higher wins when more than one rule matches a message.
+    fn precedence(&self) -> (i64, u32) {
+        (self.order, self.selector.specificity())
+    }
 }
 
 struct Selector {
     pattern: Pattern,
-    /// Bracketed qualifier, resolved by peeking at the message `raw`.
+    /// Bracketed qualifiers, resolved by peeking at the message `raw`.
     error_only: bool,
+    tool: Option<String>,
 }
 
 impl Selector {
-    /// Higher wins when more than one rule matches a message.
-    /// `type.subtype` (2) beats bare token (1), and the `[error]`
-    /// qualifier adds one within the same pattern kind.
+    /// `type.subtype` (2) beats bare token (1), and qualifiers rank
+    /// within a pattern kind. `[error]` outranks `[tool=<name>]`:
+    /// it describes the individual message, where a tool name
+    /// describes a category the message belongs to. The two
+    /// therefore never tie, and since rules naming different tools
+    /// cannot match the same message, no two rules that match a
+    /// message ever share a specificity.
     fn specificity(&self) -> u32 {
         let base = match self.pattern {
             Pattern::TypeSubtype(_, _) => 2,
             Pattern::Token(_) => 1,
         };
-        base * 2 + u32::from(self.error_only)
+        base * 4 + u32::from(self.error_only) * 2 + u32::from(self.tool.is_some())
     }
 }
 
+#[derive(PartialEq, Eq)]
 enum Pattern {
     /// `type.subtype`
     TypeSubtype(String, String),
@@ -159,40 +189,97 @@ struct RuleAttrs {
     max: Option<u64>,
     weight: Option<u64>,
     priority: Option<Vec<String>>,
+    header: Option<bool>,
+    order: Option<i64>,
 }
 
 fn parse_rules(v: &Value) -> super::Result<Vec<Rule>> {
     let entries: BTreeMap<String, RuleAttrs> = parse_json(v, "rules")?;
     entries
         .into_iter()
-        .map(|(sel, attrs)| {
-            let min = attrs.min.unwrap_or(0) as usize;
-            let max = attrs.max.map(|m| m as usize);
-            if let Some(m) = max
-                && min > m
-            {
-                return Err(Error::Args(format!(
-                    "rule `{sel}`: min ({min}) exceeds max ({m})"
-                )));
-            }
-            Ok(Rule {
-                selector: parse_selector(&sel)?,
-                min,
-                max,
-                weight: attrs.weight.unwrap_or(1),
-                parts: parse_parts(&sel, attrs.priority)?,
-            })
-        })
+        .map(|(sel, attrs)| parse_rule(&sel, attrs))
         .collect()
 }
 
+fn parse_rule(sel: &str, attrs: RuleAttrs) -> super::Result<Rule> {
+    let selector = parse_selector(sel)?;
+    let order = attrs.order.unwrap_or(0);
+    if attrs.header == Some(true) {
+        return header_rule(sel, selector, order, attrs);
+    }
+    let min = attrs.min.unwrap_or(0) as usize;
+    let max = attrs.max.map(|m| m as usize);
+    if let Some(m) = max
+        && min > m
+    {
+        return Err(Error::Args(format!(
+            "rule `{sel}`: min ({min}) exceeds max ({m})"
+        )));
+    }
+    Ok(Rule {
+        selector,
+        min,
+        max,
+        weight: attrs.weight.unwrap_or(1),
+        parts: parse_parts(sel, attrs.priority)?,
+        header_only: false,
+        order,
+    })
+}
+
+/// A header renders whole or not at all, so the sizing attributes
+/// have nothing to act on and naming one is a category error rather
+/// than a knob to configure.
+fn header_rule(sel: &str, selector: Selector, order: i64, attrs: RuleAttrs) -> super::Result<Rule> {
+    let sizing = [
+        ("min", attrs.min.is_some()),
+        ("max", attrs.max.is_some()),
+        ("weight", attrs.weight.is_some()),
+        ("priority", attrs.priority.is_some()),
+    ];
+    if let Some((name, _)) = sizing.iter().find(|(_, given)| *given) {
+        return Err(Error::Args(format!(
+            "rule `{sel}`: `header` takes no `{name}`: a header renders \
+             whole or not at all"
+        )));
+    }
+    Ok(Rule {
+        selector,
+        min: 0,
+        max: Some(0),
+        weight: 0,
+        parts: vec![Part::Start],
+        header_only: true,
+        order,
+    })
+}
+
 fn parse_selector(sel: &str) -> super::Result<Selector> {
-    let (base, error_only) = match sel.strip_suffix("[error]") {
-        Some(base) => (base, true),
-        None => (sel, false),
+    let (base, quals) = match sel.split_once('[') {
+        Some((base, rest)) => {
+            let inner = rest
+                .strip_suffix(']')
+                .ok_or_else(|| Error::Args(format!("invalid rule selector `{sel}`")))?;
+            (base, inner)
+        }
+        None => (sel, ""),
     };
     if base.is_empty() || base.contains(['[', ']', '*']) {
         return Err(Error::Args(format!("invalid rule selector `{sel}`")));
+    }
+    let mut error_only = false;
+    let mut tool = None;
+    for q in quals.split(',').map(str::trim).filter(|q| !q.is_empty()) {
+        match q.split_once('=') {
+            Some(("tool", name)) if !name.is_empty() => tool = Some(name.to_string()),
+            None if q == "error" => error_only = true,
+            _ => {
+                return Err(Error::Args(format!(
+                    "rule `{sel}`: unknown qualifier `{q}`: expected `error` \
+                     or `tool=<name>`"
+                )));
+            }
+        }
     }
     let pattern = match base.split_once('.') {
         Some((ty, sub)) if !ty.is_empty() && !sub.is_empty() => {
@@ -204,6 +291,7 @@ fn parse_selector(sel: &str) -> super::Result<Selector> {
     Ok(Selector {
         pattern,
         error_only,
+        tool,
     })
 }
 
@@ -306,7 +394,7 @@ fn match_rule(rules: &[Rule], row: &MessageRow) -> Option<usize> {
         .iter()
         .enumerate()
         .filter(|(_, r)| selector_matches(&r.selector, row))
-        .max_by_key(|(_, r)| r.selector.specificity())
+        .max_by_key(|(_, r)| r.precedence())
         .map(|(i, _)| i)
 }
 
@@ -338,10 +426,12 @@ fn fit_to_budget(
         if total <= budget {
             break;
         }
+        // A header-only message costs the same demoted, so demoting
+        // it frees nothing and it is not a candidate.
         let victim = msgs
             .iter()
             .enumerate()
-            .filter(|(_, m)| !m.demoted)
+            .filter(|(_, m)| !m.demoted && !rule_of(rules, m.rule).header_only)
             .min_by_key(|(i, m)| (rule_of(rules, m.rule).weight, std::cmp::Reverse(*i)))
             .map(|(i, _)| i);
         match victim {
@@ -453,7 +543,12 @@ fn selector_matches(sel: &Selector, row: &MessageRow) -> bool {
         }
         Pattern::Token(tok) => row.type_ == *tok || row.subtype.as_deref() == Some(tok.as_str()),
     };
-    matched && (!sel.error_only || is_error_result(row))
+    matched
+        && (!sel.error_only || is_error_result(row))
+        && sel
+            .tool
+            .as_deref()
+            .is_none_or(|t| row.tool.as_deref() == Some(t))
 }
 
 /// Qualifier peek into `raw`: any tool_result block with
@@ -487,11 +582,25 @@ fn message_len(row: &MessageRow, text: &[char], alloc: usize, parts: &[Part]) ->
     render_message(row, text, alloc, parts).chars().count()
 }
 
+/// `[L<line> <type> <subtype> <tool> ←L<call>]`, where the tool name
+/// and the back-link to the answered call appear when known. The
+/// back-link is what associates a result with its call: parallel tool
+/// batches emit every call before any result, so position alone gets
+/// the pairing wrong on a fifth of Edits and half of Writes.
 fn header(row: &MessageRow) -> String {
-    match &row.subtype {
-        Some(sub) if *sub != row.type_ => format!("[L{} {} {}]", row.line, row.type_, sub),
-        _ => format!("[L{} {}]", row.line, row.type_),
+    let mut s = match &row.subtype {
+        Some(sub) if *sub != row.type_ => format!("[L{} {} {}", row.line, row.type_, sub),
+        _ => format!("[L{} {}", row.line, row.type_),
+    };
+    if let Some(tool) = &row.tool {
+        s.push(' ');
+        s.push_str(tool);
     }
+    if let Some(call) = row.call_line {
+        s.push_str(&format!(" ←L{call}"));
+    }
+    s.push(']');
+    s
 }
 
 /// Cut the text to `alloc` kept chars, spending them on the listed
@@ -577,6 +686,67 @@ pub(crate) struct MessageRow {
     pub subtype: Option<String>,
     pub text: String,
     pub raw: String,
+    /// Tool name of a tool_use row, and of the call a tool_result
+    /// answers. Set by `link_tool_calls`.
+    pub tool: Option<String>,
+    /// For a tool_result, the line of the tool_use it answers.
+    pub call_line: Option<u64>,
+}
+
+/// Name every tool row's tool and link each tool_result back to the
+/// line of the call it answers, matching on `tool_use_id`. Position
+/// is not a sound substitute: an assistant turn issuing several tool
+/// calls at once emits all the calls before any result, which puts a
+/// result on the line after its call for only 78% of Edits and 51%
+/// of Writes.
+fn link_tool_calls(rows: &mut [MessageRow]) {
+    let mut calls: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    for row in rows.iter_mut() {
+        if let Some((id, name)) = tool_use_block(row) {
+            row.tool = Some(name.clone());
+            calls.insert(id, (row.line, name));
+        }
+    }
+    for row in rows.iter_mut() {
+        // A result whose call falls outside the fetched line range
+        // has no entry and keeps its bare header.
+        if let Some((line, name)) = tool_result_id(row).and_then(|id| calls.get(&id)) {
+            row.tool = Some(name.clone());
+            row.call_line = Some(*line);
+        }
+    }
+}
+
+/// The `(id, name)` of a row's first tool_use block.
+fn tool_use_block(row: &MessageRow) -> Option<(String, String)> {
+    content_blocks(row)?.into_iter().find_map(|b| {
+        if b.get("type").and_then(Json::as_str) != Some("tool_use") {
+            return None;
+        }
+        let id = b.get("id").and_then(Json::as_str)?;
+        let name = b.get("name").and_then(Json::as_str)?;
+        Some((id.to_string(), name.to_string()))
+    })
+}
+
+/// The `tool_use_id` of a row's first tool_result block.
+fn tool_result_id(row: &MessageRow) -> Option<String> {
+    content_blocks(row)?.into_iter().find_map(|b| {
+        if b.get("type").and_then(Json::as_str) != Some("tool_result") {
+            return None;
+        }
+        b.get("tool_use_id")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn content_blocks(row: &MessageRow) -> Option<Vec<Json>> {
+    let raw = serde_json::from_str::<Json>(&row.raw).ok()?;
+    match raw.get("message").and_then(|m| m.get("content")) {
+        Some(Json::Array(blocks)) => Some(blocks.clone()),
+        _ => None,
+    }
 }
 
 async fn fetch_rows(session_id: &str, lines: Option<(u64, u64)>) -> super::Result<Vec<MessageRow>> {
@@ -627,6 +797,8 @@ async fn fetch_rows(session_id: &str, lines: Option<(u64, u64)>) -> super::Resul
                 subtype: opt_str(subtype_arr, i),
                 text: text_arr.value(i).to_string(),
                 raw: raw_arr.value(i).to_string(),
+                tool: None,
+                call_line: None,
             });
         }
     }
@@ -652,6 +824,8 @@ mod tests {
             subtype: subtype.map(str::to_string),
             text: text.to_string(),
             raw: "{}".to_string(),
+            tool: None,
+            call_line: None,
         }
     }
 
@@ -662,6 +836,43 @@ mod tests {
             max,
             weight,
             parts,
+            header_only: false,
+            order: 0,
+        }
+    }
+
+    /// A row whose `raw` carries one tool_use block.
+    fn use_row(line: u64, id: &str, name: &str, text: &str) -> MessageRow {
+        MessageRow {
+            raw: serde_json::json!({
+                "message": {"content": [{"type": "tool_use", "id": id, "name": name}]}
+            })
+            .to_string(),
+            ..row(line, "assistant", Some("tool_use"), text)
+        }
+    }
+
+    /// A row whose `raw` carries one tool_result block.
+    fn result_row(line: u64, tool_use_id: &str, text: &str) -> MessageRow {
+        MessageRow {
+            raw: serde_json::json!({
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": tool_use_id}]
+                }
+            })
+            .to_string(),
+            ..row(line, "user", Some("tool_result"), text)
+        }
+    }
+
+    fn rules_from(json: Json) -> Vec<Rule> {
+        parse_rules(&crate::value::json_to_value(&json)).unwrap()
+    }
+
+    fn rules_err(json: Json) -> Error {
+        match parse_rules(&crate::value::json_to_value(&json)) {
+            Err(e) => e,
+            Ok(_) => panic!("rules parsed but should have been rejected"),
         }
     }
 
@@ -782,11 +993,8 @@ mod tests {
                 }] },
             });
             MessageRow {
-                line,
-                type_: "user".to_string(),
-                subtype: Some("tool_result".to_string()),
-                text: "e".repeat(100),
                 raw: raw.to_string(),
+                ..row(line, "user", Some("tool_result"), &"e".repeat(100))
             }
         };
         let rows = [mk(1, true), mk(2, false)];
@@ -953,6 +1161,185 @@ mod tests {
         let rules = serde_json::json!({ "user.text": { "min": 100, "max": 50 } });
         let v = crate::value::json_to_value(&rules);
         assert!(parse_rules(&v).is_err());
+    }
+
+    #[test]
+    fn tool_result_links_to_its_call_not_its_neighbour() {
+        // A parallel batch: both calls, then both results. Position
+        // pairs L11 with L12; the tool_use_id pairs it with L10.
+        let mut rows = vec![
+            use_row(10, "toolu_a", "Edit", "Edit:\n  file_path: a.rs"),
+            use_row(11, "toolu_b", "Write", "Write:\n  file_path: b.rs"),
+            result_row(12, "toolu_a", "updated a.rs"),
+            result_row(13, "toolu_b", "wrote b.rs"),
+        ];
+        link_tool_calls(&mut rows);
+        assert_eq!(rows[2].tool.as_deref(), Some("Edit"));
+        assert_eq!(rows[2].call_line, Some(10));
+        assert_eq!(rows[3].tool.as_deref(), Some("Write"));
+        assert_eq!(rows[3].call_line, Some(11));
+    }
+
+    #[test]
+    fn header_names_the_tool_and_back_links_the_call() {
+        let mut rows = vec![
+            use_row(10, "toolu_a", "Edit", "Edit:\n  file_path: a.rs"),
+            result_row(12, "toolu_a", "updated a.rs"),
+        ];
+        link_tool_calls(&mut rows);
+        assert_eq!(header(&rows[0]), "[L10 assistant tool_use Edit]");
+        assert_eq!(header(&rows[1]), "[L12 user tool_result Edit ←L10]");
+    }
+
+    #[test]
+    fn tool_result_without_its_call_in_range_keeps_a_bare_header() {
+        let mut rows = vec![result_row(12, "toolu_missing", "updated a.rs")];
+        link_tool_calls(&mut rows);
+        assert_eq!(rows[0].tool, None);
+        assert_eq!(header(&rows[0]), "[L12 user tool_result]");
+    }
+
+    #[test]
+    fn tool_qualifier_selects_by_tool_name() {
+        let mut rows = vec![
+            use_row(1, "toolu_a", "Edit", "editing"),
+            use_row(2, "toolu_b", "Read", "reading"),
+            result_row(3, "toolu_b", "file contents here"),
+        ];
+        link_tool_calls(&mut rows);
+        let rules = [
+            rule("assistant.tool_use", 20, None, 1, vec![Part::Start]),
+            rule(
+                "assistant.tool_use[tool=Read]",
+                4,
+                None,
+                1,
+                vec![Part::Start],
+            ),
+            rule("user.tool_result[tool=Read]", 3, None, 1, vec![Part::Start]),
+        ];
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(
+            out.contains("[L1 assistant tool_use Edit]\nediting"),
+            "{out}"
+        );
+        assert!(out.contains("[L2 assistant tool_use Read]\nread"), "{out}");
+        assert!(out.contains("[L3 user tool_result Read ←L2]\nfil"), "{out}");
+    }
+
+    #[test]
+    fn header_rule_renders_the_header_alone() {
+        let mut rows = vec![
+            use_row(1, "toolu_a", "Read", "Read:\n  file_path: a.rs"),
+            result_row(2, "toolu_a", "a very long file dump that must not appear"),
+        ];
+        link_tool_calls(&mut rows);
+        let rules = rules_from(serde_json::json!({
+            "assistant.tool_use": { "min": 40 },
+            "user.tool_result[tool=Read]": { "header": true },
+        }));
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.ends_with("[L2 user tool_result Read ←L1]"), "{out}");
+        assert!(!out.contains("file dump"), "{out}");
+    }
+
+    #[test]
+    fn header_rule_rejects_sizing_attributes() {
+        for attrs in [
+            serde_json::json!({ "header": true, "min": 10 }),
+            serde_json::json!({ "header": true, "max": 10 }),
+            serde_json::json!({ "header": true, "weight": 2 }),
+            serde_json::json!({ "header": true, "priority": ["end"] }),
+        ] {
+            let err = rules_err(serde_json::json!({ "user.tool_result": attrs }));
+            assert!(err.to_string().contains("`header` takes no"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rules_naming_different_tools_coexist() {
+        // Two tool-scoped rules over one pattern are disjoint: a
+        // message's tool is one or the other, never both.
+        let mut rows = vec![
+            use_row(1, "toolu_a", "Grep", "grepping"),
+            use_row(2, "toolu_b", "Glob", "globbing"),
+            result_row(3, "toolu_a", "grep hits"),
+            result_row(4, "toolu_b", "glob hits"),
+        ];
+        link_tool_calls(&mut rows);
+        let rules = rules_from(serde_json::json!({
+            "assistant.tool_use": { "min": 40 },
+            "user.tool_result[tool=Grep]": { "header": true },
+            "user.tool_result[tool=Glob]": { "header": true },
+        }));
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.contains("[L3 user tool_result Grep ←L1]"), "{out}");
+        assert!(out.ends_with("[L4 user tool_result Glob ←L2]"), "{out}");
+        assert!(!out.contains("grep hits"), "{out}");
+    }
+
+    #[test]
+    fn error_qualifier_outranks_tool_qualifier_by_default() {
+        let mut rows = vec![use_row(1, "toolu_a", "Bash", "just check")];
+        rows.push(MessageRow {
+            raw: serde_json::json!({
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_a",
+                        "is_error": true,
+                    }],
+                },
+            })
+            .to_string(),
+            ..row(2, "user", Some("tool_result"), "clippy failed")
+        });
+        link_tool_calls(&mut rows);
+        let rules = rules_from(serde_json::json!({
+            "assistant.tool_use": { "min": 40 },
+            "user.tool_result[error]": { "min": 40 },
+            "user.tool_result[tool=Bash]": { "header": true },
+        }));
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(
+            out.contains("[L2 user tool_result Bash ←L1]\nclippy failed"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn order_overrides_specificity() {
+        let mut rows = vec![use_row(1, "toolu_a", "Bash", "just check")];
+        rows.push(MessageRow {
+            raw: serde_json::json!({
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_a",
+                        "is_error": true,
+                    }],
+                },
+            })
+            .to_string(),
+            ..row(2, "user", Some("tool_result"), "clippy failed")
+        });
+        link_tool_calls(&mut rows);
+        // `[error]` outranks `[tool=Bash]` on specificity; `order` on
+        // the lower-ranked rule reverses that.
+        let rules = rules_from(serde_json::json!({
+            "assistant.tool_use": { "min": 40 },
+            "user.tool_result[error]": { "min": 40 },
+            "user.tool_result[tool=Bash]": { "header": true, "order": 1 },
+        }));
+        let out = compress(&rows, Budget::Unlimited, &rules);
+        assert!(out.ends_with("[L2 user tool_result Bash ←L1]"), "{out}");
+        assert!(!out.contains("clippy failed"), "{out}");
+    }
+
+    #[test]
+    fn rules_reject_unknown_qualifier() {
+        let err = rules_err(serde_json::json!({ "user.text[nope]": { "min": 10 } }));
+        assert!(err.to_string().contains("unknown qualifier"), "{err}");
     }
 
     #[test]

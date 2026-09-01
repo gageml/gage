@@ -17,6 +17,7 @@ use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmE
 use rune::{ContextError, Module};
 use tracing::warn;
 
+use crate::config::Project;
 use crate::error::Error;
 use crate::scan::{Scan, Session};
 use crate::state::current_scan_ctx;
@@ -59,6 +60,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 
     m.function_meta(session_notes)?;
     m.function_meta(scan_notes)?;
+    m.function_meta(project_notes)?;
     m.function_meta(NotesQuery::name)?;
     m.function_meta(NotesQuery::names)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
@@ -190,6 +192,7 @@ pub(crate) struct NotesQuery {
 enum NotesScope {
     Session(String),
     Scan(String),
+    Project(String),
 }
 
 #[rune::function(instance, path = notes)]
@@ -205,6 +208,15 @@ fn session_notes(session: Ref<Session>) -> NotesQuery {
 fn scan_notes(scan: Ref<Scan>) -> NotesQuery {
     NotesQuery {
         scope: NotesScope::Scan(scan.id.clone()),
+        name: None,
+        names: Vec::new(),
+    }
+}
+
+#[rune::function(instance, path = notes)]
+fn project_notes(project: Ref<Project>) -> NotesQuery {
+    NotesQuery {
+        scope: NotesScope::Project(project.path.to_string_lossy().into_owned()),
         name: None,
         names: Vec::new(),
     }
@@ -239,6 +251,7 @@ pub(crate) fn fetch_notes(q: NotesQuery) -> super::Result<Vec<Note>> {
     match q.scope {
         NotesScope::Session(id) => filters.session = Some(id),
         NotesScope::Scan(id) => filters.scan = Some(id),
+        NotesScope::Project(path) => filters.project = Some(path),
     }
     let db = ctx.db.lock().unwrap();
     let db_notes = note::find(&db, &filters).map_err(|e| Error::Db(e.to_string()))?;
