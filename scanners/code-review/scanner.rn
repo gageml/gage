@@ -17,7 +17,7 @@ pub const SCANNER = #{
     name: "code-review",
     description: "Review sessions for code quality",
     groups: ["default"],
-    config: #{ mode: #{ value: "query" } },
+    config: #{ mode: #{ value: "roadmap" } },
     tasks: #{
         project_summary: #{
             notes: #{
