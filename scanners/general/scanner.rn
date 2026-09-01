@@ -15,7 +15,7 @@ pub const SCANNER = #{
     name: "general",
     description: "Scan sessions for general findings",
     groups: ["default"],
-    config: #{ mode: #{ value: "roadmap" } },
+    params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
     tasks: #{
         findings: #{
             notes: #{
@@ -134,6 +134,8 @@ const ROADMAP_RULES = #{
     "assistant.tool_use": #{ min: 200, weight: 2 },
 };
 
+const BUDGET_CAP = 800_000;
+
 /// Roadmap mode: the whole session goes into the agent prompt as a
 /// compressed session; the agent retrieves full message text
 /// selectively through its session-scoped Query view.
@@ -151,14 +153,18 @@ async fn findings_roadmap() {
 
     // Size the compression budget to the agent's free context
     let context = model_context("medium").await?;
-    let budget = (context.free_tokens as f64) * 0.8;
+    let budget = match params().budget {
+        b if b > 0 => b,
+        _ => (((context.free_tokens as f64) * 0.8) as i64).min(BUDGET_CAP),
+    };
     log::info!("model context: {:?}", context);
     log::info!("budget: {:?}", budget);
 
     // Init template for agent prompts
     let t = Template::new(include_str!(
         "findings-roadmap-prompt.md.j2"
-    )).await?;
+    ))
+        .await?;
 
     // One tick per session: skipped sessions tick during queueing,
     // scanned sessions tick as their agents complete

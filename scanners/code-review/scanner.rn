@@ -17,7 +17,7 @@ pub const SCANNER = #{
     name: "code-review",
     description: "Review sessions for code quality",
     groups: ["default"],
-    config: #{ mode: #{ value: "roadmap" } },
+    params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
     tasks: #{
         project_summary: #{
             notes: #{
@@ -322,7 +322,10 @@ async fn findings_roadmap() {
 
     // Size the compression budget to the agent's free context
     let context = model_context("medium").await?;
-    let budget = (((context.free_tokens as f64) * 0.8) as i64).min(BUDGET_CAP);
+    let budget = match params().budget {
+        b if b > 0 => b,
+        _ => (((context.free_tokens as f64) * 0.8) as i64).min(BUDGET_CAP),
+    };
     log::info!("model context: {:?}", context);
     log::info!("budget: {:?}", budget);
 

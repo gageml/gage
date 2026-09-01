@@ -1134,7 +1134,7 @@ async fn run_scan(mut args: ScanRunArgs) {
     }
 
     // Register `-f` files into the registry and append their composite
-    // names to the explicit scanner list. Any `#{...}` config override
+    // names to the explicit scanner list. Any `#{...}` params override
     // suffix on the path is split off first and re-appended to the
     // composite name so `Scanner::from_spec` parses it normally.
     let mut file_specs: Vec<String> = Vec::new();

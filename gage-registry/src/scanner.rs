@@ -129,20 +129,11 @@ pub struct ScannerDef {
 }
 
 impl ScannerDef {
-    pub fn config(&self) -> Object {
-        match self.scanner_field("config") {
-            Some(ast::Expr::Object(obj)) => parse_config(&self.source, obj),
+    pub fn params_def(&self) -> Object {
+        match self.scanner_field("params") {
+            Some(ast::Expr::Object(obj)) => parse_params_def(&self.source, obj),
             _ => Object::new(),
         }
-    }
-
-    pub fn config_json(&self) -> Option<json::Value> {
-        let config = self.config();
-        if config.is_empty() {
-            return None;
-        }
-        let rune_val = rune::to_value(config).unwrap();
-        Some(json::to_value(&rune_val).unwrap())
     }
 
     /// Filesystem directory containing this scanner's `.rn` source.
@@ -305,7 +296,7 @@ impl fmt::Debug for Scanner<'_> {
 pub enum ScannerSpecError {
     Name(String),
     ParseFailed(String, String),
-    Config(String, String),
+    Params(String, String),
 }
 
 impl fmt::Display for ScannerSpecError {
@@ -315,8 +306,8 @@ impl fmt::Display for ScannerSpecError {
             ScannerSpecError::ParseFailed(name, rendered) => {
                 write!(f, "scanner '{name}' failed to parse:\n{rendered}")
             }
-            ScannerSpecError::Config(spec, msg) => {
-                write!(f, "Invalid scanner config '{spec}': {msg}")
+            ScannerSpecError::Params(spec, msg) => {
+                write!(f, "Invalid scanner params '{spec}': {msg}")
             }
         }
     }
@@ -328,13 +319,13 @@ impl<'a> Scanner<'a> {
     pub fn with_tasks(def: &'a ScannerDef, tasks: Vec<String>) -> Self {
         Scanner {
             def,
-            params: resolve_params(&def.config()),
+            params: resolve_params(&def.params_def()),
             only_tasks: Some(tasks),
         }
     }
 
     pub fn from_spec(spec: &str, registry: &'a ScannerRegistry) -> Result<Self, ScannerSpecError> {
-        let (name, config_override) = match spec.find("#{") {
+        let (name, params_override) = match spec.find("#{") {
             Some(pos) => (&spec[..pos], Some(&spec[pos..])),
             None => (spec, None),
         };
@@ -352,11 +343,11 @@ impl<'a> Scanner<'a> {
             }
         };
 
-        let mut params = resolve_params(&def.config());
+        let mut params = resolve_params(&def.params_def());
 
-        if let Some(override_src) = config_override {
+        if let Some(override_src) = params_override {
             let overrides = parse_object_repr(override_src)
-                .map_err(|e| ScannerSpecError::Config(spec.to_string(), e))?;
+                .map_err(|e| ScannerSpecError::Params(spec.to_string(), e))?;
 
             if let Some(ref mut params_json) = params {
                 let map = params_json.as_object_mut().unwrap();
@@ -367,7 +358,7 @@ impl<'a> Scanner<'a> {
                         tracing::warn!(
                             scanner = name,
                             key,
-                            "ignoring unknown config key in override"
+                            "ignoring unknown params key in override"
                         );
                     }
                 }
@@ -376,7 +367,7 @@ impl<'a> Scanner<'a> {
                 tracing::warn!(
                     scanner = name,
                     ?keys,
-                    "scanner has no config; ignoring overrides"
+                    "scanner has no params; ignoring overrides"
                 );
             }
         }
@@ -415,12 +406,12 @@ fn parse_object_repr(source: &str) -> Result<json::Map<String, json::Value>, Str
     Ok(map)
 }
 
-fn resolve_params(config: &Object) -> Option<json::Value> {
-    if config.is_empty() {
+fn resolve_params(params_def: &Object) -> Option<json::Value> {
+    if params_def.is_empty() {
         return None;
     }
     let mut params = Object::new();
-    for (key, val) in config.iter() {
+    for (key, val) in params_def.iter() {
         if let Ok(entry) = val.borrow_ref::<Object>()
             && let Some(default) = entry.get("value")
         {
@@ -1066,8 +1057,8 @@ fn include_base_dir(embed_key: &str) -> PathBuf {
     scanners_dir().join(rel)
 }
 
-fn parse_config(source: &str, obj: &ast::ExprObject) -> Object {
-    let mut config = Object::new();
+fn parse_params_def(source: &str, obj: &ast::ExprObject) -> Object {
+    let mut params_def = Object::new();
 
     for (field, _) in &obj.assignments {
         let Some(key) = field_key(source, &field.key) else {
@@ -1095,7 +1086,7 @@ fn parse_config(source: &str, obj: &ast::ExprObject) -> Object {
             }
         }
 
-        config
+        params_def
             .insert(
                 alloc::String::try_from(key.as_str()).unwrap(),
                 rune::to_value(entry).unwrap(),
@@ -1103,7 +1094,7 @@ fn parse_config(source: &str, obj: &ast::ExprObject) -> Object {
             .unwrap();
     }
 
-    config
+    params_def
 }
 
 fn expr_to_value(source: &str, expr: &ast::Expr) -> Option<Value> {
