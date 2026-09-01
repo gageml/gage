@@ -41,6 +41,7 @@ mod dialog;
 mod human;
 mod limit;
 mod markdown;
+mod model_prompt;
 mod style;
 mod target_content;
 

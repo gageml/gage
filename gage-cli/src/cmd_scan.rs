@@ -19,7 +19,7 @@ use tabled::{
 };
 
 use gage_claude::home::ClaudeHome;
-use gage_claude::model::ModelMap;
+use gage_claude::model::{ModelMap, resolved_model};
 use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
@@ -30,6 +30,7 @@ use gage_registry::scanner::{Scanner, ScannerRegistry};
 use rand::seq::SliceRandom;
 
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::model_prompt::{self, DefaultModel};
 use crate::style as s;
 
 const DEFAULT_AGENT_JOBS: usize = 8;
@@ -1093,13 +1094,13 @@ async fn run_scan(mut args: ScanRunArgs) {
         return;
     }
 
-    let model_map = match ModelMap::from_args(&args.models) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("gage scan: {e}");
-            std::process::exit(1);
-        }
-    };
+    // Validate --model up front so a malformed value fails before any
+    // dialog work; the map itself is rebuilt inside the dialog after
+    // the Model step, which may append a selection to args.models.
+    if let Err(e) = ModelMap::from_args(&args.models) {
+        eprintln!("gage scan: {e}");
+        std::process::exit(1);
+    }
 
     // --rerun expands into the explicit scanner and session lists, then
     // flows through the normal run path below.
@@ -1195,7 +1196,7 @@ async fn run_scan(mut args: ScanRunArgs) {
     };
 
     dialog::run_async("Scan sessions", || {
-        run_dialog(args, registry, explicit_sessions, scan_id, model_map)
+        run_dialog(args, registry, explicit_sessions, scan_id)
     })
     .await;
 }
@@ -1316,11 +1317,10 @@ fn write_stream(file: &mut Option<std::fs::File>, s: &str) {
 }
 
 async fn run_dialog(
-    args: ScanRunArgs,
+    mut args: ScanRunArgs,
     registry: ScannerRegistry,
     explicit_sessions: Option<Vec<(String, PathBuf)>>,
     scan_id: String,
-    model_map: ModelMap,
 ) -> Result<DialogResult, DialogError> {
     // Scanner selection — default set excludes disabled scanners.
     // Explicit `-s name` (handled below) still runs disabled scanners.
@@ -1602,6 +1602,33 @@ async fn run_dialog(
         }
         sessions
     };
+
+    // Model selection. If --model was passed, honor it verbatim and
+    // show the list as a step. Otherwise prompt for a bare model
+    // (added as a plain [SIZE=]-less entry to args.models), or fall
+    // back to the scan default under -y.
+    if args.models.is_empty() {
+        let default_model = resolved_model(None);
+        if args.yes {
+            selection_step("Model", &default_model)?;
+            args.models.push(default_model);
+        } else {
+            let selected = model_prompt::prompt_model(Some(DefaultModel {
+                model: default_model,
+                note: "from runtime defaults",
+            }))?;
+            args.models.push(selected);
+        }
+    } else {
+        let lines: String = args
+            .models
+            .iter()
+            .map(|m| format!("\n{}", style(m).dim()))
+            .collect();
+        cli::log::step(format!("Model{lines}"))?;
+    }
+    let model_map = ModelMap::from_args(&args.models)
+        .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
 
     // Confirmation
     if !args.yes {
