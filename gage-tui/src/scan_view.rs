@@ -83,6 +83,8 @@ pub struct ScanSetup {
 #[derive(Debug, Clone, Default)]
 pub struct ScanModel {
     pub scan_id: String,
+    /// User-provided run label, shown beside the scan id.
+    pub label: Option<String>,
     pub tasks: Vec<TaskItem>,
     pub sessions: Vec<SessionItem>,
     pub notes: Vec<NoteItem>,
@@ -3001,10 +3003,13 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             ),
             None => format!(" · {}/{} tasks run", model.progress, model.total),
         };
-        let line = Line::from(vec![
-            Span::styled(model.scan_id.clone(), styles::Text::id()),
-            Span::styled(summary, styles::Text::dim()),
-        ]);
+        let mut spans = vec![Span::styled(model.scan_id.clone(), styles::Text::id())];
+        if let Some(label) = &model.label {
+            spans.push(Span::styled(" · ", styles::Text::dim()));
+            spans.push(Span::styled(label.clone(), styles::Text::id()));
+        }
+        spans.push(Span::styled(summary, styles::Text::dim()));
+        let line = Line::from(spans);
         frame.render_widget(Paragraph::new(line), tasks);
     } else {
         let label = format!(
@@ -3597,6 +3602,7 @@ mod tests {
     fn state_with_session_dialog(nav: SessionNav) -> ViewState {
         let model = ScanModel {
             scan_id: "scan1".into(),
+            label: None,
             tasks: Vec::new(),
             sessions: Vec::new(),
             notes: Vec::new(),
@@ -3640,6 +3646,7 @@ mod tests {
     fn progress_ratio_never_moves_backward() {
         let model = ScanModel {
             scan_id: "scan1".into(),
+            label: None,
             tasks: vec![TaskItem {
                 id: TaskId {
                     scanner: "s".into(),

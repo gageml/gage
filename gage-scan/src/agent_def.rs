@@ -281,6 +281,7 @@ fn register_scan(
             // Replaced by the agent-run summary; a dead pid under this
             // payload marks a run that died
             metadata: Some(gage_db::scan::running_metadata(std::process::id())),
+            label: None,
         },
     )?;
     for s in selected.iter() {

@@ -91,7 +91,7 @@ enum Command {
     ///
     /// With no session selection options, scans sessions from the
     /// last 30 days, up to 50.
-    Scan(cmd_scan::ScanArgs),
+    Scan(Box<cmd_scan::ScanArgs>),
 
     /// Resolve issues in a Claude Code session
     ///
@@ -258,7 +258,7 @@ async fn main() {
                 if args.agent {
                     set_agent_projects_dir();
                 }
-                cmd_scan::run(args).await
+                cmd_scan::run(*args).await
             }
             Command::Resolve(args) => cmd_resolve::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {

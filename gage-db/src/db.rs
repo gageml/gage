@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 4;
+pub const CURRENT_VERSION: u32 = 5;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -99,6 +99,13 @@ pub fn open_db_in_memory() -> Result<Connection, DbError> {
     Ok(conn)
 }
 
+// Schema-parity rule: a fresh database (init_schema) and a migrated
+// database (the version steps below) must end up with the IDENTICAL
+// schema — same tables, same columns, same column order. SQLite's
+// ALTER TABLE ADD COLUMN always appends, so a new column is added at
+// the END of the table's DDL in init_schema, never in the middle.
+// Mismatched column order between fresh and migrated databases is not
+// acceptable.
 fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     // An immediate transaction serializes concurrent migrators (e.g.
     // parallel query-context creation on a fresh gage home): the
@@ -146,6 +153,9 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
                                   WHERE si.issue_id = scan_issue.issue_id
                                   ORDER BY s.created LIMIT 1);",
             )?;
+        }
+        if version < 5 {
+            tx.execute_batch("ALTER TABLE scan ADD COLUMN label TEXT")?;
         }
     }
     set_version(&tx, CURRENT_VERSION)?;
@@ -253,7 +263,8 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE scan (
             id       TEXT PRIMARY KEY,
             created  INTEGER NOT NULL,
-            metadata TEXT
+            metadata TEXT,
+            label    TEXT
         );
 
         CREATE TABLE scan_session (
@@ -473,6 +484,27 @@ mod tests {
         };
         assert_eq!(role_of("sc-old"), "wrote");
         assert_eq!(role_of("sc-new"), "carried");
+    }
+
+    #[test]
+    fn migrate_v5_adds_scan_label() {
+        // A v4 database: scan without the label column.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scan (
+                id TEXT PRIMARY KEY, created INTEGER NOT NULL, metadata TEXT
+            );
+            INSERT INTO scan VALUES ('sc-1', 100, NULL);",
+        )
+        .unwrap();
+        set_version(&conn, 4).unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let label: Option<String> = conn
+            .query_row("SELECT label FROM scan WHERE id = 'sc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(label, None);
     }
 
     #[test]

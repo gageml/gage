@@ -8,6 +8,8 @@ pub struct Scan {
     /// Epoch milliseconds.
     pub created: i64,
     pub metadata: Option<String>,
+    /// User-provided label naming the run.
+    pub label: Option<String>,
 }
 
 /// One planned task invocation within a scan. Inserted when the plan
@@ -97,8 +99,8 @@ impl std::error::Error for ScanError {}
 
 pub fn insert_scan(conn: &Connection, scan: &Scan) -> Result<(), ScanError> {
     conn.execute(
-        "INSERT INTO scan (id, created, metadata) VALUES (?1, ?2, ?3)",
-        params![scan.id, scan.created, scan.metadata],
+        "INSERT INTO scan (id, created, metadata, label) VALUES (?1, ?2, ?3, ?4)",
+        params![scan.id, scan.created, scan.metadata, scan.label],
     )?;
     Ok(())
 }
@@ -587,13 +589,15 @@ pub struct ScanCounts {
 }
 
 pub fn all(conn: &Connection) -> Result<Vec<Scan>, ScanError> {
-    let mut stmt = conn.prepare("SELECT id, created, metadata FROM scan ORDER BY created DESC")?;
+    let mut stmt =
+        conn.prepare("SELECT id, created, metadata, label FROM scan ORDER BY created DESC")?;
     let scans = stmt
         .query_map([], |row| {
             Ok(Scan {
                 id: row.get(0)?,
                 created: row.get(1)?,
                 metadata: row.get(2)?,
+                label: row.get(3)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -772,13 +776,15 @@ pub fn all_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 /// Look up a scan by ID prefix.
 pub fn get_scan(conn: &Connection, id_prefix: &str) -> Result<Scan, ScanError> {
     let pattern = format!("{id_prefix}%");
-    let mut stmt = conn.prepare("SELECT id, created, metadata FROM scan WHERE id LIKE ?1")?;
+    let mut stmt =
+        conn.prepare("SELECT id, created, metadata, label FROM scan WHERE id LIKE ?1")?;
     let scans: Vec<Scan> = stmt
         .query_map([&pattern], |row| {
             Ok(Scan {
                 id: row.get(0)?,
                 created: row.get(1)?,
                 metadata: row.get(2)?,
+                label: row.get(3)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -807,6 +813,7 @@ mod tests {
             id: "scan-001".to_string(),
             created: 1_743_984_000_000,
             metadata: None,
+            label: None,
         }
     }
 
@@ -884,6 +891,7 @@ mod tests {
                 id: id.to_string(),
                 created,
                 metadata: None,
+                label: None,
             };
             insert_scan(&conn, &scan).unwrap();
         }
@@ -925,6 +933,7 @@ mod tests {
                 id: id.to_string(),
                 created,
                 metadata: None,
+                label: None,
             };
             insert_scan(&conn, &scan).unwrap();
         }

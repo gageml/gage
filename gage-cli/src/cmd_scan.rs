@@ -187,6 +187,10 @@ pub struct ScanRunArgs {
     )]
     scan: Option<String>,
 
+    /// Label for the scan run
+    #[arg(short, long, value_name = "LABEL")]
+    label: Option<String>,
+
     /// Model for scan agents (repeatable)
     ///
     /// MODEL sets the model for every size alias a scanner may
@@ -261,7 +265,7 @@ fn list(args: ScanListArgs) {
 
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
-        "Created",
+        "Label", "Created",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -340,6 +344,7 @@ fn list_row(
         cost,
         status.to_string(),
         duration,
+        run.label.clone().unwrap_or_default(),
         crate::human::format_elapsed_ms(run.created),
     ])
 }
@@ -541,6 +546,7 @@ fn load_scan_model(
 
     Ok(ScanModel {
         scan_id: short_uuid(&run.id).to_string(),
+        label: run.label.clone(),
         out_path: Some(ScanStreams::out_path(&run.id)),
         total: summary.as_ref().map(|s| s.total).unwrap_or(0),
         progress: summary
@@ -1655,6 +1661,7 @@ async fn run_dialog(
         gage_scan::runner::run(
             db.clone(),
             scan_id,
+            args.label.clone(),
             scanners,
             slots,
             selected,
@@ -1702,6 +1709,7 @@ async fn run_dialog(
         run_scan_tui(
             db.clone(),
             scan_id,
+            args.label.clone(),
             scanners,
             slots,
             selected,
@@ -1900,6 +1908,7 @@ fn since_local_midnight() -> Duration {
 async fn run_scan_tui(
     db: Arc<Mutex<gage_db::rusqlite::Connection>>,
     scan_id: String,
+    label: Option<String>,
     scanners: Vec<Scanner<'_>>,
     slots: Vec<gage_scan::ScannerSlot>,
     selected: Arc<[SessionInfo]>,
@@ -1983,10 +1992,12 @@ async fn run_scan_tui(
 
     let mut print_buf = String::new();
     let event_tx = tx.clone();
+    let model_label = label.clone();
     let scan_fut = async {
         let result = gage_scan::runner::run(
             db.clone(),
             scan_id.clone(),
+            label,
             scanners,
             slots,
             selected,
@@ -2015,6 +2026,7 @@ async fn run_scan_tui(
 
     let mut model = scan_view::ScanModel::new(setup);
     model.scan_id = short_uuid(&scan_id).to_string();
+    model.label = model_label;
     model.out_path = Some(ScanStreams::out_path(&scan_id));
     let ui_cancel = cancel.clone();
     let run_cancel = cancel.clone();

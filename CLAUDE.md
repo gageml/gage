@@ -193,6 +193,17 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 [Rust API Guidelines C-CONV]:
   https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
 
+## Database rules
+
+- **Schema parity between fresh and migrated databases.** A fresh database
+  (created by `init_schema` in `gage-db/src/db.rs`) and a migrated database
+  (produced by the version steps in `migrate`) must end up with the IDENTICAL
+  schema: same tables, same columns, same column order. SQLite's
+  `ALTER TABLE ADD COLUMN` always appends, so when adding a column, add it at
+  the END of the table's DDL in `init_schema` — never in the middle. Mismatched
+  column order resulting from misalignment between the DDL and the migration
+  steps is not acceptable.
+
 ## TUI rules
 
 - Key-hint vocabulary for the key that exits an overlay. The term names the

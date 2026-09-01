@@ -81,6 +81,7 @@ impl From<gage_db::scan::ScanError> for RunError {
 pub async fn run(
     db: Arc<Mutex<Connection>>,
     scan_id: String,
+    label: Option<String>,
     scanners: Vec<Scanner<'_>>,
     slots: Vec<ScannerSlot>,
     selected: Arc<[SessionInfo]>,
@@ -97,7 +98,7 @@ pub async fn run(
     // Init scan + per-scanner records, recording the selected sessions
     {
         let conn = db.lock().unwrap();
-        init_run(&scan_id, &selected, &conn)?;
+        init_run(&scan_id, label, &selected, &conn)?;
     }
 
     // Resolve distinct projects from `~/.claude.json`. Sessions key
@@ -276,7 +277,12 @@ fn persist_run_summary(
     Ok(())
 }
 
-fn init_run(scan_id: &str, selected: &[SessionInfo], db: &Connection) -> Result<(), RunError> {
+fn init_run(
+    scan_id: &str,
+    label: Option<String>,
+    selected: &[SessionInfo],
+    db: &Connection,
+) -> Result<(), RunError> {
     insert_scan(
         db,
         &Scan {
@@ -285,6 +291,7 @@ fn init_run(scan_id: &str, selected: &[SessionInfo], db: &Connection) -> Result<
             // Replaced by the end-of-run summary; a dead pid under this
             // payload marks a run that died
             metadata: Some(gage_db::scan::running_metadata(std::process::id())),
+            label,
         },
     )?;
 
