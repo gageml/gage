@@ -54,9 +54,10 @@ fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
         return Err(DialogError::Failed("Unknown issues".to_string()));
     }
 
-    cli::log::info(
-        "You are about to start an interactive Claude Code session to resolve issues. Standard token usage applies for the selected model.",
-    )?;
+    cli::log::info(dialog::wrap_text(
+        "You are about to start an interactive Claude Code session to resolve issues. \
+         Standard token usage applies for the selected model.",
+    ))?;
     cli::log::step(format!("Issues\n{}", style(issues_label(&ids)).dim()))?;
 
     let model = match &args.model {

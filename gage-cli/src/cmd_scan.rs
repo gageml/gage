@@ -1636,9 +1636,13 @@ async fn run_dialog(
 
     // Confirmation
     if !args.yes {
-        let confirmed = cli::confirm("Run this scan?")
-            .initial_value(true)
-            .interact()?;
+        let n = sessions.len();
+        let plural = if n == 1 { "" } else { "s" };
+        cli::log::info(dialog::wrap_text(&format!(
+            "You are about to scan {n} session{plural}. Standard token usage \
+             applies for the selected model."
+        )))?;
+        let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
         if !confirmed {
             return Err(DialogError::Canceled);
         }
