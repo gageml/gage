@@ -1383,7 +1383,11 @@ async fn run_dialog(
                 .collect();
             let mut prompt = cli::multiselect("Scanners").initial_values(default_names);
             for (i, name) in names.iter().enumerate() {
-                prompt = prompt.item(i, (*name).to_string(), "");
+                let hint = registry
+                    .get_def(name)
+                    .map(|d| d.description.lines().next().unwrap_or("").to_string())
+                    .unwrap_or_default();
+                prompt = prompt.item(i, (*name).to_string(), hint);
             }
             let indices: Vec<usize> = prompt.interact()?;
             indices
