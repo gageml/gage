@@ -120,24 +120,20 @@ fn write_plugin_entry(out: &mut String, p: &InstalledPlugin) {
 fn write_counts(out: &mut String) {
     w(out, format!("{}", style("Data").bold()));
 
-    match open_db() {
-        Ok(conn) => {
-            let open_ct = issue_count(&conn, IssueStatusFilter::Open);
-            let pending_ct = issue_count(&conn, IssueStatusFilter::Pending);
-            let closed_ct = issue_count(&conn, IssueStatusFilter::Closed);
-            w(
-                out,
-                format!("  Issues:   {open_ct} open, {pending_ct} pending, {closed_ct} closed"),
-            );
+    let conn = open_db().unwrap();
+    let open_ct = issue_count(&conn, IssueStatusFilter::Open);
+    let pending_ct = issue_count(&conn, IssueStatusFilter::Pending);
+    let closed_ct = issue_count(&conn, IssueStatusFilter::Closed);
+    w(
+        out,
+        format!("  Issues:   {open_ct} open, {pending_ct} pending, {closed_ct} closed"),
+    );
 
-            let notes = note::count(&conn).unwrap_or(0);
-            w(out, format!("  Notes:    {notes}"));
+    let notes = note::count(&conn).unwrap();
+    w(out, format!("  Notes:    {notes}"));
 
-            let scans = scan::all(&conn).map(|v| v.len()).unwrap_or(0);
-            w(out, format!("  Scans:    {scans}"));
-        }
-        Err(e) => w(out, format!("  {} database open failed: {e}", cross())),
-    }
+    let scans = scan::all(&conn).unwrap().len();
+    w(out, format!("  Scans:    {scans}"));
 
     let sessions = SessionListBuilder::new().build().len();
     let agent_sessions = count_agent_sessions();
@@ -155,25 +151,25 @@ fn issue_count(conn: &gage_db::rusqlite::Connection, status: IssueStatusFilter) 
             ..IssueFilters::default()
         },
     )
-    .unwrap_or(0)
+    .unwrap()
 }
 
 fn count_agent_sessions() -> usize {
     let root = gage_home().join("claude");
-    let Ok(entries) = fs::read_dir(&root) else {
-        return 0;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return 0,
+        Err(e) => panic!("failed to read {}: {e}", root.display()),
     };
     let mut n = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for entry in entries {
+        let path = entry.unwrap().path();
         if !path.is_dir() {
             continue;
         }
-        let Ok(files) = fs::read_dir(&path) else {
-            continue;
-        };
-        for file in files.flatten() {
+        for file in fs::read_dir(&path).unwrap() {
             if file
+                .unwrap()
                 .path()
                 .extension()
                 .and_then(|s| s.to_str())
@@ -189,38 +185,25 @@ fn count_agent_sessions() -> usize {
 fn write_storage(out: &mut String, verbose: bool) {
     w(out, format!("{}", style("Storage").bold()));
     let root = gage_home();
-    let total = match dir_size(&root) {
-        Ok(n) => n,
-        Err(e) => {
-            w(
-                out,
-                format!("  {} could not size {}: {e}", cross(), root.display()),
-            );
-            return;
-        }
-    };
+    let total = dir_size(&root);
     w(out, format!("  ~/.gage:  {}", format_size(total as i64)));
     if !verbose {
         return;
     }
     let entries = match fs::read_dir(&root) {
         Ok(it) => it,
-        Err(e) => {
-            w(
-                out,
-                format!("  {} could not list {}: {e}", cross(), root.display()),
-            );
-            return;
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+        Err(e) => panic!("failed to read {}: {e}", root.display()),
     };
     let mut children: Vec<(String, u64)> = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap();
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         let size = if path.is_dir() {
-            dir_size(&path).unwrap_or(0)
+            dir_size(&path)
         } else {
-            fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            fs::metadata(&path).unwrap().len()
         };
         children.push((name, size));
     }
@@ -237,20 +220,18 @@ fn write_storage(out: &mut String, verbose: bool) {
     }
 }
 
-fn dir_size(path: &Path) -> io::Result<u64> {
+fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(it) => it,
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
+            Err(e) => panic!("failed to read {}: {e}", dir.display()),
         };
-        for entry in entries.flatten() {
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
+        for entry in entries {
+            let entry = entry.unwrap();
+            let metadata = entry.metadata().unwrap();
             if metadata.is_dir() {
                 stack.push(entry.path());
             } else {
@@ -258,7 +239,7 @@ fn dir_size(path: &Path) -> io::Result<u64> {
             }
         }
     }
-    Ok(total)
+    total
 }
 
 /// Append `line` and a newline to `out`. Writing to a `String` cannot

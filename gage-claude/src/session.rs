@@ -152,11 +152,12 @@ impl SessionListBuilder {
 
         let entries = match std::fs::read_dir(&projects_dir) {
             Ok(entries) => entries,
-            Err(_) => return SessionList { sessions },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return SessionList { sessions },
+            Err(e) => panic!("failed to read {}: {e}", projects_dir.display()),
         };
 
-        for project_entry in entries.flatten() {
-            let project_path = project_entry.path();
+        for project_entry in entries {
+            let project_path = project_entry.unwrap().path();
             if !project_path.is_dir() {
                 continue;
             }
@@ -173,11 +174,12 @@ impl SessionListBuilder {
 
             let dir_entries = match std::fs::read_dir(&project_path) {
                 Ok(entries) => entries,
-                Err(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("failed to read {}: {e}", project_path.display()),
             };
 
-            for entry in dir_entries.flatten() {
-                let path = entry.path();
+            for entry in dir_entries {
+                let path = entry.unwrap().path();
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy())
@@ -187,9 +189,13 @@ impl SessionListBuilder {
                 }
                 let id = &name[..36];
 
+                // Claude Code may delete or rotate a session file
+                // concurrently; treat that as vanished mid-scan, not a
+                // program error. Anything else is unexpected.
                 let metadata = match path.metadata() {
                     Ok(m) => m,
-                    Err(_) => continue,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => panic!("failed to stat {}: {e}", path.display()),
                 };
                 let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 let size = metadata.len();
@@ -200,8 +206,13 @@ impl SessionListBuilder {
                     continue;
                 }
 
-                if self.empty && !is_empty_session(&path) {
-                    continue;
+                if self.empty {
+                    match is_empty_session(&path) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => panic!("failed to read {}: {e}", path.display()),
+                    }
                 }
 
                 sessions.push(SessionInfo {
@@ -255,9 +266,13 @@ pub fn projects_dir() -> Option<PathBuf> {
 pub fn find_agent_session(session_id: &str) -> Option<PathBuf> {
     let archive = gage_home().join("claude");
     let file = format!("{session_id}.jsonl");
-    let entries = std::fs::read_dir(&archive).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join(&file);
+    let entries = match std::fs::read_dir(&archive) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+        Err(e) => panic!("failed to read {}: {e}", archive.display()),
+    };
+    for entry in entries {
+        let candidate = entry.unwrap().path().join(&file);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -272,22 +287,24 @@ pub fn find_session(id_prefix: &str) -> Vec<SessionInfo> {
 
     let entries = match std::fs::read_dir(&projects_dir) {
         Ok(entries) => entries,
-        Err(_) => return results,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return results,
+        Err(e) => panic!("failed to read {}: {e}", projects_dir.display()),
     };
 
-    for project_entry in entries.flatten() {
-        let project_path = project_entry.path();
+    for project_entry in entries {
+        let project_path = project_entry.unwrap().path();
         if !project_path.is_dir() {
             continue;
         }
 
         let dir_entries = match std::fs::read_dir(&project_path) {
             Ok(entries) => entries,
-            Err(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("failed to read {}: {e}", project_path.display()),
         };
 
-        for entry in dir_entries.flatten() {
-            let path = entry.path();
+        for entry in dir_entries {
+            let path = entry.unwrap().path();
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy())
@@ -297,9 +314,13 @@ pub fn find_session(id_prefix: &str) -> Vec<SessionInfo> {
             }
             let id = &name[..36];
 
+            // Claude Code may delete or rotate a session file
+            // concurrently; treat that as vanished mid-scan, not a
+            // program error. Anything else is unexpected.
             let metadata = match path.metadata() {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("failed to stat {}: {e}", path.display()),
             };
             let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             let size = metadata.len();
@@ -352,26 +373,20 @@ pub fn one_session(prefix: &str) -> Result<SessionInfo, SessionLookupError> {
     }
 }
 
-fn is_empty_session(path: &Path) -> bool {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return true,
-    };
+fn is_empty_session(path: &Path) -> io::Result<bool> {
+    let file = File::open(path)?;
     let reader = BufReader::new(file);
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => return true,
-        };
+        let line = line?;
         if line.contains("\"type\":\"user\"")
             || line.contains("\"type\": \"user\"")
             || line.contains("\"type\":\"assistant\"")
             || line.contains("\"type\": \"assistant\"")
         {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// Delete a session's JSONL file and sidecar directory. Gage notes

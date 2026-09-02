@@ -1633,13 +1633,13 @@ async fn run_dialog(
 
     // Model selection. If --model was passed, honor it verbatim and
     // show the list as a step. Otherwise prompt for a bare model
-    // (added as a plain [SIZE=]-less entry to args.models), or fall
-    // back to the scan default under -y.
+    // (added as a plain [SIZE=]-less entry to args.models), or under
+    // -y show the scan default as a caption only, leaving args.models
+    // empty so each scanner resolves its own per-size-tier default.
     if args.models.is_empty() {
         let default_model = resolved_model(None);
         if args.yes {
             selection_step("Model", &default_model)?;
-            args.models.push(default_model);
         } else {
             let selected = model_prompt::prompt_model(Some(DefaultModel {
                 model: default_model,
