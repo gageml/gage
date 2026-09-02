@@ -110,5 +110,5 @@ fn prompt_model() -> Result<String, DialogError> {
         model: m,
         note: "from settings",
     });
-    model_prompt::prompt_model(default)
+    model_prompt::prompt_model_ranked(default)
 }
