@@ -9,7 +9,7 @@ pub const SCANNER = #{
         issues: #{
             notes: #{
                 wants: ["finding.*"],
-                required_by: ["finding.*", "finding"],
+                required_by: ["finding.*"],
             },
             issues: #{
                 writes: #{ "findings": "Issue derived from session findings" },
