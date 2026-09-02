@@ -4,6 +4,7 @@ use clap::Args;
 use cliclack as cli;
 use console::style;
 use gage_claude::model::{configured_model, resolve_model};
+use gage_claude::preflight;
 use gage_claude::resolve::resolve_command;
 use gage_db::db;
 use gage_db::issue;
@@ -53,6 +54,8 @@ fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
     if errors > 0 {
         return Err(DialogError::Failed("Unknown issues".to_string()));
     }
+
+    preflight::check().map_err(|e| DialogError::Failed(e.to_string()))?;
 
     cli::log::info(dialog::wrap_text(
         "You are about to start an interactive Claude Code session to resolve issues. \

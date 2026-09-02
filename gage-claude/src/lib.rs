@@ -3,6 +3,7 @@ pub mod entry;
 pub mod home;
 pub mod model;
 pub mod plugin;
+pub mod preflight;
 pub mod proc;
 pub mod project;
 pub mod resolve;

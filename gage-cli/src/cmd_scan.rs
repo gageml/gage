@@ -20,6 +20,7 @@ use tabled::{
 
 use gage_claude::home::ClaudeHome;
 use gage_claude::model::{ModelMap, resolved_model};
+use gage_claude::preflight;
 use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
@@ -1656,6 +1657,8 @@ async fn run_dialog(
     }
     let model_map = ModelMap::from_args(&args.models)
         .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
+
+    preflight::check().map_err(|e| DialogError::Failed(e.to_string()))?;
 
     // Confirmation
     if !args.yes {
