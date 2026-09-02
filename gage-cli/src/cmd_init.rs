@@ -107,11 +107,26 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
             &marketplace.to_string_lossy(),
         ],
     )?;
-    run_claude(
-        "Installing plugin",
-        &claude_bin,
-        &["plugin", "install", "gage@gage"],
-    )?;
+    // One spinner covers both operations: silent uninstall (forces
+    // Claude to re-copy the plugin from source on the following
+    // install; without it, `plugin install` on an already-installed
+    // plugin is a no-op and the cached plugin.json stays frozen at
+    // the originally installed version) then the install itself.
+    let spinner = crate::style::spinner("Installing plugin");
+    silent_uninstall(&claude_bin);
+    let install_result = Command::new(&claude_bin)
+        .args(["plugin", "install", "gage@gage"])
+        .stderr(std::process::Stdio::inherit())
+        .output();
+    spinner.finish_and_clear();
+    let install_output = install_result
+        .map_err(|e| DialogError::Other(anyhow::anyhow!("failed to run claude: {e}")))?;
+    if !install_output.status.success() {
+        let stdout = String::from_utf8_lossy(&install_output.stdout);
+        return Err(DialogError::Other(anyhow::anyhow!(
+            "claude plugin install gage@gage failed: {stdout}"
+        )));
+    }
 
     Ok(DialogResult::from("Gage installed as Claude Code plugin"))
 }
@@ -140,6 +155,23 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     )?;
 
     Ok(DialogResult::from("Gage removed from Claude Code"))
+}
+
+/// Best-effort uninstall used to force Claude to re-copy the plugin
+/// from source on the next install. Discards Claude's stdout/stderr
+/// so the expected "not installed" case on a first-time init stays
+/// silent, and swallows both a non-zero exit and a spawn failure.
+/// The following `plugin install` is the source of truth for install
+/// errors, so any noise here is not actionable.
+fn silent_uninstall(claude_bin: &Path) {
+    match Command::new(claude_bin)
+        .args(["plugin", "uninstall", "gage@gage"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(_) | Err(_) => {}
+    }
 }
 
 fn find_claude_or_err() -> Result<PathBuf, DialogError> {

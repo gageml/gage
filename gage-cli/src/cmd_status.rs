@@ -1,9 +1,11 @@
 //! `gage status` — one-shot health and inventory report.
 //!
-//! Prints login state, plugin install/version state, corpus item
-//! counts, and disk usage under `~/.gage`. Read-only: no dialogs, no
-//! spinners, no session spawns, no token cost.
+//! Gathers login state, plugin install/version state, corpus item
+//! counts, and disk usage under `~/.gage` behind a spinner, then
+//! prints the whole report at once. Read-only: no dialogs, no session
+//! spawns, no token cost.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,33 +24,44 @@ use gage_db::scan;
 use crate::human::format_size;
 
 #[derive(Args)]
-pub struct StatusArgs {}
-
-pub fn run(_args: StatusArgs) {
-    print_login();
-    println!();
-    print_plugin();
-    println!();
-    print_counts();
-    println!();
-    print_storage();
+pub struct StatusArgs {
+    /// Show per-subdirectory storage breakdown under ~/.gage
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
-fn print_login() {
-    println!("{}", style("Login").bold());
+pub fn run(args: StatusArgs) {
+    let spinner = crate::style::spinner("Reading status...");
+    let mut out = String::new();
+    write_login(&mut out);
+    out.push('\n');
+    write_plugin(&mut out);
+    out.push('\n');
+    write_counts(&mut out);
+    out.push('\n');
+    write_storage(&mut out, args.verbose);
+    spinner.finish_and_clear();
+    print!("{out}");
+}
+
+fn write_login(out: &mut String) {
+    w(out, format!("{}", style("Login").bold()));
     match preflight::auth_status() {
-        Ok(s) if s.logged_in => print_login_ok(&s),
-        Ok(_) => println!(
-            "  {} not logged in — run `claude` and complete /login",
-            cross()
+        Ok(s) if s.logged_in => write_login_ok(out, &s),
+        Ok(_) => w(
+            out,
+            format!(
+                "  {} not logged in — run `claude` and complete /login",
+                cross(),
+            ),
         ),
-        Err(e) => println!("  {} {}", cross(), pretty_error(&e)),
+        Err(e) => w(out, format!("  {} {}", cross(), pretty_error(&e))),
     }
 }
 
-fn print_login_ok(s: &AuthStatus) {
+fn write_login_ok(out: &mut String, s: &AuthStatus) {
     let identity = s.email.as_deref().unwrap_or("unknown account");
-    println!("  {} logged in as {}", check(), identity);
+    w(out, format!("  {} logged in as {}", check(), identity));
     let mut detail = Vec::new();
     if let Some(sub) = &s.subscription_type {
         detail.push(format!("plan {sub}"));
@@ -63,86 +76,86 @@ fn print_login_ok(s: &AuthStatus) {
         detail.push(format!("method {method}"));
     }
     if !detail.is_empty() {
-        println!("    {}", style(detail.join(" · ")).dim());
+        w(out, format!("    {}", style(detail.join(" · ")).dim()));
     }
 }
 
-fn print_plugin() {
-    println!("{}", style("Plugin").bold());
+fn write_plugin(out: &mut String) {
+    w(out, format!("{}", style("Plugin").bold()));
     match preflight::installed_plugin() {
-        Ok(None) => println!("  {} gage plugin not installed — run `gage init`", cross(),),
-        Ok(Some(p)) => print_plugin_entry(&p),
-        Err(e) => println!("  {} {}", cross(), pretty_error(&e)),
+        Ok(None) => w(
+            out,
+            format!("  {} gage plugin not installed — run `gage init`", cross(),),
+        ),
+        Ok(Some(p)) => write_plugin_entry(out, &p),
+        Err(e) => w(out, format!("  {} {}", cross(), pretty_error(&e))),
     }
 }
 
-fn print_plugin_entry(p: &InstalledPlugin) {
+fn write_plugin_entry(out: &mut String, p: &InstalledPlugin) {
     let expected = preflight::EXPECTED_VERSION;
     if p.version == expected {
         let disabled = if p.enabled { "" } else { " (disabled)" };
-        println!("  {} {} v{}{}", check(), p.id, p.version, disabled,);
+        w(
+            out,
+            format!("  {} {} v{}{}", check(), p.id, p.version, disabled),
+        );
     } else {
-        println!(
-            "  {} {} v{} installed, this gage expects v{} — run `gage init`",
-            cross(),
-            p.id,
-            p.version,
-            expected,
+        w(
+            out,
+            format!(
+                "  {} {} v{} installed, this gage expects v{} — run `gage init`",
+                cross(),
+                p.id,
+                p.version,
+                expected,
+            ),
         );
     }
     if let Some(path) = &p.install_path {
-        println!("    {}", style(path).dim());
+        w(out, format!("    {}", style(path).dim()));
     }
 }
 
-fn print_counts() {
-    println!("{}", style("Data").bold());
+fn write_counts(out: &mut String) {
+    w(out, format!("{}", style("Data").bold()));
 
     match open_db() {
         Ok(conn) => {
-            let open_ct = issue::count(
-                &conn,
-                &IssueFilters {
-                    status: IssueStatusFilter::Open,
-                    ..IssueFilters::default()
-                },
-            )
-            .unwrap_or(0);
-            let pending_ct = issue::count(
-                &conn,
-                &IssueFilters {
-                    status: IssueStatusFilter::Pending,
-                    ..IssueFilters::default()
-                },
-            )
-            .unwrap_or(0);
-            let closed_ct = issue::count(
-                &conn,
-                &IssueFilters {
-                    status: IssueStatusFilter::Closed,
-                    ..IssueFilters::default()
-                },
-            )
-            .unwrap_or(0);
-            println!(
-                "  Issues:   {} open, {} pending, {} closed",
-                open_ct, pending_ct, closed_ct,
+            let open_ct = issue_count(&conn, IssueStatusFilter::Open);
+            let pending_ct = issue_count(&conn, IssueStatusFilter::Pending);
+            let closed_ct = issue_count(&conn, IssueStatusFilter::Closed);
+            w(
+                out,
+                format!("  Issues:   {open_ct} open, {pending_ct} pending, {closed_ct} closed"),
             );
 
             let notes = note::count(&conn).unwrap_or(0);
-            println!("  Notes:    {notes}");
+            w(out, format!("  Notes:    {notes}"));
 
             let scans = scan::all(&conn).map(|v| v.len()).unwrap_or(0);
-            println!("  Scans:    {scans}");
+            w(out, format!("  Scans:    {scans}"));
         }
-        Err(e) => {
-            println!("  {} database open failed: {e}", cross());
-        }
+        Err(e) => w(out, format!("  {} database open failed: {e}", cross())),
     }
 
     let sessions = SessionListBuilder::new().build().len();
     let agent_sessions = count_agent_sessions();
-    println!("  Sessions: {sessions} Claude Code, {agent_sessions} agent");
+    w(
+        out,
+        format!("  Sessions: {sessions} Claude Code, {agent_sessions} agent"),
+    );
+}
+
+fn issue_count(conn: &gage_db::rusqlite::Connection, status: IssueStatusFilter) -> u32 {
+    issue::count(
+        conn,
+        &IssueFilters {
+            status,
+            ..IssueFilters::default()
+        },
+    )
+    .unwrap_or(0)
 }
 
 fn count_agent_sessions() -> usize {
@@ -173,40 +186,54 @@ fn count_agent_sessions() -> usize {
     n
 }
 
-fn print_storage() {
-    println!("{}", style("Storage").bold());
+fn write_storage(out: &mut String, verbose: bool) {
+    w(out, format!("{}", style("Storage").bold()));
     let root = gage_home();
-    match dir_size(&root) {
-        Ok(total) => {
-            println!("  {}  ({})", root.display(), format_size(total as i64));
-            let entries = match fs::read_dir(&root) {
-                Ok(it) => it,
-                Err(e) => {
-                    println!("  {} could not list {}: {e}", cross(), root.display());
-                    return;
-                }
-            };
-            let mut children: Vec<(String, u64)> = Vec::new();
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let size = if path.is_dir() {
-                    dir_size(&path).unwrap_or(0)
-                } else {
-                    fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
-                };
-                children.push((name, size));
-            }
-            children.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
-            for (name, size) in children {
-                println!(
-                    "    {:<24}  {}",
-                    name,
-                    style(format_size(size as i64)).dim(),
-                );
-            }
+    let total = match dir_size(&root) {
+        Ok(n) => n,
+        Err(e) => {
+            w(
+                out,
+                format!("  {} could not size {}: {e}", cross(), root.display()),
+            );
+            return;
         }
-        Err(e) => println!("  {} could not size {}: {e}", cross(), root.display()),
+    };
+    w(out, format!("  ~/.gage:  {}", format_size(total as i64)));
+    if !verbose {
+        return;
+    }
+    let entries = match fs::read_dir(&root) {
+        Ok(it) => it,
+        Err(e) => {
+            w(
+                out,
+                format!("  {} could not list {}: {e}", cross(), root.display()),
+            );
+            return;
+        }
+    };
+    let mut children: Vec<(String, u64)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let size = if path.is_dir() {
+            dir_size(&path).unwrap_or(0)
+        } else {
+            fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        };
+        children.push((name, size));
+    }
+    children.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+    for (name, size) in children {
+        w(
+            out,
+            format!(
+                "    {:<24}  {}",
+                name,
+                style(format_size(size as i64)).dim(),
+            ),
+        );
     }
 }
 
@@ -232,6 +259,13 @@ fn dir_size(path: &Path) -> io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Append `line` and a newline to `out`. Writing to a `String` cannot
+/// fail; the tiny helper trims the noise from the writeln! + must_use
+/// dance without discarding a fallible operation.
+fn w(out: &mut String, line: String) {
+    writeln!(out, "{line}").expect("String write is infallible");
 }
 
 fn check() -> console::StyledObject<&'static str> {
