@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
-use console::style;
+use console::{Term, style};
 use tabled::{
     Table,
     settings::{
@@ -1664,10 +1664,13 @@ async fn run_dialog(
     if !args.yes {
         let n = sessions.len();
         let plural = if n == 1 { "" } else { "s" };
-        cli::log::info(dialog::wrap_text(&format!(
-            "You are about to scan {n} session{plural}. Standard token usage \
-             applies for the selected model."
-        )))?;
+        cli::log::info(dialog::wrap_text(
+            &Term::stdout(),
+            &format!(
+                "You are about to scan {n} session{plural}. Standard token usage \
+                 applies for the selected model."
+            ),
+        ))?;
         let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
         if !confirmed {
             return Err(DialogError::Canceled);

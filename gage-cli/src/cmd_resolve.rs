@@ -2,7 +2,7 @@
 
 use clap::Args;
 use cliclack as cli;
-use console::style;
+use console::{Term, style};
 use gage_claude::model::{configured_model, resolve_model};
 use gage_claude::preflight;
 use gage_claude::resolve::resolve_command;
@@ -58,6 +58,7 @@ fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
     preflight::check().map_err(|e| DialogError::Failed(e.to_string()))?;
 
     cli::log::info(dialog::wrap_text(
+        &Term::stdout(),
         "You are about to start an interactive Claude Code session to resolve issues. \
          Standard token usage applies for the selected model.",
     ))?;

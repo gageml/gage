@@ -1,7 +1,7 @@
 use std::io::{self, ErrorKind};
 
 use cliclack as cli;
-use console::style;
+use console::{Term, style};
 
 struct GageTheme;
 
@@ -21,10 +21,11 @@ impl cli::Theme for GageTheme {
 
 /// Wrap long text for dialog log lines. Width is capped at 79 columns
 /// regardless of terminal width, subject to a 40-column floor and the
-/// 4-column cliclack gutter.
-pub fn wrap_text(text: &str) -> String {
-    let term = console::Term::stdout().size().1 as usize;
-    let width = term.saturating_sub(4).clamp(40, 79);
+/// 4-column cliclack gutter. `term` must be the stream the wrapped text
+/// is ultimately written to, so the width matches that stream's size.
+pub fn wrap_text(term: &Term, text: &str) -> String {
+    let width = term.size().1 as usize;
+    let width = width.saturating_sub(4).clamp(40, 79);
     textwrap::fill(text, width)
 }
 
@@ -139,7 +140,7 @@ fn handle_result(result: Result<DialogResult, DialogError>) {
             std::process::exit(1);
         }
         Err(DialogError::Other(e)) => {
-            let wrapped = wrap_text(&format!("{e:#}"))
+            let wrapped = wrap_text(&Term::stderr(), &format!("{e:#}"))
                 .lines()
                 .map(|l| style(l).red().to_string())
                 .collect::<Vec<_>>()
