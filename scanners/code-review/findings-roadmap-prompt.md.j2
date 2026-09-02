@@ -1,39 +1,81 @@
 Write code quality finding notes for session {{ session_id }}
 
-A roadmap of the session record is included at the end of this prompt.
-Every message appears under a header:
-
-`[L<line> <type> <subtype> <tool> ←L<call>]`
-
-`<line>` is the message's session line number; use these numbers when
-citing lines in findings. `<tool>` appears on tool calls and their
-results, naming the tool. `←L<call>` appears on a tool result and
-gives the line of the call it answers. Trust that back-link, not
-position: an assistant turn issuing several tool calls at once emits
-every call before any result, so the result of an Edit is on the line
-after its call only about three quarters of the time.
-
-Two markers signal truncated content:
-
-- `… [+N chars]` marks the tail of a message cut off, with the omitted
-  char count
-- `… [N chars omitted] …` marks the elided middle of a message shown at
-  both ends
-
 Review the code the assistant wrote or changed in session {{ session_id }} and
 look for code quality issues:
 
 - Project rule violations
 - Best practice violations
 - Poor stack alignment
-- Bugs the session did not detect
+- Bugs or code that hide bugs
+
+Defer to project rules of code quality and standards when present. Otherwise use
+your best judgement.
+
+## Scope of analysis
 
 The evidence must be in the record itself. Do not infer or assume conditions
-beyond what the record shows. Do not report issues the session itself
-diagnoses and fixes.
+beyond what the record shows. Do not report issues that are fixed later in
+the session. A fix is a change to the code that fully addresses the issue.
 
-Many sessions contain no code quality issues. Do not force findings onto a
-session.
+## Applied patterns
+
+It's common for a model to apply patterns and code from other areas of the
+project. This does not exonerate the model from its obligation to meet expected
+coding standards. Subject this code to the same analysis you apply to novel patterns and code.
+
+## Issue severity
+
+Write findings without concern for severity. An issue that violates a cited rule
+or best practice must be written as a finding even if it seems minor or not
+worth reporting.
+
+## Finding no issues
+
+Many sessions contain no code quality issues. Only write issues that are
+supported by evidence. If you cannot find issues note that fact in your reply
+and do not write findings.
+
+## Reading the roadmap
+
+The roadmap is a compressed version of the session. Every message is represented
+by a header:
+
+`[L<line> <type> <subtype> <tool> ←L<call>]`
+
+`<line>` is the message's session line number; use these numbers when citing
+lines in findings. `<tool>` appears on tool calls and their results, naming the
+tool. `←L<call>` appears on a tool result and gives the line of the call it
+answers. Trust that back-link, not position: an assistant turn issuing several
+tool calls at once emits every call before any result, so the result of an Edit
+is on the line after its call only about three quarters of the time.
+
+Two markers signal truncated content:
+
+- `… [+N chars]` marks the tail of a message cut off, with the omitted char count
+- `… [N chars omitted] …` marks the elided middle of a message shown at both ends
+
+Use the roadmap to identify messages you want to read in full and use the
+`Query` tool.
+
+`SELECT line, text FROM message WHERE session_id = '{{ session_id }}' AND line = 42`
+
+Read messages in full before making any determination. Fetch surrounding lines as needed for additional context.
+
+## Writing findings
+
+Write findings using the `mcp__gage__Finding` tool using a single request
+rather than one tool use per finding. This saves time and tokens.
+
+Cite the rule that was violated. If the finding violates a generally accepted
+best practice, state the standard and why you are applying it.
+
+If the finding is a bug or other code quality issue, state your rationale.
+
+If you did not find issues for the session, do not use `mcp__gage__Finding`
+to report "no issues found". Only use the tool to report found issues.
+
+In your reply, only state whether you wrote findings. Do not re-state the
+findings in your reply.
 
 {% if summaries %}
 ## Project context
@@ -48,44 +90,8 @@ that appears here.
 {% endfor %}
 {% endif %}
 
-If the code violates a generally accepted best practice --- use your judgement ---
-state the best practice that you are applying in your finding.
-
-## Reading the roadmap
-
-The roadmap is an index, not a transcript. Each entry carries enough to
-identify a message --- the tool and its file path, the opening of a reply
-or a prompt --- and almost every entry is truncated. A `… [+N chars]`
-marker is the normal case here, not a signal that something unusual was
-cut.
-
-So the roadmap tells you what happened and where; it does not carry the
-code. Work from it to pick the messages that matter, then fetch those in
-full. Query one line at a time by line number:
-
-`SELECT line, text FROM message WHERE session_id = '{{ session_id }}' AND line = 42`
-
-Fetch before you decide, in both directions: before writing a finding
-that rests on the content of a truncated message, and before dismissing
-a candidate finding whose evidence would come from one. An Edit's
-`new_string`, a test or build result, the reasoning of a thinking block
---- none of these are in the roadmap, and none can be judged from the
-index entry alone.
-
-Query only the specific lines a decision turns on. Do not scan ranges.
-System and meta messages are deliberately absent from the roadmap and do
-not carry code-review evidence worth chasing.
-
-## Writing findings
-
-Write findings using the `mcp__gage__Finding` tool using a single request
-rather than one tool use per finding. This saves time and tokens.
-
-If you did not find issues for the session, do not use `mcp__gage__Finding`
-to report "no issues found". Only use the tool to report found issues.
-
-In your reply, simply state whether you wrote findings. Do not re-state the
-findings in your reply.
+If the code violates a generally accepted best practice --- use your judgement
+--- state the best practice that you are applying in your finding.
 
 ## Session roadmap
 

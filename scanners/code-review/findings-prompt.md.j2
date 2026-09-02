@@ -6,29 +6,34 @@ look for code quality issues:
 - Project rule violations
 - Best practice violations
 - Poor stack alignment
-- Bugs the session did not detect
+- Bugs or code that hide bugs
+
+Defer to project rules of code quality and standards when present. Otherwise use
+your best judgement.
+
+## Scope of analysis
 
 The evidence must be in the record itself. Do not infer or assume conditions
-beyond what the record shows. Do not report issues the session itself
-diagnoses and fixes.
+beyond what the record shows. Do not report issues that are fixed later in
+the session. A fix is a change to the code that fully addresses the issue.
 
-Many sessions contain no code quality issues. Do not force findings onto a
-session.
+## Applied patterns
 
-{% if project %}
-## Project context
+It's common for a model to apply patterns and code from other areas of the
+project. This does not exonerate the model from its obligation to meet expected
+coding standards. Subject this code to the same analysis you apply to novel patterns and code.
 
-The session belongs to project `{{ project }}`. Summary notes for the project
-describe its rules and stack. Read them first via `mcp__gage__Query`:
+## Issue severity
 
-`SELECT name, value FROM note WHERE target = 'project:{{ project }}' AND name LIKE 'project-summary.%'`
+Write findings without concern for severity. An issue that violates a cited rule
+or best practice must be written as a finding even if it seems minor or not
+worth reporting.
 
-Judge the session's code against these summaries. A rule violation finding
-must quote a rule that appears in the query results above.
-{% endif %}
+## Finding no issues
 
-If the code violates a generally accepted best practice --- use your judgement --- state
-the best practice that you are applying in your finding.
+Many sessions contain no code quality issues. Only write issues that are
+supported by evidence. If you cannot find issues note that fact in your reply
+and do not write findings.
 
 ## Reading the session
 
@@ -42,7 +47,25 @@ ide_tags, raw). Code changes appear as Edit and Write tool calls.
 Write findings using the `mcp__gage__Finding` tool using a single request
 rather than one tool use per finding. This saves time and tokens.
 
+Cite the rule that was violated. If the finding violates a generally accepted
+best practice, state the standard and why you are applying it.
+
+If the finding is a bug or other code quality issue, state your rationale.
+
 If you did not find issues for the session, do not use `mcp__gage__Finding`
 to report "no issues found". Only use the tool to report found issues.
 
-In your reply, simply state whether you wrote findings. Do not re-state the findings in your reply.
+In your reply, only state whether you wrote findings. Do not re-state the
+findings in your reply.
+
+{% if project %}
+## Project context
+
+The session belongs to project `{{ project }}`. Summary notes for the project
+describe its rules and stack. Read them first via `mcp__gage__Query`:
+
+`SELECT name, value FROM note WHERE target = 'project:{{ project }}' AND name LIKE 'project-summary.%'`
+
+Judge the session's code against these summaries. A rule violation finding
+must quote a rule that appears in the query results above.
+{% endif %}
