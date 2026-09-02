@@ -35,6 +35,7 @@ mod cmd_query;
 mod cmd_resolve;
 mod cmd_scan;
 mod cmd_session;
+mod cmd_status;
 mod cmd_sync;
 mod cmd_test;
 mod dialog;
@@ -121,6 +122,9 @@ enum Command {
         #[command(subcommand)]
         command: cmd_note::NoteCommand,
     },
+
+    /// Show Gage login, plugin, corpus, and storage status
+    Status(cmd_status::StatusArgs),
 
     /// Manage Gage configuration
     Config {
@@ -227,6 +231,7 @@ async fn main() {
             Command::Agent(args) => cmd_agent::run(args).await,
             Command::Config { command } => cmd_config::run(command),
             Command::Init(args) => cmd_init::run(args),
+            Command::Status(args) => cmd_status::run(args),
             Command::Note { command } => match command {
                 cmd_note::NoteCommand::List(args) => cmd_note::list(args),
                 cmd_note::NoteCommand::Add(args) => cmd_note::add(args),
