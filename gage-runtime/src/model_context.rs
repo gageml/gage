@@ -108,7 +108,9 @@ async fn do_model_context(c: ModelContextCall) -> crate::Result<ModelContext> {
         .expect("agent_pool is closed only at process shutdown");
 
     let builder = apply_call_shape(
-        GageAgentBuilder::new().name("model-context"),
+        GageAgentBuilder::new()
+            .name("model-context")
+            .no_session_persistence(),
         resolved_model.clone(),
         &c.system_prompt,
         &c.system_prompt_append,

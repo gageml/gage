@@ -155,6 +155,9 @@ pub struct AgentBuilder {
     /// `--append-system-prompt` value; composes with Claude Code's
     /// default prompt.
     system_prompt_append: Option<String>,
+    /// Pass `--no-session-persistence` on the print path so the child
+    /// writes no session JSONL and nothing is archived.
+    no_session_persistence: bool,
 }
 
 impl AgentBuilder {
@@ -238,6 +241,16 @@ impl AgentBuilder {
         self
     }
 
+    /// Skip session persistence on [`Agent::run_print`]: the child
+    /// writes no session JSONL and nothing is archived. For one-shot
+    /// calls whose transcript has no value, such as the `/context`
+    /// probe. The judge and other callers that read the archived
+    /// session leave this off.
+    pub fn no_session_persistence(mut self) -> Self {
+        self.no_session_persistence = true;
+        self
+    }
+
     pub fn build(self) -> Agent {
         Agent {
             name: self.name.unwrap_or_else(|| "default".to_string()),
@@ -250,6 +263,7 @@ impl AgentBuilder {
             archive_dir: self.archive_dir,
             system_prompt: self.system_prompt,
             system_prompt_append: self.system_prompt_append,
+            no_session_persistence: self.no_session_persistence,
             prep: None,
         }
     }
@@ -272,6 +286,7 @@ pub struct Agent {
     archive_dir: Option<PathBuf>,
     system_prompt: SystemPrompt,
     system_prompt_append: Option<String>,
+    no_session_persistence: bool,
     prep: Option<PreparedRun>,
 }
 
@@ -303,7 +318,9 @@ impl Agent {
 
     /// Spawn the child claude in print mode (`claude -p`) with no MCP
     /// server and no tools, block until it exits, and archive the session
-    /// JSONL it wrote. Returns the captured output.
+    /// JSONL it wrote unless the builder set
+    /// [`AgentBuilder::no_session_persistence`]. Returns the captured
+    /// output.
     pub fn run_print(mut self, prompt: &str) -> io::Result<Output> {
         if self.prep.is_none() {
             self.prep = Some(prepare_run(self.archive_dir(), &self.tools)?);
@@ -314,6 +331,7 @@ impl Agent {
             self.model,
             &self.system_prompt,
             &self.system_prompt_append,
+            self.no_session_persistence,
             prompt,
         )
     }
@@ -428,11 +446,15 @@ fn run_print(
     model: Option<String>,
     system_prompt: &SystemPrompt,
     system_prompt_append: &Option<String>,
+    no_session_persistence: bool,
     prompt: &str,
 ) -> io::Result<Output> {
     let projects_dir = prep.claude_home.join("projects");
     let mut cmd = Command::new(&prep.claude_bin);
-    cmd.args(["-p", prompt, "--tools", "", "--no-session-persistence"]);
+    cmd.args(["-p", prompt, "--tools", ""]);
+    if no_session_persistence {
+        cmd.arg("--no-session-persistence");
+    }
     match system_prompt {
         SystemPrompt::Empty => {
             cmd.args(["--system-prompt", ""]);
@@ -459,8 +481,13 @@ fn run_print(
     let output = cmd.output();
 
     // Archive and clean up even when the spawn failed, so a partial
-    // session is still preserved for inspection.
-    let archived = archive_sessions(&prep.claude_home, &prep.archive_dir);
+    // session is still preserved for inspection. With persistence off
+    // there is no session to archive.
+    let archived = if no_session_persistence {
+        Ok(Vec::new())
+    } else {
+        archive_sessions(&prep.claude_home, &prep.archive_dir)
+    };
     cleanup_run_dir(&prep.run_dir, &prep.cwd);
     let output = output?;
     archived?;
