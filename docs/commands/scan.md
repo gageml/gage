@@ -14,7 +14,7 @@ gage scan <COMMAND>
 ```
 
 With no session selection options, the command scans sessions from the last 30
-days, up to 50. Session arguments accept unique ID prefixes.
+days, up to 20. Session arguments accept unique ID prefixes.
 
 | Option                  | Description                                        |
 | ----------------------- | -------------------------------------------------- |

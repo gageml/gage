@@ -92,7 +92,7 @@ enum Command {
     /// Run scanners on sessions
     ///
     /// With no session selection options, scans sessions from the
-    /// last 30 days, up to 50.
+    /// last 30 days, up to 20.
     Scan(Box<cmd_scan::ScanArgs>),
 
     /// Resolve issues in a Claude Code session

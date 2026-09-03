@@ -220,7 +220,7 @@ in the `default` group. Use `--list-scanners` to show available scanners.
 
 You can also specify how many sessions you want to scan. By default Gage scans
 the last 20 sessions. To scan all available sessions, use the `-a/--all` option.
-Otherwise you can set the number with `-l/--limit`.
+Otherwise you can set the number with `-n/--limit`.
 
 During a scan you can view the active scan tasks, session, issues, and notes.
 
