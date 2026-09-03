@@ -19,16 +19,6 @@ impl cli::Theme for GageTheme {
     }
 }
 
-/// Wrap long text for dialog log lines. Width is capped at 79 columns
-/// regardless of terminal width, subject to a 40-column floor and the
-/// 4-column cliclack gutter. `term` must be the stream the wrapped text
-/// is ultimately written to, so the width matches that stream's size.
-pub fn wrap_text(term: &Term, text: &str) -> String {
-    let width = term.size().1 as usize;
-    let width = width.saturating_sub(4).clamp(40, 79);
-    textwrap::fill(text, width)
-}
-
 pub enum DialogResult {
     Message(String),
 }
@@ -150,4 +140,14 @@ fn handle_result(result: Result<DialogResult, DialogError>) {
             std::process::exit(1);
         }
     }
+}
+
+/// Wrap long text for dialog log lines. Width is capped at 79 columns
+/// regardless of terminal width, subject to a 40-column floor and the
+/// 4-column cliclack gutter. `term` must be the stream the wrapped text
+/// is ultimately written to, so the width matches that stream's size.
+pub fn wrap_text(term: &Term, text: &str) -> String {
+    let width = term.size().1 as usize;
+    let width = width.saturating_sub(4).clamp(40, 79);
+    textwrap::fill(text, width)
 }
