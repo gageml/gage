@@ -39,6 +39,7 @@ pub fn run_test(
     test: &Test,
     root: &Root,
     gage_bin: &Path,
+    claude_home: &Path,
     jobs: usize,
     judge_model: &str,
 ) -> io::Result<Score> {
@@ -57,6 +58,7 @@ pub fn run_test(
         projects,
         sessions,
         gage_bin: gage_bin.to_path_buf(),
+        claude_home: claude_home.to_path_buf(),
         judge_model: judge_model.to_string(),
     });
     let outcomes = run_samples(&ctx, jobs);
@@ -73,6 +75,9 @@ struct SampleContext {
     projects: PathBuf,
     sessions: Vec<String>,
     gage_bin: PathBuf,
+    /// Run-wide claude home with the staged plugin, for `gage scan`'s
+    /// preflight check
+    claude_home: PathBuf,
     judge_model: String,
 }
 
@@ -144,6 +149,7 @@ fn try_sample(ctx: &SampleContext, sample: u32) -> io::Result<SampleOutcome> {
     let status = cmd
         .args(["--yes", "--no-progress"])
         .env("GAGE_HOME", &sandbox)
+        .env("CLAUDE_CONFIG_DIR", &ctx.claude_home)
         .env("CLAUDE_PROJECTS_DIR", &ctx.projects)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::null())

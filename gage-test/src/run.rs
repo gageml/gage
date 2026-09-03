@@ -104,19 +104,16 @@ pub fn run_batch(
     fs::create_dir_all(&run)?;
     let gage_bin = sibling_gage_bin()?;
 
-    // Prompt tests need a shared claude home with the Gage plugin
-    // installed; scanner tests spawn agents through `gage scan`, which
-    // manages its own claude setup.
-    let prompt_env = if tests.iter().any(|t| !t.is_scanner()) {
-        let claude_home = storage::prepare_claude_home(&run, config.model, config.effort)?;
-        let claude_bin = find_claude().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH")
-        })?;
-        install_gage_plugin(&claude_bin, &claude_home, &run)?;
-        Some((claude_bin, claude_home))
-    } else {
-        None
-    };
+    // Every test runs against a shared claude home with the staged
+    // Gage plugin installed. Prompt tests spawn claude in it; scanner
+    // tests point `gage scan` at it so its preflight sees the staged
+    // plugin rather than the user's install (the scan's agents build
+    // their own claude home regardless).
+    let claude_home = storage::prepare_claude_home(&run, config.model, config.effort)?;
+    let claude_bin = find_claude()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "`claude` binary not on PATH"))?;
+    install_gage_plugin(&claude_bin, &claude_home, &run)?;
+    let claude_env = (claude_bin, claude_home);
 
     let has_scanner = tests.iter().any(|t| t.is_scanner());
     let manifest = Manifest {
@@ -132,14 +129,7 @@ pub fn run_batch(
     };
     write_manifest(&run, &manifest)?;
 
-    run_tests_pooled(
-        tests,
-        config,
-        &run,
-        &gage_bin,
-        prompt_env.as_ref(),
-        on_event,
-    )?;
+    run_tests_pooled(tests, config, &run, &gage_bin, &claude_env, on_event)?;
 
     crate::results::write(&run)?;
     write_manifest(
@@ -175,7 +165,7 @@ fn run_tests_pooled(
     config: &BatchConfig<'_>,
     run: &Path,
     gage_bin: &Path,
-    prompt_env: Option<&(PathBuf, PathBuf)>,
+    claude_env: &(PathBuf, PathBuf),
     mut on_event: impl FnMut(Event<'_>),
 ) -> io::Result<()> {
     let queue: Mutex<VecDeque<&Test>> = Mutex::new(tests.iter().copied().collect());
@@ -195,7 +185,7 @@ fn run_tests_pooled(
                     let name = test.id();
                     tx.send(WorkerEvent::Started(name.clone()))
                         .expect("event receiver lives until workers finish");
-                    match run_single(run, test, config, gage_bin, prompt_env) {
+                    match run_single(run, test, config, gage_bin, claude_env) {
                         Ok((exit_code, score)) => {
                             tx.send(WorkerEvent::Finished {
                                 name,
@@ -245,8 +235,9 @@ fn run_single(
     test: &Test,
     config: &BatchConfig<'_>,
     gage_bin: &Path,
-    prompt_env: Option<&(PathBuf, PathBuf)>,
+    claude_env: &(PathBuf, PathBuf),
 ) -> io::Result<(i32, Option<Score>)> {
+    let (claude_bin, claude_home) = claude_env;
     if test.is_scanner() {
         fs::create_dir_all(storage::test_dir(run, &test.id()))?;
         write_test_json(run, test)?;
@@ -255,12 +246,12 @@ fn run_single(
             test,
             config.root,
             gage_bin,
+            claude_home,
             config.sample_jobs,
             config.judge_model,
         )?;
         Ok((0, Some(score)))
     } else {
-        let (claude_bin, claude_home) = prompt_env.expect("prepared when prompt tests exist");
         let max_turns = test.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
         let exit_code = run_one(run, test, max_turns, claude_bin, claude_home, config.root)?;
         Ok((exit_code, score::score_test(run, test)?))
