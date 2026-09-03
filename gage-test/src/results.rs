@@ -34,7 +34,11 @@ pub struct TestResult {
     pub checks: Vec<Check>,
     /// Assistant turns observed in the session (prompt tests)
     pub turns: Option<u32>,
-    pub exit_code: i32,
+    /// Claude exit code (prompt tests). A scanner test runs a scan and
+    /// a judge per sample, so it has no single exit code; per-sample
+    /// failures are in `checks` and `stderr`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
     /// Prompt test input; None for scanner tests
     pub prompt: Option<String>,
     /// Scanner test configuration
@@ -131,7 +135,7 @@ fn build_test(run_dir: &Path, name: &str) -> io::Result<TestResult> {
         passed: score.as_ref().map(|s| s.passed),
         checks,
         turns: score.as_ref().and_then(|s| s.turns),
-        exit_code: read_exit_code(run_dir, name),
+        exit_code: (!test.is_scanner()).then(|| read_exit_code(run_dir, name)),
         prompt: test.prompt.clone(),
         scanners: test.scanners.clone(),
         fixture: test.fixture.clone(),

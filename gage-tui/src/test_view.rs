@@ -181,7 +181,7 @@ pub struct TestItem {
     pub checks: Vec<(String, bool)>,
     /// Assistant turns observed in the session
     pub turns: Option<u32>,
-    pub exit_code: i32,
+    pub exit_code: Option<i32>,
     /// Test input: the prompt, or a scanner-test config summary
     pub input: String,
     pub output: String,
@@ -664,12 +664,14 @@ fn test_sections(test: &TestItem, width: usize) -> Vec<Vec<Line<'static>>> {
         None => "not scored",
     };
     let turns = test.turns.map(|t| t.to_string()).unwrap_or_default();
-    let exit = test.exit_code.to_string();
+    let exit = test.exit_code.map(|c| c.to_string()).unwrap_or_default();
     let mut attrs: Vec<(&'static str, &str)> = vec![("Result", result)];
     if !turns.is_empty() {
         attrs.push(("Turns", &turns));
     }
-    attrs.push(("Exit", &exit));
+    if !exit.is_empty() {
+        attrs.push(("Exit", &exit));
+    }
     out.push(attr_lines(&attrs));
 
     if !test.checks.is_empty() {
