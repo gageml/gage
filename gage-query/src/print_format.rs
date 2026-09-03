@@ -33,11 +33,26 @@ impl FromStr for PrintFormat {
 }
 
 impl PrintFormat {
+    /// Whether this format must see the full result set before it can
+    /// emit anything sensible. `Table` needs every row to size column
+    /// widths; `Json` needs to wrap the whole result in a single top-
+    /// level array. Streaming formats (`Csv`, `NdJson`, `Yaml`) return
+    /// `false` and emit one batch at a time through [`print_batch`].
+    pub fn is_buffered(&self) -> bool {
+        matches!(self, Self::Table | Self::Json)
+    }
+
     /// Print one batch incrementally. `is_first` indicates whether any
     /// preceding non-empty batch has been emitted in this run — used by
     /// formats that condition headers/separators on it (Csv writes the
     /// header only on the first batch; Yaml omits the leading `---`).
     /// Empty batches are skipped.
+    ///
+    /// Buffered formats (see [`Self::is_buffered`]) still produce
+    /// output here — one bordered table per batch for `Table`, one
+    /// self-contained JSON array per batch for `Json` — but the result
+    /// is only well-formed when the caller submits every batch through
+    /// [`Self::print_batches`] instead.
     pub fn print_batch(&self, batch: &RecordBatch, is_first: bool) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
@@ -80,16 +95,38 @@ impl PrintFormat {
         Ok(())
     }
 
-    /// Convenience for non-streaming callers — loops over `print_batch`
-    /// tracking the `is_first` flag.
+    /// Print an entire result set. `Table` sizes column widths across
+    /// every row, so one bordered table is produced for the whole
+    /// slice. `Json` emits a single top-level array spanning every
+    /// batch. Streaming formats loop over [`print_batch`], tracking the
+    /// `is_first` flag so headers/separators stay well-formed.
     pub fn print_batches(&self, batches: &[RecordBatch]) -> Result<()> {
-        let mut is_first = true;
-        for batch in batches {
-            if batch.num_rows() == 0 {
-                continue;
+        let non_empty: Vec<&RecordBatch> = batches.iter().filter(|b| b.num_rows() > 0).collect();
+        if non_empty.is_empty() {
+            return Ok(());
+        }
+        match self {
+            Self::Table => {
+                let owned: Vec<RecordBatch> = non_empty.iter().map(|b| (*b).clone()).collect();
+                let formatted = pretty_format_batches(&owned)?;
+                println!("{formatted}");
             }
-            self.print_batch(batch, is_first)?;
-            is_first = false;
+            Self::Json => {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut writer = ArrayWriter::new(&mut buf);
+                for batch in &non_empty {
+                    writer.write(batch)?;
+                }
+                writer.finish()?;
+                println!("{}", String::from_utf8_lossy(&buf));
+            }
+            Self::Csv | Self::NdJson | Self::Yaml => {
+                let mut is_first = true;
+                for batch in &non_empty {
+                    self.print_batch(batch, is_first)?;
+                    is_first = false;
+                }
+            }
         }
         Ok(())
     }

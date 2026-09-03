@@ -67,20 +67,42 @@ async fn run_query(
     let mut exec = exec_start.elapsed();
     let mut rows = 0usize;
     let mut batches = 0usize;
-    let mut is_first = true;
-    loop {
-        let next_start = Instant::now();
-        let next = stream.next().await;
-        exec += next_start.elapsed();
-        let Some(batch) = next else { break };
-        let batch = batch?;
-        if batch.num_rows() == 0 {
-            continue;
+    // Buffered formats (Table, Json) need every row before they can
+    // emit — one table sized across the whole result, one top-level
+    // JSON array spanning every batch. Streaming formats print each
+    // batch as it arrives.
+    if format.is_buffered() {
+        let mut collected: Vec<datafusion::arrow::record_batch::RecordBatch> = Vec::new();
+        loop {
+            let next_start = Instant::now();
+            let next = stream.next().await;
+            exec += next_start.elapsed();
+            let Some(batch) = next else { break };
+            let batch = batch?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            rows += batch.num_rows();
+            batches += 1;
+            collected.push(batch);
         }
-        format.print_batch(&batch, is_first)?;
-        rows += batch.num_rows();
-        batches += 1;
-        is_first = false;
+        format.print_batches(&collected)?;
+    } else {
+        let mut is_first = true;
+        loop {
+            let next_start = Instant::now();
+            let next = stream.next().await;
+            exec += next_start.elapsed();
+            let Some(batch) = next else { break };
+            let batch = batch?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            format.print_batch(&batch, is_first)?;
+            rows += batch.num_rows();
+            batches += 1;
+            is_first = false;
+        }
     }
     Ok((rows, batches, plan, exec))
 }
