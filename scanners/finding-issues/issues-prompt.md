@@ -41,6 +41,11 @@ Similar findings across sessions may show a systematic problem. Report a
 systematic problem as one issue covering its instances rather than one issue per
 instance.
 
+An issue is one condition with one intervention. Findings that share a cause but
+need different interventions are separate issues, even when they come from the
+same session or the same agent behavior. The test: if fixing one would leave
+another unfixed, they are distinct issues.
+
 A problem the session itself diagnosed and fixed is not an issue. Models
 commonly attempt changes, run tools or other verification steps, and detect
 errors. This is a normal and effective process and does not typically represent
