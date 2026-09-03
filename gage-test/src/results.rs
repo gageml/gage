@@ -15,7 +15,7 @@ use crate::suite::Test;
 
 /// Bumped when the structure gains fields older files lack; `ensure`
 /// rebuilds any file with an older version.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub struct Results {
@@ -136,11 +136,49 @@ fn build_test(run_dir: &Path, name: &str) -> io::Result<TestResult> {
         scanners: test.scanners.clone(),
         fixture: test.fixture.clone(),
         samples: test.is_scanner().then_some(test.samples),
-        output: read_stream(&storage::stdout_path(run_dir, name)),
-        stderr: read_stream(&storage::stderr_path(run_dir, name)),
+        output: test_stream(run_dir, name, &test, Stream::Stdout),
+        stderr: test_stream(run_dir, name, &test, Stream::Stderr),
         session_id,
         sessions,
     })
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// A prompt test has one claude stream pair at the test root. A
+/// scanner test has a `gage scan` pair per sample, concatenated here
+/// under a per-sample heading so a failure in one sample of three is
+/// visible next to the samples that passed.
+fn test_stream(run_dir: &Path, name: &str, test: &Test, stream: Stream) -> String {
+    if !test.is_scanner() {
+        let path = match stream {
+            Stream::Stdout => storage::stdout_path(run_dir, name),
+            Stream::Stderr => storage::stderr_path(run_dir, name),
+        };
+        return read_stream(&path);
+    }
+    let file = match stream {
+        Stream::Stdout => "scan-output.txt",
+        Stream::Stderr => "scan-error.txt",
+    };
+    let mut out = String::new();
+    for sample in 1..=test.samples {
+        let text = read_stream(&storage::sample_dir(run_dir, name, sample).join(file));
+        if text.trim().is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("[sample {sample}]\n"));
+        out.push_str(text.trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 /// Enumerate the test's sessions from the run's artifacts. A prompt
