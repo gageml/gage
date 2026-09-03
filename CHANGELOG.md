@@ -6,6 +6,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [0.1.0-rc.4]
+
+Misc fixes
+
 ## [0.1.0-rc.3]
 
 - Release candidate for 0.1.0 (MVP)
