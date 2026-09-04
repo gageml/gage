@@ -24,6 +24,9 @@ permissions:
 env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PKGNAME: gage
+  # Every target that must have a built artifact for the release to
+  # proceed. Keep in sync with the build matrix in build.yml.
+  TARGETS: x86_64-unknown-linux-gnu aarch64-apple-darwin
 
 jobs:
   release:
@@ -38,26 +41,28 @@ jobs:
         uses: ./.github/actions/crate-version
 
       - name: Artifacts
-        # Find every artifact named ${PKGNAME}-${VERSION}-* across the
-        # repo (regardless of which Build run produced it) and extract
-        # the tarball from each into dist/. If a name appears in more
-        # than one run, the highest id (most recent) wins.
+        # For each target, select the artifact named exactly
+        # ${PKGNAME}-${VERSION}-${target} (regardless of which Build run
+        # produced it) and extract its tarball into dist/. If a name
+        # appears in more than one run, the highest id (most recent)
+        # wins. A missing target fails the release: a partial set of
+        # binaries is never released.
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          prefix="${PKGNAME}-${VERSION}-"
-          selected="$(mktemp)"
+          all="$(mktemp)"
           gh api --paginate \
             "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
-            | jq -s "[.[].artifacts[] | select(.name | startswith(\"$prefix\"))] | group_by(.name) | map(max_by(.id))" \
-            > "$selected"
-          count="$(jq 'length' "$selected")"
-          if [ "$count" -eq 0 ]; then
-            echo "::error::No artifacts for ${PKGNAME}-${VERSION}" >&2
-            exit 1
-          fi
+            | jq -s '[.[].artifacts[]]' > "$all"
           mkdir -p dist
-          jq -r '.[] | "\(.id)\t\(.name)"' "$selected" | while IFS=$'\t' read -r id name; do
+          for target in $TARGETS; do
+            name="${PKGNAME}-${VERSION}-${target}"
+            id="$(jq -r --arg n "$name" \
+              '[.[] | select(.name == $n)] | max_by(.id) | .id // empty' "$all")"
+            if [ -z "$id" ]; then
+              echo "::error::Missing artifact $name" >&2
+              exit 1
+            fi
             zip="$(mktemp --suffix=.zip)"
             gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$zip"
             unzip -j -o "$zip" -d dist/
