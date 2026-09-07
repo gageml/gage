@@ -97,23 +97,19 @@ async fn findings_query() {
     let results = runner.start();
 
     // Collect results
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ session }))) => {
-                log::info!(
-                    "findings: {:?}",
-                    #{
-                        session,
-                        result: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                );
-                // Ensure that valid sessions aren't re-scanned
-                validate(session).await?;
-                progress.tick();
-            }
-            None => break,
-        }
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        log::info!(
+            "findings: {:?}",
+            #{
+                session,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        // Ensure that valid sessions aren't re-scanned
+        validate(session).await?;
+        progress.tick();
     }
 
     Ok(())
@@ -198,23 +194,19 @@ async fn findings_roadmap() {
     let results = runner.start();
 
     // Collect results
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ session }))) => {
-                log::info!(
-                    "roadmap findings: {:?}",
-                    #{
-                        session,
-                        result: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                );
-                // Ensure that valid sessions aren't re-scanned
-                validate(session).await?;
-                progress.tick();
-            }
-            None => break,
-        }
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        log::info!(
+            "roadmap findings: {:?}",
+            #{
+                session,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        // Ensure that valid sessions aren't re-scanned
+        validate(session).await?;
+        progress.tick();
     }
 
     Ok(())

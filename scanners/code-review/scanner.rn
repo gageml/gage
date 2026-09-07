@@ -94,24 +94,20 @@ pub async fn project_summary() {
     }
 
     let results = runner.start();
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ project, validates }))) => {
-                log::info!(
-                    "project-summary: {:?}",
-                    #{
-                        project,
-                        result: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                );
-                for v in validates {
-                    v().await?;
-                }
-                progress.tick();
-            }
-            None => break,
+    while let Some(item) = results.next().await {
+        let (result, #{ project, validates }) = item?;
+        log::info!(
+            "project-summary: {:?}",
+            #{
+                project,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        for v in validates {
+            v().await?;
         }
+        progress.tick();
     }
     Ok(())
 }
@@ -246,22 +242,18 @@ async fn findings_query() {
     }
 
     let results = runner.start();
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ session }))) => {
-                log::info!(
-                    "code-review findings: {:?}",
-                    #{
-                        session,
-                        result: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                );
-                validate(session).await?;
-                progress.tick();
-            }
-            None => break,
-        }
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        log::info!(
+            "code-review findings: {:?}",
+            #{
+                session,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        validate(session).await?;
+        progress.tick();
     }
     Ok(())
 }
@@ -369,22 +361,18 @@ async fn findings_roadmap() {
     }
 
     let results = runner.start();
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ session }))) => {
-                log::info!(
-                    "code-review roadmap findings: {:?}",
-                    #{
-                        session,
-                        result: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                );
-                validate(session).await?;
-                progress.tick();
-            }
-            None => break,
-        }
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        log::info!(
+            "code-review roadmap findings: {:?}",
+            #{
+                session,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        validate(session).await?;
+        progress.tick();
     }
     Ok(())
 }

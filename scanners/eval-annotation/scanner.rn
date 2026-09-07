@@ -53,23 +53,19 @@ pub async fn annotate() {
     let results = runner.start();
 
     // Collect results
-    loop {
-        match results.next().await {
-            Some(Ok((result, #{ session }))) => {
-                // Debug, not info: the agent's reply restates its
-                // written notes
-                log::debug!(
-                    "eval-annotation: {:?}",
-                    #{
-                        session,
-                        result: result.text,
-                        metadata: result.as_metadata(),
-                    },
-                );
-                progress.tick();
-            }
-            None => break,
-        }
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        // Debug, not info: the agent's reply restates its
+        // written notes
+        log::debug!(
+            "eval-annotation: {:?}",
+            #{
+                session,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        progress.tick();
     }
 
     Ok(())
