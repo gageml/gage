@@ -21,11 +21,50 @@ pub fn scanners_dir() -> PathBuf {
     gage_core::config::gage_home().join("lib/scanners")
 }
 
-/// Ordered list of "scanner home" directories searched when resolving
-/// an absolute `scanner:/…` URI. Today this is a single-element list;
-/// future revisions will let users configure additional roots.
+/// User-level custom scanner root: `<gage_home>/local/scanners`. Unlike
+/// `scanners_dir()`, this directory is never wiped by the embedded
+/// extraction — it exists for user-authored scanners.
+pub fn user_scanners_dir() -> PathBuf {
+    gage_core::config::gage_home().join("local/scanners")
+}
+
+/// Project-level custom scanner roots discovered by walking up from
+/// `start`. Returns each `<dir>/.gage/scanners` that exists, innermost
+/// first. Stops at `$HOME` so the walk cannot escape into the user's
+/// gage home.
+pub fn discover_project_scanner_dirs(start: &Path) -> Vec<PathBuf> {
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let mut out = Vec::new();
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        if let Some(h) = &home
+            && dir == h.as_path()
+        {
+            break;
+        }
+        let candidate = dir.join(".gage").join("scanners");
+        if candidate.is_dir() {
+            out.push(candidate);
+        }
+        cur = dir.parent();
+    }
+    out
+}
+
+/// Ordered list of "scanner home" directories, most-specific first:
+/// project `.gage/scanners` (innermost → outermost), then
+/// `~/.gage/local/scanners`, then the embedded `<gage_home>/lib/scanners`.
+/// Used both for absolute `scanner:/…` URI resolution (first hit wins)
+/// and for registry loading (traversed in reverse so more-specific
+/// scanners shadow less-specific ones on name collision).
 pub fn scanner_home_paths() -> Vec<PathBuf> {
-    vec![scanners_dir()]
+    let mut out = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        out.extend(discover_project_scanner_dirs(&cwd));
+    }
+    out.push(user_scanners_dir());
+    out.push(scanners_dir());
+    out
 }
 
 /// Extract the embedded scanner bundle to `scanners_dir()`.
@@ -485,33 +524,59 @@ pub struct ScannerRegistry {
 impl ScannerRegistry {
     pub fn load() -> Self {
         extract_scanners().unwrap();
-        let dir = scanners_dir();
+        Self::load_from_roots(&scanners_dir(), scanner_home_paths())
+    }
+
+    /// Load scanners from an explicit ordered list of roots (most
+    /// specific first). Files under `builtin` use a relative embed
+    /// key; files under any other root use an absolute embed key so
+    /// the runner and include resolver locate them without joining
+    /// against `scanners_dir()`.
+    pub fn load_from_roots(builtin: &Path, roots: Vec<PathBuf>) -> Self {
         let mut defs = HashMap::new();
         let mut errors = HashMap::new();
 
-        for path in walk_rn_files(&dir) {
-            let rel = path
-                .strip_prefix(&dir)
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-            let code = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("{rel}: {e}");
-                    continue;
-                }
-            };
+        // Traverse roots least-specific first so a HashMap::insert from
+        // a more-specific root shadows an equally named scanner from a
+        // less-specific one (project shadows user shadows built-in).
+        let mut roots = roots;
+        roots.reverse();
 
-            match parse_scanner(&code, &rel) {
-                Ok(def) => {
-                    let name = def.name.clone();
-                    defs.insert(name, def);
-                }
-                Err(ParseError::MissingScanner) => {}
-                Err(ref e) => {
-                    let fallback_name = rel.split('/').next().unwrap_or(&rel).to_string();
-                    errors.insert(fallback_name, e.render(&rel, &code));
+        for root in roots {
+            for path in walk_rn_files(&root) {
+                let is_builtin = root.as_path() == builtin;
+                let key = if is_builtin {
+                    path.strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string()
+                } else {
+                    path.to_string_lossy().to_string()
+                };
+                let code = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("{key}: {e}");
+                        continue;
+                    }
+                };
+
+                match parse_scanner(&code, &key) {
+                    Ok(def) => {
+                        let name = def.name.clone();
+                        defs.insert(name, def);
+                    }
+                    Err(ParseError::MissingScanner) => {}
+                    Err(ref e) => {
+                        let fallback_name = if is_builtin {
+                            key.split('/').next().unwrap_or(&key).to_string()
+                        } else {
+                            path.file_stem()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| key.clone())
+                        };
+                        errors.insert(fallback_name, e.render(&key, &code));
+                    }
                 }
             }
         }
@@ -1311,6 +1376,54 @@ pub const SCANNER = #{
         assert_eq!(
             display("/home/u/foo.rn", "foo", Some("/home/u/")),
             "~/foo.rn"
+        );
+    }
+
+    fn write_scanner(dir: &Path, subdir: &str, name: &str, description: &str) {
+        let bundle = dir.join(subdir);
+        std::fs::create_dir_all(&bundle).unwrap();
+        let source = format!(
+            "pub const SCANNER = #{{ name: \"{name}\", description: \"{description}\" }};\n"
+        );
+        std::fs::write(bundle.join("scanner.rn"), source).unwrap();
+    }
+
+    #[test]
+    fn load_from_roots_shadows_by_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let builtin = tmp.path().join("builtin");
+        let user = tmp.path().join("user");
+        let project = tmp.path().join("project");
+
+        write_scanner(&builtin, "shared", "shared", "from-builtin");
+        write_scanner(&builtin, "only-builtin", "only-builtin", "b");
+        write_scanner(&user, "shared", "shared", "from-user");
+        write_scanner(&user, "only-user", "only-user", "u");
+        write_scanner(&project, "shared", "shared", "from-project");
+        write_scanner(&project, "only-project", "only-project", "p");
+
+        let roots = vec![project.clone(), user.clone(), builtin.clone()];
+        let reg = ScannerRegistry::load_from_roots(&builtin, roots);
+
+        assert_eq!(
+            reg.get_def("shared").unwrap().description,
+            "from-project",
+            "project must shadow user and built-in"
+        );
+        assert_eq!(reg.get_def("only-user").unwrap().description, "u");
+        assert_eq!(reg.get_def("only-project").unwrap().description, "p");
+        assert_eq!(reg.get_def("only-builtin").unwrap().description, "b");
+
+        let shared = reg.get_def("shared").unwrap();
+        assert!(!shared.from_file, "custom-root scanners are not from_file");
+        assert!(
+            Path::new(&shared.embed_key).is_absolute(),
+            "custom-root embed_key is absolute"
+        );
+        let only_builtin = reg.get_def("only-builtin").unwrap();
+        assert!(
+            !Path::new(&only_builtin.embed_key).is_absolute(),
+            "built-in embed_key stays relative"
         );
     }
 }
