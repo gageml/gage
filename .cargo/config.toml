@@ -1,0 +1,8 @@
+# On macOS, dev-profile builds emit an `.eh_frame` section larger than
+# the 16MB range Apple ld64's compact-unwind table can address, which
+# produces a link-time warning. `-no_compact_unwind` tells ld64 to skip
+# that table entirely; unwinding falls back to DWARF via `.eh_frame`,
+# which is somewhat slower on the unwind path but functionally
+# equivalent.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
