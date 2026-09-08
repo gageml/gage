@@ -15,14 +15,10 @@
 //!   eval judge).
 //!
 //! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` for
-//! the child claude's cwd. The headless paths (`run_print`,
-//! `start_streaming_session`) run the child with
-//! `--strict-mcp-config`, `--setting-sources ""`, and
-//! `--disable-slash-commands`, plus an explicit
-//! `--settings`/`--mcp-config`, so the user's Keychain OAuth still
-//! resolves while user/project/local config sources — hooks, plugins,
-//! custom slash commands, user MCP servers — stay quarantined. Corpus
-//! access is MCP-mediated:
+//! the child claude's cwd. The headless paths quarantine user
+//! config sources — hooks, plugins, user MCP servers — while keeping
+//! the user's Keychain OAuth reachable; see `apply_isolation_flags`
+//! for the exact flag combo. Corpus access is MCP-mediated:
 //! the child issues `Query` calls to the in-process gage MCP server,
 //! which reads the canonical db through a per-agent DataFusion
 //! context configured per tool (see `gage_mcp::ToolSpec`).
@@ -35,6 +31,7 @@
 //! copy step.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -473,19 +470,7 @@ fn run_print(
     if let Some(s) = system_prompt_append {
         cmd.args(["--append-system-prompt", s]);
     }
-    // Quarantine user customizations without cutting off our own
-    // `--mcp-config` server (safe-mode disables all MCP servers,
-    // including ours, so it is unusable here). `--strict-mcp-config`
-    // limits MCP to the `--mcp-config` server; `--setting-sources ""`
-    // suppresses user/project/local settings (hooks, plugins,
-    // permissions.allow); `--settings` re-supplies our seeded
-    // permissions.allow. Slash commands are NOT disabled here because
-    // gage-runtime's `model_context` probe invokes the built-in
-    // `/context` via `run_print`.
-    cmd.arg("--strict-mcp-config");
-    cmd.arg("--setting-sources").arg("");
-    cmd.arg("--settings")
-        .arg(prep.claude_home.join("settings.json"));
+    cmd.args(isolation_args(&prep.claude_home));
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
@@ -603,7 +588,6 @@ async fn start_streaming_session_inner(
     // --print + --output-format=stream-json requires --verbose
     cmd.arg("--verbose");
     cmd.args(["--thinking-display", "summarized"]);
-    cmd.arg("--disable-slash-commands");
     match &system_prompt {
         SystemPrompt::Empty => {
             cmd.args(["--system-prompt", ""]);
@@ -619,17 +603,7 @@ async fn start_streaming_session_inner(
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
     }
-    // Quarantine user customizations without cutting off our own
-    // `--mcp-config` server (safe-mode disables all MCP servers,
-    // including ours, so it is unusable here). `--strict-mcp-config`
-    // limits MCP to the `--mcp-config` server; `--setting-sources ""`
-    // suppresses user/project/local settings (hooks, plugins,
-    // permissions.allow); `--disable-slash-commands` is already set
-    // above; `--settings` re-supplies our seeded permissions.allow.
-    cmd.arg("--strict-mcp-config");
-    cmd.arg("--setting-sources").arg("");
-    cmd.arg("--settings")
-        .arg(prep.claude_home.join("settings.json"));
+    cmd.args(isolation_args(&prep.claude_home));
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
@@ -737,6 +711,24 @@ async fn start_streaming_session_inner(
         archive_dir: prep.archive_dir,
         timeout,
     })
+}
+
+/// Quarantine user customizations without cutting off our own
+/// `--mcp-config` server. `--strict-mcp-config` limits MCP to the
+/// `--mcp-config` server (safe-mode would disable ours too);
+/// `--setting-sources ""` suppresses user/project/local settings
+/// (hooks, plugins, permissions.allow); `--settings` re-supplies
+/// our seeded permissions.allow. Returned as a flat arg list so both
+/// `std::process::Command` and `tokio::process::Command` can consume
+/// it via `.args()`.
+fn isolation_args(claude_home: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("--strict-mcp-config"),
+        OsString::from("--setting-sources"),
+        OsString::new(),
+        OsString::from("--settings"),
+        claude_home.join("settings.json").into_os_string(),
+    ]
 }
 
 fn stream_message_kind(m: &StreamMessage) -> &'static str {
@@ -1061,7 +1053,7 @@ fn user_live_projects_dir(cwd: &Path) -> PathBuf {
     let root = gage_claude::session::projects_dir().unwrap_or_else(|| {
         std::env::var_os("HOME")
             .map(PathBuf::from)
-            .expect("HOME should be set for user_live_projects_dir fallback")
+            .expect("HOME should be set")
             .join(".claude")
             .join("projects")
     });
@@ -1226,7 +1218,7 @@ fn restore_signal(sig: libc::c_int, prev: libc::sighandler_t) {
 fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &[String]) -> io::Result<()> {
     let user_home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("HOME not set"))?;
+        .expect("HOME should be set");
     let user_claude = user_home.join(".claude");
 
     let user_settings = read_json(&user_claude.join("settings.json"));

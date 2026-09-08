@@ -14,7 +14,7 @@ pub fn gage_home() -> PathBuf {
     if let Ok(home) = env::var("GAGE_HOME") {
         PathBuf::from(home)
     } else {
-        let home = env::var("HOME").expect("HOME environment variable not set");
+        let home = env::var("HOME").expect("HOME should be set");
         PathBuf::from(home).join(".gage")
     }
 }

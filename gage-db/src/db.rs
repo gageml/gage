@@ -106,6 +106,10 @@ pub fn open_db_in_memory() -> Result<Connection, DbError> {
 // the END of the table's DDL in init_schema, never in the middle.
 // Mismatched column order between fresh and migrated databases is not
 // acceptable.
+//
+// Every migration step lives in its own `migrate_vN` function and has
+// a matching `migrate_vN_...` test that seeds a v(N-1) database and
+// invokes only that function.
 fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     // An immediate transaction serializes concurrent migrators (e.g.
     // parallel query-context creation on a fresh gage home): the
@@ -121,45 +125,59 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
         init_schema(&tx)?;
     } else {
         if version < 2 {
-            tx.execute_batch("ALTER TABLE scan_task ADD COLUMN metadata TEXT")?;
+            migrate_v2(&tx)?;
         }
         if version < 3 {
-            // Duplicate-key uniqueness moved from the schema to write
-            // policies. The comment rename collapses the suffixes that
-            // existed only to dodge the dropped constraint; it must
-            // follow the index drops since it creates equal keys.
-            tx.execute_batch(
-                "DROP INDEX idx_note_duplicate_key;
-                 DROP INDEX idx_issue_duplicate_key;
-                 CREATE INDEX idx_note_key ON note(name, target, author);
-                 CREATE INDEX idx_issue_key ON issue(name, author);
-                 UPDATE note SET name = 'comment' WHERE name LIKE 'comment.%';",
-            )?;
+            migrate_v3(&tx)?;
         }
         if version < 4 {
-            // scan_issue gains an explicit link role. Backfill: an
-            // issue's earliest link is its creating scan (the only
-            // write path that could produce it before this version);
-            // any later link is a carry. The DEFAULT satisfies ALTER's
-            // NOT NULL requirement and is inert afterwards — every
-            // writer supplies a role. Migrated tables lack the CHECK
-            // constraint (ALTER cannot add one); same precedent as
-            // scan_note.role.
-            tx.execute_batch(
-                "ALTER TABLE scan_issue ADD COLUMN role TEXT NOT NULL DEFAULT 'carried';
-                 UPDATE scan_issue SET role = 'wrote'
-                 WHERE scan_id = (SELECT si.scan_id FROM scan_issue si
-                                  JOIN scan s ON s.id = si.scan_id
-                                  WHERE si.issue_id = scan_issue.issue_id
-                                  ORDER BY s.created LIMIT 1);",
-            )?;
+            migrate_v4(&tx)?;
         }
         if version < 5 {
-            tx.execute_batch("ALTER TABLE scan ADD COLUMN label TEXT")?;
+            migrate_v5(&tx)?;
         }
     }
     set_version(&tx, CURRENT_VERSION)?;
     tx.commit()
+}
+
+fn migrate_v2(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch("ALTER TABLE scan_task ADD COLUMN metadata TEXT")
+}
+
+// Duplicate-key uniqueness moved from the schema to write policies.
+// The comment rename collapses the suffixes that existed only to dodge
+// the dropped constraint; it must follow the index drops since it
+// creates equal keys.
+fn migrate_v3(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "DROP INDEX idx_note_duplicate_key;
+         DROP INDEX idx_issue_duplicate_key;
+         CREATE INDEX idx_note_key ON note(name, target, author);
+         CREATE INDEX idx_issue_key ON issue(name, author);
+         UPDATE note SET name = 'comment' WHERE name LIKE 'comment.%';",
+    )
+}
+
+// scan_issue gains an explicit link role. Backfill: an issue's earliest
+// link is its creating scan (the only write path that could produce it
+// before this version); any later link is a carry. The DEFAULT
+// satisfies ALTER's NOT NULL requirement and is inert afterwards —
+// every writer supplies a role. Migrated tables lack the CHECK
+// constraint (ALTER cannot add one); same precedent as scan_note.role.
+fn migrate_v4(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "ALTER TABLE scan_issue ADD COLUMN role TEXT NOT NULL DEFAULT 'carried';
+         UPDATE scan_issue SET role = 'wrote'
+         WHERE scan_id = (SELECT si.scan_id FROM scan_issue si
+                          JOIN scan s ON s.id = si.scan_id
+                          WHERE si.issue_id = scan_issue.issue_id
+                          ORDER BY s.created LIMIT 1);",
+    )
+}
+
+fn migrate_v5(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch("ALTER TABLE scan ADD COLUMN label TEXT")
 }
 
 fn get_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
@@ -396,9 +414,36 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v2_drops_unique_keys_and_renames_comments() {
-        // A v2 database: current schema except for the unique duplicate
-        // keys, plus a suffixed comment row predating the rename.
+    fn migrate_v2_adds_scan_task_metadata() {
+        // A v1 database: scan_task without the metadata column.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scan_task (
+                scan_id TEXT NOT NULL, scanner_name TEXT NOT NULL,
+                scanner_version TEXT NOT NULL, task_name TEXT NOT NULL,
+                status TEXT NOT NULL, started INTEGER, stopped INTEGER,
+                error TEXT,
+                PRIMARY KEY (scan_id, scanner_name, task_name)
+            );
+            INSERT INTO scan_task VALUES
+                ('sc-1', 'sn', '1', 'tn', 'done', NULL, NULL, NULL);",
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        migrate_v2(&tx).unwrap();
+        tx.commit().unwrap();
+
+        let metadata: Option<String> = conn
+            .query_row("SELECT metadata FROM scan_task", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(metadata, None);
+    }
+
+    #[test]
+    fn migrate_v3_drops_unique_keys_and_renames_comments() {
+        // A v2 database: pre-v3 duplicate-key uniqueness plus a
+        // suffixed comment row predating the rename.
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE note (
@@ -414,21 +459,14 @@ mod tests {
                 created INTEGER NOT NULL, modified INTEGER
             );
             CREATE UNIQUE INDEX idx_issue_duplicate_key ON issue(name, author);
-            CREATE TABLE scan (
-                id TEXT PRIMARY KEY, created INTEGER NOT NULL, metadata TEXT
-            );
-            CREATE TABLE scan_issue (
-                scan_id TEXT NOT NULL, issue_id TEXT NOT NULL,
-                PRIMARY KEY (scan_id, issue_id)
-            );
             INSERT INTO note VALUES
-                ('n1', 'comment.abcd1234', 'session:s', 'user:g', '\"x\"', NULL, 1, NULL),
-                ('n2', 'summary', 'session:s', 'scanner:s', '\"y\"', NULL, 2, NULL);",
+                ('n1', 'comment.abcd1234', 'session:s', 'user:g', '\"x\"', NULL, 1, NULL);",
         )
         .unwrap();
-        set_version(&conn, 2).unwrap();
 
-        migrate(&mut conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        migrate_v3(&tx).unwrap();
+        tx.commit().unwrap();
 
         let name: String = conn
             .query_row("SELECT name FROM note WHERE id = 'n1'", [], |r| r.get(0))
@@ -443,14 +481,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unique_left, 0);
-
-        // The dropped constraint no longer rejects an equal key
-        conn.execute(
-            "INSERT INTO note VALUES
-                ('n3', 'summary', 'session:s', 'scanner:s', '\"z\"', NULL, 3, NULL)",
-            [],
-        )
-        .unwrap();
     }
 
     #[test]
@@ -470,9 +500,10 @@ mod tests {
             INSERT INTO scan_issue VALUES ('sc-old', 'i1'), ('sc-new', 'i1');",
         )
         .unwrap();
-        set_version(&conn, 3).unwrap();
 
-        migrate(&mut conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        migrate_v4(&tx).unwrap();
+        tx.commit().unwrap();
 
         let role_of = |scan_id: &str| -> String {
             conn.query_row(
@@ -497,9 +528,10 @@ mod tests {
             INSERT INTO scan VALUES ('sc-1', 100, NULL);",
         )
         .unwrap();
-        set_version(&conn, 4).unwrap();
 
-        migrate(&mut conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        migrate_v5(&tx).unwrap();
+        tx.commit().unwrap();
 
         let label: Option<String> = conn
             .query_row("SELECT label FROM scan WHERE id = 'sc-1'", [], |r| r.get(0))

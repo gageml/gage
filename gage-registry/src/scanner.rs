@@ -59,11 +59,20 @@ pub fn scanner_source(path: &Path) -> ScannerSource {
     }
 }
 
-/// User-level custom scanner root: `<gage_home>/local/scanners`. Unlike
-/// `scanners_dir()`, this directory is never wiped by the embedded
-/// extraction — it exists for user-authored scanners.
-pub fn user_scanners_dir() -> PathBuf {
-    gage_core::config::gage_home().join("local/scanners")
+/// Ordered list of "scanner home" directories, most-specific first:
+/// project `.gage/scanners` (innermost → outermost), then
+/// `~/.gage/local/scanners`, then the embedded `<gage_home>/lib/scanners`.
+/// Used both for absolute `scanner:/…` URI resolution (first hit wins)
+/// and for registry loading (traversed in reverse so more-specific
+/// scanners shadow less-specific ones on name collision).
+pub fn scanner_home_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        out.extend(discover_project_scanner_dirs(&cwd));
+    }
+    out.push(user_scanners_dir());
+    out.push(scanners_dir());
+    out
 }
 
 /// Project-level custom scanner roots discovered by walking up from
@@ -89,20 +98,11 @@ pub fn discover_project_scanner_dirs(start: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Ordered list of "scanner home" directories, most-specific first:
-/// project `.gage/scanners` (innermost → outermost), then
-/// `~/.gage/local/scanners`, then the embedded `<gage_home>/lib/scanners`.
-/// Used both for absolute `scanner:/…` URI resolution (first hit wins)
-/// and for registry loading (traversed in reverse so more-specific
-/// scanners shadow less-specific ones on name collision).
-pub fn scanner_home_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        out.extend(discover_project_scanner_dirs(&cwd));
-    }
-    out.push(user_scanners_dir());
-    out.push(scanners_dir());
-    out
+/// User-level custom scanner root: `<gage_home>/local/scanners`. Unlike
+/// `scanners_dir()`, this directory is never wiped by the embedded
+/// extraction — it exists for user-authored scanners.
+pub fn user_scanners_dir() -> PathBuf {
+    gage_core::config::gage_home().join("local/scanners")
 }
 
 /// Extract the embedded scanner bundle to `scanners_dir()`.
@@ -652,7 +652,14 @@ impl ScannerRegistry {
         let mut defs: Vec<&ScannerDef> = self
             .by_name
             .values()
-            .filter_map(|indices| indices.first().and_then(|&i| self.defs.get(i)))
+            .map(|indices| {
+                let idx = *indices
+                    .first()
+                    .expect("by_name entry has >= 1 index at push time");
+                self.defs
+                    .get(idx)
+                    .expect("by_name index came from defs.len() at push time")
+            })
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
