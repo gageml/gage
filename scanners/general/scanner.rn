@@ -83,7 +83,7 @@ async fn findings_query() {
         let prompt = t.render(#{ session_id: s.id }).await?;
         runner.add(
             call_agent(prompt)
-                .name("session-finding")
+                .name("general-finding")
                 .gage_tools([Query::new().sessions([s])])
                 .tools(#{ write_finding: write_finding_tooldef() })
                 .model("medium"),
@@ -180,7 +180,7 @@ async fn findings_roadmap() {
         let prompt = t.render(#{ session_id: s.id, roadmap }).await?;
         runner.add(
             call_agent(prompt)
-                .name("session-finding-roadmap")
+                .name("general-finding")
                 .gage_tools([Query::new().sessions([s])])
                 .tools(#{ write_finding_roadmap: write_finding_tooldef() })
                 .model("medium"),

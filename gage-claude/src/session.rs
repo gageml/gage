@@ -162,14 +162,21 @@ impl SessionListBuilder {
                 continue;
             }
 
-            if !self.projects.is_empty() {
-                let dir_name = project_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !self.projects.contains(&dir_name) {
-                    continue;
-                }
+            let dir_name = project_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            // Skip gage-agent's own in-flight sessions. Their cwd
+            // lives under `~/.gage/tmp/<run_id>/cwd`, encoded here as
+            // a slug containing `--gage-tmp-`. The persistent copy is
+            // hardlinked under `~/.gage/claude/<name>/`.
+            if is_agent_tmp_slug(&dir_name) {
+                continue;
+            }
+
+            if !self.projects.is_empty() && !self.projects.contains(&dir_name) {
+                continue;
             }
 
             let dir_entries = match std::fs::read_dir(&project_path) {
@@ -312,6 +319,13 @@ pub fn find_session(id_prefix: &str) -> Vec<SessionInfo> {
             if !name.starts_with(id_prefix) || !SESSION_RE.is_match(&name) {
                 continue;
             }
+            let slug = project_path
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default();
+            if is_agent_tmp_slug(&slug) {
+                continue;
+            }
             let id = &name[..36];
 
             // Claude Code may delete or rotate a session file
@@ -402,6 +416,17 @@ pub fn delete_session(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether a project slug belongs to a gage-agent in-flight session.
+/// gage-agent runs claude with cwd `~/.gage/tmp/<run_id>/cwd`, which
+/// Claude Code encodes to a slug containing `--gage-tmp-` (the double
+/// dash comes from the `/.` between `<home>` and `.gage`). The live
+/// files under that slug are hardlinked into `~/.gage/claude/<name>/`
+/// and are the responsibility of gage-agent alone; general enumerators
+/// hide them.
+pub fn is_agent_tmp_slug(slug: &str) -> bool {
+    slug.contains("--gage-tmp-")
+}
+
 /// Encode a project cwd into the directory name Claude Code uses under
 /// `~/.claude/projects/`. Lossy: every non-ASCII-alnum character (including
 /// the path separator) becomes `-`.
@@ -416,4 +441,59 @@ pub fn encode_project_dir(path: &Path) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_tmp_slug_detected() {
+        // Encoded from `/Users/alice/.gage/tmp/abc123/cwd`.
+        let slug = encode_project_dir(Path::new("/Users/alice/.gage/tmp/abc123/cwd"));
+        assert!(slug.contains("--gage-tmp-"), "slug was {slug}");
+        assert!(is_agent_tmp_slug(&slug));
+    }
+
+    #[test]
+    fn regular_project_slug_not_flagged() {
+        let slug = encode_project_dir(Path::new("/Users/alice/Code/gage"));
+        assert!(!is_agent_tmp_slug(&slug));
+    }
+
+    #[test]
+    fn agent_tmp_slug_across_home_layouts() {
+        for home in ["/Users/alice", "/home/bob", "/var/root"] {
+            let path = format!("{home}/.gage/tmp/run-xyz/cwd");
+            let slug = encode_project_dir(Path::new(&path));
+            assert!(is_agent_tmp_slug(&slug), "slug was {slug} for {path}");
+        }
+    }
+
+    #[test]
+    fn build_skips_agent_tmp_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+        let real_slug = encode_project_dir(Path::new("/Users/alice/Code/gage"));
+        let real_dir = root.path().join(&real_slug);
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(real_dir.join(format!("{uuid}.jsonl")), "").unwrap();
+
+        let tmp_slug = encode_project_dir(Path::new("/Users/alice/.gage/tmp/run-1/cwd"));
+        let tmp_dir = root.path().join(&tmp_slug);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::fs::write(
+            tmp_dir.join("ffffffff-ffff-ffff-ffff-ffffffffffff.jsonl"),
+            "",
+        )
+        .unwrap();
+
+        let sessions = SessionListBuilder::new().root(root.path()).build();
+        let slugs: Vec<String> = sessions
+            .iter()
+            .map(|s| s.project_name().into_owned())
+            .collect();
+        assert_eq!(slugs, vec![real_slug]);
+    }
 }

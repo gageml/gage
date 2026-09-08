@@ -14,9 +14,15 @@
 //!   MCP server and no tools, output captured and returned (e.g. the
 //!   eval judge).
 //!
-//! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` and
-//! point the child `claude` at an isolated `CLAUDE_CONFIG_DIR` /
-//! `CLAUDE_PROJECTS_DIR` inside it. Corpus access is MCP-mediated:
+//! Both assemble a throwaway run dir at `~/.gage/tmp/<run_id>/` for
+//! the child claude's cwd. The headless paths (`run_print`,
+//! `start_streaming_session`) run the child with
+//! `--strict-mcp-config`, `--setting-sources ""`, and
+//! `--disable-slash-commands`, plus an explicit
+//! `--settings`/`--mcp-config`, so the user's Keychain OAuth still
+//! resolves while user/project/local config sources — hooks, plugins,
+//! custom slash commands, user MCP servers — stay quarantined. Corpus
+//! access is MCP-mediated:
 //! the child issues `Query` calls to the in-process gage MCP server,
 //! which reads the canonical db through a per-agent DataFusion
 //! context configured per tool (see `gage_mcp::ToolSpec`).
@@ -385,7 +391,7 @@ fn run_interactive(
     let prev_sigint = ignore_signal(libc::SIGINT);
     let prev_sigquit = ignore_signal(libc::SIGQUIT);
 
-    let mirror = match start_session_mirror(&projects_dir, &prep.archive_dir) {
+    let mirror = match start_session_mirror_root(&projects_dir, &prep.archive_dir) {
         Ok(m) => Some(m),
         Err(e) => {
             eprintln!("warning: session mirror watcher failed to start: {e}");
@@ -449,7 +455,7 @@ fn run_print(
     no_session_persistence: bool,
     prompt: &str,
 ) -> io::Result<Output> {
-    let projects_dir = prep.claude_home.join("projects");
+    let live_projects = user_live_projects_dir(&prep.cwd);
     let mut cmd = Command::new(&prep.claude_bin);
     cmd.args(["-p", prompt, "--tools", ""]);
     if no_session_persistence {
@@ -467,15 +473,23 @@ fn run_print(
     if let Some(s) = system_prompt_append {
         cmd.args(["--append-system-prompt", s]);
     }
-    // No --mcp-config: strict mode alone shuts out plugin-installed
-    // servers and account-level claude.ai connectors.
+    // Quarantine user customizations without cutting off our own
+    // `--mcp-config` server (safe-mode disables all MCP servers,
+    // including ours, so it is unusable here). `--strict-mcp-config`
+    // limits MCP to the `--mcp-config` server; `--setting-sources ""`
+    // suppresses user/project/local settings (hooks, plugins,
+    // permissions.allow); `--settings` re-supplies our seeded
+    // permissions.allow. Slash commands are NOT disabled here because
+    // gage-runtime's `model_context` probe invokes the built-in
+    // `/context` via `run_print`.
     cmd.arg("--strict-mcp-config");
+    cmd.arg("--setting-sources").arg("");
+    cmd.arg("--settings")
+        .arg(prep.claude_home.join("settings.json"));
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
     cmd.current_dir(&prep.cwd)
-        .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
-        .env("CLAUDE_PROJECTS_DIR", &projects_dir)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .stdin(Stdio::null());
     let output = cmd.output();
@@ -486,8 +500,17 @@ fn run_print(
     let archived = if no_session_persistence {
         Ok(Vec::new())
     } else {
-        archive_sessions(&prep.claude_home, &prep.archive_dir)
+        archive_project_dir(&live_projects, &prep.archive_dir)
     };
+    if !no_session_persistence
+        && let Err(e) = fs::remove_dir_all(&live_projects)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        eprintln!(
+            "warning: could not remove live session dir {}: {e}",
+            live_projects.display()
+        );
+    }
     cleanup_run_dir(&prep.run_dir, &prep.cwd);
     let output = output?;
     archived?;
@@ -520,7 +543,10 @@ pub struct StreamingAgentSession {
     finalized: bool,
     run_dir: PathBuf,
     cwd: PathBuf,
-    claude_home: PathBuf,
+    /// Slot in the user's live projects dir where Claude writes this
+    /// run's session JSONL. Slug encodes the tmp cwd so multiple
+    /// concurrent headless runs don't collide.
+    live_projects: PathBuf,
     archive_dir: PathBuf,
     timeout: Option<usize>,
 }
@@ -593,23 +619,25 @@ async fn start_streaming_session_inner(
     if let Some(url) = &mcp_url {
         cmd.arg("--mcp-config").arg(mcp_config_json(url));
     }
-    // Only the --mcp-config server (if any) — never plugin-installed
-    // servers or account-level claude.ai connectors.
+    // Quarantine user customizations without cutting off our own
+    // `--mcp-config` server (safe-mode disables all MCP servers,
+    // including ours, so it is unusable here). `--strict-mcp-config`
+    // limits MCP to the `--mcp-config` server; `--setting-sources ""`
+    // suppresses user/project/local settings (hooks, plugins,
+    // permissions.allow); `--disable-slash-commands` is already set
+    // above; `--settings` re-supplies our seeded permissions.allow.
     cmd.arg("--strict-mcp-config");
-    // `user` loads our seeded `settings.json` (permissions.allow),
-    // which is required for headless tool calls to avoid prompts.
-    // `project` / `local` are skipped so cwd settings don't leak in.
-    cmd.arg("--setting-sources").arg("user");
+    cmd.arg("--setting-sources").arg("");
+    cmd.arg("--settings")
+        .arg(prep.claude_home.join("settings.json"));
     if let Some(model) = &model {
         cmd.arg("--model").arg(model);
     }
     if let Some(max_turns) = max_turns {
         cmd.arg("--max-turns").arg(max_turns.to_string());
     }
-    let projects_dir = prep.claude_home.join("projects");
+    let live_projects = user_live_projects_dir(&prep.cwd);
     cmd.current_dir(&prep.cwd)
-        .env("CLAUDE_CONFIG_DIR", &prep.claude_home)
-        .env("CLAUDE_PROJECTS_DIR", &projects_dir)
         .env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1")
         .env("ENABLE_TOOL_SEARCH", "false")
         .stdin(Stdio::piped())
@@ -687,7 +715,7 @@ async fn start_streaming_session_inner(
         })
     });
 
-    let mirror = match start_session_mirror(&projects_dir, &prep.archive_dir) {
+    let mirror = match start_session_mirror_single(&live_projects, &prep.archive_dir) {
         Ok(m) => Some(m),
         Err(e) => {
             eprintln!("warning: session mirror watcher failed to start: {e}");
@@ -705,7 +733,7 @@ async fn start_streaming_session_inner(
         finalized: false,
         run_dir: prep.run_dir,
         cwd: prep.cwd,
-        claude_home: prep.claude_home,
+        live_projects,
         archive_dir: prep.archive_dir,
         timeout,
     })
@@ -865,7 +893,15 @@ impl StreamingAgentSession {
         }
         self.finalized = true;
         self.stop_mirror();
-        archive_sessions(&self.claude_home, &self.archive_dir)?;
+        archive_project_dir(&self.live_projects, &self.archive_dir)?;
+        if let Err(e) = fs::remove_dir_all(&self.live_projects)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "warning: could not remove live session dir {}: {e}",
+                self.live_projects.display()
+            );
+        }
         cleanup_run_dir(&self.run_dir, &self.cwd);
         Ok(())
     }
@@ -989,6 +1025,49 @@ fn archive_sessions(claude_home: &Path, archive_dir: &Path) -> io::Result<Vec<Pa
     Ok(out)
 }
 
+/// Link every `*.jsonl` directly inside `project_dir` into
+/// `archive_dir`. Used by headless paths, whose session JSONLs land in
+/// a single per-run slot under the user's live projects root rather
+/// than an isolated `<claude_home>/projects/*` tree.
+fn archive_project_dir(project_dir: &Path, archive_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let iter = match fs::read_dir(project_dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for file in iter {
+        let file = file?.path();
+        if file.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(name) = file.file_name() else {
+            continue;
+        };
+        let dest = archive_dir.join(name);
+        link_or_copy(&file, &dest)?;
+        out.push(dest);
+    }
+    Ok(out)
+}
+
+/// Slot in the user's live Claude projects root where the child claude
+/// will write this run's session JSONL. Honors `CLAUDE_PROJECTS_DIR`
+/// via [`gage_claude::session::projects_dir`]; falls back to
+/// `~/.claude/projects` when neither the override nor `HOME` are set.
+/// The slug is [`gage_claude::session::encode_project_dir`] of `cwd`,
+/// which contains `--gage-tmp-` and is filtered out of session lists.
+fn user_live_projects_dir(cwd: &Path) -> PathBuf {
+    let root = gage_claude::session::projects_dir().unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .expect("HOME should be set for user_live_projects_dir fallback")
+            .join(".claude")
+            .join("projects")
+    });
+    root.join(gage_claude::session::encode_project_dir(cwd))
+}
+
 /// Hardlink `src` to `dest`. Treats an existing `dest` as success (the
 /// watcher already mirrored it). Falls back to a one-shot `fs::copy` when
 /// the two paths are on different filesystems (`EXDEV`); that loses the
@@ -1023,7 +1102,10 @@ impl SessionMirror {
 /// `*.jsonl` into `archive_dir` as it appears. Also sweeps any files
 /// already present at start time, in case Claude created a file before
 /// the watcher was armed.
-fn start_session_mirror(projects_dir: &Path, archive_dir: &Path) -> notify::Result<SessionMirror> {
+fn start_session_mirror_root(
+    projects_dir: &Path,
+    archive_dir: &Path,
+) -> notify::Result<SessionMirror> {
     let (event_tx, event_rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = notify::recommended_watcher(event_tx)?;
     watcher.watch(projects_dir, RecursiveMode::Recursive)?;
@@ -1033,6 +1115,33 @@ fn start_session_mirror(projects_dir: &Path, archive_dir: &Path) -> notify::Resu
         eprintln!("warning: initial session sweep failed: {e}");
     }
 
+    Ok(spawn_mirror_thread(event_rx, watcher, archive_dir))
+}
+
+/// Watch a single project directory (headless paths). Creates the
+/// directory first so `notify` can arm even if Claude has not yet
+/// written to it. The initial sweep looks only inside that single dir.
+fn start_session_mirror_single(
+    project_dir: &Path,
+    archive_dir: &Path,
+) -> notify::Result<SessionMirror> {
+    fs::create_dir_all(project_dir).map_err(notify::Error::io)?;
+    let (event_tx, event_rx) = mpsc::channel::<notify::Result<notify::Event>>();
+    let mut watcher = notify::recommended_watcher(event_tx)?;
+    watcher.watch(project_dir, RecursiveMode::Recursive)?;
+
+    if let Err(e) = archive_project_dir(project_dir, archive_dir) {
+        eprintln!("warning: initial session sweep failed: {e}");
+    }
+
+    Ok(spawn_mirror_thread(event_rx, watcher, archive_dir))
+}
+
+fn spawn_mirror_thread(
+    event_rx: mpsc::Receiver<notify::Result<notify::Event>>,
+    watcher: notify::RecommendedWatcher,
+    archive_dir: &Path,
+) -> SessionMirror {
     let archive = archive_dir.to_path_buf();
     let thread = thread::spawn(move || {
         // recv returns Err when the watcher (and its event sender) is
@@ -1059,7 +1168,7 @@ fn start_session_mirror(projects_dir: &Path, archive_dir: &Path) -> notify::Resu
         }
     });
 
-    Ok(SessionMirror { watcher, thread })
+    SessionMirror { watcher, thread }
 }
 
 /// Remove the tmp run dir unless the user wrote anything into `cwd/`. If
@@ -1119,12 +1228,6 @@ fn seed_claude_home(claude_home: &Path, cwd: &Path, tools: &[String]) -> io::Res
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("HOME not set"))?;
     let user_claude = user_home.join(".claude");
-
-    let user_creds = user_claude.join(".credentials.json");
-    if user_creds.exists() {
-        let target = claude_home.join(".credentials.json");
-        std::os::unix::fs::symlink(&user_creds, &target)?;
-    }
 
     let user_settings = read_json(&user_claude.join("settings.json"));
     let mut settings = serde_json::Map::new();

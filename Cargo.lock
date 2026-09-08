@@ -2556,6 +2556,7 @@ dependencies = [
 name = "gage-agent"
 version = "0.1.0"
 dependencies = [
+ "gage-claude",
  "gage-core",
  "gage-db",
  "libc",
