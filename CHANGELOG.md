@@ -19,8 +19,9 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 **Other changes**
 
+- Use plugin defined agents for resolve skill tasks
 - Use 'wontfix' instead of 'skipped' as close reason
-- Minor scanner Rune source cleanup
+- Scanner Rune source cleanup
 
 ## [0.1.0]
 

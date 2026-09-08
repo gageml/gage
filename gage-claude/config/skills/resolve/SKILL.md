@@ -70,25 +70,10 @@ before using the `IssuePendingResolve` tool to finally resolve pending issues.
 3. A pending issue with no related issues is novel by definition. Do not spawn a
    sub-agent for it.
 
-4. For each pending issue with related issues, spawn one sub-agent. Give it the
-   issue ID and its related issue IDs, and instruct it to:
-   - Read the full reports: `SELECT report FROM issue_report('<id>')` for the
-     subject and each related issue.
-   - Judge whether the subject re-reports a condition an existing issue already
-     describes. Similar wording alone is not duplication; the underlying
-     condition must be the same.
-   - Reply with a recommendation in exactly this form, plus a one-paragraph
-     rationale:
-     - `open` - the subject is novel
-     - `duplicate of <id>` - the subject re-reports issue `<id>`. Include a
-       `comment` for the surviving issue only when the subject carries insight
-       the survivor lacks.
-     - `user decision vs <closed id>` - the subject matches a closed issue.
-       State what the prior close reason was and whether the evidence suggests
-       the condition recurred or the resolution stands.
-
-   Sub-agents read via `mcp__plugin_gage_gage__Query` only. They do not write,
-   close, or promote anything.
+4. For each pending issue with related issues, invoke the Agent tool with
+   `subagent_type: "gage:pending-issue-reconcile"`. Pass the subject issue ID
+   and its related issue IDs in the prompt. The agent's definition contains the
+   full instructions and reply contract; the parent supplies only the IDs.
 
 5. Adjudicate the collected recommendations:
    - Pending issues may be related to other pending issues (e.g. multiple scans
@@ -138,8 +123,10 @@ its own right without pre-judging it.
    your working list. Run this query only after phase 1 completes - resolution
    changes which issues are open.
 
-2. Spawn sub-agents instructing each to get the full issue report and summarize
-   what it finds using the _issue summary rubric_ below.
+2. For each open issue, invoke the Agent tool with
+   `subagent_type: "gage:issue-summarize"`, passing the issue ID in the prompt.
+   The agent's definition contains the full rubric and reply contract; the
+   parent supplies only the ID. Launch these calls in parallel.
 
 3. With the summaries from the sub-agents, triage the list looking for the most
    important issues and list those first. Issues that cause the user the most
@@ -167,32 +154,6 @@ one issue to address, use this statement:
 
 > Would you like to start with a specific issue or should I present each in
 > order?
-
-**Sub-agent summary rubric**
-
-When spawning a sub-agent to summarize an issue, give the sub-agent an issue ID
-and ask it to run this query:
-
-```sql
-SELECT report FROM issue_report('<issue_id>')
-```
-
-This returns the detail report for the issue.
-
-The sub-agent should evaluate the issue --- assuming the issue to be true and
-accurate --- using this rubric:
-
-- `user benefit` - If solved, how do things improve for the user? What benefit
-  would the user enjoy?
-- `user pain addressed` - If left unsolved, what cost does the user incur? What
-  pain does the user face?
-- `fix ease` - If the issue proposes a fix, how straight forward is the fix to
-  apply?
-- `fix risk` - If the issue proposes a fix, what risk does it present to the
-  user? If something goes wrong, what could it cost the user?
-
-The sub-agent should include the issue report in its reply along with its
-answers to the rubric questions.
 
 ### Phase 2b: Resolve issues
 
