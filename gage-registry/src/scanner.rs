@@ -21,6 +21,44 @@ pub fn scanners_dir() -> PathBuf {
     gage_core::config::gage_home().join("lib/scanners")
 }
 
+/// Classification of where a scanner's source file lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScannerSource {
+    Builtin,
+    User,
+    Project,
+}
+
+impl ScannerSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScannerSource::Builtin => "builtin",
+            ScannerSource::User => "user",
+            ScannerSource::Project => "project",
+        }
+    }
+}
+
+impl fmt::Display for ScannerSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Classify a scanner file by its filesystem location. Paths under
+/// the extracted builtin bundle are `Builtin`; paths under the user
+/// custom-scanner root are `User`; everything else (any project
+/// `.gage/scanners` root, or an ad-hoc `-f` file) is `Project`.
+pub fn scanner_source(path: &Path) -> ScannerSource {
+    if path.starts_with(scanners_dir()) {
+        ScannerSource::Builtin
+    } else if path.starts_with(user_scanners_dir()) {
+        ScannerSource::User
+    } else {
+        ScannerSource::Project
+    }
+}
+
 /// User-level custom scanner root: `<gage_home>/local/scanners`. Unlike
 /// `scanners_dir()`, this directory is never wiped by the embedded
 /// extraction — it exists for user-authored scanners.
@@ -161,10 +199,8 @@ pub struct ScannerDef {
     ast: ast::File,
     source: String,
     pub embed_key: String,
-    /// True for scanners loaded ad hoc via `-f / --file`. These are
-    /// excluded from listings (`list_visible` / `list_enabled`) and
-    /// from enable/disable settings management.
-    pub from_file: bool,
+    /// Absolute filesystem path to the scanner's `.rn` source file.
+    pub path: PathBuf,
 }
 
 impl ScannerDef {
@@ -178,19 +214,10 @@ impl ScannerDef {
     /// Filesystem directory containing this scanner's `.rn` source.
     /// Used as the resolution root for relative `scanner:…` URIs.
     pub fn module_dir(&self) -> PathBuf {
-        if self.from_file {
-            return PathBuf::from(&self.embed_key)
-                .parent()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/"));
-        }
-
-        let rel = self
-            .embed_key
-            .rsplit_once('/')
-            .map(|(dir, _)| dir)
-            .unwrap_or("");
-        scanners_dir().join(rel)
+        self.path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"))
     }
 
     fn scanner_field(&self, name: &str) -> Option<&ast::Expr> {
@@ -333,22 +360,24 @@ impl fmt::Debug for Scanner<'_> {
 
 #[derive(Debug)]
 pub enum ScannerSpecError {
-    Name(String),
-    ParseFailed(String, String),
     Params(String, String),
 }
 
 impl fmt::Display for ScannerSpecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ScannerSpecError::Name(name) => write!(f, "Unknown scanner: {name}"),
-            ScannerSpecError::ParseFailed(name, rendered) => {
-                write!(f, "scanner '{name}' failed to parse:\n{rendered}")
-            }
             ScannerSpecError::Params(spec, msg) => {
                 write!(f, "Invalid scanner params '{spec}': {msg}")
             }
         }
+    }
+}
+
+/// Split a scanner spec `foo` or `foo#{...}` into `(name, Some(override_src))`.
+pub fn split_scanner_spec(spec: &str) -> (&str, Option<&str>) {
+    match spec.find("#{") {
+        Some(pos) => (&spec[..pos], Some(&spec[pos..])),
+        None => (spec, None),
     }
 }
 
@@ -363,30 +392,20 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    pub fn from_spec(spec: &str, registry: &'a ScannerRegistry) -> Result<Self, ScannerSpecError> {
-        let (name, params_override) = match spec.find("#{") {
-            Some(pos) => (&spec[..pos], Some(&spec[pos..])),
-            None => (spec, None),
-        };
-
-        let def = match registry.get_def(name) {
-            Some(def) => def,
-            None => {
-                if let Some(rendered) = registry.parse_error(name) {
-                    return Err(ScannerSpecError::ParseFailed(
-                        name.to_string(),
-                        rendered.to_string(),
-                    ));
-                }
-                return Err(ScannerSpecError::Name(name.to_string()));
-            }
-        };
-
+    /// Build a `Scanner` from an already-resolved `ScannerDef` and an
+    /// optional params override string. Name resolution happens at the
+    /// caller — ad-hoc scanners loaded via `-f` are resolved by the
+    /// CLI, not the registry.
+    pub fn from_spec(
+        def: &'a ScannerDef,
+        params_override: Option<&str>,
+        spec_for_diagnostics: &str,
+    ) -> Result<Self, ScannerSpecError> {
         let mut params = resolve_params(&def.params_def());
 
         if let Some(override_src) = params_override {
             let overrides = parse_object_repr(override_src)
-                .map_err(|e| ScannerSpecError::Params(spec.to_string(), e))?;
+                .map_err(|e| ScannerSpecError::Params(spec_for_diagnostics.to_string(), e))?;
 
             if let Some(ref mut params_json) = params {
                 let map = params_json.as_object_mut().unwrap();
@@ -395,7 +414,7 @@ impl<'a> Scanner<'a> {
                         map.insert(key, val);
                     } else {
                         tracing::warn!(
-                            scanner = name,
+                            scanner = %def.name,
                             key,
                             "ignoring unknown params key in override"
                         );
@@ -404,7 +423,7 @@ impl<'a> Scanner<'a> {
             } else if !overrides.is_empty() {
                 let keys: Vec<_> = overrides.keys().collect();
                 tracing::warn!(
-                    scanner = name,
+                    scanner = %def.name,
                     ?keys,
                     "scanner has no params; ignoring overrides"
                 );
@@ -463,26 +482,7 @@ fn resolve_params(params_def: &Object) -> Option<json::Value> {
     Some(json::to_value(&rune_val).expect("resolved params serialize to JSON"))
 }
 
-#[derive(Debug)]
-pub enum RegisterFileError {
-    Io(String, std::io::Error),
-    Parse(String),
-    Extension(String),
-}
-
-impl fmt::Display for RegisterFileError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RegisterFileError::Io(path, e) => write!(f, "{path}: {e}"),
-            RegisterFileError::Parse(rendered) => write!(f, "{rendered}"),
-            RegisterFileError::Extension(path) => {
-                write!(f, "{path}: scanner file must have a .rn extension")
-            }
-        }
-    }
-}
-
-fn display_path(abs: &Path, manifest_name: &str) -> String {
+pub fn display_path(abs: &Path, manifest_name: &str) -> String {
     let home = std::env::var_os("HOME").map(|h| h.to_string_lossy().to_string());
     display_path_impl(abs, manifest_name, home.as_deref())
 }
@@ -517,8 +517,12 @@ fn display_path_impl(abs: &Path, manifest_name: &str, home: Option<&str>) -> Str
 }
 
 pub struct ScannerRegistry {
-    defs: HashMap<String, ScannerDef>,
-    errors: HashMap<String, String>,
+    defs: Vec<ScannerDef>,
+    errors: Vec<(PathBuf, String)>,
+    // Short declared name -> ordered indices into `defs`, highest
+    // precedence first. Same-name entries beyond the first are
+    // shadowed and surfaced only through diagnostics.
+    by_name: HashMap<String, Vec<usize>>,
 }
 
 impl ScannerRegistry {
@@ -533,15 +537,14 @@ impl ScannerRegistry {
     /// the runner and include resolver locate them without joining
     /// against `scanners_dir()`.
     pub fn load_from_roots(builtin: &Path, roots: Vec<PathBuf>) -> Self {
-        let mut defs = HashMap::new();
-        let mut errors = HashMap::new();
+        let mut defs: Vec<ScannerDef> = Vec::new();
+        let mut errors: Vec<(PathBuf, String)> = Vec::new();
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
 
-        // Traverse roots least-specific first so a HashMap::insert from
-        // a more-specific root shadows an equally named scanner from a
-        // less-specific one (project shadows user shadows built-in).
-        let mut roots = roots;
-        roots.reverse();
-
+        // Traverse roots most-specific first so the first def indexed
+        // under a name is the winning one. Subsequent defs with the
+        // same name are still stored and appended to the by_name entry
+        // for shadowing diagnostics.
         for root in roots {
             for path in walk_rn_files(&root) {
                 let is_builtin = root.as_path() == builtin;
@@ -561,88 +564,105 @@ impl ScannerRegistry {
                     }
                 };
 
-                match parse_scanner(&code, &key) {
+                match parse_scanner(&code, &key, &path) {
                     Ok(def) => {
+                        let idx = defs.len();
                         let name = def.name.clone();
-                        defs.insert(name, def);
+                        defs.push(def);
+                        by_name.entry(name).or_default().push(idx);
                     }
                     Err(ParseError::MissingScanner) => {}
                     Err(ref e) => {
-                        let fallback_name = if is_builtin {
-                            key.split('/').next().unwrap_or(&key).to_string()
-                        } else {
-                            path.file_stem()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| key.clone())
-                        };
-                        errors.insert(fallback_name, e.render(&key, &code));
+                        errors.push((path.clone(), e.render(&key, &code)));
                     }
                 }
             }
         }
 
-        ScannerRegistry { defs, errors }
-    }
-
-    /// Load a scanner from a filesystem path and register it under a
-    /// composite name `{declared_name}[{display_path}]`. Returns the
-    /// composite name on success — pass it to `Scanner::from_spec`.
-    pub fn register_file(&mut self, path: &Path) -> Result<String, RegisterFileError> {
-        if path.extension().is_none_or(|ext| ext != "rn") {
-            return Err(RegisterFileError::Extension(path.display().to_string()));
+        for (name, indices) in &by_name {
+            if indices.len() > 1 {
+                let paths: Vec<String> = indices
+                    .iter()
+                    .map(|&i| {
+                        defs.get(i)
+                            .expect("by_name index came from defs.len() at push time")
+                            .path
+                            .display()
+                            .to_string()
+                    })
+                    .collect();
+                let (winning, shadowed) = paths
+                    .split_first()
+                    .expect("indices.len() > 1 guarantees paths non-empty");
+                tracing::warn!(
+                    scanner = %name,
+                    winning = %winning,
+                    shadowed = ?shadowed,
+                    "multiple scanners declare the same name; higher-precedence root wins"
+                );
+            }
         }
-        let abs = path
-            .canonicalize()
-            .map_err(|e| RegisterFileError::Io(path.display().to_string(), e))?;
-        let abs_str = abs.to_string_lossy().to_string();
-        let code =
-            std::fs::read_to_string(&abs).map_err(|e| RegisterFileError::Io(abs_str.clone(), e))?;
 
-        let mut def = match parse_scanner(&code, &abs_str) {
-            Ok(def) => def,
-            Err(e) => return Err(RegisterFileError::Parse(e.render(&abs_str, &code))),
-        };
-
-        let display = display_path(&abs, &def.name);
-        let composite = format!("{}[{}]", def.name, display);
-        def.name = composite.clone();
-        def.from_file = true;
-        self.defs.insert(composite.clone(), def);
-        Ok(composite)
+        ScannerRegistry {
+            defs,
+            errors,
+            by_name,
+        }
     }
 
     pub fn get_def(&self, name: &str) -> Option<&ScannerDef> {
-        self.defs.get(name)
+        let idx = *self.by_name.get(name)?.first()?;
+        Some(
+            self.defs
+                .get(idx)
+                .expect("by_name index came from defs.len() at push time"),
+        )
     }
 
-    pub fn parse_error(&self, name: &str) -> Option<&str> {
-        self.errors.get(name).map(|s| s.as_str())
-    }
-
-    /// True if this name maps to a known scanner — successful parse
-    /// or otherwise. Callers use this to distinguish "no such scanner"
-    /// from "this scanner exists but failed to compile".
+    /// True if `name` maps to a parsed scanner in the registry. A
+    /// scanner file that failed to parse has no reliable declared
+    /// name and is not reachable through this predicate. Surface
+    /// parse failures via `parse_errors()`.
     pub fn is_known(&self, name: &str) -> bool {
-        self.defs.contains_key(name) || self.errors.contains_key(name)
+        self.by_name.contains_key(name)
+    }
+
+    /// All parse failures discovered during load, as `(path,
+    /// rendered error)` pairs. Use at command startup or in a
+    /// `--list-scanners` path to surface every failing file.
+    pub fn parse_errors(&self) -> impl Iterator<Item = (&Path, &str)> {
+        self.errors.iter().map(|(p, e)| (p.as_path(), e.as_str()))
+    }
+
+    /// Rendered parse error for the scanner file at `path`, if any.
+    pub fn parse_error_at(&self, path: &Path) -> Option<&str> {
+        self.errors
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, e)| e.as_str())
     }
 
     pub fn names(&self) -> Vec<&str> {
-        let mut names: Vec<_> = self.defs.keys().map(|s| s.as_str()).collect();
+        let mut names: Vec<_> = self.by_name.keys().map(|s| s.as_str()).collect();
         names.sort();
         names
     }
 
     pub fn list(&self) -> Vec<&ScannerDef> {
-        let mut defs: Vec<_> = self.defs.values().collect();
+        let mut defs: Vec<&ScannerDef> = self
+            .by_name
+            .values()
+            .filter_map(|indices| indices.first().and_then(|&i| self.defs.get(i)))
+            .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }
 
     pub fn list_visible(&self) -> Vec<&ScannerDef> {
         let mut defs: Vec<_> = self
-            .defs
-            .values()
-            .filter(|d| !d.hidden && !d.library && !d.from_file)
+            .list()
+            .into_iter()
+            .filter(|d| !d.hidden && !d.library)
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
@@ -661,13 +681,12 @@ impl ScannerRegistry {
 
     /// Scanners declaring membership in `group`, sorted by name.
     /// Hidden scanners are included — `hidden` affects listing only,
-    /// not group expansion. Library and file-loaded scanners are
-    /// excluded.
+    /// not group expansion. Library scanners are excluded.
     pub fn group_members(&self, group: &str) -> Vec<&ScannerDef> {
         let mut defs: Vec<_> = self
-            .defs
-            .values()
-            .filter(|d| !d.library && !d.from_file)
+            .list()
+            .into_iter()
+            .filter(|d| !d.library)
             .filter(|d| d.groups.iter().any(|g| g == group))
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -677,7 +696,7 @@ impl ScannerRegistry {
     /// True if `name` is a known library scanner. Library scanners are
     /// not explicitly selectable — selection treats them as unknown.
     pub fn is_library(&self, name: &str) -> bool {
-        self.defs.get(name).is_some_and(|d| d.library)
+        self.get_def(name).is_some_and(|d| d.library)
     }
 
     /// Tasks pulled into a plan via `required_by`: tasks of scanners
@@ -704,8 +723,8 @@ impl ScannerRegistry {
         }
 
         let candidates: Vec<&ScannerDef> = self
-            .defs
-            .values()
+            .list()
+            .into_iter()
             .filter(|d| !selected_names.contains(d.name.as_str()))
             .filter(|d| !config.is_scanner_disabled(&d.name))
             .collect();
@@ -744,7 +763,7 @@ impl ScannerRegistry {
             .into_iter()
             .map(|(name, mut tasks)| {
                 tasks.sort();
-                (self.defs.get(name).unwrap(), tasks)
+                (self.get_def(name).unwrap(), tasks)
             })
             .collect()
     }
@@ -773,7 +792,7 @@ fn patterns_match(patterns: &[String], names: &HashSet<String>) -> bool {
         .any(|p| names.iter().any(|n| glob_match(p, n)))
 }
 
-fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError> {
+fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDef, ParseError> {
     let file = parse::parse_all::<ast::File>(source, SourceId::empty(), false)
         .map_err(ParseError::Syntax)?;
 
@@ -860,9 +879,47 @@ fn parse_scanner(source: &str, embed_key: &str) -> Result<ScannerDef, ParseError
         ast: file,
         source: source.to_string(),
         embed_key: embed_key.to_string(),
-        from_file: false,
+        path: path.to_path_buf(),
     })
 }
+
+/// Parse a scanner from a filesystem path, returning an owned
+/// `ScannerDef`. Used for scanners loaded ad hoc via `-f / --file`
+/// which do not enter the registry.
+pub fn parse_scanner_file(path: &Path) -> Result<ScannerDef, ParseScannerFileError> {
+    if path.extension().is_none_or(|ext| ext != "rn") {
+        return Err(ParseScannerFileError::Extension(path.display().to_string()));
+    }
+    let abs = path
+        .canonicalize()
+        .map_err(|e| ParseScannerFileError::Io(path.display().to_string(), e))?;
+    let embed_key = abs.to_string_lossy().to_string();
+    let code = std::fs::read_to_string(&abs)
+        .map_err(|e| ParseScannerFileError::Io(embed_key.clone(), e))?;
+    parse_scanner(&code, &embed_key, &abs)
+        .map_err(|e| ParseScannerFileError::Parse(e.render(&embed_key, &code)))
+}
+
+#[derive(Debug)]
+pub enum ParseScannerFileError {
+    Extension(String),
+    Io(String, std::io::Error),
+    Parse(String),
+}
+
+impl fmt::Display for ParseScannerFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseScannerFileError::Extension(path) => {
+                write!(f, "scanner file must have .rn extension: {path}")
+            }
+            ParseScannerFileError::Io(path, err) => write!(f, "{path}: {err}"),
+            ParseScannerFileError::Parse(rendered) => f.write_str(rendered),
+        }
+    }
+}
+
+impl std::error::Error for ParseScannerFileError {}
 
 /// Parse `SCANNER.agents`: fn name → description. Non-string values
 /// are skipped.
@@ -1280,7 +1337,7 @@ pub const SCANNER = #{
     agents: #{ agent: "Says hello" },
 };
 "#;
-        let def = parse_scanner(source, "demo").unwrap();
+        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
         assert_eq!(def.agents.get("agent").unwrap(), "Says hello");
     }
 
@@ -1300,7 +1357,7 @@ pub const SCANNER = #{
     },
 };
 "#;
-        let def = parse_scanner(source, "demo").unwrap();
+        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
         let write = def.tasks.get("write").unwrap();
         assert_eq!(write.notes.writes.get("finding").unwrap(), "A finding");
         assert_eq!(
@@ -1415,7 +1472,7 @@ pub const SCANNER = #{
         assert_eq!(reg.get_def("only-builtin").unwrap().description, "b");
 
         let shared = reg.get_def("shared").unwrap();
-        assert!(!shared.from_file, "custom-root scanners are not from_file");
+        assert!(shared.path.is_absolute(), "def path is absolute");
         assert!(
             Path::new(&shared.embed_key).is_absolute(),
             "custom-root embed_key is absolute"
@@ -1425,5 +1482,30 @@ pub const SCANNER = #{
             !Path::new(&only_builtin.embed_key).is_absolute(),
             "built-in embed_key stays relative"
         );
+    }
+
+    #[test]
+    fn load_from_roots_surfaces_all_parse_failures_by_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let builtin = tmp.path().join("builtin");
+        let user = tmp.path().join("user");
+        // Two failing scanners under different custom-root subdirs. Both
+        // land at `<dir>/scanner.rn`, so a name-keyed errors map would
+        // collide on the "scanner" file stem and drop one.
+        let a_dir = user.join("a");
+        let b_dir = user.join("b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(a_dir.join("scanner.rn"), "not valid rune!!!").unwrap();
+        std::fs::write(b_dir.join("scanner.rn"), "also not valid!!!").unwrap();
+        std::fs::create_dir_all(&builtin).unwrap();
+
+        let roots = vec![user.clone(), builtin.clone()];
+        let reg = ScannerRegistry::load_from_roots(&builtin, roots);
+
+        let paths: Vec<PathBuf> = reg.parse_errors().map(|(p, _)| p.to_path_buf()).collect();
+        assert_eq!(paths.len(), 2, "both failing custom scanners must surface");
+        assert!(reg.parse_error_at(&a_dir.join("scanner.rn")).is_some());
+        assert!(reg.parse_error_at(&b_dir.join("scanner.rn")).is_some());
     }
 }
