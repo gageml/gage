@@ -27,7 +27,10 @@ use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
 use gage_db::{db, scan};
 use gage_query::ScanSessionContext;
-use gage_registry::scanner::{Scanner, ScannerRegistry};
+use gage_registry::scanner::{
+    Scanner, ScannerDef, ScannerRegistry, display_path, parse_scanner_file, scanner_source,
+    split_scanner_spec,
+};
 use rand::seq::SliceRandom;
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -1088,7 +1091,7 @@ fn count_matching_tasks(
 }
 
 async fn run_scan(mut args: ScanRunArgs) {
-    let mut registry = ScannerRegistry::load();
+    let registry = ScannerRegistry::load();
 
     if args.list_scanners {
         list_scanners(&registry);
@@ -1134,10 +1137,13 @@ async fn run_scan(mut args: ScanRunArgs) {
         }
     }
 
-    // Register `-f` files into the registry and append their composite
-    // names to the explicit scanner list. Any `#{...}` params override
-    // suffix on the path is split off first and re-appended to the
-    // composite name so `Scanner::from_spec` parses it normally.
+    // Parse `-f` files into owned ScannerDefs held outside the
+    // registry. Each def's declared name is replaced with a composite
+    // `{name}[{display_path}]` so ad-hoc references never collide with
+    // registry scanners at selection time. The composite name is
+    // appended to the explicit scanner list; any `#{...}` params
+    // override suffix on the path is split off first and re-appended.
+    let mut ad_hoc: Vec<ScannerDef> = Vec::new();
     let mut file_specs: Vec<String> = Vec::new();
     let mut errors = 0;
     for raw in &args.files {
@@ -1145,11 +1151,17 @@ async fn run_scan(mut args: ScanRunArgs) {
             Some(pos) => (&raw[..pos], &raw[pos..]),
             None => (raw.as_str(), ""),
         };
-        match registry.register_file(Path::new(path_str)) {
-            Ok(name) => {
-                // The same file given twice (paths canonicalize to one
-                // composite name) runs once per distinct config override.
-                let spec = format!("{name}{override_suffix}");
+        match parse_scanner_file(Path::new(path_str)) {
+            Ok(mut def) => {
+                let display = display_path(&def.path, &def.name);
+                let composite = format!("{}[{}]", def.name, display);
+                def.name = composite.clone();
+                let spec = format!("{composite}{override_suffix}");
+                // Same file given twice canonicalizes to one composite
+                // name; each distinct config override still runs once.
+                if !ad_hoc.iter().any(|d| d.name == composite) {
+                    ad_hoc.push(def);
+                }
                 if !file_specs.contains(&spec) {
                     file_specs.push(spec);
                 }
@@ -1197,7 +1209,7 @@ async fn run_scan(mut args: ScanRunArgs) {
     };
 
     dialog::run_async("Scan sessions", || {
-        run_dialog(args, registry, explicit_sessions, scan_id)
+        run_dialog(args, registry, ad_hoc, explicit_sessions, scan_id)
     })
     .await;
 }
@@ -1320,9 +1332,19 @@ fn write_stream(file: &mut Option<std::fs::File>, s: &str) {
 async fn run_dialog(
     mut args: ScanRunArgs,
     registry: ScannerRegistry,
+    ad_hoc: Vec<ScannerDef>,
     explicit_sessions: Option<Vec<(String, PathBuf)>>,
     scan_id: String,
 ) -> Result<DialogResult, DialogError> {
+    // Resolve a bare scanner name against the registry first, then
+    // fall back to the ad-hoc `-f` defs held on this invocation.
+    let resolve = |name: &str| -> Option<&ScannerDef> {
+        registry
+            .get_def(name)
+            .or_else(|| ad_hoc.iter().find(|d| d.name == name))
+    };
+    let is_known_here =
+        |name: &str| -> bool { registry.is_known(name) || ad_hoc.iter().any(|d| d.name == name) };
     // Scanner selection — default set excludes disabled scanners.
     // Explicit `-s name` (handled below) still runs disabled scanners.
     let cwd = std::env::current_dir().context("reading current working directory")?;
@@ -1422,7 +1444,7 @@ async fn run_dialog(
                 let bare = name.split("#{").next().unwrap();
                 // Library scanners are not selectable — same error as an
                 // unknown name
-                if !registry.is_known(bare) || registry.is_library(bare) {
+                if !is_known_here(bare) || registry.is_library(bare) {
                     cli::log::error(format!("Unknown scanner: {bare}"))?;
                     return Err(DialogError::Canceled);
                 }
@@ -1474,7 +1496,12 @@ async fn run_dialog(
     let mut scanners: Vec<Scanner<'_>> = {
         let mut out = Vec::new();
         for spec in &selected_names {
-            match Scanner::from_spec(spec, &registry) {
+            let (name, params_override) = split_scanner_spec(spec);
+            let Some(def) = resolve(name) else {
+                cli::log::error(format!("Unknown scanner: {name}"))?;
+                return Err(DialogError::Canceled);
+            };
+            match Scanner::from_spec(def, params_override, spec) {
                 Ok(s) => out.push(s),
                 Err(e) => {
                     cli::log::error(format!("{e}"))?;
@@ -2312,7 +2339,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn list_scanners(registry: &ScannerRegistry) {
-    let header: Vec<String> = ["Scanner", "Groups", "Description"]
+    let header: Vec<String> = ["Scanner", "Source", "Groups", "Description"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -2343,15 +2370,18 @@ fn list_scanners(registry: &ScannerRegistry) {
         .into_iter()
         .map(|d| {
             let groups = style(d.groups.join(", ")).dim().to_string();
+            let source = style(scanner_source(&d.path).to_string()).dim().to_string();
             if config.is_scanner_enabled(&d.name) {
                 vec![
                     style(&d.name).yellow().to_string(),
+                    source,
                     groups,
                     style(&d.description).dim().to_string(),
                 ]
             } else {
                 vec![
                     style(format!("{} (disabled)", d.name)).dim().to_string(),
+                    source,
                     groups,
                     style(&d.description).dim().to_string(),
                 ]
@@ -2370,6 +2400,22 @@ fn list_scanners(registry: &ScannerRegistry) {
         .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
+
+    let errors: Vec<_> = registry.parse_errors().collect();
+    if !errors.is_empty() {
+        println!();
+        eprintln!(
+            "{}",
+            style(format!("{} scanner file(s) failed to parse:", errors.len()))
+                .red()
+                .bold()
+        );
+        for (path, rendered) in errors {
+            eprintln!();
+            eprintln!("{}", style(path.display()).yellow());
+            eprintln!("{rendered}");
+        }
+    }
 }
 
 #[cfg(test)]
