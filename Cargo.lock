@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "gage-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gage-claude",
  "gage-core",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "gage-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "bincode 2.0.1",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "gage-claude"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "gage-core",
@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "gage-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "gage-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "console 0.16.3",
  "percent-encoding",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "gage-db"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "gage-core",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "gage-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "chrono",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "gage-log"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "flate2",
@@ -2706,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "gage-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "gage-log",
@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "gage-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "bytes",
@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "gage-query"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "gage-registry"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "codespan-reporting",
  "fs4 1.1.0",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "gage-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "gage-scan"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "codespan-reporting",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "gage-sync"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2858,7 +2858,7 @@ dependencies = [
 
 [[package]]
 name = "gage-test"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "gage-agent",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "gage-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "datafusion",
  "gage-claude",

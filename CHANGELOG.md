@@ -6,6 +6,22 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [0.1.1]
+
+**Enhancements**
+
+- User defined scanners
+
+**Fixes**
+
+- Agent auth errors for scans on macOS
+- Scanner parse error handling
+
+**Other changes**
+
+- Use 'wontfix' instead of 'skipped' as close reason
+- Minor scanner Rune source cleanup
+
 ## [0.1.0]
 
 This is the initial Gage release (MVP).
