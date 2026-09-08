@@ -19,7 +19,7 @@ use tabled::{
 };
 
 use gage_claude::home::ClaudeHome;
-use gage_claude::model::{ModelMap, resolved_model};
+use gage_claude::model::ModelMap;
 use gage_claude::preflight;
 use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
@@ -31,7 +31,7 @@ use gage_registry::scanner::{Scanner, ScannerRegistry};
 use rand::seq::SliceRandom;
 
 use crate::dialog::{self, DialogError, DialogResult};
-use crate::model_prompt::{self, DefaultModel};
+use crate::model_prompt;
 use crate::style as s;
 
 const DEFAULT_AGENT_JOBS: usize = 8;
@@ -1634,18 +1634,16 @@ async fn run_dialog(
     // Model selection. If --model was passed, honor it verbatim and
     // show the list as a step. Otherwise prompt for a bare model
     // (added as a plain [SIZE=]-less entry to args.models), or under
-    // -y show the scan default as a caption only, leaving args.models
-    // empty so each scanner resolves its own per-size-tier default.
+    // -y leave args.models empty so each scanner resolves its own
+    // per-size-tier default. Selecting "Default" in the prompt has
+    // the same effect.
     if args.models.is_empty() {
-        let default_model = resolved_model(None);
         if args.yes {
-            selection_step("Model", &default_model)?;
-        } else {
-            let selected = model_prompt::prompt_model(Some(DefaultModel {
-                model: default_model,
-                note: "from runtime defaults",
-            }))?;
+            selection_step("Model", "Default")?;
+        } else if let Some(selected) = model_prompt::prompt_model_for_scan()? {
             args.models.push(selected);
+        } else {
+            selection_step("Model", "Default")?;
         }
     } else {
         let lines: String = args
