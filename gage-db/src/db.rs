@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use gage_core::config::gage_home;
 
-pub const CURRENT_VERSION: u32 = 5;
+pub const CURRENT_VERSION: u32 = 6;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -136,6 +136,9 @@ fn migrate(conn: &mut Connection) -> Result<(), rusqlite::Error> {
         if version < 5 {
             migrate_v5(&tx)?;
         }
+        if version < 6 {
+            migrate_v6(&tx)?;
+        }
     }
     set_version(&tx, CURRENT_VERSION)?;
     tx.commit()
@@ -178,6 +181,19 @@ fn migrate_v4(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
 
 fn migrate_v5(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch("ALTER TABLE scan ADD COLUMN label TEXT")
+}
+
+// The issue close reason 'skipped' was renamed to 'wontfix'. Rewrite
+// both the issue column and the copy carried in the issue_event
+// metadata JSON so no reader has to know the old spelling.
+fn migrate_v6(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "UPDATE issue SET status_reason = 'wontfix' WHERE status_reason = 'skipped';
+         UPDATE issue_event
+           SET metadata = json_set(metadata, '$.status_reason', 'wontfix')
+           WHERE type = 'status'
+             AND json_extract(metadata, '$.status_reason') = 'skipped';",
+    )
 }
 
 fn get_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
@@ -537,6 +553,51 @@ mod tests {
             .query_row("SELECT label FROM scan WHERE id = 'sc-1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(label, None);
+    }
+
+    #[test]
+    fn migrate_v6_renames_skipped_to_wontfix() {
+        // A v5 database: one closed issue and its status event both
+        // carrying the old 'skipped' spelling.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE issue (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, author TEXT NOT NULL,
+                title TEXT NOT NULL, description TEXT, target TEXT,
+                status TEXT NOT NULL, status_reason TEXT, metadata TEXT,
+                created INTEGER NOT NULL, modified INTEGER
+            );
+            CREATE TABLE issue_event (
+                issue_id TEXT NOT NULL, type TEXT NOT NULL,
+                author TEXT NOT NULL, timestamp INTEGER NOT NULL, metadata TEXT
+            );
+            INSERT INTO issue VALUES
+                ('i1', 'n', 'u', 't', NULL, NULL, 'closed', 'skipped', NULL, 1, NULL);
+            INSERT INTO issue_event VALUES
+                ('i1', 'status', 'u', 2,
+                 '{\"status\":\"closed\",\"status_reason\":\"skipped\"}');",
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        migrate_v6(&tx).unwrap();
+        tx.commit().unwrap();
+
+        let reason: String = conn
+            .query_row("SELECT status_reason FROM issue WHERE id = 'i1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(reason, "wontfix");
+        let event_reason: String = conn
+            .query_row(
+                "SELECT json_extract(metadata, '$.status_reason') FROM issue_event
+                 WHERE issue_id = 'i1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_reason, "wontfix");
     }
 
     #[test]

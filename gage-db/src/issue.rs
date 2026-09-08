@@ -37,7 +37,7 @@ impl std::str::FromStr for IssueStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StatusReason {
     Completed,
-    Skipped,
+    WontFix,
     /// Closed by reconciliation as a duplicate of a surviving issue.
     Duplicate,
 }
@@ -46,7 +46,7 @@ impl StatusReason {
     pub fn as_str(self) -> &'static str {
         match self {
             StatusReason::Completed => "completed",
-            StatusReason::Skipped => "skipped",
+            StatusReason::WontFix => "wontfix",
             StatusReason::Duplicate => "duplicate",
         }
     }
@@ -57,7 +57,7 @@ impl std::str::FromStr for StatusReason {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "completed" => Ok(StatusReason::Completed),
-            "skipped" => Ok(StatusReason::Skipped),
+            "wontfix" => Ok(StatusReason::WontFix),
             "duplicate" => Ok(StatusReason::Duplicate),
             other => Err(format!("unknown status_reason '{other}'")),
         }
@@ -1215,7 +1215,7 @@ mod tests {
             &conn,
             "issue-aaa",
             IssueStatus::Closed,
-            Some(StatusReason::Skipped),
+            Some(StatusReason::WontFix),
             "user:tester",
             None,
         )
@@ -1242,7 +1242,7 @@ mod tests {
             events[1].event,
             IssueEvent::Status {
                 status: IssueStatus::Closed,
-                reason: Some(StatusReason::Skipped),
+                reason: Some(StatusReason::WontFix),
                 message: None,
             }
         );

@@ -910,7 +910,7 @@ fn handle_prompt_key(state: &mut ViewState, key: KeyEvent) {
             match key.code {
                 KeyCode::Char('r') => state.start_resolve(),
                 KeyCode::Char('c') if !closed => state.start_close(StatusReason::Completed),
-                KeyCode::Char('s') if !closed => state.start_close(StatusReason::Skipped),
+                KeyCode::Char('w') if !closed => state.start_close(StatusReason::WontFix),
                 KeyCode::Char('d') if !closed => state.start_close(StatusReason::Duplicate),
                 KeyCode::Char('o') if closed => state.start_open(IssueStatus::Open),
                 KeyCode::Char('p') if closed => state.start_open(IssueStatus::Pending),
@@ -2552,7 +2552,7 @@ fn draw_actions(frame: &mut Frame, issue: &IssueItem) {
         actions.push(("p", "set as pending"));
     } else {
         actions.push(("c", "close as completed"));
-        actions.push(("s", "close as skipped"));
+        actions.push(("w", "close as wontfix"));
         actions.push(("d", "close as duplicate"));
     }
     actions.push(("t", "comment"));

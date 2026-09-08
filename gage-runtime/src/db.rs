@@ -159,7 +159,7 @@ fn fetch_issues(q: IssuesQuery) -> super::Result<Vec<Issue>> {
 
 /// Update an issue: `update_issue(id, #{ status, status_reason?, message? })`.
 /// `status` is `"open"`, `"closed"`, or `"pending"`. `status_reason`
-/// (`"completed"`, `"skipped"`, or `"duplicate"`) applies only when
+/// (`"completed"`, `"wontfix"`, or `"duplicate"`) applies only when
 /// closing; a missing reason defaults to `"completed"`.
 fn do_update_issue(id: &str, args: &Object) -> super::Result<()> {
     let ctx = current_scan_ctx();

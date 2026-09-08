@@ -1,7 +1,7 @@
 ---
 description:
   Resolve pending Gage issues, then walk through open issues and close them as
-  completed or skipped.
+  completed or wontfix.
 disable-model-invocation: true
 ---
 
@@ -253,7 +253,7 @@ Applies to `{project_1}`, `{project_2}`
   - If the issue is verified, recommend a fix or approach to working toward a
     fix (e.g. further research, etc.)
   - If the issue is no longer applicable or invalid, recommend the issue be
-    closed as "skipped" (i.e. not implemented) with an explanation
+    closed as "wontfix" (i.e. not implemented) with an explanation
 
 Ask the user how they would like to proceed or if they need more information.
 
@@ -266,14 +266,14 @@ this discussion.
 **Resolve the issue**
 
 After your investigation, if you determine that the issue is invalid or no
-longer applicable, inform the user and recommend that the issue be skipped (i.e.
-closed with "skipped" reason -- see below).
+longer applicable, inform the user and recommend that the issue be closed as
+wontfix (i.e. closed with "wontfix" reason -- see below).
 
 If the issue is valid, get the user's explicit approval before resolving any
 issues. Do not make any changes without approval from the user.
 
 Present any recommended options along with the option to defer or close the
-issue as skipped.
+issue as wontfix.
 
 Before closing, ask the user to confirm a fix only when they can verify
 something the tests do not already cover. If their check would just repeat the
@@ -284,4 +284,4 @@ Use `mcp__plugin_gage_gage__IssueUpdate` with `status=closed` and
 `status_reason=completed` to close an issue that's been verified as fixed.
 
 If the user decides to not fix the issue, close it with `status=closed` and
-`status_reason=skipped`.
+`status_reason=wontfix`.

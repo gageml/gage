@@ -111,12 +111,12 @@ pub struct IssueCloseArgs {
     /// Issue IDs (or prefix)
     ids: Vec<String>,
 
-    /// Close as 'skipped' instead of the default 'completed'
+    /// Close as 'wontfix' instead of the default 'completed'
     #[arg(short, long)]
-    skipped: bool,
+    wontfix: bool,
 
     /// Close as 'duplicate' instead of the default 'completed'
-    #[arg(short, long, conflicts_with = "skipped")]
+    #[arg(short, long, conflicts_with = "wontfix")]
     duplicate: bool,
 
     /// Message explaining issue close
@@ -593,8 +593,8 @@ pub fn close(args: IssueCloseArgs) {
         std::process::exit(1);
     }
 
-    let reason = if args.skipped {
-        StatusReason::Skipped
+    let reason = if args.wontfix {
+        StatusReason::WontFix
     } else if args.duplicate {
         StatusReason::Duplicate
     } else {
