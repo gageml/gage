@@ -31,7 +31,7 @@ use ratatui::crossterm::{cursor, execute};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, Widget, Wrap};
+use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Widget, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -3035,15 +3035,33 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .areas(tasks);
         frame.render_widget(Paragraph::new(id_line), id_area);
         frame.render_widget(
-            Gauge::default()
-                .gauge_style(styles::Panel::gauge())
-                .ratio(ratio)
-                .label(label),
+            Paragraph::new(header_gauge_line(&label, ratio, gauge_area.width as usize)),
             gauge_area,
         );
     }
 
     frame.render_widget(Paragraph::new(counts), badges);
+}
+
+/// Header progress bar drawn cell-by-cell. The label is centered
+/// within `width` cells, then split at the fill boundary so the
+/// filled span carries a solid green cell background under white
+/// label text and the unfilled span shows white label text on the
+/// default background. Fill snaps to whole cells so no Unicode
+/// block glyphs are used, avoiding inter-cell seams on terminals
+/// that pad block glyphs (e.g. macOS Terminal.app).
+fn header_gauge_line(label: &str, ratio: f64, width: usize) -> Line<'static> {
+    let label_w = label.width();
+    let pad = width.saturating_sub(label_w);
+    let left = pad / 2;
+    let right = pad - left;
+    let padded = format!("{}{}{}", " ".repeat(left), label, " ".repeat(right));
+    let fill = (ratio * width as f64).round() as usize;
+    let (head, rest) = split_at_width(&padded, fill);
+    Line::from(vec![
+        Span::styled(head.to_string(), styles::Panel::header_gauge_fill()),
+        Span::styled(rest.to_string(), styles::Panel::header_gauge()),
+    ])
 }
 
 /// Indicatif-style braille spinner; one frame per 100ms redraw tick

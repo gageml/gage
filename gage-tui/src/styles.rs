@@ -69,6 +69,19 @@ impl Panel {
             .fg(Color::Green)
             .add_modifier(Modifier::REVERSED)
     }
+
+    /// Unfilled region of the header progress bar. White label text on
+    /// the default background.
+    pub fn header_gauge() -> Style {
+        Style::new().fg(Color::White)
+    }
+
+    /// Filled region of the header progress bar. White label text on
+    /// a solid green cell background so the label reads the same on
+    /// both halves.
+    pub fn header_gauge_fill() -> Style {
+        Style::new().fg(Color::White).bg(Color::Green)
+    }
 }
 
 /// Message dialog surface — reverse video so it stands out against
