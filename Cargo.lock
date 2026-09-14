@@ -2841,6 +2841,10 @@ dependencies = [
 [[package]]
 name = "gage-store"
 version = "0.2.0-dev"
+dependencies = [
+ "gage-core",
+ "tempfile",
+]
 
 [[package]]
 name = "gage-sync"
