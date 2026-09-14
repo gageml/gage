@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
-use gage_store::{InitOutcome, NoteInput, NoteRecord, StoreStatus};
+use gage_store::{EntryKind, InitOutcome, NoteInput, NoteRecord, StoreStatus, TreeEntry};
 use tabled::{
     Table,
     settings::{
@@ -33,11 +33,40 @@ pub enum StoreCommand {
     /// immediately) and `2.weeks.ago` (the git default).
     Gc(GcArgs),
 
+    /// List entries under a tree-ish
+    ///
+    /// Runs `git ls-tree -l <REF>`. `<REF>` is any git tree-ish: a full
+    /// ref path (`refs/gage/notes/<id>`), an object sha, or
+    /// `<ref>:<path>`.
+    Ls(LsArgs),
+
+    /// Dump the content of an object
+    ///
+    /// Runs `git cat-file -p <REF>`. `<REF>` is any git tree-ish or
+    /// object sha.
+    Cat(CatArgs),
+
     /// Manage store notes
     Note {
         #[command(subcommand)]
         command: NoteCommand,
     },
+}
+
+#[derive(Args)]
+pub struct LsArgs {
+    /// Git tree-ish
+    reference: String,
+
+    /// Include the object sha column
+    #[arg(long)]
+    sha: bool,
+}
+
+#[derive(Args)]
+pub struct CatArgs {
+    /// Git object reference
+    reference: String,
 }
 
 #[derive(Args)]
@@ -108,6 +137,8 @@ pub fn run(command: StoreCommand) {
         StoreCommand::Init => init(),
         StoreCommand::Status => status(),
         StoreCommand::Gc(args) => gc(args),
+        StoreCommand::Ls(args) => ls(args),
+        StoreCommand::Cat(args) => cat(args),
         StoreCommand::Note { command } => match command {
             NoteCommand::List => note_list(),
             NoteCommand::Show(args) => note_show(args),
@@ -226,6 +257,58 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .into_iter()
     .map(|(k, before, after)| vec![k.to_string(), before, after])
     .collect()
+}
+
+fn ls(args: LsArgs) {
+    let entries = match gage_store::ls(&args.reference) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("gage store ls: {e}");
+            std::process::exit(1);
+        }
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let mut header: Vec<String> = vec!["Name".into(), "Type".into(), "Size".into()];
+    if args.sha {
+        header.push("Sha".into());
+    }
+    let rows = std::iter::once(header).chain(entries.iter().map(|e| ls_row(e, args.sha)));
+    let table = Table::from_iter(rows)
+        .with(Style::rounded())
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::one(0).not(Rows::first()),
+            style::tty(Color::FG_YELLOW),
+        )
+        .modify(Columns::one(2).not(Rows::first()), style::dim())
+        .to_string();
+    println!("{table}");
+}
+
+fn ls_row(entry: &TreeEntry, include_sha: bool) -> Vec<String> {
+    let size = match entry.size {
+        Some(bytes) => format_size(bytes as i64),
+        None => "-".to_string(),
+    };
+    let kind = entry.kind.as_str().to_string();
+    let name = match entry.kind {
+        EntryKind::Tree => format!("{}/", entry.name),
+        _ => entry.name.clone(),
+    };
+    let mut row = vec![name, kind, size];
+    if include_sha {
+        row.push(entry.sha.clone());
+    }
+    row
+}
+
+fn cat(args: CatArgs) {
+    if let Err(e) = gage_store::cat(&args.reference) {
+        eprintln!("gage store cat: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn note_list() {

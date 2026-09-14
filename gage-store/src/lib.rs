@@ -20,6 +20,104 @@ pub use note::{
     note_edit_at, note_get, note_get_at, note_list, note_list_at,
 };
 
+/// One entry from `git ls-tree -l`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TreeEntry {
+    pub mode: String,
+    pub kind: EntryKind,
+    pub sha: String,
+    /// Bytes on disk for a blob; `None` for a tree.
+    pub size: Option<u64>,
+    pub name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Blob,
+    Tree,
+    Commit,
+}
+
+impl EntryKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EntryKind::Blob => "blob",
+            EntryKind::Tree => "tree",
+            EntryKind::Commit => "commit",
+        }
+    }
+}
+
+/// List the entries directly under `reference`, resolved by
+/// `git ls-tree -l`. `reference` is a git tree-ish (ref path, sha, or
+/// `<ref>:<path>`).
+pub fn ls(reference: &str) -> Result<Vec<TreeEntry>, StoreError> {
+    ls_at(&store_path(), reference)
+}
+
+pub fn ls_at(path: &Path, reference: &str) -> Result<Vec<TreeEntry>, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let out = run(git_in(path, ["ls-tree", "-l", reference]))?;
+    let mut entries = Vec::new();
+    for line in out.lines() {
+        let (meta, name) = line
+            .split_once('\t')
+            .ok_or_else(|| StoreError::Parse(format!("ls-tree line: {line}")))?;
+        let collected: Vec<&str> = meta.split_whitespace().collect();
+        let [mode, kind_str, sha, size_str]: [&str; 4] =
+            collected.try_into().map_err(|got: Vec<&str>| {
+                StoreError::Parse(format!(
+                    "ls-tree meta {meta:?}: expected 4 fields, got {}",
+                    got.len()
+                ))
+            })?;
+        let kind = match kind_str {
+            "blob" => EntryKind::Blob,
+            "tree" => EntryKind::Tree,
+            "commit" => EntryKind::Commit,
+            other => return Err(StoreError::Parse(format!("ls-tree type: {other}"))),
+        };
+        let size = match size_str {
+            "-" => None,
+            s => Some(
+                s.parse::<u64>()
+                    .map_err(|e| StoreError::Parse(format!("ls-tree size {s:?}: {e}")))?,
+            ),
+        };
+        entries.push(TreeEntry {
+            mode: mode.to_string(),
+            kind,
+            sha: sha.to_string(),
+            size,
+            name: name.to_string(),
+        });
+    }
+    Ok(entries)
+}
+
+/// Dump the pretty-printed content of `reference` to the process's
+/// stdout by running `git cat-file -p <reference>`.
+pub fn cat(reference: &str) -> Result<(), StoreError> {
+    cat_at(&store_path(), reference)
+}
+
+pub fn cat_at(path: &Path, reference: &str) -> Result<(), StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let mut cmd = git_in(path, ["cat-file", "-p", reference]);
+    let status = cmd.status().map_err(StoreError::Spawn)?;
+    if !status.success() {
+        return Err(StoreError::Git {
+            status,
+            stderr: String::new(),
+        });
+    }
+    Ok(())
+}
+
 /// Path to the store: `<gage_home>/store.git`.
 pub fn store_path() -> PathBuf {
     gage_home().join("store.git")
