@@ -15,7 +15,7 @@ use gage_core::config::gage_home;
 
 mod note;
 
-pub use note::{NoteInput, note_add, note_add_at};
+pub use note::{NoteInput, NoteRecord, note_add, note_add_at, note_list, note_list_at};
 
 /// Path to the store: `<gage_home>/store.git`.
 pub fn store_path() -> PathBuf {

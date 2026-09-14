@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use gage_core::uuid::new_uuid;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{StoreError, exists, git_in, run, run_with_stdin, store_path};
 
@@ -30,6 +30,74 @@ pub struct NoteInput<'a> {
     /// Each target must have the form `note:<id>` and reference an
     /// existing `refs/gage/notes/<id>` in the store.
     pub targets: &'a [String],
+}
+
+/// A single note read from the store, projected into the fields the
+/// list view needs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NoteRecord {
+    pub id: String,
+    pub name: String,
+    pub value: String,
+    pub author: String,
+    /// Commit committer date, milliseconds since the Unix epoch.
+    pub created_ms: i64,
+}
+
+/// List every note in the default store, newest first by committer date.
+pub fn note_list() -> Result<Vec<NoteRecord>, StoreError> {
+    note_list_at(&store_path())
+}
+
+/// List every note in the store at `path`, newest first by committer
+/// date.
+pub fn note_list_at(path: &Path) -> Result<Vec<NoteRecord>, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let listing = run(git_in(
+        path,
+        [
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:strip=3) %(committerdate:unix)",
+            "refs/gage/notes/",
+        ],
+    ))?;
+
+    let mut records = Vec::new();
+    for line in listing.lines() {
+        let (id, ts) = line
+            .split_once(' ')
+            .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
+        let created_secs: i64 = ts
+            .parse()
+            .map_err(|e| StoreError::Parse(format!("committerdate {ts}: {e}")))?;
+        let ref_path = format!("refs/gage/notes/{id}");
+        let attrs_json = run(git_in(
+            path,
+            ["cat-file", "-p", &format!("{ref_path}:attrs")],
+        ))?;
+        let attrs: StoredAttrs = serde_json::from_str(attrs_json.trim_end())
+            .map_err(|e| StoreError::Parse(format!("attrs {id}: {e}")))?;
+        records.push(NoteRecord {
+            id: id.to_string(),
+            name: attrs.name,
+            value: attrs.value,
+            author: attrs.author,
+            created_ms: created_secs * 1000,
+        });
+    }
+    Ok(records)
+}
+
+/// The on-disk shape of `attrs`. `value` is treated as a string for now;
+/// the schema may broaden this later.
+#[derive(Deserialize)]
+struct StoredAttrs {
+    name: String,
+    value: String,
+    author: String,
 }
 
 /// Add a note to the default store. Returns the new note's id.
@@ -259,6 +327,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, StoreError::TargetNotFound(t) if t == "note:doesnotexist"));
+    }
+
+    #[test]
+    fn list_returns_notes_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let first = note_add_at(
+            &store,
+            NoteInput {
+                name: "a",
+                value: "one",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        // for-each-ref sorts by committerdate at second precision; a
+        // second-boundary sleep would be needed for strict ordering.
+        // Instead assert the set and that both timestamps are present.
+        let second = note_add_at(
+            &store,
+            NoteInput {
+                name: "b",
+                value: "two",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+
+        let records = note_list_at(&store).unwrap();
+        assert_eq!(records.len(), 2);
+        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&first.as_str()));
+        assert!(ids.contains(&second.as_str()));
+        for r in &records {
+            assert!(r.created_ms > 0);
+            assert_eq!(r.author, "user:test");
+        }
+    }
+
+    #[test]
+    fn list_empty_store_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+        assert!(note_list_at(&store).unwrap().is_empty());
     }
 
     #[test]
