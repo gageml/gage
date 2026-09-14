@@ -25,11 +25,26 @@ pub enum StoreCommand {
     /// Show store status
     Status,
 
+    /// Garbage collect the store
+    ///
+    /// Runs `git gc` in the store. Use `--prune <EXPIRE>` to control the
+    /// pruning window; the value is passed to `git gc --prune=<EXPIRE>`.
+    /// Common values are `now` (delete all unreachable objects
+    /// immediately) and `2.weeks.ago` (the git default).
+    Gc(GcArgs),
+
     /// Manage store notes
     Note {
         #[command(subcommand)]
         command: NoteCommand,
     },
+}
+
+#[derive(Args)]
+pub struct GcArgs {
+    /// Prune unreachable objects older than this
+    #[arg(long, value_name = "EXPIRE")]
+    prune: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -92,6 +107,7 @@ pub fn run(command: StoreCommand) {
     match command {
         StoreCommand::Init => init(),
         StoreCommand::Status => status(),
+        StoreCommand::Gc(args) => gc(args),
         StoreCommand::Note { command } => match command {
             NoteCommand::List => note_list(),
             NoteCommand::Show(args) => note_show(args),
@@ -158,6 +174,57 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
     ]
     .into_iter()
     .map(|(k, v)| vec![k.to_string(), v])
+    .collect()
+}
+
+fn gc(args: GcArgs) {
+    let outcome = match gage_store::gc(args.prune.as_deref()) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            eprintln!("gage store gc: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!();
+    let header: Vec<String> = ["", "Before", "After"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows = std::iter::once(header).chain(gc_summary_rows(&outcome));
+    let table = Table::from_iter(rows)
+        .with(Style::rounded())
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Columns::first(), style::dim())
+        .to_string();
+    println!("{table}");
+}
+
+fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
+    let b = &outcome.before;
+    let a = &outcome.after;
+    let objects_b = b.loose_objects + b.packed_objects;
+    let objects_a = a.loose_objects + a.packed_objects;
+    [
+        ("objects", objects_b.to_string(), objects_a.to_string()),
+        (
+            "loose",
+            b.loose_objects.to_string(),
+            a.loose_objects.to_string(),
+        ),
+        (
+            "packed",
+            b.packed_objects.to_string(),
+            a.packed_objects.to_string(),
+        ),
+        ("packs", b.packs.to_string(), a.packs.to_string()),
+        (
+            "size",
+            format_size(b.size as i64),
+            format_size(a.size as i64),
+        ),
+    ]
+    .into_iter()
+    .map(|(k, before, after)| vec![k.to_string(), before, after])
     .collect()
 }
 

@@ -99,6 +99,44 @@ pub fn status() -> Result<StoreStatus, StoreError> {
     status_at(&store_path())
 }
 
+/// Before-and-after counts for a `gc` run.
+#[derive(Debug)]
+pub struct GcOutcome {
+    pub before: StoreStatus,
+    pub after: StoreStatus,
+}
+
+/// Run `git gc` on the default store, optionally with `--prune=<expire>`.
+///
+/// `git gc`'s output is passed through to the caller's stdout/stderr so
+/// progress is visible.
+pub fn gc(prune: Option<&str>) -> Result<GcOutcome, StoreError> {
+    gc_at(&store_path(), prune)
+}
+
+/// Run `git gc` on the store at `path`.
+pub fn gc_at(path: &Path, prune: Option<&str>) -> Result<GcOutcome, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let before = status_at(path)?;
+    let mut cmd = git_in(path, ["gc"]);
+    let prune_flag: String;
+    if let Some(expire) = prune {
+        prune_flag = format!("--prune={expire}");
+        cmd.arg(&prune_flag);
+    }
+    let status = cmd.status().map_err(StoreError::Spawn)?;
+    if !status.success() {
+        return Err(StoreError::Git {
+            status,
+            stderr: String::new(),
+        });
+    }
+    let after = status_at(path)?;
+    Ok(GcOutcome { before, after })
+}
+
 /// Reads the status of the store at `path`. Fails with
 /// [`StoreError::NotFound`] when no repository is there.
 pub fn status_at(path: &Path) -> Result<StoreStatus, StoreError> {
