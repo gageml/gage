@@ -1,11 +1,12 @@
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
-use gage_store::{InitOutcome, StoreStatus};
+use gage_store::{InitOutcome, NoteInput, StoreStatus};
 use tabled::{
     Table,
     settings::{Style, object::Columns},
 };
 
+use crate::author::resolve_author;
 use crate::human::format_size;
 use crate::style;
 
@@ -19,12 +20,44 @@ pub enum StoreCommand {
 
     /// Show store status
     Status,
+
+    /// Manage store notes
+    Note {
+        #[command(subcommand)]
+        command: NoteCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum NoteCommand {
+    /// Add a note
+    Add(NoteAddArgs),
+}
+
+#[derive(Args)]
+pub struct NoteAddArgs {
+    /// Note name
+    name: String,
+
+    /// Note value
+    value: String,
+
+    /// Target note in the form `note:<id>` (repeatable)
+    #[arg(short, long)]
+    target: Vec<String>,
+
+    /// Author username (default: $USER)
+    #[arg(short, long)]
+    user: Option<String>,
 }
 
 pub fn run(command: StoreCommand) {
     match command {
         StoreCommand::Init => init(),
         StoreCommand::Status => status(),
+        StoreCommand::Note { command } => match command {
+            NoteCommand::Add(args) => note_add(args),
+        },
     }
 }
 
@@ -79,9 +112,27 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
         ("packs", status.packs.to_string()),
         ("size", format_size(status.size as i64)),
         ("refs", status.refs.to_string()),
+        ("refs/gage/notes", status.note_refs.to_string()),
         ("remotes", remotes),
     ]
     .into_iter()
     .map(|(k, v)| vec![k.to_string(), v])
     .collect()
+}
+
+fn note_add(args: NoteAddArgs) {
+    let author = resolve_author(args.user);
+    let id = match gage_store::note_add(NoteInput {
+        name: &args.name,
+        value: &args.value,
+        author: &author,
+        targets: &args.target,
+    }) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage store note add: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("{id}");
 }

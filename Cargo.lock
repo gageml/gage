@@ -2843,6 +2843,8 @@ name = "gage-store"
 version = "0.2.0-dev"
 dependencies = [
  "gage-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

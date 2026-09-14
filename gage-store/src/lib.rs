@@ -7,10 +7,15 @@
 
 use std::fmt;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 use gage_core::config::gage_home;
+
+mod note;
+
+pub use note::{NoteInput, note_add, note_add_at};
 
 /// Path to the store: `<gage_home>/store.git`.
 pub fn store_path() -> PathBuf {
@@ -75,6 +80,8 @@ pub struct StoreStatus {
     /// Bytes on disk for loose objects and packs together
     pub size: u64,
     pub refs: u64,
+    /// Count of refs under `refs/gage/notes/`.
+    pub note_refs: u64,
     pub remotes: Vec<Remote>,
 }
 
@@ -99,6 +106,12 @@ pub fn status_at(path: &Path) -> Result<StoreStatus, StoreError> {
     let refs = run(git_in(path, ["for-each-ref", "--format=%(refname)"]))?
         .lines()
         .count() as u64;
+    let note_refs = run(git_in(
+        path,
+        ["for-each-ref", "--format=%(refname)", "refs/gage/notes/"],
+    ))?
+    .lines()
+    .count() as u64;
     let remotes = parse_remotes(&run(git_in(path, ["remote", "-v"]))?);
     Ok(StoreStatus {
         path: path.to_path_buf(),
@@ -107,11 +120,12 @@ pub fn status_at(path: &Path) -> Result<StoreStatus, StoreError> {
         packs: counts.packs,
         size: (counts.size + counts.size_pack) * 1024,
         refs,
+        note_refs,
         remotes,
     })
 }
 
-fn exists(path: &Path) -> bool {
+pub(crate) fn exists(path: &Path) -> bool {
     path.join("HEAD").is_file()
 }
 
@@ -163,7 +177,7 @@ fn parse_remotes(output: &str) -> Vec<Remote> {
         .collect()
 }
 
-fn git_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
+pub(crate) fn git_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
     let mut cmd = git();
     cmd.arg("-C").arg(path).args(args);
     cmd
@@ -190,8 +204,30 @@ const REDIRECTING_ENV: [&str; 6] = [
 ];
 
 /// Runs `cmd` and returns its stdout.
-fn run(mut cmd: Command) -> Result<String, StoreError> {
+pub(crate) fn run(mut cmd: Command) -> Result<String, StoreError> {
     let output = cmd.output().map_err(StoreError::Spawn)?;
+    if !output.status.success() {
+        return Err(StoreError::Git {
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Runs `cmd` with `stdin` fed on its standard input, returning stdout.
+pub(crate) fn run_with_stdin(mut cmd: Command, stdin: &[u8]) -> Result<String, StoreError> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(StoreError::Spawn)?;
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin was requested via Stdio::piped")
+        .write_all(stdin)
+        .map_err(StoreError::Spawn)?;
+    let output = child.wait_with_output().map_err(StoreError::Spawn)?;
     if !output.status.success() {
         return Err(StoreError::Git {
             status: output.status,
@@ -211,6 +247,10 @@ pub enum StoreError {
     Git { status: ExitStatus, stderr: String },
     /// `git` output did not have the expected shape
     Parse(String),
+    /// A `--target` value did not match the `note:<id>` form
+    BadTarget(String),
+    /// A `--target` referenced a note ref that does not exist
+    TargetNotFound(String),
 }
 
 impl fmt::Display for StoreError {
@@ -226,6 +266,10 @@ impl fmt::Display for StoreError {
             StoreError::Spawn(e) => write!(f, "failed to run git: {e}"),
             StoreError::Git { status, stderr } => write!(f, "git {status}: {stderr}"),
             StoreError::Parse(what) => write!(f, "unexpected git output: {what}"),
+            StoreError::BadTarget(t) => {
+                write!(f, "invalid target {t:?}: expected `note:<id>`")
+            }
+            StoreError::TargetNotFound(t) => write!(f, "target not found: {t}"),
         }
     }
 }
@@ -234,7 +278,11 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             StoreError::Spawn(e) => Some(e),
-            StoreError::NotFound(_) | StoreError::Git { .. } | StoreError::Parse(_) => None,
+            StoreError::NotFound(_)
+            | StoreError::Git { .. }
+            | StoreError::Parse(_)
+            | StoreError::BadTarget(_)
+            | StoreError::TargetNotFound(_) => None,
         }
     }
 }
@@ -291,6 +339,7 @@ mod tests {
                 packs: 0,
                 size: 0,
                 refs: 0,
+                note_refs: 0,
                 remotes: vec![],
             }
         );
