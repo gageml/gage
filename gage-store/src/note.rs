@@ -3,12 +3,14 @@
 //!
 //! The tree carries `format` (`gage-note 1\n`), `attrs` (compact JSON of
 //! name/value/author, LF terminated), and, when at least one target is
-//! given, `targets` (one `refs/gage/notes/<id>\n` per line). The commit
-//! has no parent. Author and committer are set to
+//! given, `targets` (one `refs/gage/notes/<id>\n` per line). An `add`
+//! commit is parentless; an `edit` commit chains against the previous
+//! ref value. Author and committer are set to
 //! `gage <noreply@gage.localhost>`.
 
 use std::path::Path;
 
+use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
 
@@ -40,8 +42,10 @@ pub struct NoteRecord {
     pub name: String,
     pub value: String,
     pub author: String,
-    /// Commit committer date, milliseconds since the Unix epoch.
+    /// From the `created` blob: milliseconds since the Unix epoch.
     pub created_ms: i64,
+    /// From the `modified` blob: milliseconds since the Unix epoch.
+    pub modified_ms: i64,
 }
 
 /// Everything a `show` view needs about one note.
@@ -55,6 +59,7 @@ pub struct NoteFull {
     /// note has no `targets` file.
     pub targets: Vec<String>,
     pub created_ms: i64,
+    pub modified_ms: i64,
 }
 
 /// Look up one note by full id or unique prefix in the default store.
@@ -89,7 +94,8 @@ pub fn note_get_at(path: &Path, id_or_prefix: &str) -> Result<NoteFull, StoreErr
     };
 
     let ref_path = format!("refs/gage/notes/{id}");
-    let created_ms = read_committer_ms(path, &ref_path)?;
+    let created_ms = read_ms_blob(path, &ref_path, "created")?;
+    let modified_ms = read_ms_blob(path, &ref_path, "modified")?;
     let attrs = read_attrs(path, &ref_path)?;
     let targets = read_targets(path, &ref_path)?;
 
@@ -100,19 +106,20 @@ pub fn note_get_at(path: &Path, id_or_prefix: &str) -> Result<NoteFull, StoreErr
         author: attrs.author,
         targets,
         created_ms,
+        modified_ms,
     })
 }
 
-fn read_committer_ms(path: &Path, ref_path: &str) -> Result<i64, StoreError> {
-    let ts = run(git_in(
+/// Read `<ref_path>:<file>` as a decimal integer of milliseconds since the
+/// Unix epoch.
+fn read_ms_blob(path: &Path, ref_path: &str, file: &str) -> Result<i64, StoreError> {
+    let out = run(git_in(
         path,
-        ["for-each-ref", "--format=%(committerdate:unix)", ref_path],
+        ["cat-file", "-p", &format!("{ref_path}:{file}")],
     ))?;
-    let secs: i64 = ts
-        .trim()
-        .parse()
-        .map_err(|e| StoreError::Parse(format!("committerdate {ts:?}: {e}")))?;
-    Ok(secs * 1000)
+    out.trim()
+        .parse::<i64>()
+        .map_err(|e| StoreError::Parse(format!("{file} {ref_path}: {e}")))
 }
 
 fn read_attrs(path: &Path, ref_path: &str) -> Result<StoredAttrs, StoreError> {
@@ -152,32 +159,24 @@ pub fn note_list_at(path: &Path) -> Result<Vec<NoteRecord>, StoreError> {
         [
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname:strip=3) %(committerdate:unix)",
+            "--format=%(refname:strip=3)",
             "refs/gage/notes/",
         ],
     ))?;
 
     let mut records = Vec::new();
-    for line in listing.lines() {
-        let (id, ts) = line
-            .split_once(' ')
-            .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
-        let created_secs: i64 = ts
-            .parse()
-            .map_err(|e| StoreError::Parse(format!("committerdate {ts}: {e}")))?;
+    for id in listing.lines() {
         let ref_path = format!("refs/gage/notes/{id}");
-        let attrs_json = run(git_in(
-            path,
-            ["cat-file", "-p", &format!("{ref_path}:attrs")],
-        ))?;
-        let attrs: StoredAttrs = serde_json::from_str(attrs_json.trim_end())
-            .map_err(|e| StoreError::Parse(format!("attrs {id}: {e}")))?;
+        let attrs = read_attrs(path, &ref_path)?;
+        let created_ms = read_ms_blob(path, &ref_path, "created")?;
+        let modified_ms = read_ms_blob(path, &ref_path, "modified")?;
         records.push(NoteRecord {
             id: id.to_string(),
             name: attrs.name,
             value: attrs.value,
             author: attrs.author,
-            created_ms: created_secs * 1000,
+            created_ms,
+            modified_ms,
         });
     }
     Ok(records)
@@ -206,12 +205,16 @@ pub fn note_add_at(path: &Path, input: NoteInput) -> Result<String, StoreError> 
     let target_refs = resolve_targets(path, input.targets)?;
 
     let id = new_uuid();
+    let now = now_ms();
     let format_sha = write_blob(path, b"gage-note 1\n")?;
     let attrs_sha = write_blob(path, encode_attrs(&input).as_bytes())?;
+    let stamp_sha = write_blob(path, format!("{now}\n").as_bytes())?;
 
     let mut entries = vec![
         format!("100644 blob {attrs_sha}\tattrs"),
+        format!("100644 blob {stamp_sha}\tcreated"),
         format!("100644 blob {format_sha}\tformat"),
+        format!("100644 blob {stamp_sha}\tmodified"),
     ];
     if !target_refs.is_empty() {
         let content: String = target_refs.iter().map(|r| format!("{r}\n")).collect();
@@ -220,12 +223,128 @@ pub fn note_add_at(path: &Path, input: NoteInput) -> Result<String, StoreError> 
     }
     let tree_sha = mktree(path, &entries)?;
 
-    let commit_sha = commit_tree(path, &tree_sha, input.name)?;
+    let message = format!("note: {}", input.name);
+    let commit_sha = commit_tree(path, &tree_sha, &message, None)?;
 
     let ref_path = format!("refs/gage/notes/{id}");
     run(git_in(path, ["update-ref", &ref_path, &commit_sha, ""]))?;
 
     Ok(id)
+}
+
+/// Edit the value of an existing note. `name`, `author`, and any
+/// existing `targets` are preserved. Returns the resolved id.
+pub fn note_edit(id_or_prefix: &str, value: &str) -> Result<String, StoreError> {
+    note_edit_at(&store_path(), id_or_prefix, value)
+}
+
+/// Edit the value of an existing note in the store at `path`.
+pub fn note_edit_at(path: &Path, id_or_prefix: &str, value: &str) -> Result<String, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+
+    let (id, current_commit) = resolve_ref(path, id_or_prefix)?;
+    let ref_path = format!("refs/gage/notes/{id}");
+    let attrs = read_attrs(path, &ref_path)?;
+    let tree_shas = read_tree_shas(path, &ref_path)?;
+
+    let new_attrs = encode_attrs(&NoteInput {
+        name: &attrs.name,
+        value,
+        author: &attrs.author,
+        targets: &[],
+    });
+    let new_attrs_sha = write_blob(path, new_attrs.as_bytes())?;
+    let now = now_ms();
+    let new_modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
+
+    let mut entries = vec![
+        format!("100644 blob {new_attrs_sha}\tattrs"),
+        format!("100644 blob {}\tcreated", tree_shas.created),
+        format!("100644 blob {}\tformat", tree_shas.format),
+        format!("100644 blob {new_modified_sha}\tmodified"),
+    ];
+    if let Some(targets_sha) = tree_shas.targets {
+        entries.push(format!("100644 blob {targets_sha}\ttargets"));
+    }
+    let tree_sha = mktree(path, &entries)?;
+
+    let message = format!("note edit: {}", attrs.name);
+    let new_commit = commit_tree(path, &tree_sha, &message, Some(&current_commit))?;
+
+    run(git_in(
+        path,
+        ["update-ref", &ref_path, &new_commit, &current_commit],
+    ))?;
+
+    Ok(id)
+}
+
+/// Resolve a full id or unique prefix to `(id, commit_sha)`.
+fn resolve_ref(path: &Path, id_or_prefix: &str) -> Result<(String, String), StoreError> {
+    let pattern = format!("refs/gage/notes/{id_or_prefix}*");
+    let matches = run(git_in(
+        path,
+        [
+            "for-each-ref",
+            "--format=%(refname:strip=3) %(objectname)",
+            &pattern,
+        ],
+    ))?;
+    let lines: Vec<&str> = matches.lines().collect();
+    match lines.as_slice() {
+        [] => Err(StoreError::NoteNotFound(id_or_prefix.to_string())),
+        [only] => {
+            let (id, commit) = only
+                .split_once(' ')
+                .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {only}")))?;
+            Ok((id.to_string(), commit.to_string()))
+        }
+        many => Err(StoreError::AmbiguousNoteId(
+            id_or_prefix.to_string(),
+            many.len(),
+        )),
+    }
+}
+
+/// Blob shas of the reused tree entries under a note's current commit.
+struct TreeShas {
+    format: String,
+    created: String,
+    targets: Option<String>,
+}
+
+fn read_tree_shas(path: &Path, ref_path: &str) -> Result<TreeShas, StoreError> {
+    let listing = run(git_in(path, ["ls-tree", ref_path]))?;
+    let mut format = None;
+    let mut created = None;
+    let mut targets = None;
+    for line in listing.lines() {
+        // Each line: "<mode> <type> <sha>\t<name>".
+        let (meta, name) = line
+            .split_once('\t')
+            .ok_or_else(|| StoreError::Parse(format!("ls-tree line: {line}")))?;
+        let sha = meta
+            .split_whitespace()
+            .nth(2)
+            .ok_or_else(|| StoreError::Parse(format!("ls-tree meta: {meta}")))?;
+        match name {
+            "format" => format = Some(sha.to_string()),
+            "created" => created = Some(sha.to_string()),
+            "targets" => targets = Some(sha.to_string()),
+            _ => {}
+        }
+    }
+    let format =
+        format.ok_or_else(|| StoreError::Parse(format!("missing format blob in {ref_path}")))?;
+    let created =
+        created.ok_or_else(|| StoreError::Parse(format!("missing created blob in {ref_path}")))?;
+    Ok(TreeShas {
+        format,
+        created,
+        targets,
+    })
 }
 
 /// Parse `note:<id>` targets and confirm each referenced ref exists in
@@ -280,9 +399,17 @@ fn mktree(path: &Path, entries: &[String]) -> Result<String, StoreError> {
     Ok(sha.trim().to_string())
 }
 
-fn commit_tree(path: &Path, tree_sha: &str, name: &str) -> Result<String, StoreError> {
-    let message = format!("note: {name}");
-    let mut cmd = git_in(path, ["commit-tree", tree_sha, "-m", &message]);
+fn commit_tree(
+    path: &Path,
+    tree_sha: &str,
+    message: &str,
+    parent: Option<&str>,
+) -> Result<String, StoreError> {
+    let mut cmd = git_in(path, ["commit-tree", tree_sha]);
+    if let Some(p) = parent {
+        cmd.arg("-p").arg(p);
+    }
+    cmd.arg("-m").arg(message);
     cmd.env("GIT_AUTHOR_NAME", IDENTITY_NAME)
         .env("GIT_AUTHOR_EMAIL", IDENTITY_EMAIL)
         .env("GIT_COMMITTER_NAME", IDENTITY_NAME)
@@ -342,7 +469,9 @@ mod tests {
 
         let tree = cat_file(&store, &format!("{ref_path}^{{tree}}"));
         assert!(tree.contains("\tattrs"), "{tree}");
+        assert!(tree.contains("\tcreated"), "{tree}");
         assert!(tree.contains("\tformat"), "{tree}");
+        assert!(tree.contains("\tmodified"), "{tree}");
         assert!(!tree.contains("\ttargets"), "{tree}");
 
         let format_content = cat_file(&store, &format!("{ref_path}:format"));
@@ -457,8 +586,80 @@ mod tests {
         assert!(ids.contains(&second.as_str()));
         for r in &records {
             assert!(r.created_ms > 0);
+            assert!(r.modified_ms > 0);
+            assert_eq!(r.created_ms, r.modified_ms);
             assert_eq!(r.author, "user:test");
         }
+    }
+
+    #[test]
+    fn add_writes_created_and_modified_blobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let before = gage_core::datetime::now_ms();
+        let id = note_add_at(
+            &store,
+            NoteInput {
+                name: "n",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        let after = gage_core::datetime::now_ms();
+
+        let ref_path = format!("refs/gage/notes/{id}");
+        let created = cat_file(&store, &format!("{ref_path}:created"))
+            .trim()
+            .parse::<i64>()
+            .unwrap();
+        let modified = cat_file(&store, &format!("{ref_path}:modified"))
+            .trim()
+            .parse::<i64>()
+            .unwrap();
+        assert_eq!(created, modified);
+        assert!((before..=after).contains(&created));
+    }
+
+    #[test]
+    fn edit_preserves_created_and_bumps_modified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let id = note_add_at(
+            &store,
+            NoteInput {
+                name: "n",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        let ref_path = format!("refs/gage/notes/{id}");
+        let created_before = cat_file(&store, &format!("{ref_path}:created"))
+            .trim()
+            .to_string();
+        let modified_before = cat_file(&store, &format!("{ref_path}:modified"))
+            .trim()
+            .parse::<i64>()
+            .unwrap();
+
+        // Ensure the clock advances.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        note_edit_at(&store, &id, "v2").unwrap();
+
+        let created_after = cat_file(&store, &format!("{ref_path}:created"))
+            .trim()
+            .to_string();
+        let modified_after = cat_file(&store, &format!("{ref_path}:modified"))
+            .trim()
+            .parse::<i64>()
+            .unwrap();
+        assert_eq!(created_before, created_after);
+        assert!(modified_after > modified_before);
     }
 
     #[test]
@@ -466,6 +667,111 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = init_store(tmp.path());
         assert!(note_list_at(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn edit_replaces_value_and_chains_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let id = note_add_at(
+            &store,
+            NoteInput {
+                name: "comment",
+                value: "first",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        let ref_path = format!("refs/gage/notes/{id}");
+        let original_commit = run(git_in(&store, ["rev-parse", &ref_path]))
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let returned = note_edit_at(&store, &id, "second").unwrap();
+        assert_eq!(returned, id);
+
+        let new_commit = run(git_in(&store, ["rev-parse", &ref_path]))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_ne!(new_commit, original_commit);
+
+        let parent = run(git_in(&store, ["rev-parse", &format!("{ref_path}^")]))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(parent, original_commit);
+
+        let attrs_content = cat_file(&store, &format!("{ref_path}:attrs"));
+        assert_eq!(
+            attrs_content,
+            "{\"name\":\"comment\",\"value\":\"second\",\"author\":\"user:test\"}\n"
+        );
+
+        let commit = cat_file(&store, &new_commit);
+        assert!(commit.contains("\nnote edit: comment"), "{commit}");
+    }
+
+    #[test]
+    fn edit_preserves_targets_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let root = note_add_at(
+            &store,
+            NoteInput {
+                name: "root",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        let child = note_add_at(
+            &store,
+            NoteInput {
+                name: "reply",
+                value: "first",
+                author: "user:test",
+                targets: &[format!("note:{root}")],
+            },
+        )
+        .unwrap();
+
+        note_edit_at(&store, &child, "second").unwrap();
+
+        let ref_path = format!("refs/gage/notes/{child}");
+        let targets_content = cat_file(&store, &format!("{ref_path}:targets"));
+        assert_eq!(targets_content, format!("refs/gage/notes/{root}\n"));
+    }
+
+    #[test]
+    fn edit_accepts_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+        let id = note_add_at(
+            &store,
+            NoteInput {
+                name: "n",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        let prefix = &id[..8];
+        assert_eq!(note_edit_at(&store, prefix, "v2").unwrap(), id);
+    }
+
+    #[test]
+    fn edit_errors_on_missing_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+        let err = note_edit_at(&store, "doesnotexist", "v").unwrap_err();
+        assert!(matches!(err, StoreError::NoteNotFound(id) if id == "doesnotexist"));
     }
 
     #[test]

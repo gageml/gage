@@ -42,6 +42,18 @@ pub enum NoteCommand {
 
     /// Add a note
     Add(NoteAddArgs),
+
+    /// Edit a note's value
+    Edit(NoteEditArgs),
+}
+
+#[derive(Args)]
+pub struct NoteEditArgs {
+    /// Note id or unique prefix
+    id: String,
+
+    /// Replacement value
+    value: String,
 }
 
 #[derive(Args)]
@@ -75,6 +87,7 @@ pub fn run(command: StoreCommand) {
             NoteCommand::List => note_list(),
             NoteCommand::Show(args) => note_show(args),
             NoteCommand::Add(args) => note_add(args),
+            NoteCommand::Edit(args) => note_edit(args),
         },
     }
 }
@@ -151,7 +164,7 @@ fn note_list() {
         return;
     }
 
-    let header: Vec<String> = ["Id", "Name", "Value", "Author", "Created"]
+    let header: Vec<String> = ["Id", "Name", "Value", "Author", "Modified"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -185,7 +198,7 @@ fn note_row(r: &NoteRecord) -> Vec<String> {
         r.name.clone(),
         format_value_cell(&r.value),
         r.author.clone(),
-        format_elapsed_ms(r.created_ms),
+        format_elapsed_ms(r.modified_ms),
     ]
 }
 
@@ -228,6 +241,10 @@ fn note_show(args: NoteShowArgs) {
             "created",
             gage_core::datetime::ms_to_iso8601(note.created_ms),
         ),
+        (
+            "modified",
+            gage_core::datetime::ms_to_iso8601(note.modified_ms),
+        ),
     ];
 
     let label_width = attrs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
@@ -261,6 +278,17 @@ fn note_show(args: NoteShowArgs) {
         )
         .to_string();
     println!("{table}");
+}
+
+fn note_edit(args: NoteEditArgs) {
+    let id = match gage_store::note_edit(&args.id, &args.value) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage store note edit: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("{id}");
 }
 
 fn note_add(args: NoteAddArgs) {
