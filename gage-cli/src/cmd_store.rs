@@ -5,7 +5,7 @@ use tabled::{
     Table,
     settings::{
         Color, Style, Width,
-        object::{Columns, Object, Rows},
+        object::{Cell, Columns, Object, Rows},
         peaker::PriorityMax,
     },
 };
@@ -37,8 +37,17 @@ pub enum NoteCommand {
     /// List notes
     List,
 
+    /// Show a note
+    Show(NoteShowArgs),
+
     /// Add a note
     Add(NoteAddArgs),
+}
+
+#[derive(Args)]
+pub struct NoteShowArgs {
+    /// Note id or unique prefix
+    id: String,
 }
 
 #[derive(Args)]
@@ -64,6 +73,7 @@ pub fn run(command: StoreCommand) {
         StoreCommand::Status => status(),
         StoreCommand::Note { command } => match command {
             NoteCommand::List => note_list(),
+            NoteCommand::Show(args) => note_show(args),
             NoteCommand::Add(args) => note_add(args),
         },
     }
@@ -197,6 +207,60 @@ fn format_value_cell(value: &str) -> String {
     } else {
         flattened
     }
+}
+
+fn note_show(args: NoteShowArgs) {
+    let note = match gage_store::note_get(&args.id) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("gage store note show: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let attrs: Vec<(&str, String)> = vec![
+        ("id", note.id),
+        ("name", note.name),
+        ("value", note.value),
+        ("author", note.author),
+        ("targets", note.targets.join("\n")),
+        (
+            "created",
+            gage_core::datetime::ms_to_iso8601(note.created_ms),
+        ),
+    ];
+
+    let label_width = attrs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let (_, term_width) = console::Term::stdout().size();
+    // Borders + padding: "│ " + " │ " + " │" = 8 chars
+    let value_width = (term_width as usize)
+        .saturating_sub(label_width + 8)
+        .max(20);
+
+    let id_row_idx = attrs.iter().position(|(k, _)| *k == "id").unwrap();
+    let value_row_idx = attrs.iter().position(|(k, _)| *k == "value").unwrap();
+    let rows: Vec<Vec<String>> = attrs
+        .into_iter()
+        .map(|(k, v)| {
+            let value = if k == "targets" {
+                v
+            } else {
+                textwrap::fill(&v, value_width)
+            };
+            vec![k.to_string(), value]
+        })
+        .collect();
+
+    let table = Table::from_iter(rows)
+        .with(Style::rounded())
+        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Cell::new(id_row_idx, 1), style::tty(Color::FG_YELLOW))
+        .modify(
+            Cell::new(value_row_idx, 1),
+            style::tty(Color::FG_BRIGHT_CYAN),
+        )
+        .to_string();
+    println!("{table}");
 }
 
 fn note_add(args: NoteAddArgs) {

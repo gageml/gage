@@ -44,6 +44,98 @@ pub struct NoteRecord {
     pub created_ms: i64,
 }
 
+/// Everything a `show` view needs about one note.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NoteFull {
+    pub id: String,
+    pub name: String,
+    pub value: String,
+    pub author: String,
+    /// Ref paths from the `targets` file, in file order. Empty when the
+    /// note has no `targets` file.
+    pub targets: Vec<String>,
+    pub created_ms: i64,
+}
+
+/// Look up one note by full id or unique prefix in the default store.
+pub fn note_get(id_or_prefix: &str) -> Result<NoteFull, StoreError> {
+    note_get_at(&store_path(), id_or_prefix)
+}
+
+/// Look up one note by full id or unique prefix in the store at `path`.
+///
+/// Returns [`StoreError::NoteNotFound`] when no ref matches, and
+/// [`StoreError::AmbiguousNoteId`] when more than one does.
+pub fn note_get_at(path: &Path, id_or_prefix: &str) -> Result<NoteFull, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+
+    let pattern = format!("refs/gage/notes/{id_or_prefix}*");
+    let matches = run(git_in(
+        path,
+        ["for-each-ref", "--format=%(refname:strip=3)", &pattern],
+    ))?;
+    let ids: Vec<&str> = matches.lines().collect();
+    let id = match ids.as_slice() {
+        [] => return Err(StoreError::NoteNotFound(id_or_prefix.to_string())),
+        [only] => (*only).to_string(),
+        many => {
+            return Err(StoreError::AmbiguousNoteId(
+                id_or_prefix.to_string(),
+                many.len(),
+            ));
+        }
+    };
+
+    let ref_path = format!("refs/gage/notes/{id}");
+    let created_ms = read_committer_ms(path, &ref_path)?;
+    let attrs = read_attrs(path, &ref_path)?;
+    let targets = read_targets(path, &ref_path)?;
+
+    Ok(NoteFull {
+        id,
+        name: attrs.name,
+        value: attrs.value,
+        author: attrs.author,
+        targets,
+        created_ms,
+    })
+}
+
+fn read_committer_ms(path: &Path, ref_path: &str) -> Result<i64, StoreError> {
+    let ts = run(git_in(
+        path,
+        ["for-each-ref", "--format=%(committerdate:unix)", ref_path],
+    ))?;
+    let secs: i64 = ts
+        .trim()
+        .parse()
+        .map_err(|e| StoreError::Parse(format!("committerdate {ts:?}: {e}")))?;
+    Ok(secs * 1000)
+}
+
+fn read_attrs(path: &Path, ref_path: &str) -> Result<StoredAttrs, StoreError> {
+    let json = run(git_in(
+        path,
+        ["cat-file", "-p", &format!("{ref_path}:attrs")],
+    ))?;
+    serde_json::from_str(json.trim_end())
+        .map_err(|e| StoreError::Parse(format!("attrs {ref_path}: {e}")))
+}
+
+fn read_targets(path: &Path, ref_path: &str) -> Result<Vec<String>, StoreError> {
+    let entries = run(git_in(path, ["ls-tree", "--name-only", ref_path]))?;
+    if !entries.lines().any(|l| l == "targets") {
+        return Ok(Vec::new());
+    }
+    let content = run(git_in(
+        path,
+        ["cat-file", "-p", &format!("{ref_path}:targets")],
+    ))?;
+    Ok(content.lines().map(|s| s.to_string()).collect())
+}
+
 /// List every note in the default store, newest first by committer date.
 pub fn note_list() -> Result<Vec<NoteRecord>, StoreError> {
     note_list_at(&store_path())

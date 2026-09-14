@@ -15,7 +15,10 @@ use gage_core::config::gage_home;
 
 mod note;
 
-pub use note::{NoteInput, NoteRecord, note_add, note_add_at, note_list, note_list_at};
+pub use note::{
+    NoteFull, NoteInput, NoteRecord, note_add, note_add_at, note_get, note_get_at, note_list,
+    note_list_at,
+};
 
 /// Path to the store: `<gage_home>/store.git`.
 pub fn store_path() -> PathBuf {
@@ -251,6 +254,10 @@ pub enum StoreError {
     BadTarget(String),
     /// A `--target` referenced a note ref that does not exist
     TargetNotFound(String),
+    /// No note ref matched the given id or prefix
+    NoteNotFound(String),
+    /// More than one note ref matched the given prefix
+    AmbiguousNoteId(String, usize),
 }
 
 impl fmt::Display for StoreError {
@@ -270,6 +277,10 @@ impl fmt::Display for StoreError {
                 write!(f, "invalid target {t:?}: expected `note:<id>`")
             }
             StoreError::TargetNotFound(t) => write!(f, "target not found: {t}"),
+            StoreError::NoteNotFound(id) => write!(f, "note not found: {id}"),
+            StoreError::AmbiguousNoteId(id, n) => {
+                write!(f, "note id {id} is ambiguous ({n} matches)")
+            }
         }
     }
 }
@@ -282,7 +293,9 @@ impl std::error::Error for StoreError {
             | StoreError::Git { .. }
             | StoreError::Parse(_)
             | StoreError::BadTarget(_)
-            | StoreError::TargetNotFound(_) => None,
+            | StoreError::TargetNotFound(_)
+            | StoreError::NoteNotFound(_)
+            | StoreError::AmbiguousNoteId(_, _) => None,
         }
     }
 }
