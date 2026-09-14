@@ -36,6 +36,7 @@ mod cmd_resolve;
 mod cmd_scan;
 mod cmd_session;
 mod cmd_status;
+mod cmd_store;
 mod cmd_sync;
 mod cmd_test;
 mod dialog;
@@ -130,6 +131,12 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: cmd_config::ConfigCommand,
+    },
+
+    /// Manage the Gage store
+    Store {
+        #[command(subcommand)]
+        command: cmd_store::StoreCommand,
     },
 
     /// Copy Gage data to remotes
@@ -230,6 +237,7 @@ async fn main() {
         match cli.command {
             Command::Agent(args) => cmd_agent::run(args).await,
             Command::Config { command } => cmd_config::run(command),
+            Command::Store { command } => cmd_store::run(command),
             Command::Init(args) => cmd_init::run(args),
             Command::Status(args) => cmd_status::run(args),
             Command::Note { command } => match command {

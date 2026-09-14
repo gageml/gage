@@ -1,0 +1,1 @@
+//! Git backed Gage store.

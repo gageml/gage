@@ -15,13 +15,14 @@ members = [
     "gage-registry",
     "gage-runtime",
     "gage-scan",
+    "gage-store",
     "gage-sync",
     "gage-tui",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0-dev"
 edition = "2024"
 
 [workspace.dependencies]
