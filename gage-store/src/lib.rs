@@ -36,7 +36,7 @@ pub fn init() -> Result<InitOutcome, StoreError> {
 /// fixed so `HEAD` does not depend on `init.defaultBranch`.
 pub fn init_at(path: &Path) -> Result<InitOutcome, StoreError> {
     let existing = exists(path);
-    let mut cmd = Command::new("git");
+    let mut cmd = git();
     cmd.args([
         "init",
         "--bare",
@@ -46,12 +46,23 @@ pub fn init_at(path: &Path) -> Result<InitOutcome, StoreError> {
     ])
     .arg(path);
     run(cmd)?;
+    for (key, value) in STORE_CONFIG {
+        run(git_in(path, ["config", key, value]))?;
+    }
     Ok(if existing {
         InitOutcome::Reinitialized
     } else {
         InitOutcome::Created
     })
 }
+
+/// Settings every store carries. Refs only advance under push, and every
+/// object received over the wire is verified. See store-init.md.
+const STORE_CONFIG: [(&str, &str); 3] = [
+    ("receive.denyDeletes", "true"),
+    ("receive.denyNonFastForwards", "true"),
+    ("transfer.fsckObjects", "true"),
+];
 
 /// What Git reports about the store: object and pack counts, disk size,
 /// ref count, and configured remotes.
@@ -153,10 +164,30 @@ fn parse_remotes(output: &str) -> Vec<Remote> {
 }
 
 fn git_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = git();
     cmd.arg("-C").arg(path).args(args);
     cmd
 }
+
+/// A `git` command with the repository-locating variables removed, so an
+/// exported `GIT_DIR` or similar cannot redirect the operation away from
+/// the store. See store-init.md.
+fn git() -> Command {
+    let mut cmd = Command::new("git");
+    for var in REDIRECTING_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+const REDIRECTING_ENV: [&str; 6] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+];
 
 /// Runs `cmd` and returns its stdout.
 fn run(mut cmd: Command) -> Result<String, StoreError> {
@@ -224,6 +255,9 @@ mod tests {
         );
         let config = std::fs::read_to_string(store.join("config")).unwrap();
         assert!(config.contains("bare = true"), "{config}");
+        assert!(config.contains("denyDeletes = true"), "{config}");
+        assert!(config.contains("denyNonFastForwards = true"), "{config}");
+        assert!(config.contains("fsckObjects = true"), "{config}");
         assert!(!store.join("hooks").exists());
 
         assert_eq!(init_at(&store).unwrap(), InitOutcome::Reinitialized);
