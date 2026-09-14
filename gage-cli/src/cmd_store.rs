@@ -1,6 +1,8 @@
 use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
-use gage_store::{EntryKind, InitOutcome, NoteInput, NoteRecord, StoreStatus, TreeEntry};
+use gage_store::{
+    DatasetRecord, EntryKind, InitOutcome, NoteInput, NoteRecord, StoreStatus, TreeEntry,
+};
 use tabled::{
     Table,
     settings::{
@@ -51,6 +53,42 @@ pub enum StoreCommand {
         #[command(subcommand)]
         command: NoteCommand,
     },
+
+    /// Manage store datasets
+    Dataset {
+        #[command(subcommand)]
+        command: DatasetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DatasetCommand {
+    /// List datasets
+    List,
+
+    /// Add an empty dataset
+    Add,
+
+    /// Manage dataset sessions
+    Session {
+        #[command(subcommand)]
+        command: DatasetSessionCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DatasetSessionCommand {
+    /// Add a session to a dataset
+    Add(DatasetSessionAddArgs),
+}
+
+#[derive(Args)]
+pub struct DatasetSessionAddArgs {
+    /// Dataset id or unique prefix
+    dataset: String,
+
+    /// Session source spec, e.g. `claude:<session_id>`
+    spec: String,
 }
 
 #[derive(Args)]
@@ -145,6 +183,13 @@ pub fn run(command: StoreCommand) {
             NoteCommand::Add(args) => note_add(args),
             NoteCommand::Edit(args) => note_edit(args),
             NoteCommand::Delete(args) => note_delete(args),
+        },
+        StoreCommand::Dataset { command } => match command {
+            DatasetCommand::List => dataset_list(),
+            DatasetCommand::Add => dataset_add(),
+            DatasetCommand::Session { command } => match command {
+                DatasetSessionCommand::Add(args) => dataset_session_add(args),
+            },
         },
     }
 }
@@ -257,6 +302,61 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .into_iter()
     .map(|(k, before, after)| vec![k.to_string(), before, after])
     .collect()
+}
+
+fn dataset_add() {
+    let id = match gage_store::dataset_add() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage store dataset add: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("{id}");
+}
+
+fn dataset_list() {
+    let records = match gage_store::dataset_list() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("gage store dataset list: {e}");
+            std::process::exit(1);
+        }
+    };
+    if records.is_empty() {
+        println!("No datasets found");
+        return;
+    }
+
+    let header: Vec<String> = ["Id", "Created"].iter().map(|s| s.to_string()).collect();
+    let rows: Vec<Vec<String>> = records.iter().map(dataset_row).collect();
+
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::one(0).not(Rows::first()),
+            style::tty(Color::FG_YELLOW),
+        )
+        .modify(Columns::one(1).not(Rows::first()), style::dim())
+        .to_string();
+    println!("{table}");
+}
+
+fn dataset_row(r: &DatasetRecord) -> Vec<String> {
+    vec![r.id.clone(), format_elapsed_ms(r.created_ms)]
+}
+
+fn dataset_session_add(args: DatasetSessionAddArgs) {
+    let dataset_id = match gage_store::dataset_resolve_id(&args.dataset) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage store dataset session add: {e}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("TODO: dataset session add {dataset_id} {}", args.spec);
+    std::process::exit(1);
 }
 
 fn ls(args: LsArgs) {

@@ -13,8 +13,14 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use gage_core::config::gage_home;
 
+mod dataset;
 mod note;
+mod writer;
 
+pub use dataset::{
+    DatasetRecord, dataset_add, dataset_add_at, dataset_list, dataset_list_at, dataset_resolve_id,
+    dataset_resolve_id_at,
+};
 pub use note::{
     NoteFull, NoteInput, NoteRecord, note_add, note_add_at, note_delete, note_delete_at, note_edit,
     note_edit_at, note_get, note_get_at, note_list, note_list_at,
@@ -396,6 +402,10 @@ pub enum StoreError {
     AmbiguousNoteId(String, usize),
     /// Operation refused because the note's current commit is a tombstone
     NoteDeleted(String),
+    /// No dataset ref matched the given id or prefix
+    DatasetNotFound(String),
+    /// More than one dataset ref matched the given prefix
+    AmbiguousDatasetId(String, usize),
 }
 
 impl fmt::Display for StoreError {
@@ -420,6 +430,10 @@ impl fmt::Display for StoreError {
                 write!(f, "note id {id} is ambiguous ({n} matches)")
             }
             StoreError::NoteDeleted(id) => write!(f, "note is deleted: {id}"),
+            StoreError::DatasetNotFound(id) => write!(f, "dataset not found: {id}"),
+            StoreError::AmbiguousDatasetId(id, n) => {
+                write!(f, "dataset id {id} is ambiguous ({n} matches)")
+            }
         }
     }
 }
@@ -435,7 +449,9 @@ impl std::error::Error for StoreError {
             | StoreError::TargetNotFound(_)
             | StoreError::NoteNotFound(_)
             | StoreError::AmbiguousNoteId(_, _)
-            | StoreError::NoteDeleted(_) => None,
+            | StoreError::NoteDeleted(_)
+            | StoreError::DatasetNotFound(_)
+            | StoreError::AmbiguousDatasetId(_, _) => None,
         }
     }
 }
