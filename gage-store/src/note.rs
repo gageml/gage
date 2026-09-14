@@ -94,6 +94,9 @@ pub fn note_get_at(path: &Path, id_or_prefix: &str) -> Result<NoteFull, StoreErr
     };
 
     let ref_path = format!("refs/gage/notes/{id}");
+    if is_deleted(path, &ref_path)? {
+        return Err(StoreError::NoteDeleted(id));
+    }
     let created_ms = read_ms_blob(path, &ref_path, "created")?;
     let modified_ms = read_ms_blob(path, &ref_path, "modified")?;
     let attrs = read_attrs(path, &ref_path)?;
@@ -167,6 +170,9 @@ pub fn note_list_at(path: &Path) -> Result<Vec<NoteRecord>, StoreError> {
     let mut records = Vec::new();
     for id in listing.lines() {
         let ref_path = format!("refs/gage/notes/{id}");
+        if is_deleted(path, &ref_path)? {
+            continue;
+        }
         let attrs = read_attrs(path, &ref_path)?;
         let created_ms = read_ms_blob(path, &ref_path, "created")?;
         let modified_ms = read_ms_blob(path, &ref_path, "modified")?;
@@ -180,6 +186,18 @@ pub fn note_list_at(path: &Path) -> Result<Vec<NoteRecord>, StoreError> {
         });
     }
     Ok(records)
+}
+
+/// True when the note's current commit tree contains a `deleted` marker.
+fn is_deleted(path: &Path, ref_path: &str) -> Result<bool, StoreError> {
+    match run(git_in(
+        path,
+        ["cat-file", "-e", &format!("{ref_path}:deleted")],
+    )) {
+        Ok(_) => Ok(true),
+        Err(StoreError::Git { .. }) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// The on-disk shape of `attrs`. `value` is treated as a string for now;
@@ -246,8 +264,11 @@ pub fn note_edit_at(path: &Path, id_or_prefix: &str, value: &str) -> Result<Stri
 
     let (id, current_commit) = resolve_ref(path, id_or_prefix)?;
     let ref_path = format!("refs/gage/notes/{id}");
-    let attrs = read_attrs(path, &ref_path)?;
     let tree_shas = read_tree_shas(path, &ref_path)?;
+    if tree_shas.deleted {
+        return Err(StoreError::NoteDeleted(id));
+    }
+    let attrs = read_attrs(path, &ref_path)?;
 
     let new_attrs = encode_attrs(&NoteInput {
         name: &attrs.name,
@@ -271,6 +292,51 @@ pub fn note_edit_at(path: &Path, id_or_prefix: &str, value: &str) -> Result<Stri
     let tree_sha = mktree(path, &entries)?;
 
     let message = format!("note edit: {}", attrs.name);
+    let new_commit = commit_tree(path, &tree_sha, &message, Some(&current_commit))?;
+
+    run(git_in(
+        path,
+        ["update-ref", &ref_path, &new_commit, &current_commit],
+    ))?;
+
+    Ok(id)
+}
+
+/// Delete a note by writing a tombstone commit. `attrs` and `targets`
+/// are dropped from the tree; `created` and `format` are preserved;
+/// `modified` and `deleted` are set to the current time. Returns the
+/// resolved id.
+pub fn note_delete(id_or_prefix: &str) -> Result<String, StoreError> {
+    note_delete_at(&store_path(), id_or_prefix)
+}
+
+/// Delete a note in the store at `path`.
+pub fn note_delete_at(path: &Path, id_or_prefix: &str) -> Result<String, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+
+    let (id, current_commit) = resolve_ref(path, id_or_prefix)?;
+    let ref_path = format!("refs/gage/notes/{id}");
+    let tree_shas = read_tree_shas(path, &ref_path)?;
+    if tree_shas.deleted {
+        return Err(StoreError::NoteDeleted(id));
+    }
+    // Read the pre-delete name so the commit message names the note.
+    let attrs = read_attrs(path, &ref_path)?;
+
+    let now = now_ms();
+    let stamp_sha = write_blob(path, format!("{now}\n").as_bytes())?;
+
+    let entries = vec![
+        format!("100644 blob {}\tcreated", tree_shas.created),
+        format!("100644 blob {stamp_sha}\tdeleted"),
+        format!("100644 blob {}\tformat", tree_shas.format),
+        format!("100644 blob {stamp_sha}\tmodified"),
+    ];
+    let tree_sha = mktree(path, &entries)?;
+
+    let message = format!("note delete: {}", attrs.name);
     let new_commit = commit_tree(path, &tree_sha, &message, Some(&current_commit))?;
 
     run(git_in(
@@ -308,11 +374,13 @@ fn resolve_ref(path: &Path, id_or_prefix: &str) -> Result<(String, String), Stor
     }
 }
 
-/// Blob shas of the reused tree entries under a note's current commit.
+/// Blob shas of the reused tree entries under a note's current commit,
+/// plus whether the commit is a tombstone.
 struct TreeShas {
     format: String,
     created: String,
     targets: Option<String>,
+    deleted: bool,
 }
 
 fn read_tree_shas(path: &Path, ref_path: &str) -> Result<TreeShas, StoreError> {
@@ -320,6 +388,7 @@ fn read_tree_shas(path: &Path, ref_path: &str) -> Result<TreeShas, StoreError> {
     let mut format = None;
     let mut created = None;
     let mut targets = None;
+    let mut deleted = false;
     for line in listing.lines() {
         // Each line: "<mode> <type> <sha>\t<name>".
         let (meta, name) = line
@@ -333,6 +402,7 @@ fn read_tree_shas(path: &Path, ref_path: &str) -> Result<TreeShas, StoreError> {
             "format" => format = Some(sha.to_string()),
             "created" => created = Some(sha.to_string()),
             "targets" => targets = Some(sha.to_string()),
+            "deleted" => deleted = true,
             _ => {}
         }
     }
@@ -344,6 +414,7 @@ fn read_tree_shas(path: &Path, ref_path: &str) -> Result<TreeShas, StoreError> {
         format,
         created,
         targets,
+        deleted,
     })
 }
 
@@ -772,6 +843,131 @@ mod tests {
         let store = init_store(tmp.path());
         let err = note_edit_at(&store, "doesnotexist", "v").unwrap_err();
         assert!(matches!(err, StoreError::NoteNotFound(id) if id == "doesnotexist"));
+    }
+
+    #[test]
+    fn delete_writes_tombstone_and_chains_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let id = note_add_at(
+            &store,
+            NoteInput {
+                name: "n",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        let ref_path = format!("refs/gage/notes/{id}");
+        let created_before = cat_file(&store, &format!("{ref_path}:created"))
+            .trim()
+            .to_string();
+        let original_commit = run(git_in(&store, ["rev-parse", &ref_path]))
+            .unwrap()
+            .trim()
+            .to_string();
+
+        assert_eq!(note_delete_at(&store, &id).unwrap(), id);
+
+        let new_commit = run(git_in(&store, ["rev-parse", &ref_path]))
+            .unwrap()
+            .trim()
+            .to_string();
+        let parent = run(git_in(&store, ["rev-parse", &format!("{ref_path}^")]))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(parent, original_commit);
+
+        let listing = run(git_in(&store, ["ls-tree", "--name-only", &ref_path])).unwrap();
+        let names: Vec<&str> = listing.lines().collect();
+        assert!(names.contains(&"created"));
+        assert!(names.contains(&"deleted"));
+        assert!(names.contains(&"format"));
+        assert!(names.contains(&"modified"));
+        assert!(!names.contains(&"attrs"));
+        assert!(!names.contains(&"targets"));
+
+        let created_after = cat_file(&store, &format!("{ref_path}:created"))
+            .trim()
+            .to_string();
+        assert_eq!(created_after, created_before);
+
+        let deleted = cat_file(&store, &format!("{ref_path}:deleted"))
+            .trim()
+            .to_string();
+        let modified = cat_file(&store, &format!("{ref_path}:modified"))
+            .trim()
+            .to_string();
+        assert_eq!(deleted, modified);
+
+        let commit = cat_file(&store, &new_commit);
+        assert!(commit.contains("\nnote delete: n"), "{commit}");
+    }
+
+    #[test]
+    fn delete_hides_from_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let keep = note_add_at(
+            &store,
+            NoteInput {
+                name: "keep",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        let gone = note_add_at(
+            &store,
+            NoteInput {
+                name: "gone",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        note_delete_at(&store, &gone).unwrap();
+
+        let records = note_list_at(&store).unwrap();
+        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec![keep.as_str()]);
+    }
+
+    #[test]
+    fn get_and_edit_refuse_deleted_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = init_store(tmp.path());
+
+        let id = note_add_at(
+            &store,
+            NoteInput {
+                name: "n",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            },
+        )
+        .unwrap();
+        note_delete_at(&store, &id).unwrap();
+
+        assert!(matches!(
+            note_get_at(&store, &id).unwrap_err(),
+            StoreError::NoteDeleted(x) if x == id
+        ));
+        assert!(matches!(
+            note_edit_at(&store, &id, "v2").unwrap_err(),
+            StoreError::NoteDeleted(x) if x == id
+        ));
+        assert!(matches!(
+            note_delete_at(&store, &id).unwrap_err(),
+            StoreError::NoteDeleted(x) if x == id
+        ));
     }
 
     #[test]

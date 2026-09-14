@@ -45,6 +45,9 @@ pub enum NoteCommand {
 
     /// Edit a note's value
     Edit(NoteEditArgs),
+
+    /// Delete a note
+    Delete(NoteDeleteArgs),
 }
 
 #[derive(Args)]
@@ -54,6 +57,12 @@ pub struct NoteEditArgs {
 
     /// Replacement value
     value: String,
+}
+
+#[derive(Args)]
+pub struct NoteDeleteArgs {
+    /// Note id or unique prefix
+    id: String,
 }
 
 #[derive(Args)]
@@ -88,6 +97,7 @@ pub fn run(command: StoreCommand) {
             NoteCommand::Show(args) => note_show(args),
             NoteCommand::Add(args) => note_add(args),
             NoteCommand::Edit(args) => note_edit(args),
+            NoteCommand::Delete(args) => note_delete(args),
         },
     }
 }
@@ -278,6 +288,17 @@ fn note_show(args: NoteShowArgs) {
         )
         .to_string();
     println!("{table}");
+}
+
+fn note_delete(args: NoteDeleteArgs) {
+    let id = match gage_store::note_delete(&args.id) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage store note delete: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("{id}");
 }
 
 fn note_edit(args: NoteEditArgs) {

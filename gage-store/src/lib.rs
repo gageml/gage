@@ -16,8 +16,8 @@ use gage_core::config::gage_home;
 mod note;
 
 pub use note::{
-    NoteFull, NoteInput, NoteRecord, note_add, note_add_at, note_edit, note_edit_at, note_get,
-    note_get_at, note_list, note_list_at,
+    NoteFull, NoteInput, NoteRecord, note_add, note_add_at, note_delete, note_delete_at, note_edit,
+    note_edit_at, note_get, note_get_at, note_list, note_list_at,
 };
 
 /// Path to the store: `<gage_home>/store.git`.
@@ -258,6 +258,8 @@ pub enum StoreError {
     NoteNotFound(String),
     /// More than one note ref matched the given prefix
     AmbiguousNoteId(String, usize),
+    /// Operation refused because the note's current commit is a tombstone
+    NoteDeleted(String),
 }
 
 impl fmt::Display for StoreError {
@@ -281,6 +283,7 @@ impl fmt::Display for StoreError {
             StoreError::AmbiguousNoteId(id, n) => {
                 write!(f, "note id {id} is ambiguous ({n} matches)")
             }
+            StoreError::NoteDeleted(id) => write!(f, "note is deleted: {id}"),
         }
     }
 }
@@ -295,7 +298,8 @@ impl std::error::Error for StoreError {
             | StoreError::BadTarget(_)
             | StoreError::TargetNotFound(_)
             | StoreError::NoteNotFound(_)
-            | StoreError::AmbiguousNoteId(_, _) => None,
+            | StoreError::AmbiguousNoteId(_, _)
+            | StoreError::NoteDeleted(_) => None,
         }
     }
 }
