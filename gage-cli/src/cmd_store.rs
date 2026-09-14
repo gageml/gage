@@ -424,7 +424,7 @@ fn note_list() {
         return;
     }
 
-    let header: Vec<String> = ["Id", "Name", "Value", "Author", "Modified"]
+    let header: Vec<String> = ["Id", "Name", "Value", "Author", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -458,7 +458,7 @@ fn note_row(r: &NoteRecord) -> Vec<String> {
         r.name.clone(),
         format_value_cell(&r.value),
         r.author.clone(),
-        format_elapsed_ms(r.modified_ms),
+        format_elapsed_ms(r.created_ms),
     ]
 }
 
