@@ -9,7 +9,7 @@ use std::path::Path;
 
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
-use gage_session::SessionReader;
+use gage_session::SourceSession;
 
 use crate::writer::{commit_tree, mktree, write_blob, write_blob_stream};
 use crate::{StoreError, exists, git_in, run, store_path};
@@ -43,6 +43,105 @@ pub fn dataset_add_at(path: &Path) -> Result<String, StoreError> {
     run(git_in(path, ["update-ref", &ref_path, &commit_sha, ""]))?;
 
     Ok(id)
+}
+
+/// Summary of one session in a dataset, for list views.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetSessionSummary {
+    /// The 1-based counter under `sessions/<n>/`.
+    pub session_num: u32,
+    /// Contents of the `session_id` file.
+    pub session_id: String,
+    /// Contents of the `session_type` file, e.g. `"claude 1"`.
+    pub session_type: String,
+    /// Sum of blob sizes under `sessions/<n>/content/**`.
+    pub size: u64,
+}
+
+/// List sessions in the given dataset, ordered by ascending
+/// `session_num`.
+pub fn dataset_sessions_list(dataset_id: &str) -> Result<Vec<DatasetSessionSummary>, StoreError> {
+    dataset_sessions_list_at(&store_path(), dataset_id)
+}
+
+pub fn dataset_sessions_list_at(
+    path: &Path,
+    dataset_id: &str,
+) -> Result<Vec<DatasetSessionSummary>, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let ref_path = format!("refs/gage/datasets/{dataset_id}");
+    let commit = run(git_in(path, ["rev-parse", &ref_path]))?
+        .trim()
+        .to_string();
+    let sessions = read_sessions_index(path, &commit)?;
+    let mut out = Vec::with_capacity(sessions.len());
+    for n in sessions.keys() {
+        let session_id = run(git_in(
+            path,
+            [
+                "cat-file",
+                "-p",
+                &format!("{commit}:sessions/{n}/session_id"),
+            ],
+        ))?
+        .trim()
+        .to_string();
+        let session_type = run(git_in(
+            path,
+            [
+                "cat-file",
+                "-p",
+                &format!("{commit}:sessions/{n}/session_type"),
+            ],
+        ))?
+        .trim()
+        .to_string();
+        let size = content_bytes(path, &commit, *n)?;
+        out.push(DatasetSessionSummary {
+            session_num: *n,
+            session_id,
+            session_type,
+            size,
+        });
+    }
+    Ok(out)
+}
+
+/// Sum of blob sizes under `sessions/<n>/content/`. Zero when the
+/// content subtree is absent.
+fn content_bytes(path: &Path, commit: &str, session_num: u32) -> Result<u64, StoreError> {
+    let listing = match run(git_in(
+        path,
+        [
+            "ls-tree",
+            "-r",
+            "-l",
+            &format!("{commit}:sessions/{session_num}/content"),
+        ],
+    )) {
+        Ok(s) => s,
+        Err(StoreError::Git { .. }) => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut total = 0u64;
+    for line in listing.lines() {
+        let (meta, _) = line
+            .split_once('\t')
+            .ok_or_else(|| StoreError::Parse(format!("ls-tree line: {line}")))?;
+        let parts: Vec<&str> = meta.split_whitespace().collect();
+        let [_, kind, _, size_str]: [&str; 4] = parts.try_into().map_err(|got: Vec<&str>| {
+            StoreError::Parse(format!("ls-tree meta {meta:?}: got {}", got.len()))
+        })?;
+        if kind != "blob" {
+            continue;
+        }
+        total += size_str
+            .parse::<u64>()
+            .map_err(|e| StoreError::Parse(format!("ls-tree size {size_str:?}: {e}")))?;
+    }
+    Ok(total)
 }
 
 /// Resolve a full id or unique prefix to the dataset's full id.
@@ -93,7 +192,7 @@ pub enum SessionOutcome {
 pub struct SessionSpec<'a> {
     pub driver_name: &'a str,
     pub driver_version: &'a str,
-    pub reader: &'a mut dyn SessionReader,
+    pub reader: &'a mut dyn SourceSession,
 }
 
 /// Add or update one or more sessions in the given dataset in a single
@@ -341,7 +440,7 @@ fn build_session_tree(
     path: &Path,
     driver_name: &str,
     driver_version: &str,
-    reader: &mut dyn SessionReader,
+    reader: &mut dyn SourceSession,
 ) -> Result<String, StoreError> {
     let session_id_sha = write_blob(path, format!("{}\n", reader.session_id()).as_bytes())?;
     let driver_sha = write_blob(path, format!("{driver_name} {driver_version}\n").as_bytes())?;

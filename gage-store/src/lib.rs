@@ -18,9 +18,10 @@ mod note;
 mod writer;
 
 pub use dataset::{
-    DatasetRecord, SessionAddOutcome, SessionOutcome, SessionSpec, dataset_add, dataset_add_at,
-    dataset_list, dataset_list_at, dataset_resolve_id, dataset_resolve_id_at, dataset_sessions_add,
-    dataset_sessions_add_at,
+    DatasetRecord, DatasetSessionSummary, SessionAddOutcome, SessionOutcome, SessionSpec,
+    dataset_add, dataset_add_at, dataset_list, dataset_list_at, dataset_resolve_id,
+    dataset_resolve_id_at, dataset_sessions_add, dataset_sessions_add_at, dataset_sessions_list,
+    dataset_sessions_list_at,
 };
 pub use note::{
     NoteFull, NoteInput, NoteRecord, note_add, note_add_at, note_delete, note_delete_at, note_edit,

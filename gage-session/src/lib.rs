@@ -2,8 +2,13 @@
 //!
 //! A driver enumerates and reads sessions from one source (Claude Code
 //! on disk, a future codex source, a database). It exposes a
-//! [`SessionReader`] whose `files` method streams the session's content
+//! [`SourceSession`] whose `files` method streams the session's content
 //! into a dataset without materializing it in memory.
+//!
+//! `StoreSession` will be the read-side counterpart: a session already
+//! stored in a dataset presented back to a consumer. It is not defined
+//! here yet; it will land when the first consumer of stored sessions
+//! is written.
 
 use std::fmt;
 use std::io::Read;
@@ -18,12 +23,12 @@ pub trait Driver: Send + Sync {
     fn version(&self) -> &'static str;
 
     /// Resolve `id` (the part after `<name>:` in a spec) into a
-    /// [`SessionReader`].
-    fn resolve(&self, id: &str) -> Result<Box<dyn SessionReader>, DriverError>;
+    /// [`SourceSession`].
+    fn resolve(&self, id: &str) -> Result<Box<dyn SourceSession>, DriverError>;
 }
 
 /// A view of one session ready to be written into a dataset.
-pub trait SessionReader {
+pub trait SourceSession {
     /// The source-assigned id, preserved verbatim.
     fn session_id(&self) -> &str;
 

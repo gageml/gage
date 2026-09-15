@@ -2,14 +2,14 @@
 //!
 //! Given `<uuid>`, scans `$CLAUDE_CONFIG_DIR/projects/*` (or the default
 //! `~/.claude/projects/*`) for `<uuid>.jsonl` and returns a
-//! [`SessionReader`] that streams the transcript plus the adjacent
+//! [`SourceSession`] that streams the transcript plus the adjacent
 //! subagent sidecar directory.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-use gage_session::{Driver, DriverError, SessionFile, SessionReader, SessionType};
+use gage_session::{Driver, DriverError, SessionFile, SessionType, SourceSession};
 
 use crate::session::find_session;
 
@@ -41,13 +41,13 @@ impl Driver for ClaudeDriver {
         VERSION
     }
 
-    fn resolve(&self, id: &str) -> Result<Box<dyn SessionReader>, DriverError> {
+    fn resolve(&self, id: &str) -> Result<Box<dyn SourceSession>, DriverError> {
         let matches = find_session(id);
         let hit = matches
             .into_iter()
             .find(|info| info.id == id)
             .ok_or_else(|| DriverError::SessionNotFound(format!("{NAME}:{id}")))?;
-        Ok(Box::new(ClaudeSessionReader {
+        Ok(Box::new(ClaudeSourceSession {
             session_id: hit.id,
             session_type: SessionType::new(SESSION_TYPE, SESSION_TYPE_VERSION),
             session_path: hit.src,
@@ -55,7 +55,7 @@ impl Driver for ClaudeDriver {
     }
 }
 
-struct ClaudeSessionReader {
+struct ClaudeSourceSession {
     session_id: String,
     session_type: SessionType,
     /// The primary transcript file, e.g.
@@ -63,7 +63,7 @@ struct ClaudeSessionReader {
     session_path: PathBuf,
 }
 
-impl ClaudeSessionReader {
+impl ClaudeSourceSession {
     /// Sidecar directory for subagent files:
     /// `<parent>/<session_id>/subagents/`.
     fn subagents_dir(&self) -> PathBuf {
@@ -75,7 +75,7 @@ impl ClaudeSessionReader {
     }
 }
 
-impl SessionReader for ClaudeSessionReader {
+impl SourceSession for ClaudeSourceSession {
     fn session_id(&self) -> &str {
         &self.session_id
     }

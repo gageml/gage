@@ -78,8 +78,17 @@ pub enum DatasetCommand {
 
 #[derive(Subcommand)]
 pub enum DatasetSessionCommand {
+    /// List sessions in a dataset
+    List(DatasetSessionListArgs),
+
     /// Add a session to a dataset
     Add(DatasetSessionAddArgs),
+}
+
+#[derive(Args)]
+pub struct DatasetSessionListArgs {
+    /// Dataset id or unique prefix
+    dataset: String,
 }
 
 #[derive(Args)]
@@ -196,6 +205,7 @@ pub fn run(command: StoreCommand) {
             DatasetCommand::List => dataset_list(),
             DatasetCommand::Add => dataset_add(),
             DatasetCommand::Session { command } => match command {
+                DatasetSessionCommand::List(args) => dataset_session_list(args),
                 DatasetSessionCommand::Add(args) => dataset_session_add(args),
             },
         },
@@ -365,6 +375,58 @@ fn dataset_row(r: &DatasetRecord) -> Vec<String> {
     vec![r.id.clone(), format_elapsed_ms(r.created_ms)]
 }
 
+fn dataset_session_list(args: DatasetSessionListArgs) {
+    let dataset_id = match gage_store::dataset_resolve_id(&args.dataset) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage store dataset session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    let sessions = match gage_store::dataset_sessions_list(&dataset_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gage store dataset session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    if sessions.is_empty() {
+        println!("No sessions found");
+        return;
+    }
+    let header: Vec<String> = ["Num", "Type", "Session Id", "Size"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows: Vec<Vec<String>> = sessions
+        .iter()
+        .map(|s| {
+            let type_name = s
+                .session_type
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            vec![
+                s.session_num.to_string(),
+                type_name,
+                s.session_id.clone(),
+                format_size(s.size as i64),
+            ]
+        })
+        .collect();
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::one(0).not(Rows::first()),
+            style::tty(Color::FG_YELLOW),
+        )
+        .modify(Columns::one(3).not(Rows::first()), style::dim())
+        .to_string();
+    println!("{table}");
+}
+
 fn dataset_session_add(args: DatasetSessionAddArgs) {
     let dataset_id = match gage_store::dataset_resolve_id(&args.dataset) {
         Ok(id) => id,
@@ -382,7 +444,7 @@ fn dataset_session_add(args: DatasetSessionAddArgs) {
     struct Resolved {
         driver_name: &'static str,
         driver_version: &'static str,
-        reader: Box<dyn gage_session::SessionReader>,
+        reader: Box<dyn gage_session::SourceSession>,
     }
     let mut resolved: Vec<Resolved> = Vec::with_capacity(args.spec.len());
     for spec in &args.spec {
