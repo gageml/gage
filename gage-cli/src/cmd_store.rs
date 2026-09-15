@@ -25,7 +25,7 @@ pub enum StoreCommand {
     Init,
 
     /// Show store status
-    Status,
+    Status(StatusArgs),
 
     /// Garbage collect the store
     ///
@@ -109,6 +109,13 @@ pub struct CatArgs {
 }
 
 #[derive(Args)]
+pub struct StatusArgs {
+    /// Run `git fsck --full` after showing status
+    #[arg(long)]
+    check: bool,
+}
+
+#[derive(Args)]
 pub struct GcArgs {
     /// Prune unreachable objects older than this
     #[arg(long, value_name = "EXPIRE")]
@@ -174,7 +181,7 @@ pub struct NoteAddArgs {
 pub fn run(command: StoreCommand) {
     match command {
         StoreCommand::Init => init(),
-        StoreCommand::Status => status(),
+        StoreCommand::Status(args) => status(args),
         StoreCommand::Gc(args) => gc(args),
         StoreCommand::Ls(args) => ls(args),
         StoreCommand::Cat(args) => cat(args),
@@ -213,7 +220,17 @@ fn init() {
     );
 }
 
-fn status() {
+fn status(args: StatusArgs) {
+    if args.check {
+        match gage_store::fsck() {
+            Ok(()) => println!("Integrity: OK"),
+            Err(e) => {
+                eprintln!("Integrity: FAIL ({e})");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let status = match gage_store::status() {
         Ok(status) => status,
         Err(e) => {

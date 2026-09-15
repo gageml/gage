@@ -211,6 +211,27 @@ pub struct GcOutcome {
     pub after: StoreStatus,
 }
 
+/// Run `git fsck --full` on the default store. Output is inherited to
+/// the caller's stdout/stderr.
+pub fn fsck() -> Result<(), StoreError> {
+    fsck_at(&store_path())
+}
+
+pub fn fsck_at(path: &Path) -> Result<(), StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let mut cmd = git_in(path, ["fsck", "--full"]);
+    let status = cmd.status().map_err(StoreError::Spawn)?;
+    if !status.success() {
+        return Err(StoreError::Git {
+            status,
+            stderr: String::new(),
+        });
+    }
+    Ok(())
+}
+
 /// Run `git gc` on the default store, optionally with `--prune=<expire>`.
 ///
 /// `git gc`'s output is passed through to the caller's stdout/stderr so
