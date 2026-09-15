@@ -18,10 +18,11 @@ mod note;
 mod writer;
 
 pub use dataset::{
-    DatasetRecord, DatasetSessionSummary, SessionAddOutcome, SessionOutcome, SessionSpec,
-    dataset_add, dataset_add_at, dataset_list, dataset_list_at, dataset_resolve_id,
-    dataset_resolve_id_at, dataset_sessions_add, dataset_sessions_add_at, dataset_sessions_list,
-    dataset_sessions_list_at,
+    DatasetRecord, DatasetSessionSummary, SessionAddOutcome, SessionMeta, SessionOutcome,
+    SessionSpec, dataset_add, dataset_add_at, dataset_list, dataset_list_at, dataset_resolve_id,
+    dataset_resolve_id_at, dataset_session_content, dataset_session_content_at,
+    dataset_session_meta, dataset_session_meta_at, dataset_sessions_add, dataset_sessions_add_at,
+    dataset_sessions_list, dataset_sessions_list_at,
 };
 pub use note::{
     NoteFull, NoteInput, NoteRecord, note_add, note_add_at, note_delete, note_delete_at, note_edit,
@@ -429,6 +430,8 @@ pub enum StoreError {
     DatasetNotFound(String),
     /// More than one dataset ref matched the given prefix
     AmbiguousDatasetId(String, usize),
+    /// No session in the dataset matched the given num or session_id
+    SessionNotFound(String),
 }
 
 impl fmt::Display for StoreError {
@@ -457,6 +460,7 @@ impl fmt::Display for StoreError {
             StoreError::AmbiguousDatasetId(id, n) => {
                 write!(f, "dataset id {id} is ambiguous ({n} matches)")
             }
+            StoreError::SessionNotFound(s) => write!(f, "session not found: {s}"),
         }
     }
 }
@@ -474,7 +478,8 @@ impl std::error::Error for StoreError {
             | StoreError::AmbiguousNoteId(_, _)
             | StoreError::NoteDeleted(_)
             | StoreError::DatasetNotFound(_)
-            | StoreError::AmbiguousDatasetId(_, _) => None,
+            | StoreError::AmbiguousDatasetId(_, _)
+            | StoreError::SessionNotFound(_) => None,
         }
     }
 }

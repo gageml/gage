@@ -81,6 +81,9 @@ pub enum DatasetSessionCommand {
     /// List sessions in a dataset
     List(DatasetSessionListArgs),
 
+    /// Show a session's entry lines
+    Show(DatasetSessionShowArgs),
+
     /// Add a session to a dataset
     Add(DatasetSessionAddArgs),
 }
@@ -89,6 +92,15 @@ pub enum DatasetSessionCommand {
 pub struct DatasetSessionListArgs {
     /// Dataset id or unique prefix
     dataset: String,
+}
+
+#[derive(Args)]
+pub struct DatasetSessionShowArgs {
+    /// Dataset id or unique prefix
+    dataset: String,
+
+    /// Session number (decimal `<n>`) or the source `session_id`
+    session: String,
 }
 
 #[derive(Args)]
@@ -206,6 +218,7 @@ pub fn run(command: StoreCommand) {
             DatasetCommand::Add => dataset_add(),
             DatasetCommand::Session { command } => match command {
                 DatasetSessionCommand::List(args) => dataset_session_list(args),
+                DatasetSessionCommand::Show(args) => dataset_session_show(args),
                 DatasetSessionCommand::Add(args) => dataset_session_add(args),
             },
         },
@@ -425,6 +438,63 @@ fn dataset_session_list(args: DatasetSessionListArgs) {
         .modify(Columns::one(3).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
+}
+
+fn dataset_session_show(args: DatasetSessionShowArgs) {
+    let dataset_id = match gage_store::dataset_resolve_id(&args.dataset) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage store dataset session show: {e}");
+            std::process::exit(1);
+        }
+    };
+    let meta = match gage_store::dataset_session_meta(&dataset_id, &args.session) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("gage store dataset session show: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut registry = gage_registry::driver::DriverRegistry::new();
+    registry.register(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
+    let driver = match registry.get(&meta.driver_name) {
+        Some(d) => d,
+        None => {
+            eprintln!(
+                "gage store dataset session show: unknown driver {:?}",
+                meta.driver_name
+            );
+            std::process::exit(1);
+        }
+    };
+    let access = match gage_store::dataset_session_content(&dataset_id, meta.session_num) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("gage store dataset session show: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut session = match driver.open(
+        meta.session_id,
+        meta.session_type,
+        meta.content_format,
+        access,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gage store dataset session show: {e}");
+            std::process::exit(1);
+        }
+    };
+    for entry in session.entries() {
+        match entry {
+            Ok(e) => println!("{}", e.raw),
+            Err(e) => {
+                eprintln!("gage store dataset session show: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 fn dataset_session_add(args: DatasetSessionAddArgs) {

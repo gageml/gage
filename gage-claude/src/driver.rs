@@ -6,10 +6,13 @@
 //! subagent sidecar directory.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 
-use gage_session::{Driver, DriverError, SessionFile, SessionType, SourceSession};
+use gage_session::{
+    ContentAccess, Driver, DriverError, Entry, SessionFile, SessionType, SourceSession,
+    StoreSession,
+};
 
 use crate::session::find_session;
 
@@ -51,6 +54,54 @@ impl Driver for ClaudeDriver {
             session_id: hit.id,
             session_type: SessionType::new(SESSION_TYPE, SESSION_TYPE_VERSION),
             session_path: hit.src,
+        }))
+    }
+
+    fn open(
+        &self,
+        session_id: String,
+        session_type: SessionType,
+        _content_format: Option<String>,
+        access: Box<dyn ContentAccess>,
+    ) -> Result<Box<dyn StoreSession>, DriverError> {
+        Ok(Box::new(ClaudeStoreSession {
+            session_id,
+            session_type,
+            access,
+        }))
+    }
+}
+
+struct ClaudeStoreSession {
+    session_id: String,
+    session_type: SessionType,
+    access: Box<dyn ContentAccess>,
+}
+
+impl StoreSession for ClaudeStoreSession {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn session_type(&self) -> &SessionType {
+        &self.session_type
+    }
+
+    fn content_format(&self) -> Option<&str> {
+        None
+    }
+
+    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_> {
+        let reader = match self.access.open("session.jsonl") {
+            Ok(r) => BufReader::new(r),
+            Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
+        };
+        Box::new(reader.lines().enumerate().map(|(idx, line)| {
+            let raw = line.map_err(DriverError::Io)?;
+            Ok(Entry {
+                line: (idx as u32) + 1,
+                raw,
+            })
         }))
     }
 }

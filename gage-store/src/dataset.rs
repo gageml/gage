@@ -7,9 +7,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use std::io::Read;
+use std::process::{Command, Stdio};
+
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
-use gage_session::SourceSession;
+use gage_session::{ContentAccess, SessionType, SourceSession};
 
 use crate::writer::{commit_tree, mktree, write_blob, write_blob_stream};
 use crate::{StoreError, exists, git_in, run, store_path};
@@ -43,6 +46,210 @@ pub fn dataset_add_at(path: &Path) -> Result<String, StoreError> {
     run(git_in(path, ["update-ref", &ref_path, &commit_sha, ""]))?;
 
     Ok(id)
+}
+
+/// Metadata for one session in a dataset, read from the four
+/// top-level files under `sessions/<n>/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    pub session_num: u32,
+    pub session_id: String,
+    pub driver_name: String,
+    pub driver_version: String,
+    pub session_type: SessionType,
+    pub content_format: Option<String>,
+}
+
+/// Read a session's metadata, resolving `session_ref` as either a
+/// decimal `<n>` or a `session_id` string.
+pub fn dataset_session_meta(
+    dataset_id: &str,
+    session_ref: &str,
+) -> Result<SessionMeta, StoreError> {
+    dataset_session_meta_at(&store_path(), dataset_id, session_ref)
+}
+
+pub fn dataset_session_meta_at(
+    path: &std::path::Path,
+    dataset_id: &str,
+    session_ref: &str,
+) -> Result<SessionMeta, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let ref_path = format!("refs/gage/datasets/{dataset_id}");
+    let commit = run(git_in(path, ["rev-parse", &ref_path]))?
+        .trim()
+        .to_string();
+    let sessions = read_sessions_index(path, &commit)?;
+    let session_num = if let Ok(n) = session_ref.parse::<u32>() {
+        if !sessions.contains_key(&n) {
+            return Err(StoreError::SessionNotFound(session_ref.to_string()));
+        }
+        n
+    } else {
+        let mut found: Option<u32> = None;
+        for n in sessions.keys() {
+            let sid = run(git_in(
+                path,
+                [
+                    "cat-file",
+                    "-p",
+                    &format!("{commit}:sessions/{n}/session_id"),
+                ],
+            ))?
+            .trim()
+            .to_string();
+            if sid == session_ref {
+                found = Some(*n);
+                break;
+            }
+        }
+        found.ok_or_else(|| StoreError::SessionNotFound(session_ref.to_string()))?
+    };
+    let session_id = run(git_in(
+        path,
+        [
+            "cat-file",
+            "-p",
+            &format!("{commit}:sessions/{session_num}/session_id"),
+        ],
+    ))?
+    .trim()
+    .to_string();
+    let driver_line = run(git_in(
+        path,
+        [
+            "cat-file",
+            "-p",
+            &format!("{commit}:sessions/{session_num}/driver"),
+        ],
+    ))?
+    .trim()
+    .to_string();
+    let (driver_name, driver_version) = driver_line
+        .split_once(' ')
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .unwrap_or((driver_line.clone(), String::new()));
+    let session_type_line = run(git_in(
+        path,
+        [
+            "cat-file",
+            "-p",
+            &format!("{commit}:sessions/{session_num}/session_type"),
+        ],
+    ))?
+    .trim()
+    .to_string();
+    let session_type = match session_type_line.split_once(' ') {
+        Some((name, ver)) => SessionType::new(name.to_string(), ver.to_string()),
+        None => SessionType::new(session_type_line, String::new()),
+    };
+    let content_format = match run(git_in(
+        path,
+        [
+            "cat-file",
+            "-p",
+            &format!("{commit}:sessions/{session_num}/content_format"),
+        ],
+    )) {
+        Ok(s) => Some(s.trim().to_string()),
+        Err(StoreError::Git { .. }) => None,
+        Err(e) => return Err(e),
+    };
+    Ok(SessionMeta {
+        session_num,
+        session_id,
+        driver_name,
+        driver_version,
+        session_type,
+        content_format,
+    })
+}
+
+/// Build a [`ContentAccess`] backed by git for the given dataset
+/// session's `content/` subtree.
+pub fn dataset_session_content(
+    dataset_id: &str,
+    session_num: u32,
+) -> Result<Box<dyn ContentAccess>, StoreError> {
+    dataset_session_content_at(&store_path(), dataset_id, session_num)
+}
+
+pub fn dataset_session_content_at(
+    path: &std::path::Path,
+    dataset_id: &str,
+    session_num: u32,
+) -> Result<Box<dyn ContentAccess>, StoreError> {
+    if !exists(path) {
+        return Err(StoreError::NotFound(path.to_path_buf()));
+    }
+    let ref_path = format!("refs/gage/datasets/{dataset_id}");
+    let commit = run(git_in(path, ["rev-parse", &ref_path]))?
+        .trim()
+        .to_string();
+    Ok(Box::new(GitContentAccess {
+        store_path: path.to_path_buf(),
+        commit,
+        session_num,
+    }))
+}
+
+struct GitContentAccess {
+    store_path: std::path::PathBuf,
+    commit: String,
+    session_num: u32,
+}
+
+impl ContentAccess for GitContentAccess {
+    fn paths(&self) -> std::io::Result<Vec<String>> {
+        let listing = run(git_in(
+            &self.store_path,
+            [
+                "ls-tree",
+                "-r",
+                "--name-only",
+                &format!("{}:sessions/{}/content", self.commit, self.session_num),
+            ],
+        ))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(listing.lines().map(String::from).collect())
+    }
+
+    fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>> {
+        let target = format!(
+            "{}:sessions/{}/content/{}",
+            self.commit, self.session_num, path
+        );
+        let mut cmd: Command = git_in(&self.store_path, ["cat-file", "-p", &target]);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = cmd.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .expect("stdout was requested via Stdio::piped");
+        Ok(Box::new(GitReader { child, stdout }))
+    }
+}
+
+struct GitReader {
+    child: std::process::Child,
+    stdout: std::process::ChildStdout,
+}
+
+impl Read for GitReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.stdout.read(buf)
+    }
+}
+
+impl Drop for GitReader {
+    fn drop(&mut self) {
+        // Reap the git process to avoid a zombie. The result is
+        // intentionally discarded: we no longer care about the exit
+        // code by the time we drop.
+        drop(self.child.wait());
+    }
 }
 
 /// Summary of one session in a dataset, for list views.

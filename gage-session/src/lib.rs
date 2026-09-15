@@ -13,7 +13,8 @@
 use std::fmt;
 use std::io::Read;
 
-/// A driver reads sessions from a source keyed by a URL scheme.
+/// A driver reads sessions from a source keyed by a URL scheme and
+/// opens sessions already stored in a dataset.
 pub trait Driver: Send + Sync {
     /// The URL scheme this driver responds to, e.g. `"claude"`.
     fn name(&self) -> &'static str;
@@ -25,6 +26,18 @@ pub trait Driver: Send + Sync {
     /// Resolve `id` (the part after `<name>:` in a spec) into a
     /// [`SourceSession`].
     fn resolve(&self, id: &str) -> Result<Box<dyn SourceSession>, DriverError>;
+
+    /// Open a stored session for reading. `access` is scoped to the
+    /// session's `content/` subtree; `session_id`, `session_type`, and
+    /// `content_format` are the metadata files' contents that live
+    /// outside `content/`.
+    fn open(
+        &self,
+        session_id: String,
+        session_type: SessionType,
+        content_format: Option<String>,
+        access: Box<dyn ContentAccess>,
+    ) -> Result<Box<dyn StoreSession>, DriverError>;
 }
 
 /// A view of one session ready to be written into a dataset.
@@ -43,6 +56,41 @@ pub trait SourceSession {
     /// [`SessionFile`] carries a relative path (under `content/`) and
     /// a stream of bytes. Order is not significant; the writer sorts.
     fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_>;
+}
+
+/// Access to the files under a stored session's `content/` subtree.
+/// Implementations back this with git blob reads.
+pub trait ContentAccess: Send + Sync {
+    /// Every path (relative to `content/`) that exists in the session,
+    /// in an unspecified order. Forward-slash separated.
+    fn paths(&self) -> std::io::Result<Vec<String>>;
+
+    /// Open one path for streaming reads.
+    fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>>;
+}
+
+/// A stored session presented for reading. The driver produces one
+/// normalized view over its native storage: `entries()` yields the
+/// event stream row-by-row.
+pub trait StoreSession {
+    fn session_id(&self) -> &str;
+    fn session_type(&self) -> &SessionType;
+    fn content_format(&self) -> Option<&str>;
+
+    /// Row iterator over the session's raw event stream, one row per
+    /// source line. Called once.
+    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_>;
+}
+
+/// One row of the entry table's raw view. Minimal for now; more
+/// columns (uuid, type, subtype, timestamp) are added as consumers
+/// need them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// 1-based line number in the source content file.
+    pub line: u32,
+    /// The source line's bytes as a UTF-8 string.
+    pub raw: String,
 }
 
 /// One file in a session, streamed.
