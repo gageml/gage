@@ -5,6 +5,7 @@
 //! repositories (clone, push, pull), and the binary is the only complete
 //! implementation of that surface.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::io::Write;
@@ -190,8 +191,11 @@ pub struct StoreStatus {
     /// Bytes on disk for loose objects and packs together
     pub size: u64,
     pub refs: u64,
-    /// Count of refs under `refs/gage/notes/`.
-    pub note_refs: u64,
+    /// Count of refs under each proper prefix beneath `refs/gage/`,
+    /// sorted by prefix. A ref `refs/gage/notes/<id>` contributes to
+    /// `refs/gage` and `refs/gage/notes`; the leaf ref name itself is
+    /// not a prefix.
+    pub ref_prefixes: Vec<(String, u64)>,
     pub remotes: Vec<Remote>,
 }
 
@@ -272,15 +276,9 @@ pub fn status_at(path: &Path) -> Result<StoreStatus, StoreError> {
         return Err(StoreError::NotFound(path.to_path_buf()));
     }
     let counts = parse_count_objects(&run(git_in(path, ["count-objects", "-v"]))?)?;
-    let refs = run(git_in(path, ["for-each-ref", "--format=%(refname)"]))?
-        .lines()
-        .count() as u64;
-    let note_refs = run(git_in(
-        path,
-        ["for-each-ref", "--format=%(refname)", "refs/gage/notes/"],
-    ))?
-    .lines()
-    .count() as u64;
+    let ref_names = run(git_in(path, ["for-each-ref", "--format=%(refname)"]))?;
+    let refs = ref_names.lines().count() as u64;
+    let ref_prefixes = compute_ref_prefixes(&ref_names);
     let remotes = parse_remotes(&run(git_in(path, ["remote", "-v"]))?);
     Ok(StoreStatus {
         path: path.to_path_buf(),
@@ -289,9 +287,37 @@ pub fn status_at(path: &Path) -> Result<StoreStatus, StoreError> {
         packs: counts.packs,
         size: (counts.size + counts.size_pack) * 1024,
         refs,
-        note_refs,
+        ref_prefixes,
         remotes,
     })
+}
+
+/// Counts every proper prefix under `refs/gage/` across the given
+/// newline-separated ref names. `refs/gage/notes/<id>` contributes to
+/// `refs/gage` and `refs/gage/notes`; the full ref name is not a
+/// prefix. Refs outside `refs/gage/` are ignored.
+fn compute_ref_prefixes(ref_names: &str) -> Vec<(String, u64)> {
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for name in ref_names.lines() {
+        if !name.starts_with("refs/gage/") {
+            continue;
+        }
+        let segments: Vec<&str> = name.split('/').collect();
+        let mut prefix = String::new();
+        for (i, seg) in segments.iter().enumerate() {
+            if i + 1 == segments.len() {
+                break;
+            }
+            if i > 0 {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            if i >= 1 {
+                *counts.entry(prefix.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts.into_iter().collect()
 }
 
 pub(crate) fn exists(path: &Path) -> bool {
@@ -536,7 +562,7 @@ mod tests {
                 packs: 0,
                 size: 0,
                 refs: 0,
-                note_refs: 0,
+                ref_prefixes: vec![],
                 remotes: vec![],
             }
         );
@@ -564,6 +590,36 @@ mod tests {
                 size_pack: 2839,
             }
         );
+    }
+
+    #[test]
+    fn counts_ref_prefixes() {
+        let refs = "\
+refs/gage/notes/abc123\n\
+refs/gage/datasets/def456\n\
+refs/gage/sessions/claude/1/xyz\n\
+refs/gage/sessions/claude/1/uvw\n\
+refs/gage/sessions/codex/1/qrs\n\
+refs/heads/main\n";
+        let prefixes = compute_ref_prefixes(refs);
+        assert_eq!(
+            prefixes,
+            vec![
+                ("refs/gage".to_string(), 5),
+                ("refs/gage/datasets".to_string(), 1),
+                ("refs/gage/notes".to_string(), 1),
+                ("refs/gage/sessions".to_string(), 3),
+                ("refs/gage/sessions/claude".to_string(), 2),
+                ("refs/gage/sessions/claude/1".to_string(), 2),
+                ("refs/gage/sessions/codex".to_string(), 1),
+                ("refs/gage/sessions/codex/1".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn ref_prefixes_of_empty_input_is_empty() {
+        assert_eq!(compute_ref_prefixes(""), Vec::<(String, u64)>::new());
     }
 
     #[test]

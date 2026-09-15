@@ -276,22 +276,22 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
         .map(|r| format!("{} {}", r.name, r.url))
         .collect::<Vec<_>>()
         .join("\n");
-    [
-        ("path", shorten_home_path(&status.path)),
-        (
-            "objects",
+    let mut rows: Vec<Vec<String>> = vec![
+        vec!["path".to_string(), shorten_home_path(&status.path)],
+        vec![
+            "objects".to_string(),
             (status.loose_objects + status.packed_objects).to_string(),
-        ),
-        ("loose", status.loose_objects.to_string()),
-        ("packs", status.packs.to_string()),
-        ("size", format_size(status.size as i64)),
-        ("refs", status.refs.to_string()),
-        ("refs/gage/notes", status.note_refs.to_string()),
-        ("remotes", remotes),
-    ]
-    .into_iter()
-    .map(|(k, v)| vec![k.to_string(), v])
-    .collect()
+        ],
+        vec!["loose".to_string(), status.loose_objects.to_string()],
+        vec!["packs".to_string(), status.packs.to_string()],
+        vec!["size".to_string(), format_size(status.size as i64)],
+        vec!["refs".to_string(), status.refs.to_string()],
+    ];
+    for (prefix, count) in &status.ref_prefixes {
+        rows.push(vec![prefix.clone(), count.to_string()]);
+    }
+    rows.push(vec!["remotes".to_string(), remotes]);
+    rows
 }
 
 fn gc(args: GcArgs) {
