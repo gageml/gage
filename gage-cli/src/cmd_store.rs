@@ -87,8 +87,9 @@ pub struct DatasetSessionAddArgs {
     /// Dataset id or unique prefix
     dataset: String,
 
-    /// Session source spec, e.g. `claude:<session_id>`
-    spec: String,
+    /// One or more session source specs, e.g. `claude:<session_id>`
+    #[arg(required = true)]
+    spec: Vec<String>,
 }
 
 #[derive(Args)]
@@ -355,8 +356,77 @@ fn dataset_session_add(args: DatasetSessionAddArgs) {
             std::process::exit(1);
         }
     };
-    eprintln!("TODO: dataset session add {dataset_id} {}", args.spec);
-    std::process::exit(1);
+
+    let mut registry = gage_registry::driver::DriverRegistry::new();
+    registry.register(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
+
+    // Resolve every spec into a reader before touching the store, so any
+    // driver failure short-circuits without a partial write.
+    struct Resolved {
+        driver_name: &'static str,
+        driver_version: &'static str,
+        reader: Box<dyn gage_session::SessionReader>,
+    }
+    let mut resolved: Vec<Resolved> = Vec::with_capacity(args.spec.len());
+    for spec in &args.spec {
+        let (scheme, id) = match spec.split_once(':') {
+            Some((s, i)) if !s.is_empty() && !i.is_empty() => (s, i),
+            _ => {
+                eprintln!(
+                    "gage store dataset session add: invalid spec {spec:?}: expected <driver>:<session_id>"
+                );
+                std::process::exit(1);
+            }
+        };
+        let driver = match registry.get(scheme) {
+            Some(d) => d,
+            None => {
+                let known = registry.schemes().join(", ");
+                eprintln!(
+                    "gage store dataset session add: unknown driver {scheme:?} (known: {known})"
+                );
+                std::process::exit(1);
+            }
+        };
+        let reader = match driver.resolve(id) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("gage store dataset session add: {spec}: {e}");
+                std::process::exit(1);
+            }
+        };
+        resolved.push(Resolved {
+            driver_name: driver.name(),
+            driver_version: driver.version(),
+            reader,
+        });
+    }
+
+    let specs: Vec<gage_store::SessionSpec<'_>> = resolved
+        .iter_mut()
+        .map(|r| gage_store::SessionSpec {
+            driver_name: r.driver_name,
+            driver_version: r.driver_version,
+            reader: r.reader.as_mut(),
+        })
+        .collect();
+
+    let outcomes = match gage_store::dataset_sessions_add(&dataset_id, specs) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("gage store dataset session add: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    for outcome in &outcomes {
+        let verb = match outcome.outcome {
+            gage_store::SessionOutcome::Added => "Added",
+            gage_store::SessionOutcome::Updated => "Updated",
+            gage_store::SessionOutcome::NoOp => "No changes",
+        };
+        println!("{verb} sessions/{}", outcome.session_num);
+    }
 }
 
 fn ls(args: LsArgs) {

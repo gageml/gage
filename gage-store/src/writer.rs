@@ -1,8 +1,9 @@
 //! Shared plumbing for artifact writers: writing blobs, building trees,
 //! and committing under the fixed Gage identity.
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::{StoreError, git_in, run, run_with_stdin};
 
@@ -12,10 +13,36 @@ pub(crate) const IDENTITY_NAME: &str = "gage";
 pub(crate) const IDENTITY_EMAIL: &str = "noreply@gage.localhost";
 
 /// Write `content` as a blob via `git hash-object -w --stdin` and return
-/// its sha.
+/// its sha. For metadata and other small buffers.
 pub(crate) fn write_blob(path: &Path, content: &[u8]) -> Result<String, StoreError> {
     let sha = run_with_stdin(git_in(path, ["hash-object", "-w", "--stdin"]), content)?;
     Ok(sha.trim().to_string())
+}
+
+/// Stream `content` into `git hash-object -w --stdin` and return the
+/// blob sha. Memory is bounded by the copy buffer, so this is the right
+/// choice for driver-supplied session content that may be large.
+pub(crate) fn write_blob_stream(path: &Path, mut content: impl Read) -> Result<String, StoreError> {
+    let mut cmd = git_in(path, ["hash-object", "-w", "--stdin"]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(StoreError::Spawn)?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .expect("stdin was requested via Stdio::piped");
+        std::io::copy(&mut content, stdin).map_err(StoreError::Spawn)?;
+    }
+    let output = child.wait_with_output().map_err(StoreError::Spawn)?;
+    if !output.status.success() {
+        return Err(StoreError::Git {
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Feed `entries` (already in git tree byte-sort order) to `git mktree`

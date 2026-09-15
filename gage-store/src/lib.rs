@@ -18,8 +18,9 @@ mod note;
 mod writer;
 
 pub use dataset::{
-    DatasetRecord, dataset_add, dataset_add_at, dataset_list, dataset_list_at, dataset_resolve_id,
-    dataset_resolve_id_at,
+    DatasetRecord, SessionAddOutcome, SessionOutcome, SessionSpec, dataset_add, dataset_add_at,
+    dataset_list, dataset_list_at, dataset_resolve_id, dataset_resolve_id_at, dataset_sessions_add,
+    dataset_sessions_add_at,
 };
 pub use note::{
     NoteFull, NoteInput, NoteRecord, note_add, note_add_at, note_delete, note_delete_at, note_edit,
@@ -65,7 +66,7 @@ pub fn ls_at(path: &Path, reference: &str) -> Result<Vec<TreeEntry>, StoreError>
     if !exists(path) {
         return Err(StoreError::NotFound(path.to_path_buf()));
     }
-    let out = run(git_in(path, ["ls-tree", "-l", reference]))?;
+    let out = run(git_in(path, ["ls-tree", "-r", "-t", "-l", reference]))?;
     let mut entries = Vec::new();
     for line in out.lines() {
         let (meta, name) = line

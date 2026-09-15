@@ -2601,6 +2601,7 @@ version = "0.2.0-dev"
 dependencies = [
  "chrono",
  "gage-core",
+ "gage-session",
  "regex",
  "rust-embed",
  "serde",
@@ -2630,6 +2631,7 @@ dependencies = [
  "gage-query",
  "gage-registry",
  "gage-scan",
+ "gage-session",
  "gage-store",
  "gage-sync",
  "gage-test",
@@ -2778,6 +2780,7 @@ dependencies = [
  "codespan-reporting",
  "fs4 1.1.0",
  "gage-core",
+ "gage-session",
  "rune",
  "rust-embed",
  "serde",
@@ -2839,10 +2842,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-session"
+version = "0.2.0-dev"
+
+[[package]]
 name = "gage-store"
 version = "0.2.0-dev"
 dependencies = [
  "gage-core",
+ "gage-session",
  "serde",
  "serde_json",
  "tempfile",

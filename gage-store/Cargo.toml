@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gage-core = { path = "../gage-core" }
+gage-session = { path = "../gage-session" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
