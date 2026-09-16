@@ -1,11 +1,15 @@
 //! Note writing: build the tree, commit it, and update
 //! `refs/gage/notes/<id>`.
 //!
-//! The tree carries `format` (`gage-note 1\n`), `attrs` (compact JSON of
-//! name/value/author, LF terminated), and, when at least one target is
-//! given, `targets` (one `refs/gage/notes/<id>\n` per line). An `add`
-//! commit is parentless; an `edit` commit chains against the previous
-//! ref value. Author and committer are set to
+//! The tree carries the common header (`object` = `gage::note 1\n`,
+//! `id`, `created`, `modified`), `attrs` (compact JSON), and, when at
+//! least one target is given, `target.link` (one commit SHA per
+//! line). Every SHA in a `*.link` file becomes a commit parent. An
+//! edit tree additionally carries a `prev` file holding the previous
+//! commit SHA, and that SHA is also added as a commit parent; a `prev`
+//! file always points exactly one hop back. An add tree has no `prev`.
+//! A delete writes a parentless tombstone whose tree carries only the
+//! header plus `deleted`. Author and committer are set to
 //! `gage <noreply@gage.localhost>`.
 
 use std::path::Path;
@@ -13,9 +17,13 @@ use std::path::Path;
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::writer::{commit_tree, mktree, write_blob};
 use crate::{StoreError, exists, git_in, run, store_path};
+
+/// `object` blob content for a note tree.
+const NOTE_OBJECT: &[u8] = b"gage::note 1\n";
 
 /// Input to [`note_add`]. Every string is stored verbatim; the caller is
 /// responsible for producing `author` in the `user:`/`scanner:`/`agent:`
@@ -50,8 +58,8 @@ pub struct NoteFull {
     pub name: String,
     pub value: String,
     pub author: String,
-    /// Ref paths from the `targets` file, in file order. Empty when the
-    /// note has no `targets` file.
+    /// Commit SHAs from the `target.link` file, in file order. Empty
+    /// when the note has no `target.link` file.
     pub targets: Vec<String>,
     pub created_ms: i64,
     pub modified_ms: i64,
@@ -95,7 +103,7 @@ pub fn note_get_at(path: &Path, id_or_prefix: &str) -> Result<NoteFull, StoreErr
     let created_ms = read_ms_blob(path, &ref_path, "created")?;
     let modified_ms = read_ms_blob(path, &ref_path, "modified")?;
     let attrs = read_attrs(path, &ref_path)?;
-    let targets = read_targets(path, &ref_path)?;
+    let targets = read_target_link(path, &ref_path)?;
 
     Ok(NoteFull {
         id,
@@ -129,14 +137,14 @@ fn read_attrs(path: &Path, ref_path: &str) -> Result<StoredAttrs, StoreError> {
         .map_err(|e| StoreError::Parse(format!("attrs {ref_path}: {e}")))
 }
 
-fn read_targets(path: &Path, ref_path: &str) -> Result<Vec<String>, StoreError> {
+fn read_target_link(path: &Path, ref_path: &str) -> Result<Vec<String>, StoreError> {
     let entries = run(git_in(path, ["ls-tree", "--name-only", ref_path]))?;
-    if !entries.lines().any(|l| l == "targets") {
+    if !entries.lines().any(|l| l == "target.link") {
         return Ok(Vec::new());
     }
     let content = run(git_in(
         path,
-        ["cat-file", "-p", &format!("{ref_path}:targets")],
+        ["cat-file", "-p", &format!("{ref_path}:target.link")],
     ))?;
     Ok(content.lines().map(|s| s.to_string()).collect())
 }
@@ -196,12 +204,24 @@ fn is_deleted(path: &Path, ref_path: &str) -> Result<bool, StoreError> {
 }
 
 /// The on-disk shape of `attrs`. `value` is treated as a string for now;
-/// the schema may broaden this later.
-#[derive(Deserialize)]
+/// the schema may broaden this later. Optional fields defined by the
+/// spec are held so an edit round-trip preserves them; no writer sets
+/// them today.
+#[derive(Deserialize, Serialize)]
 struct StoredAttrs {
     name: String,
     value: String,
     author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_end: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scan: Option<String>,
 }
 
 /// Add a note to the default store. Returns the new note's id.
@@ -215,29 +235,32 @@ pub fn note_add_at(path: &Path, input: NoteInput) -> Result<String, StoreError> 
         return Err(StoreError::NotFound(path.to_path_buf()));
     }
 
-    let target_refs = resolve_targets(path, input.targets)?;
+    let target_shas = resolve_target_shas(path, input.targets)?;
 
     let id = new_uuid();
     let now = now_ms();
-    let format_sha = write_blob(path, b"gage-note 1\n")?;
+    let object_sha = write_blob(path, NOTE_OBJECT)?;
+    let id_sha = write_blob(path, format!("{id}\n").as_bytes())?;
     let attrs_sha = write_blob(path, encode_attrs(&input).as_bytes())?;
     let stamp_sha = write_blob(path, format!("{now}\n").as_bytes())?;
 
     let mut entries = vec![
         format!("100644 blob {attrs_sha}\tattrs"),
         format!("100644 blob {stamp_sha}\tcreated"),
-        format!("100644 blob {format_sha}\tformat"),
+        format!("100644 blob {id_sha}\tid"),
         format!("100644 blob {stamp_sha}\tmodified"),
+        format!("100644 blob {object_sha}\tobject"),
     ];
-    if !target_refs.is_empty() {
-        let content: String = target_refs.iter().map(|r| format!("{r}\n")).collect();
-        let targets_sha = write_blob(path, content.as_bytes())?;
-        entries.push(format!("100644 blob {targets_sha}\ttargets"));
+    if !target_shas.is_empty() {
+        let content: String = target_shas.iter().map(|s| format!("{s}\n")).collect();
+        let target_link_sha = write_blob(path, content.as_bytes())?;
+        entries.push(format!("100644 blob {target_link_sha}\ttarget.link"));
     }
     let tree_sha = mktree(path, &entries)?;
 
     let message = format!("note: {}", input.name);
-    let commit_sha = commit_tree(path, &tree_sha, &message, None)?;
+    let parents: Vec<&str> = target_shas.iter().map(|s| s.as_str()).collect();
+    let commit_sha = commit_tree(path, &tree_sha, &message, &parents)?;
 
     let ref_path = format!("refs/gage/notes/{id}");
     run(git_in(path, ["update-ref", &ref_path, &commit_sha, ""]))?;
@@ -263,31 +286,34 @@ pub fn note_edit_at(path: &Path, id_or_prefix: &str, value: &str) -> Result<Stri
     if tree_shas.deleted {
         return Err(StoreError::NoteDeleted(id));
     }
-    let attrs = read_attrs(path, &ref_path)?;
+    let mut attrs = read_attrs(path, &ref_path)?;
+    let name = attrs.name.clone();
+    attrs.value = value.to_string();
 
-    let new_attrs = encode_attrs(&NoteInput {
-        name: &attrs.name,
-        value,
-        author: &attrs.author,
-        targets: &[],
-    });
-    let new_attrs_sha = write_blob(path, new_attrs.as_bytes())?;
+    let new_attrs_sha = write_blob(path, serialize_attrs(&attrs).as_bytes())?;
     let now = now_ms();
     let new_modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
+    let prev_sha = write_blob(path, format!("{current_commit}\n").as_bytes())?;
 
     let mut entries = vec![
         format!("100644 blob {new_attrs_sha}\tattrs"),
         format!("100644 blob {}\tcreated", tree_shas.created),
-        format!("100644 blob {}\tformat", tree_shas.format),
+        format!("100644 blob {}\tid", tree_shas.id),
         format!("100644 blob {new_modified_sha}\tmodified"),
+        format!("100644 blob {}\tobject", tree_shas.object),
+        format!("100644 blob {prev_sha}\tprev"),
     ];
-    if let Some(targets_sha) = tree_shas.targets {
-        entries.push(format!("100644 blob {targets_sha}\ttargets"));
+    if let Some(target_sha) = &tree_shas.target {
+        entries.push(format!("100644 blob {target_sha}\ttarget.link"));
     }
     let tree_sha = mktree(path, &entries)?;
 
-    let message = format!("note edit: {}", attrs.name);
-    let new_commit = commit_tree(path, &tree_sha, &message, Some(&current_commit))?;
+    let target_shas = read_target_link(path, &ref_path)?;
+    let mut parents: Vec<&str> = vec![&current_commit];
+    parents.extend(target_shas.iter().map(|s| s.as_str()));
+
+    let message = format!("note edit: {name}");
+    let new_commit = commit_tree(path, &tree_sha, &message, &parents)?;
 
     run(git_in(
         path,
@@ -297,10 +323,11 @@ pub fn note_edit_at(path: &Path, id_or_prefix: &str, value: &str) -> Result<Stri
     Ok(id)
 }
 
-/// Delete a note by writing a tombstone commit. `attrs` and `targets`
-/// are dropped from the tree; `created` and `format` are preserved;
-/// `modified` and `deleted` are set to the current time. Returns the
-/// resolved id.
+/// Delete a note by writing a parentless tombstone commit. The tree
+/// carries only the header (`object`, `id`, `created`, `modified`) plus
+/// `deleted`; `attrs`, `prev`, and any `*.link` files are dropped. The
+/// prior commits become unreachable from the ref and are reclaimed by
+/// `gc` unless another object links them. Returns the resolved id.
 pub fn note_delete(id_or_prefix: &str) -> Result<String, StoreError> {
     note_delete_at(&store_path(), id_or_prefix)
 }
@@ -326,13 +353,14 @@ pub fn note_delete_at(path: &Path, id_or_prefix: &str) -> Result<String, StoreEr
     let entries = vec![
         format!("100644 blob {}\tcreated", tree_shas.created),
         format!("100644 blob {stamp_sha}\tdeleted"),
-        format!("100644 blob {}\tformat", tree_shas.format),
+        format!("100644 blob {}\tid", tree_shas.id),
         format!("100644 blob {stamp_sha}\tmodified"),
+        format!("100644 blob {}\tobject", tree_shas.object),
     ];
     let tree_sha = mktree(path, &entries)?;
 
     let message = format!("note delete: {}", attrs.name);
-    let new_commit = commit_tree(path, &tree_sha, &message, Some(&current_commit))?;
+    let new_commit = commit_tree(path, &tree_sha, &message, &[])?;
 
     run(git_in(
         path,
@@ -372,17 +400,19 @@ fn resolve_ref(path: &Path, id_or_prefix: &str) -> Result<(String, String), Stor
 /// Blob shas of the reused tree entries under a note's current commit,
 /// plus whether the commit is a tombstone.
 struct TreeShas {
-    format: String,
+    object: String,
+    id: String,
     created: String,
-    targets: Option<String>,
+    target: Option<String>,
     deleted: bool,
 }
 
 fn read_tree_shas(path: &Path, ref_path: &str) -> Result<TreeShas, StoreError> {
     let listing = run(git_in(path, ["ls-tree", ref_path]))?;
-    let mut format = None;
+    let mut object = None;
+    let mut id = None;
     let mut created = None;
-    let mut targets = None;
+    let mut target = None;
     let mut deleted = false;
     for line in listing.lines() {
         // Each line: "<mode> <type> <sha>\t<name>".
@@ -394,59 +424,69 @@ fn read_tree_shas(path: &Path, ref_path: &str) -> Result<TreeShas, StoreError> {
             .nth(2)
             .ok_or_else(|| StoreError::Parse(format!("ls-tree meta: {meta}")))?;
         match name {
-            "format" => format = Some(sha.to_string()),
+            "object" => object = Some(sha.to_string()),
+            "id" => id = Some(sha.to_string()),
             "created" => created = Some(sha.to_string()),
-            "targets" => targets = Some(sha.to_string()),
+            "target.link" => target = Some(sha.to_string()),
             "deleted" => deleted = true,
             _ => {}
         }
     }
-    let format =
-        format.ok_or_else(|| StoreError::Parse(format!("missing format blob in {ref_path}")))?;
+    let object =
+        object.ok_or_else(|| StoreError::Parse(format!("missing object blob in {ref_path}")))?;
+    let id = id.ok_or_else(|| StoreError::Parse(format!("missing id blob in {ref_path}")))?;
     let created =
         created.ok_or_else(|| StoreError::Parse(format!("missing created blob in {ref_path}")))?;
     Ok(TreeShas {
-        format,
+        object,
+        id,
         created,
-        targets,
+        target,
         deleted,
     })
 }
 
-/// Parse `note:<id>` targets and confirm each referenced ref exists in
-/// the store. Returns the corresponding ref paths in input order.
-fn resolve_targets(path: &Path, targets: &[String]) -> Result<Vec<String>, StoreError> {
-    let mut refs = Vec::with_capacity(targets.len());
+/// Parse `note:<id>` targets, verify each referenced ref exists, and
+/// return the corresponding commit SHAs in input order. These SHAs are
+/// written to the `target.link` file and added as commit parents.
+fn resolve_target_shas(path: &Path, targets: &[String]) -> Result<Vec<String>, StoreError> {
+    let mut shas = Vec::with_capacity(targets.len());
     for raw in targets {
         let id = raw
             .strip_prefix("note:")
             .ok_or_else(|| StoreError::BadTarget(raw.clone()))?;
         let ref_path = format!("refs/gage/notes/{id}");
-        match run(git_in(path, ["show-ref", "--verify", "--quiet", &ref_path])) {
-            Ok(_) => refs.push(ref_path),
+        match run(git_in(path, ["rev-parse", "--verify", &ref_path])) {
+            Ok(sha) => shas.push(sha.trim().to_string()),
             Err(StoreError::Git { .. }) => {
                 return Err(StoreError::TargetNotFound(raw.clone()));
             }
             Err(e) => return Err(e),
         }
     }
-    Ok(refs)
+    Ok(shas)
 }
 
-/// Compact JSON encoding of the note's `attrs`, with a trailing LF.
+/// Compact JSON encoding of a fresh note's `attrs`, with a trailing LF.
+/// Optional spec fields are omitted; no writer sets them today.
 fn encode_attrs(input: &NoteInput) -> String {
-    #[derive(Serialize)]
-    struct Attrs<'a> {
-        name: &'a str,
-        value: &'a str,
-        author: &'a str,
-    }
-    let mut s = serde_json::to_string(&Attrs {
-        name: input.name,
-        value: input.value,
-        author: input.author,
-    })
-    .expect("string fields cannot fail to serialize");
+    let attrs = StoredAttrs {
+        name: input.name.to_string(),
+        value: input.value.to_string(),
+        author: input.author.to_string(),
+        target: None,
+        line: None,
+        line_end: None,
+        metadata: None,
+        scan: None,
+    };
+    serialize_attrs(&attrs)
+}
+
+/// Serialize `StoredAttrs` with a trailing LF, preserving any optional
+/// fields present on the value.
+fn serialize_attrs(attrs: &StoredAttrs) -> String {
+    let mut s = serde_json::to_string(attrs).expect("attrs are always serializable");
     s.push('\n');
     s
 }
@@ -504,12 +544,17 @@ mod tests {
         let tree = cat_file(&store, &format!("{ref_path}^{{tree}}"));
         assert!(tree.contains("\tattrs"), "{tree}");
         assert!(tree.contains("\tcreated"), "{tree}");
-        assert!(tree.contains("\tformat"), "{tree}");
+        assert!(tree.contains("\tid"), "{tree}");
         assert!(tree.contains("\tmodified"), "{tree}");
-        assert!(!tree.contains("\ttargets"), "{tree}");
+        assert!(tree.contains("\tobject"), "{tree}");
+        assert!(!tree.contains("\ttarget.link"), "{tree}");
+        assert!(!tree.contains("\tprev"), "{tree}");
 
-        let format_content = cat_file(&store, &format!("{ref_path}:format"));
-        assert_eq!(format_content, "gage-note 1\n");
+        let object_content = cat_file(&store, &format!("{ref_path}:object"));
+        assert_eq!(object_content, "gage::note 1\n");
+
+        let id_content = cat_file(&store, &format!("{ref_path}:id"));
+        assert_eq!(id_content, format!("{id}\n"));
 
         let attrs_content = cat_file(&store, &format!("{ref_path}:attrs"));
         assert_eq!(
@@ -519,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn add_writes_targets_file_when_targets_given() {
+    fn add_writes_target_link_when_targets_given() {
         let tmp = tempfile::tempdir().unwrap();
         let store = init_store(tmp.path());
 
@@ -533,6 +578,13 @@ mod tests {
             },
         )
         .unwrap();
+        let first_commit = run(git_in(
+            &store,
+            ["rev-parse", &format!("refs/gage/notes/{first}")],
+        ))
+        .unwrap()
+        .trim()
+        .to_string();
 
         let target = format!("note:{first}");
         let second = note_add_at(
@@ -546,8 +598,21 @@ mod tests {
         )
         .unwrap();
 
-        let targets_content = cat_file(&store, &format!("refs/gage/notes/{second}:targets"));
-        assert_eq!(targets_content, format!("refs/gage/notes/{first}\n"));
+        let target_content = cat_file(&store, &format!("refs/gage/notes/{second}:target.link"));
+        assert_eq!(target_content, format!("{first_commit}\n"));
+
+        let second_commit = run(git_in(
+            &store,
+            ["rev-parse", &format!("refs/gage/notes/{second}")],
+        ))
+        .unwrap()
+        .trim()
+        .to_string();
+        let commit = cat_file(&store, &second_commit);
+        assert!(
+            commit.contains(&format!("parent {first_commit}")),
+            "{commit}"
+        );
     }
 
     #[test]
@@ -739,6 +804,9 @@ mod tests {
             .to_string();
         assert_eq!(parent, original_commit);
 
+        let prev_content = cat_file(&store, &format!("{ref_path}:prev"));
+        assert_eq!(prev_content, format!("{original_commit}\n"));
+
         let attrs_content = cat_file(&store, &format!("{ref_path}:attrs"));
         assert_eq!(
             attrs_content,
@@ -750,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_preserves_targets_blob() {
+    fn edit_preserves_target_link() {
         let tmp = tempfile::tempdir().unwrap();
         let store = init_store(tmp.path());
 
@@ -775,11 +843,18 @@ mod tests {
         )
         .unwrap();
 
+        let root_commit = run(git_in(
+            &store,
+            ["rev-parse", &format!("refs/gage/notes/{root}")],
+        ))
+        .unwrap()
+        .trim()
+        .to_string();
         note_edit_at(&store, &child, "second").unwrap();
 
         let ref_path = format!("refs/gage/notes/{child}");
-        let targets_content = cat_file(&store, &format!("{ref_path}:targets"));
-        assert_eq!(targets_content, format!("refs/gage/notes/{root}\n"));
+        let target_content = cat_file(&store, &format!("{ref_path}:target.link"));
+        assert_eq!(target_content, format!("{root_commit}\n"));
     }
 
     #[test]
@@ -809,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_writes_tombstone_and_chains_commit() {
+    fn delete_writes_parentless_tombstone() {
         let tmp = tempfile::tempdir().unwrap();
         let store = init_store(tmp.path());
 
@@ -827,10 +902,6 @@ mod tests {
         let created_before = cat_file(&store, &format!("{ref_path}:created"))
             .trim()
             .to_string();
-        let original_commit = run(git_in(&store, ["rev-parse", &ref_path]))
-            .unwrap()
-            .trim()
-            .to_string();
 
         assert_eq!(note_delete_at(&store, &id).unwrap(), id);
 
@@ -838,20 +909,19 @@ mod tests {
             .unwrap()
             .trim()
             .to_string();
-        let parent = run(git_in(&store, ["rev-parse", &format!("{ref_path}^")]))
-            .unwrap()
-            .trim()
-            .to_string();
-        assert_eq!(parent, original_commit);
+        let commit = cat_file(&store, &new_commit);
+        assert!(!commit.contains("\nparent "), "{commit}");
 
         let listing = run(git_in(&store, ["ls-tree", "--name-only", &ref_path])).unwrap();
         let names: Vec<&str> = listing.lines().collect();
         assert!(names.contains(&"created"));
         assert!(names.contains(&"deleted"));
-        assert!(names.contains(&"format"));
+        assert!(names.contains(&"id"));
         assert!(names.contains(&"modified"));
+        assert!(names.contains(&"object"));
         assert!(!names.contains(&"attrs"));
-        assert!(!names.contains(&"targets"));
+        assert!(!names.contains(&"target.link"));
+        assert!(!names.contains(&"prev"));
 
         let created_after = cat_file(&store, &format!("{ref_path}:created"))
             .trim()
@@ -866,7 +936,6 @@ mod tests {
             .to_string();
         assert_eq!(deleted, modified);
 
-        let commit = cat_file(&store, &new_commit);
         assert!(commit.contains("\nnote delete: n"), "{commit}");
     }
 

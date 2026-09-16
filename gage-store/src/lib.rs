@@ -165,12 +165,20 @@ pub fn init_at(path: &Path) -> Result<InitOutcome, StoreError> {
     for (key, value) in STORE_CONFIG {
         run(git_in(path, ["config", key, value]))?;
     }
+    run(git_in(
+        path,
+        ["config", "gage.version", &STORE_VERSION.to_string()],
+    ))?;
     Ok(if existing {
         InitOutcome::Reinitialized
     } else {
         InitOutcome::Created
     })
 }
+
+/// Schema version stamped into `gage.version` at init. Bumped when the
+/// ref layout or another store-wide convention changes.
+pub const STORE_VERSION: u32 = 1;
 
 /// Settings every store carries. Refs only advance under push, and every
 /// object received over the wire is verified. See store-init.md.
@@ -529,6 +537,10 @@ mod tests {
         assert!(config.contains("denyDeletes = true"), "{config}");
         assert!(config.contains("denyNonFastForwards = true"), "{config}");
         assert!(config.contains("fsckObjects = true"), "{config}");
+        assert!(
+            config.contains(&format!("version = {STORE_VERSION}")),
+            "{config}"
+        );
         assert!(!store.join("hooks").exists());
 
         assert_eq!(init_at(&store).unwrap(), InitOutcome::Reinitialized);

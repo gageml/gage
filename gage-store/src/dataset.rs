@@ -1,8 +1,14 @@
 //! Dataset writer and reader.
 //!
 //! A dataset is a ref under `refs/gage/datasets/<id>`. Its tree carries
-//! `format` (`gage-dataset 1\n`), `created`, and `modified`, and any
-//! session directories added later. An `add` commit is parentless.
+//! the common header (`object` = `gage::dataset 1\n`, `id`, `created`,
+//! `modified`) and any session directories added later. An `add`
+//! commit is parentless.
+//!
+//! Sessions are currently embedded under `sessions/<n>/` while
+//! first-class session objects are still deferred; when session
+//! objects land, the embedded layout will be replaced with a
+//! `sessions` link file of session commit SHAs.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,6 +23,9 @@ use gage_session::{ContentAccess, SessionType, SourceSession};
 use crate::writer::{commit_tree, mktree, write_blob, write_blob_stream};
 use crate::{StoreError, exists, git_in, run, store_path};
 
+/// `object` blob content for a dataset tree.
+const DATASET_OBJECT: &[u8] = b"gage::dataset 1\n";
+
 /// Add an empty dataset to the default store. Returns the new id.
 pub fn dataset_add() -> Result<String, StoreError> {
     dataset_add_at(&store_path())
@@ -30,17 +39,19 @@ pub fn dataset_add_at(path: &Path) -> Result<String, StoreError> {
 
     let id = new_uuid();
     let now = now_ms();
-    let format_sha = write_blob(path, b"gage-dataset 1\n")?;
+    let object_sha = write_blob(path, DATASET_OBJECT)?;
+    let id_sha = write_blob(path, format!("{id}\n").as_bytes())?;
     let stamp_sha = write_blob(path, format!("{now}\n").as_bytes())?;
 
     let entries = vec![
         format!("100644 blob {stamp_sha}\tcreated"),
-        format!("100644 blob {format_sha}\tformat"),
+        format!("100644 blob {id_sha}\tid"),
         format!("100644 blob {stamp_sha}\tmodified"),
+        format!("100644 blob {object_sha}\tobject"),
     ];
     let tree_sha = mktree(path, &entries)?;
 
-    let commit_sha = commit_tree(path, &tree_sha, "dataset", None)?;
+    let commit_sha = commit_tree(path, &tree_sha, "dataset", &[])?;
 
     let ref_path = format!("refs/gage/datasets/{id}");
     run(git_in(path, ["update-ref", &ref_path, &commit_sha, ""]))?;
@@ -491,15 +502,21 @@ pub fn dataset_sessions_add_at(
     let created_sha = top.get("created").cloned().ok_or_else(|| {
         StoreError::Parse(format!("dataset {dataset_id}: missing top-level `created`"))
     })?;
-    let format_sha = top.get("format").cloned().ok_or_else(|| {
-        StoreError::Parse(format!("dataset {dataset_id}: missing top-level `format`"))
+    let id_sha = top.get("id").cloned().ok_or_else(|| {
+        StoreError::Parse(format!("dataset {dataset_id}: missing top-level `id`"))
+    })?;
+    let object_sha = top.get("object").cloned().ok_or_else(|| {
+        StoreError::Parse(format!("dataset {dataset_id}: missing top-level `object`"))
     })?;
     let now = now_ms();
     let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
+    let prev_sha = write_blob(path, format!("{current_commit}\n").as_bytes())?;
     let mut top_entries = vec![
         format!("100644 blob {created_sha}\tcreated"),
-        format!("100644 blob {format_sha}\tformat"),
+        format!("100644 blob {id_sha}\tid"),
         format!("100644 blob {modified_sha}\tmodified"),
+        format!("100644 blob {object_sha}\tobject"),
+        format!("100644 blob {prev_sha}\tprev"),
         format!("040000 tree {sessions_tree_sha}\tsessions"),
     ];
     top_entries.sort_by(|a, b| {
@@ -510,7 +527,7 @@ pub fn dataset_sessions_add_at(
     let top_tree_sha = mktree(path, &top_entries)?;
 
     let message = format_session_commit_message(&outcomes);
-    let new_commit = commit_tree(path, &top_tree_sha, &message, Some(&current_commit))?;
+    let new_commit = commit_tree(path, &top_tree_sha, &message, &[current_commit.as_str()])?;
     run(git_in(
         path,
         ["update-ref", &ref_path, &new_commit, &current_commit],
@@ -798,14 +815,21 @@ mod tests {
         let ref_path = format!("refs/gage/datasets/{id}");
         let listing = run(git_in(&store, ["ls-tree", "--name-only", &ref_path])).unwrap();
         let names: Vec<&str> = listing.lines().collect();
-        assert_eq!(names, vec!["created", "format", "modified"]);
+        assert_eq!(names, vec!["created", "id", "modified", "object"]);
 
-        let format_content = run(git_in(
+        let object_content = run(git_in(
             &store,
-            ["cat-file", "-p", &format!("{ref_path}:format")],
+            ["cat-file", "-p", &format!("{ref_path}:object")],
         ))
         .unwrap();
-        assert_eq!(format_content, "gage-dataset 1\n");
+        assert_eq!(object_content, "gage::dataset 1\n");
+
+        let id_content = run(git_in(
+            &store,
+            ["cat-file", "-p", &format!("{ref_path}:id")],
+        ))
+        .unwrap();
+        assert_eq!(id_content, format!("{id}\n"));
     }
 
     #[test]

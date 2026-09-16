@@ -55,16 +55,17 @@ pub(crate) fn mktree(path: &Path, entries: &[String]) -> Result<String, StoreErr
 }
 
 /// Create a commit for `tree_sha` under the fixed Gage identity with
-/// `message`. `parent = None` produces a parentless commit; `Some(sha)`
-/// chains against the previous ref value.
+/// `message`. Every entry in `parents` is passed as `-p`, in order. The
+/// lineage parent (if any) comes first; link SHAs from the object's
+/// link files follow. An empty slice produces a parentless commit.
 pub(crate) fn commit_tree(
     path: &Path,
     tree_sha: &str,
     message: &str,
-    parent: Option<&str>,
+    parents: &[&str],
 ) -> Result<String, StoreError> {
     let mut cmd: Command = git_in(path, ["commit-tree", tree_sha]);
-    if let Some(p) = parent {
+    for p in parents {
         cmd.arg("-p").arg(p);
     }
     cmd.arg("-m").arg(message);

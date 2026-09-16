@@ -715,7 +715,7 @@ fn note_show(args: NoteShowArgs) {
         ("name", note.name),
         ("value", note.value),
         ("author", note.author),
-        ("targets", note.targets.join("\n")),
+        ("target", note.targets.join("\n")),
         (
             "created",
             gage_core::datetime::ms_to_iso8601(note.created_ms),
@@ -738,7 +738,7 @@ fn note_show(args: NoteShowArgs) {
     let rows: Vec<Vec<String>> = attrs
         .into_iter()
         .map(|(k, v)| {
-            let value = if k == "targets" {
+            let value = if k == "target" {
                 v
             } else {
                 textwrap::fill(&v, value_width)
