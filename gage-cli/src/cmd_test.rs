@@ -241,7 +241,7 @@ async fn cmd_view(args: ViewArgs) {
         let run = view::resolve(id)?;
         run_model(&run, run_refs())
     };
-    if let Err(e) = gage_tui::test_view::run_app(initial, runs, load) {
+    if let Err(e) = gage_tui::test_view::run(initial, runs, load) {
         eprintln!("view failed: {e}");
         std::process::exit(2);
     }

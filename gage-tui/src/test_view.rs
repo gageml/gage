@@ -13,13 +13,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gage_db::rusqlite::Connection;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::item_table::ItemTable;
+use crate::panel::{header_row, panel_block};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
@@ -94,14 +95,14 @@ pub(crate) fn run_picker(runs: &[TestRunRef], current: Option<&str>) -> Picker {
 /// The test-run view app: one terminal session hosting the test run
 /// view, switching runs as `o` opens them. With no initial model, the
 /// run picker shows over an empty shell; canceling it exits.
-pub fn run_app(
+pub fn run(
     initial: Option<TestRunModel>,
     runs: Vec<TestRunRef>,
     load: impl Fn(&str) -> io::Result<TestRunModel>,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = run_app_inner(&mut terminal, initial, &runs, &load);
+    let result = run_inner(&mut terminal, initial, &runs, &load);
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -109,7 +110,7 @@ pub fn run_app(
     result
 }
 
-fn run_app_inner(
+fn run_inner(
     terminal: &mut DefaultTerminal,
     initial: Option<TestRunModel>,
     runs: &[TestRunRef],
@@ -506,6 +507,11 @@ fn ids_as_refs(ids: &[String]) -> Vec<&str> {
 
 /// Returns the exit action when the view should close.
 fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
+    if let KeyCode::Char('c') = key.code
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        return Some(ExitAction::Quit);
+    }
     match &mut state.dialog {
         Dialog::OpenRun(picker) => {
             match picker.handle_key(key.code) {
@@ -532,8 +538,8 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
                 KeyCode::Up | KeyCode::Char('k') => state.scroll_view.scroll_by(-1),
                 KeyCode::PageDown => state.scroll_view.scroll_by(page),
                 KeyCode::PageUp => state.scroll_view.scroll_by(-page),
-                KeyCode::Char('g') => state.scroll_view.scroll_to_top(),
-                KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
+                KeyCode::Char('g') | KeyCode::Home => state.scroll_view.scroll_to_top(),
+                KeyCode::Char('G') | KeyCode::End => state.scroll_view.scroll_to_bottom(),
                 KeyCode::Char(']') => state.step_dialog(1),
                 KeyCode::Char('[') => state.step_dialog(-1),
                 _ => {}
@@ -554,8 +560,8 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
         KeyCode::Up | KeyCode::Char('k') => state.table.select_by(-1, &refs),
         KeyCode::PageDown => state.table.select_by(state.table.page() as isize, &refs),
         KeyCode::PageUp => state.table.select_by(-(state.table.page() as isize), &refs),
-        KeyCode::Char('g') => state.table.select_first(&refs),
-        KeyCode::Char('G') => state.table.select_last(&refs),
+        KeyCode::Char('g') | KeyCode::Home => state.table.select_first(&refs),
+        KeyCode::Char('G') | KeyCode::End => state.table.select_last(&refs),
         KeyCode::Char(' ') => state.toggle_selected(),
         KeyCode::Right => state.expand_selected(),
         KeyCode::Left => state.collapse_selected(),
@@ -780,14 +786,4 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
         Paragraph::new(help).style(styles::Panel::footer()),
         help_area,
     );
-}
-
-fn panel_block(title: String, active: bool) -> Block<'static> {
-    Block::bordered()
-        .title(title)
-        .border_style(styles::Panel::border(active))
-}
-
-fn header_row<const N: usize>(names: [&'static str; N]) -> Row<'static> {
-    Row::new(names.map(|n| Cell::from(Span::styled(n, styles::Text::dim()))))
 }

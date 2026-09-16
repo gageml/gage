@@ -43,6 +43,7 @@ use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::doc::Document;
 use crate::item_table::ItemTable;
+use crate::panel::{header_row, panel_block};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 
 /// Loader used by the open-scan dialog to rebuild the model for a
@@ -859,8 +860,8 @@ fn handle_key(
                 KeyCode::Up | KeyCode::Char('k') => state.scroll_view.scroll_by(-1),
                 KeyCode::PageDown => state.scroll_view.scroll_by(page),
                 KeyCode::PageUp => state.scroll_view.scroll_by(-page),
-                KeyCode::Char('g') => state.scroll_view.scroll_to_top(),
-                KeyCode::Char('G') => state.scroll_view.scroll_to_bottom(),
+                KeyCode::Char('g') | KeyCode::Home => state.scroll_view.scroll_to_top(),
+                KeyCode::Char('G') | KeyCode::End => state.scroll_view.scroll_to_bottom(),
                 KeyCode::Char(']') => state.step_dialog_item(1),
                 KeyCode::Char('[') => state.step_dialog_item(-1),
                 _ => {}
@@ -880,8 +881,8 @@ fn handle_key(
         KeyCode::Up | KeyCode::Char('k') => state.select_by(-1),
         KeyCode::PageDown => state.select_by(state.page() as isize),
         KeyCode::PageUp => state.select_by(-(state.page() as isize)),
-        KeyCode::Char('g') => state.select_first(),
-        KeyCode::Char('G') => state.select_last(),
+        KeyCode::Char('g') | KeyCode::Home => state.select_first(),
+        KeyCode::Char('G') | KeyCode::End => state.select_last(),
         KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
         KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
         KeyCode::Char('a') if state.focus == Focus::Issues => state.actions_for_selected_issue(),
@@ -2484,7 +2485,13 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
         }
         Prompt::Resolve { issue } => {
             let options = [
-                ("y", format!("yes, resolve issue {}", short_id(&issue.id))),
+                (
+                    "y",
+                    format!(
+                        "yes, resolve issue {}",
+                        gage_core::uuid::short_uuid(&issue.id)
+                    ),
+                ),
                 ("a", "yes, resolve all scan issues".to_string()),
                 ("n", "cancel".to_string()),
             ];
@@ -3221,7 +3228,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 }
                 TaskRow::Agent(t, a) => {
                     let (_, _, glyph) = agent_status(a, t, finished);
-                    let id = short_id(&a.session_id);
+                    let id = gage_core::uuid::short_uuid(&a.session_id).to_string();
                     let text = format!("    {glyph} {id}");
                     if is_selected {
                         Cell::from(text)
@@ -3418,7 +3425,11 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .issues
         .iter()
         .map(|i| {
-            let ids: Vec<String> = i.sessions.iter().map(|s| short_id(&s.id)).collect();
+            let ids: Vec<String> = i
+                .sessions
+                .iter()
+                .map(|s| gage_core::uuid::short_uuid(&s.id).to_string())
+                .collect();
             ids.join(" ")
         })
         .collect();
@@ -3593,27 +3604,14 @@ fn session_step_targets(state: &ViewState, nav: SessionNav) -> usize {
     }
 }
 
-fn panel_block(title: String, active: bool) -> Block<'static> {
-    Block::bordered()
-        .title(title)
-        .border_style(styles::Panel::border(active))
-}
-
-fn header_row<const N: usize>(names: [&'static str; N]) -> Row<'static> {
-    Row::new(names.map(|n| Cell::from(Span::styled(n, styles::Text::dim()))))
-}
-
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
 /// Id cell: dim, except on the selected row where dim text lacks
 /// contrast against the highlight background.
 fn id_span(id: &str, selected: bool) -> Span<'static> {
+    let short = gage_core::uuid::short_uuid(id).to_string();
     if selected {
-        Span::raw(short_id(id))
+        Span::raw(short)
     } else {
-        Span::styled(short_id(id), styles::Text::dim())
+        Span::styled(short, styles::Text::dim())
     }
 }
 

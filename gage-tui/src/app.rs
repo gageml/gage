@@ -268,14 +268,14 @@ pub(crate) fn handle_key(
             }
             KeyOutcome::Consumed
         }
-        KeyCode::Char('g') => {
+        KeyCode::Char('g') | KeyCode::Home => {
             match state.focus {
                 Focus::Outline => state.select_first(),
                 Focus::Body => state.body_scroll_to_top(),
             }
             KeyOutcome::Consumed
         }
-        KeyCode::Char('G') => {
+        KeyCode::Char('G') | KeyCode::End => {
             match state.focus {
                 Focus::Outline => state.select_last(),
                 Focus::Body => state.body_scroll_to_bottom(),

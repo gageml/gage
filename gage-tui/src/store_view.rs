@@ -14,6 +14,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use gage_core::datetime::ms_to_iso8601;
+use gage_core::uuid::short_uuid;
 use gage_store::EntryKind;
 use gage_store::git::{CommitMeta, TreeEntry, list_tree_at, read_commit_at};
 use gage_store::object::{
@@ -21,21 +23,16 @@ use gage_store::object::{
     read_header_at, walk_prev_chain_at,
 };
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Cell, Paragraph, Row, ScrollbarState, Table, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::hint;
-use crate::item_table::ItemTable;
+use crate::item_table::{ItemTable, scrollbar};
+use crate::panel::{header_row, panel_block};
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::styles;
-
-/// How much of a SHA to display at a glance. The full SHA is available
-/// in the raw view; the short form keeps table cells and inline
-/// references legible.
-const SHORT_SHA: usize = 12;
 
 /// Run the store viewer against the store at `store_path`.
 pub fn run(store_path: PathBuf) -> io::Result<()> {
@@ -85,14 +82,17 @@ struct ViewState {
     ordered_ids: Vec<String>,
     table: ItemTable,
     focus: Focus,
-    /// Vertical scroll offset for the detail pane.
-    detail_scroll: u16,
-    /// Cached rendered detail lines for the current selection. Rebuilt
-    /// whenever selection or store contents change.
+    /// Scroll offset for the detail pane, in wrapped rows.
+    body_scroll: u16,
+    /// Max scroll for the detail pane, updated each frame from the
+    /// wrapped line count and viewport height.
+    body_max_scroll: u16,
+    /// Cached rendered detail lines for the current selection.
+    /// Rebuilt when the selection changes or the pane width changes.
     detail: Vec<Line<'static>>,
-    /// Last recorded viewport height of the detail pane, so paging
-    /// keys know their page size.
-    detail_viewport: u16,
+    /// Pane width the cached detail was built for. `None` on first
+    /// render, then updated whenever the detail cache is rebuilt.
+    detail_width: Option<u16>,
     /// A load or refresh error; shown in the footer until the next
     /// keypress.
     error: Option<String>,
@@ -106,14 +106,15 @@ impl ViewState {
             ordered_ids: Vec::new(),
             table: ItemTable::new(),
             focus: Focus::Refs,
-            detail_scroll: 0,
+            body_scroll: 0,
+            body_max_scroll: 0,
             detail: Vec::new(),
-            detail_viewport: 0,
+            detail_width: None,
             error: None,
         }
     }
 
-    /// Reload the ref list and rebuild the detail pane.
+    /// Reload the ref list and invalidate the detail cache.
     fn reload(&mut self) {
         match list_gage_refs_at(&self.store_path) {
             Ok(mut refs) => {
@@ -134,104 +135,94 @@ impl ViewState {
                 self.table.update(&[]);
             }
         }
-        self.rebuild_detail();
+        self.invalidate_detail();
     }
 
-    fn rebuild_detail(&mut self) {
-        self.detail_scroll = 0;
-        self.detail = match self.selected_ref() {
-            Some(r) => render_detail(&self.store_path, r.tip_sha.clone(), &r.ref_name),
-            None => vec![Line::from(Span::styled(
-                "No objects in this store.",
-                styles::Text::dim(),
-            ))],
-        };
+    fn invalidate_detail(&mut self) {
+        self.detail_width = None;
+        self.body_scroll = 0;
     }
 
     fn selected_ref(&self) -> Option<&ObjectRef> {
         let idx = self.table.selected_index()?;
         self.refs.get(idx)
     }
+
+    fn cycle_focus(&mut self, delta: isize) {
+        self.focus = match (self.focus, delta.signum()) {
+            (Focus::Refs, 1) | (Focus::Detail, -1) => Focus::Detail,
+            _ => Focus::Refs,
+        };
+    }
 }
 
 fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
-    // Ctrl-C and Ctrl-D always quit, regardless of focus.
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+    if let KeyCode::Char('c') = key.code
+        && key.modifiers.contains(KeyModifiers::CONTROL)
     {
         return Some(ExitAction::Quit);
     }
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => Some(ExitAction::Quit),
+        KeyCode::Char('q') | KeyCode::Esc => return Some(ExitAction::Quit),
         KeyCode::Tab => {
-            state.focus = match state.focus {
-                Focus::Refs => Focus::Detail,
-                Focus::Detail => Focus::Refs,
-            };
-            None
+            state.cycle_focus(1);
+            return None;
+        }
+        KeyCode::BackTab => {
+            state.cycle_focus(-1);
+            return None;
         }
         KeyCode::Char('r') => {
             state.reload();
-            None
+            return None;
         }
-        _ => {
-            match state.focus {
-                Focus::Refs => handle_refs_key(state, key),
-                Focus::Detail => handle_detail_key(state, key),
-            }
-            None
-        }
+        _ => {}
     }
+    match state.focus {
+        Focus::Refs => handle_refs_key(state, key),
+        Focus::Detail => handle_detail_key(state, key),
+    }
+    None
 }
 
 fn handle_refs_key(state: &mut ViewState, key: KeyEvent) {
     let ids: Vec<&str> = state.ordered_ids.iter().map(String::as_str).collect();
     let prior = state.table.selected_index();
+    let page = state.table.page() as isize;
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => state.table.select_by(1, &ids),
         KeyCode::Char('k') | KeyCode::Up => state.table.select_by(-1, &ids),
         KeyCode::Char('g') | KeyCode::Home => state.table.select_first(&ids),
         KeyCode::Char('G') | KeyCode::End => state.table.select_last(&ids),
-        KeyCode::PageDown => {
-            let page = state.table.page() as isize;
-            state.table.select_by(page, &ids);
-        }
-        KeyCode::PageUp => {
-            let page = state.table.page() as isize;
-            state.table.select_by(-page, &ids);
-        }
+        KeyCode::PageDown => state.table.select_by(page, &ids),
+        KeyCode::PageUp => state.table.select_by(-page, &ids),
         _ => {}
     }
     if state.table.selected_index() != prior {
-        state.rebuild_detail();
+        state.invalidate_detail();
     }
 }
 
 fn handle_detail_key(state: &mut ViewState, key: KeyEvent) {
-    let last = state
-        .detail
-        .len()
-        .saturating_sub(state.detail_viewport.max(1) as usize) as u16;
+    let page = state.body_max_scroll.max(1);
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
-            state.detail_scroll = state.detail_scroll.saturating_add(1).min(last);
+            state.body_scroll = state.body_scroll.saturating_add(1);
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            state.detail_scroll = state.detail_scroll.saturating_sub(1);
+            state.body_scroll = state.body_scroll.saturating_sub(1);
         }
         KeyCode::PageDown => {
-            let page = state.detail_viewport.max(1);
-            state.detail_scroll = state.detail_scroll.saturating_add(page).min(last);
+            state.body_scroll = state.body_scroll.saturating_add(page);
         }
         KeyCode::PageUp => {
-            let page = state.detail_viewport.max(1);
-            state.detail_scroll = state.detail_scroll.saturating_sub(page);
+            state.body_scroll = state.body_scroll.saturating_sub(page);
         }
         KeyCode::Char('g') | KeyCode::Home => {
-            state.detail_scroll = 0;
+            state.body_scroll = 0;
         }
         KeyCode::Char('G') | KeyCode::End => {
-            state.detail_scroll = last;
+            state.body_scroll = state.body_max_scroll;
         }
         _ => {}
     }
@@ -249,39 +240,35 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
 
 fn draw_refs(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let active = state.focus == Focus::Refs;
-    let header = Row::new(vec![
-        Cell::from("Type"),
-        Cell::from("Id"),
-        Cell::from("Tip"),
-    ])
-    .style(styles::Text::dim());
     let rows: Vec<Row> = state
         .refs
         .iter()
         .map(|r| {
             Row::new(vec![
                 Cell::from(r.type_bucket.clone()),
-                Cell::from(Span::styled(short_id(&r.id), styles::Text::id())),
-                Cell::from(Span::styled(short_sha(&r.tip_sha), styles::Text::dim())),
+                Cell::from(Span::styled(
+                    short_uuid(&r.id).to_string(),
+                    styles::Text::id(),
+                )),
+                Cell::from(Span::styled(
+                    short_uuid(&r.tip_sha).to_string(),
+                    styles::Text::dim(),
+                )),
             ])
         })
         .collect();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            format!(" Refs ({}) ", state.refs.len()),
-            styles::Panel::border(active),
-        ))
-        .border_style(styles::Panel::border(active));
     let widths = [
         Constraint::Length(10),
-        Constraint::Length(14),
-        Constraint::Length(SHORT_SHA as u16),
+        Constraint::Length(10),
+        Constraint::Length(10),
     ];
     let table = Table::new(rows, widths)
-        .header(header)
+        .header(header_row(["Type", "Id", "Tip"]))
         .row_highlight_style(styles::Panel::selection(active))
-        .block(block);
+        .block(panel_block(
+            format!(" Refs ({}) ", state.refs.len()),
+            active,
+        ));
     let len = state.refs.len();
     state.table.render(frame, area, table, len, active);
 }
@@ -292,38 +279,85 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         Some(r) => format!(" {} ", r.ref_name),
         None => " Detail ".to_string(),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(title, styles::Panel::border(active)))
-        .border_style(styles::Panel::border(active));
+    let block = panel_block(title, active);
     let inner = block.inner(area);
-    state.detail_viewport = inner.height;
-    let paragraph = Paragraph::new(state.detail.clone())
-        .wrap(Wrap { trim: false })
-        .scroll((state.detail_scroll, 0))
-        .block(block);
-    frame.render_widget(paragraph, area);
+    frame.render_widget(&block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if state.detail_width != Some(inner.width) {
+        state.detail = match state.selected_ref() {
+            Some(r) => render_detail(
+                &state.store_path,
+                r.tip_sha.clone(),
+                &r.ref_name,
+                inner.width,
+            ),
+            None => vec![Line::from(Span::styled(
+                "No objects in this store.",
+                styles::Text::dim(),
+            ))],
+        };
+        state.detail_width = Some(inner.width);
+    }
+
+    let paragraph = Paragraph::new(state.detail.clone()).wrap(Wrap { trim: false });
+    let total = u16::try_from(paragraph.line_count(inner.width)).unwrap_or(u16::MAX);
+    state.body_max_scroll = total.saturating_sub(inner.height);
+    if state.body_scroll > state.body_max_scroll {
+        state.body_scroll = state.body_max_scroll;
+    }
+    frame.render_widget(paragraph.scroll((state.body_scroll, 0)), inner);
+
+    let mut sb_state =
+        ScrollbarState::new(state.body_max_scroll as usize).position(state.body_scroll as usize);
+    frame.render_stateful_widget(
+        scrollbar(active),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut sb_state,
+    );
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
-    let line = if let Some(err) = &state.error {
-        Line::from(Span::styled(err.clone(), styles::LogLevel::error()))
-    } else {
-        hint::help_line(&[
-            ("Tab", "focus"),
-            ("j/k", "move"),
-            ("PgUp/PgDn", "page"),
-            ("r", "refresh"),
-            ("q", "quit"),
-        ])
-    };
-    frame.render_widget(Paragraph::new(line).style(styles::Panel::footer()), area);
+    if let Some(err) = &state.error {
+        let footer = Paragraph::new(Span::styled(err.clone(), styles::RunStatus::error()));
+        frame.render_widget(footer, area);
+        return;
+    }
+    let help = hint::help_line(&[
+        ("Tab", "focus"),
+        ("j/k g/G", ""),
+        ("PgUp/PgDn", "page"),
+        ("r", "refresh"),
+        ("q", "quit"),
+    ]);
+    let help_width = help.width() as u16;
+    let [_, help_area, _] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(help_width),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(help).style(styles::Panel::footer()),
+        help_area,
+    );
 }
 
 /// Build the detail pane's lines for the object whose tip is `commit`.
 /// A read failure at any step is surfaced as a red line rather than
-/// aborting the render.
-fn render_detail(store: &std::path::Path, commit: String, ref_name: &str) -> Vec<Line<'static>> {
+/// aborting the render. `width` is the inner pane width, used so
+/// full-width section headers span the pane.
+fn render_detail(
+    store: &std::path::Path,
+    commit: String,
+    ref_name: &str,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let header = match read_header_at(store, &commit) {
         Ok(h) => h,
@@ -340,15 +374,11 @@ fn render_detail(store: &std::path::Path, commit: String, ref_name: &str) -> Vec
         }
     };
 
-    push_header_section(&mut lines, ref_name, &commit, &header, &commit_meta);
-    lines.push(Line::from(""));
-    push_parents_section(&mut lines, store, &commit);
-    lines.push(Line::from(""));
-    push_tree_section(&mut lines, store, &commit);
-    lines.push(Line::from(""));
-    push_link_files_section(&mut lines, store, &commit);
-    lines.push(Line::from(""));
-    push_prev_chain_section(&mut lines, store, &commit);
+    push_header_section(&mut lines, ref_name, &commit, &header, &commit_meta, width);
+    push_parents_section(&mut lines, store, &commit, width);
+    push_tree_section(&mut lines, store, &commit, width);
+    push_link_files_section(&mut lines, store, &commit, width);
+    push_prev_chain_section(&mut lines, store, &commit, width);
     lines
 }
 
@@ -358,8 +388,9 @@ fn push_header_section(
     commit: &str,
     header: &ObjectHeader,
     commit_meta: &CommitMeta,
+    width: u16,
 ) {
-    lines.push(section_header("Object"));
+    push_section_header(lines, "Object", width);
     lines.push(kv(
         "type",
         format!("{} {}", header.object_type, header.version),
@@ -368,13 +399,13 @@ fn push_header_section(
     lines.push(kv("ref", ref_name.to_string()));
     lines.push(kv("commit", commit.to_string()));
     if let Some(ms) = header.created_ms {
-        lines.push(kv("created", format_ms(ms)));
+        lines.push(kv("created", ms_to_iso8601(ms)));
     }
     if let Some(ms) = header.modified_ms {
-        lines.push(kv("modified", format_ms(ms)));
+        lines.push(kv("modified", ms_to_iso8601(ms)));
     }
     if let Some(ms) = header.deleted_ms {
-        lines.push(kv("deleted", format_ms(ms)));
+        lines.push(kv("deleted", ms_to_iso8601(ms)));
     }
     if header.is_tombstone() {
         lines.push(Line::from(Span::styled(
@@ -389,8 +420,13 @@ fn push_header_section(
     lines.push(kv("message", subject));
 }
 
-fn push_parents_section(lines: &mut Vec<Line<'static>>, store: &std::path::Path, commit: &str) {
-    lines.push(section_header("Parents"));
+fn push_parents_section(
+    lines: &mut Vec<Line<'static>>,
+    store: &std::path::Path,
+    commit: &str,
+    width: u16,
+) {
+    push_section_header(lines, "Parents", width);
     let classified = match classify_parents_at(store, commit) {
         Ok(c) => c,
         Err(e) => {
@@ -411,13 +447,13 @@ fn push_parents_section(lines: &mut Vec<Line<'static>>, store: &std::path::Path,
     for extra in &classified.unattributed {
         lines.push(Line::from(vec![
             Span::styled("  unattributed ", styles::LogLevel::warn()),
-            Span::styled(short_sha(extra), styles::Text::dim()),
+            Span::styled(short_uuid(extra).to_string(), styles::Text::dim()),
         ]));
     }
     for missing in &classified.missing {
         lines.push(Line::from(vec![
             Span::styled("  missing parent ", styles::LogLevel::warn()),
-            Span::styled(short_sha(missing), styles::Text::dim()),
+            Span::styled(short_uuid(missing).to_string(), styles::Text::dim()),
         ]));
     }
 }
@@ -427,7 +463,7 @@ fn labeled_parent(label: &str, sha: &str, store: &std::path::Path) -> Line<'stat
     let mut spans: Vec<Span<'static>> = vec![
         Span::raw("  "),
         Span::styled(format!("{label}: "), styles::Text::dim()),
-        Span::styled(short_sha(sha), styles::Text::id()),
+        Span::styled(short_uuid(sha).to_string(), styles::Text::id()),
     ];
     if let Some(text) = annotation {
         spans.push(Span::raw("  "));
@@ -444,12 +480,17 @@ fn resolve_child(store: &std::path::Path, sha: &str) -> Option<String> {
         "{} {} {}",
         header.object_type,
         header.version,
-        short_id(&header.id)
+        short_uuid(&header.id)
     ))
 }
 
-fn push_tree_section(lines: &mut Vec<Line<'static>>, store: &std::path::Path, commit: &str) {
-    lines.push(section_header("Tree"));
+fn push_tree_section(
+    lines: &mut Vec<Line<'static>>,
+    store: &std::path::Path,
+    commit: &str,
+    width: u16,
+) {
+    push_section_header(lines, "Tree", width);
     let entries = match list_tree_at(store, commit) {
         Ok(t) => t,
         Err(e) => {
@@ -484,8 +525,13 @@ fn tree_line(entry: &TreeEntry) -> Line<'static> {
     ])
 }
 
-fn push_link_files_section(lines: &mut Vec<Line<'static>>, store: &std::path::Path, commit: &str) {
-    lines.push(section_header("Link files"));
+fn push_link_files_section(
+    lines: &mut Vec<Line<'static>>,
+    store: &std::path::Path,
+    commit: &str,
+    width: u16,
+) {
+    push_section_header(lines, "Link files", width);
     let files = match find_link_files_at(store, commit) {
         Ok(f) => f,
         Err(e) => {
@@ -516,7 +562,7 @@ fn push_link_file(lines: &mut Vec<Line<'static>>, store: &std::path::Path, file:
         let annotation = resolve_child(store, sha);
         let mut spans: Vec<Span<'static>> = vec![
             Span::raw("    "),
-            Span::styled(short_sha(sha), styles::Text::id()),
+            Span::styled(short_uuid(sha).to_string(), styles::Text::id()),
         ];
         if let Some(text) = annotation {
             spans.push(Span::raw("  "));
@@ -526,8 +572,13 @@ fn push_link_file(lines: &mut Vec<Line<'static>>, store: &std::path::Path, file:
     }
 }
 
-fn push_prev_chain_section(lines: &mut Vec<Line<'static>>, store: &std::path::Path, commit: &str) {
-    lines.push(section_header("History (prev chain)"));
+fn push_prev_chain_section(
+    lines: &mut Vec<Line<'static>>,
+    store: &std::path::Path,
+    commit: &str,
+    width: u16,
+) {
+    push_section_header(lines, "History (prev chain)", width);
     let chain = match walk_prev_chain_at(store, commit) {
         Ok(c) => c,
         Err(e) => {
@@ -551,11 +602,11 @@ fn push_prev_chain_section(lines: &mut Vec<Line<'static>>, store: &std::path::Pa
         let marker = if idx == 0 { "*" } else { " " };
         let time = meta
             .as_ref()
-            .map(|m| format_ms(m.committer_time_ms))
+            .map(|m| ms_to_iso8601(m.committer_time_ms))
             .unwrap_or_default();
         lines.push(Line::from(vec![
             Span::raw(format!("  {marker} ")),
-            Span::styled(short_sha(sha), styles::Text::id()),
+            Span::styled(short_uuid(sha).to_string(), styles::Text::id()),
             Span::raw("  "),
             Span::styled(time, styles::Text::dim()),
             Span::raw("  "),
@@ -564,11 +615,18 @@ fn push_prev_chain_section(lines: &mut Vec<Line<'static>>, store: &std::path::Pa
     }
 }
 
-fn section_header(label: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        label.to_string(),
-        styles::Text::dim().add_modifier(Modifier::BOLD),
-    ))
+/// Full-width section header: a leading blank line, the label on a
+/// DarkGray-bg row spanning the pane, and a trailing blank line.
+/// Mirrors the layout used by `scan_view::section_header` and
+/// `test_view::section_header`.
+fn push_section_header(lines: &mut Vec<Line<'static>>, label: &str, width: u16) {
+    lines.push(Line::raw(""));
+    let pad = (width as usize).saturating_sub(1);
+    lines.push(Line::from(Span::styled(
+        format!(" {label:<pad$}"),
+        styles::Text::header(),
+    )));
+    lines.push(Line::raw(""));
 }
 
 fn kv(k: &str, v: String) -> Line<'static> {
@@ -581,26 +639,4 @@ fn kv(k: &str, v: String) -> Line<'static> {
 
 fn err_line(text: String) -> Line<'static> {
     Line::from(Span::styled(format!("  {text}"), styles::LogLevel::error()))
-}
-
-fn short_sha(sha: &str) -> String {
-    if sha.len() > SHORT_SHA {
-        sha[..SHORT_SHA].to_string()
-    } else {
-        sha.to_string()
-    }
-}
-
-fn short_id(id: &str) -> String {
-    // Object ids are 26-char Crockford base32. 12 chars keep the row
-    // readable while still being unique in a typical store.
-    if id.len() > SHORT_SHA {
-        id[..SHORT_SHA].to_string()
-    } else {
-        id.to_string()
-    }
-}
-
-fn format_ms(ms: i64) -> String {
-    gage_core::datetime::ms_to_iso8601(ms)
 }
