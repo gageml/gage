@@ -8,6 +8,19 @@ pub fn new_uuid() -> String {
     encode_crockford(uuid::Uuid::new_v4().as_bytes())
 }
 
+/// Namespace UUID for Gage-derived object IDs. A fixed random constant;
+/// changing it would relabel every derived object.
+const GAGE_ID_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x7d, 0xb2, 0x1a, 0x0e, 0x4f, 0x3c, 0x4a, 0x87, 0xa1, 0x0e, 0x9c, 0x2b, 0x5d, 0xf7, 0x1a, 0x64,
+]);
+
+/// Derive a stable 26-char Crockford ID from a key. Used for object
+/// types whose IDs are computed from external identifiers (sessions,
+/// contexts) so the same input always maps to the same object.
+pub fn derive_id(key: &str) -> String {
+    encode_crockford(uuid::Uuid::new_v5(&GAGE_ID_NAMESPACE, key.as_bytes()).as_bytes())
+}
+
 pub fn short_uuid(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }

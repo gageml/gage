@@ -5,7 +5,8 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::{StoreError, git_in, run, run_with_stdin};
+use crate::StoreError;
+use crate::git::{git_in, run, run_with_stdin};
 
 /// Fixed identity written to the author and committer of every artifact
 /// commit.

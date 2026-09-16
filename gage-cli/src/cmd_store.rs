@@ -59,6 +59,15 @@ pub enum StoreCommand {
         #[command(subcommand)]
         command: DatasetCommand,
     },
+
+    /// Browse the store's object graph
+    ///
+    /// Opens an interactive view of `refs/gage/**`: refs listing on the
+    /// left, per-commit detail (header, parents classified as `prev`
+    /// vs link, tree, resolved link files, and the `prev` chain) on
+    /// the right. Payload agnostic --- object type names are shown but
+    /// no `attrs` is interpreted.
+    View,
 }
 
 #[derive(Subcommand)]
@@ -222,6 +231,22 @@ pub fn run(command: StoreCommand) {
                 DatasetSessionCommand::Add(args) => dataset_session_add(args),
             },
         },
+        StoreCommand::View => view(),
+    }
+}
+
+fn view() {
+    let store = gage_store::store_path();
+    if !store.join("HEAD").is_file() {
+        eprintln!(
+            "gage store view: no Gage store at {} (run `gage store init`)",
+            store.display()
+        );
+        std::process::exit(1);
+    }
+    if let Err(e) = gage_tui::store_view::run(store) {
+        eprintln!("gage store view: {e}");
+        std::process::exit(1);
     }
 }
 

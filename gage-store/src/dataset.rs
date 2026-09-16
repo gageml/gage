@@ -2,26 +2,26 @@
 //!
 //! A dataset is a ref under `refs/gage/datasets/<id>`. Its tree carries
 //! the common header (`object` = `gage::dataset 1\n`, `id`, `created`,
-//! `modified`) and any session directories added later. An `add`
-//! commit is parentless.
-//!
-//! Sessions are currently embedded under `sessions/<n>/` while
-//! first-class session objects are still deferred; when session
-//! objects land, the embedded layout will be replaced with a
-//! `sessions` link file of session commit SHAs.
-
-use std::collections::BTreeMap;
-use std::path::Path;
+//! `modified`) and, once sessions have been added, a `sessions.link`
+//! blob listing the commit SHA of each member session, one per line,
+//! in insertion order. Every SHA in `sessions.link` becomes a commit
+//! parent of the dataset commit, so pushing a dataset carries its
+//! sessions along. Session content itself lives in first-class
+//! [`gage::session`](crate::session) objects; the dataset does not
+//! copy it.
 
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
 use gage_session::{ContentAccess, SessionType, SourceSession};
 
-use crate::writer::{commit_tree, mktree, write_blob, write_blob_stream};
-use crate::{StoreError, exists, git_in, run, store_path};
+use crate::git::{git_in, run};
+use crate::session::{SessionAddOutcome, SessionOutcome, session_add_at, session_at_commit};
+use crate::writer::{commit_tree, mktree, write_blob};
+use crate::{StoreError, exists, store_path};
 
 /// `object` blob content for a dataset tree.
 const DATASET_OBJECT: &[u8] = b"gage::dataset 1\n";
@@ -59,11 +59,13 @@ pub fn dataset_add_at(path: &Path) -> Result<String, StoreError> {
     Ok(id)
 }
 
-/// Metadata for one session in a dataset, read from the four
-/// top-level files under `sessions/<n>/`.
+/// Metadata for one member session in a dataset, resolved through the
+/// dataset's `sessions.link` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMeta {
+    /// 1-based index in `sessions.link`.
     pub session_num: u32,
+    /// The source's own session id (attrs.session_id).
     pub session_id: String,
     pub driver_name: String,
     pub driver_version: String,
@@ -72,7 +74,7 @@ pub struct SessionMeta {
 }
 
 /// Read a session's metadata, resolving `session_ref` as either a
-/// decimal `<n>` or a `session_id` string.
+/// decimal `<n>` or a source `session_id` string.
 pub fn dataset_session_meta(
     dataset_id: &str,
     session_ref: &str,
@@ -81,7 +83,7 @@ pub fn dataset_session_meta(
 }
 
 pub fn dataset_session_meta_at(
-    path: &std::path::Path,
+    path: &Path,
     dataset_id: &str,
     session_ref: &str,
 ) -> Result<SessionMeta, StoreError> {
@@ -89,97 +91,25 @@ pub fn dataset_session_meta_at(
         return Err(StoreError::NotFound(path.to_path_buf()));
     }
     let ref_path = format!("refs/gage/datasets/{dataset_id}");
-    let commit = run(git_in(path, ["rev-parse", &ref_path]))?
-        .trim()
-        .to_string();
-    let sessions = read_sessions_index(path, &commit)?;
-    let session_num = if let Ok(n) = session_ref.parse::<u32>() {
-        if !sessions.contains_key(&n) {
-            return Err(StoreError::SessionNotFound(session_ref.to_string()));
-        }
-        n
-    } else {
-        let mut found: Option<u32> = None;
-        for n in sessions.keys() {
-            let sid = run(git_in(
-                path,
-                [
-                    "cat-file",
-                    "-p",
-                    &format!("{commit}:sessions/{n}/session_id"),
-                ],
-            ))?
-            .trim()
-            .to_string();
-            if sid == session_ref {
-                found = Some(*n);
-                break;
-            }
-        }
-        found.ok_or_else(|| StoreError::SessionNotFound(session_ref.to_string()))?
-    };
-    let session_id = run(git_in(
-        path,
-        [
-            "cat-file",
-            "-p",
-            &format!("{commit}:sessions/{session_num}/session_id"),
-        ],
-    ))?
-    .trim()
-    .to_string();
-    let driver_line = run(git_in(
-        path,
-        [
-            "cat-file",
-            "-p",
-            &format!("{commit}:sessions/{session_num}/driver"),
-        ],
-    ))?
-    .trim()
-    .to_string();
-    let (driver_name, driver_version) = driver_line
-        .split_once(' ')
-        .map(|(n, v)| (n.to_string(), v.to_string()))
-        .unwrap_or((driver_line.clone(), String::new()));
-    let session_type_line = run(git_in(
-        path,
-        [
-            "cat-file",
-            "-p",
-            &format!("{commit}:sessions/{session_num}/session_type"),
-        ],
-    ))?
-    .trim()
-    .to_string();
-    let session_type = match session_type_line.split_once(' ') {
-        Some((name, ver)) => SessionType::new(name.to_string(), ver.to_string()),
-        None => SessionType::new(session_type_line, String::new()),
-    };
-    let content_format = match run(git_in(
-        path,
-        [
-            "cat-file",
-            "-p",
-            &format!("{commit}:sessions/{session_num}/content_format"),
-        ],
-    )) {
-        Ok(s) => Some(s.trim().to_string()),
-        Err(StoreError::Git { .. }) => None,
-        Err(e) => return Err(e),
-    };
+    let commit = rev_parse(path, &ref_path)?;
+    let members = read_sessions_link(path, &commit)?;
+    let session_num = resolve_session_num(path, &members, session_ref)?;
+    let commit_sha = members
+        .get((session_num - 1) as usize)
+        .expect("resolve_session_num returns a valid 1-based index");
+    let record = session_at_commit(path, commit_sha)?;
     Ok(SessionMeta {
         session_num,
-        session_id,
-        driver_name,
-        driver_version,
-        session_type,
-        content_format,
+        session_id: record.attrs.session_id,
+        driver_name: record.driver_name,
+        driver_version: record.driver_version,
+        session_type: record.session_type,
+        content_format: record.attrs.content_format,
     })
 }
 
-/// Build a [`ContentAccess`] backed by git for the given dataset
-/// session's `content/` subtree.
+/// Build a [`ContentAccess`] backed by git for the session at
+/// position `session_num` in the given dataset.
 pub fn dataset_session_content(
     dataset_id: &str,
     session_num: u32,
@@ -188,7 +118,7 @@ pub fn dataset_session_content(
 }
 
 pub fn dataset_session_content_at(
-    path: &std::path::Path,
+    path: &Path,
     dataset_id: &str,
     session_num: u32,
 ) -> Result<Box<dyn ContentAccess>, StoreError> {
@@ -196,20 +126,24 @@ pub fn dataset_session_content_at(
         return Err(StoreError::NotFound(path.to_path_buf()));
     }
     let ref_path = format!("refs/gage/datasets/{dataset_id}");
-    let commit = run(git_in(path, ["rev-parse", &ref_path]))?
-        .trim()
-        .to_string();
+    let commit = rev_parse(path, &ref_path)?;
+    let members = read_sessions_link(path, &commit)?;
+    if session_num == 0 || (session_num as usize) > members.len() {
+        return Err(StoreError::SessionNotFound(session_num.to_string()));
+    }
+    let session_commit = members
+        .get((session_num - 1) as usize)
+        .expect("bounds checked above")
+        .clone();
     Ok(Box::new(GitContentAccess {
         store_path: path.to_path_buf(),
-        commit,
-        session_num,
+        session_commit,
     }))
 }
 
 struct GitContentAccess {
     store_path: std::path::PathBuf,
-    commit: String,
-    session_num: u32,
+    session_commit: String,
 }
 
 impl ContentAccess for GitContentAccess {
@@ -220,7 +154,7 @@ impl ContentAccess for GitContentAccess {
                 "ls-tree",
                 "-r",
                 "--name-only",
-                &format!("{}:sessions/{}/content", self.commit, self.session_num),
+                &format!("{}:files", self.session_commit),
             ],
         ))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -228,10 +162,7 @@ impl ContentAccess for GitContentAccess {
     }
 
     fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>> {
-        let target = format!(
-            "{}:sessions/{}/content/{}",
-            self.commit, self.session_num, path
-        );
+        let target = format!("{}:files/{}", self.session_commit, path);
         let mut cmd: Command = git_in(&self.store_path, ["cat-file", "-p", &target]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::null());
         let mut child = cmd.spawn()?;
@@ -256,23 +187,20 @@ impl Read for GitReader {
 
 impl Drop for GitReader {
     fn drop(&mut self) {
-        // Reap the git process to avoid a zombie. The result is
-        // intentionally discarded: we no longer care about the exit
-        // code by the time we drop.
+        // Reap the git process to avoid a zombie. The exit code is
+        // uninteresting by the time the reader is dropped.
         drop(self.child.wait());
     }
 }
 
-/// Summary of one session in a dataset, for list views.
+/// Summary of one member session in a dataset, for list views.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DatasetSessionSummary {
-    /// The 1-based counter under `sessions/<n>/`.
     pub session_num: u32,
-    /// Contents of the `session_id` file.
     pub session_id: String,
-    /// Contents of the `session_type` file, e.g. `"claude 1"`.
+    /// Contents of the session's `attrs.session_type` (e.g. `"claude 1"`).
     pub session_type: String,
-    /// Sum of blob sizes under `sessions/<n>/content/**`.
+    /// Sum of blob sizes under the session's `files/**`.
     pub size: u64,
 }
 
@@ -290,76 +218,19 @@ pub fn dataset_sessions_list_at(
         return Err(StoreError::NotFound(path.to_path_buf()));
     }
     let ref_path = format!("refs/gage/datasets/{dataset_id}");
-    let commit = run(git_in(path, ["rev-parse", &ref_path]))?
-        .trim()
-        .to_string();
-    let sessions = read_sessions_index(path, &commit)?;
-    let mut out = Vec::with_capacity(sessions.len());
-    for n in sessions.keys() {
-        let session_id = run(git_in(
-            path,
-            [
-                "cat-file",
-                "-p",
-                &format!("{commit}:sessions/{n}/session_id"),
-            ],
-        ))?
-        .trim()
-        .to_string();
-        let session_type = run(git_in(
-            path,
-            [
-                "cat-file",
-                "-p",
-                &format!("{commit}:sessions/{n}/session_type"),
-            ],
-        ))?
-        .trim()
-        .to_string();
-        let size = content_bytes(path, &commit, *n)?;
+    let commit = rev_parse(path, &ref_path)?;
+    let members = read_sessions_link(path, &commit)?;
+    let mut out = Vec::with_capacity(members.len());
+    for (idx, session_commit) in members.iter().enumerate() {
+        let record = session_at_commit(path, session_commit)?;
         out.push(DatasetSessionSummary {
-            session_num: *n,
-            session_id,
-            session_type,
-            size,
+            session_num: (idx + 1) as u32,
+            session_id: record.attrs.session_id,
+            session_type: record.attrs.session_type,
+            size: record.size,
         });
     }
     Ok(out)
-}
-
-/// Sum of blob sizes under `sessions/<n>/content/`. Zero when the
-/// content subtree is absent.
-fn content_bytes(path: &Path, commit: &str, session_num: u32) -> Result<u64, StoreError> {
-    let listing = match run(git_in(
-        path,
-        [
-            "ls-tree",
-            "-r",
-            "-l",
-            &format!("{commit}:sessions/{session_num}/content"),
-        ],
-    )) {
-        Ok(s) => s,
-        Err(StoreError::Git { .. }) => return Ok(0),
-        Err(e) => return Err(e),
-    };
-    let mut total = 0u64;
-    for line in listing.lines() {
-        let (meta, _) = line
-            .split_once('\t')
-            .ok_or_else(|| StoreError::Parse(format!("ls-tree line: {line}")))?;
-        let parts: Vec<&str> = meta.split_whitespace().collect();
-        let [_, kind, _, size_str]: [&str; 4] = parts.try_into().map_err(|got: Vec<&str>| {
-            StoreError::Parse(format!("ls-tree meta {meta:?}: got {}", got.len()))
-        })?;
-        if kind != "blob" {
-            continue;
-        }
-        total += size_str
-            .parse::<u64>()
-            .map_err(|e| StoreError::Parse(format!("ls-tree size {size_str:?}: {e}")))?;
-    }
-    Ok(total)
 }
 
 /// Resolve a full id or unique prefix to the dataset's full id.
@@ -387,26 +258,18 @@ pub fn dataset_resolve_id_at(path: &Path, id_or_prefix: &str) -> Result<String, 
     }
 }
 
-/// Outcome of a session add: which slot the session landed in and
-/// whether anything changed.
+/// Outcome of adding one session to a dataset.
 #[derive(Debug, PartialEq, Eq)]
-pub struct SessionAddOutcome {
+pub struct DatasetSessionAddOutcome {
+    /// Position in `sessions.link` after the operation.
     pub session_num: u32,
+    /// Derived Gage session object id.
+    pub session_id: String,
     pub outcome: SessionOutcome,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum SessionOutcome {
-    /// New session dir at `sessions/<n>/`.
-    Added,
-    /// Existing session dir replaced with new content.
-    Updated,
-    /// Existing session matched byte-for-byte; no commit was written.
-    NoOp,
-}
-
-/// One session to add to a dataset. Held for the duration of the
-/// call; the caller owns the reader box.
+/// One session to add to a dataset. Held for the duration of the call;
+/// the caller owns the reader box.
 pub struct SessionSpec<'a> {
     pub driver_name: &'a str,
     pub driver_version: &'a str,
@@ -414,14 +277,15 @@ pub struct SessionSpec<'a> {
 }
 
 /// Add or update one or more sessions in the given dataset in a single
-/// commit. Streams each session reader's files into the store, splices
-/// each session dir into the dataset tree at `sessions/<n>/`, and
-/// chains one new commit for the whole batch. If every input is a
-/// byte-identical no-op, no commit is written.
+/// commit. Each spec is materialized as a session object (created,
+/// updated, or reused); the dataset's `sessions.link` file is rewritten
+/// to reference the resulting commit SHAs. If every input is a
+/// byte-identical no-op and the linked SHAs are unchanged, no dataset
+/// commit is written.
 pub fn dataset_sessions_add(
     dataset_id: &str,
     specs: Vec<SessionSpec<'_>>,
-) -> Result<Vec<SessionAddOutcome>, StoreError> {
+) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
     dataset_sessions_add_at(&store_path(), dataset_id, specs)
 }
 
@@ -429,7 +293,7 @@ pub fn dataset_sessions_add_at(
     path: &Path,
     dataset_id: &str,
     mut specs: Vec<SessionSpec<'_>>,
-) -> Result<Vec<SessionAddOutcome>, StoreError> {
+) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
     if !exists(path) {
         return Err(StoreError::NotFound(path.to_path_buf()));
     }
@@ -437,97 +301,92 @@ pub fn dataset_sessions_add_at(
         return Ok(Vec::new());
     }
     let ref_path = format!("refs/gage/datasets/{dataset_id}");
-    let current_commit = run(git_in(path, ["rev-parse", &ref_path]))?
-        .trim()
-        .to_string();
+    let current_commit = rev_parse(path, &ref_path)?;
+    let mut members = read_sessions_link(path, &current_commit)?;
 
-    let existing_sessions = read_sessions_index(path, &current_commit)?;
-    // Pending state accumulates as we process each spec: existing
-    // slot shas overridden by newly built trees, next number bumps
-    // as new slots are allocated.
-    let mut pending: BTreeMap<u32, String> = existing_sessions.clone();
-    let mut next_num = existing_sessions.keys().copied().max().map_or(1, |m| m + 1);
-    let mut outcomes: Vec<SessionAddOutcome> = Vec::with_capacity(specs.len());
-    let mut any_change = false;
+    // Compute derived ids of existing members so we can detect updates
+    // to a session already in the dataset without re-scanning.
+    let mut member_ids: Vec<String> = Vec::with_capacity(members.len());
+    for sha in &members {
+        member_ids.push(read_id_blob(path, sha)?);
+    }
+
+    let mut outcomes: Vec<DatasetSessionAddOutcome> = Vec::with_capacity(specs.len());
+    let mut sessions_link_changed = false;
 
     for spec in specs.iter_mut() {
-        let existing_hit = find_matching_session(
-            path,
-            &current_commit,
-            &existing_sessions,
-            spec.driver_name,
-            spec.reader.session_id(),
-        )?;
-        let session_num = match existing_hit {
-            Some(n) => n,
+        let SessionAddOutcome {
+            id,
+            commit_sha,
+            outcome,
+        } = session_add_at(path, spec.driver_name, spec.driver_version, spec.reader)?;
+        let position = member_ids.iter().position(|m| m == &id);
+        let session_num = match position {
+            Some(idx) => {
+                let slot = members
+                    .get_mut(idx)
+                    .expect("idx came from members.iter().position");
+                if *slot != commit_sha {
+                    *slot = commit_sha.clone();
+                    sessions_link_changed = true;
+                }
+                (idx + 1) as u32
+            }
             None => {
-                let n = next_num;
-                next_num += 1;
-                n
+                members.push(commit_sha.clone());
+                member_ids.push(id.clone());
+                sessions_link_changed = true;
+                members.len() as u32
             }
         };
-        let session_tree_sha =
-            build_session_tree(path, spec.driver_name, spec.driver_version, spec.reader)?;
-        let previous_sha = existing_sessions.get(&session_num);
-        let outcome = if previous_sha == Some(&session_tree_sha) {
-            SessionOutcome::NoOp
-        } else if existing_hit.is_some() {
-            SessionOutcome::Updated
-        } else {
-            SessionOutcome::Added
-        };
-        if outcome != SessionOutcome::NoOp {
-            pending.insert(session_num, session_tree_sha);
-            any_change = true;
-        }
-        outcomes.push(SessionAddOutcome {
+        outcomes.push(DatasetSessionAddOutcome {
             session_num,
+            session_id: id,
             outcome,
         });
     }
 
-    if !any_change {
+    if !sessions_link_changed {
         return Ok(outcomes);
     }
 
-    // Rebuild sessions/ subtree from the pending map.
-    let sessions_entries: Vec<(String, String)> = pending
-        .iter()
-        .map(|(n, sha)| (n.to_string(), sha.clone()))
-        .collect();
-    let sessions_tree_sha = mktree_dirs(path, &sessions_entries)?;
+    // Rebuild the dataset tree with a fresh `sessions.link` and `prev`.
+    let sessions_link_content: String = members.iter().map(|s| format!("{s}\n")).collect();
+    let sessions_link_sha = write_blob(path, sessions_link_content.as_bytes())?;
 
-    // Rewrite the top-level tree.
     let top = read_top_tree(path, &current_commit)?;
-    let created_sha = top.get("created").cloned().ok_or_else(|| {
-        StoreError::Parse(format!("dataset {dataset_id}: missing top-level `created`"))
-    })?;
-    let id_sha = top.get("id").cloned().ok_or_else(|| {
-        StoreError::Parse(format!("dataset {dataset_id}: missing top-level `id`"))
-    })?;
-    let object_sha = top.get("object").cloned().ok_or_else(|| {
-        StoreError::Parse(format!("dataset {dataset_id}: missing top-level `object`"))
-    })?;
+    let created_sha = top
+        .get("created")
+        .cloned()
+        .ok_or_else(|| StoreError::Parse(format!("dataset {dataset_id}: missing `created`")))?;
+    let id_sha = top
+        .get("id")
+        .cloned()
+        .ok_or_else(|| StoreError::Parse(format!("dataset {dataset_id}: missing `id`")))?;
+    let object_sha = top
+        .get("object")
+        .cloned()
+        .ok_or_else(|| StoreError::Parse(format!("dataset {dataset_id}: missing `object`")))?;
     let now = now_ms();
     let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
     let prev_sha = write_blob(path, format!("{current_commit}\n").as_bytes())?;
+
     let mut top_entries = vec![
         format!("100644 blob {created_sha}\tcreated"),
         format!("100644 blob {id_sha}\tid"),
         format!("100644 blob {modified_sha}\tmodified"),
         format!("100644 blob {object_sha}\tobject"),
         format!("100644 blob {prev_sha}\tprev"),
-        format!("040000 tree {sessions_tree_sha}\tsessions"),
+        format!("100644 blob {sessions_link_sha}\tsessions.link"),
     ];
-    top_entries.sort_by(|a, b| {
-        let na = a.split('\t').nth(1).unwrap_or("");
-        let nb = b.split('\t').nth(1).unwrap_or("");
-        na.cmp(nb)
-    });
+    top_entries.sort_by(|a, b| tree_entry_name(a).cmp(tree_entry_name(b)));
     let top_tree_sha = mktree(path, &top_entries)?;
 
+    let mut parents: Vec<&str> = vec![&current_commit];
+    parents.extend(members.iter().map(|s| s.as_str()));
+
     let message = format_session_commit_message(&outcomes);
-    let new_commit = commit_tree(path, &top_tree_sha, &message, &[current_commit.as_str()])?;
+    let new_commit = commit_tree(path, &top_tree_sha, &message, &parents)?;
     run(git_in(
         path,
         ["update-ref", &ref_path, &new_commit, &current_commit],
@@ -536,7 +395,7 @@ pub fn dataset_sessions_add_at(
     Ok(outcomes)
 }
 
-fn format_session_commit_message(outcomes: &[SessionAddOutcome]) -> String {
+fn format_session_commit_message(outcomes: &[DatasetSessionAddOutcome]) -> String {
     let mut added: Vec<u32> = Vec::new();
     let mut updated: Vec<u32> = Vec::new();
     for o in outcomes {
@@ -572,78 +431,35 @@ fn format_session_commit_message(outcomes: &[SessionAddOutcome]) -> String {
     format!("sessions: {}", parts.join("; "))
 }
 
-/// Return `<n> -> tree sha` for every existing `sessions/<n>/` entry.
-fn read_sessions_index(path: &Path, commit: &str) -> Result<BTreeMap<u32, String>, StoreError> {
-    // Peek at the top-level tree; if `sessions` is absent, empty map.
-    let top_listing = run(git_in(path, ["ls-tree", commit]))?;
-    let has_sessions = top_listing.lines().any(|l| {
-        l.split_once('\t')
-            .map(|(_, n)| n == "sessions")
-            .unwrap_or(false)
-    });
-    if !has_sessions {
-        return Ok(BTreeMap::new());
+fn read_sessions_link(path: &Path, commit: &str) -> Result<Vec<String>, StoreError> {
+    let listing = run(git_in(path, ["ls-tree", commit]))?;
+    if !listing
+        .lines()
+        .any(|l| l.split('\t').nth(1) == Some("sessions.link"))
+    {
+        return Ok(Vec::new());
     }
-    let listing = run(git_in(path, ["ls-tree", &format!("{commit}:sessions")]))?;
-    let mut out = BTreeMap::new();
-    for line in listing.lines() {
-        let (meta, name) = line
-            .split_once('\t')
-            .ok_or_else(|| StoreError::Parse(format!("ls-tree sessions: {line}")))?;
-        let parts: Vec<&str> = meta.split_whitespace().collect();
-        let [_, kind, sha]: [&str; 3] = parts.try_into().map_err(|got: Vec<&str>| {
-            StoreError::Parse(format!("ls-tree sessions meta {meta:?}: got {}", got.len()))
-        })?;
-        if kind != "tree" {
-            return Err(StoreError::Parse(format!(
-                "unexpected entry under sessions/: {name} ({kind})"
-            )));
-        }
-        let n: u32 = name
-            .parse()
-            .map_err(|e| StoreError::Parse(format!("session dir name {name:?}: {e}")))?;
-        out.insert(n, sha.to_string());
-    }
-    Ok(out)
+    let content = run(git_in(
+        path,
+        ["cat-file", "-p", &format!("{commit}:sessions.link")],
+    ))?;
+    Ok(content.lines().map(|s| s.trim().to_string()).collect())
 }
 
-/// Find the existing session `<n>` whose `(driver_name, session_id)`
-/// matches the incoming pair, if any.
-fn find_matching_session(
+fn read_id_blob(path: &Path, commit_sha: &str) -> Result<String, StoreError> {
+    let s = run(git_in(
+        path,
+        ["cat-file", "-p", &format!("{commit_sha}:id")],
+    ))?;
+    Ok(s.trim().to_string())
+}
+
+fn read_top_tree(
     path: &Path,
     commit: &str,
-    existing: &BTreeMap<u32, String>,
-    driver_name: &str,
-    session_id: &str,
-) -> Result<Option<u32>, StoreError> {
-    for n in existing.keys() {
-        let driver = run(git_in(
-            path,
-            ["cat-file", "-p", &format!("{commit}:sessions/{n}/driver")],
-        ))?;
-        let existing_driver_name = driver.split_whitespace().next().unwrap_or("");
-        if existing_driver_name != driver_name {
-            continue;
-        }
-        let existing_id = run(git_in(
-            path,
-            [
-                "cat-file",
-                "-p",
-                &format!("{commit}:sessions/{n}/session_id"),
-            ],
-        ))?;
-        if existing_id.trim() == session_id {
-            return Ok(Some(*n));
-        }
-    }
-    Ok(None)
-}
-
-/// Read the top-level tree of `commit` into a map of `name -> sha`.
-fn read_top_tree(path: &Path, commit: &str) -> Result<BTreeMap<String, String>, StoreError> {
+) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
     let listing = run(git_in(path, ["ls-tree", commit]))?;
-    let mut out = BTreeMap::new();
+    let mut out = std::collections::BTreeMap::new();
     for line in listing.lines() {
         let (meta, name) = line
             .split_once('\t')
@@ -657,94 +473,34 @@ fn read_top_tree(path: &Path, commit: &str) -> Result<BTreeMap<String, String>, 
     Ok(out)
 }
 
-/// Build the tree for one `sessions/<n>/` directory. Streams the
-/// reader's files into the store, then assembles the metadata blobs
-/// plus the `content/` subtree.
-fn build_session_tree(
-    path: &Path,
-    driver_name: &str,
-    driver_version: &str,
-    reader: &mut dyn SourceSession,
-) -> Result<String, StoreError> {
-    let session_id_sha = write_blob(path, format!("{}\n", reader.session_id()).as_bytes())?;
-    let driver_sha = write_blob(path, format!("{driver_name} {driver_version}\n").as_bytes())?;
-    let session_type_sha = write_blob(path, format!("{}\n", reader.session_type()).as_bytes())?;
-    let content_format_sha = reader
-        .content_format()
-        .map(|s| write_blob(path, format!("{s}\n").as_bytes()))
-        .transpose()?;
-
-    let mut content_entries: Vec<(String, String)> = Vec::new();
-    for file in reader.files() {
-        let file = file.map_err(|e| StoreError::Parse(format!("driver: {e}")))?;
-        let sha = write_blob_stream(path, file.content)?;
-        content_entries.push((file.path, sha));
-    }
-    let content_tree_sha = build_content_tree(path, content_entries)?;
-
-    let mut entries: Vec<String> = vec![
-        format!("040000 tree {content_tree_sha}\tcontent"),
-        format!("100644 blob {driver_sha}\tdriver"),
-        format!("100644 blob {session_id_sha}\tsession_id"),
-        format!("100644 blob {session_type_sha}\tsession_type"),
-    ];
-    if let Some(sha) = &content_format_sha {
-        entries.push(format!("100644 blob {sha}\tcontent_format"));
-    }
-    entries.sort_by(|a, b| {
-        let na = a.split('\t').nth(1).unwrap_or("");
-        let nb = b.split('\t').nth(1).unwrap_or("");
-        na.cmp(nb)
-    });
-    mktree(path, &entries)
+fn rev_parse(path: &Path, ref_path: &str) -> Result<String, StoreError> {
+    Ok(run(git_in(path, ["rev-parse", ref_path]))?
+        .trim()
+        .to_string())
 }
 
-/// Recursively build a tree from `(relative_path, blob_sha)` pairs.
-fn build_content_tree(path: &Path, entries: Vec<(String, String)>) -> Result<String, StoreError> {
-    let mut blobs: BTreeMap<String, String> = BTreeMap::new();
-    let mut subdirs: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-    for (rel, sha) in entries {
-        match rel.split_once('/') {
-            Some((dir, rest)) => {
-                subdirs
-                    .entry(dir.to_string())
-                    .or_default()
-                    .push((rest.to_string(), sha));
-            }
-            None => {
-                blobs.insert(rel, sha);
-            }
+fn resolve_session_num(
+    path: &Path,
+    members: &[String],
+    session_ref: &str,
+) -> Result<u32, StoreError> {
+    if let Ok(n) = session_ref.parse::<u32>() {
+        if n == 0 || (n as usize) > members.len() {
+            return Err(StoreError::SessionNotFound(session_ref.to_string()));
+        }
+        return Ok(n);
+    }
+    for (idx, sha) in members.iter().enumerate() {
+        let record = session_at_commit(path, sha)?;
+        if record.attrs.session_id == session_ref {
+            return Ok((idx + 1) as u32);
         }
     }
-    let mut lines: Vec<String> = Vec::new();
-    for (name, sha) in blobs {
-        lines.push(format!("100644 blob {sha}\t{name}"));
-    }
-    for (dir, sub) in subdirs {
-        let sub_sha = build_content_tree(path, sub)?;
-        lines.push(format!("040000 tree {sub_sha}\t{dir}"));
-    }
-    lines.sort_by(|a, b| {
-        let na = a.split('\t').nth(1).unwrap_or("");
-        let nb = b.split('\t').nth(1).unwrap_or("");
-        na.cmp(nb)
-    });
-    mktree(path, &lines)
+    Err(StoreError::SessionNotFound(session_ref.to_string()))
 }
 
-/// Build a tree whose entries are numbered subdirectories, each
-/// pointing at the given tree sha.
-fn mktree_dirs(path: &Path, entries: &[(String, String)]) -> Result<String, StoreError> {
-    let mut lines: Vec<String> = entries
-        .iter()
-        .map(|(name, sha)| format!("040000 tree {sha}\t{name}"))
-        .collect();
-    lines.sort_by(|a, b| {
-        let na = a.split('\t').nth(1).unwrap_or("");
-        let nb = b.split('\t').nth(1).unwrap_or("");
-        na.cmp(nb)
-    });
-    mktree(path, &lines)
+fn tree_entry_name(entry: &str) -> &str {
+    entry.split('\t').nth(1).unwrap_or("")
 }
 
 /// A dataset summary row for the list view.
@@ -754,8 +510,8 @@ pub struct DatasetRecord {
     pub created_ms: i64,
 }
 
-/// List every dataset in the default store, newest first by
-/// committer date.
+/// List every dataset in the default store, newest first by committer
+/// date.
 pub fn dataset_list() -> Result<Vec<DatasetRecord>, StoreError> {
     dataset_list_at(&store_path())
 }

@@ -19,8 +19,9 @@ use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::git::{git_in, run};
 use crate::writer::{commit_tree, mktree, write_blob};
-use crate::{StoreError, exists, git_in, run, store_path};
+use crate::{StoreError, exists, store_path};
 
 /// `object` blob content for a note tree.
 const NOTE_OBJECT: &[u8] = b"gage::note 1\n";

@@ -14,6 +14,7 @@ mod scroll;
 mod session;
 pub mod session_view;
 mod stack;
+pub mod store_view;
 mod styles;
 mod syntax;
 pub mod test_view;

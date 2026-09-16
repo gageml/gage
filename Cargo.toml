@@ -65,7 +65,7 @@ tokio = "1.50.0"
 tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [patch.crates-io]
 datafusion-table-providers = { git = "https://github.com/gar1t/datafusion-table-providers", branch = "gar1t-dev-v0.10.1" }
