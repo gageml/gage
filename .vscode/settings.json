@@ -1,0 +1,6 @@
+{
+  "files.watcherInclude": [".local.design", ".local.notes", ".local.release"],
+  "files.watcherExclude": {
+    "**/.local.vendor/**": true
+  }
+}
