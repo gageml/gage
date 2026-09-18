@@ -37,6 +37,8 @@ pub enum StoreError {
     },
     /// No session in the dataset matched the given num or session_id
     SessionNotFound(String),
+    /// The object index could not be opened, written, or queried
+    Index(String),
 }
 
 impl fmt::Display for StoreError {
@@ -82,6 +84,7 @@ impl fmt::Display for StoreError {
                 actual,
             } => write!(f, "{id} is a {actual}, not a {expected}"),
             StoreError::SessionNotFound(s) => write!(f, "session not found: {s}"),
+            StoreError::Index(what) => write!(f, "object index: {what}"),
         }
     }
 }
@@ -101,7 +104,8 @@ impl std::error::Error for StoreError {
             | StoreError::AmbiguousId(_, _)
             | StoreError::ObjectDeleted(_)
             | StoreError::WrongType { .. }
-            | StoreError::SessionNotFound(_) => None,
+            | StoreError::SessionNotFound(_)
+            | StoreError::Index(_) => None,
         }
     }
 }

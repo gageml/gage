@@ -395,7 +395,7 @@ fn dataset_new(datasets: &DatasetStore) {
 }
 
 fn dataset_list(datasets: &DatasetStore) {
-    let records = match datasets.list() {
+    let records: Vec<DatasetRecord> = match datasets.iter().and_then(|it| it.collect()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("gage store dataset list: {e}");
@@ -669,7 +669,7 @@ fn cat(store: &Store, args: CatArgs) {
 }
 
 fn note_list(notes: &NoteStore) {
-    let records = match notes.list() {
+    let records: Vec<NoteRecord> = match notes.iter().and_then(|it| it.collect()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("gage store note list: {e}");

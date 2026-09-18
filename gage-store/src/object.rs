@@ -221,29 +221,6 @@ impl Store {
         Ok(object)
     }
 
-    /// Every live object of type `object_type`, newest first by
-    /// committer date. Reads every ref in the store; the ref path does
-    /// not carry the type.
-    pub(crate) fn list_typed(&self, object_type: &str) -> Result<Vec<Object>, StoreError> {
-        let listing = run(git_in(
-            self.path(),
-            [
-                "for-each-ref",
-                "--sort=-committerdate",
-                "--format=%(objectname)",
-                "refs/gage/object/",
-            ],
-        ))?;
-        let mut objects = Vec::new();
-        for sha in listing.lines() {
-            let object = self.read_object(sha)?;
-            if object.header.object_type == object_type && !object.header.is_tombstone() {
-                objects.push(object);
-            }
-        }
-        Ok(objects)
-    }
-
     /// Write a new object: a parentless commit (except for link
     /// parents) under `refs/gage/object/<id>`, which must not exist.
     /// Returns the commit SHA.
@@ -277,6 +254,8 @@ impl Store {
             path,
             ["update-ref", &object_ref(id), &commit_sha, ""],
         ))?;
+        self.index_commit(&commit_sha)?;
+        self.index.set_tip(id, Some(&commit_sha))?;
         Ok(commit_sha)
     }
 
@@ -326,6 +305,8 @@ impl Store {
                 &current.commit_sha,
             ],
         ))?;
+        self.index_commit(&commit_sha)?;
+        self.index.set_tip(&current.header.id, Some(&commit_sha))?;
         Ok(EditOutcome::Written(commit_sha))
     }
 
@@ -358,6 +339,8 @@ impl Store {
                 &current.commit_sha,
             ],
         ))?;
+        self.index_commit(&commit_sha)?;
+        self.index.set_tip(&current.header.id, Some(&commit_sha))?;
         Ok(commit_sha)
     }
 
@@ -564,6 +547,29 @@ pub(crate) fn require_type(object: &Object, expected: &str) -> Result<(), StoreE
 }
 
 impl Object {
+    /// An in-memory object with only a type and attrs, for tests that
+    /// exercise attribute extraction without a repository.
+    #[cfg(test)]
+    pub(crate) fn for_test(object_type: &str, attrs: JsonValue) -> Object {
+        Object {
+            commit_sha: String::new(),
+            header: ObjectHeader {
+                object_type: object_type.to_string(),
+                version: "1".to_string(),
+                id: String::new(),
+                created_ms: None,
+                modified_ms: None,
+                deleted_ms: None,
+                parent: None,
+            },
+            tree: ObjectTree {
+                attrs: Some(attrs),
+                ..ObjectTree::default()
+            },
+            entries: BTreeMap::new(),
+        }
+    }
+
     fn marker_sha(&self, name: &str) -> Result<String, StoreError> {
         self.entries
             .get(name)
@@ -951,26 +957,6 @@ mod tests {
             store.resolve_typed("abc", "gage::test").unwrap_err(),
             StoreError::ObjectDeleted(id) if id == "abc"
         ));
-    }
-
-    #[test]
-    fn list_typed_filters_by_type_and_skips_tombstones() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
-        let tree = ObjectTree::default();
-        store.create("gage::test", "1", "a", &tree, "t").unwrap();
-        let b = store.create("gage::test", "1", "b", &tree, "t").unwrap();
-        store.create("gage::other", "1", "c", &tree, "t").unwrap();
-        let current = store.read_object(&b).unwrap();
-        store.delete(&current, "t").unwrap();
-
-        let ids: Vec<String> = store
-            .list_typed("gage::test")
-            .unwrap()
-            .into_iter()
-            .map(|o| o.header.id)
-            .collect();
-        assert_eq!(ids, vec!["a"]);
     }
 
     #[test]

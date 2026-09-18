@@ -10,11 +10,14 @@ use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::index::{ObjectQuery, Order};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::{Store, StoreError};
 
-const OBJECT_TYPE: &str = "gage::note";
+pub(crate) const OBJECT_TYPE: &str = "gage::note";
 const OBJECT_VERSION: &str = "1";
+/// Attribute paths the index extracts from a note's `attrs.json`.
+pub(crate) const INDEXED_ATTRS: &[&str] = &["name"];
 const VALUE_FILE: &str = "value.txt";
 const TARGET_LINK: &str = "target.link";
 
@@ -137,21 +140,19 @@ impl NoteStore<'_> {
         decode_full(&object)
     }
 
-    /// List every note, newest first by committer date.
-    pub fn list(&self) -> Result<Vec<NoteRecord>, StoreError> {
-        let mut records = Vec::new();
-        for object in self.store.list_typed(OBJECT_TYPE)? {
-            let full = decode_full(&object)?;
-            records.push(NoteRecord {
-                id: full.id,
-                name: full.name,
-                value: full.value,
-                author: full.author,
-                created_ms: full.created_ms,
-                modified_ms: full.modified_ms,
-            });
+    /// Every live note, newest created first, read lazily.
+    pub fn iter(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<NoteRecord, StoreError>> + '_, StoreError> {
+        self.query().iter()
+    }
+
+    /// Start a selection over notes.
+    pub fn query(&self) -> NoteQuery<'_> {
+        NoteQuery {
+            store: self.store,
+            query: ObjectQuery::new(OBJECT_TYPE),
         }
-        Ok(records)
     }
 
     /// Edit the value of an existing note. `name`, `author`, and any
@@ -180,6 +181,53 @@ impl NoteStore<'_> {
         let message = format!("note delete: {}", attrs.name);
         self.store.delete(&object, &message)?;
         Ok(object.header.id)
+    }
+}
+
+/// A selection over notes: filters on the indexed attributes, an
+/// order, and a limit. `iter` reads matching notes one at a time.
+pub struct NoteQuery<'a> {
+    store: &'a Store,
+    query: ObjectQuery,
+}
+
+impl<'a> NoteQuery<'a> {
+    /// Select notes whose `name` equals `name`.
+    pub fn name(mut self, name: &str) -> Self {
+        self.query.attrs.push(("name", name.to_string()));
+        self
+    }
+
+    pub fn order(mut self, order: Order) -> Self {
+        self.query.order = order;
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.query.limit = Some(limit);
+        self
+    }
+
+    /// Run the selection. Matching tips are resolved by the index in
+    /// one step; each note is read from the repository as the iterator
+    /// advances.
+    pub fn iter(
+        self,
+    ) -> Result<impl Iterator<Item = Result<NoteRecord, StoreError>> + 'a, StoreError> {
+        let store = self.store;
+        let shas = store.select(&self.query)?;
+        Ok(shas.into_iter().map(move |sha| {
+            let object = store.read_object(&sha)?;
+            let full = decode_full(&object)?;
+            Ok(NoteRecord {
+                id: full.id,
+                name: full.name,
+                value: full.value,
+                author: full.author,
+                created_ms: full.created_ms,
+                modified_ms: full.modified_ms,
+            })
+        }))
     }
 }
 
@@ -402,7 +450,11 @@ mod tests {
         let second = note(&store, "b", "two", &[]);
         DatasetStore::from(&store).create().unwrap();
 
-        let records = NoteStore::from(&store).list().unwrap();
+        let records: Vec<NoteRecord> = NoteStore::from(&store)
+            .iter()
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
         assert_eq!(records.len(), 2);
         let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&first.as_str()));
@@ -490,10 +542,43 @@ mod tests {
     }
 
     #[test]
-    fn list_empty_store_returns_empty() {
+    fn iter_of_empty_store_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let store = open_store(tmp.path());
-        assert!(NoteStore::from(&store).list().unwrap().is_empty());
+        assert_eq!(NoteStore::from(&store).iter().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn query_filters_by_name_and_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let a1 = note(&store, "a", "1", &[]);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let a2 = note(&store, "a", "2", &[]);
+        note(&store, "b", "3", &[]);
+
+        let ids: Vec<String> = notes
+            .query()
+            .name("a")
+            .iter()
+            .unwrap()
+            .map(|r| r.unwrap().id)
+            .collect();
+        assert_eq!(ids, vec![a2.clone(), a1.clone()]);
+
+        let ids: Vec<String> = notes
+            .query()
+            .name("a")
+            .order(Order::CreatedAsc)
+            .limit(1)
+            .iter()
+            .unwrap()
+            .map(|r| r.unwrap().id)
+            .collect();
+        assert_eq!(ids, vec![a1]);
+
+        assert_eq!(notes.query().name("zzz").iter().unwrap().count(), 0);
     }
 
     #[test]
@@ -612,9 +697,8 @@ mod tests {
         let gone = note(&store, "gone", "v", &[]);
         notes.delete(&gone).unwrap();
 
-        let records = notes.list().unwrap();
-        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec![keep.as_str()]);
+        let ids: Vec<String> = notes.iter().unwrap().map(|r| r.unwrap().id).collect();
+        assert_eq!(ids, vec![keep]);
     }
 
     #[test]

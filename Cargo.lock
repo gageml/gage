@@ -2851,6 +2851,7 @@ version = "0.2.0-dev"
 dependencies = [
  "gage-core",
  "gage-session",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

@@ -11,13 +11,27 @@ use std::path::{Path, PathBuf};
 use crate::StoreError;
 use crate::admin::{STORE_VERSION, exists};
 use crate::git::{git_in, run};
+use crate::index::ObjectIndex;
+use crate::sqlite_index::SqliteIndex;
+
+/// Index file, relative to the store's parent directory (Gage home).
+const INDEX_FILE: &str = "cache/object-index.sqlite";
 
 /// An opened Gage store: a bare Git repository whose `gage.version`
 /// this build supports.
-#[derive(Debug)]
 pub struct Store {
     path: PathBuf,
     version: u32,
+    pub(crate) index: Box<dyn ObjectIndex>,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("path", &self.path)
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Store {
@@ -25,7 +39,9 @@ impl Store {
     /// when no repository is there, [`StoreError::VersionMissing`] when
     /// the repository carries no `gage.version`, and
     /// [`StoreError::VersionMismatch`] when the version is not the one
-    /// this build supports.
+    /// this build supports. Opens the object index beside the store
+    /// (`cache/object-index.sqlite` under the store's parent) and
+    /// reconciles it with the repository's refs.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         if !exists(path) {
             return Err(StoreError::NotFound(path.to_path_buf()));
@@ -37,10 +53,17 @@ impl Store {
                 supported: STORE_VERSION,
             });
         }
-        Ok(Store {
+        let index_path = path
+            .parent()
+            .map(|p| p.join(INDEX_FILE))
+            .unwrap_or_else(|| PathBuf::from(INDEX_FILE));
+        let store = Store {
             path: path.to_path_buf(),
             version,
-        })
+            index: Box::new(SqliteIndex::open(&index_path)?),
+        };
+        store.reconcile()?;
+        Ok(store)
     }
 
     pub fn path(&self) -> &Path {

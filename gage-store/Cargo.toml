@@ -11,6 +11,7 @@ gage-core = { path = "../gage-core" }
 gage-session = { path = "../gage-session" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

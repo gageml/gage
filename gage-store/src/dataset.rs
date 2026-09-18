@@ -17,12 +17,15 @@ use gage_core::uuid::new_uuid;
 use gage_session::{ContentAccess, SessionType, SourceSession};
 
 use crate::git::{git_in, run};
+use crate::index::{ObjectQuery, Order};
 use crate::object::{EditOutcome, Object, ObjectTree};
 use crate::session::{SessionAddOutcome, SessionOutcome, SessionStore};
 use crate::{Store, StoreError};
 
-const OBJECT_TYPE: &str = "gage::dataset";
+pub(crate) const OBJECT_TYPE: &str = "gage::dataset";
 const OBJECT_VERSION: &str = "1";
+/// Datasets declare no indexed attributes.
+pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 const SESSIONS_LINK: &str = "sessions.link";
 
 /// Dataset operations over an opened store.
@@ -101,19 +104,19 @@ impl DatasetStore<'_> {
         Ok(id)
     }
 
-    /// List every dataset, newest first by committer date.
-    pub fn list(&self) -> Result<Vec<DatasetRecord>, StoreError> {
-        let mut records = Vec::new();
-        for object in self.store.list_typed(OBJECT_TYPE)? {
-            let created_ms = object.header.created_ms.ok_or_else(|| {
-                StoreError::Parse(format!("dataset {}: missing created", object.header.id))
-            })?;
-            records.push(DatasetRecord {
-                id: object.header.id,
-                created_ms,
-            });
+    /// Every live dataset, newest created first, read lazily.
+    pub fn iter(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<DatasetRecord, StoreError>> + '_, StoreError> {
+        self.query().iter()
+    }
+
+    /// Start a selection over datasets.
+    pub fn query(&self) -> DatasetQuery<'_> {
+        DatasetQuery {
+            store: self.store,
+            query: ObjectQuery::new(OBJECT_TYPE),
         }
-        Ok(records)
     }
 
     /// Resolve a full id or unique prefix to the dataset's full id.
@@ -268,6 +271,43 @@ impl DatasetStore<'_> {
         match self.store.edit(&dataset, &tree, &message)? {
             EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(outcomes),
         }
+    }
+}
+
+/// A selection over datasets: an order and a limit. `iter` reads
+/// matching datasets one at a time.
+pub struct DatasetQuery<'a> {
+    store: &'a Store,
+    query: ObjectQuery,
+}
+
+impl<'a> DatasetQuery<'a> {
+    pub fn order(mut self, order: Order) -> Self {
+        self.query.order = order;
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.query.limit = Some(limit);
+        self
+    }
+
+    /// Run the selection.
+    pub fn iter(
+        self,
+    ) -> Result<impl Iterator<Item = Result<DatasetRecord, StoreError>> + 'a, StoreError> {
+        let store = self.store;
+        let shas = store.select(&self.query)?;
+        Ok(shas.into_iter().map(move |sha| {
+            let object = store.read_object(&sha)?;
+            let created_ms = object.header.created_ms.ok_or_else(|| {
+                StoreError::Parse(format!("dataset {}: missing created", object.header.id))
+            })?;
+            Ok(DatasetRecord {
+                id: object.header.id,
+                created_ms,
+            })
+        }))
     }
 }
 
@@ -482,7 +522,8 @@ mod tests {
         let b = datasets.create().unwrap();
         note(&store);
 
-        let records = datasets.list().unwrap();
+        let records: Vec<DatasetRecord> =
+            datasets.iter().unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(records.len(), 2);
         let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&a.as_str()));
@@ -493,10 +534,10 @@ mod tests {
     }
 
     #[test]
-    fn list_empty_store_returns_empty() {
+    fn iter_of_empty_store_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let store = open_store(tmp.path());
-        assert!(DatasetStore::from(&store).list().unwrap().is_empty());
+        assert_eq!(DatasetStore::from(&store).iter().unwrap().count(), 0);
     }
 
     #[test]

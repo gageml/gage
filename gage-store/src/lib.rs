@@ -22,6 +22,10 @@
 //! - [`object`] --- the object model: ref layout, markers, `parent`,
 //!   link files, and the one create, edit, and delete path every type
 //!   uses. Payload agnostic.
+//! - [`index`] --- the object index: the `ObjectIndex` trait, the
+//!   reconcile that keeps it current, and the query core. Type modules
+//!   opt attributes in through `INDEXED_ATTRS`.
+//! - [`sqlite_index`] --- the SQLite implementation of the index.
 //! - `note`, `dataset`, `session` --- object types: each supplies its
 //!   `attrs.json` shape, its content files, its decoder, and its typed
 //!   store.
@@ -30,21 +34,26 @@ mod admin;
 mod dataset;
 mod error;
 pub mod git;
+pub mod index;
 mod note;
 pub mod object;
 mod session;
+mod sqlite_index;
 mod store;
 mod writer;
 
 pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init, store_path};
 pub use dataset::{
-    DatasetRecord, DatasetSessionAddOutcome, DatasetSessionSummary, DatasetStore, SessionMeta,
-    SessionSpec,
+    DatasetQuery, DatasetRecord, DatasetSessionAddOutcome, DatasetSessionSummary, DatasetStore,
+    SessionMeta, SessionSpec,
 };
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
-pub use note::{NoteFull, NoteInput, NoteRecord, NoteStore};
+pub use index::Order;
+pub use note::{NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore};
 pub use session::{
-    SessionAddOutcome, SessionAttrs, SessionOutcome, SessionRecord, SessionStore, session_object_id,
+    SessionAddOutcome, SessionAttrs, SessionOutcome, SessionQuery, SessionRecord, SessionStore,
+    session_object_id,
 };
+pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::Store;

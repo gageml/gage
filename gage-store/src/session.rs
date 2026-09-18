@@ -17,12 +17,17 @@ use gage_session::{SessionType, SourceSession};
 use serde::{Deserialize, Serialize};
 
 use crate::git::{git_in, run};
-use crate::object::{EditOutcome, ObjectTree, object_ref, require_type};
+use crate::index::{ObjectQuery, Order};
+use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::writer::{mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
-const OBJECT_TYPE: &str = "gage::session";
+pub(crate) const OBJECT_TYPE: &str = "gage::session";
 const OBJECT_VERSION: &str = "1";
+/// Attribute paths the index extracts from a session's `attrs.json`.
+/// `summary` is a driver projection; until a driver writes it the
+/// `model` filter selects nothing.
+pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];
 const FILES_TREE: &str = "files";
 
 /// Session operations over an opened store.
@@ -158,34 +163,93 @@ impl SessionStore<'_> {
         }
     }
 
+    /// Every live session, newest created first, read lazily.
+    pub fn iter(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<SessionRecord, StoreError>> + '_, StoreError> {
+        self.query().iter()
+    }
+
+    /// Start a selection over sessions.
+    pub fn query(&self) -> SessionQuery<'_> {
+        SessionQuery {
+            store: self.store,
+            query: ObjectQuery::new(OBJECT_TYPE),
+        }
+    }
+
     /// Read the session at the given commit SHA.
     pub fn at_commit(&self, commit_sha: &str) -> Result<SessionRecord, StoreError> {
         let object = self.store.read_object(commit_sha)?;
-        require_type(&object, OBJECT_TYPE)?;
-        let attrs_value = object.tree.attrs.ok_or_else(|| {
-            StoreError::Parse(format!("session {commit_sha}: missing attrs.json"))
-        })?;
-        let attrs: SessionAttrs = serde_json::from_value(attrs_value)
-            .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))?;
-        let (driver_name, driver_version) = match attrs.driver.split_once(' ') {
-            Some((n, v)) => (n.to_string(), v.to_string()),
-            None => (attrs.driver.clone(), String::new()),
-        };
-        let session_type = match attrs.session_type.split_once(' ') {
-            Some((n, v)) => SessionType::new(n.to_string(), v.to_string()),
-            None => SessionType::new(attrs.session_type.clone(), String::new()),
-        };
-        let size = files_size(self.store.path(), commit_sha)?;
-        Ok(SessionRecord {
-            id: object.header.id,
-            commit_sha: object.commit_sha,
-            attrs,
-            session_type,
-            driver_name,
-            driver_version,
-            size,
-        })
+        decode(self.store, object)
     }
+}
+
+/// A selection over sessions: filters on the indexed attributes, an
+/// order, and a limit. `iter` reads matching sessions one at a time.
+pub struct SessionQuery<'a> {
+    store: &'a Store,
+    query: ObjectQuery,
+}
+
+impl<'a> SessionQuery<'a> {
+    /// Select sessions whose `summary.model` equals `model`.
+    pub fn model(mut self, model: &str) -> Self {
+        self.query.attrs.push(("summary.model", model.to_string()));
+        self
+    }
+
+    pub fn order(mut self, order: Order) -> Self {
+        self.query.order = order;
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.query.limit = Some(limit);
+        self
+    }
+
+    /// Run the selection. Matching tips are resolved by the index in
+    /// one step; each session is read from the repository as the
+    /// iterator advances.
+    pub fn iter(
+        self,
+    ) -> Result<impl Iterator<Item = Result<SessionRecord, StoreError>> + 'a, StoreError> {
+        let store = self.store;
+        let shas = store.select(&self.query)?;
+        Ok(shas
+            .into_iter()
+            .map(move |sha| decode(store, store.read_object(&sha)?)))
+    }
+}
+
+fn decode(store: &Store, object: Object) -> Result<SessionRecord, StoreError> {
+    let commit_sha = object.commit_sha.as_str();
+    require_type(&object, OBJECT_TYPE)?;
+    let attrs_value = object
+        .tree
+        .attrs
+        .ok_or_else(|| StoreError::Parse(format!("session {commit_sha}: missing attrs.json")))?;
+    let attrs: SessionAttrs = serde_json::from_value(attrs_value)
+        .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))?;
+    let (driver_name, driver_version) = match attrs.driver.split_once(' ') {
+        Some((n, v)) => (n.to_string(), v.to_string()),
+        None => (attrs.driver.clone(), String::new()),
+    };
+    let session_type = match attrs.session_type.split_once(' ') {
+        Some((n, v)) => SessionType::new(n.to_string(), v.to_string()),
+        None => SessionType::new(attrs.session_type.clone(), String::new()),
+    };
+    let size = files_size(store.path(), commit_sha)?;
+    Ok(SessionRecord {
+        id: object.header.id,
+        commit_sha: object.commit_sha.clone(),
+        attrs,
+        session_type,
+        driver_name,
+        driver_version,
+        size,
+    })
 }
 
 /// Recursively build the `files/` tree from `(relative_path, blob_sha)`
