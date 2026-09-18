@@ -1,4 +1,4 @@
-//! Shared plumbing for artifact writers: writing blobs, building trees,
+//! Git write plumbing shared by the object model: writing blobs, building trees,
 //! and committing under the fixed Gage identity.
 
 use std::io::Read;
@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use crate::StoreError;
 use crate::git::{git_in, run, run_with_stdin};
 
-/// Fixed identity written to the author and committer of every artifact
+/// Fixed identity written to the author and committer of every object
 /// commit.
 pub(crate) const IDENTITY_NAME: &str = "gage";
 pub(crate) const IDENTITY_EMAIL: &str = "noreply@gage.localhost";
@@ -46,7 +46,7 @@ pub(crate) fn write_blob_stream(path: &Path, mut content: impl Read) -> Result<S
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Feed `entries` (already in git tree byte-sort order) to `git mktree`
+/// Feed `entries` to `git mktree`, which sorts them into tree order,
 /// and return the resulting tree sha.
 pub(crate) fn mktree(path: &Path, entries: &[String]) -> Result<String, StoreError> {
     let mut input = entries.join("\n");

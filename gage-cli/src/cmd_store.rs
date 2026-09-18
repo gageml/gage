@@ -38,7 +38,7 @@ pub enum StoreCommand {
     /// List entries under a tree-ish
     ///
     /// Runs `git ls-tree -l <REF>`. `<REF>` is any git tree-ish: a full
-    /// ref path (`refs/gage/notes/<id>`), an object sha, or
+    /// ref path (`refs/gage/object/<id>`), an object sha, or
     /// `<ref>:<path>`.
     Ls(LsArgs),
 
@@ -62,11 +62,11 @@ pub enum StoreCommand {
 
     /// Browse the store's object graph
     ///
-    /// Opens an interactive view of `refs/gage/**`: refs listing on the
-    /// left, per-commit detail (header, parents classified as `prev`
-    /// vs link, tree, resolved link files, and the `prev` chain) on
-    /// the right. Payload agnostic --- object type names are shown but
-    /// no `attrs` is interpreted.
+    /// Opens an interactive view of `refs/gage/object/*`: refs listing
+    /// on the left, per-commit detail (header, parents classified as
+    /// `parent` vs link, tree, resolved link files, and the `parent`
+    /// chain) on the right. Payload agnostic --- object type names are
+    /// shown but no `attrs.json` is interpreted.
     View,
 }
 
@@ -75,8 +75,8 @@ pub enum DatasetCommand {
     /// List datasets
     List,
 
-    /// Add an empty dataset
-    Add,
+    /// Create an empty dataset
+    New,
 
     /// Manage dataset sessions
     Session {
@@ -108,7 +108,7 @@ pub struct DatasetSessionShowArgs {
     /// Dataset id or unique prefix
     dataset: String,
 
-    /// Session number (decimal `<n>`) or the source `session_id`
+    /// Session number (decimal `<n>`) or the native session id
     session: String,
 }
 
@@ -160,8 +160,8 @@ pub enum NoteCommand {
     /// Show a note
     Show(NoteShowArgs),
 
-    /// Add a note
-    Add(NoteAddArgs),
+    /// Create a note
+    New(NoteNewArgs),
 
     /// Edit a note's value
     Edit(NoteEditArgs),
@@ -192,7 +192,7 @@ pub struct NoteShowArgs {
 }
 
 #[derive(Args)]
-pub struct NoteAddArgs {
+pub struct NoteNewArgs {
     /// Note name
     name: String,
 
@@ -218,13 +218,13 @@ pub fn run(command: StoreCommand) {
         StoreCommand::Note { command } => match command {
             NoteCommand::List => note_list(),
             NoteCommand::Show(args) => note_show(args),
-            NoteCommand::Add(args) => note_add(args),
+            NoteCommand::New(args) => note_new(args),
             NoteCommand::Edit(args) => note_edit(args),
             NoteCommand::Delete(args) => note_delete(args),
         },
         StoreCommand::Dataset { command } => match command {
             DatasetCommand::List => dataset_list(),
-            DatasetCommand::Add => dataset_add(),
+            DatasetCommand::New => dataset_new(),
             DatasetCommand::Session { command } => match command {
                 DatasetSessionCommand::List(args) => dataset_session_list(args),
                 DatasetSessionCommand::Show(args) => dataset_session_show(args),
@@ -370,11 +370,11 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .collect()
 }
 
-fn dataset_add() {
-    let id = match gage_store::dataset_add() {
+fn dataset_new() {
+    let id = match gage_store::dataset_new() {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("gage store dataset add: {e}");
+            eprintln!("gage store dataset new: {e}");
             std::process::exit(1);
         }
     };
@@ -597,9 +597,9 @@ fn dataset_session_add(args: DatasetSessionAddArgs) {
         let verb = match outcome.outcome {
             gage_store::SessionOutcome::Added => "Added",
             gage_store::SessionOutcome::Updated => "Updated",
-            gage_store::SessionOutcome::NoOp => "No changes",
+            gage_store::SessionOutcome::Unchanged => "Unchanged",
         };
-        println!("{verb} sessions/{}", outcome.session_num);
+        println!("{verb} session {}", outcome.session_num);
     }
 }
 
@@ -806,9 +806,9 @@ fn note_edit(args: NoteEditArgs) {
     println!("{id}");
 }
 
-fn note_add(args: NoteAddArgs) {
+fn note_new(args: NoteNewArgs) {
     let author = resolve_author(args.user);
-    let id = match gage_store::note_add(NoteInput {
+    let id = match gage_store::note_new(NoteInput {
         name: &args.name,
         value: &args.value,
         author: &author,
@@ -816,7 +816,7 @@ fn note_add(args: NoteAddArgs) {
     }) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("gage store note add: {e}");
+            eprintln!("gage store note new: {e}");
             std::process::exit(1);
         }
     };

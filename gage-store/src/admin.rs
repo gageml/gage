@@ -88,8 +88,8 @@ pub struct StoreStatus {
     pub size: u64,
     pub refs: u64,
     /// Count of refs under each proper prefix beneath `refs/gage/`,
-    /// sorted by prefix. A ref `refs/gage/notes/<id>` contributes to
-    /// `refs/gage` and `refs/gage/notes`; the leaf ref name itself is
+    /// sorted by prefix. A ref `refs/gage/object/<id>` contributes to
+    /// `refs/gage` and `refs/gage/object`; the leaf ref name itself is
     /// not a prefix.
     pub ref_prefixes: Vec<(String, u64)>,
     pub remotes: Vec<Remote>,
@@ -222,8 +222,8 @@ fn parse_count_objects(output: &str) -> Result<CountObjects, StoreError> {
 }
 
 /// Counts every proper prefix under `refs/gage/` across the given
-/// newline-separated ref names. `refs/gage/notes/<id>` contributes to
-/// `refs/gage` and `refs/gage/notes`; the full ref name is not a
+/// newline-separated ref names. `refs/gage/object/<id>` contributes to
+/// `refs/gage` and `refs/gage/object`; the full ref name is not a
 /// prefix. Refs outside `refs/gage/` are ignored.
 fn compute_ref_prefixes(ref_names: &str) -> Vec<(String, u64)> {
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();

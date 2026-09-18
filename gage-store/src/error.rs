@@ -17,18 +17,20 @@ pub enum StoreError {
     Parse(String),
     /// A `--target` value did not match the `note:<id>` form
     BadTarget(String),
-    /// A `--target` referenced a note ref that does not exist
+    /// A `--target` referenced an object that does not exist
     TargetNotFound(String),
-    /// No note ref matched the given id or prefix
-    NoteNotFound(String),
-    /// More than one note ref matched the given prefix
-    AmbiguousNoteId(String, usize),
-    /// Operation refused because the note's current commit is a tombstone
-    NoteDeleted(String),
-    /// No dataset ref matched the given id or prefix
-    DatasetNotFound(String),
-    /// More than one dataset ref matched the given prefix
-    AmbiguousDatasetId(String, usize),
+    /// No object matched the given id or prefix
+    ObjectNotFound(String),
+    /// More than one object matched the given prefix
+    AmbiguousId(String, usize),
+    /// Operation refused because the object's current commit is a tombstone
+    ObjectDeleted(String),
+    /// The object exists but is not of the type the operation requires
+    WrongType {
+        id: String,
+        expected: String,
+        actual: String,
+    },
     /// No session in the dataset matched the given num or session_id
     SessionNotFound(String),
 }
@@ -50,15 +52,16 @@ impl fmt::Display for StoreError {
                 write!(f, "invalid target {t:?}: expected `note:<id>`")
             }
             StoreError::TargetNotFound(t) => write!(f, "target not found: {t}"),
-            StoreError::NoteNotFound(id) => write!(f, "note not found: {id}"),
-            StoreError::AmbiguousNoteId(id, n) => {
-                write!(f, "note id {id} is ambiguous ({n} matches)")
+            StoreError::ObjectNotFound(id) => write!(f, "object not found: {id}"),
+            StoreError::AmbiguousId(id, n) => {
+                write!(f, "id {id} is ambiguous ({n} matches)")
             }
-            StoreError::NoteDeleted(id) => write!(f, "note is deleted: {id}"),
-            StoreError::DatasetNotFound(id) => write!(f, "dataset not found: {id}"),
-            StoreError::AmbiguousDatasetId(id, n) => {
-                write!(f, "dataset id {id} is ambiguous ({n} matches)")
-            }
+            StoreError::ObjectDeleted(id) => write!(f, "object is deleted: {id}"),
+            StoreError::WrongType {
+                id,
+                expected,
+                actual,
+            } => write!(f, "{id} is a {actual}, not a {expected}"),
             StoreError::SessionNotFound(s) => write!(f, "session not found: {s}"),
         }
     }
@@ -73,11 +76,10 @@ impl std::error::Error for StoreError {
             | StoreError::Parse(_)
             | StoreError::BadTarget(_)
             | StoreError::TargetNotFound(_)
-            | StoreError::NoteNotFound(_)
-            | StoreError::AmbiguousNoteId(_, _)
-            | StoreError::NoteDeleted(_)
-            | StoreError::DatasetNotFound(_)
-            | StoreError::AmbiguousDatasetId(_, _)
+            | StoreError::ObjectNotFound(_)
+            | StoreError::AmbiguousId(_, _)
+            | StoreError::ObjectDeleted(_)
+            | StoreError::WrongType { .. }
             | StoreError::SessionNotFound(_) => None,
         }
     }

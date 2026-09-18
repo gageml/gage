@@ -1,11 +1,11 @@
 //! Store viewer — a structural, payload-agnostic view of the Gage
 //! store's Git object graph.
 //!
-//! The viewer knows the shape of an object tree (`object`, `id`,
-//! `created`, `modified`, optional `prev`, optional `deleted`, and
+//! The viewer knows the shape of an object tree (`type`, `id`,
+//! `created`, `modified`, optional `parent`, optional `deleted`, and
 //! `*.link` files) and displays what is there. It does not parse
-//! `attrs` or interpret anything about a given object type beyond its
-//! name.
+//! `attrs.json` or interpret anything about a given object type beyond
+//! its name.
 //!
 //! Layout: a refs table on the left, a scrollable detail pane on the
 //! right, and a footer of key hints. Follows the pane/table/footer
@@ -19,8 +19,8 @@ use gage_core::uuid::short_uuid;
 use gage_store::EntryKind;
 use gage_store::git::{CommitMeta, TreeEntry, list_tree_at, read_commit_at};
 use gage_store::object::{
-    LinkFile, ObjectHeader, ObjectRef, classify_parents_at, find_link_files_at, list_gage_refs_at,
-    read_header_at, walk_prev_chain_at,
+    LinkFile, ObjectHeader, ObjectRef, classify_parents_at, find_link_files_at,
+    list_object_refs_at, read_header_at, walk_parent_chain_at,
 };
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -74,9 +74,18 @@ enum Focus {
     Detail,
 }
 
+/// One row of the refs table: the ref plus the type name read from
+/// its tip's `type` blob.
+struct RefRow {
+    object_ref: ObjectRef,
+    /// Type name without the `gage::` prefix, or `?` when the tip is
+    /// not a readable Gage object.
+    type_name: String,
+}
+
 struct ViewState {
     store_path: PathBuf,
-    refs: Vec<ObjectRef>,
+    refs: Vec<RefRow>,
     /// Ref ids in display order, kept alongside `refs` so the id-stable
     /// table can address rows through it.
     ordered_ids: Vec<String>,
@@ -116,15 +125,31 @@ impl ViewState {
 
     /// Reload the ref list and invalidate the detail cache.
     fn reload(&mut self) {
-        match list_gage_refs_at(&self.store_path) {
-            Ok(mut refs) => {
-                refs.sort_by(|a, b| {
-                    a.type_bucket
-                        .cmp(&b.type_bucket)
-                        .then_with(|| a.id.cmp(&b.id))
+        match list_object_refs_at(&self.store_path) {
+            Ok(refs) => {
+                let mut rows: Vec<RefRow> = refs
+                    .into_iter()
+                    .map(|object_ref| {
+                        let type_name = read_header_at(&self.store_path, &object_ref.tip_sha)
+                            .map(|h| type_display(&h.object_type))
+                            .unwrap_or_else(|_| "?".to_string());
+                        RefRow {
+                            object_ref,
+                            type_name,
+                        }
+                    })
+                    .collect();
+                rows.sort_by(|a, b| {
+                    a.type_name
+                        .cmp(&b.type_name)
+                        .then_with(|| a.object_ref.id.cmp(&b.object_ref.id))
                 });
-                self.refs = refs;
-                self.ordered_ids = self.refs.iter().map(|r| r.ref_name.clone()).collect();
+                self.refs = rows;
+                self.ordered_ids = self
+                    .refs
+                    .iter()
+                    .map(|r| r.object_ref.ref_name.clone())
+                    .collect();
                 let ids: Vec<&str> = self.ordered_ids.iter().map(String::as_str).collect();
                 self.table.update(&ids);
             }
@@ -143,7 +168,7 @@ impl ViewState {
         self.body_scroll = 0;
     }
 
-    fn selected_ref(&self) -> Option<&ObjectRef> {
+    fn selected_ref(&self) -> Option<&RefRow> {
         let idx = self.table.selected_index()?;
         self.refs.get(idx)
     }
@@ -245,13 +270,13 @@ fn draw_refs(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .iter()
         .map(|r| {
             Row::new(vec![
-                Cell::from(r.type_bucket.clone()),
+                Cell::from(r.type_name.clone()),
                 Cell::from(Span::styled(
-                    short_uuid(&r.id).to_string(),
+                    short_uuid(&r.object_ref.id).to_string(),
                     styles::Text::id(),
                 )),
                 Cell::from(Span::styled(
-                    short_uuid(&r.tip_sha).to_string(),
+                    short_uuid(&r.object_ref.tip_sha).to_string(),
                     styles::Text::dim(),
                 )),
             ])
@@ -276,7 +301,7 @@ fn draw_refs(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let active = state.focus == Focus::Detail;
     let title = match state.selected_ref() {
-        Some(r) => format!(" {} ", r.ref_name),
+        Some(r) => format!(" {} ", r.object_ref.ref_name),
         None => " Detail ".to_string(),
     };
     let block = panel_block(title, active);
@@ -290,8 +315,8 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         state.detail = match state.selected_ref() {
             Some(r) => render_detail(
                 &state.store_path,
-                r.tip_sha.clone(),
-                &r.ref_name,
+                r.object_ref.tip_sha.clone(),
+                &r.object_ref.ref_name,
                 inner.width,
             ),
             None => vec![Line::from(Span::styled(
@@ -378,7 +403,7 @@ fn render_detail(
     push_parents_section(&mut lines, store, &commit, width);
     push_tree_section(&mut lines, store, &commit, width);
     push_link_files_section(&mut lines, store, &commit, width);
-    push_prev_chain_section(&mut lines, store, &commit, width);
+    push_parent_chain_section(&mut lines, store, &commit, width);
     lines
 }
 
@@ -434,12 +459,12 @@ fn push_parents_section(
             return;
         }
     };
-    if classified.prev.is_none() && classified.links.is_empty() {
+    if classified.parent.is_none() && classified.links.is_empty() {
         lines.push(Line::from(Span::styled("  (none)", styles::Text::dim())));
         return;
     }
-    if let Some(prev) = &classified.prev {
-        lines.push(labeled_parent("prev", prev, store));
+    if let Some(parent) = &classified.parent {
+        lines.push(labeled_parent("parent", parent, store));
     }
     for link in &classified.links {
         lines.push(labeled_parent(&link.link_file, &link.sha, store));
@@ -572,17 +597,17 @@ fn push_link_file(lines: &mut Vec<Line<'static>>, store: &std::path::Path, file:
     }
 }
 
-fn push_prev_chain_section(
+fn push_parent_chain_section(
     lines: &mut Vec<Line<'static>>,
     store: &std::path::Path,
     commit: &str,
     width: u16,
 ) {
-    push_section_header(lines, "History (prev chain)", width);
-    let chain = match walk_prev_chain_at(store, commit) {
+    push_section_header(lines, "History", width);
+    let chain = match walk_parent_chain_at(store, commit) {
         Ok(c) => c,
         Err(e) => {
-            lines.push(err_line(format!("walk prev: {e}")));
+            lines.push(err_line(format!("walk parents: {e}")));
             return;
         }
     };
@@ -627,6 +652,14 @@ fn push_section_header(lines: &mut Vec<Line<'static>>, label: &str, width: u16) 
         styles::Text::header(),
     )));
     lines.push(Line::raw(""));
+}
+
+/// Type name for the refs table: `gage::note` displays as `note`.
+fn type_display(object_type: &str) -> String {
+    object_type
+        .strip_prefix("gage::")
+        .unwrap_or(object_type)
+        .to_string()
 }
 
 fn kv(k: &str, v: String) -> Line<'static> {
