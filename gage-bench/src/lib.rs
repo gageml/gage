@@ -1,12 +1,11 @@
-//! Cross-library serialization benchmark for gage's prospective
-//! on-disk caches (per-session aggregates and per-session entries).
+//! Benchmarks for the Gage store.
 //!
-//! Each compiled format is run against the same corpus; the runner
-//! reports time (ser, deser), bytes on disk, and peak RSS during deser.
+//! The `store` bench populates a fresh store with generated objects,
+//! reports size statistics, verifies that everything reads back, and
+//! times the common read operations. Results are written as JSON so a
+//! later run can be compared against a baseline.
 
-pub mod benches;
-pub mod corpus;
-pub mod formats;
 pub mod measure;
-pub mod model;
 pub mod report;
+pub mod store_bench;
+pub mod synth;

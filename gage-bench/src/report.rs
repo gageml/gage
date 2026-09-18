@@ -1,128 +1,277 @@
-//! Stdout table and JSON output for benchmark results.
-//!
-//! Numeric columns are rendered as `mean (rank)`. Rank is computed
-//! per-column, lowest value = rank 1.
-//!
-//! Rows are sorted by bytes-on-disk, bucketed by single-linkage on a
-//! relative-gap threshold so near-equal sizes (≤5% apart) cluster.
-//! Within a bucket, `deser_ms` mean breaks the tie.
+//! Stdout tables, JSON output, and baseline comparison.
 
-use std::cmp::Ordering;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tabled::settings::Style;
 use tabled::{Table, Tabled};
 
-/// Two byte counts are considered equal-for-ranking when their
-/// relative gap is ≤ this value. 5% maps the intuition that any
-/// on-disk difference under 5% is a wash.
-const SIZE_BUCKET_GAP_RATIO: f64 = 0.05;
+use crate::measure::{Count, Metric, Size};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RowData {
+/// Everything one run produced, as written to `results.json`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Results {
+    /// Bench name; results are kept under `bench/<bench>/` in Gage home.
     pub bench: String,
-    pub format: String,
-    pub records: usize,
-    pub ser_ms_samples: Vec<f64>,
-    pub deser_ms_samples: Vec<f64>,
-    pub bytes_on_disk: u64,
+    /// UTC timestamp of the run, also the saved file's stem.
+    pub stamp: String,
+    /// Gage version and commit the bench was built from, e.g.
+    /// `0.2.0-dev (e0e835a)`.
+    pub code_version: String,
+    pub params: serde_json::Value,
+    pub metrics: Vec<Metric>,
+    pub sizes: Vec<Size>,
+    pub counts: Vec<Count>,
+}
+
+impl Results {
+    pub fn write(&self, path: &Path) -> std::io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, self).map_err(std::io::Error::other)
+    }
+
+    pub fn read(path: &Path) -> std::io::Result<Results> {
+        let file = std::fs::File::open(path)?;
+        serde_json::from_reader(file).map_err(std::io::Error::other)
+    }
+
+    /// Save under `gage-bench/results/<bench>/<stamp>.json` in the
+    /// source tree and return the path.
+    pub fn save(&self) -> std::io::Result<PathBuf> {
+        let dir = results_dir(&self.bench);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", self.stamp));
+        self.write(&path)?;
+        Ok(path)
+    }
+}
+
+/// Where saved results for `bench` live: `results/<bench>/` under
+/// this crate's directory in the source tree, so a baseline can be
+/// committed with the change it measured.
+pub fn results_dir(bench: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("results")
+        .join(bench)
+}
+
+/// The newest saved results file for `bench`, by file name, which is
+/// the run stamp.
+pub fn latest_results(bench: &str) -> std::io::Result<Option<PathBuf>> {
+    let dir = results_dir(bench);
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths.pop())
+}
+
+/// The gage version this binary was built from, with the commit of the
+/// working tree when git can report it: `0.2.0-dev (e0e835a)`, plus
+/// `-dirty` when the tree has uncommitted changes. Without git the
+/// version alone is reported.
+pub fn code_version() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let head = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let Some(head) = head else {
+        return version.to_string();
+    };
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| !o.stdout.is_empty());
+    if dirty {
+        format!("{version} ({head}-dirty)")
+    } else {
+        format!("{version} ({head})")
+    }
 }
 
 #[derive(Tabled)]
-struct Row {
-    bench: String,
-    format: String,
-    records: String,
-    ser_ms: String,
-    deser_ms: String,
-    bytes: String,
+struct MetricRow {
+    operation: String,
+    count: usize,
+    total_ms: String,
+    p50_ms: String,
+    p95_ms: String,
+    max_ms: String,
+    per_sec: String,
 }
 
-pub fn print_table(rows: &[RowData]) {
-    if rows.is_empty() {
+pub fn print_metrics(title: &str, metrics: &[Metric]) {
+    if metrics.is_empty() {
         return;
     }
-
-    let ser_means: Vec<f64> = rows.iter().map(|r| mean(&r.ser_ms_samples)).collect();
-    let deser_means: Vec<f64> = rows.iter().map(|r| mean(&r.deser_ms_samples)).collect();
-    let bytes_vals: Vec<f64> = rows.iter().map(|r| r.bytes_on_disk as f64).collect();
-
-    let ser_ranks = ranks_asc(&ser_means);
-    let deser_ranks = ranks_asc(&deser_means);
-    let bytes_ranks = ranks_asc(&bytes_vals);
-
-    let bytes_u64: Vec<u64> = rows.iter().map(|r| r.bytes_on_disk).collect();
-    let bytes_buckets = relative_gap_buckets(&bytes_u64, SIZE_BUCKET_GAP_RATIO);
-
-    let mut scored: Vec<(usize, f64, Row)> = rows
+    println!();
+    println!("== {title} ==");
+    let rows: Vec<MetricRow> = metrics
         .iter()
-        .zip(ser_ranks)
-        .zip(deser_ranks)
-        .zip(bytes_ranks)
-        .zip(bytes_buckets)
-        .map(|((((r, sr), dr), br), bucket)| {
-            let row = Row {
-                bench: r.bench.clone(),
-                format: r.format.clone(),
-                records: r.records.to_string(),
-                ser_ms: format_timing(&r.ser_ms_samples, sr),
-                deser_ms: format_timing(&r.deser_ms_samples, dr),
-                bytes: format_bytes_cell(r.bytes_on_disk, br),
-            };
-            (bucket, mean(&r.deser_ms_samples), row)
+        .map(|m| MetricRow {
+            operation: m.name.clone(),
+            count: m.count,
+            total_ms: format!("{:.1}", m.total_ms),
+            p50_ms: format!("{:.2}", m.p50_ms),
+            p95_ms: format!("{:.2}", m.p95_ms),
+            max_ms: format!("{:.2}", m.max_ms),
+            per_sec: format!("{:.1}", m.per_sec),
         })
         .collect();
-    scored.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then(a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
-    });
-    let display: Vec<Row> = scored.into_iter().map(|(_, _, r)| r).collect();
-
-    let mut table = Table::new(display);
+    let mut table = Table::new(rows);
     table.with(Style::sharp());
     println!("{table}");
 }
 
-pub fn write_json(path: &Path, rows: &[RowData]) -> std::io::Result<()> {
-    let f = std::fs::File::create(path)?;
-    serde_json::to_writer_pretty(f, rows).map_err(std::io::Error::other)
+#[derive(Tabled)]
+struct SizeRow {
+    measure: String,
+    size: String,
+    bytes: u64,
 }
 
-pub fn duration_ms(d: Duration) -> f64 {
-    d.as_secs_f64() * 1000.0
-}
-
-fn format_timing(samples: &[f64], rank: usize) -> String {
-    let m = mean(samples);
-    format!("{m:.2} ({rank})")
-}
-
-fn format_bytes_cell(bytes: u64, rank: usize) -> String {
-    format!("{} ({rank})", format_bytes(bytes))
-}
-
-fn mean(samples: &[f64]) -> f64 {
-    if samples.is_empty() {
-        return 0.0;
+pub fn print_sizes(title: &str, sizes: &[Size]) {
+    if sizes.is_empty() {
+        return;
     }
-    samples.iter().sum::<f64>() / samples.len() as f64
+    println!();
+    println!("== {title} ==");
+    let rows: Vec<SizeRow> = sizes
+        .iter()
+        .map(|s| SizeRow {
+            measure: s.name.clone(),
+            size: format_bytes(s.bytes),
+            bytes: s.bytes,
+        })
+        .collect();
+    let mut table = Table::new(rows);
+    table.with(Style::sharp());
+    println!("{table}");
 }
 
-fn ranks_asc(values: &[f64]) -> Vec<usize> {
-    let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-    let mut ranks = vec![0usize; values.len()];
-    for (rank0, (idx, _)) in indexed.into_iter().enumerate() {
-        if let Some(slot) = ranks.get_mut(idx) {
-            *slot = rank0 + 1;
+#[derive(Tabled)]
+struct CountRow {
+    measure: String,
+    value: u64,
+}
+
+pub fn print_counts(title: &str, counts: &[Count]) {
+    if counts.is_empty() {
+        return;
+    }
+    println!();
+    println!("== {title} ==");
+    let rows: Vec<CountRow> = counts
+        .iter()
+        .map(|c| CountRow {
+            measure: c.name.clone(),
+            value: c.value,
+        })
+        .collect();
+    let mut table = Table::new(rows);
+    table.with(Style::sharp());
+    println!("{table}");
+}
+
+#[derive(Tabled)]
+struct DeltaRow {
+    name: String,
+    baseline: String,
+    current: String,
+    delta: String,
+}
+
+/// Print `p50_ms` and byte deltas of `current` against `baseline`,
+/// matched by name. Names present in only one run are listed with a
+/// blank on the missing side. Differing params are reported first,
+/// since deltas across different scales do not compare.
+pub fn print_comparison(baseline: &Results, current: &Results) {
+    println!();
+    println!(
+        "== Baseline: {} {} ==",
+        baseline.stamp, baseline.code_version
+    );
+    if baseline.params != current.params {
+        println!("Warning: params differ from the baseline; deltas are not comparable");
+        println!("  baseline: {}", baseline.params);
+        println!("  current:  {}", current.params);
+    }
+    println!();
+    println!("== Compared with baseline (p50 ms) ==");
+    let rows = delta_rows(
+        baseline.metrics.iter().map(|m| (m.name.clone(), m.p50_ms)),
+        current.metrics.iter().map(|m| (m.name.clone(), m.p50_ms)),
+        |v| format!("{v:.2}"),
+    );
+    let mut table = Table::new(rows);
+    table.with(Style::sharp());
+    println!("{table}");
+
+    println!();
+    println!("== Compared with baseline (bytes) ==");
+    let rows = delta_rows(
+        baseline
+            .sizes
+            .iter()
+            .map(|s| (s.name.clone(), s.bytes as f64)),
+        current
+            .sizes
+            .iter()
+            .map(|s| (s.name.clone(), s.bytes as f64)),
+        |v| format_bytes(v as u64),
+    );
+    let mut table = Table::new(rows);
+    table.with(Style::sharp());
+    println!("{table}");
+}
+
+fn delta_rows(
+    baseline: impl Iterator<Item = (String, f64)>,
+    current: impl Iterator<Item = (String, f64)>,
+    fmt: impl Fn(f64) -> String,
+) -> Vec<DeltaRow> {
+    let base: Vec<(String, f64)> = baseline.collect();
+    let cur: Vec<(String, f64)> = current.collect();
+    let mut rows = Vec::new();
+    for (name, now) in &cur {
+        let before = base.iter().find(|(n, _)| n == name).map(|(_, v)| *v);
+        rows.push(DeltaRow {
+            name: name.clone(),
+            baseline: before.map(&fmt).unwrap_or_default(),
+            current: fmt(*now),
+            delta: match before {
+                Some(b) if b > 0.0 => format!("{:+.1}%", (now - b) / b * 100.0),
+                _ => String::new(),
+            },
+        });
+    }
+    for (name, before) in &base {
+        if !cur.iter().any(|(n, _)| n == name) {
+            rows.push(DeltaRow {
+                name: name.clone(),
+                baseline: fmt(*before),
+                current: String::new(),
+                delta: String::new(),
+            });
         }
     }
-    ranks
+    rows
 }
 
-fn format_bytes(n: u64) -> String {
+pub fn format_bytes(n: u64) -> String {
     if n < 1024 {
         format!("{n} B")
     } else if n < 1024 * 1024 {
@@ -132,31 +281,4 @@ fn format_bytes(n: u64) -> String {
     } else {
         format!("{:.2} GiB", n as f64 / (1024.0 * 1024.0 * 1024.0))
     }
-}
-
-/// Single-linkage 1D bucketing by relative gap: sort the values, then
-/// start a new bucket whenever the gap to the previous value exceeds
-/// `threshold` of that previous value. Returns one bucket index per
-/// input position (in original order). Lower bucket index = smaller
-/// values.
-fn relative_gap_buckets(values: &[u64], threshold: f64) -> Vec<usize> {
-    let n = values.len();
-    let mut sorted: Vec<(usize, u64)> = values.iter().copied().enumerate().collect();
-    sorted.sort_by_key(|(_, v)| *v);
-    let mut buckets = vec![0usize; n];
-    let mut current = 0usize;
-    let mut prev: Option<u64> = None;
-    for (orig_idx, v) in sorted {
-        if let Some(p) = prev {
-            let gap = (v as f64 - p as f64) / p.max(1) as f64;
-            if gap > threshold {
-                current += 1;
-            }
-        }
-        if let Some(slot) = buckets.get_mut(orig_idx) {
-            *slot = current;
-        }
-        prev = Some(v);
-    }
-    buckets
 }

@@ -140,10 +140,13 @@ impl Store {
 
     /// Run `git gc`, optionally with `--prune=<expire>`. `git gc`'s
     /// output is passed through to the caller's stdout/stderr so
-    /// progress is visible.
-    pub fn gc(&self, prune: Option<&str>) -> Result<GcOutcome, StoreError> {
+    /// progress is visible, unless `quiet` passes `--quiet` to git.
+    pub fn gc(&self, prune: Option<&str>, quiet: bool) -> Result<GcOutcome, StoreError> {
         let before = self.status()?;
         let mut cmd = git_in(self.path(), ["gc"]);
+        if quiet {
+            cmd.arg("--quiet");
+        }
         let prune_flag: String;
         if let Some(expire) = prune {
             prune_flag = format!("--prune={expire}");

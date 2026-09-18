@@ -3,149 +3,190 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use chrono::Utc;
-use clap::Parser;
-use gage_bench::benches::{self};
-use gage_bench::corpus::{self, LoadOptions};
-use gage_bench::formats;
-use gage_bench::report::{self, RowData};
+use clap::{Args, Parser, Subcommand};
+use gage_bench::report::{self, Results};
+use gage_bench::store_bench::{self, BENCH_NAME, Params};
 use indicatif::{ProgressBar, ProgressStyle};
 
-const DEFAULT_SESSION_LIMIT: usize = 100;
-const DEFAULT_ITERATIONS: usize = 10;
-
 #[derive(Parser, Debug)]
-#[command(
-    name = "gage-bench",
-    about = "Benchmark serialization formats against real gage session data"
-)]
+#[command(name = "gage-bench", about = "Benchmark the Gage store")]
 struct Cli {
-    /// Names of benchmarks to run
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Populate a fresh store, report sizes, verify, and time reads
+    Store(StoreArgs),
+}
+
+#[derive(Args, Debug)]
+struct StoreArgs {
+    /// Notes to create
+    #[arg(long, default_value_t = 2000)]
+    notes: usize,
+
+    /// Bytes per note value
+    #[arg(long, default_value_t = 256)]
+    note_bytes: usize,
+
+    /// Sessions to add
+    #[arg(long, default_value_t = 200)]
+    sessions: usize,
+
+    /// KiB of content per session
+    #[arg(long, default_value_t = 64)]
+    session_kb: usize,
+
+    /// Large sessions to add, reported separately
+    #[arg(long, default_value_t = 2)]
+    large_sessions: usize,
+
+    /// KiB of content per large session
+    #[arg(long, default_value_t = 5120)]
+    large_kb: usize,
+
+    /// Datasets to create
+    #[arg(long, default_value_t = 10)]
+    datasets: usize,
+
+    /// Sessions linked into each dataset
+    #[arg(long, default_value_t = 20)]
+    dataset_size: usize,
+
+    /// Percent of notes edited and sessions grown after creation
+    #[arg(long, default_value_t = 10)]
+    edit_pct: u8,
+
+    /// Percent of notes deleted after creation
+    #[arg(long, default_value_t = 5)]
+    delete_pct: u8,
+
+    /// Repetitions of each read operation
+    #[arg(long, default_value_t = 10)]
+    iterations: usize,
+
+    /// Reads by id drawn uniformly from the whole population
+    #[arg(long, default_value_t = 500)]
+    random_reads: usize,
+
+    /// Generator seed
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+
+    /// Compare against a saved run: `latest` or a results file path
     ///
-    /// Use --list to list available benchmarks.
-    names: Vec<String>,
+    /// Runs are saved under `gage-bench/results/store/<stamp>.json`.
+    #[arg(long, value_name = "FILE|latest")]
+    baseline: Option<String>,
 
-    /// Maximum number of sessions to load (default 100)
-    #[arg(short, long)]
-    limit: Option<usize>,
-
-    /// Load all sessions
-    #[arg(short, long)]
-    all: bool,
-
-    /// Iterations per format (default 10)
-    #[arg(short, long)]
-    iterations: Option<usize>,
-
-    /// List available benchmark names
+    /// Keep the run directory instead of deleting it on success
     #[arg(long)]
-    list: bool,
-
-    /// Override the source root (default ~/.claude/projects)
-    #[arg(long)]
-    root: Option<PathBuf>,
+    keep: bool,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-
-    if cli.list {
-        for b in benches::registry() {
-            println!("{:10}  {}", b.name, b.description);
-        }
-        return ExitCode::SUCCESS;
+    match cli.command {
+        Command::Store(args) => store(args),
     }
+}
 
-    if cli.names.is_empty() {
-        eprintln!("Error: at least one benchmark name required (try --list)");
-        return ExitCode::from(2);
-    }
-
-    let mut selected: Vec<&'static benches::Bench> = Vec::new();
-    for name in &cli.names {
-        match benches::find(name) {
-            Some(b) => selected.push(b),
-            None => {
-                eprintln!("Error: unknown benchmark: {name}");
-                return ExitCode::from(2);
-            }
-        }
-    }
-
-    let formats = formats::compiled();
-    if formats.is_empty() {
-        eprintln!("Error: no formats compiled in — enable at least one fmt-* feature");
-        return ExitCode::from(2);
-    }
-
-    let limit = if cli.all {
-        None
-    } else {
-        Some(cli.limit.unwrap_or(DEFAULT_SESSION_LIMIT))
+fn store(args: StoreArgs) -> ExitCode {
+    let params = Params {
+        notes: args.notes,
+        note_bytes: args.note_bytes,
+        sessions: args.sessions,
+        session_kb: args.session_kb,
+        large_sessions: args.large_sessions,
+        large_kb: args.large_kb,
+        datasets: args.datasets,
+        dataset_size: args.dataset_size,
+        edit_pct: args.edit_pct.min(100),
+        delete_pct: args.delete_pct.min(100),
+        iterations: args.iterations.max(1),
+        random_reads: args.random_reads,
+        seed: args.seed,
     };
-
-    let sessions = match corpus::pick_sessions(&LoadOptions {
-        root: cli.root.clone(),
-        limit,
-    }) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return ExitCode::from(1);
+    let baseline = match args.baseline.as_deref().map(resolve_baseline) {
+        Some(Ok(results)) => Some(results),
+        Some(Err(e)) => {
+            eprintln!("gage-bench: baseline: {e}");
+            return ExitCode::from(2);
         }
+        None => None,
     };
-
-    let load_bar = make_progress_bar(0);
-    load_bar.set_message("Loading sessions");
-    let corpus = match corpus::load(sessions, &load_bar) {
-        Ok(c) => {
-            load_bar.finish_and_clear();
-            c
-        }
-        Err(e) => {
-            load_bar.finish_and_clear();
-            eprintln!("Error: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    println!(
-        "Loaded {} sessions, {} total entries",
-        corpus.session_count(),
-        corpus.total_entries()
-    );
 
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let outdir = PathBuf::from(format!("/tmp/gage-bench-{stamp}"));
-    std::fs::create_dir_all(&outdir).unwrap();
-
-    let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS).max(1);
-    let mut all_rows: Vec<RowData> = Vec::new();
-    for b in &selected {
-        println!();
-        println!("== Bench: {} ==", b.name);
-        let progress_len = (formats.len() * corpus.session_count() * 2 * iterations) as u64;
-        let bar = make_progress_bar(progress_len);
-        let rows = (b.run)(&corpus, &formats, &outdir, iterations, &bar);
-        bar.finish_and_clear();
-        report::print_table(&rows);
-        all_rows.extend(rows);
+    let run_dir = std::env::temp_dir().join(format!("gage-bench-{stamp}"));
+    let home = run_dir.join("home");
+    if let Err(e) = std::fs::create_dir_all(&home) {
+        eprintln!("gage-bench: create {}: {e}", home.display());
+        return ExitCode::from(1);
     }
 
-    let json_path = outdir.join("results.json");
-    if let Err(e) = report::write_json(&json_path, &all_rows) {
-        eprintln!("Warn: results.json write failed: {e}");
+    let bar = progress_bar();
+    let results = store_bench::run(&params, &stamp, &home, &bar);
+    bar.finish_and_clear();
+    let results = match results {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("gage-bench: {e}");
+            eprintln!("Run dir: {}", run_dir.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    println!("Run {} {}", results.stamp, results.code_version);
+    println!("Params: {}", results.params);
+    report::print_metrics("Timings", &results.metrics);
+    report::print_sizes("Sizes", &results.sizes);
+    report::print_counts("Counts", &results.counts);
+    if let Some(baseline) = &baseline {
+        report::print_comparison(baseline, &results);
     }
 
+    let saved = match results.save() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("gage-bench: save results: {e}");
+            return ExitCode::from(1);
+        }
+    };
     println!();
-    println!("Bench dir: {}", outdir.display());
-
+    println!("Results: {}", saved.display());
+    if args.keep {
+        println!("Store: {}", home.join("store.git").display());
+    } else if let Err(e) = std::fs::remove_dir_all(&home) {
+        eprintln!("gage-bench: remove {}: {e}", home.display());
+    }
     ExitCode::SUCCESS
 }
 
-fn make_progress_bar(len: u64) -> ProgressBar {
-    let bar = ProgressBar::new(len);
+/// `latest` selects the newest saved run for this bench; anything else
+/// is a results file path.
+fn resolve_baseline(spec: &str) -> Result<Results, String> {
+    let path = if spec == "latest" {
+        report::latest_results(BENCH_NAME)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "no saved runs under {}",
+                    report::results_dir(BENCH_NAME).display()
+                )
+            })?
+    } else {
+        PathBuf::from(spec)
+    };
+    Results::read(&path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn progress_bar() -> ProgressBar {
+    let bar = ProgressBar::new(0);
     bar.set_style(
         ProgressStyle::with_template(
-            "{spinner:.magenta} {msg:16!} [{elapsed_precise}] \
+            "{spinner:.magenta} {msg:12!} [{elapsed_precise}] \
             {bar:30.white/bright.black} ({pos}/{len})",
         )
         .unwrap()

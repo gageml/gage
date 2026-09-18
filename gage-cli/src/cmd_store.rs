@@ -333,7 +333,7 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
 }
 
 fn gc(store: &Store, args: GcArgs) {
-    let outcome = match store.gc(args.prune.as_deref()) {
+    let outcome = match store.gc(args.prune.as_deref(), false) {
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("gage store gc: {e}");
