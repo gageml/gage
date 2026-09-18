@@ -1,7 +1,8 @@
 use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
 use gage_store::{
-    DatasetRecord, EntryKind, InitOutcome, NoteInput, NoteRecord, StoreStatus, TreeEntry,
+    DatasetRecord, DatasetStore, EntryKind, InitOutcome, NoteInput, NoteRecord, NoteStore,
+    SessionOutcome, SessionSpec, Store, StoreStatus, TreeEntry,
 };
 use tabled::{
     Table,
@@ -209,49 +210,57 @@ pub struct NoteNewArgs {
 }
 
 pub fn run(command: StoreCommand) {
+    if let StoreCommand::Init = command {
+        init();
+        return;
+    }
+    let store = open_store();
     match command {
-        StoreCommand::Init => init(),
-        StoreCommand::Status(args) => status(args),
-        StoreCommand::Gc(args) => gc(args),
-        StoreCommand::Ls(args) => ls(args),
-        StoreCommand::Cat(args) => cat(args),
-        StoreCommand::Note { command } => match command {
-            NoteCommand::List => note_list(),
-            NoteCommand::Show(args) => note_show(args),
-            NoteCommand::New(args) => note_new(args),
-            NoteCommand::Edit(args) => note_edit(args),
-            NoteCommand::Delete(args) => note_delete(args),
-        },
-        StoreCommand::Dataset { command } => match command {
-            DatasetCommand::List => dataset_list(),
-            DatasetCommand::New => dataset_new(),
-            DatasetCommand::Session { command } => match command {
-                DatasetSessionCommand::List(args) => dataset_session_list(args),
-                DatasetSessionCommand::Show(args) => dataset_session_show(args),
-                DatasetSessionCommand::Add(args) => dataset_session_add(args),
-            },
-        },
-        StoreCommand::View => view(),
+        StoreCommand::Init => unreachable!("handled above"),
+        StoreCommand::Status(args) => status(&store, args),
+        StoreCommand::Gc(args) => gc(&store, args),
+        StoreCommand::Ls(args) => ls(&store, args),
+        StoreCommand::Cat(args) => cat(&store, args),
+        StoreCommand::Note { command } => {
+            let notes = NoteStore::from(&store);
+            match command {
+                NoteCommand::List => note_list(&notes),
+                NoteCommand::Show(args) => note_show(&notes, args),
+                NoteCommand::New(args) => note_new(&notes, args),
+                NoteCommand::Edit(args) => note_edit(&notes, args),
+                NoteCommand::Delete(args) => note_delete(&notes, args),
+            }
+        }
+        StoreCommand::Dataset { command } => {
+            let datasets = DatasetStore::from(&store);
+            match command {
+                DatasetCommand::List => dataset_list(&datasets),
+                DatasetCommand::New => dataset_new(&datasets),
+                DatasetCommand::Session { command } => match command {
+                    DatasetSessionCommand::List(args) => dataset_session_list(&datasets, args),
+                    DatasetSessionCommand::Show(args) => dataset_session_show(&datasets, args),
+                    DatasetSessionCommand::Add(args) => dataset_session_add(&datasets, args),
+                },
+            }
+        }
+        StoreCommand::View => view(store),
     }
 }
 
-fn view() {
-    let store = gage_store::store_path();
-    if !store.join("HEAD").is_file() {
-        eprintln!(
-            "gage store view: no Gage store at {} (run `gage store init`)",
-            store.display()
-        );
-        std::process::exit(1);
-    }
-    if let Err(e) = gage_tui::store_view::run(store) {
-        eprintln!("gage store view: {e}");
-        std::process::exit(1);
+/// Open the default store, or exit with the open error.
+fn open_store() -> Store {
+    match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage store: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
 fn init() {
-    let outcome = match gage_store::init() {
+    let path = gage_store::store_path();
+    let outcome = match gage_store::init(&path) {
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("gage store init: {e}");
@@ -262,15 +271,19 @@ fn init() {
         InitOutcome::Created => "Initialized empty",
         InitOutcome::Reinitialized => "Reinitialized existing",
     };
-    println!(
-        "{verb} Gage store in {}/",
-        gage_store::store_path().display()
-    );
+    println!("{verb} Gage store in {}/", path.display());
 }
 
-fn status(args: StatusArgs) {
+fn view(store: Store) {
+    if let Err(e) = gage_tui::store_view::run(store) {
+        eprintln!("gage store view: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn status(store: &Store, args: StatusArgs) {
     if args.check {
-        match gage_store::fsck() {
+        match store.fsck() {
             Ok(()) => println!("Integrity: OK"),
             Err(e) => {
                 eprintln!("Integrity: FAIL ({e})");
@@ -279,7 +292,7 @@ fn status(args: StatusArgs) {
         }
         return;
     }
-    let status = match gage_store::status() {
+    let status = match store.status() {
         Ok(status) => status,
         Err(e) => {
             eprintln!("gage store status: {e}");
@@ -319,8 +332,8 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
     rows
 }
 
-fn gc(args: GcArgs) {
-    let outcome = match gage_store::gc(args.prune.as_deref()) {
+fn gc(store: &Store, args: GcArgs) {
+    let outcome = match store.gc(args.prune.as_deref()) {
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("gage store gc: {e}");
@@ -370,8 +383,8 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .collect()
 }
 
-fn dataset_new() {
-    let id = match gage_store::dataset_new() {
+fn dataset_new(datasets: &DatasetStore) {
+    let id = match datasets.create() {
         Ok(id) => id,
         Err(e) => {
             eprintln!("gage store dataset new: {e}");
@@ -381,8 +394,8 @@ fn dataset_new() {
     println!("{id}");
 }
 
-fn dataset_list() {
-    let records = match gage_store::dataset_list() {
+fn dataset_list(datasets: &DatasetStore) {
+    let records = match datasets.list() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("gage store dataset list: {e}");
@@ -413,15 +426,15 @@ fn dataset_row(r: &DatasetRecord) -> Vec<String> {
     vec![r.id.clone(), format_elapsed_ms(r.created_ms)]
 }
 
-fn dataset_session_list(args: DatasetSessionListArgs) {
-    let dataset_id = match gage_store::dataset_resolve_id(&args.dataset) {
+fn dataset_session_list(datasets: &DatasetStore, args: DatasetSessionListArgs) {
+    let dataset_id = match datasets.resolve_id(&args.dataset) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("gage store dataset session list: {e}");
             std::process::exit(1);
         }
     };
-    let sessions = match gage_store::dataset_sessions_list(&dataset_id) {
+    let sessions = match datasets.sessions_list(&dataset_id) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("gage store dataset session list: {e}");
@@ -465,15 +478,15 @@ fn dataset_session_list(args: DatasetSessionListArgs) {
     println!("{table}");
 }
 
-fn dataset_session_show(args: DatasetSessionShowArgs) {
-    let dataset_id = match gage_store::dataset_resolve_id(&args.dataset) {
+fn dataset_session_show(datasets: &DatasetStore, args: DatasetSessionShowArgs) {
+    let dataset_id = match datasets.resolve_id(&args.dataset) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("gage store dataset session show: {e}");
             std::process::exit(1);
         }
     };
-    let meta = match gage_store::dataset_session_meta(&dataset_id, &args.session) {
+    let meta = match datasets.session_meta(&dataset_id, &args.session) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("gage store dataset session show: {e}");
@@ -492,7 +505,7 @@ fn dataset_session_show(args: DatasetSessionShowArgs) {
             std::process::exit(1);
         }
     };
-    let access = match gage_store::dataset_session_content(&dataset_id, meta.session_num) {
+    let access = match datasets.session_content(&dataset_id, meta.session_num) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("gage store dataset session show: {e}");
@@ -522,8 +535,8 @@ fn dataset_session_show(args: DatasetSessionShowArgs) {
     }
 }
 
-fn dataset_session_add(args: DatasetSessionAddArgs) {
-    let dataset_id = match gage_store::dataset_resolve_id(&args.dataset) {
+fn dataset_session_add(datasets: &DatasetStore, args: DatasetSessionAddArgs) {
+    let dataset_id = match datasets.resolve_id(&args.dataset) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("gage store dataset session add: {e}");
@@ -576,16 +589,16 @@ fn dataset_session_add(args: DatasetSessionAddArgs) {
         });
     }
 
-    let specs: Vec<gage_store::SessionSpec<'_>> = resolved
+    let specs: Vec<SessionSpec<'_>> = resolved
         .iter_mut()
-        .map(|r| gage_store::SessionSpec {
+        .map(|r| SessionSpec {
             driver_name: r.driver_name,
             driver_version: r.driver_version,
             reader: r.reader.as_mut(),
         })
         .collect();
 
-    let outcomes = match gage_store::dataset_sessions_add(&dataset_id, specs) {
+    let outcomes = match datasets.sessions_add(&dataset_id, specs) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("gage store dataset session add: {e}");
@@ -595,16 +608,16 @@ fn dataset_session_add(args: DatasetSessionAddArgs) {
 
     for outcome in &outcomes {
         let verb = match outcome.outcome {
-            gage_store::SessionOutcome::Added => "Added",
-            gage_store::SessionOutcome::Updated => "Updated",
-            gage_store::SessionOutcome::Unchanged => "Unchanged",
+            SessionOutcome::Added => "Added",
+            SessionOutcome::Updated => "Updated",
+            SessionOutcome::Unchanged => "Unchanged",
         };
         println!("{verb} session {}", outcome.session_num);
     }
 }
 
-fn ls(args: LsArgs) {
-    let entries = match gage_store::ls(&args.reference) {
+fn ls(store: &Store, args: LsArgs) {
+    let entries = match store.ls(&args.reference) {
         Ok(entries) => entries,
         Err(e) => {
             eprintln!("gage store ls: {e}");
@@ -648,15 +661,15 @@ fn ls_row(entry: &TreeEntry, include_sha: bool) -> Vec<String> {
     row
 }
 
-fn cat(args: CatArgs) {
-    if let Err(e) = gage_store::cat(&args.reference) {
+fn cat(store: &Store, args: CatArgs) {
+    if let Err(e) = store.cat(&args.reference) {
         eprintln!("gage store cat: {e}");
         std::process::exit(1);
     }
 }
 
-fn note_list() {
-    let records = match gage_store::note_list() {
+fn note_list(notes: &NoteStore) {
+    let records = match notes.list() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("gage store note list: {e}");
@@ -726,8 +739,8 @@ fn format_value_cell(value: &str) -> String {
     }
 }
 
-fn note_show(args: NoteShowArgs) {
-    let note = match gage_store::note_get(&args.id) {
+fn note_show(notes: &NoteStore, args: NoteShowArgs) {
+    let note = match notes.get(&args.id) {
         Ok(n) => n,
         Err(e) => {
             eprintln!("gage store note show: {e}");
@@ -784,8 +797,8 @@ fn note_show(args: NoteShowArgs) {
     println!("{table}");
 }
 
-fn note_delete(args: NoteDeleteArgs) {
-    let id = match gage_store::note_delete(&args.id) {
+fn note_delete(notes: &NoteStore, args: NoteDeleteArgs) {
+    let id = match notes.delete(&args.id) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("gage store note delete: {e}");
@@ -795,8 +808,8 @@ fn note_delete(args: NoteDeleteArgs) {
     println!("{id}");
 }
 
-fn note_edit(args: NoteEditArgs) {
-    let id = match gage_store::note_edit(&args.id, &args.value) {
+fn note_edit(notes: &NoteStore, args: NoteEditArgs) {
+    let id = match notes.edit(&args.id, &args.value) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("gage store note edit: {e}");
@@ -806,9 +819,9 @@ fn note_edit(args: NoteEditArgs) {
     println!("{id}");
 }
 
-fn note_new(args: NoteNewArgs) {
+fn note_new(notes: &NoteStore, args: NoteNewArgs) {
     let author = resolve_author(args.user);
-    let id = match gage_store::note_new(NoteInput {
+    let id = match notes.create(NoteInput {
         name: &args.name,
         value: &args.value,
         author: &author,

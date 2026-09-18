@@ -12,16 +12,11 @@
 //! shape used by `scan view` and `test view`.
 
 use std::io;
-use std::path::PathBuf;
 
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
-use gage_store::EntryKind;
-use gage_store::git::{CommitMeta, TreeEntry, list_tree_at, read_commit_at};
-use gage_store::object::{
-    LinkFile, ObjectHeader, ObjectRef, classify_parents_at, find_link_files_at,
-    list_object_refs_at, read_header_at, walk_parent_chain_at,
-};
+use gage_store::object::{LinkFile, ObjectHeader, ObjectRef};
+use gage_store::{CommitMeta, EntryKind, Store, TreeEntry};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
@@ -34,11 +29,11 @@ use crate::panel::{header_row, panel_block};
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::styles;
 
-/// Run the store viewer against the store at `store_path`.
-pub fn run(store_path: PathBuf) -> io::Result<()> {
+/// Run the store viewer against an opened store.
+pub fn run(store: Store) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = run_inner(&mut terminal, &store_path);
+    let result = run_inner(&mut terminal, store);
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -46,8 +41,8 @@ pub fn run(store_path: PathBuf) -> io::Result<()> {
     result
 }
 
-fn run_inner(terminal: &mut DefaultTerminal, store_path: &std::path::Path) -> io::Result<()> {
-    let mut state = ViewState::new(store_path.to_path_buf());
+fn run_inner(terminal: &mut DefaultTerminal, store: Store) -> io::Result<()> {
+    let mut state = ViewState::new(store);
     state.reload();
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -84,7 +79,7 @@ struct RefRow {
 }
 
 struct ViewState {
-    store_path: PathBuf,
+    store: Store,
     refs: Vec<RefRow>,
     /// Ref ids in display order, kept alongside `refs` so the id-stable
     /// table can address rows through it.
@@ -108,9 +103,9 @@ struct ViewState {
 }
 
 impl ViewState {
-    fn new(store_path: PathBuf) -> Self {
+    fn new(store: Store) -> Self {
         Self {
-            store_path,
+            store,
             refs: Vec::new(),
             ordered_ids: Vec::new(),
             table: ItemTable::new(),
@@ -125,12 +120,14 @@ impl ViewState {
 
     /// Reload the ref list and invalidate the detail cache.
     fn reload(&mut self) {
-        match list_object_refs_at(&self.store_path) {
+        match self.store.list_object_refs() {
             Ok(refs) => {
                 let mut rows: Vec<RefRow> = refs
                     .into_iter()
                     .map(|object_ref| {
-                        let type_name = read_header_at(&self.store_path, &object_ref.tip_sha)
+                        let type_name = self
+                            .store
+                            .read_header(&object_ref.tip_sha)
                             .map(|h| type_display(&h.object_type))
                             .unwrap_or_else(|_| "?".to_string());
                         RefRow {
@@ -314,7 +311,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     if state.detail_width != Some(inner.width) {
         state.detail = match state.selected_ref() {
             Some(r) => render_detail(
-                &state.store_path,
+                &state.store,
                 r.object_ref.tip_sha.clone(),
                 &r.object_ref.ref_name,
                 inner.width,
@@ -377,21 +374,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
 /// A read failure at any step is surfaced as a red line rather than
 /// aborting the render. `width` is the inner pane width, used so
 /// full-width section headers span the pane.
-fn render_detail(
-    store: &std::path::Path,
-    commit: String,
-    ref_name: &str,
-    width: u16,
-) -> Vec<Line<'static>> {
+fn render_detail(store: &Store, commit: String, ref_name: &str, width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let header = match read_header_at(store, &commit) {
+    let header = match store.read_header(&commit) {
         Ok(h) => h,
         Err(e) => {
             lines.push(err_line(format!("read header: {e}")));
             return lines;
         }
     };
-    let commit_meta = match read_commit_at(store, &commit) {
+    let commit_meta = match store.read_commit(&commit) {
         Ok(c) => c,
         Err(e) => {
             lines.push(err_line(format!("read commit: {e}")));
@@ -445,14 +437,9 @@ fn push_header_section(
     lines.push(kv("message", subject));
 }
 
-fn push_parents_section(
-    lines: &mut Vec<Line<'static>>,
-    store: &std::path::Path,
-    commit: &str,
-    width: u16,
-) {
+fn push_parents_section(lines: &mut Vec<Line<'static>>, store: &Store, commit: &str, width: u16) {
     push_section_header(lines, "Parents", width);
-    let classified = match classify_parents_at(store, commit) {
+    let classified = match store.classify_parents(commit) {
         Ok(c) => c,
         Err(e) => {
             lines.push(err_line(format!("classify parents: {e}")));
@@ -483,7 +470,7 @@ fn push_parents_section(
     }
 }
 
-fn labeled_parent(label: &str, sha: &str, store: &std::path::Path) -> Line<'static> {
+fn labeled_parent(label: &str, sha: &str, store: &Store) -> Line<'static> {
     let annotation = resolve_child(store, sha);
     let mut spans: Vec<Span<'static>> = vec![
         Span::raw("  "),
@@ -499,8 +486,8 @@ fn labeled_parent(label: &str, sha: &str, store: &std::path::Path) -> Line<'stat
 
 /// Read a commit's header and format it as a short annotation, or
 /// return `None` if the SHA does not resolve to a Gage object.
-fn resolve_child(store: &std::path::Path, sha: &str) -> Option<String> {
-    let header = read_header_at(store, sha).ok()?;
+fn resolve_child(store: &Store, sha: &str) -> Option<String> {
+    let header = store.read_header(sha).ok()?;
     Some(format!(
         "{} {} {}",
         header.object_type,
@@ -509,14 +496,9 @@ fn resolve_child(store: &std::path::Path, sha: &str) -> Option<String> {
     ))
 }
 
-fn push_tree_section(
-    lines: &mut Vec<Line<'static>>,
-    store: &std::path::Path,
-    commit: &str,
-    width: u16,
-) {
+fn push_tree_section(lines: &mut Vec<Line<'static>>, store: &Store, commit: &str, width: u16) {
     push_section_header(lines, "Tree", width);
-    let entries = match list_tree_at(store, commit) {
+    let entries = match store.list_tree(commit) {
         Ok(t) => t,
         Err(e) => {
             lines.push(err_line(format!("list tree: {e}")));
@@ -552,12 +534,12 @@ fn tree_line(entry: &TreeEntry) -> Line<'static> {
 
 fn push_link_files_section(
     lines: &mut Vec<Line<'static>>,
-    store: &std::path::Path,
+    store: &Store,
     commit: &str,
     width: u16,
 ) {
     push_section_header(lines, "Link files", width);
-    let files = match find_link_files_at(store, commit) {
+    let files = match store.find_link_files(commit) {
         Ok(f) => f,
         Err(e) => {
             lines.push(err_line(format!("read link files: {e}")));
@@ -573,7 +555,7 @@ fn push_link_files_section(
     }
 }
 
-fn push_link_file(lines: &mut Vec<Line<'static>>, store: &std::path::Path, file: &LinkFile) {
+fn push_link_file(lines: &mut Vec<Line<'static>>, store: &Store, file: &LinkFile) {
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(file.path.clone(), styles::Text::accent()),
@@ -599,12 +581,12 @@ fn push_link_file(lines: &mut Vec<Line<'static>>, store: &std::path::Path, file:
 
 fn push_parent_chain_section(
     lines: &mut Vec<Line<'static>>,
-    store: &std::path::Path,
+    store: &Store,
     commit: &str,
     width: u16,
 ) {
     push_section_header(lines, "History", width);
-    let chain = match walk_parent_chain_at(store, commit) {
+    let chain = match store.walk_parent_chain(commit) {
         Ok(c) => c,
         Err(e) => {
             lines.push(err_line(format!("walk parents: {e}")));
@@ -619,7 +601,7 @@ fn push_parent_chain_section(
         return;
     }
     for (idx, sha) in chain.iter().enumerate() {
-        let meta = read_commit_at(store, sha).ok();
+        let meta = store.read_commit(sha).ok();
         let subject = meta
             .as_ref()
             .map(|m| m.message.lines().next().unwrap_or("").to_string())

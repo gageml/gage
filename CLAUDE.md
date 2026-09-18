@@ -58,8 +58,9 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - RIGHT: `fs::create_dir_all(p).unwrap()` - if the filesystem is read-only the
     panic location alone is sufficient - no `expect` message would add value
 
-  Keep `expect` messages as short as possible while still naming the
-  precondition.
+  This is the "expect as precondition" style recommended by [std::error
+  Common Message Styles]. Keep `expect` messages as short as possible while
+  still naming the precondition.
   - Good: `"splitn should yield >= one substr"`
   - Bad:
     `"splitn(2, ' ') always yields at least one element per the API contract"`
@@ -68,15 +69,15 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - `.is_ok()` / `.is_err()` to discard a `Result` - same rule as above; if you
     actually need the boolean (rare), name the discarded variant
 
-- Run `just check` before declaring any change complete. It runs the full
-  gate — clippy (no warnings), fmt, tests — as one command; partial
-  verification is not an option.
+- Run `just check` before declaring any change complete. It runs the full gate —
+  clippy (no warnings), fmt, tests — as one command; partial verification is not
+  an option.
 
 - **Prefer imports over fully qualified references.** Keep symbol use short to
   improve readability. The test: before writing `a::b::C` inline, look at the
   file's `use` block. If the module or item is already imported, use the short
-  form; if not, add the import alongside the existing ones - the import block
-  is the file's established convention and new code follows it.
+  form; if not, add the import alongside the existing ones - the import block is
+  the file's established convention and new code follows it.
 
   For std modules, import the module, not the item, when the item name would
   collide with the prelude: `use std::io;` then `io::Result<T>`, never
@@ -86,27 +87,40 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     file whose header already imports four other `std` modules
   - RIGHT: `use std::io;` in the import block, `io::Result<Window>` at use
 
-  Not violations: trait imports scoped to a function body
-  (`use std::io::Write;` inside the one function that writes), and aliased
-  imports for disambiguation (`use crate::style as s;`). Existing
-  fully-qualified references elsewhere in the codebase are fixed
-  opportunistically when the surrounding code is being edited, not swept.
+  Not violations: trait imports scoped to a function body (`use std::io::Write;`
+  inside the one function that writes), and aliased imports for disambiguation
+  (`use crate::style as s;`). Existing fully-qualified references elsewhere in
+  the codebase are fixed opportunistically when the surrounding code is being
+  edited, not swept.
 
 - Use the _Stepdown Rule_ when ordering functions. Define functions below where
   they are first called, so code reads top-down like a narrative. This takes
   priority over grouping by visibility.
 
-- Constructor naming - Match the prefix to what the function does:
-  - `new(...)` - primary constructor; minimal/required arguments only
+- Constructor naming - Match the prefix to what the function does. Sources:
+  [Rust API Guidelines C-CTOR] and the constructor rows of [Rust API
+  Guidelines C-CASE].
+  - `new(...)` - primary constructor; minimal/required arguments only. When a
+    type has both `new()` and `Default`, they must produce the same value
+    (C-CTOR; clippy `new_without_default`).
   - `with_xxx(...)` - alternate constructor that _configures_ the new value
-    (`Vec::with_capacity`, `BufReader::with_capacity`) - use for
-    scoping/parameterizing constructors where the inputs are not the data of
-    `Self` in another form
-  - `from_xxx(...)` - _conversion_ constructor per [Rust API Guidelines C-CONV].
-    The inputs _are_ `Self` in another representation (parse, decode,
-    reinterpret). `Target::from_columns(row) -> Target` qualifies;
-    `MessageTable::from_session(id, path)` does not.
-  - Avoid `for_xxx` - prefer `with_xxx` for the same role
+    (`Vec::with_capacity`, `BufReader::with_capacity`). C-CASE names this form
+    `with_more_details`. Use it when the arguments are options or parameters,
+    not the source data the value is built from.
+  - `from_xxx(...)` - _conversion_ constructor. C-CTOR defines it as building
+    the type from a value of a different type; the argument is the source data
+    the new value is derived from (parse, decode, reinterpret). Extra
+    disambiguating arguments are permitted (`u64::from_str_radix`,
+    `io::Error::from_raw_os_error`). `Target::from_columns(row) -> Target`
+    qualifies; `MessageTable::from_session(id, path)` does not, because the
+    arguments locate the data rather than being the data. Clippy
+    `wrong_self_convention` requires `from_` functions to take no `self`.
+  - Domain verbs (`open`, `connect`, `bind`) are accepted by C-CTOR for
+    resource types where the verb is clearer than `new`.
+  - Avoid `for_xxx` - prefer `with_xxx` for the same role. This is a project
+    convention with no counterpart in the API Guidelines.
+  - Do not define an inherent `from_str(&str)`; implement `FromStr` (clippy
+    `should_implement_trait`).
 
 - **No banner/section-header comments.** Do not cordon off regions of a file
   with comments like `// -- TableProvider --`, `// === helpers ===`,
@@ -116,7 +130,7 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   ordering, naming, or splitting the file - not a banner. The reader infers
   structure from the code itself.
 
-- Comment puntuation rules:
+- Comment punctuation rules:
   - Sentences that provide background or details not obvious in the code should
     end with periods
   - Short fragments that demark sections or provide quick clarity to code
@@ -124,6 +138,10 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 
   Rule of thumb: If it reads like a description, use periods. If it reads like a
   label or title, omit the period.
+
+  This deviates from the [Rust Style Guide comments] chapter, which requires
+  complete sentences ending with a period for all comments except inline block
+  comments. The deviation is intentional.
 
   Doc comments (`///`) are prose and follow normal conventions.
 
@@ -190,8 +208,31 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - When describing content DO NOT describe implementation details. This is user
     facing help text, NOT code docs.
 
-[Rust API Guidelines C-CONV]:
-  https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
+References for the Rust rules:
+
+- [Rust API Guidelines C-CTOR] - constructors: `new`, `_with_foo`, `from_`,
+  domain verbs, `new`/`Default` parity
+- [Rust API Guidelines C-CASE] - casing and constructor name forms (RFC 430)
+- [Rust API Guidelines C-CONV] - ad-hoc conversion methods `as_`, `to_`,
+  `into_`
+- [Rust API Guidelines C-GETTER] - no `get_` prefix; `_mut` suffix
+- [std::error Common Message Styles] - `expect` message style
+- [Rust Style Guide comments] - comment formatting and punctuation
+- [Rust Style Guide items] - `use` grouping and ordering
+- Clippy lints: [wrong_self_convention], [new_ret_no_self],
+  [should_implement_trait], [new_without_default]
+
+[Rust API Guidelines C-CTOR]: https://rust-lang.github.io/api-guidelines/predictability.html#constructors-are-static-inherent-methods-c-ctor
+[Rust API Guidelines C-CASE]: https://rust-lang.github.io/api-guidelines/naming.html#casing-conforms-to-rfc-430-c-case
+[Rust API Guidelines C-CONV]: https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
+[Rust API Guidelines C-GETTER]: https://rust-lang.github.io/api-guidelines/naming.html#getter-names-follow-rust-convention-c-getter
+[std::error Common Message Styles]: https://doc.rust-lang.org/std/error/index.html#common-message-styles
+[Rust Style Guide comments]: https://doc.rust-lang.org/style-guide/index.html#comments
+[Rust Style Guide items]: https://doc.rust-lang.org/style-guide/items.html
+[wrong_self_convention]: https://rust-lang.github.io/rust-clippy/master/index.html#wrong_self_convention
+[new_ret_no_self]: https://rust-lang.github.io/rust-clippy/master/index.html#new_ret_no_self
+[should_implement_trait]: https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
+[new_without_default]: https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
 
 ## Database rules
 
@@ -216,8 +257,8 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     session, log, test dialogs): `q close`.
   - `dismiss` - message dialogs (notices, announcements) with no pending action
     or item: `Enter dismiss`.
-  - App level names its object where bare `cancel` would be ambiguous:
-    `q quit`, `q cancel scan`.
+  - App level names its object where bare `cancel` would be ambiguous: `q quit`,
+    `q cancel scan`.
 
 ## Other rules
 

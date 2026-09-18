@@ -1,4 +1,4 @@
-//! Note objects: `gage::note 1`.
+//! Note objects: `gage::note 1`, reached through [`NoteStore`].
 //!
 //! Content is `attrs.json` (name, author, and the optional spec
 //! fields), `value.txt` (the note value as plain text), and, when at
@@ -6,25 +6,31 @@
 //! SHAs. Tree construction, commit parents, edits, and tombstones are
 //! the generic object model's job; see [`crate::object`].
 
-use std::path::Path;
-
 use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::git::{git_in, run};
-use crate::object::{
-    EditOutcome, Object, ObjectTree, object_ref, read_object_at, require_type, resolve_id_at,
-};
-use crate::{StoreError, exists, object, store_path};
+use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
+use crate::{Store, StoreError};
 
 const OBJECT_TYPE: &str = "gage::note";
 const OBJECT_VERSION: &str = "1";
 const VALUE_FILE: &str = "value.txt";
 const TARGET_LINK: &str = "target.link";
 
-/// Input to [`note_new`]. Every string is stored verbatim; the caller
-/// is responsible for producing `author` in the
+/// Note operations over an opened store.
+pub struct NoteStore<'a> {
+    store: &'a Store,
+}
+
+impl<'a> From<&'a Store> for NoteStore<'a> {
+    fn from(store: &'a Store) -> Self {
+        NoteStore { store }
+    }
+}
+
+/// Input to [`NoteStore::create`]. Every string is stored verbatim; the
+/// caller is responsible for producing `author` in the
 /// `user:`/`scanner:`/`agent:` URI form.
 pub struct NoteInput<'a> {
     pub name: &'a str,
@@ -81,31 +87,100 @@ struct NoteAttrs {
     scan: Option<String>,
 }
 
-/// Create a note in the default store. Returns the new note's id.
-pub fn note_new(input: NoteInput) -> Result<String, StoreError> {
-    note_new_at(&store_path(), input)
-}
-
-/// Create a note in the store at `path`. Returns the new note's id.
-pub fn note_new_at(path: &Path, input: NoteInput) -> Result<String, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
+impl NoteStore<'_> {
+    /// Create a note. Returns the new note's id.
+    pub fn create(&self, input: NoteInput) -> Result<String, StoreError> {
+        let target_shas = self.resolve_target_shas(input.targets)?;
+        let attrs = NoteAttrs {
+            name: input.name.to_string(),
+            author: input.author.to_string(),
+            target: None,
+            line: None,
+            line_end: None,
+            metadata: None,
+            scan: None,
+        };
+        let tree = build_tree(&attrs, input.value, target_shas)?;
+        let id = new_uuid();
+        let message = format!("note: {}", input.name);
+        self.store
+            .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
+        Ok(id)
     }
-    let target_shas = resolve_target_shas(path, input.targets)?;
-    let attrs = NoteAttrs {
-        name: input.name.to_string(),
-        author: input.author.to_string(),
-        target: None,
-        line: None,
-        line_end: None,
-        metadata: None,
-        scan: None,
-    };
-    let tree = build_tree(&attrs, input.value, target_shas)?;
-    let id = new_uuid();
-    let message = format!("note: {}", input.name);
-    object::create(path, OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
-    Ok(id)
+
+    /// Parse `note:<id>` targets, verify each references an existing
+    /// note, and return the corresponding tip SHAs in input order.
+    fn resolve_target_shas(&self, targets: &[String]) -> Result<Vec<String>, StoreError> {
+        let mut shas = Vec::with_capacity(targets.len());
+        for raw in targets {
+            let id = raw
+                .strip_prefix("note:")
+                .ok_or_else(|| StoreError::BadTarget(raw.clone()))?;
+            let sha = self
+                .store
+                .rev_parse(&object_ref(id))?
+                .ok_or_else(|| StoreError::TargetNotFound(raw.clone()))?;
+            let target = self.store.read_object(&sha)?;
+            require_type(&target, OBJECT_TYPE)?;
+            shas.push(sha);
+        }
+        Ok(shas)
+    }
+
+    /// Look up one note by full id or unique prefix.
+    ///
+    /// Returns [`StoreError::ObjectNotFound`] when no object matches,
+    /// [`StoreError::AmbiguousId`] when more than one does, and
+    /// [`StoreError::WrongType`] when the match is not a note.
+    pub fn get(&self, id_or_prefix: &str) -> Result<NoteFull, StoreError> {
+        let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
+        decode_full(&object)
+    }
+
+    /// List every note, newest first by committer date.
+    pub fn list(&self) -> Result<Vec<NoteRecord>, StoreError> {
+        let mut records = Vec::new();
+        for object in self.store.list_typed(OBJECT_TYPE)? {
+            let full = decode_full(&object)?;
+            records.push(NoteRecord {
+                id: full.id,
+                name: full.name,
+                value: full.value,
+                author: full.author,
+                created_ms: full.created_ms,
+                modified_ms: full.modified_ms,
+            });
+        }
+        Ok(records)
+    }
+
+    /// Edit the value of an existing note. `name`, `author`, and any
+    /// existing targets are preserved. Returns the resolved id.
+    pub fn edit(&self, id_or_prefix: &str, value: &str) -> Result<String, StoreError> {
+        let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
+        let (attrs, _) = decode_content(&object)?;
+        let targets = object
+            .tree
+            .links
+            .get(TARGET_LINK)
+            .cloned()
+            .unwrap_or_default();
+        let tree = build_tree(&attrs, value, targets)?;
+        let message = format!("note edit: {}", attrs.name);
+        match self.store.edit(&object, &tree, &message)? {
+            EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(object.header.id),
+        }
+    }
+
+    /// Delete a note by writing a parentless tombstone commit. Returns
+    /// the resolved id.
+    pub fn delete(&self, id_or_prefix: &str) -> Result<String, StoreError> {
+        let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
+        let (attrs, _) = decode_content(&object)?;
+        let message = format!("note delete: {}", attrs.name);
+        self.store.delete(&object, &message)?;
+        Ok(object.header.id)
+    }
 }
 
 fn build_tree(
@@ -126,53 +201,6 @@ fn build_tree(
         tree.links.insert(TARGET_LINK.to_string(), target_shas);
     }
     Ok(tree)
-}
-
-/// Parse `note:<id>` targets, verify each references an existing note,
-/// and return the corresponding tip SHAs in input order.
-fn resolve_target_shas(path: &Path, targets: &[String]) -> Result<Vec<String>, StoreError> {
-    let mut shas = Vec::with_capacity(targets.len());
-    for raw in targets {
-        let id = raw
-            .strip_prefix("note:")
-            .ok_or_else(|| StoreError::BadTarget(raw.clone()))?;
-        let sha = match run(git_in(path, ["rev-parse", "--verify", &object_ref(id)])) {
-            Ok(sha) => sha.trim().to_string(),
-            Err(StoreError::Git { .. }) => return Err(StoreError::TargetNotFound(raw.clone())),
-            Err(e) => return Err(e),
-        };
-        let target = read_object_at(path, &sha)?;
-        require_type(&target, OBJECT_TYPE)?;
-        shas.push(sha);
-    }
-    Ok(shas)
-}
-
-/// Look up one note by full id or unique prefix in the default store.
-pub fn note_get(id_or_prefix: &str) -> Result<NoteFull, StoreError> {
-    note_get_at(&store_path(), id_or_prefix)
-}
-
-/// Look up one note by full id or unique prefix in the store at `path`.
-///
-/// Returns [`StoreError::ObjectNotFound`] when no object matches,
-/// [`StoreError::AmbiguousId`] when more than one does, and
-/// [`StoreError::WrongType`] when the match is not a note.
-pub fn note_get_at(path: &Path, id_or_prefix: &str) -> Result<NoteFull, StoreError> {
-    let object = current(path, id_or_prefix)?;
-    decode_full(&object)
-}
-
-/// Resolve `id_or_prefix` to its current commit, verified to be a live
-/// note.
-fn current(path: &Path, id_or_prefix: &str) -> Result<Object, StoreError> {
-    let (id, sha) = resolve_id_at(path, id_or_prefix)?;
-    let object = read_object_at(path, &sha)?;
-    require_type(&object, OBJECT_TYPE)?;
-    if object.header.is_tombstone() {
-        return Err(StoreError::ObjectDeleted(id));
-    }
-    Ok(object)
 }
 
 fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
@@ -211,128 +239,42 @@ fn marker_ms(object: &Object, name: &str, value: Option<i64>) -> Result<i64, Sto
     value.ok_or_else(|| StoreError::Parse(format!("note {}: missing {name}", object.header.id)))
 }
 
-/// List every note in the default store, newest first by committer date.
-pub fn note_list() -> Result<Vec<NoteRecord>, StoreError> {
-    note_list_at(&store_path())
-}
-
-/// List every note in the store at `path`, newest first by committer
-/// date. Tombstones and objects of other types are skipped.
-pub fn note_list_at(path: &Path) -> Result<Vec<NoteRecord>, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
-    }
-    let listing = run(git_in(
-        path,
-        [
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format=%(objectname)",
-            "refs/gage/object/",
-        ],
-    ))?;
-    let mut records = Vec::new();
-    for sha in listing.lines() {
-        let object = read_object_at(path, sha)?;
-        if object.header.object_type != OBJECT_TYPE || object.header.is_tombstone() {
-            continue;
-        }
-        let full = decode_full(&object)?;
-        records.push(NoteRecord {
-            id: full.id,
-            name: full.name,
-            value: full.value,
-            author: full.author,
-            created_ms: full.created_ms,
-            modified_ms: full.modified_ms,
-        });
-    }
-    Ok(records)
-}
-
-/// Edit the value of an existing note. `name`, `author`, and any
-/// existing targets are preserved. Returns the resolved id.
-pub fn note_edit(id_or_prefix: &str, value: &str) -> Result<String, StoreError> {
-    note_edit_at(&store_path(), id_or_prefix, value)
-}
-
-/// Edit the value of an existing note in the store at `path`.
-pub fn note_edit_at(path: &Path, id_or_prefix: &str, value: &str) -> Result<String, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
-    }
-    let object = current(path, id_or_prefix)?;
-    let (attrs, _) = decode_content(&object)?;
-    let targets = object
-        .tree
-        .links
-        .get(TARGET_LINK)
-        .cloned()
-        .unwrap_or_default();
-    let tree = build_tree(&attrs, value, targets)?;
-    let message = format!("note edit: {}", attrs.name);
-    match object::edit(path, &object, &tree, &message)? {
-        EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(object.header.id),
-    }
-}
-
-/// Delete a note by writing a parentless tombstone commit. Returns the
-/// resolved id.
-pub fn note_delete(id_or_prefix: &str) -> Result<String, StoreError> {
-    note_delete_at(&store_path(), id_or_prefix)
-}
-
-/// Delete a note in the store at `path`.
-pub fn note_delete_at(path: &Path, id_or_prefix: &str) -> Result<String, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
-    }
-    let object = current(path, id_or_prefix)?;
-    let (attrs, _) = decode_content(&object)?;
-    let message = format!("note delete: {}", attrs.name);
-    object::delete(path, &object, &message)?;
-    Ok(object.header.id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_at;
+    use crate::git::{git_in, run};
+    use crate::{DatasetStore, init};
+    use std::path::Path;
 
-    fn init_store(dir: &Path) -> std::path::PathBuf {
-        let store = dir.join("store.git");
-        init_at(&store).unwrap();
-        store
+    fn open_store(dir: &Path) -> Store {
+        let path = dir.join("store.git");
+        init(&path).unwrap();
+        Store::open(&path).unwrap()
     }
 
-    fn cat_file(store: &Path, spec: &str) -> String {
-        run(git_in(store, ["cat-file", "-p", spec])).unwrap()
+    fn cat_file(store: &Store, spec: &str) -> String {
+        run(git_in(store.path(), ["cat-file", "-p", spec])).unwrap()
     }
 
-    fn rev_parse(store: &Path, id: &str) -> String {
-        run(git_in(store, ["rev-parse", &object_ref(id)]))
-            .unwrap()
-            .trim()
-            .to_string()
+    fn rev_parse(store: &Store, id: &str) -> String {
+        store.rev_parse(&object_ref(id)).unwrap().unwrap()
     }
 
-    fn note(store: &Path, name: &str, value: &str, targets: &[String]) -> String {
-        note_new_at(
-            store,
-            NoteInput {
+    fn note(store: &Store, name: &str, value: &str, targets: &[String]) -> String {
+        NoteStore::from(store)
+            .create(NoteInput {
                 name,
                 value,
                 author: "user:test",
                 targets,
-            },
-        )
-        .unwrap()
+            })
+            .unwrap()
     }
 
     #[test]
-    fn new_writes_ref_tree_and_commit() {
+    fn create_writes_ref_tree_and_commit() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let id = note(&store, "comment", "looks fine", &[]);
         assert_eq!(id.len(), 26);
@@ -351,7 +293,7 @@ mod tests {
         assert!(commit.contains("\nnote: comment"), "{commit}");
         assert!(!commit.contains("\nparent "), "{commit}");
 
-        let listing = run(git_in(&store, ["ls-tree", "--name-only", &ref_path])).unwrap();
+        let listing = run(git_in(store.path(), ["ls-tree", "--name-only", &ref_path])).unwrap();
         let names: Vec<&str> = listing.lines().collect();
         assert_eq!(
             names,
@@ -383,9 +325,9 @@ mod tests {
     }
 
     #[test]
-    fn new_writes_target_link_when_targets_given() {
+    fn create_writes_target_link_when_targets_given() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let first = note(&store, "root", "v", &[]);
         let first_commit = rev_parse(&store, &first);
@@ -402,54 +344,48 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_target_missing_scheme() {
+    fn create_rejects_target_missing_scheme() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
-        let err = note_new_at(
-            &store,
-            NoteInput {
+        let store = open_store(tmp.path());
+        let err = NoteStore::from(&store)
+            .create(NoteInput {
                 name: "n",
                 value: "v",
                 author: "user:test",
                 targets: &["abc".to_string()],
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
         assert!(matches!(err, StoreError::BadTarget(t) if t == "abc"));
     }
 
     #[test]
-    fn new_rejects_target_pointing_at_missing_ref() {
+    fn create_rejects_target_pointing_at_missing_ref() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
-        let err = note_new_at(
-            &store,
-            NoteInput {
+        let store = open_store(tmp.path());
+        let err = NoteStore::from(&store)
+            .create(NoteInput {
                 name: "n",
                 value: "v",
                 author: "user:test",
                 targets: &["note:doesnotexist".to_string()],
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
         assert!(matches!(err, StoreError::TargetNotFound(t) if t == "note:doesnotexist"));
     }
 
     #[test]
-    fn new_rejects_target_of_another_type() {
+    fn create_rejects_target_of_another_type() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
-        let dataset = crate::dataset_new_at(&store).unwrap();
-        let err = note_new_at(
-            &store,
-            NoteInput {
+        let store = open_store(tmp.path());
+        let dataset = DatasetStore::from(&store).create().unwrap();
+        let err = NoteStore::from(&store)
+            .create(NoteInput {
                 name: "n",
                 value: "v",
                 author: "user:test",
                 targets: &[format!("note:{dataset}")],
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
         assert!(matches!(
             err,
             StoreError::WrongType { id, expected, actual }
@@ -460,13 +396,13 @@ mod tests {
     #[test]
     fn list_returns_notes_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let first = note(&store, "a", "one", &[]);
         let second = note(&store, "b", "two", &[]);
-        crate::dataset_new_at(&store).unwrap();
+        DatasetStore::from(&store).create().unwrap();
 
-        let records = note_list_at(&store).unwrap();
+        let records = NoteStore::from(&store).list().unwrap();
         assert_eq!(records.len(), 2);
         let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&first.as_str()));
@@ -481,12 +417,12 @@ mod tests {
     #[test]
     fn get_returns_full_record() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
         let root = note(&store, "root", "v", &[]);
         let root_commit = rev_parse(&store, &root);
         let id = note(&store, "reply", "hello\nworld", &[format!("note:{root}")]);
 
-        let full = note_get_at(&store, &id[..8]).unwrap();
+        let full = NoteStore::from(&store).get(&id[..8]).unwrap();
         assert_eq!(full.id, id);
         assert_eq!(full.name, "reply");
         assert_eq!(full.value, "hello\nworld");
@@ -498,18 +434,18 @@ mod tests {
     #[test]
     fn get_rejects_other_types() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
-        let dataset = crate::dataset_new_at(&store).unwrap();
+        let store = open_store(tmp.path());
+        let dataset = DatasetStore::from(&store).create().unwrap();
         assert!(matches!(
-            note_get_at(&store, &dataset).unwrap_err(),
+            NoteStore::from(&store).get(&dataset).unwrap_err(),
             StoreError::WrongType { actual, .. } if actual == "gage::dataset"
         ));
     }
 
     #[test]
-    fn new_writes_created_and_modified_blobs() {
+    fn create_writes_created_and_modified_blobs() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let before = gage_core::datetime::now_ms();
         let id = note(&store, "n", "v", &[]);
@@ -531,7 +467,7 @@ mod tests {
     #[test]
     fn edit_preserves_created_and_bumps_modified() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let id = note(&store, "n", "v", &[]);
         let ref_path = object_ref(&id);
@@ -542,7 +478,7 @@ mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2));
-        note_edit_at(&store, &id, "v2").unwrap();
+        NoteStore::from(&store).edit(&id, "v2").unwrap();
 
         let created_after = cat_file(&store, &format!("{ref_path}:created"));
         let modified_after = cat_file(&store, &format!("{ref_path}:modified"))
@@ -556,24 +492,24 @@ mod tests {
     #[test]
     fn list_empty_store_returns_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
-        assert!(note_list_at(&store).unwrap().is_empty());
+        let store = open_store(tmp.path());
+        assert!(NoteStore::from(&store).list().unwrap().is_empty());
     }
 
     #[test]
     fn edit_replaces_value_and_chains_commit() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let id = note(&store, "comment", "first", &[]);
         let ref_path = object_ref(&id);
         let original_commit = rev_parse(&store, &id);
 
-        assert_eq!(note_edit_at(&store, &id, "second").unwrap(), id);
+        assert_eq!(NoteStore::from(&store).edit(&id, "second").unwrap(), id);
 
         let new_commit = rev_parse(&store, &id);
         assert_ne!(new_commit, original_commit);
-        let parent = run(git_in(&store, ["rev-parse", &format!("{ref_path}^")]))
+        let parent = run(git_in(store.path(), ["rev-parse", &format!("{ref_path}^")]))
             .unwrap()
             .trim()
             .to_string();
@@ -594,22 +530,22 @@ mod tests {
     #[test]
     fn edit_with_same_value_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
         let id = note(&store, "n", "same", &[]);
         let before = rev_parse(&store, &id);
-        note_edit_at(&store, &id, "same").unwrap();
+        NoteStore::from(&store).edit(&id, "same").unwrap();
         assert_eq!(rev_parse(&store, &id), before);
     }
 
     #[test]
     fn edit_preserves_target_link() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let root = note(&store, "root", "v", &[]);
         let root_commit = rev_parse(&store, &root);
         let child = note(&store, "reply", "first", &[format!("note:{root}")]);
-        note_edit_at(&store, &child, "second").unwrap();
+        NoteStore::from(&store).edit(&child, "second").unwrap();
 
         let target_content = cat_file(&store, &format!("{}:target.link", object_ref(&child)));
         assert_eq!(target_content, format!("{root_commit}\n"));
@@ -623,35 +559,37 @@ mod tests {
     #[test]
     fn edit_accepts_prefix() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
         let id = note(&store, "n", "v", &[]);
-        assert_eq!(note_edit_at(&store, &id[..8], "v2").unwrap(), id);
+        assert_eq!(NoteStore::from(&store).edit(&id[..8], "v2").unwrap(), id);
     }
 
     #[test]
     fn edit_errors_on_missing_note() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
-        let err = note_edit_at(&store, "doesnotexist", "v").unwrap_err();
+        let store = open_store(tmp.path());
+        let err = NoteStore::from(&store)
+            .edit("doesnotexist", "v")
+            .unwrap_err();
         assert!(matches!(err, StoreError::ObjectNotFound(id) if id == "doesnotexist"));
     }
 
     #[test]
     fn delete_writes_parentless_tombstone() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
 
         let id = note(&store, "n", "v", &[]);
         let ref_path = object_ref(&id);
         let created_before = cat_file(&store, &format!("{ref_path}:created"));
 
-        assert_eq!(note_delete_at(&store, &id).unwrap(), id);
+        assert_eq!(NoteStore::from(&store).delete(&id).unwrap(), id);
 
         let commit = cat_file(&store, &rev_parse(&store, &id));
         assert!(!commit.contains("\nparent "), "{commit}");
         assert!(commit.contains("\nnote delete: n"), "{commit}");
 
-        let listing = run(git_in(&store, ["ls-tree", "--name-only", &ref_path])).unwrap();
+        let listing = run(git_in(store.path(), ["ls-tree", "--name-only", &ref_path])).unwrap();
         let names: Vec<&str> = listing.lines().collect();
         assert_eq!(names, vec!["created", "deleted", "id", "modified", "type"]);
         assert_eq!(
@@ -667,13 +605,14 @@ mod tests {
     #[test]
     fn delete_hides_from_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
 
         let keep = note(&store, "keep", "v", &[]);
         let gone = note(&store, "gone", "v", &[]);
-        note_delete_at(&store, &gone).unwrap();
+        notes.delete(&gone).unwrap();
 
-        let records = note_list_at(&store).unwrap();
+        let records = notes.list().unwrap();
         let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec![keep.as_str()]);
     }
@@ -681,38 +620,23 @@ mod tests {
     #[test]
     fn get_and_edit_refuse_deleted_notes() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
 
         let id = note(&store, "n", "v", &[]);
-        note_delete_at(&store, &id).unwrap();
+        notes.delete(&id).unwrap();
 
         assert!(matches!(
-            note_get_at(&store, &id).unwrap_err(),
+            notes.get(&id).unwrap_err(),
             StoreError::ObjectDeleted(x) if x == id
         ));
         assert!(matches!(
-            note_edit_at(&store, &id, "v2").unwrap_err(),
+            notes.edit(&id, "v2").unwrap_err(),
             StoreError::ObjectDeleted(x) if x == id
         ));
         assert!(matches!(
-            note_delete_at(&store, &id).unwrap_err(),
+            notes.delete(&id).unwrap_err(),
             StoreError::ObjectDeleted(x) if x == id
         ));
-    }
-
-    #[test]
-    fn new_fails_when_store_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = note_new_at(
-            &tmp.path().join("nope.git"),
-            NoteInput {
-                name: "n",
-                value: "v",
-                author: "user:test",
-                targets: &[],
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, StoreError::NotFound(_)));
     }
 }

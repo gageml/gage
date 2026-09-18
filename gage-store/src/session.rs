@@ -1,4 +1,4 @@
-//! Session objects: `gage::session 1`.
+//! Session objects: `gage::session 1`, reached through [`SessionStore`].
 //!
 //! Content is `attrs.json` (driver, native session id, session type,
 //! optional content format) and the opaque `files/**` subtree holding
@@ -17,13 +17,24 @@ use gage_session::{SessionType, SourceSession};
 use serde::{Deserialize, Serialize};
 
 use crate::git::{git_in, run};
-use crate::object::{EditOutcome, ObjectTree, object_ref, read_object_at, require_type};
+use crate::object::{EditOutcome, ObjectTree, object_ref, require_type};
 use crate::writer::{mktree, write_blob_stream};
-use crate::{StoreError, exists, object};
+use crate::{Store, StoreError};
 
 const OBJECT_TYPE: &str = "gage::session";
 const OBJECT_VERSION: &str = "1";
 const FILES_TREE: &str = "files";
+
+/// Session operations over an opened store.
+pub struct SessionStore<'a> {
+    store: &'a Store,
+}
+
+impl<'a> From<&'a Store> for SessionStore<'a> {
+    fn from(store: &'a Store) -> Self {
+        SessionStore { store }
+    }
+}
 
 /// The `attrs.json` shape of a session.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -59,83 +70,121 @@ pub enum SessionOutcome {
     Unchanged,
 }
 
+/// A stored session presented for reading, resolved to its commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub id: String,
+    pub commit_sha: String,
+    pub attrs: SessionAttrs,
+    pub session_type: SessionType,
+    pub driver_name: String,
+    pub driver_version: String,
+    /// Total bytes of blobs under `files/**`.
+    pub size: u64,
+}
+
 /// Derive the Gage object id of a session from its driver name and
 /// native session id.
 pub fn session_object_id(driver_name: &str, native_session_id: &str) -> String {
     derive_id(&format!("session\0{driver_name}\0{native_session_id}"))
 }
 
-/// Write `reader`'s content as a session object. Idempotent when the
-/// native session's files and attrs are unchanged.
-pub fn session_add_at(
-    path: &Path,
-    driver_name: &str,
-    driver_version: &str,
-    reader: &mut dyn SourceSession,
-) -> Result<SessionAddOutcome, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
-    }
+impl SessionStore<'_> {
+    /// Write `reader`'s content as a session object. Idempotent when
+    /// the native session's files and attrs are unchanged.
+    pub fn add(
+        &self,
+        driver_name: &str,
+        driver_version: &str,
+        reader: &mut dyn SourceSession,
+    ) -> Result<SessionAddOutcome, StoreError> {
+        let path = self.store.path();
+        let native_session_id = reader.session_id().to_string();
+        let id = session_object_id(driver_name, &native_session_id);
+        let attrs = SessionAttrs {
+            driver: format!("{driver_name} {driver_version}"),
+            session_id: native_session_id,
+            session_type: reader.session_type().to_string(),
+            content_format: reader.content_format().map(str::to_string),
+        };
 
-    let native_session_id = reader.session_id().to_string();
-    let id = session_object_id(driver_name, &native_session_id);
-    let attrs = SessionAttrs {
-        driver: format!("{driver_name} {driver_version}"),
-        session_id: native_session_id,
-        session_type: reader.session_type().to_string(),
-        content_format: reader.content_format().map(str::to_string),
-    };
-
-    let mut file_entries: Vec<(String, String)> = Vec::new();
-    for file in reader.files() {
-        let file = file.map_err(|e| StoreError::Parse(format!("driver: {e}")))?;
-        let sha = write_blob_stream(path, file.content)?;
-        file_entries.push((file.path, sha));
-    }
-    let files_tree_sha = build_files_tree(path, file_entries)?;
-
-    let mut tree = ObjectTree {
-        attrs: Some(
-            serde_json::to_value(&attrs)
-                .map_err(|e| StoreError::Parse(format!("session attrs encode: {e}")))?,
-        ),
-        ..ObjectTree::default()
-    };
-    tree.subtrees.insert(FILES_TREE.to_string(), files_tree_sha);
-
-    let existing = match run(git_in(path, ["rev-parse", "--verify", &object_ref(&id)])) {
-        Ok(sha) => Some(read_object_at(path, sha.trim())?),
-        Err(StoreError::Git { .. }) => None,
-        Err(e) => return Err(e),
-    };
-    let subject = format!("{driver_name}:{}", attrs.session_id);
-    match existing {
-        None => {
-            let message = format!("session: {subject}");
-            let commit_sha =
-                object::create(path, OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
-            Ok(SessionAddOutcome {
-                id,
-                commit_sha,
-                outcome: SessionOutcome::Added,
-            })
+        let mut file_entries: Vec<(String, String)> = Vec::new();
+        for file in reader.files() {
+            let file = file.map_err(|e| StoreError::Parse(format!("driver: {e}")))?;
+            let sha = write_blob_stream(path, file.content)?;
+            file_entries.push((file.path, sha));
         }
-        Some(current) => {
-            require_type(&current, OBJECT_TYPE)?;
-            let message = format!("session edit: {subject}");
-            match object::edit(path, &current, &tree, &message)? {
-                EditOutcome::Unchanged => Ok(SessionAddOutcome {
-                    id,
-                    commit_sha: current.commit_sha,
-                    outcome: SessionOutcome::Unchanged,
-                }),
-                EditOutcome::Written(commit_sha) => Ok(SessionAddOutcome {
+        let files_tree_sha = build_files_tree(path, file_entries)?;
+
+        let mut tree = ObjectTree {
+            attrs: Some(
+                serde_json::to_value(&attrs)
+                    .map_err(|e| StoreError::Parse(format!("session attrs encode: {e}")))?,
+            ),
+            ..ObjectTree::default()
+        };
+        tree.subtrees.insert(FILES_TREE.to_string(), files_tree_sha);
+
+        let subject = format!("{driver_name}:{}", attrs.session_id);
+        match self.store.rev_parse(&object_ref(&id))? {
+            None => {
+                let message = format!("session: {subject}");
+                let commit_sha =
+                    self.store
+                        .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
+                Ok(SessionAddOutcome {
                     id,
                     commit_sha,
-                    outcome: SessionOutcome::Updated,
-                }),
+                    outcome: SessionOutcome::Added,
+                })
+            }
+            Some(sha) => {
+                let current = self.store.read_object(&sha)?;
+                require_type(&current, OBJECT_TYPE)?;
+                let message = format!("session edit: {subject}");
+                match self.store.edit(&current, &tree, &message)? {
+                    EditOutcome::Unchanged => Ok(SessionAddOutcome {
+                        id,
+                        commit_sha: current.commit_sha,
+                        outcome: SessionOutcome::Unchanged,
+                    }),
+                    EditOutcome::Written(commit_sha) => Ok(SessionAddOutcome {
+                        id,
+                        commit_sha,
+                        outcome: SessionOutcome::Updated,
+                    }),
+                }
             }
         }
+    }
+
+    /// Read the session at the given commit SHA.
+    pub fn at_commit(&self, commit_sha: &str) -> Result<SessionRecord, StoreError> {
+        let object = self.store.read_object(commit_sha)?;
+        require_type(&object, OBJECT_TYPE)?;
+        let attrs_value = object.tree.attrs.ok_or_else(|| {
+            StoreError::Parse(format!("session {commit_sha}: missing attrs.json"))
+        })?;
+        let attrs: SessionAttrs = serde_json::from_value(attrs_value)
+            .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))?;
+        let (driver_name, driver_version) = match attrs.driver.split_once(' ') {
+            Some((n, v)) => (n.to_string(), v.to_string()),
+            None => (attrs.driver.clone(), String::new()),
+        };
+        let session_type = match attrs.session_type.split_once(' ') {
+            Some((n, v)) => SessionType::new(n.to_string(), v.to_string()),
+            None => SessionType::new(attrs.session_type.clone(), String::new()),
+        };
+        let size = files_size(self.store.path(), commit_sha)?;
+        Ok(SessionRecord {
+            id: object.header.id,
+            commit_sha: object.commit_sha,
+            attrs,
+            session_type,
+            driver_name,
+            driver_version,
+            size,
+        })
     }
 }
 
@@ -168,54 +217,8 @@ fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<Strin
     mktree(path, &lines)
 }
 
-/// A stored session presented for reading, resolved to its commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionRecord {
-    pub id: String,
-    pub commit_sha: String,
-    pub attrs: SessionAttrs,
-    pub session_type: SessionType,
-    pub driver_name: String,
-    pub driver_version: String,
-    /// Total bytes of blobs under `files/**`.
-    pub size: u64,
-}
-
-/// Read the session at the given commit SHA into a [`SessionRecord`].
-pub fn session_at_commit(path: &Path, commit_sha: &str) -> Result<SessionRecord, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
-    }
-    let object = read_object_at(path, commit_sha)?;
-    require_type(&object, OBJECT_TYPE)?;
-    let attrs_value = object
-        .tree
-        .attrs
-        .ok_or_else(|| StoreError::Parse(format!("session {commit_sha}: missing attrs.json")))?;
-    let attrs: SessionAttrs = serde_json::from_value(attrs_value)
-        .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))?;
-    let (driver_name, driver_version) = match attrs.driver.split_once(' ') {
-        Some((n, v)) => (n.to_string(), v.to_string()),
-        None => (attrs.driver.clone(), String::new()),
-    };
-    let session_type = match attrs.session_type.split_once(' ') {
-        Some((n, v)) => SessionType::new(n.to_string(), v.to_string()),
-        None => SessionType::new(attrs.session_type.clone(), String::new()),
-    };
-    let size = files_size(path, commit_sha)?;
-    Ok(SessionRecord {
-        id: object.header.id,
-        commit_sha: object.commit_sha,
-        attrs,
-        session_type,
-        driver_name,
-        driver_version,
-        size,
-    })
-}
-
 /// Sum of blob sizes under `<commit_sha>:files/`.
-pub(crate) fn files_size(path: &Path, commit_sha: &str) -> Result<u64, StoreError> {
+fn files_size(path: &Path, commit_sha: &str) -> Result<u64, StoreError> {
     let listing = match run(git_in(
         path,
         ["ls-tree", "-r", "-l", &format!("{commit_sha}:{FILES_TREE}")],
@@ -246,14 +249,14 @@ pub(crate) fn files_size(path: &Path, commit_sha: &str) -> Result<u64, StoreErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_at;
+    use crate::{DatasetStore, init};
     use gage_session::{DriverError, SessionFile};
     use std::io::Cursor;
 
-    fn init_store(dir: &Path) -> std::path::PathBuf {
-        let store = dir.join("store.git");
-        init_at(&store).unwrap();
-        store
+    fn open_store(dir: &Path) -> Store {
+        let path = dir.join("store.git");
+        init(&path).unwrap();
+        Store::open(&path).unwrap()
     }
 
     /// A native session with fixed content, for exercising the writer.
@@ -297,22 +300,23 @@ mod tests {
         }
     }
 
-    fn cat(store: &Path, spec: &str) -> String {
-        run(git_in(store, ["cat-file", "-p", spec])).unwrap()
+    fn cat(store: &Store, spec: &str) -> String {
+        run(git_in(store.path(), ["cat-file", "-p", spec])).unwrap()
     }
 
     #[test]
     fn add_writes_session_object_with_files_subtree() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
         let mut session = fake("s1", &[("session.jsonl", "{}\n"), ("sub/a.txt", "a")]);
 
-        let outcome = session_add_at(&store, "fake", "0.1", &mut session).unwrap();
+        let outcome = sessions.add("fake", "0.1", &mut session).unwrap();
         assert_eq!(outcome.outcome, SessionOutcome::Added);
         assert_eq!(outcome.id, session_object_id("fake", "s1"));
 
         let ref_path = object_ref(&outcome.id);
-        let listing = run(git_in(&store, ["ls-tree", "--name-only", &ref_path])).unwrap();
+        let listing = run(git_in(store.path(), ["ls-tree", "--name-only", &ref_path])).unwrap();
         assert_eq!(
             listing.lines().collect::<Vec<_>>(),
             vec!["attrs.json", "created", "files", "id", "modified", "type"]
@@ -327,7 +331,7 @@ mod tests {
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files/sub/a.txt")), "a");
 
-        let record = session_at_commit(&store, &outcome.commit_sha).unwrap();
+        let record = sessions.at_commit(&outcome.commit_sha).unwrap();
         assert_eq!(record.id, outcome.id);
         assert_eq!(record.driver_name, "fake");
         assert_eq!(record.driver_version, "0.1");
@@ -339,32 +343,25 @@ mod tests {
     #[test]
     fn add_is_idempotent_and_updates_on_change() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
+        let store = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
 
-        let first = session_add_at(
-            &store,
-            "fake",
-            "0.1",
-            &mut fake("s1", &[("session.jsonl", "{}\n")]),
-        )
-        .unwrap();
-        let again = session_add_at(
-            &store,
-            "fake",
-            "0.1",
-            &mut fake("s1", &[("session.jsonl", "{}\n")]),
-        )
-        .unwrap();
+        let first = sessions
+            .add("fake", "0.1", &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let again = sessions
+            .add("fake", "0.1", &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .unwrap();
         assert_eq!(again.outcome, SessionOutcome::Unchanged);
         assert_eq!(again.commit_sha, first.commit_sha);
 
-        let grown = session_add_at(
-            &store,
-            "fake",
-            "0.1",
-            &mut fake("s1", &[("session.jsonl", "{}\n{}\n")]),
-        )
-        .unwrap();
+        let grown = sessions
+            .add(
+                "fake",
+                "0.1",
+                &mut fake("s1", &[("session.jsonl", "{}\n{}\n")]),
+            )
+            .unwrap();
         assert_eq!(grown.outcome, SessionOutcome::Updated);
         assert_eq!(grown.id, first.id);
         assert_ne!(grown.commit_sha, first.commit_sha);
@@ -375,16 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn session_at_commit_rejects_other_types() {
+    fn at_commit_rejects_other_types() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = init_store(tmp.path());
-        let dataset = crate::dataset_new_at(&store).unwrap();
-        let sha = run(git_in(&store, ["rev-parse", &object_ref(&dataset)]))
-            .unwrap()
-            .trim()
-            .to_string();
+        let store = open_store(tmp.path());
+        let dataset = DatasetStore::from(&store).create().unwrap();
+        let sha = store.rev_parse(&object_ref(&dataset)).unwrap().unwrap();
         assert!(matches!(
-            session_at_commit(&store, &sha).unwrap_err(),
+            SessionStore::from(&store).at_commit(&sha).unwrap_err(),
             StoreError::WrongType { actual, .. } if actual == "gage::dataset"
         ));
     }

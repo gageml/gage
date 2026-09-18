@@ -9,6 +9,10 @@ use std::process::ExitStatus;
 pub enum StoreError {
     /// No repository at the path
     NotFound(PathBuf),
+    /// The repository carries no `gage.version`
+    VersionMissing(PathBuf),
+    /// The store's `gage.version` is not the one this build supports
+    VersionMismatch { found: u32, supported: u32 },
     /// The `git` binary could not be started
     Spawn(io::Error),
     /// `git` ran and exited with a failure status
@@ -45,6 +49,21 @@ impl fmt::Display for StoreError {
                     path.display()
                 )
             }
+            StoreError::VersionMissing(path) => {
+                write!(f, "store at {} has no gage.version", path.display())
+            }
+            StoreError::VersionMismatch { found, supported } if found > supported => {
+                write!(
+                    f,
+                    "store version {found} is newer than the supported version {supported}; upgrade gage"
+                )
+            }
+            StoreError::VersionMismatch { found, supported } => {
+                write!(
+                    f,
+                    "store version {found} is older than the supported version {supported}; no migration is available"
+                )
+            }
             StoreError::Spawn(e) => write!(f, "failed to run git: {e}"),
             StoreError::Git { status, stderr } => write!(f, "git {status}: {stderr}"),
             StoreError::Parse(what) => write!(f, "unexpected git output: {what}"),
@@ -72,6 +91,8 @@ impl std::error::Error for StoreError {
         match self {
             StoreError::Spawn(e) => Some(e),
             StoreError::NotFound(_)
+            | StoreError::VersionMissing(_)
+            | StoreError::VersionMismatch { .. }
             | StoreError::Git { .. }
             | StoreError::Parse(_)
             | StoreError::BadTarget(_)

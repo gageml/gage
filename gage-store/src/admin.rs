@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use gage_core::config::gage_home;
 
-use crate::StoreError;
 use crate::git::{git_cmd, git_in, run};
+use crate::{Store, StoreError};
 
 /// Schema version stamped into `gage.version` at init. Bumped when the
 /// ref layout or another store-wide convention changes.
@@ -23,7 +23,7 @@ const STORE_CONFIG: [(&str, &str); 3] = [
     ("transfer.fsckObjects", "true"),
 ];
 
-/// Path to the store: `<gage_home>/store.git`.
+/// Path to the default store: `<gage_home>/store.git`.
 pub fn store_path() -> PathBuf {
     gage_home().join("store.git")
 }
@@ -39,18 +39,13 @@ pub enum InitOutcome {
     Reinitialized,
 }
 
-/// Creates the store at [`store_path`], or reinitializes it if present.
-pub fn init() -> Result<InitOutcome, StoreError> {
-    init_at(&store_path())
-}
-
 /// Creates a bare repository at `path`, or reinitializes it if present.
 ///
 /// Leading directories are created as needed. The empty template keeps
 /// sample hooks and `description` out of the store and ignores any
 /// `init.templateDir` in the user's Git config. The initial branch is
 /// fixed so `HEAD` does not depend on `init.defaultBranch`.
-pub fn init_at(path: &Path) -> Result<InitOutcome, StoreError> {
+pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
     let existing = exists(path);
     let mut cmd = git_cmd();
     cmd.args([
@@ -101,34 +96,6 @@ pub struct Remote {
     pub url: String,
 }
 
-/// Reads the status of the store at [`store_path`].
-pub fn status() -> Result<StoreStatus, StoreError> {
-    status_at(&store_path())
-}
-
-/// Reads the status of the store at `path`. Fails with
-/// [`StoreError::NotFound`] when no repository is there.
-pub fn status_at(path: &Path) -> Result<StoreStatus, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
-    }
-    let counts = parse_count_objects(&run(git_in(path, ["count-objects", "-v"]))?)?;
-    let ref_names = run(git_in(path, ["for-each-ref", "--format=%(refname)"]))?;
-    let refs = ref_names.lines().count() as u64;
-    let ref_prefixes = compute_ref_prefixes(&ref_names);
-    let remotes = parse_remotes(&run(git_in(path, ["remote", "-v"]))?);
-    Ok(StoreStatus {
-        path: path.to_path_buf(),
-        loose_objects: counts.count,
-        packed_objects: counts.in_pack,
-        packs: counts.packs,
-        size: (counts.size + counts.size_pack) * 1024,
-        refs,
-        ref_prefixes,
-        remotes,
-    })
-}
-
 /// Before-and-after counts for a `gc` run.
 #[derive(Debug)]
 pub struct GcOutcome {
@@ -136,56 +103,62 @@ pub struct GcOutcome {
     pub after: StoreStatus,
 }
 
-/// Run `git fsck --full` on the default store. Output is inherited to
-/// the caller's stdout/stderr.
-pub fn fsck() -> Result<(), StoreError> {
-    fsck_at(&store_path())
-}
+impl Store {
+    /// Reads the status of the store.
+    pub fn status(&self) -> Result<StoreStatus, StoreError> {
+        let path = self.path();
+        let counts = parse_count_objects(&run(git_in(path, ["count-objects", "-v"]))?)?;
+        let ref_names = run(git_in(path, ["for-each-ref", "--format=%(refname)"]))?;
+        let refs = ref_names.lines().count() as u64;
+        let ref_prefixes = compute_ref_prefixes(&ref_names);
+        let remotes = parse_remotes(&run(git_in(path, ["remote", "-v"]))?);
+        Ok(StoreStatus {
+            path: path.to_path_buf(),
+            loose_objects: counts.count,
+            packed_objects: counts.in_pack,
+            packs: counts.packs,
+            size: (counts.size + counts.size_pack) * 1024,
+            refs,
+            ref_prefixes,
+            remotes,
+        })
+    }
 
-pub fn fsck_at(path: &Path) -> Result<(), StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
+    /// Run `git fsck --full`. Output is inherited to the caller's
+    /// stdout/stderr.
+    pub fn fsck(&self) -> Result<(), StoreError> {
+        let mut cmd = git_in(self.path(), ["fsck", "--full"]);
+        let status = cmd.status().map_err(StoreError::Spawn)?;
+        if !status.success() {
+            return Err(StoreError::Git {
+                status,
+                stderr: String::new(),
+            });
+        }
+        Ok(())
     }
-    let mut cmd = git_in(path, ["fsck", "--full"]);
-    let status = cmd.status().map_err(StoreError::Spawn)?;
-    if !status.success() {
-        return Err(StoreError::Git {
-            status,
-            stderr: String::new(),
-        });
-    }
-    Ok(())
-}
 
-/// Run `git gc` on the default store, optionally with `--prune=<expire>`.
-///
-/// `git gc`'s output is passed through to the caller's stdout/stderr so
-/// progress is visible.
-pub fn gc(prune: Option<&str>) -> Result<GcOutcome, StoreError> {
-    gc_at(&store_path(), prune)
-}
-
-/// Run `git gc` on the store at `path`.
-pub fn gc_at(path: &Path, prune: Option<&str>) -> Result<GcOutcome, StoreError> {
-    if !exists(path) {
-        return Err(StoreError::NotFound(path.to_path_buf()));
+    /// Run `git gc`, optionally with `--prune=<expire>`. `git gc`'s
+    /// output is passed through to the caller's stdout/stderr so
+    /// progress is visible.
+    pub fn gc(&self, prune: Option<&str>) -> Result<GcOutcome, StoreError> {
+        let before = self.status()?;
+        let mut cmd = git_in(self.path(), ["gc"]);
+        let prune_flag: String;
+        if let Some(expire) = prune {
+            prune_flag = format!("--prune={expire}");
+            cmd.arg(&prune_flag);
+        }
+        let status = cmd.status().map_err(StoreError::Spawn)?;
+        if !status.success() {
+            return Err(StoreError::Git {
+                status,
+                stderr: String::new(),
+            });
+        }
+        let after = self.status()?;
+        Ok(GcOutcome { before, after })
     }
-    let before = status_at(path)?;
-    let mut cmd = git_in(path, ["gc"]);
-    let prune_flag: String;
-    if let Some(expire) = prune {
-        prune_flag = format!("--prune={expire}");
-        cmd.arg(&prune_flag);
-    }
-    let status = cmd.status().map_err(StoreError::Spawn)?;
-    if !status.success() {
-        return Err(StoreError::Git {
-            status,
-            stderr: String::new(),
-        });
-    }
-    let after = status_at(path)?;
-    Ok(GcOutcome { before, after })
 }
 
 /// The `git count-objects -v` fields this module reads. Sizes are in
@@ -273,7 +246,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("home").join("store.git");
 
-        assert_eq!(init_at(&store).unwrap(), InitOutcome::Created);
+        assert_eq!(init(&store).unwrap(), InitOutcome::Created);
         assert_eq!(
             std::fs::read_to_string(store.join("HEAD")).unwrap().trim(),
             "ref: refs/heads/main"
@@ -289,7 +262,7 @@ mod tests {
         );
         assert!(!store.join("hooks").exists());
 
-        assert_eq!(init_at(&store).unwrap(), InitOutcome::Reinitialized);
+        assert_eq!(init(&store).unwrap(), InitOutcome::Reinitialized);
     }
 
     #[test]
@@ -298,7 +271,7 @@ mod tests {
         let file = tmp.path().join("occupied");
         std::fs::write(&file, "").unwrap();
 
-        match init_at(&file.join("store.git")) {
+        match init(&file.join("store.git")) {
             Err(StoreError::Git { stderr, .. }) => assert!(!stderr.is_empty()),
             other => panic!("expected git failure, got {other:?}"),
         }
@@ -307,14 +280,14 @@ mod tests {
     #[test]
     fn status_of_fresh_store() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = tmp.path().join("store.git");
-        init_at(&store).unwrap();
+        let path = tmp.path().join("store.git");
+        init(&path).unwrap();
 
-        let status = status_at(&store).unwrap();
+        let status = Store::open(&path).unwrap().status().unwrap();
         assert_eq!(
             status,
             StoreStatus {
-                path: store,
+                path,
                 loose_objects: 0,
                 packed_objects: 0,
                 packs: 0,
@@ -324,15 +297,6 @@ mod tests {
                 remotes: vec![],
             }
         );
-    }
-
-    #[test]
-    fn status_of_missing_store() {
-        let tmp = tempfile::tempdir().unwrap();
-        match status_at(&tmp.path().join("store.git")) {
-            Err(StoreError::NotFound(_)) => {}
-            other => panic!("expected NotFound, got {other:?}"),
-        }
     }
 
     #[test]
@@ -353,24 +317,20 @@ mod tests {
     #[test]
     fn counts_ref_prefixes() {
         let refs = "\
-refs/gage/notes/abc123\n\
-refs/gage/datasets/def456\n\
-refs/gage/sessions/claude/1/xyz\n\
-refs/gage/sessions/claude/1/uvw\n\
-refs/gage/sessions/codex/1/qrs\n\
+refs/gage/object/abc123\n\
+refs/gage/object/def456\n\
+refs/gage/index/claude/1/xyz\n\
+refs/gage/index/claude/1/uvw\n\
 refs/heads/main\n";
         let prefixes = compute_ref_prefixes(refs);
         assert_eq!(
             prefixes,
             vec![
-                ("refs/gage".to_string(), 5),
-                ("refs/gage/datasets".to_string(), 1),
-                ("refs/gage/notes".to_string(), 1),
-                ("refs/gage/sessions".to_string(), 3),
-                ("refs/gage/sessions/claude".to_string(), 2),
-                ("refs/gage/sessions/claude/1".to_string(), 2),
-                ("refs/gage/sessions/codex".to_string(), 1),
-                ("refs/gage/sessions/codex/1".to_string(), 1),
+                ("refs/gage".to_string(), 4),
+                ("refs/gage/index".to_string(), 2),
+                ("refs/gage/index/claude".to_string(), 2),
+                ("refs/gage/index/claude/1".to_string(), 2),
+                ("refs/gage/object".to_string(), 2),
             ]
         );
     }
