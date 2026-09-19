@@ -144,11 +144,14 @@ not meaningful in that case.
 
 ## Reading the numbers
 
-Every store operation launches several `git` processes, and a process launch
-costs a few milliseconds on a typical machine. That floor shows up as the p50 of
-every write and of every per-object read, and it is the first target of any
-optimization. Run-to-run variation on the same code is a few percent; a delta
-inside that band is noise.
+A write is one `git update-ref` launch plus loose object files; a read is a
+few round-trips on the store's long-lived `cat-file` process; a query is one
+SQLite statement plus one read per row. Those are the floors the p50 columns
+show. Every run is one process on a machine with nothing else controlled.
+Run-to-run variation on the same code has not been measured beyond two
+smoke-scale runs that agreed within a few percent on most rows, so a delta
+from one run of each version is a lead, not a finding, until the same code has
+been run more than once.
 
 The index rebuild figure is the cost of a full reconcile: reading every commit
 and its link files once. The warm open figure is the cost of the ref diff when

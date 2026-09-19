@@ -73,6 +73,54 @@ Code versions: 01 `640f549`, 02 `fb28d28`, 03 `7ec331e`, 04 `511d77d`.
     which grows with the count of loose refs before `gc`. Creates do not pay it,
     which is why edits and deletes gained less in 03 and 04.
 
+## 04 - 05
+
+These changes reflect enhancements starting from 04.
+
+- `04 write-loose-objects`
+- `05 summary-storage`
+
+Normal-scale runs, p50 in milliseconds, with the speedup of 05 over 04. One run
+of each version; run-to-run variation on the same code has not been measured at
+this scale.
+
+| Operation (p50 ms)            |    04 |    05 |           |
+| ----------------------------- | ----: | ----: | --------: |
+| note create                   |  1.26 |  1.23 |      +1.0 |
+| note edit                     |  7.07 |  7.04 |      +1.0 |
+| note delete                   |  6.93 |  6.94 |      -1.0 |
+| session add                   |  2.45 |  3.01 |      -1.2 |
+| session add (large)           |   109 |   110 |      -1.0 |
+| dataset sessions add          |  12.3 |  11.6 |      +1.1 |
+| gc                            | 1,294 | 1,324 |      -1.0 |
+| open (warm index)             |  6.59 |  4.60 |      +1.4 |
+| open (rebuild index)          |   246 |   262 |      -1.1 |
+| random read by id             |  0.61 |  0.62 |      -1.0 |
+| note get                      |  0.77 |  0.66 |      +1.2 |
+| session content read          |  2.52 |  2.49 |      +1.0 |
+| session content read (large)  |  21.4 |  21.4 |      -1.0 |
+| query name, limit 20          |  2.48 |  5.63 | -2.3 [^7] |
+| query modified desc, limit 20 |  2.19 |  2.40 |      -1.1 |
+| iter all notes                |   217 |   215 |      +1.0 |
+| dataset sessions list         |  1.68 |  1.51 | +1.1 [^6] |
+
+Code versions: 04 `511d77d`, 05 `ac8c169`.
+
+[^6]: **Summary stored at add time.** The driver now reports `summary` with the
+    session and the store writes it into `attrs.summary`; `size` is read from
+    there instead of walking `files/**` on every session read. This is the one
+    row whose code path changed. The bench's sessions have one file each, so the
+    walk it removed was one round-trip per member, and a difference of that size
+    cannot be resolved by one run of each version. The change was made for the
+    model, not the table: a figure about content is the driver's to write, and
+    readers compute nothing over content.
+
+[^7]: **Unexplained.** Nothing on the query path changed between 04 and 05; the
+    index statement and the twenty object reads are the same code. The figure is
+    one run of each version, ten samples per row, on a machine with nothing else
+    controlled. Whether the difference is real is not known from this data; a
+    repeated run of the same code would say what a 2 ms shift on this row means.
+
 ## Further changes
 
 Where the cost is now, at normal scale: a write is one `git update-ref` launch
@@ -97,19 +145,19 @@ These are the ones worth making.
    from every edit and delete (footnote 5). Alias resolution, when it lands,
    joins the prefix side.
 
-2. **Store the driver's `summary` at session add.** Done. The spec puts a driver
-   projection `summary` on the session (`title`, `model`, `message_count`,
-   `size`) so listings do not read content, and only the driver can compute
-   those figures: which files are the session and what they contain are facts of
-   the harness format, not of the store. Before this change `SessionRecord.size`
-   was computed on every read by walking `files/**` with one round-trip per
-   blob, a store-side guess at a driver-owned number. The driver now reports
-   `summary` with the session, the store writes it into `attrs.summary`
-   verbatim, and readers take `size` from there. The Claude driver reports
-   `size` today; `title`, `model`, and `message_count` require reading the
-   transcript and land with the driver interface work. The rule that generalizes
-   this: a figure about content is written by the type at write time, and
-   readers compute nothing over content.
+2. **Store the driver's `summary` at session add.** Done in 05. The spec puts a
+   driver projection `summary` on the session (`title`, `model`,
+   `message_count`, `size`) so listings do not read content, and only the driver
+   can compute those figures: which files are the session and what they contain
+   are facts of the harness format, not of the store. Before this change
+   `SessionRecord.size` was computed on every read by walking `files/**` with
+   one round-trip per blob, a store-side guess at a driver-owned number. The
+   driver now reports `summary` with the session, the store writes it into
+   `attrs.summary` verbatim, and readers take `size` from there. The Claude
+   driver reports `size` today; `title`, `model`, and `message_count` require
+   reading the transcript and land with the driver interface work. The rule that
+   generalizes this: a figure about content is written by the type at write
+   time, and readers compute nothing over content.
 
 3. **One read per object in `classify_parents`.** It reads the commit, the
    header, and the link files as three tree reads of the same commit.

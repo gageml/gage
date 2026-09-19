@@ -1,0 +1,276 @@
+{
+  "bench": "store",
+  "stamp": "20260919T164546Z",
+  "code_version": "0.2.0-dev (ac8c169)",
+  "params": {
+    "dataset_size": 5,
+    "datasets": 3,
+    "delete_pct": 5,
+    "edit_pct": 10,
+    "iterations": 3,
+    "large_kb": 1024,
+    "large_sessions": 1,
+    "note_bytes": 256,
+    "notes": 200,
+    "random_reads": 50,
+    "seed": 1,
+    "session_kb": 64,
+    "sessions": 20
+  },
+  "metrics": [
+    {
+      "name": "note create",
+      "count": 200,
+      "total_ms": 277.9235339999999,
+      "p50_ms": 1.285088,
+      "p95_ms": 1.503182,
+      "max_ms": 18.671148,
+      "per_sec": 719.6223980082236
+    },
+    {
+      "name": "session add",
+      "count": 20,
+      "total_ms": 49.928254,
+      "p50_ms": 2.420113,
+      "p95_ms": 2.716275,
+      "max_ms": 3.336824,
+      "per_sec": 400.57479278165823
+    },
+    {
+      "name": "session add (large)",
+      "count": 1,
+      "total_ms": 40.666078,
+      "p50_ms": 40.666078,
+      "p95_ms": 40.666078,
+      "max_ms": 40.666078,
+      "per_sec": 24.59051989227975
+    },
+    {
+      "name": "dataset create",
+      "count": 3,
+      "total_ms": 5.424417999999999,
+      "p50_ms": 1.011637,
+      "p95_ms": 3.449071,
+      "max_ms": 3.449071,
+      "per_sec": 553.0547240275363
+    },
+    {
+      "name": "dataset sessions add",
+      "count": 3,
+      "total_ms": 12.295428,
+      "p50_ms": 4.163728,
+      "p95_ms": 4.2697389999999995,
+      "max_ms": 4.2697389999999995,
+      "per_sec": 243.99313305726326
+    },
+    {
+      "name": "dataset sessions add (large)",
+      "count": 1,
+      "total_ms": 4.313775,
+      "p50_ms": 4.313775,
+      "p95_ms": 4.313775,
+      "max_ms": 4.313775,
+      "per_sec": 231.81552120822252
+    },
+    {
+      "name": "note edit",
+      "count": 20,
+      "total_ms": 49.376428999999995,
+      "p50_ms": 2.4094759999999997,
+      "p95_ms": 2.755623,
+      "max_ms": 3.059095,
+      "per_sec": 405.05156822904314
+    },
+    {
+      "name": "session grow",
+      "count": 2,
+      "total_ms": 6.136623,
+      "p50_ms": 3.0129050000000004,
+      "p95_ms": 3.123718,
+      "max_ms": 3.123718,
+      "per_sec": 325.91215070568944
+    },
+    {
+      "name": "note delete",
+      "count": 10,
+      "total_ms": 24.831261,
+      "p50_ms": 2.4547060000000003,
+      "p95_ms": 2.895387,
+      "max_ms": 2.895387,
+      "per_sec": 402.71817045457334
+    },
+    {
+      "name": "gc",
+      "count": 1,
+      "total_ms": 242.56951199999997,
+      "p50_ms": 242.56951199999997,
+      "p95_ms": 242.56951199999997,
+      "max_ms": 242.56951199999997,
+      "per_sec": 4.122529627713478
+    },
+    {
+      "name": "open (warm index)",
+      "count": 3,
+      "total_ms": 8.197206999999999,
+      "p50_ms": 2.724319,
+      "p95_ms": 2.8010539999999997,
+      "max_ms": 2.8010539999999997,
+      "per_sec": 365.9783143209633
+    },
+    {
+      "name": "open (rebuild index)",
+      "count": 1,
+      "total_ms": 45.883669000000005,
+      "p50_ms": 45.883669000000005,
+      "p95_ms": 45.883669000000005,
+      "max_ms": 45.883669000000005,
+      "per_sec": 21.794246663230005
+    },
+    {
+      "name": "resolve id (full)",
+      "count": 3,
+      "total_ms": 2.0885380000000002,
+      "p50_ms": 0.700428,
+      "p95_ms": 0.703229,
+      "max_ms": 0.703229,
+      "per_sec": 1436.411499335899
+    },
+    {
+      "name": "resolve id (8-char prefix)",
+      "count": 3,
+      "total_ms": 2.354028,
+      "p50_ms": 0.754045,
+      "p95_ms": 0.961982,
+      "max_ms": 0.961982,
+      "per_sec": 1274.4113493977131
+    },
+    {
+      "name": "note get",
+      "count": 3,
+      "total_ms": 4.150735,
+      "p50_ms": 1.2011509999999999,
+      "p95_ms": 1.778961,
+      "max_ms": 1.778961,
+      "per_sec": 722.7635587432105
+    },
+    {
+      "name": "random read by id",
+      "count": 50,
+      "total_ms": 31.78244400000001,
+      "p50_ms": 0.619355,
+      "p95_ms": 0.7573350000000001,
+      "max_ms": 0.7898379999999999,
+      "per_sec": 1573.1955667097216
+    },
+    {
+      "name": "random note get",
+      "count": 50,
+      "total_ms": 31.255573999999992,
+      "p50_ms": 0.611773,
+      "p95_ms": 0.711736,
+      "max_ms": 0.77266,
+      "per_sec": 1599.7146620951517
+    },
+    {
+      "name": "query name, limit 20",
+      "count": 3,
+      "total_ms": 3.4418930000000003,
+      "p50_ms": 1.108643,
+      "p95_ms": 1.244366,
+      "max_ms": 1.244366,
+      "per_sec": 871.6133825194449
+    },
+    {
+      "name": "iter all notes",
+      "count": 3,
+      "total_ms": 29.175556999999998,
+      "p50_ms": 9.742668,
+      "p95_ms": 9.77643,
+      "max_ms": 9.77643,
+      "per_sec": 102.82580037803564
+    },
+    {
+      "name": "query modified desc, limit 20",
+      "count": 3,
+      "total_ms": 3.39783,
+      "p50_ms": 1.14207,
+      "p95_ms": 1.144668,
+      "max_ms": 1.144668,
+      "per_sec": 882.9164496163728
+    },
+    {
+      "name": "dataset sessions list",
+      "count": 3,
+      "total_ms": 2.5989459999999998,
+      "p50_ms": 0.83511,
+      "p95_ms": 0.9551769999999999,
+      "max_ms": 0.9551769999999999,
+      "per_sec": 1154.3140950215975
+    },
+    {
+      "name": "session content read",
+      "count": 3,
+      "total_ms": 6.835698,
+      "p50_ms": 2.2703390000000003,
+      "p95_ms": 2.299582,
+      "max_ms": 2.299582,
+      "per_sec": 438.87251894393233
+    },
+    {
+      "name": "session content read (large)",
+      "count": 3,
+      "total_ms": 18.178611,
+      "p50_ms": 6.122642,
+      "p95_ms": 6.159013,
+      "max_ms": 6.159013,
+      "per_sec": 165.0291103099131
+    }
+  ],
+  "sizes": [
+    {
+      "name": "repository (before gc)",
+      "bytes": 6758400
+    },
+    {
+      "name": "bytes per git object (before gc)",
+      "bytes": 5051
+    },
+    {
+      "name": "index (before gc)",
+      "bytes": 184320
+    },
+    {
+      "name": "repository (after gc)",
+      "bytes": 1443840
+    },
+    {
+      "name": "bytes per git object (after gc)",
+      "bytes": 1103
+    },
+    {
+      "name": "index (after gc)",
+      "bytes": 184320
+    }
+  ],
+  "counts": [
+    {
+      "name": "git objects (before gc)",
+      "value": 1338
+    },
+    {
+      "name": "refs (before gc)",
+      "value": 225
+    },
+    {
+      "name": "git objects (after gc)",
+      "value": 1308
+    },
+    {
+      "name": "refs (after gc)",
+      "value": 225
+    }
+  ],
+  "fsck": [
+    "notice: HEAD points to an unborn branch (main)"
+  ]
+}
