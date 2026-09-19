@@ -467,7 +467,7 @@ fn dataset_session_list(datasets: &DatasetStore, args: DatasetSessionListArgs) {
                 s.session_num.to_string(),
                 type_name,
                 s.session_id.clone(),
-                format_size(s.size as i64),
+                s.size.map(|b| format_size(b as i64)).unwrap_or_default(),
             ]
         })
         .collect();

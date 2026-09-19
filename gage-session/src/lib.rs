@@ -40,6 +40,21 @@ pub trait Driver: Send + Sync {
     ) -> Result<Box<dyn StoreSession>, DriverError>;
 }
 
+/// Facts about a native session that only its driver can know: what
+/// the session is called, which model produced it, how many messages
+/// it holds, and how large its own files are. The store writes them
+/// into the session object as `attrs.summary` at add time so that
+/// listings never parse content. Every field is optional; a driver
+/// reports what it can.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub title: Option<String>,
+    pub model: Option<String>,
+    pub message_count: Option<u64>,
+    /// Bytes of the session's own files, as the driver measures them.
+    pub size: Option<u64>,
+}
+
 /// A view of one session ready to be written into a dataset.
 pub trait SourceSession {
     /// The source-assigned id, preserved verbatim.
@@ -51,6 +66,10 @@ pub trait SourceSession {
     /// Optional storage format hint for the session's `content/`
     /// files. `None` when the session type is enough on its own.
     fn content_format(&self) -> Option<&str>;
+
+    /// The driver's projection of the session, stored as
+    /// `attrs.summary`. Nothing outside the driver can compute it.
+    fn summary(&self) -> SessionSummary;
 
     /// Stream the session's content files. Called once. Each yielded
     /// [`SessionFile`] carries a relative path (under `content/`) and

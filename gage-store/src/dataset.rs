@@ -68,8 +68,8 @@ pub struct DatasetSessionSummary {
     pub session_id: String,
     /// Contents of the session's `attrs.session_type` (e.g. `"claude 1"`).
     pub session_type: String,
-    /// Sum of blob sizes under the session's `files/**`.
-    pub size: u64,
+    /// The driver's size of the session's own files, when reported.
+    pub size: Option<u64>,
 }
 
 /// Outcome of adding one session to a dataset.
@@ -434,7 +434,7 @@ mod tests {
     use crate::object::object_ref;
     use crate::test_support::open_store;
     use crate::{NoteInput, NoteStore};
-    use gage_session::{DriverError, SessionFile};
+    use gage_session::{DriverError, SessionFile, SessionSummary};
     use std::io::Cursor;
 
     struct FakeSession {
@@ -455,6 +455,13 @@ mod tests {
 
         fn content_format(&self) -> Option<&str> {
             None
+        }
+
+        fn summary(&self) -> SessionSummary {
+            SessionSummary {
+                size: Some(self.content.len() as u64),
+                ..SessionSummary::default()
+            }
         }
 
         fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
@@ -650,7 +657,7 @@ mod tests {
 
         let listed = datasets.sessions_list(&dataset).unwrap();
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].size, 7);
+        assert_eq!(listed[0].size, Some(7));
         let meta = datasets.session_meta(&dataset, "s1").unwrap();
         assert_eq!(meta.session_num, 1);
         assert_eq!(meta.driver_name, "fake");

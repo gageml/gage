@@ -2,6 +2,18 @@
 
 ## 01 - 04
 
+This section summarizes results over this span of changes:
+
+- `01 baseline`
+- `02 cat-file-server`
+- `03 index-batch-writes`
+- `04 write-loose-objects`
+
+These changes represent the first pass at improving store performance. They
+represent the low hanging fruit. We expect future changes to have relatively
+less impact and be directed at improving conceptual soundness of the store and
+simplification of code or approaches.
+
 Normal-scale runs (2,000 notes, 200 sessions, 2 large sessions, 10 datasets),
 one per change, p50 in milliseconds. The factor after each value is the speedup
 over the column to its left: `+2.0` is twice as fast, `-1.5` is 1.5 times
@@ -60,3 +72,88 @@ Code versions: 01 `640f549`, 02 `fb28d28`, 03 `7ec331e`, 04 `511d77d`.
     `for-each-ref` glob, which is the one read still on a process launch and
     which grows with the count of loose refs before `gc`. Creates do not pay it,
     which is why edits and deletes gained less in 03 and 04.
+
+## Further changes
+
+Where the cost is now, at normal scale: a write is one `git update-ref` launch
+plus file writes, about 1 ms; a read is a few pipe round-trips, about 0.6 ms;
+queries are one SQLite statement plus one read per row. For a single CLI
+command, the process startup of `gage` itself is now larger than any of these,
+so further per-operation wins are invisible to a user running one command. They
+matter only on bulk paths: iterating many objects, applying a scan's output, and
+rebuilding the index.
+
+### Better and faster
+
+Changes that move the code toward the design and remove cost as a consequence.
+These are the ones worth making.
+
+1. **Resolve prefixes through the index, exact ids through git.** `resolve_id`
+   is the last read on a process launch: a `for-each-ref` glob over every ref,
+   growing with the loose-ref count. The index already holds every id in its
+   `ref` table. Selecting among ids by prefix is selection, which the design
+   assigns to the index; resolving an exact name is a store read, one `info` on
+   the pipe. Splitting the two puts each where it belongs and removes the launch
+   from every edit and delete (footnote 5). Alias resolution, when it lands,
+   joins the prefix side.
+
+2. **Store the driver's `summary` at session add.** Done. The spec puts a driver
+   projection `summary` on the session (`title`, `model`, `message_count`,
+   `size`) so listings do not read content, and only the driver can compute
+   those figures: which files are the session and what they contain are facts of
+   the harness format, not of the store. Before this change `SessionRecord.size`
+   was computed on every read by walking `files/**` with one round-trip per
+   blob, a store-side guess at a driver-owned number. The driver now reports
+   `summary` with the session, the store writes it into `attrs.summary`
+   verbatim, and readers take `size` from there. The Claude driver reports
+   `size` today; `title`, `model`, and `message_count` require reading the
+   transcript and land with the driver interface work. The rule that generalizes
+   this: a figure about content is written by the type at write time, and
+   readers compute nothing over content.
+
+3. **One read per object in `classify_parents`.** It reads the commit, the
+   header, and the link files as three tree reads of the same commit.
+   `read_object` already yields the header and the top-level links. One read
+   with the recursive link walk only when a subtree exists is the same shape
+   `index_written` already uses. Less code, one fewer way to read an object.
+
+### Faster, not better
+
+Changes that would show up in the table and cost something in the model, the
+code, or both. Listed so they are not rediscovered as new ideas.
+
+- **Hold `attrs.json` in the index.** Iteration and queries would return rows
+  without reading git, taking `iter all notes` from about 200 ms to a few. The
+  index would then hold a copy of object content, not a selection over it, and
+  every reader would have two sources of truth to keep straight. The design
+  draws the index as rebuildable selection state, and this crosses that line.
+
+- **Pipeline cat-file requests.** Sending many requests before reading replies
+  would cut the per-object cost of the rebuild and iteration further. It
+  replaces a request-reply function with batching state and reply matching, for
+  a path that already runs at 0.1 ms per object.
+
+- **Stream session content through the cat-file pipe.** Content reads are the
+  one remaining per-read launch, about 2.5 ms. The pipe returns a whole object,
+  so a 50 MB session would be buffered rather than streamed, and the driver's
+  `ContentAccess` would need a lifetime tied to the store. Streaming is the
+  better property for opaque content; the launch is the price.
+
+- **Batch ref updates through `update-ref --stdin`.** A dataset add that writes
+  several sessions and the dataset could issue its ref updates in one process.
+  It is a second long-lived child with its own protocol, or a per-operation
+  launch that replaces N launches with one, for a path that is already 12 ms at
+  20 members.
+
+### Considered and rejected
+
+- **Write refs directly.** Ref files carry git's locking, the old-value check,
+  and packed-refs interplay. Reimplementing them buys about 0.6 ms per write at
+  the cost of correctness that git provides for free.
+
+- **Cache objects in memory for the life of a `Store`.** Another process can
+  move a ref at any time; the reconcile-on-open design exists so that nothing in
+  memory has to be invalidated. A cache reintroduces exactly that problem.
+
+- **Tune `gc` and compression settings.** `store-init.md` leaves them at
+  defaults on purpose, and `gc` is not on any interactive path.

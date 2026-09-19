@@ -10,8 +10,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 
 use gage_session::{
-    ContentAccess, Driver, DriverError, Entry, SessionFile, SessionType, SourceSession,
-    StoreSession,
+    ContentAccess, Driver, DriverError, Entry, SessionFile, SessionSummary, SessionType,
+    SourceSession, StoreSession,
 };
 
 use crate::session::find_session;
@@ -137,6 +137,26 @@ impl SourceSession for ClaudeSourceSession {
 
     fn content_format(&self) -> Option<&str> {
         None
+    }
+
+    /// `size` is the transcript plus every subagent sidecar. Title,
+    /// model, and message count require reading the transcript and
+    /// are not projected yet.
+    fn summary(&self) -> SessionSummary {
+        let mut size = std::fs::metadata(&self.session_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if let Ok(entries) = std::fs::read_dir(self.subagents_dir()) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    size += meta.len();
+                }
+            }
+        }
+        SessionSummary {
+            size: Some(size),
+            ..SessionSummary::default()
+        }
     }
 
     fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {

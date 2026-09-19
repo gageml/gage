@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use gage_core::uuid::derive_id;
-use gage_session::{SessionType, SourceSession};
+use gage_session::{SessionSummary, SessionType, SourceSession};
 use serde::{Deserialize, Serialize};
 
 use crate::index::{ObjectQuery, Order};
@@ -51,6 +51,35 @@ pub struct SessionAttrs {
     pub session_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_format: Option<String>,
+    /// The driver's projection of the session, written at add time.
+    /// Absent when the driver reported nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SummaryAttrs>,
+}
+
+/// `attrs.summary`: the driver's [`SessionSummary`] as stored. Only
+/// the driver can compute these; the store copies them verbatim.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SummaryAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+impl From<SessionSummary> for SummaryAttrs {
+    fn from(s: SessionSummary) -> Self {
+        SummaryAttrs {
+            title: s.title,
+            model: s.model,
+            message_count: s.message_count,
+            size: s.size,
+        }
+    }
 }
 
 /// Outcome of writing one session to the store.
@@ -83,8 +112,9 @@ pub struct SessionRecord {
     pub session_type: SessionType,
     pub driver_name: String,
     pub driver_version: String,
-    /// Total bytes of blobs under `files/**`.
-    pub size: u64,
+    /// The driver's size of the session's own files, from
+    /// `attrs.summary`. `None` when the driver did not report one.
+    pub size: Option<u64>,
 }
 
 /// Derive the Gage object id of a session from its driver name and
@@ -110,6 +140,10 @@ impl SessionStore<'_> {
             session_id: native_session_id,
             session_type: reader.session_type().to_string(),
             content_format: reader.content_format().map(str::to_string),
+            summary: {
+                let summary = reader.summary();
+                (summary != SessionSummary::default()).then(|| SummaryAttrs::from(summary))
+            },
         };
 
         let mut file_entries: Vec<(String, String)> = Vec::new();
@@ -180,7 +214,7 @@ impl SessionStore<'_> {
     /// Read the session at the given commit SHA.
     pub fn at_commit(&self, commit_sha: &str) -> Result<SessionRecord, StoreError> {
         let object = self.store.read_object(commit_sha)?;
-        decode(self.store, object)
+        decode(object)
     }
 }
 
@@ -218,11 +252,11 @@ impl<'a> SessionQuery<'a> {
         let shas = store.select(&self.query)?;
         Ok(shas
             .into_iter()
-            .map(move |sha| decode(store, store.read_object(&sha)?)))
+            .map(move |sha| decode(store.read_object(&sha)?)))
     }
 }
 
-fn decode(store: &Store, object: Object) -> Result<SessionRecord, StoreError> {
+fn decode(object: Object) -> Result<SessionRecord, StoreError> {
     let commit_sha = object.commit_sha.as_str();
     require_type(&object, OBJECT_TYPE)?;
     let attrs_value = object
@@ -239,7 +273,7 @@ fn decode(store: &Store, object: Object) -> Result<SessionRecord, StoreError> {
         Some((n, v)) => SessionType::new(n.to_string(), v.to_string()),
         None => SessionType::new(attrs.session_type.clone(), String::new()),
     };
-    let size = files_size(store, commit_sha)?;
+    let size = attrs.summary.as_ref().and_then(|s| s.size);
     Ok(SessionRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
@@ -289,21 +323,6 @@ fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<Strin
     mktree(path, &entries)
 }
 
-/// Sum of blob sizes under `<commit_sha>:files/`. Zero when the
-/// commit has no `files` tree.
-fn files_size(store: &Store, commit_sha: &str) -> Result<u64, StoreError> {
-    let files = format!("{commit_sha}:{FILES_TREE}");
-    if store.object_info(&files)?.is_none() {
-        return Ok(0);
-    }
-    let mut total = 0u64;
-    store.walk_tree(&files, "", &mut |entry| {
-        total += entry.size.unwrap_or(0);
-        Ok(())
-    })?;
-    Ok(total)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +350,13 @@ mod tests {
 
         fn content_format(&self) -> Option<&str> {
             None
+        }
+
+        fn summary(&self) -> SessionSummary {
+            SessionSummary {
+                size: Some(self.files.iter().map(|(_, b)| b.len() as u64).sum()),
+                ..SessionSummary::default()
+            }
         }
 
         fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
@@ -381,7 +407,7 @@ mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"driver\":\"fake 0.1\",\"session_id\":\"s1\",\"session_type\":\"fake 1\"}\n"
+            "{\"driver\":\"fake 0.1\",\"session_id\":\"s1\",\"session_type\":\"fake 1\",\"summary\":{\"size\":4}}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files/sub/a.txt")), "a");
 
@@ -391,7 +417,7 @@ mod tests {
         assert_eq!(record.driver_version, "0.1");
         assert_eq!(record.session_type, SessionType::new("fake", "1"));
         assert_eq!(record.attrs.session_id, "s1");
-        assert_eq!(record.size, 4);
+        assert_eq!(record.size, Some(4));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use std::io::{Cursor, Read};
 
-use gage_session::{DriverError, SessionFile, SessionType, SourceSession};
+use gage_session::{DriverError, SessionFile, SessionSummary, SessionType, SourceSession};
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 
@@ -115,6 +115,13 @@ impl SourceSession for SyntheticSession {
 
     fn content_format(&self) -> Option<&str> {
         None
+    }
+
+    fn summary(&self) -> SessionSummary {
+        SessionSummary {
+            size: Some(self.content.len() as u64),
+            ..SessionSummary::default()
+        }
     }
 
     fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
