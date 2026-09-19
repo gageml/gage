@@ -342,16 +342,20 @@ impl TaskStatus {
             TaskStatus::Canceled => "canceled",
         }
     }
+}
 
-    fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
+impl std::str::FromStr for TaskStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "pending" => TaskStatus::Pending,
             "started" => TaskStatus::Started,
             "completed" => TaskStatus::Completed,
             "failed" => TaskStatus::Failed,
             "skipped" => TaskStatus::Skipped,
             "canceled" => TaskStatus::Canceled,
-            _ => return None,
+            other => return Err(format!("unknown task status '{other}'")),
         })
     }
 }
@@ -619,11 +623,11 @@ pub fn tasks_for_scan(conn: &Connection, scan_id: &str) -> Result<Vec<ScanTask>,
                 scanner_name: row.get(1)?,
                 scanner_version: row.get(2)?,
                 task_name: row.get(3)?,
-                status: TaskStatus::from_str(&status).ok_or_else(|| {
+                status: status.parse::<TaskStatus>().map_err(|msg| {
                     rusqlite::Error::FromSqlConversionFailure(
                         4,
                         rusqlite::types::Type::Text,
-                        format!("unknown task status '{status}'").into(),
+                        msg.into(),
                     )
                 })?,
                 started: row.get(5)?,
