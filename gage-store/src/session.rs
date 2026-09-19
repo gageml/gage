@@ -9,7 +9,7 @@
 //! writes an edit commit. Tree construction, commit parents, and
 //! edits are the generic object model's job; see [`crate::object`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use gage_core::uuid::derive_id;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::index::{ObjectQuery, Order};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
-use crate::writer::{TreeInput, mktree, write_blob_stream};
+use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
 pub(crate) const OBJECT_TYPE: &str = "gage::session";
@@ -285,9 +285,86 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
     })
 }
 
-/// Recursively build the `files/` tree from `(relative_path, blob_sha)`
-/// pairs.
+/// Build the `files/` tree from `(relative_path, blob_sha)` pairs.
+/// Validates the full path set once, then recurses on subdirectories.
 fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<String, StoreError> {
+    validate_session_paths(&entries)?;
+    build_files_tree_inner(path, entries)
+}
+
+/// Checks the driver's file paths against Gage's tree rules. Runs once
+/// at the top-level call so the full offending path is available in
+/// every error.
+fn validate_session_paths(entries: &[(String, String)]) -> Result<(), StoreError> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (rel, _) in entries {
+        validate_session_path(rel)?;
+        if !seen.insert(rel.as_str()) {
+            return Err(StoreError::InvalidPath {
+                path: rel.clone(),
+                reason: "duplicate session file path".to_string(),
+            });
+        }
+    }
+    let prefixes: HashSet<&str> = entries
+        .iter()
+        .flat_map(|(p, _)| directory_prefixes(p))
+        .collect();
+    for (p, _) in entries {
+        if prefixes.contains(p.as_str()) {
+            return Err(StoreError::InvalidPath {
+                path: p.clone(),
+                reason: "file path is also a directory prefix of another path".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects malformed paths. Per-component checks mirror
+/// [`crate::writer::validate_tree_name`]; the whole-path checks catch
+/// shapes that would otherwise split into empty components.
+fn validate_session_path(rel: &str) -> Result<(), StoreError> {
+    let invalid = |reason: &str| StoreError::InvalidPath {
+        path: rel.to_string(),
+        reason: reason.to_string(),
+    };
+    if rel.is_empty() {
+        return Err(invalid("empty path"));
+    }
+    if rel.starts_with('/') {
+        return Err(invalid("leading `/`"));
+    }
+    if rel.ends_with('/') {
+        return Err(invalid("trailing `/`"));
+    }
+    for component in rel.split('/') {
+        if component.is_empty() {
+            return Err(invalid("empty component (`//` in path)"));
+        }
+        if component.contains('\0') {
+            return Err(invalid("component contains NUL"));
+        }
+        if component == "." || component == ".." {
+            return Err(invalid("component is `.` or `..`"));
+        }
+        if is_dot_git(component) {
+            return Err(invalid("component is `.git`"));
+        }
+    }
+    Ok(())
+}
+
+/// Every proper directory prefix of `path`. `"a/b/c"` yields `"a"`
+/// and `"a/b"`; a path with no `/` yields nothing.
+fn directory_prefixes(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(|(i, _)| &path[..i])
+}
+
+fn build_files_tree_inner(
+    path: &Path,
+    entries: Vec<(String, String)>,
+) -> Result<String, StoreError> {
     let mut blobs: BTreeMap<String, String> = BTreeMap::new();
     let mut subdirs: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (rel, sha) in entries {
@@ -305,7 +382,7 @@ fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<Strin
     }
     let mut subtree_shas: Vec<(String, String)> = Vec::with_capacity(subdirs.len());
     for (dir, sub) in subdirs {
-        subtree_shas.push((dir, build_files_tree(path, sub)?));
+        subtree_shas.push((dir, build_files_tree_inner(path, sub)?));
     }
     let mut entries: Vec<TreeInput<'_>> = blobs
         .iter()
@@ -461,5 +538,76 @@ mod tests {
             SessionStore::from(&store).at_commit(&sha).unwrap_err(),
             StoreError::WrongType { actual, .. } if actual == "gage::dataset"
         ));
+    }
+
+    #[test]
+    fn add_accepts_legal_nested_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let mut session = fake(
+            "nested",
+            &[("a/b/c.jsonl", "1"), ("a/b/d.jsonl", "2"), ("a/e.txt", "3")],
+        );
+        let outcome = sessions.add("fake", "0.1", &mut session).unwrap();
+        assert_eq!(outcome.outcome, SessionOutcome::Added);
+        let ref_path = object_ref(&outcome.id);
+        let listing = run(git_in(
+            store.path(),
+            ["ls-tree", "-r", "--name-only", &format!("{ref_path}:files")],
+        ))
+        .unwrap();
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec!["a/b/c.jsonl", "a/b/d.jsonl", "a/e.txt"]
+        );
+    }
+
+    #[test]
+    fn add_rejects_invalid_session_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let cases: &[(&[(&str, &str)], &str, &str)] = &[
+            (&[("", "x")], "", "empty path"),
+            (&[("/a", "x")], "/a", "leading `/`"),
+            (&[("a/", "x")], "a/", "trailing `/`"),
+            (&[("a//b", "x")], "a//b", "empty component (`//` in path)"),
+            (&[("a/./b", "x")], "a/./b", "component is `.` or `..`"),
+            (&[("a/../b", "x")], "a/../b", "component is `.` or `..`"),
+            (
+                &[(".git/config", "x")],
+                ".git/config",
+                "component is `.git`",
+            ),
+            (
+                &[(".GIT/config", "x")],
+                ".GIT/config",
+                "component is `.git`",
+            ),
+            (&[("a/git~1", "x")], "a/git~1", "component is `.git`"),
+            (&[("a\0b", "x")], "a\0b", "component contains NUL"),
+            (
+                &[("dup", "x"), ("dup", "y")],
+                "dup",
+                "duplicate session file path",
+            ),
+            (
+                &[("a", "x"), ("a/b", "y")],
+                "a",
+                "file path is also a directory prefix of another path",
+            ),
+        ];
+        for (i, (files, expected_path, expected_reason)) in cases.iter().enumerate() {
+            let mut session = fake(&format!("s{i}"), files);
+            let err = sessions.add("fake", "0.1", &mut session).unwrap_err();
+            match err {
+                StoreError::InvalidPath { path, reason } => {
+                    assert_eq!(path, *expected_path, "case {i}: {files:?}");
+                    assert_eq!(reason, *expected_reason, "case {i}: {files:?}");
+                }
+                other => panic!("case {i} {files:?}: expected InvalidPath, got {other:?}"),
+            }
+        }
     }
 }

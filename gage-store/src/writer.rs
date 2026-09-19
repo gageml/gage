@@ -54,6 +54,7 @@ pub(crate) fn mktree(path: &Path, entries: &[TreeInput<'_>]) -> Result<String, S
     sorted.sort_by_key(|entry| tree_sort_key(entry));
     let mut body = Vec::new();
     for entry in sorted {
+        validate_tree_name(entry.name)?;
         let mode = entry.mode.trim_start_matches('0');
         body.extend_from_slice(mode.as_bytes());
         body.push(b' ');
@@ -62,6 +63,51 @@ pub(crate) fn mktree(path: &Path, entries: &[TreeInput<'_>]) -> Result<String, S
         body.extend_from_slice(&decode_sha(entry.sha)?);
     }
     write_object(path, "tree", &body)
+}
+
+/// Rejects tree entry names git's own parser or `fsck --strict` would
+/// choke on. `/` is rejected because a tree entry names one path
+/// component; a `/` inside an entry produces a legal-but-flat tree
+/// where git expects a subtree.
+fn validate_tree_name(name: &str) -> Result<(), StoreError> {
+    let reason = if name.is_empty() {
+        "empty tree entry name"
+    } else if name.contains('\0') {
+        "tree entry name contains NUL"
+    } else if name.contains('/') {
+        "tree entry name contains /"
+    } else if name == "." || name == ".." {
+        "tree entry name is `.` or `..`"
+    } else if is_dot_git(name) {
+        "tree entry name is `.git`"
+    } else {
+        return Ok(());
+    };
+    Err(StoreError::InvalidPath {
+        path: name.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
+/// True when git's `fsck` treats `name` as `.git`, which a receiving
+/// store rejects under `transfer.fsckObjects`. Mirrors git's
+/// `is_hfs_dotgit` and `is_ntfs_dotgit`: the comparison is
+/// case-insensitive, ignores the code points HFS+ drops from names,
+/// ignores the trailing spaces and dots NTFS drops, and includes the
+/// NTFS short name `git~1`.
+pub(crate) fn is_dot_git(name: &str) -> bool {
+    let visible: String = name.chars().filter(|c| !is_hfs_ignored(*c)).collect();
+    let visible = visible.trim_end_matches([' ', '.']);
+    visible.eq_ignore_ascii_case(".git") || visible.eq_ignore_ascii_case("git~1")
+}
+
+/// Code points HFS+ ignores when comparing file names, per git's
+/// `is_hfs_ignored_codepoint`.
+fn is_hfs_ignored(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}'
+    )
 }
 
 /// Git orders tree entries by name bytes, comparing a directory as if
@@ -362,6 +408,71 @@ mod tests {
             .env("GIT_COMMITTER_DATE", &date);
         let theirs = run(cmd).unwrap().trim().to_string();
         assert_eq!(ours, theirs);
+    }
+
+    #[test]
+    fn dot_git_forms_match_what_fsck_rejects() {
+        // Each row was checked by pushing a raw tree into a store with
+        // transfer.fsckObjects on git 2.43.
+        for name in [
+            ".git", ".GIT", ".Git", ".git.", ".git ", ".git..", "git~1", "GIT~1",
+        ] {
+            assert!(is_dot_git(name), "{name:?}");
+        }
+        for cp in [
+            '\u{200c}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{206a}', '\u{206f}', '\u{feff}',
+        ] {
+            assert!(is_dot_git(&format!(".g{cp}it")), "U+{:04X}", cp as u32);
+        }
+        for name in [".gitx", ".gitmodules", "GIT~10", "git", "a.git"] {
+            assert!(!is_dot_git(name), "{name:?}");
+        }
+        for cp in [
+            '\u{200b}', '\u{2010}', '\u{2029}', '\u{202f}', '\u{2069}', '\u{2070}', '\u{2060}',
+            '\u{fefe}',
+        ] {
+            assert!(!is_dot_git(&format!(".g{cp}it")), "U+{:04X}", cp as u32);
+        }
+    }
+
+    #[test]
+    fn mktree_rejects_invalid_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let blob = write_blob(&path, b"x").unwrap();
+        let cases = [
+            ("", "empty tree entry name"),
+            ("a\0b", "tree entry name contains NUL"),
+            ("a/b", "tree entry name contains /"),
+            (".", "tree entry name is `.` or `..`"),
+            ("..", "tree entry name is `.` or `..`"),
+            (".git", "tree entry name is `.git`"),
+            (".GIT", "tree entry name is `.git`"),
+            (".git.", "tree entry name is `.git`"),
+            (".git ", "tree entry name is `.git`"),
+            (".git . ", "tree entry name is `.git`"),
+            ("git~1", "tree entry name is `.git`"),
+            ("GIT~1", "tree entry name is `.git`"),
+            (".g\u{200c}it", "tree entry name is `.git`"),
+            (".git\u{feff}", "tree entry name is `.git`"),
+        ];
+        for (name, expected) in cases {
+            let result = mktree(
+                &path,
+                &[TreeInput {
+                    mode: "100644",
+                    sha: &blob,
+                    name,
+                }],
+            );
+            match result {
+                Err(StoreError::InvalidPath { path: p, reason }) => {
+                    assert_eq!(p, name, "{name:?}");
+                    assert_eq!(reason, expected, "{name:?}");
+                }
+                other => panic!("expected InvalidPath for {name:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

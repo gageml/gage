@@ -37,6 +37,8 @@ pub enum StoreError {
     AmbiguousId(String, usize),
     /// Operation refused because the object's current commit is a tombstone
     ObjectDeleted(String),
+    /// A tree entry name or session file path failed validation
+    InvalidPath { path: String, reason: String },
     /// The object exists but is not of the type the operation requires
     WrongType {
         id: String,
@@ -97,6 +99,9 @@ impl fmt::Display for StoreError {
                 write!(f, "id {id} is ambiguous ({n} matches)")
             }
             StoreError::ObjectDeleted(id) => write!(f, "object is deleted: {id}"),
+            StoreError::InvalidPath { path, reason } => {
+                write!(f, "invalid path {path:?}: {reason}")
+            }
             StoreError::WrongType {
                 id,
                 expected,
@@ -126,6 +131,7 @@ impl std::error::Error for StoreError {
             | StoreError::ObjectNotFound(_)
             | StoreError::AmbiguousId(_, _)
             | StoreError::ObjectDeleted(_)
+            | StoreError::InvalidPath { .. }
             | StoreError::WrongType { .. }
             | StoreError::SessionNotFound(_)
             | StoreError::Index(_) => None,
