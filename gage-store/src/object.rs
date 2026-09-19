@@ -182,7 +182,8 @@ impl Store {
                 }
                 "blob" if name.ends_with(".link") => {
                     let bytes = self.read_blob_bytes(&entry.sha)?;
-                    tree.links.insert(name.clone(), parse_link(&bytes));
+                    tree.links
+                        .insert(name.clone(), parse_link(&bytes, name, &commit_sha)?);
                 }
                 "blob" => {
                     tree.blobs
@@ -446,9 +447,10 @@ impl Store {
         let created_ms = self.read_marker_ms(commit, entries, "created")?;
         let modified_ms = self.read_marker_ms(commit, entries, "modified")?;
         let deleted_ms = self.read_marker_ms(commit, entries, "deleted")?;
-        let parent = self
-            .read_marker(commit, entries, "parent")?
-            .map(|s| s.trim().to_string());
+        let parent = match self.read_marker(commit, entries, "parent")? {
+            Some(text) => Some(parse_sha(text.trim(), "parent blob", commit)?),
+            None => None,
+        };
         Ok(ObjectHeader {
             object_type,
             version,
@@ -508,10 +510,8 @@ impl Store {
         let mut files = Vec::with_capacity(link_blobs.len());
         for (path, sha) in link_blobs {
             let bytes = self.read_blob_bytes(&sha)?;
-            files.push(LinkFile {
-                path,
-                shas: parse_link(&bytes),
-            });
+            let shas = parse_link(&bytes, &path, commit)?;
+            files.push(LinkFile { path, shas });
         }
         Ok(files)
     }
@@ -563,16 +563,17 @@ impl Store {
 
     /// Walk the `parent` chain from `commit`, oldest last (index 0 is
     /// `commit` itself). Stops at the first commit whose header has no
-    /// `parent` blob.
+    /// `parent` blob. The walk terminates because every `parent` is a
+    /// SHA: a cycle would need a commit whose SHA covers a blob naming
+    /// a commit whose SHA covers a blob naming it back.
     pub fn walk_parent_chain(&self, commit: &str) -> Result<Vec<String>, StoreError> {
         let mut chain = Vec::new();
         let mut current = commit.to_string();
         loop {
             chain.push(current.clone());
-            let header = self.read_header(&current)?;
-            match header.parent {
-                Some(parent) if !parent.is_empty() => current = parent,
-                _ => return Ok(chain),
+            match self.read_header(&current)?.parent {
+                Some(parent) => current = parent,
+                None => return Ok(chain),
             }
         }
     }
@@ -715,13 +716,32 @@ fn blob_entry(sha: &str) -> TreeEntryRef {
     }
 }
 
-fn parse_link(bytes: &[u8]) -> Vec<String> {
+/// The commit SHAs listed in a link file, one per line. Every line
+/// must be a SHA: a ref name would resolve, and a ref that points back
+/// at the object makes every walk over parents and links a loop.
+fn parse_link(bytes: &[u8], path: &str, commit: &str) -> Result<Vec<String>, StoreError> {
     String::from_utf8_lossy(bytes)
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(String::from)
+        .map(|line| parse_sha(line, &format!("link file {path}"), commit))
         .collect()
+}
+
+/// `value` when it is a 40-character lowercase hex SHA, as the store
+/// writes them. `what` names the source for the error.
+fn parse_sha(value: &str, what: &str, commit: &str) -> Result<String, StoreError> {
+    let is_sha = value.len() == 40
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if is_sha {
+        Ok(value.to_string())
+    } else {
+        Err(StoreError::Parse(format!(
+            "{what} at {commit}: {value:?} is not a commit SHA"
+        )))
+    }
 }
 
 /// The parents of one commit, split into the previous-version parent
@@ -780,6 +800,68 @@ mod tests {
 
     fn commit_parents(store: &Store, commit: &str) -> Vec<String> {
         store.read_commit(commit).unwrap().parents
+    }
+
+    /// Rewrites the object at `id` so its tree carries `name` as a blob
+    /// with `content`, bypassing the writer's checks.
+    fn plant_blob(store: &Store, id: &str, name: &str, content: &str) -> String {
+        let (_, sha) = store.resolve_id(id).unwrap();
+        let mut entries = store.read_entries(&sha).unwrap();
+        let blob = write_blob(store.path(), content.as_bytes()).unwrap();
+        entries.insert(name.to_string(), blob_entry(&blob));
+        let tree = mktree(store.path(), &tree_lines(&entries)).unwrap();
+        let commit = commit_tree(store.path(), &tree, "planted", &[]).unwrap();
+        run(git_in(
+            store.path(),
+            ["update-ref", &object_ref(id), &commit],
+        ))
+        .unwrap();
+        commit
+    }
+
+    #[test]
+    fn parent_naming_a_ref_is_a_parse_error_not_a_loop() {
+        // Both the chain walk and the reconcile at open follow
+        // `parent`. A regression hangs, so the whole test runs on a
+        // thread with a bound.
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let tmp = tempfile::tempdir().unwrap();
+            let (store, _fsck) = open_store(tmp.path());
+            let id = note(&store, "n", &[]);
+            let commit = plant_blob(&store, &id, "parent", &format!("{}\n", object_ref(&id)));
+            let walk = store.walk_parent_chain(&commit).map_err(|e| e.to_string());
+            let path = store.path().to_path_buf();
+            drop(store);
+            let open = Store::open(&path).map(|_| ()).map_err(|e| e.to_string());
+            send.send((walk, open)).unwrap();
+        });
+        let (walk, open) = recv
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("walk and open should return, not loop");
+        match walk {
+            Err(e) => assert!(e.contains("parent blob"), "{e}"),
+            Ok(chain) => panic!("expected a parse error, got {chain:?}"),
+        }
+        match open {
+            Err(e) => assert!(e.contains("parent blob"), "{e}"),
+            Ok(()) => panic!("expected open to fail with a parse error"),
+        }
+    }
+
+    #[test]
+    fn link_line_naming_a_ref_is_a_parse_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "n", &[]);
+        let commit = plant_blob(&store, &id, "things.link", "refs/gage/object/x\n");
+
+        match store.read_object(&commit) {
+            Err(StoreError::Parse(what)) => {
+                assert!(what.contains("link file things.link"), "{what}");
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
     }
 
     fn note(store: &Store, name: &str, targets: &[String]) -> String {
