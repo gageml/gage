@@ -94,7 +94,7 @@ pub fn run(
 
     progress.set_message("verify");
     let store = Store::open(&store_path).map_err(|e| e.to_string())?;
-    verify(&store, params, &population)?;
+    let fsck = verify(&store, params, &population)?;
     drop(store);
 
     progress.set_message("reads");
@@ -110,6 +110,7 @@ pub fn run(
         metrics,
         sizes,
         counts,
+        fsck,
     })
 }
 
@@ -308,7 +309,8 @@ fn measure_sizes(
     Ok(())
 }
 
-fn verify(store: &Store, params: &Params, population: &Population) -> Result<(), String> {
+/// Returns the lines `git fsck` printed.
+fn verify(store: &Store, params: &Params, population: &Population) -> Result<Vec<String>, String> {
     let notes = NoteStore::from(store);
     let sessions = SessionStore::from(store);
     let datasets = DatasetStore::from(store);
@@ -374,7 +376,7 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<(),
         }
     }
 
-    store.fsck().map_err(|e| format!("verify: git fsck: {e}"))?;
+    let fsck = store.fsck().map_err(|e| format!("verify: git fsck: {e}"))?;
 
     for id in &population.dataset_ids {
         let listed = datasets
@@ -388,9 +390,8 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<(),
             ));
         }
     }
-    Ok(())
+    Ok(fsck)
 }
-
 fn time_reads(
     store_path: &Path,
     home: &Path,

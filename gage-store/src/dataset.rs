@@ -372,32 +372,59 @@ impl ContentAccess for GitContentAccess {
     fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>> {
         let target = format!("{}:files/{}", self.session_commit, path);
         let mut cmd: Command = git_in(&self.store_path, ["cat-file", "-p", &target]);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
         let stdout = child
             .stdout
             .take()
             .expect("stdout was requested via Stdio::piped");
-        Ok(Box::new(GitReader { child, stdout }))
+        Ok(Box::new(GitReader {
+            child,
+            stdout,
+            finished: false,
+        }))
     }
 }
 
 struct GitReader {
     child: std::process::Child,
     stdout: std::process::ChildStdout,
+    /// Set once the process has been waited on at end of stream.
+    finished: bool,
 }
 
 impl Read for GitReader {
+    /// At end of stream the process is reaped, and a failing status
+    /// becomes an error carrying git's stderr, so a truncated read is
+    /// never mistaken for a complete one.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.stdout.read(buf)
+        let n = self.stdout.read(buf)?;
+        if n == 0 && !self.finished {
+            self.finished = true;
+            let status = self.child.wait()?;
+            if !status.success() {
+                let mut reason = String::new();
+                if let Some(stderr) = self.child.stderr.as_mut() {
+                    drop(stderr.read_to_string(&mut reason));
+                }
+                return Err(std::io::Error::other(format!(
+                    "git cat-file {status}: {}",
+                    reason.trim()
+                )));
+            }
+        }
+        Ok(n)
     }
 }
 
 impl Drop for GitReader {
     fn drop(&mut self) {
-        // Reap the git process to avoid a zombie. The exit code is
-        // uninteresting by the time the reader is dropped.
-        drop(self.child.wait());
+        // Reap the git process to avoid a zombie. A reader dropped
+        // before end of stream has nothing to report.
+        if !self.finished {
+            drop(self.child.kill());
+            drop(self.child.wait());
+        }
     }
 }
 

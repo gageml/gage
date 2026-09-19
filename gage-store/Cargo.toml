@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha1 = "0.10"
 flate2 = "1"
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 use crate::{Store, StoreError};
 
@@ -77,6 +77,8 @@ pub(crate) struct CatFile {
     /// Taken and dropped first on drop so git sees EOF and exits.
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
+    /// Read only when the process fails, to carry git's reason.
+    stderr: ChildStderr,
 }
 
 impl CatFile {
@@ -84,7 +86,7 @@ impl CatFile {
         let mut cmd = git_in(path, ["cat-file", "--batch-command"]);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(StoreError::Spawn)?;
         let stdin = child
             .stdin
@@ -94,10 +96,15 @@ impl CatFile {
             .stdout
             .take()
             .expect("stdout was requested via Stdio::piped");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("stderr was requested via Stdio::piped");
         Ok(CatFile {
             child,
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
+            stderr,
         })
     }
 
@@ -143,9 +150,7 @@ impl CatFile {
             .read_line(&mut line)
             .map_err(StoreError::Spawn)?;
         if n == 0 {
-            return Err(StoreError::Parse(
-                "cat-file process closed its output".to_string(),
-            ));
+            return Err(self.failure("cat-file process closed its output"));
         }
         let fields: Vec<&str> = line.trim_end().split(' ').collect();
         match fields.as_slice() {
@@ -157,9 +162,22 @@ impl CatFile {
                     .parse()
                     .map_err(|e| StoreError::Parse(format!("cat-file size for {name}: {e}")))?,
             })),
-            _ => Err(StoreError::Parse(format!(
-                "cat-file reply for {name}: {line:?}"
-            ))),
+            _ => Err(self.failure(&format!("cat-file reply for {name}: {line:?}"))),
+        }
+    }
+
+    /// An error for a failed exchange, carrying whatever git wrote to
+    /// stderr. Called only once the process has closed its output or
+    /// replied out of protocol, so stderr is complete or about to be.
+    fn failure(&mut self, what: &str) -> StoreError {
+        drop(self.stdin.take());
+        let mut reason = String::new();
+        drop(self.stderr.read_to_string(&mut reason));
+        let reason = reason.trim();
+        if reason.is_empty() {
+            StoreError::Parse(what.to_string())
+        } else {
+            StoreError::Parse(format!("{what}: {reason}"))
         }
     }
 }
@@ -415,14 +433,20 @@ const REDIRECTING_ENV: [&str; 6] = [
     "GIT_INDEX_FILE",
 ];
 
-/// Runs `cmd` and returns its stdout.
+/// Runs `cmd` and returns its stdout. A failing status is an error
+/// carrying stderr. Anything git writes to stderr on success, such as
+/// a `warning:` line, is logged at warn level so it is not lost.
 pub(crate) fn run(mut cmd: Command) -> Result<String, StoreError> {
     let output = cmd.output().map_err(StoreError::Spawn)?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success() {
         return Err(StoreError::Git {
             status: output.status,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            stderr,
         });
+    }
+    if !stderr.is_empty() {
+        tracing::warn!(command = ?cmd, "git: {stderr}");
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

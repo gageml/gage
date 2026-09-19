@@ -143,6 +143,7 @@ fn store(args: StoreArgs) -> ExitCode {
     report::print_metrics("Timings", &results.metrics);
     report::print_sizes("Sizes", &results.sizes);
     report::print_counts("Counts", &results.counts);
+    report::print_fsck(&results.fsck);
     if let Some(baseline) = &baseline {
         report::print_comparison(baseline, &results);
     }

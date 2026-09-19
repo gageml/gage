@@ -124,18 +124,27 @@ impl Store {
         })
     }
 
-    /// Run `git fsck --full`. Output is inherited to the caller's
-    /// stdout/stderr.
-    pub fn fsck(&self) -> Result<(), StoreError> {
+    /// Run `git fsck --full` and return every line it printed. A
+    /// failing status is an error carrying those lines. A passing fsck
+    /// may still report notices, such as `HEAD` pointing at a branch
+    /// that has no commit, which is every Gage store's state; the
+    /// caller decides how to show them.
+    pub fn fsck(&self) -> Result<Vec<String>, StoreError> {
         let mut cmd = git_in(self.path(), ["fsck", "--full", "--no-progress"]);
-        let status = cmd.status().map_err(StoreError::Spawn)?;
-        if !status.success() {
+        let output = cmd.output().map_err(StoreError::Spawn)?;
+        let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .chain(String::from_utf8_lossy(&output.stderr).lines())
+            .map(String::from)
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        if !output.status.success() {
             return Err(StoreError::Git {
-                status,
-                stderr: String::new(),
+                status: output.status,
+                stderr: lines.join("\n"),
             });
         }
-        Ok(())
+        Ok(lines)
     }
 
     /// Run `git gc`, optionally with `--prune=<expire>`. `git gc`'s

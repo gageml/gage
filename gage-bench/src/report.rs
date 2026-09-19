@@ -23,6 +23,10 @@ pub struct Results {
     pub metrics: Vec<Metric>,
     pub sizes: Vec<Size>,
     pub counts: Vec<Count>,
+    /// Every line `git fsck` printed during verify. A passing fsck
+    /// still reports notices, and they are kept with the run.
+    #[serde(default)]
+    pub fsck: Vec<String>,
 }
 
 impl Results {
@@ -184,6 +188,17 @@ pub fn print_counts(title: &str, counts: &[Count]) {
     let mut table = Table::new(rows);
     table.with(Style::sharp());
     println!("{table}");
+}
+
+pub fn print_fsck(lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    println!();
+    println!("== fsck ==");
+    for line in lines {
+        println!("{line}");
+    }
 }
 
 #[derive(Tabled)]

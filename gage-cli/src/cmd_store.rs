@@ -284,7 +284,12 @@ fn view(store: Store) {
 fn status(store: &Store, args: StatusArgs) {
     if args.check {
         match store.fsck() {
-            Ok(()) => println!("Integrity: OK"),
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                println!("Integrity: OK");
+            }
             Err(e) => {
                 eprintln!("Integrity: FAIL ({e})");
                 std::process::exit(1);
