@@ -356,17 +356,25 @@ struct GitContentAccess {
 
 impl ContentAccess for GitContentAccess {
     fn paths(&self) -> std::io::Result<Vec<String>> {
+        // `-z` prints names raw with NUL separators. Without it git
+        // C-quotes any name with a byte >= 0x80, a tab, a backslash, a
+        // quote, or a newline, and the quoted form is not a path.
         let listing = run(git_in(
             &self.store_path,
             [
                 "ls-tree",
                 "-r",
+                "-z",
                 "--name-only",
                 &format!("{}:files", self.session_commit),
             ],
         ))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok(listing.lines().map(String::from).collect())
+        Ok(listing
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect())
     }
 
     fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>> {
@@ -439,7 +447,7 @@ mod tests {
 
     struct FakeSession {
         id: String,
-        content: String,
+        files: Vec<(String, String)>,
     }
 
     impl SourceSession for FakeSession {
@@ -459,23 +467,32 @@ mod tests {
 
         fn summary(&self) -> SessionSummary {
             SessionSummary {
-                size: Some(self.content.len() as u64),
+                size: Some(self.files.iter().map(|(_, c)| c.len() as u64).sum()),
                 ..SessionSummary::default()
             }
         }
 
         fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
-            Box::new(std::iter::once(Ok(SessionFile {
-                path: "session.jsonl".to_string(),
-                content: Box::new(Cursor::new(self.content.clone().into_bytes())),
-            })))
+            Box::new(self.files.iter().map(|(path, content)| {
+                Ok(SessionFile {
+                    path: path.clone(),
+                    content: Box::new(Cursor::new(content.clone().into_bytes())),
+                })
+            }))
         }
     }
 
     fn fake(id: &str, content: &str) -> FakeSession {
+        fake_files(id, &[("session.jsonl", content)])
+    }
+
+    fn fake_files(id: &str, files: &[(&str, &str)]) -> FakeSession {
         FakeSession {
             id: id.to_string(),
-            content: content.to_string(),
+            files: files
+                .iter()
+                .map(|(p, c)| (p.to_string(), c.to_string()))
+                .collect(),
         }
     }
 
@@ -684,5 +701,37 @@ mod tests {
             .read_to_string(&mut text)
             .unwrap();
         assert_eq!(text, "hello\n");
+    }
+
+    #[test]
+    fn session_content_paths_are_raw_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        // Each of these is C-quoted by ls-tree without -z
+        let files = [
+            ("subagents/agent-\u{e9}.jsonl", "e"),
+            ("subagents/back\\slash.txt", "b"),
+            ("tab\there.txt", "t"),
+            ("quo\"te.txt", "q"),
+        ];
+        add(&store, &dataset, &mut [fake_files("s1", &files)]);
+
+        let access = datasets.session_content(&dataset, 1).unwrap();
+        let mut paths = access.paths().unwrap();
+        paths.sort();
+        let mut expected: Vec<&str> = files.iter().map(|(p, _)| *p).collect();
+        expected.sort();
+        assert_eq!(paths, expected);
+        for (path, content) in files {
+            let mut text = String::new();
+            access
+                .open(path)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert_eq!(text, content, "{path:?}");
+        }
     }
 }
