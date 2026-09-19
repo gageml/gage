@@ -9,9 +9,11 @@
 //! Gage-object concepts live in [`crate::object`].
 
 use std::cell::RefCell;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 
 use crate::{Store, StoreError};
 
@@ -68,21 +70,146 @@ pub struct ObjectInfo {
     pub size: u64,
 }
 
-/// A `git cat-file --batch-command` child process. `info <name>`
-/// returns an object's SHA, kind, and size; `contents <name>` returns
-/// those plus the raw bytes. `name` is anything git resolves: a SHA, a
-/// ref, `<rev>:<path>`, `<rev>^{tree}`.
+/// Attempts per exchange. The first retry covers a killed process; the
+/// second covers a `gc` still running across the first retry. More
+/// attempts only delay reporting a deterministic fault.
+const ATTEMPTS: usize = 3;
+
+/// A `git cat-file --batch-command` reader. `info <name>` returns an
+/// object's SHA, kind, and size; `contents <name>` returns those plus
+/// the raw bytes. `name` is anything git resolves: a SHA, a ref,
+/// `<rev>:<path>`, `<rev>^{tree}`.
+///
+/// The reader supervises its own child process: a transport fault
+/// tears the process down and reruns the request on a fresh one, so
+/// callers never see a transient failure. A fault that survives
+/// [`ATTEMPTS`], or a process that cannot be started again, is a
+/// process fault and panics with git's reason.
 pub(crate) struct CatFile {
-    child: Child,
-    /// Taken and dropped first on drop so git sees EOF and exits.
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
-    /// Read only when the process fails, to carry git's reason.
-    stderr: ChildStderr,
+    path: PathBuf,
+    /// `None` only between a teardown and the next spawn.
+    process: Option<Process>,
 }
 
 impl CatFile {
     pub(crate) fn spawn(path: &Path) -> Result<CatFile, StoreError> {
+        Ok(CatFile {
+            path: path.to_path_buf(),
+            process: Some(Process::spawn(path)?),
+        })
+    }
+
+    /// `Ok(None)` when git reports the name missing or ambiguous.
+    fn info(&mut self, name: &str) -> Result<Option<ObjectInfo>, StoreError> {
+        self.exchange("info", name, |process, name| process.read_header(name))
+    }
+
+    /// `Ok(None)` when git reports the name missing or ambiguous.
+    fn contents(&mut self, name: &str) -> Result<Option<(ObjectInfo, Vec<u8>)>, StoreError> {
+        self.exchange("contents", name, |process, name| {
+            let Some(info) = process.read_header(name)? else {
+                return Ok(None);
+            };
+            let bytes = process.read_body(info.size)?;
+            Ok(Some((info, bytes)))
+        })
+    }
+
+    /// Runs one request as a supervised exchange: send, then `read` the
+    /// reply. Reads are idempotent, so a request that faulted is resent
+    /// verbatim on a fresh process.
+    fn exchange<T>(
+        &mut self,
+        command: &str,
+        name: &str,
+        read: impl Fn(&mut Process, &str) -> Result<T, Fault>,
+    ) -> Result<T, StoreError> {
+        if name.contains('\n') {
+            return Err(StoreError::Parse(format!(
+                "object name with newline: {name:?}"
+            )));
+        }
+        let mut reason = String::new();
+        for attempt in 1..=ATTEMPTS {
+            if attempt > 1 {
+                tracing::warn!(
+                    attempt,
+                    command,
+                    name,
+                    "git cat-file reader restarted: {reason}"
+                );
+            }
+            let process = self.process.get_or_insert_with(|| {
+                Process::spawn(&self.path).unwrap_or_else(|e| {
+                    panic!("git cat-file reader could not restart for `{command} {name}`: {e}")
+                })
+            });
+            match process
+                .send(command, name)
+                .and_then(|()| read(process, name))
+            {
+                Ok(value) => return Ok(value),
+                Err(Fault(what)) => {
+                    reason = self.teardown(&what);
+                }
+            }
+        }
+        panic!(
+            "git cat-file reader failed after {ATTEMPTS} attempts on `{command} {name}`: {reason}"
+        )
+    }
+
+    /// Ends the current process after a fault and returns the reason:
+    /// `what` went wrong at the pipe, plus whatever git wrote to stderr.
+    fn teardown(&mut self, what: &str) -> String {
+        let Some(process) = self.process.take() else {
+            return what.to_string();
+        };
+        let stderr = process.finish();
+        if stderr.is_empty() {
+            what.to_string()
+        } else {
+            format!("{what}: {stderr}")
+        }
+    }
+
+    #[cfg(test)]
+    fn kill_process(&mut self) {
+        self.process
+            .as_mut()
+            .expect("reader is between teardown and spawn")
+            .child
+            .kill()
+            .unwrap();
+    }
+}
+
+impl Drop for CatFile {
+    fn drop(&mut self) {
+        if let Some(process) = self.process.take() {
+            process.finish();
+        }
+    }
+}
+
+/// A failure at the pipe: a write error, EOF, a short body, or a reply
+/// out of protocol. Carries a description for the teardown reason.
+struct Fault(String);
+
+/// One `git cat-file --batch-command` child and its pipes. Stderr is
+/// drained on its own thread into `stderr` for the life of the process:
+/// git blocks once the pipe holds 64 KiB unread, and a reader waiting
+/// on stdout would then wait forever with no EOF to fault on.
+struct Process {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    drain: JoinHandle<()>,
+}
+
+impl Process {
+    fn spawn(path: &Path) -> Result<Process, StoreError> {
         let mut cmd = git_in(path, ["cat-file", "--batch-command"]);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -100,94 +227,140 @@ impl CatFile {
             .stderr
             .take()
             .expect("stderr was requested via Stdio::piped");
-        Ok(CatFile {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let drain = thread::spawn({
+            let buffer = Arc::clone(&buffer);
+            move || drain_stderr(stderr, &buffer)
+        });
+        Ok(Process {
             child,
-            stdin: Some(stdin),
+            stdin,
             stdout: BufReader::new(stdout),
-            stderr,
+            stderr: buffer,
+            drain,
         })
     }
 
-    /// `Ok(None)` when git reports the name missing or ambiguous.
-    fn info(&mut self, name: &str) -> Result<Option<ObjectInfo>, StoreError> {
-        self.send("info", name)?;
-        self.read_header(name)
+    /// Everything git has written to stderr since the last take.
+    fn take_stderr(&self) -> String {
+        stderr_text(&self.stderr)
     }
 
-    /// `Ok(None)` when git reports the name missing or ambiguous.
-    fn contents(&mut self, name: &str) -> Result<Option<(ObjectInfo, Vec<u8>)>, StoreError> {
-        self.send("contents", name)?;
-        let Some(info) = self.read_header(name)? else {
-            return Ok(None);
-        };
-        let mut bytes = vec![0u8; info.size as usize];
-        self.stdout
-            .read_exact(&mut bytes)
-            .map_err(StoreError::Spawn)?;
-        // Every reply ends with a newline after the contents.
-        let mut newline = [0u8; 1];
-        self.stdout
-            .read_exact(&mut newline)
-            .map_err(StoreError::Spawn)?;
-        Ok(Some((info, bytes)))
+    fn send(&mut self, command: &str, name: &str) -> Result<(), Fault> {
+        writeln!(self.stdin, "{command} {name}")
+            .and_then(|()| self.stdin.flush())
+            .map_err(|e| Fault(format!("write failed: {e}")))
     }
 
-    fn send(&mut self, command: &str, name: &str) -> Result<(), StoreError> {
-        if name.contains('\n') {
-            return Err(StoreError::Parse(format!(
-                "object name with newline: {name:?}"
-            )));
-        }
-        let stdin = self.stdin.as_mut().expect("stdin is present until drop");
-        writeln!(stdin, "{command} {name}").map_err(StoreError::Spawn)?;
-        stdin.flush().map_err(StoreError::Spawn)
-    }
-
-    fn read_header(&mut self, name: &str) -> Result<Option<ObjectInfo>, StoreError> {
+    /// `Ok(None)` for a `missing` or `ambiguous` reply, which git
+    /// forms by echoing the requested name verbatim; the whole line is
+    /// compared so a name containing spaces cannot be mistaken for a
+    /// header.
+    fn read_header(&mut self, name: &str) -> Result<Option<ObjectInfo>, Fault> {
         let mut line = String::new();
         let n = self
             .stdout
             .read_line(&mut line)
-            .map_err(StoreError::Spawn)?;
+            .map_err(|e| Fault(format!("read failed: {e}")))?;
         if n == 0 {
-            return Err(self.failure("cat-file process closed its output"));
+            return Err(Fault("process closed its output".to_string()));
         }
-        let fields: Vec<&str> = line.trim_end().split(' ').collect();
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        if line == format!("{name} missing") || line == format!("{name} ambiguous") {
+            // A corrupt object also reads as missing; git says why on
+            // stderr and keeps running.
+            let stderr = self.take_stderr();
+            if !stderr.is_empty() {
+                tracing::warn!(name, "git cat-file: {stderr}");
+            }
+            return Ok(None);
+        }
+        let fields: Vec<&str> = line.split(' ').collect();
         match fields.as_slice() {
-            [_, "missing"] | [_, "ambiguous"] => Ok(None),
-            [sha, kind, size] => Ok(Some(ObjectInfo {
-                sha: (*sha).to_string(),
-                kind: (*kind).to_string(),
-                size: size
+            [sha, kind, size] => {
+                let size = size
                     .parse()
-                    .map_err(|e| StoreError::Parse(format!("cat-file size for {name}: {e}")))?,
-            })),
-            _ => Err(self.failure(&format!("cat-file reply for {name}: {line:?}"))),
+                    .map_err(|e| Fault(format!("reply {line:?}: size: {e}")))?;
+                Ok(Some(ObjectInfo {
+                    sha: (*sha).to_string(),
+                    kind: (*kind).to_string(),
+                    size,
+                }))
+            }
+            _ => Err(Fault(format!("reply out of protocol: {line:?}"))),
         }
     }
 
-    /// An error for a failed exchange, carrying whatever git wrote to
-    /// stderr. Called only once the process has closed its output or
-    /// replied out of protocol, so stderr is complete or about to be.
-    fn failure(&mut self, what: &str) -> StoreError {
-        drop(self.stdin.take());
-        let mut reason = String::new();
-        drop(self.stderr.read_to_string(&mut reason));
-        let reason = reason.trim();
-        if reason.is_empty() {
-            StoreError::Parse(what.to_string())
-        } else {
-            StoreError::Parse(format!("{what}: {reason}"))
+    /// The object bytes that follow a header, and the newline git
+    /// writes after every reply.
+    fn read_body(&mut self, size: u64) -> Result<Vec<u8>, Fault> {
+        let mut bytes = vec![0u8; size as usize];
+        self.stdout
+            .read_exact(&mut bytes)
+            .map_err(|e| Fault(format!("short body: {e}")))?;
+        let mut newline = [0u8; 1];
+        self.stdout
+            .read_exact(&mut newline)
+            .map_err(|e| Fault(format!("short body: {e}")))?;
+        Ok(bytes)
+    }
+
+    /// Ends the process and returns what it wrote to stderr. Closing
+    /// stdin makes git exit at the next read; the kill covers a process
+    /// that is alive but out of protocol.
+    fn finish(self) -> String {
+        let Process {
+            mut child,
+            stdin,
+            stdout: _,
+            stderr,
+            drain,
+        } = self;
+        drop(stdin);
+        // Err only when the child has already exited, which is the
+        // state the kill is meant to reach
+        drop(child.kill());
+        // Err only when there is no child to wait for, and the kill
+        // above has just addressed one
+        drop(child.wait());
+        let drained = drain.join();
+        let text = stderr_text(&stderr);
+        match drained {
+            Ok(()) => text,
+            Err(_) => format!("{text} (stderr drain panicked)"),
         }
     }
 }
 
-impl Drop for CatFile {
-    fn drop(&mut self) {
-        // Closing stdin ends the process; the wait outcome carries no
-        // signal the caller can act on at drop time.
-        drop(self.stdin.take());
-        drop(self.child.wait());
+/// Copies `stderr` into `buffer` until git closes it.
+fn drain_stderr(mut stderr: ChildStderr, buffer: &Mutex<Vec<u8>>) {
+    if let Err(e) = io::copy(&mut stderr, &mut StderrSink(buffer)) {
+        buffer
+            .lock()
+            .unwrap()
+            .extend_from_slice(format!("(stderr unreadable: {e})").as_bytes());
+    }
+}
+
+/// Everything in `buffer`, taken and decoded, with the surrounding
+/// whitespace removed.
+fn stderr_text(buffer: &Mutex<Vec<u8>>) -> String {
+    let bytes = std::mem::take(&mut *buffer.lock().unwrap());
+    String::from_utf8_lossy(&bytes).trim().to_string()
+}
+
+/// A `Write` over the shared stderr buffer, locking per chunk so the
+/// drain thread never holds the lock while blocked on the pipe.
+struct StderrSink<'a>(&'a Mutex<Vec<u8>>);
+
+impl Write for StderrSink<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -480,6 +653,67 @@ pub(crate) type CatFileCell = RefCell<CatFile>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::init;
+    use crate::writer::write_blob;
+
+    fn store_with_blob() -> (tempfile::TempDir, Store, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        init(&path).unwrap();
+        let sha = write_blob(&path, b"hello").unwrap();
+        let store = Store::open(&path).unwrap();
+        (tmp, store, sha)
+    }
+
+    #[test]
+    fn missing_names_with_spaces_are_none_and_reader_stays_usable() {
+        let (_tmp, store, sha) = store_with_blob();
+        assert_eq!(store.object_info("HEAD:no such thing here").unwrap(), None);
+        assert_eq!(store.object_info("a b").unwrap(), None);
+        assert_eq!(store.object_info(&sha).unwrap().unwrap().sha, sha);
+    }
+
+    #[test]
+    fn killed_process_is_replaced_without_the_caller_noticing() {
+        let (_tmp, store, sha) = store_with_blob();
+        store.cat_file.borrow_mut().kill_process();
+        let (info, bytes) = store.object_contents(&sha).unwrap().unwrap();
+        assert_eq!(info.sha, sha);
+        assert_eq!(bytes, b"hello");
+        store.cat_file.borrow_mut().kill_process();
+        assert_eq!(store.object_info(&sha).unwrap().unwrap().size, 5);
+    }
+
+    #[test]
+    fn corrupt_objects_read_as_missing_without_blocking_the_reader() {
+        let (_tmp, store, sha) = store_with_blob();
+        // Enough corrupt objects that git's stderr exceeds the 64 KiB
+        // pipe buffer; an undrained pipe would block git and hang the
+        // read.
+        let objects = store.path().join("objects");
+        let names: Vec<String> = (1..=1000).map(|i| format!("{i:040}")).collect();
+        for name in &names {
+            let dir = objects.join(&name[..2]);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(&name[2..]), b"garbage").unwrap();
+        }
+        for name in &names {
+            assert_eq!(store.object_info(name).unwrap(), None, "{name}");
+        }
+        assert_eq!(store.object_info(&sha).unwrap().unwrap().size, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed after 3 attempts on `contents")]
+    fn persistent_fault_is_a_process_fault() {
+        let (_tmp, store, sha) = store_with_blob();
+        // A truncated loose object: git prints the header, then exits
+        // before the body, on every attempt.
+        let file = store.path().join("objects").join(&sha[..2]).join(&sha[2..]);
+        let bytes = std::fs::read(&file).unwrap();
+        std::fs::write(&file, &bytes[..12]).unwrap();
+        drop(store.object_contents(&sha));
+    }
 
     #[test]
     fn parse_tree_reads_modes_names_and_shas() {
