@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -88,6 +89,14 @@ impl SqliteIndex {
         // damaged, so a commit does not need to reach disk before the
         // call returns; NORMAL under WAL skips the per-commit sync.
         conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(sql_err)?;
+        // A concurrent writer holds the reserved lock for the duration
+        // of its transaction. Wait rather than fail so `Store::open`
+        // and `index_written` do not surface a spurious "database is
+        // locked" when a TUI, CLI, or scan runs alongside. Matches
+        // rusqlite's current default, but set it here so the store does
+        // not depend on that default.
+        conn.busy_timeout(Duration::from_millis(5000))
             .map_err(sql_err)?;
         if fresh {
             conn.execute_batch(SCHEMA).map_err(sql_err)?;
@@ -197,8 +206,13 @@ impl ObjectIndex for SqliteIndex {
         Ok(())
     }
 
+    /// Every index transaction writes, so the reserved lock is taken
+    /// at BEGIN. A deferred transaction would read under a snapshot
+    /// and fail with `SQLITE_BUSY_SNAPSHOT` on the first write if
+    /// another connection committed in between; that failure is not
+    /// resolved by `busy_timeout`.
     fn begin(&self) -> Result<(), StoreError> {
-        self.conn.execute_batch("BEGIN").map_err(sql_err)
+        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_err)
     }
 
     fn commit(&self) -> Result<(), StoreError> {

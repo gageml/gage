@@ -135,13 +135,15 @@ impl Store {
     /// from a changed tip that the index does not hold, and drop refs
     /// that no longer exist.
     pub(crate) fn reconcile(&self) -> Result<(), StoreError> {
-        let known = self.index.tips()?;
-        let live: BTreeMap<String, String> = self
-            .list_object_refs()?
-            .into_iter()
-            .map(|r| (r.id, r.tip_sha))
-            .collect();
+        // Both reads happen inside the transaction so the diff and the
+        // writes see one state.
         self.in_index_transaction(|| {
+            let known = self.index.tips()?;
+            let live: BTreeMap<String, String> = self
+                .list_object_refs()?
+                .into_iter()
+                .map(|r| (r.id, r.tip_sha))
+                .collect();
             for (id, tip) in &live {
                 if known.get(id) != Some(tip) {
                     self.index_from(tip)?;
