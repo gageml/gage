@@ -4,6 +4,7 @@
 //! not depend on live in [`crate::object`].
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use gage_core::config::gage_home;
@@ -15,13 +16,23 @@ use crate::{Store, StoreError};
 /// ref layout or another store-wide convention changes.
 pub const STORE_VERSION: u32 = 1;
 
-/// Settings every store carries. Refs only advance under push, and every
-/// object received over the wire is verified. See store-init.md.
+/// Settings every store carries. `denyDeletes` and `denyNonFastForwards`
+/// cover `refs/heads/*` and are branch-scoped by git; `refs/gage/object/*`
+/// is protected by the `update` hook installed below. `fsckObjects`
+/// verifies every object received over the wire.
 const STORE_CONFIG: [(&str, &str); 3] = [
     ("receive.denyDeletes", "true"),
     ("receive.denyNonFastForwards", "true"),
     ("transfer.fsckObjects", "true"),
 ];
+
+/// Update hook script installed at `hooks/update` on init. The script
+/// enforces the ref rules for `refs/gage/object/*`; see store-init.md
+/// for the contract.
+pub(crate) const UPDATE_HOOK: &str = include_str!("hooks/update");
+
+/// Relative path of the update hook inside the store.
+pub(crate) const UPDATE_HOOK_PATH: &str = "hooks/update";
 
 /// Path to the default store: `<gage_home>/store.git`.
 pub fn store_path() -> PathBuf {
@@ -43,8 +54,10 @@ pub enum InitOutcome {
 ///
 /// Leading directories are created as needed. The empty template keeps
 /// sample hooks and `description` out of the store and ignores any
-/// `init.templateDir` in the user's Git config. The initial branch is
-/// fixed so `HEAD` does not depend on `init.defaultBranch`.
+/// `init.templateDir` in the user's Git config; the store's own
+/// `hooks/update` is written afterwards by [`write_update_hook`]. The
+/// initial branch is fixed so `HEAD` does not depend on
+/// `init.defaultBranch`.
 pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
     let existing = exists(path);
     let mut cmd = git_cmd();
@@ -64,11 +77,35 @@ pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
         path,
         ["config", "gage.version", &STORE_VERSION.to_string()],
     ))?;
+    write_update_hook(path)?;
     Ok(if existing {
         InitOutcome::Reinitialized
     } else {
         InitOutcome::Created
     })
+}
+
+/// Writes [`UPDATE_HOOK`] to `<path>/<UPDATE_HOOK_PATH>` and marks it
+/// executable on Unix. Overwrites any existing file so a reinit
+/// restores the shipped script.
+fn write_update_hook(path: &Path) -> Result<(), StoreError> {
+    let hook = path.join(UPDATE_HOOK_PATH);
+    let hook_write = |source| StoreError::Write {
+        path: hook.clone(),
+        source,
+    };
+    if let Some(parent) = hook.parent() {
+        fs::create_dir_all(parent).map_err(hook_write)?;
+    }
+    fs::write(&hook, UPDATE_HOOK).map_err(hook_write)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&hook).map_err(hook_write)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&hook, perms).map_err(hook_write)?;
+    }
+    Ok(())
 }
 
 /// What Git reports about the store: object and pack counts, disk size,
@@ -252,6 +289,10 @@ fn parse_remotes(output: &str) -> Vec<Remote> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::{git_in, run};
+    use crate::note::{NoteInput, NoteStore};
+    use crate::object::object_ref;
+    use crate::writer::commit_tree;
 
     #[test]
     fn init_creates_then_reinitializes() {
@@ -272,9 +313,110 @@ mod tests {
             config.contains(&format!("version = {STORE_VERSION}")),
             "{config}"
         );
-        assert!(!store.join("hooks").exists());
+
+        let hook = store.join(UPDATE_HOOK_PATH);
+        assert!(hook.exists(), "{}", hook.display());
+        assert_eq!(std::fs::read_to_string(&hook).unwrap(), UPDATE_HOOK);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "mode {mode:o}");
+        }
 
         assert_eq!(init(&store).unwrap(), InitOutcome::Reinitialized);
+    }
+
+    #[test]
+    fn update_hook_enforces_object_ref_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("source.git");
+        let target_path = tmp.path().join("target.git");
+        init(&source_path).unwrap();
+        init(&target_path).unwrap();
+        let source = Store::open(&source_path).unwrap();
+        let notes = NoteStore::from(&source);
+        let tip = |id: &str| source.rev_parse(&object_ref(id)).unwrap().unwrap();
+
+        let a = note(&notes, "a");
+        let a_first = tip(&a);
+        notes.edit(&a, "v2").unwrap();
+        let a_second = tip(&a);
+        let b = note(&notes, "b");
+        let b_first = tip(&b);
+        notes.delete(&b).unwrap();
+        let b_tomb = tip(&b);
+        let a_ref = object_ref(&a);
+        let push = |sha: &str, refname: &str| push(&source_path, &target_path, sha, refname);
+
+        // Create, then a fast-forward edit
+        push(&a_first, &a_ref).unwrap();
+        push(&a_second, &a_ref).unwrap();
+
+        // Rewind, deletion, and a parentless commit without `deleted`
+        assert_declined(push(&a_first, &a_ref), "not a tombstone");
+        assert_declined(push("", &a_ref), "deletion");
+        assert_declined(push(&b_first, &a_ref), "not a tombstone");
+
+        // A tombstone for a different object
+        assert_declined(push(&b_tomb, &a_ref), "object identity");
+
+        // A tombstone with a parent, whether or not it fast-forwards
+        notes.delete(&a).unwrap();
+        let a_tomb = tip(&a);
+        let tomb_tree = run(git_in(
+            &source_path,
+            ["rev-parse", &format!("{a_tomb}^{{tree}}")],
+        ))
+        .unwrap();
+        let parented =
+            commit_tree(&source_path, tomb_tree.trim(), "parented", &[&a_second]).unwrap();
+        assert_declined(push(&parented, &a_ref), "parentless");
+
+        // The valid tombstone, then nothing more
+        push(&a_tomb, &a_ref).unwrap();
+        assert_declined(push(&a_second, &a_ref), "closed by tombstone");
+        let again = commit_tree(&source_path, tomb_tree.trim(), "again", &[]).unwrap();
+        assert_declined(push(&again, &a_ref), "closed by tombstone");
+
+        // Refs outside the namespace are not examined
+        push(&a_second, "refs/tags/x").unwrap();
+        push(&a_first, "refs/tags/x").unwrap();
+
+        let target = Store::open(&target_path).unwrap();
+        assert_eq!(target.rev_parse(&a_ref).unwrap().unwrap(), a_tomb);
+    }
+
+    fn note(notes: &NoteStore<'_>, name: &str) -> String {
+        notes
+            .create(NoteInput {
+                name,
+                value: "v1",
+                author: "user:test",
+                targets: &[],
+            })
+            .unwrap()
+    }
+
+    /// Force-pushes `sha` from `source` to `refname` in `target`, so the
+    /// client's own non-fast-forward check does not preempt the hook. An
+    /// empty `sha` pushes a deletion.
+    fn push(source: &Path, target: &Path, sha: &str, refname: &str) -> Result<String, StoreError> {
+        let refspec = format!("+{sha}:{refname}");
+        run(git_in(
+            source,
+            ["push", "--quiet", target.to_str().unwrap(), &refspec],
+        ))
+    }
+
+    fn assert_declined(result: Result<String, StoreError>, reason: &str) {
+        match result {
+            Err(StoreError::Git { stderr, .. }) => {
+                assert!(stderr.contains("hook declined"), "{stderr}");
+                assert!(stderr.contains(reason), "{stderr}");
+            }
+            other => panic!("expected the hook to decline with {reason:?}, got {other:?}"),
+        }
     }
 
     #[test]

@@ -42,7 +42,9 @@ pub(crate) fn write_blob(path: &Path, content: &[u8]) -> Result<String, StoreErr
 /// does for a stream of unknown length.
 pub(crate) fn write_blob_stream(path: &Path, mut content: impl Read) -> Result<String, StoreError> {
     let mut bytes = Vec::new();
-    content.read_to_end(&mut bytes).map_err(StoreError::Spawn)?;
+    content
+        .read_to_end(&mut bytes)
+        .map_err(StoreError::ReadContent)?;
     write_object(path, "blob", &bytes)
 }
 
@@ -132,21 +134,25 @@ fn write_object(path: &Path, kind: &str, bytes: &[u8]) -> Result<String, StoreEr
     if file.exists() {
         return Ok(sha);
     }
-    fs::create_dir_all(&dir).map_err(StoreError::Spawn)?;
+    let write = |source| StoreError::Write {
+        path: file.clone(),
+        source,
+    };
+    fs::create_dir_all(&dir).map_err(write)?;
 
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder
         .write_all(format!("{kind} {}\0", bytes.len()).as_bytes())
-        .map_err(StoreError::Spawn)?;
-    encoder.write_all(bytes).map_err(StoreError::Spawn)?;
-    let compressed = encoder.finish().map_err(StoreError::Spawn)?;
+        .map_err(write)?;
+    encoder.write_all(bytes).map_err(write)?;
+    let compressed = encoder.finish().map_err(write)?;
 
     // Write beside the target and rename, so a reader never sees a
     // partial object. Two writers racing on the same object produce
     // identical bytes, so either rename winning is correct.
     let tmp = dir.join(format!("tmp_{}_{}", std::process::id(), file_name));
-    fs::write(&tmp, &compressed).map_err(StoreError::Spawn)?;
-    fs::rename(&tmp, &file).map_err(StoreError::Spawn)?;
+    fs::write(&tmp, &compressed).map_err(write)?;
+    fs::rename(&tmp, &file).map_err(write)?;
     Ok(sha)
 }
 

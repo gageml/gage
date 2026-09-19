@@ -1,0 +1,61 @@
+#!/bin/sh
+# Gage store update hook. Enforces the ref rules for refs/gage/object/*.
+# See store-init.md. Written verbatim by gage-store at init; edits are
+# clobbered on the next `gage store init`. Uses shell builtins and git
+# only, so the receiving host needs nothing beyond git itself.
+
+refname="$1"
+old="$2"
+new="$3"
+
+case "$refname" in
+    refs/gage/object/*) ;;
+    *) exit 0 ;;
+esac
+
+zero="0000000000000000000000000000000000000000"
+
+# Ref creation.
+if [ "$old" = "$zero" ]; then
+    exit 0
+fi
+
+# Ref deletion.
+if [ "$new" = "$zero" ]; then
+    echo "gage: deletion of $refname is prohibited" >&2
+    exit 1
+fi
+
+# Old is a tombstone: the object is closed.
+if git cat-file -e "$old:deleted" 2>/dev/null; then
+    echo "gage: $refname is closed by tombstone" >&2
+    exit 1
+fi
+
+# New is not a tombstone: it must be a fast-forward edit.
+if ! git cat-file -e "$new:deleted" 2>/dev/null; then
+    if git merge-base --is-ancestor "$old" "$new" 2>/dev/null; then
+        exit 0
+    fi
+    echo "gage: non-fast-forward $refname is not a tombstone" >&2
+    exit 1
+fi
+
+# New is a tombstone: it must be parentless and name the same object as
+# old. Identity is compared by blob SHA; a tombstone copies these entries
+# from the commit it replaces.
+if git rev-parse --verify -q "$new^1" >/dev/null 2>&1; then
+    echo "gage: tombstone $refname must be parentless" >&2
+    exit 1
+fi
+
+for entry in type id created; do
+    old_sha=$(git rev-parse --verify -q "$old:$entry" 2>/dev/null)
+    new_sha=$(git rev-parse --verify -q "$new:$entry" 2>/dev/null)
+    if [ -z "$old_sha" ] || [ "$old_sha" != "$new_sha" ]; then
+        echo "gage: tombstone $refname does not match object identity ($entry)" >&2
+        exit 1
+    fi
+done
+
+exit 0
