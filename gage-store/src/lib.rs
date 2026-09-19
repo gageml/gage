@@ -40,6 +40,8 @@ pub mod object;
 mod session;
 mod sqlite_index;
 mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod writer;
 
 pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init, store_path};

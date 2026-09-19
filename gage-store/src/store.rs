@@ -49,6 +49,11 @@ impl Store {
         if !exists(path) {
             return Err(StoreError::NotFound(path.to_path_buf()));
         }
+        if let Some(format) = read_object_format(path)?
+            && format != "sha1"
+        {
+            return Err(StoreError::UnsupportedObjectFormat(format));
+        }
         let version = read_version(path)?;
         if version != STORE_VERSION {
             return Err(StoreError::VersionMismatch {
@@ -77,6 +82,30 @@ impl Store {
     /// The store's `gage.version`.
     pub fn version(&self) -> u32 {
         self.version
+    }
+}
+
+/// `extensions.objectFormat`, or `None` when unset (SHA-1). The writer
+/// produces SHA-1 objects only.
+fn read_object_format(path: &Path) -> Result<Option<String>, StoreError> {
+    // Read the file directly: with the extension set on a SHA-1
+    // repository git refuses to open it at all, and the answer here
+    // has to be the format, not that refusal.
+    let config = path.join("config");
+    let config = config.to_string_lossy();
+    match run(git_in(
+        path,
+        [
+            "config",
+            "--file",
+            &config,
+            "--get",
+            "extensions.objectFormat",
+        ],
+    )) {
+        Ok(text) => Ok(Some(text.trim().to_string())),
+        Err(StoreError::Git { status, .. }) if status.code() == Some(1) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -129,6 +158,22 @@ mod tests {
             Store::open(&path).unwrap_err(),
             StoreError::VersionMismatch { found, supported }
                 if found == STORE_VERSION + 1 && supported == STORE_VERSION
+        ));
+    }
+
+    #[test]
+    fn open_refuses_sha256_object_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        init(&path).unwrap();
+        run(git_in(
+            &path,
+            ["config", "extensions.objectFormat", "sha256"],
+        ))
+        .unwrap();
+        assert!(matches!(
+            Store::open(&path).unwrap_err(),
+            StoreError::UnsupportedObjectFormat(f) if f == "sha256"
         ));
     }
 

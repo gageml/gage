@@ -13,6 +13,8 @@ pub enum StoreError {
     VersionMissing(PathBuf),
     /// The store's `gage.version` is not the one this build supports
     VersionMismatch { found: u32, supported: u32 },
+    /// The repository uses an object format the writer does not produce
+    UnsupportedObjectFormat(String),
     /// The `git` binary could not be started
     Spawn(io::Error),
     /// `git` ran and exited with a failure status
@@ -68,6 +70,12 @@ impl fmt::Display for StoreError {
                     "store version {found} is older than the supported version {supported}; no migration is available"
                 )
             }
+            StoreError::UnsupportedObjectFormat(format) => {
+                write!(
+                    f,
+                    "store object format {format} is not supported; only sha1 is"
+                )
+            }
             StoreError::Spawn(e) => write!(f, "failed to run git: {e}"),
             StoreError::Git { status, stderr } => write!(f, "git {status}: {stderr}"),
             StoreError::Parse(what) => write!(f, "unexpected git output: {what}"),
@@ -99,6 +107,7 @@ impl std::error::Error for StoreError {
             StoreError::NotFound(_)
             | StoreError::VersionMissing(_)
             | StoreError::VersionMismatch { .. }
+            | StoreError::UnsupportedObjectFormat(_)
             | StoreError::Git { .. }
             | StoreError::Parse(_)
             | StoreError::MissingObject(_)

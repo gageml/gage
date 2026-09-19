@@ -290,15 +290,9 @@ fn marker_ms(object: &Object, name: &str, value: Option<i64>) -> Result<i64, Sto
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DatasetStore;
     use crate::git::{git_in, run};
-    use crate::{DatasetStore, init};
-    use std::path::Path;
-
-    fn open_store(dir: &Path) -> Store {
-        let path = dir.join("store.git");
-        init(&path).unwrap();
-        Store::open(&path).unwrap()
-    }
+    use crate::test_support::open_store;
 
     fn cat_file(store: &Store, spec: &str) -> String {
         run(git_in(store.path(), ["cat-file", "-p", spec])).unwrap()
@@ -322,7 +316,7 @@ mod tests {
     #[test]
     fn create_writes_ref_tree_and_commit() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let id = note(&store, "comment", "looks fine", &[]);
         assert_eq!(id.len(), 26);
@@ -375,7 +369,7 @@ mod tests {
     #[test]
     fn create_writes_target_link_when_targets_given() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let first = note(&store, "root", "v", &[]);
         let first_commit = rev_parse(&store, &first);
@@ -394,7 +388,7 @@ mod tests {
     #[test]
     fn create_rejects_target_missing_scheme() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let err = NoteStore::from(&store)
             .create(NoteInput {
                 name: "n",
@@ -409,7 +403,7 @@ mod tests {
     #[test]
     fn create_rejects_target_pointing_at_missing_ref() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let err = NoteStore::from(&store)
             .create(NoteInput {
                 name: "n",
@@ -424,7 +418,7 @@ mod tests {
     #[test]
     fn create_rejects_target_of_another_type() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let dataset = DatasetStore::from(&store).create().unwrap();
         let err = NoteStore::from(&store)
             .create(NoteInput {
@@ -444,7 +438,7 @@ mod tests {
     #[test]
     fn list_returns_notes_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let first = note(&store, "a", "one", &[]);
         let second = note(&store, "b", "two", &[]);
@@ -469,7 +463,7 @@ mod tests {
     #[test]
     fn get_returns_full_record() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let root = note(&store, "root", "v", &[]);
         let root_commit = rev_parse(&store, &root);
         let id = note(&store, "reply", "hello\nworld", &[format!("note:{root}")]);
@@ -486,7 +480,7 @@ mod tests {
     #[test]
     fn get_rejects_other_types() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let dataset = DatasetStore::from(&store).create().unwrap();
         assert!(matches!(
             NoteStore::from(&store).get(&dataset).unwrap_err(),
@@ -497,7 +491,7 @@ mod tests {
     #[test]
     fn create_writes_created_and_modified_blobs() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let before = gage_core::datetime::now_ms();
         let id = note(&store, "n", "v", &[]);
@@ -519,7 +513,7 @@ mod tests {
     #[test]
     fn edit_preserves_created_and_bumps_modified() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let id = note(&store, "n", "v", &[]);
         let ref_path = object_ref(&id);
@@ -544,14 +538,14 @@ mod tests {
     #[test]
     fn iter_of_empty_store_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         assert_eq!(NoteStore::from(&store).iter().unwrap().count(), 0);
     }
 
     #[test]
     fn query_filters_by_name_and_limits() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
         let a1 = note(&store, "a", "1", &[]);
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -584,7 +578,7 @@ mod tests {
     #[test]
     fn edit_replaces_value_and_chains_commit() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let id = note(&store, "comment", "first", &[]);
         let ref_path = object_ref(&id);
@@ -615,7 +609,7 @@ mod tests {
     #[test]
     fn edit_with_same_value_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let id = note(&store, "n", "same", &[]);
         let before = rev_parse(&store, &id);
         NoteStore::from(&store).edit(&id, "same").unwrap();
@@ -625,7 +619,7 @@ mod tests {
     #[test]
     fn edit_preserves_target_link() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let root = note(&store, "root", "v", &[]);
         let root_commit = rev_parse(&store, &root);
@@ -644,7 +638,7 @@ mod tests {
     #[test]
     fn edit_accepts_prefix() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let id = note(&store, "n", "v", &[]);
         assert_eq!(NoteStore::from(&store).edit(&id[..8], "v2").unwrap(), id);
     }
@@ -652,7 +646,7 @@ mod tests {
     #[test]
     fn edit_errors_on_missing_note() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let err = NoteStore::from(&store)
             .edit("doesnotexist", "v")
             .unwrap_err();
@@ -662,7 +656,7 @@ mod tests {
     #[test]
     fn delete_writes_parentless_tombstone() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let id = note(&store, "n", "v", &[]);
         let ref_path = object_ref(&id);
@@ -690,7 +684,7 @@ mod tests {
     #[test]
     fn delete_hides_from_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
         let keep = note(&store, "keep", "v", &[]);
@@ -704,7 +698,7 @@ mod tests {
     #[test]
     fn get_and_edit_refuse_deleted_notes() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
         let id = note(&store, "n", "v", &[]);

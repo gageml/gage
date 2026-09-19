@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::index::{ObjectQuery, Order};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
-use crate::writer::{mktree, write_blob_stream};
+use crate::writer::{TreeInput, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
 pub(crate) const OBJECT_TYPE: &str = "gage::session";
@@ -269,15 +269,24 @@ fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<Strin
             }
         }
     }
-    let mut lines: Vec<String> = Vec::new();
-    for (name, sha) in blobs {
-        lines.push(format!("100644 blob {sha}\t{name}"));
-    }
+    let mut subtree_shas: Vec<(String, String)> = Vec::with_capacity(subdirs.len());
     for (dir, sub) in subdirs {
-        let sub_sha = build_files_tree(path, sub)?;
-        lines.push(format!("040000 tree {sub_sha}\t{dir}"));
+        subtree_shas.push((dir, build_files_tree(path, sub)?));
     }
-    mktree(path, &lines)
+    let mut entries: Vec<TreeInput<'_>> = blobs
+        .iter()
+        .map(|(name, sha)| TreeInput {
+            mode: "100644",
+            sha,
+            name,
+        })
+        .collect();
+    entries.extend(subtree_shas.iter().map(|(dir, sha)| TreeInput {
+        mode: "040000",
+        sha,
+        name: dir,
+    }));
+    mktree(path, &entries)
 }
 
 /// Sum of blob sizes under `<commit_sha>:files/`. Zero when the
@@ -298,16 +307,11 @@ fn files_size(store: &Store, commit_sha: &str) -> Result<u64, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DatasetStore;
     use crate::git::{git_in, run};
-    use crate::{DatasetStore, init};
+    use crate::test_support::open_store;
     use gage_session::{DriverError, SessionFile};
     use std::io::Cursor;
-
-    fn open_store(dir: &Path) -> Store {
-        let path = dir.join("store.git");
-        init(&path).unwrap();
-        Store::open(&path).unwrap()
-    }
 
     /// A native session with fixed content, for exercising the writer.
     struct FakeSession {
@@ -357,7 +361,7 @@ mod tests {
     #[test]
     fn add_writes_session_object_with_files_subtree() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let sessions = SessionStore::from(&store);
         let mut session = fake("s1", &[("session.jsonl", "{}\n"), ("sub/a.txt", "a")]);
 
@@ -393,7 +397,7 @@ mod tests {
     #[test]
     fn add_is_idempotent_and_updates_on_change() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let sessions = SessionStore::from(&store);
 
         let first = sessions
@@ -424,7 +428,7 @@ mod tests {
     #[test]
     fn at_commit_rejects_other_types() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let dataset = DatasetStore::from(&store).create().unwrap();
         let sha = store.rev_parse(&object_ref(&dataset)).unwrap().unwrap();
         assert!(matches!(

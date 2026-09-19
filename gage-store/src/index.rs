@@ -235,14 +235,16 @@ mod tests {
     use crate::note::{NoteInput, NoteStore};
     use crate::object::object_ref;
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
+    use crate::test_support::{FsckGuard, fsck_guard};
     use crate::{DatasetStore, init};
     use serde_json::json;
     use std::path::Path;
 
-    fn init_repo(dir: &Path) -> std::path::PathBuf {
+    fn init_repo(dir: &Path) -> (std::path::PathBuf, FsckGuard) {
         let path = dir.join("store.git");
         init(&path).unwrap();
-        path
+        let guard = fsck_guard(&path);
+        (path, guard)
     }
 
     fn note(store: &Store, name: &str) -> String {
@@ -269,7 +271,7 @@ mod tests {
     #[test]
     fn write_through_makes_objects_selectable_immediately() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let store = Store::open(&path).unwrap();
         let a = note(&store, "a");
         let b = note(&store, "b");
@@ -279,7 +281,7 @@ mod tests {
     #[test]
     fn reopen_reconciles_objects_written_by_another_handle() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let a = note(&Store::open(&path).unwrap(), "a");
         // Remove the index so the second open starts from nothing.
         std::fs::remove_file(tmp.path().join("cache/object-index.sqlite")).unwrap();
@@ -290,7 +292,7 @@ mod tests {
     #[test]
     fn reconcile_catches_ref_moved_outside_the_store() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let store = Store::open(&path).unwrap();
         let id = note(&store, "a");
         let first = store.rev_parse(&object_ref(&id)).unwrap().unwrap();
@@ -312,7 +314,7 @@ mod tests {
     #[test]
     fn reconcile_drops_refs_deleted_outside_the_store() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let store = Store::open(&path).unwrap();
         let a = note(&store, "a");
         let b = note(&store, "b");
@@ -326,7 +328,7 @@ mod tests {
     #[test]
     fn tombstones_are_not_selected() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let store = Store::open(&path).unwrap();
         let a = note(&store, "a");
         let b = note(&store, "b");
@@ -337,7 +339,7 @@ mod tests {
     #[test]
     fn linked_commits_stay_indexed_after_their_ref_moves() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let store = Store::open(&path).unwrap();
         let notes = NoteStore::from(&store);
         let root = note(&store, "root");
@@ -360,7 +362,7 @@ mod tests {
     #[test]
     fn schema_version_mismatch_rebuilds_the_index() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let a = note(&Store::open(&path).unwrap(), "a");
 
         let index_path = tmp.path().join("cache/object-index.sqlite");
@@ -384,7 +386,7 @@ mod tests {
     #[test]
     fn datasets_and_notes_select_independently() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = init_repo(tmp.path());
+        let (path, _fsck) = init_repo(tmp.path());
         let store = Store::open(&path).unwrap();
         note(&store, "a");
         let d = DatasetStore::from(&store).create().unwrap();

@@ -374,6 +374,8 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<(),
         }
     }
 
+    store.fsck().map_err(|e| format!("verify: git fsck: {e}"))?;
+
     for id in &population.dataset_ids {
         let listed = datasets
             .sessions_list(id)

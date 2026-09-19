@@ -127,7 +127,7 @@ impl Store {
     /// Run `git fsck --full`. Output is inherited to the caller's
     /// stdout/stderr.
     pub fn fsck(&self) -> Result<(), StoreError> {
-        let mut cmd = git_in(self.path(), ["fsck", "--full"]);
+        let mut cmd = git_in(self.path(), ["fsck", "--full", "--no-progress"]);
         let status = cmd.status().map_err(StoreError::Spawn)?;
         if !status.success() {
             return Err(StoreError::Git {

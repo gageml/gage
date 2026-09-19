@@ -405,16 +405,10 @@ impl Drop for GitReader {
 mod tests {
     use super::*;
     use crate::object::object_ref;
-    use crate::{NoteInput, NoteStore, init};
+    use crate::test_support::open_store;
+    use crate::{NoteInput, NoteStore};
     use gage_session::{DriverError, SessionFile};
     use std::io::Cursor;
-    use std::path::Path;
-
-    fn open_store(dir: &Path) -> Store {
-        let path = dir.join("store.git");
-        init(&path).unwrap();
-        Store::open(&path).unwrap()
-    }
 
     struct FakeSession {
         id: String,
@@ -487,7 +481,7 @@ mod tests {
     #[test]
     fn create_writes_ref_and_tree() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let id = DatasetStore::from(&store).create().unwrap();
         assert_eq!(id.len(), 26);
@@ -515,7 +509,7 @@ mod tests {
     #[test]
     fn list_reports_datasets_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let datasets = DatasetStore::from(&store);
 
         let a = datasets.create().unwrap();
@@ -536,14 +530,14 @@ mod tests {
     #[test]
     fn iter_of_empty_store_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         assert_eq!(DatasetStore::from(&store).iter().unwrap().count(), 0);
     }
 
     #[test]
     fn resolve_id_rejects_other_types() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let note = note(&store);
         assert!(matches!(
             DatasetStore::from(&store).resolve_id(&note).unwrap_err(),
@@ -554,7 +548,7 @@ mod tests {
     #[test]
     fn sessions_add_links_members_as_parents() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let datasets = DatasetStore::from(&store);
         let dataset = datasets.create().unwrap();
         let before = rev_parse(&store, &dataset);
@@ -601,7 +595,7 @@ mod tests {
     #[test]
     fn sessions_add_unchanged_writes_no_dataset_commit() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let dataset = DatasetStore::from(&store).create().unwrap();
         add(&store, &dataset, &mut [fake("s1", "a\n")]);
         let tip = rev_parse(&store, &dataset);
@@ -614,7 +608,7 @@ mod tests {
     #[test]
     fn sessions_add_updates_slot_of_grown_member() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let datasets = DatasetStore::from(&store);
         let dataset = datasets.create().unwrap();
         add(
@@ -642,7 +636,7 @@ mod tests {
     #[test]
     fn session_content_reads_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let datasets = DatasetStore::from(&store);
         let dataset = datasets.create().unwrap();
         add(&store, &dataset, &mut [fake("s1", "hello\n")]);

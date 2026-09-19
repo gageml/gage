@@ -27,7 +27,7 @@ use gage_core::datetime::now_ms;
 use serde_json::Value as JsonValue;
 
 use crate::git::{EntryKind, git_in, run};
-use crate::writer::{commit_tree, mktree, write_blob};
+use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
 use crate::{Store, StoreError};
 
 /// Full ref name of the object with the given id.
@@ -687,11 +687,15 @@ fn write_content(path: &Path, tree: &ObjectTree) -> Result<WrittenContent, Store
     })
 }
 
-/// `mktree` input lines for `entries`.
-fn tree_lines(entries: &BTreeMap<String, TreeEntryRef>) -> Vec<String> {
+/// `mktree` input for `entries`.
+fn tree_lines(entries: &BTreeMap<String, TreeEntryRef>) -> Vec<TreeInput<'_>> {
     entries
         .iter()
-        .map(|(name, e)| format!("{} {} {}\t{name}", e.mode, e.kind, e.sha))
+        .map(|(name, e)| TreeInput {
+            mode: &e.mode,
+            sha: &e.sha,
+            name,
+        })
         .collect()
 }
 
@@ -757,15 +761,10 @@ pub struct LinkFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DatasetStore;
     use crate::note::{NoteInput, NoteStore};
-    use crate::{DatasetStore, init};
+    use crate::test_support::open_store;
     use serde_json::json;
-
-    fn open_store(dir: &Path) -> Store {
-        let path = dir.join("store.git");
-        init(&path).unwrap();
-        Store::open(&path).unwrap()
-    }
 
     fn tree_names(store: &Store, commit: &str) -> Vec<String> {
         run(git_in(store.path(), ["ls-tree", "--name-only", commit]))
@@ -797,7 +796,7 @@ mod tests {
     #[test]
     fn create_writes_markers_content_and_link_parents() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let linked = note(&store, "linked", &[]);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
@@ -840,7 +839,7 @@ mod tests {
     #[test]
     fn read_object_round_trips_content() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let linked = note(&store, "linked", &[]);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
@@ -865,7 +864,7 @@ mod tests {
     #[test]
     fn edit_writes_parent_first_then_links_and_bumps_modified() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let linked = note(&store, "linked", &[]);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
@@ -911,7 +910,7 @@ mod tests {
     #[test]
     fn edit_with_identical_content_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let mut tree = ObjectTree::default();
         tree.attrs = Some(json!({ "n": 1 }));
         tree.blobs.insert("body.txt".into(), b"x".to_vec());
@@ -930,7 +929,7 @@ mod tests {
     #[test]
     fn delete_writes_parentless_tombstone_with_markers_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let mut tree = ObjectTree::default();
         tree.attrs = Some(json!({ "n": 1 }));
         tree.blobs.insert("body.txt".into(), b"x".to_vec());
@@ -970,7 +969,7 @@ mod tests {
     #[test]
     fn resolve_id_reports_missing_and_ambiguous() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let tree = ObjectTree::default();
         store.create("gage::test", "1", "abc1", &tree, "t").unwrap();
         store.create("gage::test", "1", "abc2", &tree, "t").unwrap();
@@ -989,7 +988,7 @@ mod tests {
     #[test]
     fn resolve_typed_checks_type_and_tombstone() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let sha = store
             .create("gage::test", "1", "abc", &ObjectTree::default(), "t")
             .unwrap();
@@ -1013,7 +1012,7 @@ mod tests {
     #[test]
     fn list_object_refs_returns_every_object() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let note_id = note(&store, "n", &[]);
         let dataset_id = DatasetStore::from(&store).create().unwrap();
 
@@ -1026,7 +1025,7 @@ mod tests {
     #[test]
     fn classify_parents_splits_parent_and_links() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
         let root = note(&store, "root", &[]);
@@ -1047,7 +1046,7 @@ mod tests {
     #[test]
     fn walk_parent_chain_returns_lineage() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
         let id = note(&store, "n", &[]);
@@ -1063,7 +1062,7 @@ mod tests {
     #[test]
     fn find_link_files_reads_target_link() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = open_store(tmp.path());
+        let (store, _fsck) = open_store(tmp.path());
 
         let root = note(&store, "root", &[]);
         let root_commit = store.resolve_id(&root).unwrap().1;
