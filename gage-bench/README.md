@@ -98,46 +98,25 @@ is given.
 
 Build in release mode. Debug timings do not represent the store.
 
+The three tiers are argument files under `gage-bench/configs/`. An `@FILE`
+argument expands to the file's lines, one option per line, with `#` comments
+and blank lines dropped. Anything typed after the `@FILE` overrides the file's
+value, so a profile is a starting point rather than a fixed run.
+
 **Smoke test**
 
 A few seconds.
 
 ```shell
-cargo run -p gage-bench --release -- store \
-    --notes 200 \
-    --note-bytes 256 \
-    --sessions 20 \
-    --session-kb 64 \
-    --large-sessions 1 \
-    --large-kb 1024 \
-    --datasets 3 \
-    --dataset-size 5 \
-    --edit-pct 10 \
-    --delete-pct 5 \
-    --iterations 3 \
-    --random-reads 50 \
-    --seed 1
+cargo run -p gage-bench --release -- store @gage-bench/configs/smoke.conf
 ```
 
 **Normal**
 
-A few minutes. The defaults, written out.
+A few minutes. The defaults, and the scale baselines are kept at.
 
 ```shell
-cargo run -p gage-bench --release -- store \
-    --notes 2000 \
-    --note-bytes 256 \
-    --sessions 200 \
-    --session-kb 64 \
-    --large-sessions 2 \
-    --large-kb 5120 \
-    --datasets 10 \
-    --dataset-size 20 \
-    --edit-pct 10 \
-    --delete-pct 5 \
-    --iterations 10 \
-    --random-reads 500 \
-    --seed 1
+cargo run -p gage-bench --release -- store @gage-bench/configs/normal.conf
 ```
 
 **Heavy**
@@ -145,20 +124,13 @@ cargo run -p gage-bench --release -- store \
 Tens of minutes, for scale questions and for measuring the tail.
 
 ```shell
-cargo run -p gage-bench --release -- store \
-    --notes 20000 \
-    --note-bytes 256 \
-    --sessions 2000 \
-    --session-kb 64 \
-    --large-sessions 5 \
-    --large-kb 20480 \
-    --datasets 50 \
-    --dataset-size 40 \
-    --edit-pct 10 \
-    --delete-pct 5 \
-    --iterations 20 \
-    --random-reads 2000 \
-    --seed 1
+cargo run -p gage-bench --release -- store @gage-bench/configs/heavy.conf
+```
+
+Overriding one option of a profile:
+
+```shell
+cargo run -p gage-bench --release -- store @gage-bench/configs/normal.conf --iterations 20
 ```
 
 Comparing against the previous run at the same scale:

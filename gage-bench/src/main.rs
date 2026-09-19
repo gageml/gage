@@ -9,7 +9,14 @@ use gage_bench::store_bench::{self, BENCH_NAME, Params};
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser, Debug)]
-#[command(name = "gage-bench", about = "Benchmark the Gage store")]
+#[command(
+    name = "gage-bench",
+    about = "Benchmark the Gage store",
+    after_help = "Arguments may be read from a file with @FILE, one argument per line. \
+Later arguments override earlier ones, so `store @configs/normal.conf --iterations 20` \
+runs the normal profile with more iterations.",
+    args_override_self = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -87,7 +94,17 @@ struct StoreArgs {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // `@path` arguments expand to the file's lines, one argument per
+    // line, before clap sees them; typed arguments after the `@path`
+    // override the file's. The profiles under `configs/` use this.
+    let args = match argfile::expand_args(parse_profile, argfile::PREFIX) {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("gage-bench: argument file: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let cli = Cli::parse_from(args);
     match cli.command {
         Command::Store(args) => store(args),
     }
@@ -163,6 +180,16 @@ fn store(args: StoreArgs) -> ExitCode {
         eprintln!("gage-bench: remove {}: {e}", home.display());
     }
     ExitCode::SUCCESS
+}
+
+/// One argument per line, with blank lines and `#` comments dropped.
+fn parse_profile(content: &str, prefix: char) -> Vec<argfile::Argument> {
+    let kept: String = content
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    argfile::parse_fromfile(&kept, prefix)
 }
 
 /// `latest` selects the newest saved run for this bench; anything else
