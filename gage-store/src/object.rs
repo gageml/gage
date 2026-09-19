@@ -247,10 +247,6 @@ impl Store {
 
         let parents: Vec<&str> = content.link_parents.iter().map(String::as_str).collect();
         let commit_sha = commit_tree(path, &tree_sha, message, &parents)?;
-        run(git_in(
-            path,
-            ["update-ref", &object_ref(id), &commit_sha, ""],
-        ))?;
         let object = Object {
             commit_sha: commit_sha.clone(),
             header: ObjectHeader {
@@ -265,7 +261,7 @@ impl Store {
             tree: tree.clone(),
             entries,
         };
-        self.index_written(&object)?;
+        self.record_write(&object, "")?;
         Ok(commit_sha)
     }
 
@@ -304,15 +300,6 @@ impl Store {
         let mut parents: Vec<&str> = vec![&current.commit_sha];
         parents.extend(content.link_parents.iter().map(String::as_str));
         let commit_sha = commit_tree(path, &tree_sha, message, &parents)?;
-        run(git_in(
-            path,
-            [
-                "update-ref",
-                &object_ref(&current.header.id),
-                &commit_sha,
-                &current.commit_sha,
-            ],
-        ))?;
         let object = Object {
             commit_sha: commit_sha.clone(),
             header: ObjectHeader {
@@ -324,7 +311,7 @@ impl Store {
             tree: tree.clone(),
             entries,
         };
-        self.index_written(&object)?;
+        self.record_write(&object, &current.commit_sha)?;
         Ok(EditOutcome::Written(commit_sha))
     }
 
@@ -347,15 +334,6 @@ impl Store {
         entries.insert("deleted".to_string(), blob_entry(&stamp_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
         let commit_sha = commit_tree(path, &tree_sha, message, &[])?;
-        run(git_in(
-            path,
-            [
-                "update-ref",
-                &object_ref(&current.header.id),
-                &commit_sha,
-                &current.commit_sha,
-            ],
-        ))?;
         let object = Object {
             commit_sha: commit_sha.clone(),
             header: ObjectHeader {
@@ -367,7 +345,7 @@ impl Store {
             tree: ObjectTree::default(),
             entries,
         };
-        self.index_written(&object)?;
+        self.record_write(&object, &current.commit_sha)?;
         Ok(commit_sha)
     }
 

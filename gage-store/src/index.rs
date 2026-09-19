@@ -25,7 +25,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value as JsonValue;
 
-use crate::object::{LinkFile, Object};
+use crate::git::{git_in, run};
+use crate::object::{LinkFile, Object, object_ref};
 use crate::{Store, StoreError, dataset, note, session};
 
 /// Indexed attribute paths for an object type, or empty when the type
@@ -205,12 +206,22 @@ impl Store {
         Ok((object, links))
     }
 
-    /// Record an object the store just wrote and point its ref at it.
+    /// Record a write the store just made: index the object, then
+    /// point its ref at it, inside one index transaction. The ref
+    /// moves last, so a failed index write leaves the ref where it was
+    /// and `Err` means the object is not published. `previous_tip` is
+    /// the ref value the update requires; empty means the ref must
+    /// not exist yet.
+    ///
     /// Nothing is read back: the writer holds the header, the content,
     /// and the top-level link files. Link files inside an opaque
     /// subtree are found by walking it, which only happens when the
     /// object has one.
-    pub(crate) fn index_written(&self, object: &Object) -> Result<(), StoreError> {
+    pub(crate) fn record_write(
+        &self,
+        object: &Object,
+        previous_tip: &str,
+    ) -> Result<(), StoreError> {
         let links = if object.tree.subtrees.is_empty() {
             object.top_level_links()
         } else {
@@ -220,7 +231,17 @@ impl Store {
         self.in_index_transaction(|| {
             self.index.put(object, &links, &attrs)?;
             self.index
-                .set_tip(&object.header.id, Some(&object.commit_sha))
+                .set_tip(&object.header.id, Some(&object.commit_sha))?;
+            run(git_in(
+                self.path(),
+                [
+                    "update-ref",
+                    &object_ref(&object.header.id),
+                    &object.commit_sha,
+                    previous_tip,
+                ],
+            ))?;
+            Ok(())
         })
     }
 
@@ -233,11 +254,9 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::{git_in, run};
     use crate::note::{NoteInput, NoteStore};
-    use crate::object::object_ref;
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
-    use crate::test_support::{FsckGuard, fsck_guard};
+    use crate::test_support::{FsckGuard, fsck_guard, open_store};
     use crate::{DatasetStore, init};
     use serde_json::json;
     use std::path::Path;
@@ -289,6 +308,74 @@ mod tests {
         std::fs::remove_file(tmp.path().join("cache/object-index.sqlite")).unwrap();
         let store = Store::open(&path).unwrap();
         assert_eq!(note_ids(&store), vec![a]);
+    }
+
+    /// Delegates to the real index but refuses every `put`, to stand in
+    /// for an index failure after the git objects are written.
+    struct FailingPut {
+        inner: Option<Box<dyn ObjectIndex>>,
+    }
+
+    impl FailingPut {
+        fn inner(&self) -> &dyn ObjectIndex {
+            self.inner
+                .as_deref()
+                .expect("wrapper is installed with an inner index")
+        }
+    }
+
+    impl ObjectIndex for FailingPut {
+        fn tips(&self) -> Result<BTreeMap<String, String>, StoreError> {
+            self.inner().tips()
+        }
+        fn has_commit(&self, sha: &str) -> Result<bool, StoreError> {
+            self.inner().has_commit(sha)
+        }
+        fn put(
+            &self,
+            _object: &Object,
+            _links: &[LinkFile],
+            _attrs: &[(&'static str, String)],
+        ) -> Result<(), StoreError> {
+            Err(StoreError::Index("injected put failure".to_string()))
+        }
+        fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError> {
+            self.inner().set_tip(id, tip)
+        }
+        fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
+            self.inner().select(query)
+        }
+        fn begin(&self) -> Result<(), StoreError> {
+            self.inner().begin()
+        }
+        fn commit(&self) -> Result<(), StoreError> {
+            self.inner().commit()
+        }
+        fn rollback(&self) -> Result<(), StoreError> {
+            self.inner().rollback()
+        }
+    }
+
+    #[test]
+    fn failed_index_write_leaves_the_ref_unmoved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "a");
+        let before = store.rev_parse(&object_ref(&id)).unwrap().unwrap();
+
+        let inner = std::mem::replace(&mut store.index, Box::new(FailingPut { inner: None }));
+        store.index = Box::new(FailingPut { inner: Some(inner) });
+
+        let err = NoteStore::from(&store).edit(&id, "v2").unwrap_err();
+        assert!(matches!(err, StoreError::Index(_)), "{err}");
+        assert_eq!(store.rev_parse(&object_ref(&id)).unwrap().unwrap(), before);
+
+        let reopened = Store::open(store.path()).unwrap();
+        assert_eq!(
+            reopened.rev_parse(&object_ref(&id)).unwrap().unwrap(),
+            before
+        );
+        assert_eq!(NoteStore::from(&reopened).get(&id).unwrap().value, "v");
     }
 
     #[test]
