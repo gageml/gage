@@ -121,6 +121,12 @@ pub trait ObjectIndex {
 
     /// Tip SHAs selected by `query`, in query order.
     fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError>;
+
+    /// Start a transaction. Every `put` and `set_tip` until `commit`
+    /// or `rollback` is applied as one unit.
+    fn begin(&self) -> Result<(), StoreError>;
+    fn commit(&self) -> Result<(), StoreError>;
+    fn rollback(&self) -> Result<(), StoreError>;
 }
 
 impl Store {
@@ -135,18 +141,41 @@ impl Store {
             .into_iter()
             .map(|r| (r.id, r.tip_sha))
             .collect();
-        for (id, tip) in &live {
-            if known.get(id) != Some(tip) {
-                self.index_from(tip)?;
-                self.index.set_tip(id, Some(tip))?;
+        self.in_index_transaction(|| {
+            for (id, tip) in &live {
+                if known.get(id) != Some(tip) {
+                    self.index_from(tip)?;
+                    self.index.set_tip(id, Some(tip))?;
+                }
+            }
+            for id in known.keys() {
+                if !live.contains_key(id) {
+                    self.index.set_tip(id, None)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Run `f` inside one index transaction, rolling back on error.
+    /// The rollback outcome is not reported: the original error is the
+    /// one the caller needs, and a failed rollback leaves the
+    /// transaction to be discarded when the connection closes.
+    fn in_index_transaction<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.index.begin()?;
+        match f() {
+            Ok(value) => {
+                self.index.commit()?;
+                Ok(value)
+            }
+            Err(e) => {
+                drop(self.index.rollback());
+                Err(e)
             }
         }
-        for id in known.keys() {
-            if !live.contains_key(id) {
-                self.index.set_tip(id, None)?;
-            }
-        }
-        Ok(())
     }
 
     /// Index `sha` and every commit reachable from it through `parent`
@@ -186,9 +215,11 @@ impl Store {
             self.find_link_files(&object.commit_sha)?
         };
         let attrs = extract_attrs(object);
-        self.index.put(object, &links, &attrs)?;
-        self.index
-            .set_tip(&object.header.id, Some(&object.commit_sha))
+        self.in_index_transaction(|| {
+            self.index.put(object, &links, &attrs)?;
+            self.index
+                .set_tip(&object.header.id, Some(&object.commit_sha))
+        })
     }
 
     /// Tip SHAs selected by `query`, in query order.

@@ -84,6 +84,11 @@ impl SqliteIndex {
         let conn = Connection::open(path).map_err(sql_err)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(sql_err)?;
+        // The index is rebuilt from the refs whenever it is missing or
+        // damaged, so a commit does not need to reach disk before the
+        // call returns; NORMAL under WAL skips the per-commit sync.
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(sql_err)?;
         if fresh {
             conn.execute_batch(SCHEMA).map_err(sql_err)?;
             conn.execute(
@@ -147,63 +152,61 @@ impl ObjectIndex for SqliteIndex {
     ) -> Result<(), StoreError> {
         let h = &object.header;
         let sha = &object.commit_sha;
-        self.conn.execute_batch("BEGIN").map_err(sql_err)?;
-        let result = (|| {
-            self.conn
-                .execute(
-                    "INSERT OR REPLACE INTO object
-                     (sha, id, type, version, created, modified, deleted, parent_sha)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        sha,
-                        h.id,
-                        h.object_type,
-                        h.version,
-                        h.created_ms,
-                        h.modified_ms,
-                        h.deleted_ms,
-                        h.parent
-                    ],
-                )
-                .map_err(sql_err)?;
-            self.conn
-                .execute("DELETE FROM link WHERE commit_sha = ?1", params![sha])
-                .map_err(sql_err)?;
-            for file in links {
-                for (ord, target) in file.shas.iter().enumerate() {
-                    self.conn
-                        .execute(
-                            "INSERT INTO link (commit_sha, link_file, ord, target_sha)
-                             VALUES (?1, ?2, ?3, ?4)",
-                            params![sha, file.path, ord as i64, target],
-                        )
-                        .map_err(sql_err)?;
-                }
-            }
-            self.conn
-                .execute("DELETE FROM attr WHERE commit_sha = ?1", params![sha])
-                .map_err(sql_err)?;
-            for (key, value) in attrs {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO object
+                 (sha, id, type, version, created, modified, deleted, parent_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    sha,
+                    h.id,
+                    h.object_type,
+                    h.version,
+                    h.created_ms,
+                    h.modified_ms,
+                    h.deleted_ms,
+                    h.parent
+                ],
+            )
+            .map_err(sql_err)?;
+        self.conn
+            .execute("DELETE FROM link WHERE commit_sha = ?1", params![sha])
+            .map_err(sql_err)?;
+        for file in links {
+            for (ord, target) in file.shas.iter().enumerate() {
                 self.conn
                     .execute(
-                        "INSERT INTO attr (commit_sha, key, value) VALUES (?1, ?2, ?3)",
-                        params![sha, key, value],
+                        "INSERT INTO link (commit_sha, link_file, ord, target_sha)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![sha, file.path, ord as i64, target],
                     )
                     .map_err(sql_err)?;
             }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => self.conn.execute_batch("COMMIT").map_err(sql_err),
-            Err(e) => {
-                // The rollback outcome is not reported: the original
-                // error is the one the caller needs, and a failed
-                // rollback leaves the transaction to be discarded when
-                // the connection closes.
-                drop(self.conn.execute_batch("ROLLBACK"));
-                Err(e)
-            }
         }
+        self.conn
+            .execute("DELETE FROM attr WHERE commit_sha = ?1", params![sha])
+            .map_err(sql_err)?;
+        for (key, value) in attrs {
+            self.conn
+                .execute(
+                    "INSERT INTO attr (commit_sha, key, value) VALUES (?1, ?2, ?3)",
+                    params![sha, key, value],
+                )
+                .map_err(sql_err)?;
+        }
+        Ok(())
+    }
+
+    fn begin(&self) -> Result<(), StoreError> {
+        self.conn.execute_batch("BEGIN").map_err(sql_err)
+    }
+
+    fn commit(&self) -> Result<(), StoreError> {
+        self.conn.execute_batch("COMMIT").map_err(sql_err)
+    }
+
+    fn rollback(&self) -> Result<(), StoreError> {
+        self.conn.execute_batch("ROLLBACK").map_err(sql_err)
     }
 
     fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError> {
