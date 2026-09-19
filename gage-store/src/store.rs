@@ -6,11 +6,12 @@
 //! handle; the type-specific interfaces (`NoteStore`, `DatasetStore`,
 //! `SessionStore`) borrow it.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use crate::StoreError;
 use crate::admin::{STORE_VERSION, exists};
-use crate::git::{git_in, run};
+use crate::git::{CatFile, CatFileCell, git_in, run};
 use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
 
@@ -23,6 +24,8 @@ pub struct Store {
     path: PathBuf,
     version: u32,
     pub(crate) index: Box<dyn ObjectIndex>,
+    /// The long-lived `cat-file` process every read goes through.
+    pub(crate) cat_file: CatFileCell,
 }
 
 impl std::fmt::Debug for Store {
@@ -61,6 +64,7 @@ impl Store {
             path: path.to_path_buf(),
             version,
             index: Box::new(SqliteIndex::open(&index_path)?),
+            cat_file: RefCell::new(CatFile::spawn(path)?),
         };
         store.reconcile()?;
         Ok(store)

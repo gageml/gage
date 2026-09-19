@@ -26,7 +26,7 @@ use std::path::Path;
 use gage_core::datetime::now_ms;
 use serde_json::Value as JsonValue;
 
-use crate::git::{git_in, run};
+use crate::git::{EntryKind, git_in, run};
 use crate::writer::{commit_tree, mktree, write_blob};
 use crate::{Store, StoreError};
 
@@ -157,13 +157,11 @@ impl Store {
     /// SHA of every subtree. A missing `type` or `id` blob is a parse
     /// error.
     pub fn read_object(&self, commit: &str) -> Result<Object, StoreError> {
-        let commit_sha = run(git_in(
-            self.path(),
-            ["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
-        ))?
-        .trim()
-        .to_string();
-        let entries = read_entries(self.path(), &commit_sha)?;
+        let commit_sha = self
+            .object_info(&format!("{commit}^{{commit}}"))?
+            .ok_or_else(|| StoreError::MissingObject(commit.to_string()))?
+            .sha;
+        let entries = self.read_entries(&commit_sha)?;
         let header = self.header_from_entries(&commit_sha, &entries)?;
 
         let mut tree = ObjectTree::default();
@@ -238,15 +236,13 @@ impl Store {
         let id_sha = write_blob(path, format!("{id}\n").as_bytes())?;
         let stamp_sha = write_blob(path, format!("{now}\n").as_bytes())?;
 
-        let mut entries = vec![
-            blob_entry(&type_sha, "type"),
-            blob_entry(&id_sha, "id"),
-            blob_entry(&stamp_sha, "created"),
-            blob_entry(&stamp_sha, "modified"),
-        ];
         let content = write_content(path, tree)?;
-        entries.extend(content.entries);
-        let tree_sha = mktree(path, &entries)?;
+        let mut entries = content.entries;
+        entries.insert("type".to_string(), blob_entry(&type_sha));
+        entries.insert("id".to_string(), blob_entry(&id_sha));
+        entries.insert("created".to_string(), blob_entry(&stamp_sha));
+        entries.insert("modified".to_string(), blob_entry(&stamp_sha));
+        let tree_sha = mktree(path, &tree_lines(&entries))?;
 
         let parents: Vec<&str> = content.link_parents.iter().map(String::as_str).collect();
         let commit_sha = commit_tree(path, &tree_sha, message, &parents)?;
@@ -254,8 +250,21 @@ impl Store {
             path,
             ["update-ref", &object_ref(id), &commit_sha, ""],
         ))?;
-        self.index_commit(&commit_sha)?;
-        self.index.set_tip(id, Some(&commit_sha))?;
+        let object = Object {
+            commit_sha: commit_sha.clone(),
+            header: ObjectHeader {
+                object_type: object_type.to_string(),
+                version: version.to_string(),
+                id: id.to_string(),
+                created_ms: Some(now),
+                modified_ms: Some(now),
+                deleted_ms: None,
+                parent: None,
+            },
+            tree: tree.clone(),
+            entries,
+        };
+        self.index_written(&object)?;
         Ok(commit_sha)
     }
 
@@ -283,15 +292,13 @@ impl Store {
         let now = now_ms();
         let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
         let parent_sha = write_blob(path, format!("{}\n", current.commit_sha).as_bytes())?;
-        let mut entries = vec![
-            blob_entry(&current.marker_sha("type")?, "type"),
-            blob_entry(&current.marker_sha("id")?, "id"),
-            blob_entry(&current.marker_sha("created")?, "created"),
-            blob_entry(&modified_sha, "modified"),
-            blob_entry(&parent_sha, "parent"),
-        ];
-        entries.extend(content.entries);
-        let tree_sha = mktree(path, &entries)?;
+        let mut entries = content.entries;
+        entries.insert("type".to_string(), current.marker("type")?);
+        entries.insert("id".to_string(), current.marker("id")?);
+        entries.insert("created".to_string(), current.marker("created")?);
+        entries.insert("modified".to_string(), blob_entry(&modified_sha));
+        entries.insert("parent".to_string(), blob_entry(&parent_sha));
+        let tree_sha = mktree(path, &tree_lines(&entries))?;
 
         let mut parents: Vec<&str> = vec![&current.commit_sha];
         parents.extend(content.link_parents.iter().map(String::as_str));
@@ -305,8 +312,18 @@ impl Store {
                 &current.commit_sha,
             ],
         ))?;
-        self.index_commit(&commit_sha)?;
-        self.index.set_tip(&current.header.id, Some(&commit_sha))?;
+        let object = Object {
+            commit_sha: commit_sha.clone(),
+            header: ObjectHeader {
+                modified_ms: Some(now),
+                deleted_ms: None,
+                parent: Some(current.commit_sha.clone()),
+                ..current.header.clone()
+            },
+            tree: tree.clone(),
+            entries,
+        };
+        self.index_written(&object)?;
         Ok(EditOutcome::Written(commit_sha))
     }
 
@@ -321,14 +338,13 @@ impl Store {
         let path = self.path();
         let now = now_ms();
         let stamp_sha = write_blob(path, format!("{now}\n").as_bytes())?;
-        let entries = vec![
-            blob_entry(&current.marker_sha("type")?, "type"),
-            blob_entry(&current.marker_sha("id")?, "id"),
-            blob_entry(&current.marker_sha("created")?, "created"),
-            blob_entry(&stamp_sha, "modified"),
-            blob_entry(&stamp_sha, "deleted"),
-        ];
-        let tree_sha = mktree(path, &entries)?;
+        let mut entries = BTreeMap::new();
+        entries.insert("type".to_string(), current.marker("type")?);
+        entries.insert("id".to_string(), current.marker("id")?);
+        entries.insert("created".to_string(), current.marker("created")?);
+        entries.insert("modified".to_string(), blob_entry(&stamp_sha));
+        entries.insert("deleted".to_string(), blob_entry(&stamp_sha));
+        let tree_sha = mktree(path, &tree_lines(&entries))?;
         let commit_sha = commit_tree(path, &tree_sha, message, &[])?;
         run(git_in(
             path,
@@ -339,8 +355,18 @@ impl Store {
                 &current.commit_sha,
             ],
         ))?;
-        self.index_commit(&commit_sha)?;
-        self.index.set_tip(&current.header.id, Some(&commit_sha))?;
+        let object = Object {
+            commit_sha: commit_sha.clone(),
+            header: ObjectHeader {
+                modified_ms: Some(now),
+                deleted_ms: Some(now),
+                parent: None,
+                ..current.header.clone()
+            },
+            tree: ObjectTree::default(),
+            entries,
+        };
+        self.index_written(&object)?;
         Ok(commit_sha)
     }
 
@@ -377,8 +403,26 @@ impl Store {
 
     /// Read a commit's markers only.
     pub fn read_header(&self, commit: &str) -> Result<ObjectHeader, StoreError> {
-        let entries = read_entries(self.path(), commit)?;
+        let entries = self.read_entries(commit)?;
         self.header_from_entries(commit, &entries)
+    }
+
+    /// Top-level entries of `commit`'s tree by name.
+    fn read_entries(&self, commit: &str) -> Result<BTreeMap<String, TreeEntryRef>, StoreError> {
+        Ok(self
+            .read_tree(commit)?
+            .into_iter()
+            .map(|e| {
+                (
+                    e.name,
+                    TreeEntryRef {
+                        mode: e.mode,
+                        kind: e.kind.as_str().to_string(),
+                        sha: e.sha,
+                    },
+                )
+            })
+            .collect())
     }
 
     fn header_from_entries(
@@ -454,18 +498,18 @@ impl Store {
     /// Walk the commit tree recursively and return every `.link` file
     /// with its listed SHAs. The path is relative to the commit's root.
     pub fn find_link_files(&self, commit: &str) -> Result<Vec<LinkFile>, StoreError> {
-        let out = run(git_in(
-            self.path(),
-            ["ls-tree", "-r", "--name-only", commit],
-        ))?;
-        let mut files = Vec::new();
-        for name in out.lines() {
-            if !name.ends_with(".link") {
-                continue;
+        let mut link_blobs: Vec<(String, String)> = Vec::new();
+        self.walk_tree(commit, "", &mut |entry| {
+            if entry.kind == EntryKind::Blob && entry.name.ends_with(".link") {
+                link_blobs.push((entry.name, entry.sha));
             }
-            let bytes = self.read_blob_bytes(&format!("{commit}:{name}"))?;
+            Ok(())
+        })?;
+        let mut files = Vec::with_capacity(link_blobs.len());
+        for (path, sha) in link_blobs {
+            let bytes = self.read_blob_bytes(&sha)?;
             files.push(LinkFile {
-                path: name.to_string(),
+                path,
                 shas: parse_link(&bytes),
             });
         }
@@ -570,25 +614,39 @@ impl Object {
         }
     }
 
-    fn marker_sha(&self, name: &str) -> Result<String, StoreError> {
+    /// The tree entry of marker `name`, for reuse in a child commit.
+    fn marker(&self, name: &str) -> Result<TreeEntryRef, StoreError> {
         self.entries
             .get(name)
-            .map(|e| e.sha.clone())
+            .cloned()
             .ok_or_else(|| StoreError::Parse(format!("missing {name} blob at {}", self.commit_sha)))
+    }
+
+    /// Link files at the top level of the tree, as written.
+    pub(crate) fn top_level_links(&self) -> Vec<LinkFile> {
+        self.tree
+            .links
+            .iter()
+            .map(|(path, shas)| LinkFile {
+                path: path.clone(),
+                shas: shas.clone(),
+            })
+            .collect()
     }
 }
 
 /// Content entries written for an [`ObjectTree`], with the SHAs that
 /// identify the content and the SHAs that become link parents.
 struct WrittenContent {
-    entries: Vec<String>,
+    /// Content entries by name.
+    entries: BTreeMap<String, TreeEntryRef>,
     /// Entry name to object SHA, for change detection.
     shas: BTreeMap<String, String>,
     link_parents: Vec<String>,
 }
 
 fn write_content(path: &Path, tree: &ObjectTree) -> Result<WrittenContent, StoreError> {
-    let mut entries = Vec::new();
+    let mut entries = BTreeMap::new();
     let mut shas = BTreeMap::new();
     let mut link_parents = Vec::new();
     if let Some(attrs) = &tree.attrs {
@@ -596,23 +654,30 @@ fn write_content(path: &Path, tree: &ObjectTree) -> Result<WrittenContent, Store
             .map_err(|e| StoreError::Parse(format!("attrs.json encode: {e}")))?;
         json.push('\n');
         let sha = write_blob(path, json.as_bytes())?;
-        entries.push(blob_entry(&sha, "attrs.json"));
+        entries.insert("attrs.json".to_string(), blob_entry(&sha));
         shas.insert("attrs.json".to_string(), sha);
     }
     for (name, bytes) in &tree.blobs {
         let sha = write_blob(path, bytes)?;
-        entries.push(blob_entry(&sha, name));
+        entries.insert(name.clone(), blob_entry(&sha));
         shas.insert(name.clone(), sha);
     }
     for (name, link_shas) in &tree.links {
         let content: String = link_shas.iter().map(|s| format!("{s}\n")).collect();
         let sha = write_blob(path, content.as_bytes())?;
-        entries.push(blob_entry(&sha, name));
+        entries.insert(name.clone(), blob_entry(&sha));
         shas.insert(name.clone(), sha);
         link_parents.extend(link_shas.iter().cloned());
     }
     for (name, sha) in &tree.subtrees {
-        entries.push(format!("040000 tree {sha}\t{name}"));
+        entries.insert(
+            name.clone(),
+            TreeEntryRef {
+                mode: "040000".to_string(),
+                kind: "tree".to_string(),
+                sha: sha.clone(),
+            },
+        );
         shas.insert(name.clone(), sha.clone());
     }
     Ok(WrittenContent {
@@ -620,6 +685,14 @@ fn write_content(path: &Path, tree: &ObjectTree) -> Result<WrittenContent, Store
         shas,
         link_parents,
     })
+}
+
+/// `mktree` input lines for `entries`.
+fn tree_lines(entries: &BTreeMap<String, TreeEntryRef>) -> Vec<String> {
+    entries
+        .iter()
+        .map(|(name, e)| format!("{} {} {}\t{name}", e.mode, e.kind, e.sha))
+        .collect()
 }
 
 fn content_shas(entries: &BTreeMap<String, TreeEntryRef>) -> BTreeMap<String, String> {
@@ -630,8 +703,12 @@ fn content_shas(entries: &BTreeMap<String, TreeEntryRef>) -> BTreeMap<String, St
         .collect()
 }
 
-fn blob_entry(sha: &str, name: &str) -> String {
-    format!("100644 blob {sha}\t{name}")
+fn blob_entry(sha: &str) -> TreeEntryRef {
+    TreeEntryRef {
+        mode: "100644".to_string(),
+        kind: "blob".to_string(),
+        sha: sha.to_string(),
+    }
 }
 
 fn parse_link(bytes: &[u8]) -> Vec<String> {
@@ -641,32 +718,6 @@ fn parse_link(bytes: &[u8]) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect()
-}
-
-fn read_entries(path: &Path, commit: &str) -> Result<BTreeMap<String, TreeEntryRef>, StoreError> {
-    let listing = run(git_in(path, ["ls-tree", commit]))?;
-    let mut entries = BTreeMap::new();
-    for line in listing.lines() {
-        let (meta, name) = line
-            .split_once('\t')
-            .ok_or_else(|| StoreError::Parse(format!("ls-tree line: {line}")))?;
-        let fields: Vec<&str> = meta.split_whitespace().collect();
-        let [mode, kind, sha]: [&str; 3] = fields.try_into().map_err(|got: Vec<&str>| {
-            StoreError::Parse(format!(
-                "ls-tree meta {meta:?}: expected 3 fields, got {}",
-                got.len()
-            ))
-        })?;
-        entries.insert(
-            name.to_string(),
-            TreeEntryRef {
-                mode: mode.to_string(),
-                kind: kind.to_string(),
-                sha: sha.to_string(),
-            },
-        );
-    }
-    Ok(entries)
 }
 
 /// The parents of one commit, split into the previous-version parent

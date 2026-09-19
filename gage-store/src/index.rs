@@ -165,13 +165,30 @@ impl Store {
     }
 
     /// Read the object at `sha` and record it in the index. Used by
-    /// the reconcile walk and by the store's own writes.
+    /// the reconcile walk.
     pub(crate) fn index_commit(&self, sha: &str) -> Result<(Object, Vec<LinkFile>), StoreError> {
         let object = self.read_object(sha)?;
         let links = self.find_link_files(sha)?;
         let attrs = extract_attrs(&object);
         self.index.put(&object, &links, &attrs)?;
         Ok((object, links))
+    }
+
+    /// Record an object the store just wrote and point its ref at it.
+    /// Nothing is read back: the writer holds the header, the content,
+    /// and the top-level link files. Link files inside an opaque
+    /// subtree are found by walking it, which only happens when the
+    /// object has one.
+    pub(crate) fn index_written(&self, object: &Object) -> Result<(), StoreError> {
+        let links = if object.tree.subtrees.is_empty() {
+            object.top_level_links()
+        } else {
+            self.find_link_files(&object.commit_sha)?
+        };
+        let attrs = extract_attrs(object);
+        self.index.put(object, &links, &attrs)?;
+        self.index
+            .set_tip(&object.header.id, Some(&object.commit_sha))
     }
 
     /// Tip SHAs selected by `query`, in query order.

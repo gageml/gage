@@ -19,6 +19,8 @@ pub enum StoreError {
     Git { status: ExitStatus, stderr: String },
     /// `git` output did not have the expected shape
     Parse(String),
+    /// An object name did not resolve in the repository
+    MissingObject(String),
     /// A `--target` value did not match the `note:<id>` form
     BadTarget(String),
     /// A `--target` referenced an object that does not exist
@@ -69,6 +71,7 @@ impl fmt::Display for StoreError {
             StoreError::Spawn(e) => write!(f, "failed to run git: {e}"),
             StoreError::Git { status, stderr } => write!(f, "git {status}: {stderr}"),
             StoreError::Parse(what) => write!(f, "unexpected git output: {what}"),
+            StoreError::MissingObject(name) => write!(f, "no such object: {name}"),
             StoreError::BadTarget(t) => {
                 write!(f, "invalid target {t:?}: expected `note:<id>`")
             }
@@ -98,6 +101,7 @@ impl std::error::Error for StoreError {
             | StoreError::VersionMismatch { .. }
             | StoreError::Git { .. }
             | StoreError::Parse(_)
+            | StoreError::MissingObject(_)
             | StoreError::BadTarget(_)
             | StoreError::TargetNotFound(_)
             | StoreError::ObjectNotFound(_)

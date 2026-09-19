@@ -16,7 +16,6 @@ use gage_core::uuid::derive_id;
 use gage_session::{SessionType, SourceSession};
 use serde::{Deserialize, Serialize};
 
-use crate::git::{git_in, run};
 use crate::index::{ObjectQuery, Order};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::writer::{mktree, write_blob_stream};
@@ -240,7 +239,7 @@ fn decode(store: &Store, object: Object) -> Result<SessionRecord, StoreError> {
         Some((n, v)) => SessionType::new(n.to_string(), v.to_string()),
         None => SessionType::new(attrs.session_type.clone(), String::new()),
     };
-    let size = files_size(store.path(), commit_sha)?;
+    let size = files_size(store, commit_sha)?;
     Ok(SessionRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
@@ -281,38 +280,25 @@ fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<Strin
     mktree(path, &lines)
 }
 
-/// Sum of blob sizes under `<commit_sha>:files/`.
-fn files_size(path: &Path, commit_sha: &str) -> Result<u64, StoreError> {
-    let listing = match run(git_in(
-        path,
-        ["ls-tree", "-r", "-l", &format!("{commit_sha}:{FILES_TREE}")],
-    )) {
-        Ok(s) => s,
-        Err(StoreError::Git { .. }) => return Ok(0),
-        Err(e) => return Err(e),
-    };
-    let mut total = 0u64;
-    for line in listing.lines() {
-        let (meta, _) = line
-            .split_once('\t')
-            .ok_or_else(|| StoreError::Parse(format!("ls-tree line: {line}")))?;
-        let parts: Vec<&str> = meta.split_whitespace().collect();
-        let [_, kind, _, size_str]: [&str; 4] = parts.try_into().map_err(|got: Vec<&str>| {
-            StoreError::Parse(format!("ls-tree meta: got {}", got.len()))
-        })?;
-        if kind != "blob" {
-            continue;
-        }
-        total += size_str
-            .parse::<u64>()
-            .map_err(|e| StoreError::Parse(format!("ls-tree size {size_str:?}: {e}")))?;
+/// Sum of blob sizes under `<commit_sha>:files/`. Zero when the
+/// commit has no `files` tree.
+fn files_size(store: &Store, commit_sha: &str) -> Result<u64, StoreError> {
+    let files = format!("{commit_sha}:{FILES_TREE}");
+    if store.object_info(&files)?.is_none() {
+        return Ok(0);
     }
+    let mut total = 0u64;
+    store.walk_tree(&files, "", &mut |entry| {
+        total += entry.size.unwrap_or(0);
+        Ok(())
+    })?;
     Ok(total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::{git_in, run};
     use crate::{DatasetStore, init};
     use gage_session::{DriverError, SessionFile};
     use std::io::Cursor;
