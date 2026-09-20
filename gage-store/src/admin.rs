@@ -168,8 +168,12 @@ impl Store {
     /// may still report notices, such as `HEAD` pointing at a branch
     /// that has no commit, which is every Gage store's state; the
     /// caller decides how to show them.
+    ///
+    /// Runs with `--strict`, which is the set of checks a receiving
+    /// store applies under `transfer.fsckObjects`; a store that passes
+    /// here can be pushed.
     pub fn fsck(&self) -> Result<Vec<String>, StoreError> {
-        let mut cmd = git_in(self.path(), ["fsck", "--full", "--no-progress"]);
+        let mut cmd = git_in(self.path(), ["fsck", "--full", "--strict", "--no-progress"]);
         let output = cmd.output().map_err(StoreError::Spawn)?;
         let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
             .lines()

@@ -160,3 +160,12 @@ been run more than once.
 The index rebuild figure is the cost of a full reconcile: reading every commit
 and its link files once. The warm open figure is the cost of the ref diff when
 nothing changed.
+
+A metric name carries a generation suffix when the operation or the population
+behind the row changes such that its number no longer answers the same
+question: `session add` became `session add v2` when sessions gained a
+subdirectory and a third file, and `note create v2` when a quarter of notes
+gained a target. A generation never marks a code change the bench is meant to
+measure. The comparison matches rows by name, so a row of one generation is
+never placed beside a row of another; the untouched rows keep comparing across
+the change.

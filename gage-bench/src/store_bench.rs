@@ -6,9 +6,10 @@
 //!    seeded generator, then edits, growth, and deletes on a fraction.
 //!    Every operation is timed individually.
 //! 2. Stats: repository and index sizes before and after `gc`.
-//! 3. Verify: every object reads back as written, counts by type match,
-//!    and every commit's parents are accounted for. A failure aborts
-//!    the run.
+//! 3. Verify: every note value, every session file, every link, and
+//!    every dataset's membership reads back as written, counts by type
+//!    match, every commit's parents are accounted for, and `git fsck
+//!    --strict` passes. A failure aborts the run.
 //! 4. Reads: the common read operations, each repeated `iterations`
 //!    times.
 
@@ -16,7 +17,10 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use gage_store::{DatasetStore, NoteInput, NoteStore, Order, SessionSpec, SessionStore, Store};
+use gage_store::object::ObjectTree;
+use gage_store::{
+    DatasetStore, NoteInput, NoteStore, Order, SessionOutcome, SessionSpec, SessionStore, Store,
+};
 use indicatif::ProgressBar;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -24,7 +28,7 @@ use serde::Serialize;
 
 use crate::measure::{Count, Metric, Size, Timings};
 use crate::report::Results;
-use crate::synth::{Generator, SyntheticSession};
+use crate::synth::{Generator, SyntheticSession, session_files};
 
 /// Scale and shape of one run.
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +58,8 @@ struct Population {
     note_ids: Vec<String>,
     /// Note id to the value it should read back as.
     note_values: BTreeMap<String, String>,
+    /// Note id to the commit its `target.link` should name.
+    note_targets: Vec<(String, String)>,
     deleted_notes: Vec<String>,
     /// Native session id to its content, after growth.
     sessions: Vec<(String, String)>,
@@ -75,6 +81,19 @@ pub fn run(
 ) -> Result<Results, String> {
     let store_path = home.join("store.git");
     gage_store::init(&store_path).map_err(|e| e.to_string())?;
+    // A store runs `git gc --auto` when a writing handle closes. Off
+    // here: a background collection would run under the timed reads,
+    // and it would collide with the `gc` the bench runs and measures
+    // itself right after populating.
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&store_path)
+        .args(["config", "gc.auto", "0"])
+        .status()
+        .map_err(|e| format!("git config gc.auto: {e}"))?;
+    if !status.success() {
+        return Err(format!("git config gc.auto: {status}"));
+    }
     let mut timings = Timings::default();
     let mut sizes = Vec::new();
     let mut counts = Vec::new();
@@ -86,7 +105,7 @@ pub fn run(
     measure_sizes(&store_path, home, "before gc", &mut sizes, &mut counts)?;
     progress.set_message("gc");
     let store = Store::open(&store_path).map_err(|e| e.to_string())?;
-    timings.time("gc", || {
+    timings.time("gc v2", || {
         store.gc(Some("now"), true).map_err(|e| e.to_string())
     })?;
     drop(store);
@@ -94,7 +113,10 @@ pub fn run(
 
     progress.set_message("verify");
     let store = Store::open(&store_path).map_err(|e| e.to_string())?;
-    let fsck = verify(&store, params, &population)?;
+    verify(&store, params, &population)?;
+    let fsck = timings
+        .time("fsck", || store.fsck())
+        .map_err(|e| format!("verify: git fsck: {e}"))?;
     drop(store);
 
     progress.set_message("reads");
@@ -131,6 +153,7 @@ fn populate(
     let mut population = Population {
         note_ids: Vec::with_capacity(params.notes),
         note_values: BTreeMap::new(),
+        note_targets: Vec::new(),
         deleted_notes: Vec::new(),
         sessions: Vec::with_capacity(params.sessions),
         large_sessions: Vec::with_capacity(params.large_sessions),
@@ -139,19 +162,36 @@ fn populate(
         large_dataset: None,
     };
 
-    for _ in 0..params.notes {
+    for i in 0..params.notes {
         let name = generator.note_name();
         let value = generator.text(params.note_bytes);
+        // Every fourth note targets an earlier one, so link files, link
+        // parents, and link rows are part of the population
+        let target = if i % 4 == 3 && !population.note_ids.is_empty() {
+            let target = population
+                .note_ids
+                .get(generator.pick(population.note_ids.len()))
+                .expect("index is below the length")
+                .clone();
+            let (_, sha) = store.resolve_id(&target).map_err(|e| e.to_string())?;
+            Some((format!("note:{target}"), sha))
+        } else {
+            None
+        };
+        let targets: Vec<String> = target.iter().map(|(t, _)| t.clone()).collect();
         let id = timings
-            .time("note create", || {
+            .time("note create v2", || {
                 notes.create(NoteInput {
                     name,
                     value: &value,
                     author: "user:bench",
-                    targets: &[],
+                    targets: &targets,
                 })
             })
             .map_err(|e| e.to_string())?;
+        if let Some((_, sha)) = target {
+            population.note_targets.push((id.clone(), sha));
+        }
         population.note_values.insert(id.clone(), value);
         population.note_ids.push(id);
         progress.inc(1);
@@ -162,7 +202,7 @@ fn populate(
         let content = generator.session_content(params.session_kb * 1024);
         let mut reader = SyntheticSession::new(&native_id, &content);
         let outcome = timings
-            .time("session add", || {
+            .time("session add v2", || {
                 sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
             })
             .map_err(|e| e.to_string())?;
@@ -176,7 +216,7 @@ fn populate(
         let content = generator.session_content(params.large_kb * 1024);
         let mut reader = SyntheticSession::new(&native_id, &content);
         let outcome = timings
-            .time("session add (large)", || {
+            .time("session add (large) v2", || {
                 sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
             })
             .map_err(|e| e.to_string())?;
@@ -210,7 +250,9 @@ fn populate(
             })
             .collect();
         timings
-            .time("dataset sessions add", || datasets.sessions_add(&id, specs))
+            .time("dataset sessions add v2", || {
+                datasets.sessions_add(&id, specs)
+            })
             .map_err(|e| e.to_string())?;
         population.dataset_ids.push(id);
         progress.inc(1);
@@ -232,7 +274,7 @@ fn populate(
             })
             .collect();
         timings
-            .time("dataset sessions add (large)", || {
+            .time("dataset sessions add (large) v2", || {
                 datasets.sessions_add(&id, specs)
             })
             .map_err(|e| e.to_string())?;
@@ -244,7 +286,7 @@ fn populate(
     for id in population.note_ids.iter().take(edit_count) {
         let value = generator.text(params.note_bytes);
         timings
-            .time("note edit", || notes.edit(id, &value))
+            .time("note edit v2", || notes.edit(id, &value))
             .map_err(|e| e.to_string())?;
         population.note_values.insert(id.clone(), value);
     }
@@ -255,10 +297,55 @@ fn populate(
         generator.grow(content, 20);
         let mut reader = SyntheticSession::new(native_id, content);
         timings
-            .time("session grow", || {
+            .time("session grow v2", || {
                 sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
             })
             .map_err(|e| e.to_string())?;
+    }
+
+    // Re-adding sessions the store already holds is the common user
+    // path; every one must come back unchanged
+    progress.set_message("re-add");
+    for (native_id, content) in &population.sessions {
+        let mut reader = SyntheticSession::new(native_id, content);
+        let outcome = timings
+            .time("session add (unchanged)", || {
+                sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
+            })
+            .map_err(|e| e.to_string())?;
+        if outcome.outcome != SessionOutcome::Unchanged {
+            return Err(format!(
+                "re-add of {native_id} was {:?}, expected Unchanged",
+                outcome.outcome
+            ));
+        }
+    }
+
+    // Grown sessions that are members of the first dataset replace
+    // their slots rather than appending
+    if let Some(dataset) = population.dataset_ids.first() {
+        let replaced = grow_count.min(params.dataset_size.min(params.sessions));
+        if replaced > 0 {
+            let mut readers: Vec<SyntheticSession> = population
+                .sessions
+                .iter()
+                .take(replaced)
+                .map(|(native_id, content)| SyntheticSession::new(native_id, content))
+                .collect();
+            let specs: Vec<SessionSpec<'_>> = readers
+                .iter_mut()
+                .map(|r| SessionSpec {
+                    driver_name: DRIVER,
+                    driver_version: DRIVER_VERSION,
+                    reader: r,
+                })
+                .collect();
+            timings
+                .time("dataset sessions add (replace)", || {
+                    datasets.sessions_add(dataset, specs)
+                })
+                .map_err(|e| e.to_string())?;
+        }
     }
 
     let delete_count = params.notes * usize::from(params.delete_pct) / 100;
@@ -287,30 +374,29 @@ fn measure_sizes(
         .map(|m| m.len())
         .unwrap_or(0);
     sizes.push(Size {
-        name: format!("repository ({label})"),
+        name: format!("repository v2 ({label})"),
         bytes: status.size,
     });
     sizes.push(Size {
-        name: format!("bytes per git object ({label})"),
+        name: format!("bytes per git object v2 ({label})"),
         bytes: status.size.checked_div(objects).unwrap_or(0),
     });
     sizes.push(Size {
-        name: format!("index ({label})"),
+        name: format!("index v2 ({label})"),
         bytes: index_bytes,
     });
     counts.push(Count {
-        name: format!("git objects ({label})"),
+        name: format!("git objects v2 ({label})"),
         value: objects,
     });
     counts.push(Count {
-        name: format!("refs ({label})"),
+        name: format!("refs v2 ({label})"),
         value: status.refs,
     });
     Ok(())
 }
 
-/// Returns the lines `git fsck` printed.
-fn verify(store: &Store, params: &Params, population: &Population) -> Result<Vec<String>, String> {
+fn verify(store: &Store, params: &Params, population: &Population) -> Result<(), String> {
     let notes = NoteStore::from(store);
     let sessions = SessionStore::from(store);
     let datasets = DatasetStore::from(store);
@@ -328,6 +414,24 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<Vec
         let deleted = population.deleted_notes.contains(id);
         if object.header.is_tombstone() != deleted {
             return Err(format!("verify: {id} tombstone state is wrong"));
+        }
+        if deleted && object.tree != ObjectTree::default() {
+            return Err(format!("verify: tombstone {id} carries content"));
+        }
+    }
+
+    for (id, target_sha) in &population.note_targets {
+        if population.deleted_notes.contains(id) {
+            continue;
+        }
+        let (_, sha) = store
+            .resolve_id(id)
+            .map_err(|e| format!("verify: resolve {id}: {e}"))?;
+        let object = store
+            .read_object(&sha)
+            .map_err(|e| format!("verify: read {id}: {e}"))?;
+        if object.tree.links.get("target.link") != Some(&vec![target_sha.clone()]) {
+            return Err(format!("verify: {id} target.link does not name its target"));
         }
     }
 
@@ -353,17 +457,38 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<Vec
         ));
     }
 
-    let sample = population
+    for id in population
         .note_ids
         .iter()
         .filter(|id| !population.deleted_notes.contains(id))
-        .step_by((live_notes / 50).max(1));
-    for id in sample {
+    {
         let full = notes
             .get(id)
             .map_err(|e| format!("verify: get {id}: {e}"))?;
         if Some(&full.value) != population.note_values.get(id) {
             return Err(format!("verify: {id} value differs from what was written"));
+        }
+    }
+
+    // Every file of every session, regular and large, through the
+    // same shape function the writer was fed
+    let all_sessions = population
+        .sessions
+        .iter()
+        .chain(population.large_sessions.iter());
+    for ((native_id, content), id) in all_sessions.zip(population.session_ids.iter()) {
+        let (_, sha) = store
+            .resolve_id(id)
+            .map_err(|e| format!("verify: resolve session {native_id}: {e}"))?;
+        for (path, bytes) in session_files(native_id, content) {
+            let stored = store
+                .read_blob_bytes(&format!("{sha}:files.d/{path}"))
+                .map_err(|e| format!("verify: session {native_id} {path}: {e}"))?;
+            if stored != bytes {
+                return Err(format!(
+                    "verify: session {native_id} {path} differs from what was written"
+                ));
+            }
         }
     }
 
@@ -376,21 +501,31 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<Vec
         }
     }
 
-    let fsck = store.fsck().map_err(|e| format!("verify: git fsck: {e}"))?;
-
-    for id in &population.dataset_ids {
-        let listed = datasets
+    // Membership and order by native id, from the same formula that
+    // chose the members; slot replacement must not reorder
+    for (d, id) in population.dataset_ids.iter().enumerate() {
+        let listed: Vec<String> = datasets
             .sessions_list(id)
-            .map_err(|e| format!("verify: dataset {id}: {e}"))?;
-        let expected = params.dataset_size.min(params.sessions);
-        if listed.len() != expected {
+            .map_err(|e| format!("verify: dataset {id}: {e}"))?
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        let start = (d * params.dataset_size) % params.sessions.max(1);
+        let expected: Vec<String> = population
+            .sessions
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(params.dataset_size.min(params.sessions))
+            .map(|(native_id, _)| native_id.clone())
+            .collect();
+        if listed != expected {
             return Err(format!(
-                "verify: dataset {id} has {} sessions, expected {expected}",
-                listed.len()
+                "verify: dataset {id} members are {listed:?}, expected {expected:?}"
             ));
         }
     }
-    Ok(fsck)
+    Ok(())
 }
 fn time_reads(
     store_path: &Path,
@@ -408,7 +543,7 @@ fn time_reads(
     // A rebuild walks every object and runs for seconds at default
     // scale, so it is measured once rather than per iteration.
     std::fs::remove_file(&index_path).map_err(|e| e.to_string())?;
-    let store = timings.time("open (rebuild index)", || Store::open(store_path));
+    let store = timings.time("open (rebuild index) v2", || Store::open(store_path));
     drop(store.map_err(|e| e.to_string())?);
 
     let store = Store::open(store_path).map_err(|e| e.to_string())?;
@@ -433,7 +568,15 @@ fn time_reads(
             .time("resolve id (8-char prefix)", || store.resolve_id(&id[..8]))
             .map_err(|e| e.to_string())?;
         timings
-            .time("note get", || notes.get(id))
+            .time("note get v2", || notes.get(id))
+            .map_err(|e| e.to_string())?;
+    }
+
+    // The TUI's cold-start read, and the one read still on a process
+    // launch
+    for _ in 0..params.iterations {
+        timings
+            .time("list object refs", || store.list_object_refs())
             .map_err(|e| e.to_string())?;
     }
 
@@ -449,7 +592,7 @@ fn time_reads(
             .get(rng.random_range(0..all_ids.len()))
             .expect("range is bounded by the length");
         timings
-            .time("random read by id", || {
+            .time("random read by id v2", || {
                 let (_, sha) = store.resolve_id(id)?;
                 store.read_object(&sha)
             })
@@ -460,13 +603,13 @@ fn time_reads(
             .get(rng.random_range(0..live.len()))
             .expect("range is bounded by the length");
         timings
-            .time("random note get", || notes.get(id))
+            .time("random note get v2", || notes.get(id))
             .map_err(|e| e.to_string())?;
     }
 
     for _ in 0..params.iterations {
         let count = timings
-            .time("query name, limit 20", || {
+            .time("query name, limit 20 v2", || {
                 notes
                     .query()
                     .name("finding")
@@ -483,7 +626,7 @@ fn time_reads(
 
     for _ in 0..params.iterations {
         timings
-            .time("iter all notes", || {
+            .time("iter all notes v2", || {
                 notes
                     .iter()
                     .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -494,7 +637,7 @@ fn time_reads(
 
     for _ in 0..params.iterations {
         timings
-            .time("query modified desc, limit 20", || {
+            .time("query modified desc, limit 20 v2", || {
                 notes
                     .query()
                     .order(Order::ModifiedDesc)
@@ -514,7 +657,7 @@ fn time_reads(
         }
         for _ in 0..params.iterations {
             timings
-                .time("session content read", || {
+                .time("session content read v2", || {
                     read_content(&datasets, dataset, 1)
                 })
                 .map_err(|e| e.to_string())?;
@@ -523,7 +666,7 @@ fn time_reads(
     if let Some(dataset) = &population.large_dataset {
         for _ in 0..params.iterations {
             timings
-                .time("session content read (large)", || {
+                .time("session content read (large) v2", || {
                     read_content(&datasets, dataset, 1)
                 })
                 .map_err(|e| e.to_string())?;

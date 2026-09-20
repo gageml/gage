@@ -141,7 +141,7 @@ pub struct CatArgs {
 
 #[derive(Args)]
 pub struct StatusArgs {
-    /// Run `git fsck --full` after showing status
+    /// Run `git fsck --strict` after showing status
     #[arg(long)]
     check: bool,
 }

@@ -86,7 +86,10 @@ pub fn latest_results(bench: &str) -> io::Result<Option<PathBuf>> {
 /// version alone is reported.
 pub fn code_version() -> String {
     let version = env!("CARGO_PKG_VERSION");
+    // Run in this crate's directory, not the caller's, so the answer
+    // is the workspace's commit wherever the bench is invoked from
     let head = Command::new("git")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
@@ -96,6 +99,7 @@ pub fn code_version() -> String {
         return version.to_string();
     };
     let dirty = Command::new("git")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["status", "--porcelain"])
         .output()
         .ok()

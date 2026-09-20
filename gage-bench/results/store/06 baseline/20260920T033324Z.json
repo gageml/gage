@@ -1,0 +1,312 @@
+{
+  "bench": "store",
+  "stamp": "20260920T033324Z",
+  "code_version": "0.2.0-dev (5a1e00c-dirty)",
+  "params": {
+    "dataset_size": 5,
+    "datasets": 3,
+    "delete_pct": 5,
+    "edit_pct": 10,
+    "iterations": 3,
+    "large_kb": 1024,
+    "large_sessions": 1,
+    "note_bytes": 256,
+    "notes": 200,
+    "random_reads": 50,
+    "seed": 1,
+    "session_kb": 64,
+    "sessions": 20
+  },
+  "metrics": [
+    {
+      "name": "note create v2",
+      "count": 200,
+      "total_ms": 296.96150800000004,
+      "p50_ms": 1.1953980000000002,
+      "p95_ms": 1.777651,
+      "max_ms": 18.409837,
+      "per_sec": 673.4879592543017
+    },
+    {
+      "name": "session add v2",
+      "count": 20,
+      "total_ms": 66.382731,
+      "p50_ms": 3.259776,
+      "p95_ms": 3.524172,
+      "max_ms": 3.556276,
+      "per_sec": 301.2831755897479
+    },
+    {
+      "name": "session add (large) v2",
+      "count": 1,
+      "total_ms": 31.167562999999998,
+      "p50_ms": 31.167562999999998,
+      "p95_ms": 31.167562999999998,
+      "max_ms": 31.167562999999998,
+      "per_sec": 32.08463876370443
+    },
+    {
+      "name": "dataset create",
+      "count": 3,
+      "total_ms": 3.1972430000000003,
+      "p50_ms": 1.0669760000000001,
+      "p95_ms": 1.232801,
+      "max_ms": 1.232801,
+      "per_sec": 938.3084113406456
+    },
+    {
+      "name": "dataset sessions add v2",
+      "count": 3,
+      "total_ms": 10.821791,
+      "p50_ms": 3.42128,
+      "p95_ms": 4.015791,
+      "max_ms": 4.015791,
+      "per_sec": 277.218438241877
+    },
+    {
+      "name": "dataset sessions add (large) v2",
+      "count": 1,
+      "total_ms": 4.111026,
+      "p50_ms": 4.111026,
+      "p95_ms": 4.111026,
+      "max_ms": 4.111026,
+      "per_sec": 243.24827914004922
+    },
+    {
+      "name": "note edit v2",
+      "count": 20,
+      "total_ms": 47.470749999999995,
+      "p50_ms": 2.301382,
+      "p95_ms": 2.716394,
+      "max_ms": 2.881933,
+      "per_sec": 421.31207111747767
+    },
+    {
+      "name": "session grow v2",
+      "count": 2,
+      "total_ms": 6.213891,
+      "p50_ms": 3.039166,
+      "p95_ms": 3.174725,
+      "max_ms": 3.174725,
+      "per_sec": 321.8595240888519
+    },
+    {
+      "name": "session add (unchanged)",
+      "count": 20,
+      "total_ms": 4.660324,
+      "p50_ms": 0.214664,
+      "p95_ms": 0.276686,
+      "max_ms": 0.332048,
+      "per_sec": 4291.547111316723
+    },
+    {
+      "name": "dataset sessions add (replace)",
+      "count": 1,
+      "total_ms": 3.754829,
+      "p50_ms": 3.754829,
+      "p95_ms": 3.754829,
+      "max_ms": 3.754829,
+      "per_sec": 266.32371274430875
+    },
+    {
+      "name": "note delete",
+      "count": 10,
+      "total_ms": 22.21866,
+      "p50_ms": 2.1978560000000003,
+      "p95_ms": 2.3627689999999997,
+      "max_ms": 2.3627689999999997,
+      "per_sec": 450.0721465650944
+    },
+    {
+      "name": "gc",
+      "count": 1,
+      "total_ms": 252.45760699999997,
+      "p50_ms": 252.45760699999997,
+      "p95_ms": 252.45760699999997,
+      "max_ms": 252.45760699999997,
+      "per_sec": 3.961061074305438
+    },
+    {
+      "name": "fsck",
+      "count": 1,
+      "total_ms": 25.451369,
+      "p50_ms": 25.451369,
+      "p95_ms": 25.451369,
+      "max_ms": 25.451369,
+      "per_sec": 39.29061733378664
+    },
+    {
+      "name": "open (warm index)",
+      "count": 3,
+      "total_ms": 8.325912,
+      "p50_ms": 2.700929,
+      "p95_ms": 2.992906,
+      "max_ms": 2.992906,
+      "per_sec": 360.3208873694557
+    },
+    {
+      "name": "open (rebuild index) v2",
+      "count": 1,
+      "total_ms": 43.239267999999996,
+      "p50_ms": 43.239267999999996,
+      "p95_ms": 43.239267999999996,
+      "max_ms": 43.239267999999996,
+      "per_sec": 23.127126018877103
+    },
+    {
+      "name": "resolve id (full)",
+      "count": 3,
+      "total_ms": 2.117881,
+      "p50_ms": 0.652084,
+      "p95_ms": 0.862467,
+      "max_ms": 0.862467,
+      "per_sec": 1416.5101816391004
+    },
+    {
+      "name": "resolve id (8-char prefix)",
+      "count": 3,
+      "total_ms": 1.8681969999999999,
+      "p50_ms": 0.627563,
+      "p95_ms": 0.666219,
+      "max_ms": 0.666219,
+      "per_sec": 1605.8263662772183
+    },
+    {
+      "name": "note get v2",
+      "count": 3,
+      "total_ms": 3.65308,
+      "p50_ms": 1.010926,
+      "p95_ms": 1.849424,
+      "max_ms": 1.849424,
+      "per_sec": 821.2248294589771
+    },
+    {
+      "name": "list object refs",
+      "count": 3,
+      "total_ms": 2.0544350000000002,
+      "p50_ms": 0.682558,
+      "p95_ms": 0.689509,
+      "max_ms": 0.689509,
+      "per_sec": 1460.255496036623
+    },
+    {
+      "name": "random read by id v2",
+      "count": 50,
+      "total_ms": 30.733148999999997,
+      "p50_ms": 0.600037,
+      "p95_ms": 0.6743180000000001,
+      "max_ms": 0.766539,
+      "per_sec": 1626.9078056400924
+    },
+    {
+      "name": "random note get v2",
+      "count": 50,
+      "total_ms": 31.132288999999997,
+      "p50_ms": 0.603642,
+      "p95_ms": 0.71621,
+      "max_ms": 0.9990680000000001,
+      "per_sec": 1606.049590507142
+    },
+    {
+      "name": "query name, limit 20 v2",
+      "count": 3,
+      "total_ms": 3.4539229999999996,
+      "p50_ms": 1.112299,
+      "p95_ms": 1.25207,
+      "max_ms": 1.25207,
+      "per_sec": 868.5775565928946
+    },
+    {
+      "name": "iter all notes v2",
+      "count": 3,
+      "total_ms": 30.657705999999997,
+      "p50_ms": 10.246160000000001,
+      "p95_ms": 10.465857999999999,
+      "max_ms": 10.465857999999999,
+      "per_sec": 97.85467966846575
+    },
+    {
+      "name": "query modified desc, limit 20 v2",
+      "count": 3,
+      "total_ms": 3.502134,
+      "p50_ms": 1.160002,
+      "p95_ms": 1.185995,
+      "max_ms": 1.185995,
+      "per_sec": 856.6205633479473
+    },
+    {
+      "name": "dataset sessions list",
+      "count": 3,
+      "total_ms": 2.682272,
+      "p50_ms": 0.846924,
+      "p95_ms": 1.021962,
+      "max_ms": 1.021962,
+      "per_sec": 1118.4548024957944
+    },
+    {
+      "name": "session content read v2",
+      "count": 3,
+      "total_ms": 11.308267,
+      "p50_ms": 3.5829500000000003,
+      "p95_ms": 4.250029,
+      "max_ms": 4.250029,
+      "per_sec": 265.29263944687546
+    },
+    {
+      "name": "session content read (large) v2",
+      "count": 3,
+      "total_ms": 24.332853999999998,
+      "p50_ms": 8.047419,
+      "p95_ms": 8.278791,
+      "max_ms": 8.278791,
+      "per_sec": 123.2900998789538
+    }
+  ],
+  "sizes": [
+    {
+      "name": "repository v2 (before gc)",
+      "bytes": 7471104
+    },
+    {
+      "name": "bytes per git object v2 (before gc)",
+      "bytes": 5206
+    },
+    {
+      "name": "index v2 (before gc)",
+      "bytes": 200704
+    },
+    {
+      "name": "repository v2 (after gc)",
+      "bytes": 1764352
+    },
+    {
+      "name": "bytes per git object v2 (after gc)",
+      "bytes": 1256
+    },
+    {
+      "name": "index v2 (after gc)",
+      "bytes": 200704
+    }
+  ],
+  "counts": [
+    {
+      "name": "git objects v2 (before gc)",
+      "value": 1435
+    },
+    {
+      "name": "refs v2 (before gc)",
+      "value": 225
+    },
+    {
+      "name": "git objects v2 (after gc)",
+      "value": 1404
+    },
+    {
+      "name": "refs v2 (after gc)",
+      "value": 225
+    }
+  ],
+  "fsck": [
+    "notice: HEAD points to an unborn branch (main)"
+  ]
+}
