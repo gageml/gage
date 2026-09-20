@@ -121,6 +121,76 @@ Code versions: 04 `511d77d`, 05 `ac8c169`.
     controlled. Whether the difference is real is not known from this data; a
     repeated run of the same code would say what a 2 ms shift on this row means.
 
+## 05 - 06
+
+The bench's population changed shape at 06, and every row whose number depends
+on the shape carries a `v2` suffix from here on (see "Reading the numbers" in
+the bench README). Rows without the suffix compare with 05; rows with it start
+their history at 06.
+
+- `05 summary-storage`
+- `06 baseline`
+
+Normal-scale runs, p50 in milliseconds. One run of each version.
+
+| Operation (p50 ms)         |   05 |   06 |      |
+| -------------------------- | ---: | ---: | ---: |
+| note delete                | 6.94 | 6.93 | +1.0 |
+| dataset create             | 0.98 | 0.93 | +1.1 |
+| open (warm index)          | 4.60 | 5.54 | -1.2 |
+| resolve id (full)          | 0.59 | 0.64 | -1.1 |
+| resolve id (8-char prefix) | 0.70 | 0.64 | +1.1 |
+| dataset sessions list      | 1.51 | 1.63 | -1.1 |
+
+Every difference is within the ten-sample noise noted at 05.
+
+The new generation, as measured at 06. These are the figures later changes are
+compared against.
+
+| Operation (p50 ms)                  |    06 |
+| ----------------------------------- | ----: |
+| note create v2 [^8]                 |  1.24 |
+| note edit v2                        |  7.09 |
+| session add v2 [^8]                 |  3.23 |
+| session add (large) v2              |   139 |
+| session add (unchanged) [^9]        |  0.21 |
+| dataset sessions add v2             |  12.1 |
+| dataset sessions add (replace) [^9] |  16.9 |
+| gc v2 [^10]                         | 1,472 |
+| fsck [^9]                           |   201 |
+| open (rebuild index) v2             |   225 |
+| list object refs [^9]               |  1.80 |
+| note get v2                         |  0.75 |
+| random read by id v2                |  0.60 |
+| query name, limit 20 v2             |  2.55 |
+| query modified desc, limit 20 v2    |  2.21 |
+| iter all notes v2                   |   220 |
+| session content read v2             |  3.88 |
+| session content read (large) v2     |  28.0 |
+
+Code versions: 05 `ac8c169`, 06 `5a1e00c`.
+
+[^8]: **Population shape.** A quarter of notes now target an earlier note, so
+    link files, link parents, and link rows exist at scale, and every session
+    has three files including one under a subdirectory, the shape the Claude
+    driver produces. Every row that writes or reads a note or a session moved
+    with it: a session add writes three blobs and a subtree instead of one blob,
+    and a note read parses a link file. The sizes and counts moved for the same
+    reason and carry the suffix too.
+
+[^9]: **New rows.** `session add (unchanged)` is a re-add of a session the store
+    already holds, the common user path, and returns without a write.
+    `dataset sessions add (replace)` re-adds grown members of a dataset, which
+    replace their slots rather than appending. `list object refs` is the TUI's
+    cold-start read and the one read still on a process launch. `fsck` is
+    `git fsck --full --strict`, which the bench's verify step already ran and
+    now times.
+
+[^10]: **`gc` scales with the population.** 13,914 objects at 06 against 12,964
+    at 05, and a collection walks every one, so the row is a new generation. The
+    06 results file names it `gc`; the rename to `gc v2` landed after that run
+    and applies from the next.
+
 ## Further changes
 
 Where the cost is now, at normal scale: a write is one `git update-ref` launch
