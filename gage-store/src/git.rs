@@ -586,24 +586,60 @@ pub(crate) fn git_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
     cmd
 }
 
-/// A `git` command with the repository-locating variables removed, so
-/// an exported `GIT_DIR` or similar cannot redirect the operation away
-/// from the store. See `store-init.md`.
+/// A `git` command with every `GIT_*` environment variable cleared
+/// except a small allowlist. The allowlist covers the vars users need
+/// for remote operations (SSH, credentials, HTTP, terminal prompt) and
+/// diagnostics (tracing), plus the two config-locating vars the store
+/// deliberately keeps (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`).
+/// Anything else `GIT_*` is cleared, so an exported `GIT_DIR`, a
+/// `GIT_NAMESPACE`, or a `GIT_CONFIG_KEY_<n>` injection cannot redirect
+/// or reconfigure the store. See `store-init.md`.
 pub(crate) fn git_cmd() -> Command {
     let mut cmd = Command::new("git");
-    for var in REDIRECTING_ENV {
-        cmd.env_remove(var);
+    for (name, _) in std::env::vars_os() {
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("GIT_") && !git_env_kept(name) {
+            cmd.env_remove(name);
+        }
     }
     cmd
 }
 
-const REDIRECTING_ENV: [&str; 6] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_INDEX_FILE",
+/// True when a `GIT_*` environment variable should pass through to a
+/// git subprocess unchanged.
+fn git_env_kept(name: &str) -> bool {
+    GIT_ENV_KEEP.iter().any(|k| k.matches(name))
+}
+
+enum EnvKeep {
+    Exact(&'static str),
+    Prefix(&'static str),
+}
+
+impl EnvKeep {
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            EnvKeep::Exact(n) => *n == name,
+            EnvKeep::Prefix(p) => name.starts_with(p),
+        }
+    }
+}
+
+const GIT_ENV_KEEP: &[EnvKeep] = &[
+    // SSH transport for remote operations.
+    EnvKeep::Exact("GIT_SSH"),
+    EnvKeep::Exact("GIT_SSH_COMMAND"),
+    EnvKeep::Exact("GIT_SSH_VARIANT"),
+    // Credential prompt.
+    EnvKeep::Exact("GIT_ASKPASS"),
+    EnvKeep::Exact("GIT_TERMINAL_PROMPT"),
+    // Config-file location the store deliberately keeps; see store-init.md.
+    EnvKeep::Exact("GIT_CONFIG_GLOBAL"),
+    EnvKeep::Exact("GIT_CONFIG_SYSTEM"),
+    // HTTP transport for remote operations (proxy, timeouts, user-agent).
+    EnvKeep::Prefix("GIT_HTTP_"),
+    // Tracing for diagnostics (GIT_TRACE, GIT_TRACE_CURL, ...).
+    EnvKeep::Prefix("GIT_TRACE"),
 ];
 
 /// Runs `cmd` and returns its stdout. A failing status is an error
@@ -663,6 +699,50 @@ mod tests {
         let sha = write_blob(&path, b"hello").unwrap();
         let store = Store::open(&path).unwrap();
         (tmp, store, sha)
+    }
+
+    #[test]
+    fn git_env_keep_covers_transport_and_diagnostics_but_not_redirects() {
+        // Allowlisted: transport, credentials, tracing, and the two
+        // config-locating vars store-init.md keeps.
+        for name in [
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "GIT_SSH_VARIANT",
+            "GIT_ASKPASS",
+            "GIT_TERMINAL_PROMPT",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_HTTP_PROXY",
+            "GIT_HTTP_USER_AGENT",
+            "GIT_HTTP_LOW_SPEED_LIMIT",
+            "GIT_TRACE",
+            "GIT_TRACE_CURL",
+            "GIT_TRACE_PERFORMANCE",
+        ] {
+            assert!(git_env_kept(name), "expected kept: {name}");
+        }
+        // Cleared: repository redirection and config injection,
+        // including the parameterized `GIT_CONFIG_KEY_<n>` family the
+        // old name-list could not cover.
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_INDEX_FILE",
+            "GIT_NAMESPACE",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_KEY_42",
+            "GIT_CONFIG_VALUE_0",
+        ] {
+            assert!(!git_env_kept(name), "expected cleared: {name}");
+        }
     }
 
     #[test]
