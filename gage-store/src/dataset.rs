@@ -9,9 +9,9 @@
 //! and edits are the generic object model's job; see
 //! [`crate::object`].
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 use gage_core::uuid::new_uuid;
 use gage_session::{ContentAccess, SessionType, SourceSession};
@@ -355,7 +355,7 @@ struct GitContentAccess {
 }
 
 impl ContentAccess for GitContentAccess {
-    fn paths(&self) -> std::io::Result<Vec<String>> {
+    fn paths(&self) -> io::Result<Vec<String>> {
         // `-z` prints names raw with NUL separators. Without it git
         // C-quotes any name with a byte >= 0x80, a tab, a backslash, a
         // quote, or a newline, and the quoted form is not a path.
@@ -369,7 +369,7 @@ impl ContentAccess for GitContentAccess {
                 &format!("{}:files.d", self.session_commit),
             ],
         ))
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(listing
             .split('\0')
             .filter(|p| !p.is_empty())
@@ -377,7 +377,7 @@ impl ContentAccess for GitContentAccess {
             .collect())
     }
 
-    fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>> {
+    fn open(&self, path: &str) -> io::Result<Box<dyn Read + Send>> {
         let target = format!("{}:files.d/{}", self.session_commit, path);
         let mut cmd: Command = git_in(&self.store_path, ["cat-file", "-p", &target]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -395,8 +395,8 @@ impl ContentAccess for GitContentAccess {
 }
 
 struct GitReader {
-    child: std::process::Child,
-    stdout: std::process::ChildStdout,
+    child: Child,
+    stdout: ChildStdout,
     /// Set once the process has been waited on at end of stream.
     finished: bool,
 }
@@ -405,7 +405,7 @@ impl Read for GitReader {
     /// At end of stream the process is reaped, and a failing status
     /// becomes an error carrying git's stderr, so a truncated read is
     /// never mistaken for a complete one.
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.stdout.read(buf)?;
         if n == 0 && !self.finished {
             self.finished = true;
@@ -413,9 +413,12 @@ impl Read for GitReader {
             if !status.success() {
                 let mut reason = String::new();
                 if let Some(stderr) = self.child.stderr.as_mut() {
+                    // Best-effort: the stderr snapshot may be truncated
+                    // or empty. The exit status in the error message
+                    // carries git's own reason on its own.
                     drop(stderr.read_to_string(&mut reason));
                 }
-                return Err(std::io::Error::other(format!(
+                return Err(io::Error::other(format!(
                     "git cat-file {status}: {}",
                     reason.trim()
                 )));

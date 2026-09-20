@@ -7,11 +7,13 @@
 //! `SessionStore`) borrow it.
 
 use std::cell::{Cell, RefCell};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::StoreError;
 use crate::admin::{STORE_VERSION, exists};
-use crate::git::{CatFile, CatFileCell, git_in, run};
+use crate::git::{CatFile, CatFileCell, git_cmd, git_in, run};
 use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
 
@@ -55,8 +57,8 @@ impl Drop for Store {
     }
 }
 
-impl std::fmt::Debug for Store {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Store {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Store")
             .field("path", &self.path)
             .field("version", &self.version)
@@ -121,17 +123,11 @@ fn read_object_format(path: &Path) -> Result<Option<String>, StoreError> {
     // repository git refuses to open it at all, and the answer here
     // has to be the format, not that refusal.
     let config = path.join("config");
-    let config = config.to_string_lossy();
-    match run(git_in(
-        path,
-        [
-            "config",
-            "--file",
-            &config,
-            "--get",
-            "extensions.objectFormat",
-        ],
-    )) {
+    let mut cmd: Command = git_cmd();
+    cmd.args(["config", "--file"])
+        .arg(&config)
+        .args(["--get", "extensions.objectFormat"]);
+    match run(cmd) {
         Ok(text) => Ok(Some(text.trim().to_string())),
         Err(StoreError::Git { status, .. }) if status.code() == Some(1) => Ok(None),
         Err(e) => Err(e),

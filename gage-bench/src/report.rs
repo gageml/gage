@@ -1,5 +1,7 @@
 //! Stdout tables, JSON output, and baseline comparison.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -30,21 +32,21 @@ pub struct Results {
 }
 
 impl Results {
-    pub fn write(&self, path: &Path) -> std::io::Result<()> {
-        let file = std::fs::File::create(path)?;
-        serde_json::to_writer_pretty(file, self).map_err(std::io::Error::other)
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        let file = fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, self).map_err(io::Error::other)
     }
 
-    pub fn read(path: &Path) -> std::io::Result<Results> {
-        let file = std::fs::File::open(path)?;
-        serde_json::from_reader(file).map_err(std::io::Error::other)
+    pub fn read(path: &Path) -> io::Result<Results> {
+        let file = fs::File::open(path)?;
+        serde_json::from_reader(file).map_err(io::Error::other)
     }
 
     /// Save under `gage-bench/results/<bench>/<stamp>.json` in the
     /// source tree and return the path.
-    pub fn save(&self) -> std::io::Result<PathBuf> {
+    pub fn save(&self) -> io::Result<PathBuf> {
         let dir = results_dir(&self.bench);
-        std::fs::create_dir_all(&dir)?;
+        fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", self.stamp));
         self.write(&path)?;
         Ok(path)
@@ -62,13 +64,13 @@ pub fn results_dir(bench: &str) -> PathBuf {
 
 /// The newest saved results file for `bench`, by file name, which is
 /// the run stamp.
-pub fn latest_results(bench: &str) -> std::io::Result<Option<PathBuf>> {
+pub fn latest_results(bench: &str) -> io::Result<Option<PathBuf>> {
     let dir = results_dir(bench);
     if !dir.is_dir() {
         return Ok(None);
     }
     let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
+    for entry in fs::read_dir(&dir)? {
         let path = entry?.path();
         if path.extension().is_some_and(|e| e == "json") {
             paths.push(path);
