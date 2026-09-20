@@ -247,7 +247,9 @@ impl Store {
         entries.insert("modified".to_string(), blob_entry(&stamp_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
 
-        let parents: Vec<&str> = content.link_parents.iter().map(String::as_str).collect();
+        let links = self.link_files_for_write(tree, &tree_sha)?;
+        let parents = link_parents(None, &links);
+        let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
         let commit_sha = commit_tree(path, &tree_sha, message, &parents)?;
         let object = Object {
             commit_sha: commit_sha.clone(),
@@ -263,7 +265,7 @@ impl Store {
             tree: tree.clone(),
             entries,
         };
-        self.record_write(&object, "")?;
+        self.record_write(&object, &links, "")?;
         Ok(commit_sha)
     }
 
@@ -299,8 +301,9 @@ impl Store {
         entries.insert("parent".to_string(), blob_entry(&parent_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
 
-        let mut parents: Vec<&str> = vec![&current.commit_sha];
-        parents.extend(content.link_parents.iter().map(String::as_str));
+        let links = self.link_files_for_write(tree, &tree_sha)?;
+        let parents = link_parents(Some(&current.commit_sha), &links);
+        let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
         let commit_sha = commit_tree(path, &tree_sha, message, &parents)?;
         let object = Object {
             commit_sha: commit_sha.clone(),
@@ -313,7 +316,7 @@ impl Store {
             tree: tree.clone(),
             entries,
         };
-        self.record_write(&object, &current.commit_sha)?;
+        self.record_write(&object, &links, &current.commit_sha)?;
         Ok(EditOutcome::Written(commit_sha))
     }
 
@@ -347,7 +350,7 @@ impl Store {
             tree: ObjectTree::default(),
             entries,
         };
-        self.record_write(&object, &current.commit_sha)?;
+        self.record_write(&object, &[], &current.commit_sha)?;
         Ok(commit_sha)
     }
 
@@ -475,6 +478,29 @@ impl Store {
             .parse()
             .map_err(|e| StoreError::Parse(format!("{name} at {commit}: {e}")))?;
         Ok(Some(ms))
+    }
+
+    /// Every link file a write carries, for its commit parents and its
+    /// index rows. The root links are in `tree`; a subtree that is not
+    /// `.d` is walked at `tree_sha`, the same walk a rebuild uses, so
+    /// the write and the rebuild agree.
+    fn link_files_for_write(
+        &self,
+        tree: &ObjectTree,
+        tree_sha: &str,
+    ) -> Result<Vec<LinkFile>, StoreError> {
+        if tree.subtrees.keys().all(|name| name.ends_with(".d")) {
+            Ok(tree
+                .links
+                .iter()
+                .map(|(path, shas)| LinkFile {
+                    path: path.clone(),
+                    shas: shas.clone(),
+                })
+                .collect())
+        } else {
+            self.find_link_files(tree_sha)
+        }
     }
 
     /// Walk the commit tree and return every `.link` file with its
@@ -627,34 +653,20 @@ impl Object {
             .cloned()
             .ok_or_else(|| StoreError::Parse(format!("missing {name} blob at {}", self.commit_sha)))
     }
-
-    /// Link files at the top level of the tree, as written.
-    pub(crate) fn top_level_links(&self) -> Vec<LinkFile> {
-        self.tree
-            .links
-            .iter()
-            .map(|(path, shas)| LinkFile {
-                path: path.clone(),
-                shas: shas.clone(),
-            })
-            .collect()
-    }
 }
 
 /// Content entries written for an [`ObjectTree`], with the SHAs that
-/// identify the content and the SHAs that become link parents.
+/// identify the content.
 struct WrittenContent {
     /// Content entries by name.
     entries: BTreeMap<String, TreeEntryRef>,
     /// Entry name to object SHA, for change detection.
     shas: BTreeMap<String, String>,
-    link_parents: Vec<String>,
 }
 
 fn write_content(path: &Path, tree: &ObjectTree) -> Result<WrittenContent, StoreError> {
     let mut entries = BTreeMap::new();
     let mut shas = BTreeMap::new();
-    let mut link_parents = Vec::new();
     if let Some(attrs) = &tree.attrs {
         let mut json = serde_json::to_string(attrs)
             .map_err(|e| StoreError::Parse(format!("attrs.json encode: {e}")))?;
@@ -673,7 +685,6 @@ fn write_content(path: &Path, tree: &ObjectTree) -> Result<WrittenContent, Store
         let sha = write_blob(path, content.as_bytes())?;
         entries.insert(name.clone(), blob_entry(&sha));
         shas.insert(name.clone(), sha);
-        link_parents.extend(link_shas.iter().cloned());
     }
     for (name, sha) in &tree.subtrees {
         entries.insert(
@@ -686,11 +697,25 @@ fn write_content(path: &Path, tree: &ObjectTree) -> Result<WrittenContent, Store
         );
         shas.insert(name.clone(), sha.clone());
     }
-    Ok(WrittenContent {
-        entries,
-        shas,
-        link_parents,
-    })
+    Ok(WrittenContent { entries, shas })
+}
+
+/// The commit parents for a write: the previous version first, then
+/// every SHA in every link file in file order. Every link SHA becomes a
+/// parent, which is what makes a link a link: the target stays
+/// reachable, and a fetch of this object carries it. Repeats are
+/// written once.
+fn link_parents(previous: Option<&str>, links: &[LinkFile]) -> Vec<String> {
+    let mut parents: Vec<String> = Vec::new();
+    for sha in previous
+        .into_iter()
+        .chain(links.iter().flat_map(|l| l.shas.iter().map(String::as_str)))
+    {
+        if !parents.iter().any(|p| p == sha) {
+            parents.push(sha.to_string());
+        }
+    }
+    parents
 }
 
 /// `mktree` input for `entries`.
@@ -867,6 +892,93 @@ mod tests {
             }
             other => panic!("expected a parse error, got {other:?}"),
         }
+    }
+
+    /// A `tasks/x/` subtree holding `agent_sessions.link` listing
+    /// `shas`, beside an opaque `logs.d` with a decoy `.link`.
+    fn nested_link_tree(store: &Store, shas: &[&str]) -> String {
+        let listing: String = shas.iter().map(|s| format!("{s}\n")).collect();
+        let link_blob = write_blob(store.path(), listing.as_bytes()).unwrap();
+        let decoy_blob = write_blob(store.path(), b"not a sha\n").unwrap();
+        let logs = mktree(
+            store.path(),
+            &[TreeInput {
+                mode: "100644",
+                sha: &decoy_blob,
+                name: "decoy.link",
+            }],
+        )
+        .unwrap();
+        let task = mktree(
+            store.path(),
+            &[
+                TreeInput {
+                    mode: "100644",
+                    sha: &link_blob,
+                    name: "agent_sessions.link",
+                },
+                TreeInput {
+                    mode: "040000",
+                    sha: &logs,
+                    name: "logs.d",
+                },
+            ],
+        )
+        .unwrap();
+        mktree(
+            store.path(),
+            &[TreeInput {
+                mode: "040000",
+                sha: &task,
+                name: "x",
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn nested_links_become_commit_parents_on_create_and_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let a = store.resolve_id(&note(&store, "a", &[])).unwrap().1;
+        let b = store.resolve_id(&note(&store, "b", &[])).unwrap().1;
+        // The nested link lists b and a; the root link lists a. Every
+        // SHA becomes a parent, and a is written once. Git sorts
+        // `tasks/` before `things.link`, so the nested SHAs come first.
+        let tasks = nested_link_tree(&store, &[&b, &a]);
+        let mut tree = ObjectTree::default();
+        tree.attrs = Some(json!({ "n": 1 }));
+        tree.links.insert("things.link".into(), vec![a.clone()]);
+        tree.subtrees.insert("tasks".to_string(), tasks);
+
+        let first = store
+            .create("gage::test", "1", "scan", &tree, "create")
+            .unwrap();
+        assert_eq!(commit_parents(&store, &first), vec![b.clone(), a.clone()]);
+        let classified = store.classify_parents(&first).unwrap();
+        assert!(classified.missing.is_empty(), "{classified:?}");
+        assert!(classified.unattributed.is_empty(), "{classified:?}");
+        assert!(
+            classified
+                .links
+                .iter()
+                .any(|l| l.link_file == "tasks/x/agent_sessions.link" && l.sha == b),
+            "{classified:?}"
+        );
+
+        let current = store.read_object(&first).unwrap();
+        let mut edited = tree.clone();
+        edited.attrs = Some(json!({ "n": 2 }));
+        let EditOutcome::Written(second) = store.edit(&current, &edited, "edit").unwrap() else {
+            panic!("edit should write");
+        };
+        assert_eq!(
+            commit_parents(&store, &second),
+            vec![first.clone(), b.clone(), a.clone()]
+        );
+        let classified = store.classify_parents(&second).unwrap();
+        assert!(classified.missing.is_empty(), "{classified:?}");
+        assert!(classified.unattributed.is_empty(), "{classified:?}");
     }
 
     #[test]

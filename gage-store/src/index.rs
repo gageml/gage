@@ -206,25 +206,21 @@ impl Store {
         Ok((object, links))
     }
 
-    /// Record a write the store just made: index the object, then
-    /// point its ref at it, inside one index transaction. The ref
-    /// moves last, so a failed index write leaves the ref where it was
-    /// and `Err` means the object is not published. `previous_tip` is
-    /// the ref value the update requires; empty means the ref must
-    /// not exist yet.
-    ///
-    /// Nothing is read back: link files live at the tree root (see
-    /// object-trees.md), and any nested `.link` file inside an opaque
-    /// `.d` subtree is producer content that Gage does not index.
+    /// Record a write the store just made: index the object with the
+    /// link files the writer found, then point its ref at it, inside
+    /// one index transaction. The ref moves last, so a failed index
+    /// write leaves the ref where it was and `Err` means the object is
+    /// not published. `previous_tip` is the ref value the update
+    /// requires; empty means the ref must not exist yet.
     pub(crate) fn record_write(
         &self,
         object: &Object,
+        links: &[LinkFile],
         previous_tip: &str,
     ) -> Result<(), StoreError> {
-        let links = object.top_level_links();
         let attrs = extract_attrs(object);
         self.in_index_transaction(|| {
-            self.index.put(object, &links, &attrs)?;
+            self.index.put(object, links, &attrs)?;
             self.index
                 .set_tip(&object.header.id, Some(&object.commit_sha))?;
             run(git_in(
@@ -250,11 +246,15 @@ impl Store {
 mod tests {
     use super::*;
     use crate::note::{NoteInput, NoteStore};
+    use crate::object::ObjectTree;
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
     use crate::test_support::{FsckGuard, fsck_guard, open_store};
+    use crate::writer::{TreeInput, mktree, write_blob};
     use crate::{DatasetStore, init};
     use serde_json::json;
+    use std::cell::RefCell;
     use std::path::Path;
+    use std::rc::Rc;
 
     fn init_repo(dir: &Path) -> (std::path::PathBuf, FsckGuard) {
         let path = dir.join("store.git");
@@ -349,6 +349,131 @@ mod tests {
         fn rollback(&self) -> Result<(), StoreError> {
             self.inner().rollback()
         }
+    }
+
+    /// Delegates to the real index and records the link files every
+    /// `put` receives.
+    struct CapturingPut {
+        inner: Option<Box<dyn ObjectIndex>>,
+        seen: Rc<RefCell<Vec<LinkFile>>>,
+    }
+
+    impl CapturingPut {
+        fn inner(&self) -> &dyn ObjectIndex {
+            self.inner
+                .as_deref()
+                .expect("wrapper is installed with an inner index")
+        }
+    }
+
+    impl ObjectIndex for CapturingPut {
+        fn tips(&self) -> Result<BTreeMap<String, String>, StoreError> {
+            self.inner().tips()
+        }
+        fn has_commit(&self, sha: &str) -> Result<bool, StoreError> {
+            self.inner().has_commit(sha)
+        }
+        fn put(
+            &self,
+            object: &Object,
+            links: &[LinkFile],
+            attrs: &[(&'static str, String)],
+        ) -> Result<(), StoreError> {
+            self.seen.borrow_mut().extend(links.iter().cloned());
+            self.inner().put(object, links, attrs)
+        }
+        fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError> {
+            self.inner().set_tip(id, tip)
+        }
+        fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
+            self.inner().select(query)
+        }
+        fn begin(&self) -> Result<(), StoreError> {
+            self.inner().begin()
+        }
+        fn commit(&self) -> Result<(), StoreError> {
+            self.inner().commit()
+        }
+        fn rollback(&self) -> Result<(), StoreError> {
+            self.inner().rollback()
+        }
+    }
+
+    #[test]
+    fn write_indexes_links_inside_schema_subtrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut store, _fsck) = open_store(tmp.path());
+        let target = note(&store, "target");
+        let target_sha = store.rev_parse(&object_ref(&target)).unwrap().unwrap();
+
+        // tasks/x/agent_sessions.link, a link file two levels down in a
+        // schema subtree, beside an opaque logs.d holding a decoy
+        let link_blob = write_blob(store.path(), format!("{target_sha}\n").as_bytes()).unwrap();
+        let decoy_blob = write_blob(store.path(), b"not a sha\n").unwrap();
+        let logs = mktree(
+            store.path(),
+            &[TreeInput {
+                mode: "100644",
+                sha: &decoy_blob,
+                name: "decoy.link",
+            }],
+        )
+        .unwrap();
+        let task = mktree(
+            store.path(),
+            &[
+                TreeInput {
+                    mode: "100644",
+                    sha: &link_blob,
+                    name: "agent_sessions.link",
+                },
+                TreeInput {
+                    mode: "040000",
+                    sha: &logs,
+                    name: "logs.d",
+                },
+            ],
+        )
+        .unwrap();
+        let tasks = mktree(
+            store.path(),
+            &[TreeInput {
+                mode: "040000",
+                sha: &task,
+                name: "x",
+            }],
+        )
+        .unwrap();
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let inner = std::mem::replace(
+            &mut store.index,
+            Box::new(CapturingPut {
+                inner: None,
+                seen: Rc::clone(&seen),
+            }),
+        );
+        store.index = Box::new(CapturingPut {
+            inner: Some(inner),
+            seen: Rc::clone(&seen),
+        });
+
+        let mut tree = ObjectTree::default();
+        tree.subtrees.insert("tasks".to_string(), tasks);
+        let commit = store
+            .create("gage::test", "1", "scan", &tree, "test")
+            .unwrap();
+
+        let expected = vec![LinkFile {
+            path: "tasks/x/agent_sessions.link".to_string(),
+            shas: vec![target_sha],
+        }];
+        assert_eq!(*seen.borrow(), expected, "links indexed on write");
+        assert_eq!(
+            store.find_link_files(&commit).unwrap(),
+            expected,
+            "links found on rebuild"
+        );
     }
 
     #[test]
