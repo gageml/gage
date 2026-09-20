@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use gage_core::uuid::new_uuid;
-use gage_session::{ContentAccess, NativeSession, SessionType};
+use gage_session::{ContentAccess, ContentFormat, NativeSession};
 
 use crate::git::{git_in, run};
 use crate::index::{ObjectQuery, Order};
@@ -56,8 +56,9 @@ pub struct SessionMeta {
     pub native_id: String,
     pub driver_name: String,
     pub driver_version: String,
-    pub session_type: SessionType,
-    pub content_format: Option<String>,
+    /// Harness family (`attrs.session_type`).
+    pub session_type: String,
+    pub content_format: ContentFormat,
 }
 
 /// Summary of one member session in a dataset, for list views.
@@ -66,7 +67,7 @@ pub struct DatasetSessionSummary {
     pub session_num: u32,
     /// Native session id.
     pub native_id: String,
-    /// Contents of the session's `attrs.session_type` (e.g. `"claude 1"`).
+    /// Harness family (`attrs.session_type`, e.g. `"claude"`).
     pub session_type: String,
     /// The driver's size of the session's own files, when reported.
     pub size: Option<u64>,
@@ -146,8 +147,8 @@ impl DatasetStore<'_> {
             native_id: record.attrs.native_id,
             driver_name: record.driver_name,
             driver_version: record.driver_version,
-            session_type: record.session_type,
-            content_format: record.attrs.content_format,
+            session_type: record.attrs.session_type,
+            content_format: record.content_format,
         })
     }
 
@@ -458,14 +459,14 @@ mod tests {
             &self.id
         }
 
-        fn session_type(&self) -> &SessionType {
-            static TYPE: std::sync::LazyLock<SessionType> =
-                std::sync::LazyLock::new(|| SessionType::new("fake", "1"));
-            &TYPE
+        fn session_type(&self) -> &str {
+            "fake"
         }
 
-        fn content_format(&self) -> Option<&str> {
-            None
+        fn content_format(&self) -> &ContentFormat {
+            static FORMAT: std::sync::LazyLock<ContentFormat> =
+                std::sync::LazyLock::new(|| ContentFormat::new("fake-lines", "1"));
+            &FORMAT
         }
 
         fn summary(&self) -> SessionSummary {
@@ -643,7 +644,7 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].native_id, "s1");
         assert_eq!(listed[1].native_id, "s2");
-        assert_eq!(listed[0].session_type, "fake 1");
+        assert_eq!(listed[0].session_type, "fake");
     }
 
     #[test]

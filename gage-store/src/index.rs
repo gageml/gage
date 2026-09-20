@@ -268,7 +268,7 @@ mod tests {
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
     use crate::test_support::{FsckGuard, fsck_guard, init_for_test, open_store};
     use crate::writer::{TreeInput, mktree, write_blob};
-    use gage_session::{DriverError, NativeSession, SessionFile, SessionSummary, SessionType};
+    use gage_session::{ContentFormat, DriverError, NativeSession, SessionFile, SessionSummary};
     use serde_json::json;
     use std::cell::RefCell;
     use std::path::Path;
@@ -532,14 +532,14 @@ mod tests {
             &self.id
         }
 
-        fn session_type(&self) -> &SessionType {
-            static TYPE: std::sync::LazyLock<SessionType> =
-                std::sync::LazyLock::new(|| SessionType::new("fake", "1"));
-            &TYPE
+        fn session_type(&self) -> &str {
+            "fake"
         }
 
-        fn content_format(&self) -> Option<&str> {
-            None
+        fn content_format(&self) -> &ContentFormat {
+            static FORMAT: std::sync::LazyLock<ContentFormat> =
+                std::sync::LazyLock::new(|| ContentFormat::new("fake-lines", "1"));
+            &FORMAT
         }
 
         fn summary(&self) -> SessionSummary {

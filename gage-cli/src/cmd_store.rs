@@ -463,15 +463,9 @@ fn dataset_session_list(datasets: &DatasetStore, args: DatasetSessionListArgs) {
     let rows: Vec<Vec<String>> = sessions
         .iter()
         .map(|s| {
-            let type_name = s
-                .session_type
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
             vec![
                 s.session_num.to_string(),
-                type_name,
+                s.session_type.clone(),
                 s.native_id.clone(),
                 s.size.map(|b| format_size(b as i64)).unwrap_or_default(),
             ]
@@ -523,12 +517,7 @@ fn dataset_session_show(datasets: &DatasetStore, args: DatasetSessionShowArgs) {
             std::process::exit(1);
         }
     };
-    let mut session = match driver.open(
-        meta.native_id,
-        meta.session_type,
-        meta.content_format,
-        access,
-    ) {
+    let mut session = match driver.open(meta.native_id, meta.content_format, access) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("gage store dataset session show: {e}");

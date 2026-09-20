@@ -3,7 +3,7 @@
 
 use std::io::{Cursor, Read};
 
-use gage_session::{DriverError, NativeSession, SessionFile, SessionSummary, SessionType};
+use gage_session::{ContentFormat, DriverError, NativeSession, SessionFile, SessionSummary};
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 
@@ -121,7 +121,7 @@ pub fn session_files(id: &str, content: &str) -> Vec<(String, Vec<u8>)> {
 pub struct SyntheticSession {
     id: String,
     files: Vec<(String, Vec<u8>)>,
-    session_type: SessionType,
+    content_format: ContentFormat,
 }
 
 impl SyntheticSession {
@@ -129,7 +129,7 @@ impl SyntheticSession {
         SyntheticSession {
             id: id.to_string(),
             files: session_files(id, content),
-            session_type: SessionType::new("bench", "1"),
+            content_format: ContentFormat::new("synth", "1"),
         }
     }
 }
@@ -139,12 +139,12 @@ impl NativeSession for SyntheticSession {
         &self.id
     }
 
-    fn session_type(&self) -> &SessionType {
-        &self.session_type
+    fn session_type(&self) -> &str {
+        "bench"
     }
 
-    fn content_format(&self) -> Option<&str> {
-        None
+    fn content_format(&self) -> &ContentFormat {
+        &self.content_format
     }
 
     fn summary(&self) -> SessionSummary {

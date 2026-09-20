@@ -10,8 +10,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 
 use gage_session::{
-    ContentAccess, Driver, DriverError, Entry, NativeSession, SessionFile, SessionSummary,
-    SessionType, StoreSession,
+    ContentAccess, ContentFormat, Driver, DriverError, Entry, NativeSession, SessionFile,
+    SessionSummary, StoreSession,
 };
 
 use crate::session::find_session;
@@ -19,7 +19,10 @@ use crate::session::find_session;
 const NAME: &str = "claude";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SESSION_TYPE: &str = "claude";
-const SESSION_TYPE_VERSION: &str = "1";
+/// Claude Code's project layout: `session.jsonl` plus the `subagents/`
+/// sidecar directory, one JSON object per line.
+const CONTENT_FORMAT: &str = "claude-jsonl";
+const CONTENT_FORMAT_VERSION: &str = "1";
 
 pub struct ClaudeDriver;
 
@@ -51,44 +54,39 @@ impl Driver for ClaudeDriver {
             .find(|info| info.id == id)
             .ok_or_else(|| DriverError::SessionNotFound(format!("{NAME}:{id}")))?;
         Ok(Box::new(ClaudeNativeSession {
-            session_id: hit.id,
-            session_type: SessionType::new(SESSION_TYPE, SESSION_TYPE_VERSION),
+            native_id: hit.id,
+            content_format: ContentFormat::new(CONTENT_FORMAT, CONTENT_FORMAT_VERSION),
             session_path: hit.src,
         }))
     }
 
     fn open(
         &self,
-        session_id: String,
-        session_type: SessionType,
-        _content_format: Option<String>,
+        native_id: String,
+        content_format: ContentFormat,
         access: Box<dyn ContentAccess>,
     ) -> Result<Box<dyn StoreSession>, DriverError> {
         Ok(Box::new(ClaudeStoreSession {
-            session_id,
-            session_type,
+            native_id,
+            content_format,
             access,
         }))
     }
 }
 
 struct ClaudeStoreSession {
-    session_id: String,
-    session_type: SessionType,
+    native_id: String,
+    content_format: ContentFormat,
     access: Box<dyn ContentAccess>,
 }
 
 impl StoreSession for ClaudeStoreSession {
-    fn session_id(&self) -> &str {
-        &self.session_id
+    fn native_id(&self) -> &str {
+        &self.native_id
     }
 
-    fn session_type(&self) -> &SessionType {
-        &self.session_type
-    }
-
-    fn content_format(&self) -> Option<&str> {
-        None
+    fn content_format(&self) -> &ContentFormat {
+        &self.content_format
     }
 
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_> {
@@ -107,8 +105,8 @@ impl StoreSession for ClaudeStoreSession {
 }
 
 struct ClaudeNativeSession {
-    session_id: String,
-    session_type: SessionType,
+    native_id: String,
+    content_format: ContentFormat,
     /// The primary transcript file, e.g.
     /// `~/.claude/projects/<slug>/<uuid>.jsonl`.
     session_path: PathBuf,
@@ -121,22 +119,22 @@ impl ClaudeNativeSession {
         self.session_path
             .parent()
             .expect("session path has a parent")
-            .join(&self.session_id)
+            .join(&self.native_id)
             .join("subagents")
     }
 }
 
 impl NativeSession for ClaudeNativeSession {
     fn native_id(&self) -> &str {
-        &self.session_id
+        &self.native_id
     }
 
-    fn session_type(&self) -> &SessionType {
-        &self.session_type
+    fn session_type(&self) -> &str {
+        SESSION_TYPE
     }
 
-    fn content_format(&self) -> Option<&str> {
-        None
+    fn content_format(&self) -> &ContentFormat {
+        &self.content_format
     }
 
     /// `size` is the transcript plus every subagent sidecar. Title,

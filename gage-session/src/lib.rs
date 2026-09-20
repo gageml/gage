@@ -3,12 +3,8 @@
 //! A driver enumerates and reads sessions from one source (Claude Code
 //! on disk, a future codex source, a database). It exposes a
 //! [`NativeSession`] whose `files` method streams the session's content
-//! into a dataset without materializing it in memory.
-//!
-//! `StoreSession` will be the read-side counterpart: a session already
-//! stored in a dataset presented back to a consumer. It is not defined
-//! here yet; it will land when the first consumer of stored sessions
-//! is written.
+//! into the store without materializing it in memory, and a
+//! [`StoreSession`] that presents a stored session back to a consumer.
 
 use std::fmt;
 use std::io::Read;
@@ -28,14 +24,13 @@ pub trait Driver: Send + Sync {
     fn resolve(&self, id: &str) -> Result<Box<dyn NativeSession>, DriverError>;
 
     /// Open a stored session for reading. `access` is scoped to the
-    /// session's `content/` subtree; `session_id`, `session_type`, and
-    /// `content_format` are the metadata files' contents that live
-    /// outside `content/`.
+    /// session's `files.d/` subtree. `content_format` is the format this
+    /// driver named when it added the session and selects how the files
+    /// are read.
     fn open(
         &self,
-        session_id: String,
-        session_type: SessionType,
-        content_format: Option<String>,
+        native_id: String,
+        content_format: ContentFormat,
         access: Box<dyn ContentAccess>,
     ) -> Result<Box<dyn StoreSession>, DriverError>;
 }
@@ -61,12 +56,14 @@ pub trait NativeSession {
     /// The id the harness gave the session, preserved verbatim.
     fn native_id(&self) -> &str;
 
-    /// The session type: name + version, dispatch key for parsers.
-    fn session_type(&self) -> &SessionType;
+    /// The harness family the session belongs to (`claude`, `opencode`,
+    /// `codex`). A category with no version; says nothing about the
+    /// bytes.
+    fn session_type(&self) -> &str;
 
-    /// Optional storage format hint for the session's `content/`
-    /// files. `None` when the session type is enough on its own.
-    fn content_format(&self) -> Option<&str>;
+    /// The driver-owned name and version of the byte layout `files`
+    /// yields. The driver reads the session back under this format.
+    fn content_format(&self) -> &ContentFormat;
 
     /// The driver's projection of the session, stored as
     /// `attrs.summary`. Nothing outside the driver can compute it.
@@ -78,10 +75,10 @@ pub trait NativeSession {
     fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_>;
 }
 
-/// Access to the files under a stored session's `content/` subtree.
+/// Access to the files under a stored session's `files.d/` subtree.
 /// Implementations back this with git blob reads.
 pub trait ContentAccess: Send + Sync {
-    /// Every path (relative to `content/`) that exists in the session,
+    /// Every path (relative to `files.d/`) that exists in the session,
     /// in an unspecified order. Forward-slash separated.
     fn paths(&self) -> std::io::Result<Vec<String>>;
 
@@ -93,9 +90,8 @@ pub trait ContentAccess: Send + Sync {
 /// normalized view over its native storage: `entries()` yields the
 /// event stream row-by-row.
 pub trait StoreSession {
-    fn session_id(&self) -> &str;
-    fn session_type(&self) -> &SessionType;
-    fn content_format(&self) -> Option<&str>;
+    fn native_id(&self) -> &str;
+    fn content_format(&self) -> &ContentFormat;
 
     /// Row iterator over the session's raw event stream, one row per
     /// source line. Called once.
@@ -122,14 +118,17 @@ pub struct SessionFile {
     pub content: Box<dyn Read + Send>,
 }
 
-/// The parser dispatch key and its version.
+/// The driver-owned name and version of a session's byte layout.
+/// Written as `"<name> <version>"` in `attrs.content_format`. Gage
+/// stores it and hands it back to the driver; it does not interpret
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionType {
+pub struct ContentFormat {
     pub name: String,
     pub version: String,
 }
 
-impl SessionType {
+impl ContentFormat {
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -138,7 +137,7 @@ impl SessionType {
     }
 }
 
-impl fmt::Display for SessionType {
+impl fmt::Display for ContentFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.name, self.version)
     }

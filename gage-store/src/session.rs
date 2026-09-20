@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use gage_core::uuid::derive_id;
-use gage_session::{NativeSession, SessionSummary, SessionType};
+use gage_session::{ContentFormat, NativeSession, SessionSummary};
 use serde::{Deserialize, Serialize};
 
 use crate::index::{ObjectQuery, Order};
@@ -50,10 +50,10 @@ pub struct SessionAttrs {
     pub driver: String,
     /// The id the harness gave the session, as the driver reported it.
     pub native_id: String,
-    /// `"<type name> <type version>"`, e.g. `"claude 1"`.
+    /// Harness family, e.g. `"claude"`. A category with no version.
     pub session_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_format: Option<String>,
+    /// `"<format name> <format version>"`, the driver's byte layout.
+    pub content_format: String,
     /// The driver's projection of the session, written at add time.
     /// Absent when the driver reported nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,7 +112,7 @@ pub struct SessionRecord {
     pub id: String,
     pub commit_sha: String,
     pub attrs: SessionAttrs,
-    pub session_type: SessionType,
+    pub content_format: ContentFormat,
     pub driver_name: String,
     pub driver_version: String,
     /// The driver's size of the session's own files, from
@@ -142,7 +142,7 @@ impl SessionStore<'_> {
             driver: format!("{driver_name} {driver_version}"),
             native_id,
             session_type: reader.session_type().to_string(),
-            content_format: reader.content_format().map(str::to_string),
+            content_format: reader.content_format().to_string(),
             summary: {
                 let summary = reader.summary();
                 (summary != SessionSummary::default()).then(|| SummaryAttrs::from(summary))
@@ -272,16 +272,16 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
         Some((n, v)) => (n.to_string(), v.to_string()),
         None => (attrs.driver.clone(), String::new()),
     };
-    let session_type = match attrs.session_type.split_once(' ') {
-        Some((n, v)) => SessionType::new(n.to_string(), v.to_string()),
-        None => SessionType::new(attrs.session_type.clone(), String::new()),
+    let content_format = match attrs.content_format.split_once(' ') {
+        Some((n, v)) => ContentFormat::new(n.to_string(), v.to_string()),
+        None => ContentFormat::new(attrs.content_format.clone(), String::new()),
     };
     let size = attrs.summary.as_ref().and_then(|s| s.size);
     Ok(SessionRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
         attrs,
-        session_type,
+        content_format,
         driver_name,
         driver_version,
         size,
@@ -416,7 +416,7 @@ mod tests {
     struct FakeSession {
         id: String,
         files: Vec<(String, Vec<u8>)>,
-        session_type: SessionType,
+        content_format: ContentFormat,
     }
 
     impl NativeSession for FakeSession {
@@ -424,12 +424,12 @@ mod tests {
             &self.id
         }
 
-        fn session_type(&self) -> &SessionType {
-            &self.session_type
+        fn session_type(&self) -> &str {
+            "fake"
         }
 
-        fn content_format(&self) -> Option<&str> {
-            None
+        fn content_format(&self) -> &ContentFormat {
+            &self.content_format
         }
 
         fn summary(&self) -> SessionSummary {
@@ -456,7 +456,7 @@ mod tests {
                 .iter()
                 .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
                 .collect(),
-            session_type: SessionType::new("fake", "1"),
+            content_format: ContentFormat::new("fake-lines", "1"),
         }
     }
 
@@ -487,7 +487,7 @@ mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"session_type\":\"fake 1\",\"summary\":{\"size\":4}}\n"
+            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"session_type\":\"fake\",\"summary\":{\"size\":4}}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
@@ -495,7 +495,8 @@ mod tests {
         assert_eq!(record.id, outcome.id);
         assert_eq!(record.driver_name, "fake");
         assert_eq!(record.driver_version, "0.1");
-        assert_eq!(record.session_type, SessionType::new("fake", "1"));
+        assert_eq!(record.attrs.session_type, "fake");
+        assert_eq!(record.content_format, ContentFormat::new("fake-lines", "1"));
         assert_eq!(record.attrs.native_id, "s1");
         assert_eq!(record.size, Some(4));
     }
