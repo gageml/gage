@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use gage_core::uuid::new_uuid;
-use gage_session::{ContentAccess, ContentFormat, NativeSession};
+use gage_session::{ContentSource, Driver, NativeSession};
 
 use crate::git::{git_in, run};
 use crate::index::{ObjectQuery, Order};
@@ -58,7 +58,9 @@ pub struct SessionMeta {
     pub driver_version: String,
     /// Harness family (`attrs.session_type`).
     pub session_type: String,
-    pub content_format: ContentFormat,
+    /// Driver-owned byte-layout string as returned by
+    /// [`Driver::write_native`].
+    pub content_format: String,
 }
 
 /// Summary of one member session in a dataset, for list views.
@@ -83,12 +85,12 @@ pub struct DatasetSessionAddOutcome {
     pub outcome: SessionOutcome,
 }
 
-/// One session to add to a dataset. Held for the duration of the call;
-/// the caller owns the reader box.
+/// One session to add to a dataset. The driver drives the serialization
+/// via [`Driver::write_native`]; `session` supplies the native id,
+/// type, and attributes.
 pub struct SessionSpec<'a> {
-    pub driver_name: &'a str,
-    pub driver_version: &'a str,
-    pub reader: &'a mut dyn NativeSession,
+    pub driver: &'a dyn Driver,
+    pub session: &'a mut dyn NativeSession,
 }
 
 impl DatasetStore<'_> {
@@ -148,7 +150,7 @@ impl DatasetStore<'_> {
             driver_name: record.driver_name,
             driver_version: record.driver_version,
             session_type: record.attrs.session_type,
-            content_format: record.content_format,
+            content_format: record.attrs.content_format,
         })
     }
 
@@ -173,13 +175,13 @@ impl DatasetStore<'_> {
         Err(StoreError::SessionNotFound(session_ref.to_string()))
     }
 
-    /// Build a [`ContentAccess`] backed by git for the session at
+    /// Build a [`ContentSource`] backed by git for the session at
     /// position `session_num` in the given dataset.
     pub fn session_content(
         &self,
         dataset_id: &str,
         session_num: u32,
-    ) -> Result<Box<dyn ContentAccess>, StoreError> {
+    ) -> Result<Box<dyn ContentSource>, StoreError> {
         let members = members(&self.current(dataset_id)?);
         if session_num == 0 || (session_num as usize) > members.len() {
             return Err(StoreError::SessionNotFound(session_num.to_string()));
@@ -188,7 +190,7 @@ impl DatasetStore<'_> {
             .get((session_num - 1) as usize)
             .expect("bounds checked above")
             .clone();
-        Ok(Box::new(GitContentAccess {
+        Ok(Box::new(GitContentSource {
             store_path: self.store.path().to_path_buf(),
             session_commit,
         }))
@@ -245,7 +247,7 @@ impl DatasetStore<'_> {
                 id,
                 commit_sha,
                 outcome,
-            } = sessions.add(spec.driver_name, spec.driver_version, spec.reader)?;
+            } = sessions.add(spec.driver, spec.session)?;
             let session_num = match member_ids.iter().position(|m| m == &id) {
                 Some(idx) => {
                     *members
@@ -350,12 +352,12 @@ fn join_nums(nums: &[u32]) -> String {
         .join(", ")
 }
 
-struct GitContentAccess {
+struct GitContentSource {
     store_path: PathBuf,
     session_commit: String,
 }
 
-impl ContentAccess for GitContentAccess {
+impl ContentSource for GitContentSource {
     fn paths(&self) -> io::Result<Vec<String>> {
         // `-z` prints names raw with NUL separators. Without it git
         // C-quotes any name with a byte >= 0x80, a tab, a backslash, a
@@ -446,12 +448,27 @@ mod tests {
     use crate::object::object_ref;
     use crate::test_support::open_store;
     use crate::{NoteInput, NoteStore};
-    use gage_session::{DriverError, SessionFile, SessionSummary};
-    use std::io::Cursor;
+    use gage_session::{
+        ContentSink, DriverError, NativeLookupError, NativeSessions, Project, ProjectSpec,
+        SessionAttrs, SourceUrl, StoredSession,
+    };
+    use std::any::Any;
+    use std::io::{Cursor, Write as _};
 
     struct FakeSession {
         id: String,
         files: Vec<(String, String)>,
+        attrs: FakeAttrs,
+    }
+
+    struct FakeAttrs {
+        size: u64,
+    }
+
+    impl SessionAttrs for FakeAttrs {
+        fn size(&self) -> Option<u64> {
+            Some(self.size)
+        }
     }
 
     impl NativeSession for FakeSession {
@@ -463,26 +480,73 @@ mod tests {
             "fake"
         }
 
-        fn content_format(&self) -> &ContentFormat {
-            static FORMAT: std::sync::LazyLock<ContentFormat> =
-                std::sync::LazyLock::new(|| ContentFormat::new("fake-lines", "1"));
-            &FORMAT
+        fn attrs(&self) -> &dyn SessionAttrs {
+            &self.attrs
         }
 
-        fn summary(&self) -> SessionSummary {
-            SessionSummary {
-                size: Some(self.files.iter().map(|(_, c)| c.len() as u64).sum()),
-                ..SessionSummary::default()
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct FakeDriver;
+
+    impl Driver for FakeDriver {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn version(&self) -> &'static str {
+            "0.1"
+        }
+        fn sessions<'a>(
+            &'a self,
+            _source: &'a SourceUrl,
+        ) -> Result<NativeSessions<'a>, DriverError> {
+            Ok(Box::new(std::iter::empty()))
+        }
+        fn find_native(
+            &self,
+            _source: &SourceUrl,
+            _prefix: &str,
+        ) -> Result<String, NativeLookupError> {
+            Err(NativeLookupError::NoMatch(String::new()))
+        }
+        fn open_native(
+            &self,
+            _source: &SourceUrl,
+            _native_id: &str,
+        ) -> Result<Box<dyn NativeSession>, DriverError> {
+            Err(DriverError::Other("open_native not used".into()))
+        }
+        fn project(
+            &self,
+            _source: &SourceUrl,
+            _spec: ProjectSpec,
+        ) -> Result<Option<Box<dyn Project>>, DriverError> {
+            Ok(None)
+        }
+        fn write_native(
+            &self,
+            session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            let fake = session
+                .as_any()
+                .downcast_ref::<FakeSession>()
+                .ok_or_else(|| DriverError::Other("not a FakeSession".into()))?;
+            for (path, content) in &fake.files {
+                let mut w = sink.create(path).map_err(DriverError::Io)?;
+                w.write_all(content.as_bytes()).map_err(DriverError::Io)?;
             }
+            Ok("fake-lines 1".to_string())
         }
-
-        fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
-            Box::new(self.files.iter().map(|(path, content)| {
-                Ok(SessionFile {
-                    path: path.clone(),
-                    content: Box::new(Cursor::new(content.clone().into_bytes())),
-                })
-            }))
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used".into()))
         }
     }
 
@@ -491,12 +555,15 @@ mod tests {
     }
 
     fn fake_files(id: &str, files: &[(&str, &str)]) -> FakeSession {
+        let entries: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect();
+        let size = entries.iter().map(|(_, c)| c.len() as u64).sum();
         FakeSession {
             id: id.to_string(),
-            files: files
-                .iter()
-                .map(|(p, c)| (p.to_string(), c.to_string()))
-                .collect(),
+            files: entries,
+            attrs: FakeAttrs { size },
         }
     }
 
@@ -505,18 +572,25 @@ mod tests {
         dataset: &str,
         sessions: &mut [FakeSession],
     ) -> Vec<DatasetSessionAddOutcome> {
+        let driver = FakeDriver;
         let specs = sessions
             .iter_mut()
             .map(|s| SessionSpec {
-                driver_name: "fake",
-                driver_version: "0.1",
-                reader: s,
+                driver: &driver,
+                session: s,
             })
             .collect();
         DatasetStore::from(store)
             .sessions_add(dataset, specs)
             .unwrap()
     }
+
+    // Silence unused-import warning; Cursor is used in the store's own
+    // tests, not here.
+    #[allow(dead_code)]
+    const _: fn() = || {
+        let _ = Cursor::new(Vec::<u8>::new());
+    };
 
     fn rev_parse(store: &Store, id: &str) -> String {
         store.rev_parse(&object_ref(id)).unwrap().unwrap()

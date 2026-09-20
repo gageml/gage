@@ -1,163 +1,219 @@
 //! Session driver interface.
 //!
 //! A driver enumerates and reads sessions from one source (Claude Code
-//! on disk, a future codex source, a database). It exposes a
-//! [`NativeSession`] whose `files` method streams the session's content
-//! into the store without materializing it in memory, and a
-//! [`StoreSession`] that presents a stored session back to a consumer.
+//! on disk, a future OpenCode source, a database). It writes a native
+//! session's bytes into the store through a [`ContentSink`] and reads
+//! a stored session back through a [`ContentSource`].
 
+use std::borrow::Cow;
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-/// A driver reads sessions from a source keyed by a URL scheme and
-/// opens sessions already stored in a dataset.
 pub trait Driver: Send + Sync {
-    /// The URL scheme this driver responds to, e.g. `"claude"`.
     fn name(&self) -> &'static str;
-
-    /// The driver's own version, e.g. `"0.2.0"`. Recorded as
-    /// `"{name} {version}"` in a dataset's session `driver` file.
     fn version(&self) -> &'static str;
 
-    /// Resolve `id` (the part after `<name>:` in a spec) into a
-    /// [`NativeSession`].
-    fn resolve(&self, id: &str) -> Result<Box<dyn NativeSession>, DriverError>;
+    fn sessions<'a>(&'a self, source: &'a SourceUrl) -> Result<NativeSessions<'a>, DriverError>;
 
-    /// Open a stored session for reading. `access` is scoped to the
-    /// session's `files.d/` subtree. `content_format` is the format this
-    /// driver named when it added the session and selects how the files
-    /// are read.
-    fn open(
+    fn find_native(&self, source: &SourceUrl, prefix: &str) -> Result<String, NativeLookupError>;
+
+    fn open_native(
+        &self,
+        source: &SourceUrl,
+        native_id: &str,
+    ) -> Result<Box<dyn NativeSession>, DriverError>;
+
+    fn project(
+        &self,
+        source: &SourceUrl,
+        spec: ProjectSpec,
+    ) -> Result<Option<Box<dyn Project>>, DriverError>;
+
+    /// Serialize `session` into the store through `sink`. The returned
+    /// string is the `content_format` value the store persists on the
+    /// session object; it is opaque to the store and is handed back to
+    /// [`Driver::read_stored`] verbatim when the session is read.
+    fn write_native(
+        &self,
+        session: &mut dyn NativeSession,
+        sink: &mut dyn ContentSink,
+    ) -> Result<String, DriverError>;
+
+    /// Present a stored session for reading.
+    fn read_stored(
         &self,
         native_id: String,
-        content_format: ContentFormat,
-        access: Box<dyn ContentAccess>,
-    ) -> Result<Box<dyn StoreSession>, DriverError>;
+        content_format: &str,
+        source: Box<dyn ContentSource>,
+    ) -> Result<Box<dyn StoredSession>, DriverError>;
 }
 
-/// Facts about a native session that only its driver can know: what
-/// the session is called, which model produced it, how many messages
-/// it holds, and how large its own files are. The store writes them
-/// into the session object as `attrs.summary` at add time so that
-/// listings never parse content. Every field is optional; a driver
-/// reports what it can.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionSummary {
-    pub title: Option<String>,
-    pub model: Option<String>,
-    pub message_count: Option<u64>,
-    /// Bytes of the session's own files, as the driver measures them.
-    pub size: Option<u64>,
-}
+/// Iterator returned by [`Driver::sessions`]. One yield per native
+/// session; per-yield errors surface driver-side read failures without
+/// aborting the walk.
+pub type NativeSessions<'a> =
+    Box<dyn Iterator<Item = Result<Box<dyn NativeSession>, DriverError>> + 'a>;
 
-/// A native session as its harness wrote it, ready to be written into
-/// the store.
 pub trait NativeSession {
-    /// The id the harness gave the session, preserved verbatim.
     fn native_id(&self) -> &str;
-
-    /// The harness family the session belongs to (`claude`, `opencode`,
-    /// `codex`). A category with no version; says nothing about the
-    /// bytes.
     fn session_type(&self) -> &str;
-
-    /// The driver-owned name and version of the byte layout `files`
-    /// yields. The driver reads the session back under this format.
-    fn content_format(&self) -> &ContentFormat;
-
-    /// The driver's projection of the session, stored as
-    /// `attrs.summary`. Nothing outside the driver can compute it.
-    fn summary(&self) -> SessionSummary;
-
-    /// Stream the session's content files. Called once. Each yielded
-    /// [`SessionFile`] carries a relative path (under `content/`) and
-    /// a stream of bytes. Order is not significant; the writer sorts.
-    fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_>;
+    fn attrs(&self) -> &dyn SessionAttrs;
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
-/// Access to the files under a stored session's `files.d/` subtree.
-/// Implementations back this with git blob reads.
-pub trait ContentAccess: Send + Sync {
-    /// Every path (relative to `files.d/`) that exists in the session,
-    /// in an unspecified order. Forward-slash separated.
-    fn paths(&self) -> std::io::Result<Vec<String>>;
+pub trait StoredSession {
+    fn native_id(&self) -> &str;
+    fn content_format(&self) -> &str;
+    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Box<dyn Entry>, DriverError>> + '_>;
+}
 
-    /// Open one path for streaming reads.
+/// Attribute reader for a session. Every method defaults to `None`;
+/// a driver overrides only the attributes it can answer.
+pub trait SessionAttrs {
+    fn mtime(&self) -> Option<SystemTime> {
+        None
+    }
+    fn size(&self) -> Option<u64> {
+        None
+    }
+    fn is_empty(&self) -> Option<bool> {
+        None
+    }
+    fn project_name(&self) -> Option<&str> {
+        None
+    }
+    fn project_path(&self) -> Option<&Path> {
+        None
+    }
+    fn title(&self) -> Option<&str> {
+        None
+    }
+    fn model(&self) -> Option<&str> {
+        None
+    }
+    fn message_count(&self) -> Option<u64> {
+        None
+    }
+}
+
+pub enum ProjectSpec {
+    Path(PathBuf),
+    Name(String),
+}
+
+pub trait Project {
+    fn name(&self) -> &str;
+    fn path(&self) -> Option<&Path>;
+    fn is_for(&self, session: &dyn NativeSession) -> bool;
+}
+
+pub trait Entry {
+    fn line(&self) -> u32;
+    fn uuid(&self) -> Option<&str>;
+    fn timestamp(&self) -> Option<SystemTime>;
+    fn raw(&self) -> Cow<'_, str>;
+    fn type_(&self) -> &str;
+    fn subtype(&self) -> Option<&str>;
+    fn to_message(&self) -> Option<&dyn Message>;
+}
+
+pub trait Message {
+    fn line(&self) -> u32;
+    fn uuid(&self) -> Option<&str>;
+    fn type_(&self) -> &str;
+    fn subtype(&self) -> Option<&str>;
+    fn text(&self) -> Cow<'_, str>;
+    fn timestamp(&self) -> Option<SystemTime>;
+    fn attachments(&self) -> Option<Cow<'_, str>>;
+    fn ide_tags(&self) -> Option<Cow<'_, str>>;
+    fn raw(&self) -> Cow<'_, str>;
+}
+
+/// A read-only view of the byte tree a stored session carries.
+pub trait ContentSource: Send + Sync {
+    fn paths(&self) -> std::io::Result<Vec<String>>;
     fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>>;
 }
 
-/// A stored session presented for reading. The driver produces one
-/// normalized view over its native storage: `entries()` yields the
-/// event stream row-by-row.
-pub trait StoreSession {
-    fn native_id(&self) -> &str;
-    fn content_format(&self) -> &ContentFormat;
-
-    /// Row iterator over the session's raw event stream, one row per
-    /// source line. Called once.
-    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_>;
+/// A write-only sink for the byte tree a native session serializes
+/// into. `create` returns a writer bound to the sink; only one writer
+/// is open at a time.
+pub trait ContentSink {
+    fn create<'a>(&'a mut self, path: &str) -> std::io::Result<Box<dyn Write + 'a>>;
 }
 
-/// One row of the entry table's raw view. Minimal for now; more
-/// columns (uuid, type, subtype, timestamp) are added as consumers
-/// need them.
+/// A parsed `scheme:body` source URL. Fragment and query are not
+/// modeled; drivers that need them add them separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry {
-    /// 1-based line number in the source content file.
-    pub line: u32,
-    /// The source line's bytes as a UTF-8 string.
-    pub raw: String,
+pub struct SourceUrl {
+    scheme: String,
+    body: String,
 }
 
-/// One file in a session, streamed.
-pub struct SessionFile {
-    /// Path relative to `content/`, forward-slash separated. May contain
-    /// sub-directories.
-    pub path: String,
-    /// The file's bytes, streamed on demand.
-    pub content: Box<dyn Read + Send>,
-}
-
-/// The driver-owned name and version of a session's byte layout.
-/// Written as `"<name> <version>"` in `attrs.content_format`. Gage
-/// stores it and hands it back to the driver; it does not interpret
-/// it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentFormat {
-    pub name: String,
-    pub version: String,
-}
-
-impl ContentFormat {
-    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+impl SourceUrl {
+    pub fn new(scheme: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
-            version: version.into(),
+            scheme: scheme.into(),
+            body: body.into(),
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, SourceUrlError> {
+        let (scheme, body) = s
+            .split_once(':')
+            .ok_or_else(|| SourceUrlError::NoScheme(s.to_string()))?;
+        if scheme.is_empty() {
+            return Err(SourceUrlError::EmptyScheme(s.to_string()));
+        }
+        Ok(Self {
+            scheme: scheme.to_string(),
+            body: body.to_string(),
+        })
+    }
+
+    pub fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+impl fmt::Display for SourceUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.scheme, self.body)
+    }
+}
+
+#[derive(Debug)]
+pub enum SourceUrlError {
+    NoScheme(String),
+    EmptyScheme(String),
+}
+
+impl fmt::Display for SourceUrlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SourceUrlError::NoScheme(s) => write!(f, "missing scheme in source URL: {s}"),
+            SourceUrlError::EmptyScheme(s) => write!(f, "empty scheme in source URL: {s}"),
         }
     }
 }
 
-impl fmt::Display for ContentFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.name, self.version)
-    }
-}
+impl std::error::Error for SourceUrlError {}
 
-/// Failures returned by a driver.
 #[derive(Debug)]
 pub enum DriverError {
-    /// No session matched the given id at this source.
-    SessionNotFound(String),
-    /// An I/O error reading the source.
     Io(std::io::Error),
-    /// Anything else the driver wants to surface.
     Other(String),
 }
 
 impl fmt::Display for DriverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DriverError::SessionNotFound(id) => write!(f, "session not found: {id}"),
             DriverError::Io(e) => write!(f, "io: {e}"),
             DriverError::Other(m) => write!(f, "{m}"),
         }
@@ -176,5 +232,80 @@ impl std::error::Error for DriverError {
 impl From<std::io::Error> for DriverError {
     fn from(e: std::io::Error) -> Self {
         DriverError::Io(e)
+    }
+}
+
+#[derive(Debug)]
+pub enum NativeLookupError {
+    NoMatch(String),
+    TooManyMatches {
+        prefix: String,
+        candidates: Vec<String>,
+    },
+    Driver(DriverError),
+}
+
+impl fmt::Display for NativeLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NativeLookupError::NoMatch(s) => write!(f, "no native session matches {s}"),
+            NativeLookupError::TooManyMatches { prefix, candidates } => {
+                write!(f, "more than one native session matches {prefix}")?;
+                for c in candidates {
+                    write!(f, "\n  {c}")?;
+                }
+                Ok(())
+            }
+            NativeLookupError::Driver(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for NativeLookupError {}
+
+impl From<DriverError> for NativeLookupError {
+    fn from(e: DriverError) -> Self {
+        NativeLookupError::Driver(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_url_parses_scheme_and_body() {
+        let u = SourceUrl::parse("claude:/tmp/foo").unwrap();
+        assert_eq!(u.scheme(), "claude");
+        assert_eq!(u.body(), "/tmp/foo");
+    }
+
+    #[test]
+    fn source_url_parses_empty_body() {
+        let u = SourceUrl::parse("claude:").unwrap();
+        assert_eq!(u.scheme(), "claude");
+        assert_eq!(u.body(), "");
+    }
+
+    #[test]
+    fn source_url_missing_scheme_rejected() {
+        assert!(matches!(
+            SourceUrl::parse("no-colon-here"),
+            Err(SourceUrlError::NoScheme(_)),
+        ));
+    }
+
+    #[test]
+    fn source_url_empty_scheme_rejected() {
+        assert!(matches!(
+            SourceUrl::parse(":body"),
+            Err(SourceUrlError::EmptyScheme(_)),
+        ));
+    }
+
+    #[test]
+    fn source_url_display_roundtrips() {
+        let u = SourceUrl::new("claude", "/tmp/foo");
+        assert_eq!(u.to_string(), "claude:/tmp/foo");
     }
 }

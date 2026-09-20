@@ -498,9 +498,9 @@ fn dataset_session_show(datasets: &DatasetStore, args: DatasetSessionShowArgs) {
             std::process::exit(1);
         }
     };
-    let mut registry = gage_registry::driver::DriverRegistry::new();
-    registry.register(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
-    let driver = match registry.get(&meta.driver_name) {
+    let registry = gage_registry::driver::DriverRegistry::new()
+        .add(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
+    let driver = match registry.for_scheme(&meta.driver_name) {
         Some(d) => d,
         None => {
             eprintln!(
@@ -510,14 +510,14 @@ fn dataset_session_show(datasets: &DatasetStore, args: DatasetSessionShowArgs) {
             std::process::exit(1);
         }
     };
-    let access = match datasets.session_content(&dataset_id, meta.session_num) {
+    let source = match datasets.session_content(&dataset_id, meta.session_num) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("gage store dataset session show: {e}");
             std::process::exit(1);
         }
     };
-    let mut session = match driver.open(meta.native_id, meta.content_format, access) {
+    let mut session = match driver.read_stored(meta.native_id, &meta.content_format, source) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("gage store dataset session show: {e}");
@@ -526,7 +526,7 @@ fn dataset_session_show(datasets: &DatasetStore, args: DatasetSessionShowArgs) {
     };
     for entry in session.entries() {
         match entry {
-            Ok(e) => println!("{}", e.raw),
+            Ok(e) => println!("{}", e.raw()),
             Err(e) => {
                 eprintln!("gage store dataset session show: {e}");
                 std::process::exit(1);
@@ -544,14 +544,13 @@ fn dataset_session_add(datasets: &DatasetStore, args: DatasetSessionAddArgs) {
         }
     };
 
-    let mut registry = gage_registry::driver::DriverRegistry::new();
-    registry.register(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
+    let registry = gage_registry::driver::DriverRegistry::new()
+        .add(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
 
     // Resolve every spec into a reader before touching the store, so any
     // driver failure short-circuits without a partial write.
     struct Resolved {
-        driver_name: &'static str,
-        driver_version: &'static str,
+        driver: std::sync::Arc<dyn gage_session::Driver>,
         reader: Box<dyn gage_session::NativeSession>,
     }
     let mut resolved: Vec<Resolved> = Vec::with_capacity(args.spec.len());
@@ -565,36 +564,29 @@ fn dataset_session_add(datasets: &DatasetStore, args: DatasetSessionAddArgs) {
                 std::process::exit(1);
             }
         };
-        let driver = match registry.get(scheme) {
+        let driver = match registry.for_scheme(scheme) {
             Some(d) => d,
             None => {
-                let known = registry.schemes().join(", ");
-                eprintln!(
-                    "gage store dataset session add: unknown driver {scheme:?} (known: {known})"
-                );
+                eprintln!("gage store dataset session add: unknown driver {scheme:?}");
                 std::process::exit(1);
             }
         };
-        let reader = match driver.resolve(id) {
+        let source = gage_session::SourceUrl::new(driver.name(), "");
+        let reader = match driver.open_native(&source, id) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("gage store dataset session add: {spec}: {e}");
                 std::process::exit(1);
             }
         };
-        resolved.push(Resolved {
-            driver_name: driver.name(),
-            driver_version: driver.version(),
-            reader,
-        });
+        resolved.push(Resolved { driver, reader });
     }
 
     let specs: Vec<SessionSpec<'_>> = resolved
         .iter_mut()
         .map(|r| SessionSpec {
-            driver_name: r.driver_name,
-            driver_version: r.driver_version,
-            reader: r.reader.as_mut(),
+            driver: r.driver.as_ref(),
+            session: r.reader.as_mut(),
         })
         .collect();
 

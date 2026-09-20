@@ -1,7 +1,7 @@
 //! Registry of session drivers keyed by URL scheme.
 //!
 //! Constructed and populated explicitly at process startup by the
-//! facility that needs it (the CLI, the MCP server, …). No lazy
+//! facility that needs it (the CLI, the MCP server, ...). No lazy
 //! module-level init.
 
 use std::collections::HashMap;
@@ -9,30 +9,47 @@ use std::sync::Arc;
 
 use gage_session::Driver;
 
-/// Registered drivers keyed by their URL scheme name.
-#[derive(Default)]
 pub struct DriverRegistry {
-    drivers: HashMap<&'static str, Arc<dyn Driver>>,
+    default: Option<Arc<dyn Driver>>,
+    by_scheme: HashMap<&'static str, Arc<dyn Driver>>,
 }
 
 impl DriverRegistry {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            default: None,
+            by_scheme: HashMap::new(),
+        }
     }
 
-    /// Register `driver`. Returns the previous entry if the scheme was
-    /// already registered.
-    pub fn register(&mut self, driver: Arc<dyn Driver>) -> Option<Arc<dyn Driver>> {
-        self.drivers.insert(driver.name(), driver)
+    /// Register `driver` under its scheme and mark it as the default
+    /// used when no `--source` is given. Panics if a default is
+    /// already set.
+    pub fn add_default(mut self, driver: Arc<dyn Driver>) -> Self {
+        assert!(self.default.is_none(), "default driver already set");
+        self.by_scheme.insert(driver.name(), driver.clone());
+        self.default = Some(driver);
+        self
     }
 
-    /// Look up a driver by scheme name.
-    pub fn get(&self, scheme: &str) -> Option<Arc<dyn Driver>> {
-        self.drivers.get(scheme).cloned()
+    /// Register `driver` under its scheme.
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, driver: Arc<dyn Driver>) -> Self {
+        self.by_scheme.insert(driver.name(), driver);
+        self
     }
 
-    /// Every registered scheme name, in registration-independent order.
-    pub fn schemes(&self) -> Vec<&'static str> {
-        self.drivers.keys().copied().collect()
+    pub fn for_scheme(&self, scheme: &str) -> Option<Arc<dyn Driver>> {
+        self.by_scheme.get(scheme).cloned()
+    }
+
+    pub fn default(&self) -> Option<Arc<dyn Driver>> {
+        self.default.clone()
+    }
+}
+
+impl Default for DriverRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }

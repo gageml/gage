@@ -268,9 +268,14 @@ mod tests {
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
     use crate::test_support::{FsckGuard, fsck_guard, init_for_test, open_store};
     use crate::writer::{TreeInput, mktree, write_blob};
-    use gage_session::{ContentFormat, DriverError, NativeSession, SessionFile, SessionSummary};
+    use gage_session::{
+        ContentSink, ContentSource, Driver, DriverError, NativeLookupError, NativeSession,
+        NativeSessions, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
+    };
     use serde_json::json;
+    use std::any::Any;
     use std::cell::RefCell;
+    use std::io::Write as _;
     use std::path::Path;
     use std::rc::Rc;
 
@@ -525,6 +530,15 @@ mod tests {
     /// A session with one file under the opaque `files.d` subtree.
     struct FakeSession {
         id: String,
+        attrs: FakeAttrs,
+    }
+
+    struct FakeAttrs;
+
+    impl SessionAttrs for FakeAttrs {
+        fn size(&self) -> Option<u64> {
+            Some(2)
+        }
     }
 
     impl NativeSession for FakeSession {
@@ -536,24 +550,67 @@ mod tests {
             "fake"
         }
 
-        fn content_format(&self) -> &ContentFormat {
-            static FORMAT: std::sync::LazyLock<ContentFormat> =
-                std::sync::LazyLock::new(|| ContentFormat::new("fake-lines", "1"));
-            &FORMAT
+        fn attrs(&self) -> &dyn SessionAttrs {
+            &self.attrs
         }
 
-        fn summary(&self) -> SessionSummary {
-            SessionSummary {
-                size: Some(2),
-                ..SessionSummary::default()
-            }
+        fn as_any(&self) -> &dyn Any {
+            self
         }
+    }
 
-        fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
-            Box::new(std::iter::once(Ok(SessionFile {
-                path: "session.jsonl".to_string(),
-                content: Box::new(std::io::Cursor::new(b"{}".to_vec())),
-            })))
+    struct FakeDriver;
+
+    impl Driver for FakeDriver {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn version(&self) -> &'static str {
+            "0.1"
+        }
+        fn sessions<'a>(
+            &'a self,
+            _source: &'a SourceUrl,
+        ) -> Result<NativeSessions<'a>, DriverError> {
+            Ok(Box::new(std::iter::empty()))
+        }
+        fn find_native(
+            &self,
+            _source: &SourceUrl,
+            _prefix: &str,
+        ) -> Result<String, NativeLookupError> {
+            Err(NativeLookupError::NoMatch(String::new()))
+        }
+        fn open_native(
+            &self,
+            _source: &SourceUrl,
+            _native_id: &str,
+        ) -> Result<Box<dyn NativeSession>, DriverError> {
+            Err(DriverError::Other("open_native not used".into()))
+        }
+        fn project(
+            &self,
+            _source: &SourceUrl,
+            _spec: ProjectSpec,
+        ) -> Result<Option<Box<dyn Project>>, DriverError> {
+            Ok(None)
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
+            w.write_all(b"{}").map_err(DriverError::Io)?;
+            Ok("fake-lines 1".to_string())
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used".into()))
         }
     }
 
@@ -622,7 +679,13 @@ mod tests {
 
         // A session, whose only subtree is opaque
         SessionStore::from(&store)
-            .add("fake", "0.1", &mut FakeSession { id: "s1".into() })
+            .add(
+                &FakeDriver,
+                &mut FakeSession {
+                    id: "s1".into(),
+                    attrs: FakeAttrs,
+                },
+            )
             .unwrap();
 
         // An object with a link file inside a schema subtree

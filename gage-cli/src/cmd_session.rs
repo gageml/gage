@@ -1,14 +1,19 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
-use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::array::{Array, StringArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
+use gage_claude::driver::ClaudeDriver;
 use gage_claude::home::claude_home;
 use gage_claude::session::{delete_session, encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
+use gage_index::derive_session;
+use gage_registry::driver::DriverRegistry;
+use gage_session::{Driver, DriverError, NativeSession, Project, ProjectSpec, SourceUrl};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
@@ -34,6 +39,29 @@ pub enum SessionCommand {
 
     /// Move a session to a different project directory
     Move(SessionMoveArgs),
+}
+
+#[derive(Args)]
+pub struct SessionListArgs {
+    #[command(flatten)]
+    pub limit: crate::limit::LimitArgs,
+
+    /// Filter by project. Accepts a filesystem path or a slug
+    /// (e.g. `-home-me-code-foo`).
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<String>,
+
+    /// Filter by how long ago the session was modified (e.g. 1h, 30m, 7d).
+    #[arg(long, value_parser = super::parse_duration)]
+    pub since: Option<Duration>,
+
+    /// Only show empty sessions.
+    #[arg(long)]
+    pub empty: bool,
+
+    /// Show the full session ID, never truncating it.
+    #[arg(long)]
+    pub full_id: bool,
 }
 
 #[derive(Args)]
@@ -64,40 +92,6 @@ pub struct SessionViewArgs {
 }
 
 #[derive(Args)]
-pub struct SessionFilterArgs {
-    /// Filter by project path (repeatable)
-    #[arg(long, value_name = "PATH")]
-    project: Vec<PathBuf>,
-
-    /// Filter by how long ago the session was modified (e.g. 1h, 30m, 7d)
-    #[arg(long, value_parser = super::parse_duration)]
-    since: Option<Duration>,
-
-    /// Only show empty sessions
-    #[arg(long)]
-    empty: bool,
-}
-
-#[derive(Args)]
-pub struct SessionListArgs {
-    #[command(flatten)]
-    limit: crate::limit::LimitArgs,
-
-    #[command(flatten)]
-    filter: SessionFilterArgs,
-
-    /// Show the full session ID, never truncating it
-    #[arg(long)]
-    full_id: bool,
-
-    /// Include additional stats columns
-    ///
-    /// Columns: model time, tokens (in / out / cached), turns
-    #[arg(short = 'S', long)]
-    stats: bool,
-}
-
-#[derive(Args)]
 pub struct SessionDeleteArgs {
     /// Session IDs (or prefix)
     #[arg(conflicts_with = "empty")]
@@ -112,61 +106,240 @@ pub struct SessionDeleteArgs {
     pub yes: bool,
 }
 
-fn format_model_time(ms: u64) -> String {
-    let secs = ms / 1000;
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{:02}m", secs / 3600, (secs / 60) % 60)
+pub async fn list(source: Option<String>, args: SessionListArgs) {
+    let registry = build_registry();
+    let (driver, source_url) = match resolve_source(&registry, source.as_deref()) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("gage session list: {msg}");
+            std::process::exit(1);
+        }
+    };
+
+    let project = match args.project.as_deref() {
+        Some(text) => match driver.project(&source_url, parse_project_spec(text)) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("gage session list: project: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    let rows = match collect_rows(driver.as_ref(), &source_url, project.as_deref(), &args) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("gage session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    let total = rows.len();
+    if total == 0 {
+        println!("No sessions found");
+        return;
+    }
+    let show = args.limit.show_count(total);
+    render_table(rows, show, args.full_id);
+    args.limit.print_summary(show, total, "session");
+}
+
+fn build_registry() -> DriverRegistry {
+    DriverRegistry::new().add_default(Arc::new(ClaudeDriver::new()))
+}
+
+/// Resolve the CLI's `--source` value into a `(driver, url)` pair.
+/// Missing `--source` uses the registry's default driver with an
+/// empty body (that driver's default location).
+fn resolve_source(
+    registry: &DriverRegistry,
+    source: Option<&str>,
+) -> Result<(Arc<dyn Driver>, SourceUrl), String> {
+    match source {
+        None => {
+            let driver = registry
+                .default()
+                .ok_or_else(|| "no default driver registered".to_string())?;
+            let url = SourceUrl::new(driver.name(), "");
+            Ok((driver, url))
+        }
+        Some(text) => {
+            let url = SourceUrl::parse(text).map_err(|e| e.to_string())?;
+            let driver = registry
+                .for_scheme(url.scheme())
+                .ok_or_else(|| format!("no driver for scheme {}", url.scheme()))?;
+            Ok((driver, url))
+        }
     }
 }
 
-fn format_tokens(n: u64) -> String {
-    if n < 1_000 {
-        n.to_string()
-    } else if n < 1_000_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else if n < 1_000_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
+/// Discriminate between a filesystem path (starts with `/`, `~`, `.`,
+/// or contains `/`) and a project slug (everything else). Matches
+/// what Claude does: encoded slugs start with `-` and never contain
+/// `/`.
+fn parse_project_spec(text: &str) -> ProjectSpec {
+    let looks_like_path = text.starts_with('/')
+        || text.starts_with('~')
+        || text.starts_with('.')
+        || text.contains('/');
+    if looks_like_path {
+        ProjectSpec::Path(PathBuf::from(text))
     } else {
-        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+        ProjectSpec::Name(text.to_string())
     }
 }
 
-fn format_model(model: &str) -> String {
-    model.strip_prefix("claude-").unwrap_or(model).to_string()
+struct Row {
+    id: String,
+    project_home_stripped: String,
+    title: String,
+    model: String,
+    size: u64,
+    message_count: i64,
+    mtime: SystemTime,
+    is_empty: bool,
 }
 
-fn home_slug() -> String {
+fn collect_rows(
+    driver: &dyn Driver,
+    source: &SourceUrl,
+    project: Option<&dyn Project>,
+    args: &SessionListArgs,
+) -> Result<Vec<Row>, DriverError> {
+    let iter = driver.sessions(source)?;
+    let cutoff = args.since.and_then(|d| SystemTime::now().checked_sub(d));
+    let mut rows: Vec<Row> = Vec::new();
+    for hit in iter {
+        let session = hit?;
+        if let Some(p) = project
+            && !p.is_for(&*session)
+        {
+            continue;
+        }
+        let attrs = session.attrs();
+        let mtime = attrs.mtime().unwrap_or(SystemTime::UNIX_EPOCH);
+        if let Some(after) = cutoff
+            && mtime < after
+        {
+            continue;
+        }
+        let is_empty = attrs.is_empty().unwrap_or(false);
+        if args.empty && !is_empty {
+            continue;
+        }
+        let project_name = attrs.project_name().unwrap_or("");
+        let project_home_stripped = strip_home_slug_prefix(project_name);
+
+        let (title, model, message_count) = load_summary(&*session);
+
+        rows.push(Row {
+            id: session.native_id().to_string(),
+            project_home_stripped,
+            title,
+            model,
+            size: attrs.size().unwrap_or(0),
+            message_count,
+            mtime,
+            is_empty,
+        });
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.mtime));
+    Ok(rows)
+}
+
+/// Load `title`, `model`, and `message_count` for one session by
+/// deriving the JSONL. No caching in this pass; every listing pays
+/// one derive per shown session.
+fn load_summary(session: &dyn NativeSession) -> (String, String, i64) {
+    let Some(claude) = session
+        .as_any()
+        .downcast_ref::<gage_claude::driver::ClaudeNativeSession>()
+    else {
+        return (String::new(), String::new(), 0);
+    };
+    match derive_session(session.native_id(), claude.session_path()) {
+        Ok(d) => (
+            d.summary.title.unwrap_or_default(),
+            d.summary
+                .model
+                .map(|m| m.strip_prefix("claude-").unwrap_or(&m).to_string())
+                .unwrap_or_default(),
+            d.summary.message_count,
+        ),
+        Err(_) => (String::new(), String::new(), 0),
+    }
+}
+
+fn strip_home_slug_prefix(project: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut slug = String::new();
+    let mut slug = String::with_capacity(home.len() + 1);
     for c in home.chars() {
         slug.push(if c.is_ascii_alphanumeric() { c } else { '-' });
     }
     slug.push('-');
-    slug
+    match project.strip_prefix(&slug) {
+        Some(rest) => rest.to_string(),
+        None => project.to_string(),
+    }
 }
 
-fn filter_clauses(filter: &SessionFilterArgs) -> Vec<String> {
-    let mut clauses = Vec::new();
-    for p in &filter.project {
-        let path_str = p.to_string_lossy().replace('\'', "''");
-        clauses.push(format!("path LIKE '%/{path_str}/%'"));
+fn render_table(rows: Vec<Row>, show: usize, full_id: bool) {
+    let all_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let highlighter = style::IdHighlighter::new(all_ids);
+
+    let visible = rows.into_iter().take(show);
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    for r in visible {
+        let id_display = if full_id {
+            highlighter.full(&r.id)
+        } else {
+            highlighter.short(&r.id)
+        };
+        let modified = crate::human::format_elapsed_ms(system_time_to_millis(r.mtime));
+        let size = crate::human::format_size(r.size as i64);
+        let count = if r.is_empty && r.message_count == 0 {
+            "0".to_string()
+        } else {
+            r.message_count.to_string()
+        };
+        table_rows.push(vec![
+            id_display,
+            r.project_home_stripped,
+            r.title,
+            r.model,
+            size,
+            count,
+            modified,
+        ]);
     }
-    if let Some(duration) = filter.since {
-        let cutoff = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as i64
-            - duration.as_micros() as i64;
-        clauses.push(format!("mtime >= CAST({cutoff} AS TIMESTAMP)"));
-    }
-    if filter.empty {
-        clauses.push("is_empty".to_string());
-    }
-    clauses
+
+    let header: Vec<String> = [
+        "Id", "Project", "Title", "Model", "Size", "Messages", "Modified",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let col_count = header.len();
+
+    let mut table = Table::from_iter(std::iter::once(header).chain(table_rows));
+    table
+        .with(Style::rounded())
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
+        .modify(Columns::new(5..6), Alignment::right());
+    let term_width = console::Term::stdout().size().1 as usize;
+    table.with(
+        Width::truncate(term_width)
+            .suffix("…")
+            .priority(style::IdAwarePriority::new(full_id)),
+    );
+    println!("{}", table);
+}
+
+fn system_time_to_millis(t: SystemTime) -> i64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
@@ -183,197 +356,6 @@ async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
             std::process::exit(1);
         }
     }
-}
-
-pub async fn list(args: SessionListArgs, agent: bool) {
-    let ctx = gage_query::create_context_default().await;
-
-    // Agent sessions live in their own corpus, surfaced by the
-    // `agent_session` table.
-    let table = if agent { "agent_session" } else { "session" };
-
-    let clauses = filter_clauses(&args.filter);
-    let where_clause = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", clauses.join(" AND "))
-    };
-
-    let count_sql = format!("SELECT COUNT(*) FROM {table}{where_clause}");
-    let count_batches = run_query(&ctx, &count_sql).await;
-    let total = count_batches
-        .first()
-        .map(|b| {
-            b.column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .value(0) as usize
-        })
-        .unwrap_or(0);
-    if total == 0 {
-        println!("No sessions found");
-        return;
-    }
-
-    let show = args.limit.show_count(total);
-
-    // Peer set for the ID highlighter: every id in the corpus (not
-    // the filtered subset), so the disambiguating prefix matches what
-    // `one_session()` actually resolves against.
-    let highlighter = {
-        let all_ids_sql = format!("SELECT id FROM {table}");
-        let all_batches = run_query(&ctx, &all_ids_sql).await;
-        let mut all_ids: Vec<String> = Vec::new();
-        for batch in &all_batches {
-            let col = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                all_ids.push(col.value(i).to_string());
-            }
-        }
-        style::IdHighlighter::new(all_ids)
-    };
-
-    let sql = format!(
-        "SELECT id, project, mtime, size, title, model, message_count, path \
-         FROM {table}{where_clause} ORDER BY mtime DESC LIMIT {show}"
-    );
-    let batches = run_query(&ctx, &sql).await;
-
-    let prefix = home_slug();
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-
-    for batch in &batches {
-        let ids = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let projects = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let mtimes = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
-        let sizes = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let titles = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let models = batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let counts = batch
-            .column(6)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let paths = batch
-            .column(7)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-
-        for i in 0..batch.num_rows() {
-            let id = ids.value(i);
-            let project_name = projects.value(i);
-            let project = project_name
-                .strip_prefix(&*prefix)
-                .unwrap_or(project_name)
-                .to_string();
-            let modified = crate::human::format_elapsed_ms(mtimes.value(i));
-            let size = crate::human::format_size(sizes.value(i));
-            let title = if titles.is_null(i) {
-                String::new()
-            } else {
-                titles.value(i).to_string()
-            };
-            let count = counts.value(i).to_string();
-            let id_display = if args.full_id {
-                highlighter.full(id)
-            } else {
-                highlighter.short(id)
-            };
-            let model = if models.is_null(i) {
-                String::new()
-            } else {
-                format_model(models.value(i))
-            };
-            let mut row = vec![id_display, project, title, model, size, count];
-            if args.stats {
-                let (time, tin, tout, tcache, turns) =
-                    match gage_claude::stats::compute_session_stats(std::path::Path::new(
-                        paths.value(i),
-                    )) {
-                        Ok(s) => (
-                            format_model_time(s.model_time_ms),
-                            format_tokens(s.input_tokens),
-                            format_tokens(s.output_tokens),
-                            format_tokens(s.cached_tokens),
-                            s.turn_count.to_string(),
-                        ),
-                        Err(_) => ("?".into(), "?".into(), "?".into(), "?".into(), "?".into()),
-                    };
-                row.push(time);
-                row.push(tin);
-                row.push(tout);
-                row.push(tcache);
-                row.push(turns);
-            }
-            row.push(modified);
-            table_rows.push(row);
-        }
-    }
-
-    let mut header: Vec<String> = ["Id", "Project", "Title", "Model", "Size", "Messages"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    if args.stats {
-        header.push("Model time".into());
-        header.push("Tk in".into());
-        header.push("Tk out".into());
-        header.push("Tk cache".into());
-        header.push("Turns".into());
-    }
-    header.push("Modified".into());
-
-    let col_count = header.len();
-    let mut table = Table::from_iter(std::iter::once(header).chain(table_rows));
-    table
-        .with(Style::rounded())
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
-        .modify(Columns::new(5..6), Alignment::right());
-    if args.stats {
-        // The stats columns, between Messages and Modified
-        table.modify(Columns::new(6..col_count - 1), Alignment::right());
-    }
-    let term_width = console::Term::stdout().size().1 as usize;
-    table.with(
-        Width::truncate(term_width)
-            .suffix("…")
-            .priority(style::IdAwarePriority::new(args.full_id)),
-    );
-    let table = table.to_string();
-    println!("{table}");
-
-    args.limit.print_summary(show, total, "session");
 }
 
 pub async fn delete(args: SessionDeleteArgs) {
@@ -416,7 +398,7 @@ pub async fn delete(args: SessionDeleteArgs) {
         let ctx = gage_query::create_context_default().await;
         let mut errors = 0;
         for prefix in &args.ids {
-            match gage_claude::session::one_session(prefix) {
+            match one_session(prefix) {
                 Ok(session) => sessions.push((session.id, session.src)),
                 Err(e) => {
                     eprintln!("{e}");
@@ -524,7 +506,7 @@ pub fn move_(args: SessionMoveArgs) {
         }
     };
 
-    let session = match gage_claude::session::one_session(&args.session) {
+    let session = match one_session(&args.session) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("gage session move: {e}");

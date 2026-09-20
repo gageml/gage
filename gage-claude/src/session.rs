@@ -387,7 +387,7 @@ pub fn one_session(prefix: &str) -> Result<SessionInfo, SessionLookupError> {
     }
 }
 
-fn is_empty_session(path: &Path) -> io::Result<bool> {
+pub fn is_empty_session(path: &Path) -> io::Result<bool> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     for line in reader.lines() {

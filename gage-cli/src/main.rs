@@ -104,9 +104,11 @@ enum Command {
 
     /// Manage sessions
     Session {
-        /// Operate on agent sessions instead of Claude Code sessions
-        #[arg(short = 'A', long)]
-        agent: bool,
+        /// Session source URL (e.g. `claude:`, `claude:/tmp/foo`)
+        ///
+        /// Default: the default driver's default location.
+        #[arg(short = 's', long, value_name = "SOURCE", global = true)]
+        source: Option<String>,
 
         #[command(subcommand)]
         command: cmd_session::SessionCommand,
@@ -247,17 +249,12 @@ async fn main() {
                 cmd_note::NoteCommand::Edit(args) => cmd_note::edit(args),
                 cmd_note::NoteCommand::Delete(args) => cmd_note::delete(args),
             },
-            Command::Session { agent, command } => {
-                if agent {
-                    set_agent_projects_dir();
-                }
-                match command {
-                    cmd_session::SessionCommand::List(args) => cmd_session::list(args, agent).await,
-                    cmd_session::SessionCommand::Delete(args) => cmd_session::delete(args).await,
-                    cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
-                    cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),
-                }
-            }
+            Command::Session { source, command } => match command {
+                cmd_session::SessionCommand::List(args) => cmd_session::list(source, args).await,
+                cmd_session::SessionCommand::Delete(args) => cmd_session::delete(args).await,
+                cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
+                cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),
+            },
             Command::Issue { command } => match command {
                 cmd_issue::IssueCommand::List(args) => cmd_issue::list(args),
                 cmd_issue::IssueCommand::Show(args) => cmd_issue::show(args),

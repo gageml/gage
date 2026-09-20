@@ -28,7 +28,7 @@ use serde::Serialize;
 
 use crate::measure::{Count, Metric, Size, Timings};
 use crate::report::Results;
-use crate::synth::{Generator, SyntheticSession, session_files};
+use crate::synth::{Generator, SyntheticDriver, SyntheticSession, session_files};
 
 /// Scale and shape of one run.
 #[derive(Debug, Clone, Serialize)]
@@ -49,8 +49,6 @@ pub struct Params {
     pub seed: u64,
 }
 
-const DRIVER: &str = "bench";
-const DRIVER_VERSION: &str = "0";
 const INDEX_FILE: &str = "cache/object-index.sqlite";
 
 /// Everything the populate phase created, for verification and reads.
@@ -197,14 +195,13 @@ fn populate(
         progress.inc(1);
     }
 
+    let driver = SyntheticDriver;
     for i in 0..params.sessions {
         let native_id = format!("session-{i:06}");
         let content = generator.session_content(params.session_kb * 1024);
         let mut reader = SyntheticSession::new(&native_id, &content);
         let outcome = timings
-            .time("session add v2", || {
-                sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
-            })
+            .time("session add v2", || sessions.add(&driver, &mut reader))
             .map_err(|e| e.to_string())?;
         population.session_ids.push(outcome.id);
         population.sessions.push((native_id, content));
@@ -217,7 +214,7 @@ fn populate(
         let mut reader = SyntheticSession::new(&native_id, &content);
         let outcome = timings
             .time("session add (large) v2", || {
-                sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
+                sessions.add(&driver, &mut reader)
             })
             .map_err(|e| e.to_string())?;
         population.session_ids.push(outcome.id);
@@ -244,9 +241,8 @@ fn populate(
         let specs: Vec<SessionSpec<'_>> = readers
             .iter_mut()
             .map(|r| SessionSpec {
-                driver_name: DRIVER,
-                driver_version: DRIVER_VERSION,
-                reader: r,
+                driver: &driver,
+                session: r,
             })
             .collect();
         timings
@@ -268,9 +264,8 @@ fn populate(
         let specs: Vec<SessionSpec<'_>> = readers
             .iter_mut()
             .map(|r| SessionSpec {
-                driver_name: DRIVER,
-                driver_version: DRIVER_VERSION,
-                reader: r,
+                driver: &driver,
+                session: r,
             })
             .collect();
         timings
@@ -297,9 +292,7 @@ fn populate(
         generator.grow(content, 20);
         let mut reader = SyntheticSession::new(native_id, content);
         timings
-            .time("session grow v2", || {
-                sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
-            })
+            .time("session grow v2", || sessions.add(&driver, &mut reader))
             .map_err(|e| e.to_string())?;
     }
 
@@ -310,7 +303,7 @@ fn populate(
         let mut reader = SyntheticSession::new(native_id, content);
         let outcome = timings
             .time("session add (unchanged)", || {
-                sessions.add(DRIVER, DRIVER_VERSION, &mut reader)
+                sessions.add(&driver, &mut reader)
             })
             .map_err(|e| e.to_string())?;
         if outcome.outcome != SessionOutcome::Unchanged {
@@ -335,9 +328,8 @@ fn populate(
             let specs: Vec<SessionSpec<'_>> = readers
                 .iter_mut()
                 .map(|r| SessionSpec {
-                    driver_name: DRIVER,
-                    driver_version: DRIVER_VERSION,
-                    reader: r,
+                    driver: &driver,
+                    session: r,
                 })
                 .collect();
             timings

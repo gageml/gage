@@ -1,19 +1,21 @@
 //! Session objects: `gage::session 1`, reached through [`SessionStore`].
 //!
 //! Content is `attrs.json` (driver, native session id, session type,
-//! optional content format) and the opaque `files.d/**` subtree holding
-//! the session content as provided by the driver. The object id is
-//! derived from `(driver_name, native_session_id)`, so the same native
-//! session maps to the same object over time. Adding a session whose
-//! content matches the stored version writes nothing; changed content
-//! writes an edit commit. Tree construction, commit parents, and
-//! edits are the generic object model's job; see [`crate::object`].
+//! content format) and the opaque `files.d/**` subtree holding the
+//! session content as provided by the driver. The object id is
+//! derived from `(driver_name, native_session_id)`, so the same
+//! native session maps to the same object over time. Adding a session
+//! whose content matches the stored version writes nothing; changed
+//! content writes an edit commit. Tree construction, commit parents,
+//! and edits are the generic object model's job; see
+//! [`crate::object`].
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use gage_core::uuid::derive_id;
-use gage_session::{ContentFormat, NativeSession, SessionSummary};
+use gage_session::{ContentSink, Driver, NativeSession, SessionAttrs};
 use serde::{Deserialize, Serialize};
 
 use crate::index::{ObjectQuery, Order};
@@ -24,8 +26,6 @@ use crate::{Store, StoreError};
 pub(crate) const OBJECT_TYPE: &str = "gage::session";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from a session's `attrs.json`.
-/// `summary` is a driver projection; until a driver writes it the
-/// `model` filter selects nothing.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];
 /// Top-level subtree name for the session's opaque file content. The
 /// `.d` suffix marks the subtree as producer-owned; Gage schema
@@ -45,14 +45,15 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
 
 /// The `attrs.json` shape of a session.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SessionAttrs {
+pub struct SessionAttrsRecord {
     /// `"<driver name> <driver version>"`.
     pub driver: String,
     /// The id the harness gave the session, as the driver reported it.
     pub native_id: String,
     /// Harness family, e.g. `"claude"`. A category with no version.
     pub session_type: String,
-    /// `"<format name> <format version>"`, the driver's byte layout.
+    /// The driver's byte-layout string, as returned by
+    /// [`Driver::write_native`].
     pub content_format: String,
     /// The driver's projection of the session, written at add time.
     /// Absent when the driver reported nothing.
@@ -60,8 +61,9 @@ pub struct SessionAttrs {
     pub summary: Option<SummaryAttrs>,
 }
 
-/// `attrs.summary`: the driver's [`SessionSummary`] as stored. Only
-/// the driver can compute these; the store copies them verbatim.
+/// `attrs.summary`: the driver's session-level attributes at write
+/// time. Only the driver can compute these; the store copies them
+/// verbatim.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SummaryAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,15 +76,14 @@ pub struct SummaryAttrs {
     pub size: Option<u64>,
 }
 
-impl From<SessionSummary> for SummaryAttrs {
-    fn from(s: SessionSummary) -> Self {
-        SummaryAttrs {
-            title: s.title,
-            model: s.model,
-            message_count: s.message_count,
-            size: s.size,
-        }
-    }
+fn collect_summary(attrs: &dyn SessionAttrs) -> Option<SummaryAttrs> {
+    let summary = SummaryAttrs {
+        title: attrs.title().map(String::from),
+        model: attrs.model().map(String::from),
+        message_count: attrs.message_count(),
+        size: attrs.size(),
+    };
+    (summary != SummaryAttrs::default()).then_some(summary)
 }
 
 /// Outcome of writing one session to the store.
@@ -111,8 +112,7 @@ pub enum SessionOutcome {
 pub struct SessionRecord {
     pub id: String,
     pub commit_sha: String,
-    pub attrs: SessionAttrs,
-    pub content_format: ContentFormat,
+    pub attrs: SessionAttrsRecord,
     pub driver_name: String,
     pub driver_version: String,
     /// The driver's size of the session's own files, from
@@ -127,35 +127,36 @@ pub fn session_object_id(driver_name: &str, native_session_id: &str) -> String {
 }
 
 impl SessionStore<'_> {
-    /// Write `reader`'s content as a session object. Idempotent when
-    /// the native session's files and attrs are unchanged.
+    /// Write `session`'s content as a session object. `driver` drives
+    /// the serialization through [`Driver::write_native`]; the
+    /// returned string is stored as the session's `content_format`.
+    /// Idempotent when the native session's files and attrs are
+    /// unchanged.
     pub fn add(
         &self,
-        driver_name: &str,
-        driver_version: &str,
-        reader: &mut dyn NativeSession,
+        driver: &dyn Driver,
+        session: &mut dyn NativeSession,
     ) -> Result<SessionAddOutcome, StoreError> {
         let path = self.store.path();
-        let native_id = reader.native_id().to_string();
-        let id = session_object_id(driver_name, &native_id);
-        let attrs = SessionAttrs {
-            driver: format!("{driver_name} {driver_version}"),
-            native_id,
-            session_type: reader.session_type().to_string(),
-            content_format: reader.content_format().to_string(),
-            summary: {
-                let summary = reader.summary();
-                (summary != SessionSummary::default()).then(|| SummaryAttrs::from(summary))
-            },
-        };
+        let native_id = session.native_id().to_string();
+        let id = session_object_id(driver.name(), &native_id);
+        let session_type = session.session_type().to_string();
+        let summary = collect_summary(session.attrs());
 
-        let mut file_entries: Vec<(String, String)> = Vec::new();
-        for file in reader.files() {
-            let file = file.map_err(|e| StoreError::Parse(format!("driver: {e}")))?;
-            let sha = write_blob_stream(path, file.content)?;
-            file_entries.push((file.path, sha));
-        }
+        let mut sink = GitContentSink::new(path.to_path_buf());
+        let content_format = driver
+            .write_native(session, &mut sink)
+            .map_err(|e| StoreError::Parse(format!("driver: {e}")))?;
+        let file_entries = sink.into_entries()?;
         let files_tree_sha = build_files_tree(path, file_entries)?;
+
+        let attrs = SessionAttrsRecord {
+            driver: format!("{} {}", driver.name(), driver.version()),
+            native_id,
+            session_type,
+            content_format,
+            summary,
+        };
 
         let mut tree = ObjectTree {
             attrs: Some(
@@ -166,7 +167,7 @@ impl SessionStore<'_> {
         };
         tree.subtrees.insert(FILES_TREE.to_string(), files_tree_sha);
 
-        let subject = format!("{driver_name}:{}", attrs.native_id);
+        let subject = format!("{}:{}", driver.name(), attrs.native_id);
         match self.store.rev_parse(&object_ref(&id))? {
             None => {
                 let message = format!("session: {subject}");
@@ -266,26 +267,90 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
         .tree
         .attrs
         .ok_or_else(|| StoreError::Parse(format!("session {commit_sha}: missing attrs.json")))?;
-    let attrs: SessionAttrs = serde_json::from_value(attrs_value)
+    let attrs: SessionAttrsRecord = serde_json::from_value(attrs_value)
         .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))?;
     let (driver_name, driver_version) = match attrs.driver.split_once(' ') {
         Some((n, v)) => (n.to_string(), v.to_string()),
         None => (attrs.driver.clone(), String::new()),
-    };
-    let content_format = match attrs.content_format.split_once(' ') {
-        Some((n, v)) => ContentFormat::new(n.to_string(), v.to_string()),
-        None => ContentFormat::new(attrs.content_format.clone(), String::new()),
     };
     let size = attrs.summary.as_ref().and_then(|s| s.size);
     Ok(SessionRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
         attrs,
-        content_format,
         driver_name,
         driver_version,
         size,
     })
+}
+
+/// A [`ContentSink`] that captures each `create` call into a git blob
+/// under the store's object directory and records the resulting SHA.
+/// Blobs are buffered in memory to compute their SHA (matching git's
+/// `hash-object` behavior for a stream of unknown length).
+pub(crate) struct GitContentSink {
+    store_path: PathBuf,
+    entries: Vec<(String, String)>,
+    write_error: Option<StoreError>,
+}
+
+impl GitContentSink {
+    pub(crate) fn new(store_path: PathBuf) -> Self {
+        Self {
+            store_path,
+            entries: Vec::new(),
+            write_error: None,
+        }
+    }
+
+    pub(crate) fn into_entries(self) -> Result<Vec<(String, String)>, StoreError> {
+        if let Some(e) = self.write_error {
+            return Err(e);
+        }
+        Ok(self.entries)
+    }
+}
+
+impl ContentSink for GitContentSink {
+    fn create<'a>(&'a mut self, path: &str) -> io::Result<Box<dyn Write + 'a>> {
+        Ok(Box::new(GitBlobWriter {
+            sink: self,
+            path: path.to_string(),
+            buffer: Vec::new(),
+        }))
+    }
+}
+
+struct GitBlobWriter<'a> {
+    sink: &'a mut GitContentSink,
+    path: String,
+    buffer: Vec<u8>,
+}
+
+impl Write for GitBlobWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for GitBlobWriter<'_> {
+    fn drop(&mut self) {
+        if self.sink.write_error.is_some() {
+            return;
+        }
+        let bytes = std::mem::take(&mut self.buffer);
+        match write_blob_stream(&self.sink.store_path, io::Cursor::new(bytes)) {
+            Ok(sha) => self
+                .sink
+                .entries
+                .push((std::mem::take(&mut self.path), sha)),
+            Err(e) => self.sink.write_error = Some(e),
+        }
+    }
 }
 
 /// Build the `files.d/` tree from `(relative_path, blob_sha)` pairs.
@@ -295,9 +360,6 @@ fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<Strin
     build_files_tree_inner(path, entries)
 }
 
-/// Checks the driver's file paths against Gage's tree rules. Runs once
-/// at the top-level call so the full offending path is available in
-/// every error.
 fn validate_session_paths(entries: &[(String, String)]) -> Result<(), StoreError> {
     let mut seen: HashSet<&str> = HashSet::new();
     for (rel, _) in entries {
@@ -324,9 +386,6 @@ fn validate_session_paths(entries: &[(String, String)]) -> Result<(), StoreError
     Ok(())
 }
 
-/// Rejects malformed paths. Per-component checks mirror
-/// [`crate::writer::validate_tree_name`]; the whole-path checks catch
-/// shapes that would otherwise split into empty components.
 fn validate_session_path(rel: &str) -> Result<(), StoreError> {
     let invalid = |reason: &str| StoreError::InvalidPath {
         path: rel.to_string(),
@@ -358,8 +417,6 @@ fn validate_session_path(rel: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Every proper directory prefix of `path`. `"a/b/c"` yields `"a"`
-/// and `"a/b"`; a path with no `/` yields nothing.
 fn directory_prefixes(path: &str) -> impl Iterator<Item = &str> {
     path.match_indices('/').map(|(i, _)| &path[..i])
 }
@@ -409,14 +466,28 @@ mod tests {
     use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
-    use gage_session::{DriverError, SessionFile};
+    use gage_session::{
+        ContentSource, Driver as DriverTrait, DriverError, Entry, NativeLookupError,
+        NativeSessions, Project, ProjectSpec, SourceUrl, StoredSession,
+    };
+    use std::any::Any;
     use std::io::Cursor;
 
     /// A native session with fixed content, for exercising the writer.
     struct FakeSession {
         id: String,
         files: Vec<(String, Vec<u8>)>,
-        content_format: ContentFormat,
+        summary: FakeAttrs,
+    }
+
+    struct FakeAttrs {
+        size: u64,
+    }
+
+    impl SessionAttrs for FakeAttrs {
+        fn size(&self) -> Option<u64> {
+            Some(self.size)
+        }
     }
 
     impl NativeSession for FakeSession {
@@ -428,35 +499,92 @@ mod tests {
             "fake"
         }
 
-        fn content_format(&self) -> &ContentFormat {
-            &self.content_format
+        fn attrs(&self) -> &dyn SessionAttrs {
+            &self.summary
         }
 
-        fn summary(&self) -> SessionSummary {
-            SessionSummary {
-                size: Some(self.files.iter().map(|(_, b)| b.len() as u64).sum()),
-                ..SessionSummary::default()
-            }
-        }
-
-        fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
-            Box::new(self.files.iter().map(|(path, bytes)| {
-                Ok(SessionFile {
-                    path: path.clone(),
-                    content: Box::new(Cursor::new(bytes.clone())),
-                })
-            }))
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 
+    /// A driver whose `write_native` iterates the fake session's
+    /// in-memory files into the sink.
+    struct FakeDriver;
+
+    impl DriverTrait for FakeDriver {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn version(&self) -> &'static str {
+            "0.1"
+        }
+        fn sessions<'a>(
+            &'a self,
+            _source: &'a SourceUrl,
+        ) -> Result<NativeSessions<'a>, DriverError> {
+            Ok(Box::new(std::iter::empty()))
+        }
+        fn find_native(
+            &self,
+            _source: &SourceUrl,
+            _prefix: &str,
+        ) -> Result<String, NativeLookupError> {
+            Err(NativeLookupError::NoMatch(String::new()))
+        }
+        fn open_native(
+            &self,
+            _source: &SourceUrl,
+            _native_id: &str,
+        ) -> Result<Box<dyn NativeSession>, DriverError> {
+            Err(DriverError::Other("open_native not used in tests".into()))
+        }
+        fn project(
+            &self,
+            _source: &SourceUrl,
+            _spec: ProjectSpec,
+        ) -> Result<Option<Box<dyn Project>>, DriverError> {
+            Ok(None)
+        }
+        fn write_native(
+            &self,
+            session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            let fake = session
+                .as_any()
+                .downcast_ref::<FakeSession>()
+                .ok_or_else(|| DriverError::Other("not a FakeSession".into()))?;
+            for (path, bytes) in &fake.files {
+                let mut w = sink.create(path).map_err(DriverError::Io)?;
+                let mut cursor = Cursor::new(bytes.clone());
+                std::io::copy(&mut cursor, &mut w).map_err(DriverError::Io)?;
+            }
+            Ok("fake-lines 1".to_string())
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used in tests".into()))
+        }
+    }
+
+    #[allow(dead_code)]
+    fn _entry_trait_is_object_safe(_: &dyn Entry) {}
+
     fn fake(id: &str, files: &[(&str, &str)]) -> FakeSession {
+        let entries: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
+            .collect();
+        let size = entries.iter().map(|(_, b)| b.len() as u64).sum();
         FakeSession {
             id: id.to_string(),
-            files: files
-                .iter()
-                .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
-                .collect(),
-            content_format: ContentFormat::new("fake-lines", "1"),
+            files: entries,
+            summary: FakeAttrs { size },
         }
     }
 
@@ -471,7 +599,7 @@ mod tests {
         let sessions = SessionStore::from(&store);
         let mut session = fake("s1", &[("session.jsonl", "{}\n"), ("sub/a.txt", "a")]);
 
-        let outcome = sessions.add("fake", "0.1", &mut session).unwrap();
+        let outcome = sessions.add(&FakeDriver, &mut session).unwrap();
         assert_eq!(outcome.outcome, SessionOutcome::Added);
         assert_eq!(outcome.id, session_object_id("fake", "s1"));
 
@@ -496,7 +624,7 @@ mod tests {
         assert_eq!(record.driver_name, "fake");
         assert_eq!(record.driver_version, "0.1");
         assert_eq!(record.attrs.session_type, "fake");
-        assert_eq!(record.content_format, ContentFormat::new("fake-lines", "1"));
+        assert_eq!(record.attrs.content_format, "fake-lines 1");
         assert_eq!(record.attrs.native_id, "s1");
         assert_eq!(record.size, Some(4));
     }
@@ -508,18 +636,17 @@ mod tests {
         let sessions = SessionStore::from(&store);
 
         let first = sessions
-            .add("fake", "0.1", &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
             .unwrap();
         let again = sessions
-            .add("fake", "0.1", &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
             .unwrap();
         assert_eq!(again.outcome, SessionOutcome::Unchanged);
         assert_eq!(again.commit_sha, first.commit_sha);
 
         let grown = sessions
             .add(
-                "fake",
-                "0.1",
+                &FakeDriver,
                 &mut fake("s1", &[("session.jsonl", "{}\n{}\n")]),
             )
             .unwrap();
@@ -553,7 +680,7 @@ mod tests {
             "nested",
             &[("a/b/c.jsonl", "1"), ("a/b/d.jsonl", "2"), ("a/e.txt", "3")],
         );
-        let outcome = sessions.add("fake", "0.1", &mut session).unwrap();
+        let outcome = sessions.add(&FakeDriver, &mut session).unwrap();
         assert_eq!(outcome.outcome, SessionOutcome::Added);
         let ref_path = object_ref(&outcome.id);
         let listing = run(git_in(
@@ -609,7 +736,7 @@ mod tests {
         ];
         for (i, (files, expected_path, expected_reason)) in cases.iter().enumerate() {
             let mut session = fake(&format!("s{i}"), files);
-            let err = sessions.add("fake", "0.1", &mut session).unwrap_err();
+            let err = sessions.add(&FakeDriver, &mut session).unwrap_err();
             match err {
                 StoreError::InvalidPath { path, reason } => {
                     assert_eq!(path, *expected_path, "case {i}: {files:?}");
