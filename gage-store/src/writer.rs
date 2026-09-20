@@ -16,6 +16,7 @@ use std::path::Path;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use sha1::{Digest, Sha1};
+use tempfile::NamedTempFile;
 
 use crate::StoreError;
 
@@ -193,12 +194,14 @@ fn write_object(path: &Path, kind: &str, bytes: &[u8]) -> Result<String, StoreEr
     encoder.write_all(bytes).map_err(write)?;
     let compressed = encoder.finish().map_err(write)?;
 
-    // Write beside the target and rename, so a reader never sees a
-    // partial object. Two writers racing on the same object produce
-    // identical bytes, so either rename winning is correct.
-    let tmp = dir.join(format!("tmp_{}_{}", std::process::id(), file_name));
-    fs::write(&tmp, &compressed).map_err(write)?;
-    fs::rename(&tmp, &file).map_err(write)?;
+    // Write to a uniquely named file beside the target and rename it
+    // into place, so a reader never sees a partial object and two
+    // writers never share a temporary path. Two writers racing on the
+    // same object produce identical bytes, so either rename winning is
+    // correct. A failed write drops the temporary file with it.
+    let mut tmp = NamedTempFile::new_in(&dir).map_err(write)?;
+    tmp.write_all(&compressed).map_err(write)?;
+    tmp.persist(&file).map_err(|e| write(e.error))?;
     Ok(sha)
 }
 
@@ -472,6 +475,46 @@ mod tests {
                 }
                 other => panic!("expected InvalidPath for {name:?}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn write_leaves_no_temporary_file_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let sha = write_blob(&path, b"tidy").unwrap();
+        let dir = path.join("objects").join(&sha[..2]);
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![sha[2..].to_string()]);
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_object_both_succeed() {
+        // A smoke check, not a proof: the race is not deterministic.
+        // What it pins is that no writer reports failure and the object
+        // decodes, which the shared per-pid temporary path violated.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    (0..50)
+                        .map(|i| write_blob(&path, format!("shared {i}").as_bytes()).unwrap())
+                        .collect::<Vec<String>>()
+                })
+            })
+            .collect();
+        let mut shas: Vec<Vec<String>> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        let first = shas.remove(0);
+        assert!(shas.iter().all(|s| *s == first));
+        for (i, sha) in first.iter().enumerate() {
+            let expected = format!("shared {i}");
+            let out = run(git_in(&path, ["cat-file", "-p", sha])).unwrap();
+            assert_eq!(out, expected, "{sha}");
         }
     }
 
