@@ -351,6 +351,7 @@ impl Store {
             entries,
         };
         self.record_write(&object, &[], &current.commit_sha)?;
+        self.deleted.set(true);
         Ok(commit_sha)
     }
 
@@ -979,6 +980,41 @@ mod tests {
         let classified = store.classify_parents(&second).unwrap();
         assert!(classified.missing.is_empty(), "{classified:?}");
         assert!(classified.unattributed.is_empty(), "{classified:?}");
+    }
+
+    /// The expected-old-value argument to `update-ref` is the only
+    /// guard against a lost update and a duplicate create.
+    #[test]
+    fn stale_current_and_duplicate_create_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "a", &[]);
+        let first = store.resolve_id(&id).unwrap().1;
+        let stale = store.read_object(&first).unwrap();
+
+        NoteStore::from(&store).edit(&id, "v2").unwrap();
+        let second = store.resolve_id(&id).unwrap().1;
+        assert_ne!(first, second);
+
+        let mut tree = stale.tree.clone();
+        tree.blobs.insert("value.txt".into(), b"v3\n".to_vec());
+        assert!(matches!(
+            store.edit(&stale, &tree, "stale edit"),
+            Err(StoreError::Git { .. })
+        ));
+        assert!(matches!(
+            store.delete(&stale, "stale delete"),
+            Err(StoreError::Git { .. })
+        ));
+        assert!(matches!(
+            store.create("gage::note", "1", &id, &tree, "duplicate"),
+            Err(StoreError::Git { .. })
+        ));
+
+        assert_eq!(store.resolve_id(&id).unwrap().1, second);
+        assert_eq!(NoteStore::from(&store).get(&id).unwrap().value, "v2");
+        let reopened = Store::open(store.path()).unwrap();
+        assert_eq!(NoteStore::from(&reopened).get(&id).unwrap().value, "v2");
     }
 
     #[test]

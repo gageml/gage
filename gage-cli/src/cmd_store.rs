@@ -357,6 +357,12 @@ fn gc(store: &Store, args: GcArgs) {
         .modify(Columns::first(), style::dim())
         .to_string();
     println!("{table}");
+    if outcome.pruned_commits > 0 {
+        println!(
+            "Pruned {} unreachable commits from the object index",
+            outcome.pruned_commits
+        );
+    }
 }
 
 fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {

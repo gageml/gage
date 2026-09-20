@@ -13,8 +13,9 @@
 //!
 //! `ref` is what the reconcile diff runs against. `object` holds every
 //! commit the index has seen, so a linked SHA resolves after its ref
-//! has moved on. `link` serves reverse lookups. `attr` holds the
-//! values each type opted in through `INDEXED_ATTRS`.
+//! has moved on; a commit that a delete made unreachable stays until
+//! `gc` prunes it, as in git. `link` serves reverse lookups. `attr`
+//! holds the values each type opted in through `INDEXED_ATTRS`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -221,6 +222,42 @@ impl ObjectIndex for SqliteIndex {
 
     fn rollback(&self) -> Result<(), StoreError> {
         self.conn.execute_batch("ROLLBACK").map_err(sql_err)
+    }
+
+    /// Reachability is computed inside SQLite: from every tip, through
+    /// `parent_sha` and every link target, the same edges a rebuild
+    /// walks. Rows for anything else are removed.
+    fn prune(&self) -> Result<usize, StoreError> {
+        let removed = self
+            .conn
+            .execute(
+                "WITH RECURSIVE reachable(sha) AS (
+                     SELECT tip_sha FROM ref
+                     UNION
+                     SELECT o.parent_sha FROM object o
+                         JOIN reachable r ON o.sha = r.sha
+                         WHERE o.parent_sha IS NOT NULL
+                     UNION
+                     SELECT l.target_sha FROM link l
+                         JOIN reachable r ON l.commit_sha = r.sha
+                 )
+                 DELETE FROM object WHERE sha NOT IN (SELECT sha FROM reachable)",
+                [],
+            )
+            .map_err(sql_err)?;
+        self.conn
+            .execute(
+                "DELETE FROM link WHERE commit_sha NOT IN (SELECT sha FROM object)",
+                [],
+            )
+            .map_err(sql_err)?;
+        self.conn
+            .execute(
+                "DELETE FROM attr WHERE commit_sha NOT IN (SELECT sha FROM object)",
+                [],
+            )
+            .map_err(sql_err)?;
+        Ok(removed)
     }
 
     fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError> {

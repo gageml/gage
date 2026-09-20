@@ -31,9 +31,16 @@ impl Drop for FsckGuard {
 /// the guard so it outlives the test body: `let (store, _fsck) = ...`.
 pub(crate) fn open_store(dir: &Path) -> (Store, FsckGuard) {
     let path = dir.join("store.git");
-    init(&path).unwrap();
+    init_for_test(&path);
     let store = Store::open(&path).unwrap();
     (store, FsckGuard { path })
+}
+
+/// `init` with git's automatic gc switched off, so no background git
+/// runs against a temporary directory the test is about to remove.
+pub(crate) fn init_for_test(path: &Path) {
+    init(path).unwrap();
+    run(git_in(path, ["config", "gc.auto", "0"])).unwrap();
 }
 
 /// An fsck guard for a store the test opens itself.

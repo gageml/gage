@@ -120,6 +120,11 @@ pub trait ObjectIndex {
     /// `tip` is `None`.
     fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError>;
 
+    /// Drop every commit not reachable from a tip through `parent` and
+    /// link edges, with its links and attributes. Returns the number
+    /// of commits dropped. Runs inside the caller's transaction.
+    fn prune(&self) -> Result<usize, StoreError>;
+
     /// Tip SHAs selected by `query`, in query order.
     fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError>;
 
@@ -164,7 +169,7 @@ impl Store {
     /// The rollback outcome is not reported: the original error is the
     /// one the caller needs, and a failed rollback leaves the
     /// transaction to be discarded when the connection closes.
-    fn in_index_transaction<T>(
+    pub(crate) fn in_index_transaction<T>(
         &self,
         f: impl FnOnce() -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
@@ -218,6 +223,7 @@ impl Store {
         links: &[LinkFile],
         previous_tip: &str,
     ) -> Result<(), StoreError> {
+        self.wrote.set(true);
         let attrs = extract_attrs(object);
         self.in_index_transaction(|| {
             self.index.put(object, links, &attrs)?;
@@ -245,12 +251,14 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DatasetStore;
     use crate::note::{NoteInput, NoteStore};
     use crate::object::ObjectTree;
+    use crate::session::SessionStore;
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
-    use crate::test_support::{FsckGuard, fsck_guard, open_store};
+    use crate::test_support::{FsckGuard, fsck_guard, init_for_test, open_store};
     use crate::writer::{TreeInput, mktree, write_blob};
-    use crate::{DatasetStore, init};
+    use gage_session::{DriverError, SessionFile, SessionSummary, SessionType, SourceSession};
     use serde_json::json;
     use std::cell::RefCell;
     use std::path::Path;
@@ -258,7 +266,7 @@ mod tests {
 
     fn init_repo(dir: &Path) -> (std::path::PathBuf, FsckGuard) {
         let path = dir.join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         let guard = fsck_guard(&path);
         (path, guard)
     }
@@ -337,6 +345,9 @@ mod tests {
         fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError> {
             self.inner().set_tip(id, tip)
         }
+        fn prune(&self) -> Result<usize, StoreError> {
+            self.inner().prune()
+        }
         fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
             self.inner().select(query)
         }
@@ -384,6 +395,9 @@ mod tests {
         }
         fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError> {
             self.inner().set_tip(id, tip)
+        }
+        fn prune(&self) -> Result<usize, StoreError> {
+            self.inner().prune()
         }
         fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
             self.inner().select(query)
@@ -496,6 +510,182 @@ mod tests {
             before
         );
         assert_eq!(NoteStore::from(&reopened).get(&id).unwrap().value, "v");
+    }
+
+    /// A session with one file under the opaque `files.d` subtree.
+    struct FakeSession {
+        id: String,
+    }
+
+    impl SourceSession for FakeSession {
+        fn session_id(&self) -> &str {
+            &self.id
+        }
+
+        fn session_type(&self) -> &SessionType {
+            static TYPE: std::sync::LazyLock<SessionType> =
+                std::sync::LazyLock::new(|| SessionType::new("fake", "1"));
+            &TYPE
+        }
+
+        fn content_format(&self) -> Option<&str> {
+            None
+        }
+
+        fn summary(&self) -> SessionSummary {
+            SessionSummary {
+                size: Some(2),
+                ..SessionSummary::default()
+            }
+        }
+
+        fn files(&mut self) -> Box<dyn Iterator<Item = Result<SessionFile, DriverError>> + '_> {
+            Box::new(std::iter::once(Ok(SessionFile {
+                path: "session.jsonl".to_string(),
+                content: Box::new(std::io::Cursor::new(b"{}".to_vec())),
+            })))
+        }
+    }
+
+    /// Every row of every index table except `meta`, sorted.
+    fn dump_index(path: &Path) -> Vec<String> {
+        let conn =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let mut rows = Vec::new();
+        for table in ["ref", "object", "link", "attr"] {
+            let mut stmt = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+            let columns = stmt.column_count();
+            let mut query = stmt.query([]).unwrap();
+            while let Some(row) = query.next().unwrap() {
+                let cells: Vec<String> = (0..columns)
+                    .map(|i| format!("{:?}", row.get::<_, rusqlite::types::Value>(i).unwrap()))
+                    .collect();
+                rows.push(format!("{table}: {}", cells.join(" | ")));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    /// `record_write` indexes what the writer holds without reading
+    /// back, and a delete leaves the old version's rows for `gc` to
+    /// prune. This pins that after `gc` the index equals a rebuild
+    /// from the refs, row for row, for every kind of write.
+    #[test]
+    fn rebuild_matches_write_through_after_gc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _fsck) = init_repo(tmp.path());
+        let index_path = tmp.path().join(crate::store::INDEX_FILE);
+        let store = Store::open(&path).unwrap();
+        let notes = NoteStore::from(&store);
+        let tip = |id: &str| store.rev_parse(&object_ref(id)).unwrap().unwrap();
+
+        // Notes: a target, a link to it, and an edit
+        let a = note(&store, "a");
+        notes
+            .create(NoteInput {
+                name: "b",
+                value: "v",
+                author: "user:test",
+                targets: &[format!("note:{a}")],
+            })
+            .unwrap();
+        notes.edit(&a, "v2").unwrap();
+
+        // Two deletes: c1's first version stays reachable through d's
+        // link; c2's first version becomes unreachable
+        let c1 = note(&store, "c1");
+        let c1_first = tip(&c1);
+        notes
+            .create(NoteInput {
+                name: "d",
+                value: "v",
+                author: "user:test",
+                targets: &[format!("note:{c1}")],
+            })
+            .unwrap();
+        let c2 = note(&store, "c2");
+        let c2_first = tip(&c2);
+        notes.delete(&c1).unwrap();
+        notes.delete(&c2).unwrap();
+
+        // A session, whose only subtree is opaque
+        SessionStore::from(&store)
+            .add("fake", "0.1", &mut FakeSession { id: "s1".into() })
+            .unwrap();
+
+        // An object with a link file inside a schema subtree
+        let a_sha = tip(&a);
+        let link_blob = write_blob(&path, format!("{a_sha}\n").as_bytes()).unwrap();
+        let task = mktree(
+            &path,
+            &[TreeInput {
+                mode: "100644",
+                sha: &link_blob,
+                name: "agent_sessions.link",
+            }],
+        )
+        .unwrap();
+        let mut tree = ObjectTree::default();
+        tree.subtrees.insert("tasks".to_string(), task);
+        store
+            .create("gage::test", "1", "scan", &tree, "scan")
+            .unwrap();
+
+        let before_gc = dump_index(&index_path);
+        store.gc(Some("now"), true).unwrap();
+        let after_gc = dump_index(&index_path);
+        let pruned: Vec<&String> = before_gc.iter().filter(|r| !after_gc.contains(r)).collect();
+        assert!(!pruned.is_empty(), "delete leaves rows for gc");
+        assert!(pruned.iter().all(|r| r.contains(&c2_first)), "{pruned:?}");
+        assert!(
+            after_gc.iter().any(|r| r.contains(&c1_first)),
+            "linked version survives"
+        );
+        assert!(
+            after_gc.iter().any(|r| r.starts_with("link:")),
+            "{after_gc:?}"
+        );
+        assert!(
+            after_gc.iter().any(|r| r.starts_with("attr:")),
+            "{after_gc:?}"
+        );
+        drop(store);
+
+        for suffix in ["", "-wal", "-shm"] {
+            let file = index_path.with_file_name(format!(
+                "{}{suffix}",
+                index_path.file_name().unwrap().to_str().unwrap()
+            ));
+            if file.exists() {
+                std::fs::remove_file(&file).unwrap();
+            }
+        }
+        let rebuilt_store = Store::open(&path).unwrap();
+        let rebuilt = dump_index(&index_path);
+        drop(rebuilt_store);
+        assert_eq!(after_gc, rebuilt);
+    }
+
+    #[test]
+    fn delete_prunes_the_index_at_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _fsck) = init_repo(tmp.path());
+        let index_path = tmp.path().join(crate::store::INDEX_FILE);
+        let store = Store::open(&path).unwrap();
+        let keep = note(&store, "keep");
+        let gone = note(&store, "gone");
+        let gone_first = store.rev_parse(&object_ref(&gone)).unwrap().unwrap();
+        NoteStore::from(&store).delete(&gone).unwrap();
+        assert!(store.deleted.get());
+        let before = dump_index(&index_path);
+        assert!(before.iter().any(|r| r.contains(&gone_first)), "{before:?}");
+        drop(store);
+
+        let after = dump_index(&index_path);
+        assert!(!after.iter().any(|r| r.contains(&gone_first)), "{after:?}");
+        assert!(after.iter().any(|r| r.contains(&keep)), "{after:?}");
     }
 
     #[test]

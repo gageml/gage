@@ -6,7 +6,7 @@
 //! handle; the type-specific interfaces (`NoteStore`, `DatasetStore`,
 //! `SessionStore`) borrow it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 use crate::StoreError;
@@ -16,7 +16,7 @@ use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
 
 /// Index file, relative to the store's parent directory (Gage home).
-const INDEX_FILE: &str = "cache/object-index.sqlite";
+pub(crate) const INDEX_FILE: &str = "cache/object-index.sqlite";
 
 /// An opened Gage store: a bare Git repository whose `gage.version`
 /// this build supports.
@@ -26,6 +26,33 @@ pub struct Store {
     pub(crate) index: Box<dyn ObjectIndex>,
     /// The long-lived `cat-file` process every read goes through.
     pub(crate) cat_file: CatFileCell,
+    /// Set by any write; decides whether `git gc --auto` runs at drop.
+    pub(crate) wrote: Cell<bool>,
+    /// Set by a delete; decides whether the index is pruned at drop.
+    pub(crate) deleted: Cell<bool>,
+}
+
+impl Drop for Store {
+    /// End-of-command housekeeping, as git runs `gc --auto` at the end
+    /// of a porcelain command. A delete leaves index rows for versions
+    /// nothing reaches, pruned once here however many deletes ran. Any
+    /// write hands git the decision on collecting: `gc --auto` returns
+    /// at once when its thresholds are not met and otherwise detaches
+    /// into the background with the default prune expiry, which is
+    /// what keeps a concurrent writer safe. Neither outcome can be
+    /// returned from a drop, so failures are logged.
+    fn drop(&mut self) {
+        if self.deleted.get()
+            && let Err(e) = self.in_index_transaction(|| self.index.prune())
+        {
+            tracing::warn!("index prune at close: {e}");
+        }
+        if self.wrote.get()
+            && let Err(e) = run(git_in(&self.path, ["gc", "--auto", "--quiet"]))
+        {
+            tracing::warn!("git gc --auto at close: {e}");
+        }
+    }
 }
 
 impl std::fmt::Debug for Store {
@@ -70,6 +97,8 @@ impl Store {
             version,
             index: Box::new(SqliteIndex::open(&index_path)?),
             cat_file: RefCell::new(CatFile::spawn(path)?),
+            wrote: Cell::new(false),
+            deleted: Cell::new(false),
         };
         store.reconcile()?;
         Ok(store)
@@ -136,6 +165,52 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.path(), path);
         assert_eq!(store.version(), STORE_VERSION);
+    }
+
+    /// Loose blobs whose SHAs start with `17`, the directory git
+    /// samples to estimate the loose object count for `gc --auto`.
+    fn blobs_under_17(path: &Path, count: usize) -> Vec<String> {
+        (0u32..)
+            .map(|n| crate::writer::write_blob(path, format!("probe {n}").as_bytes()).unwrap())
+            .filter(|sha| sha.starts_with("17"))
+            .take(count)
+            .collect()
+    }
+
+    #[test]
+    fn writes_hand_git_gc_auto_the_decision_at_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        init(&path).unwrap();
+        // git runs when the sampled directory holds more than
+        // gc.auto/256 rounded up, so two probes clear a threshold of
+        // 1; in the foreground so the outcome is observable
+        run(git_in(&path, ["config", "gc.auto", "1"])).unwrap();
+        run(git_in(&path, ["config", "gc.autoDetach", "false"])).unwrap();
+        let probes = blobs_under_17(&path, 2);
+        {
+            let store = Store::open(&path).unwrap();
+            crate::NoteStore::from(&store)
+                .create(crate::NoteInput {
+                    name: "n",
+                    value: "v",
+                    author: "user:test",
+                    targets: &[],
+                })
+                .unwrap();
+            assert!(store.wrote.get());
+        }
+        let counts = run(git_in(&path, ["count-objects", "-v"])).unwrap();
+        assert!(counts.contains("packs: 1"), "{counts}");
+        // The unreferenced probes are younger than the prune expiry
+        for probe in &probes {
+            assert!(
+                path.join("objects")
+                    .join(&probe[..2])
+                    .join(&probe[2..])
+                    .exists()
+            );
+        }
     }
 
     #[test]

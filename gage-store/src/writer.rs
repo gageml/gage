@@ -378,6 +378,55 @@ mod tests {
         assert_eq!(ours, theirs);
     }
 
+    /// Names chosen around the `/` byte git appends to a directory name
+    /// when sorting: `-` `.` and space sort below it, `0` `A` `_` and
+    /// letters above it. A mis-sorted tree is `treeNotSorted` under
+    /// fsck and a receiving store rejects it.
+    #[test]
+    fn tree_sort_matches_git_on_adversarial_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let blob = write_blob(&path, b"x").unwrap();
+        let inner = mktree(
+            &path,
+            &[TreeInput {
+                mode: "100644",
+                sha: &blob,
+                name: "z",
+            }],
+        )
+        .unwrap();
+        let dirs = ["a", "a.d", "a-"];
+        let blobs = [
+            "A", "a b", "a.", "a.txt", "a0", "a-b", "a_", "aa", "a.d.txt", "a-.txt",
+        ];
+        let mut entries: Vec<TreeInput<'_>> = Vec::new();
+        let mut input = String::new();
+        for name in blobs {
+            entries.push(TreeInput {
+                mode: "100644",
+                sha: &blob,
+                name,
+            });
+            input.push_str(&format!("100644 blob {blob}\t{name}\n"));
+        }
+        for name in dirs {
+            entries.push(TreeInput {
+                mode: "040000",
+                sha: &inner,
+                name,
+            });
+            input.push_str(&format!("040000 tree {inner}\t{name}\n"));
+        }
+        let ours = mktree(&path, &entries).unwrap();
+        let theirs = crate::git::run_with_stdin(git_in(&path, ["mktree"]), input.as_bytes())
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(ours, theirs);
+        run(git_in(&path, ["fsck", "--strict"])).unwrap();
+    }
+
     /// The same commit built by `git commit-tree` with the same tree,
     /// parents, message, identity, and time.
     #[test]

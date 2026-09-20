@@ -138,6 +138,8 @@ pub struct Remote {
 pub struct GcOutcome {
     pub before: StoreStatus,
     pub after: StoreStatus,
+    /// Index rows for commits `git gc` made collectable
+    pub pruned_commits: usize,
 }
 
 impl Store {
@@ -184,9 +186,11 @@ impl Store {
         Ok(lines)
     }
 
-    /// Run `git gc`, optionally with `--prune=<expire>`. `git gc`'s
-    /// output is passed through to the caller's stdout/stderr so
-    /// progress is visible, unless `quiet` passes `--quiet` to git.
+    /// Run `git gc`, optionally with `--prune=<expire>`, then prune
+    /// the index of commits no tip reaches, which are the ones a
+    /// delete left behind. `git gc`'s output is passed through to the
+    /// caller's stdout/stderr so progress is visible, unless `quiet`
+    /// passes `--quiet` to git.
     pub fn gc(&self, prune: Option<&str>, quiet: bool) -> Result<GcOutcome, StoreError> {
         let before = self.status()?;
         let mut cmd = git_in(self.path(), ["gc"]);
@@ -205,8 +209,13 @@ impl Store {
                 stderr: String::new(),
             });
         }
+        let pruned_commits = self.in_index_transaction(|| self.index.prune())?;
         let after = self.status()?;
-        Ok(GcOutcome { before, after })
+        Ok(GcOutcome {
+            before,
+            after,
+            pruned_commits,
+        })
     }
 }
 
@@ -292,6 +301,7 @@ mod tests {
     use crate::git::{git_in, run};
     use crate::note::{NoteInput, NoteStore};
     use crate::object::object_ref;
+    use crate::test_support::init_for_test;
     use crate::writer::commit_tree;
 
     #[test]
@@ -332,8 +342,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let source_path = tmp.path().join("source.git");
         let target_path = tmp.path().join("target.git");
-        init(&source_path).unwrap();
-        init(&target_path).unwrap();
+        init_for_test(&source_path);
+        init_for_test(&target_path);
         let source = Store::open(&source_path).unwrap();
         let notes = NoteStore::from(&source);
         let tip = |id: &str| source.rev_parse(&object_ref(id)).unwrap().unwrap();
