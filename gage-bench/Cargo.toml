@@ -8,6 +8,8 @@ name = "gage-bench"
 path = "src/main.rs"
 
 [dependencies]
+gage-claude = { path = "../gage-claude" }
+gage-index = { path = "../gage-index" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 chrono = { workspace = true }

@@ -2457,6 +2457,8 @@ dependencies = [
  "argfile",
  "chrono",
  "clap",
+ "gage-claude",
+ "gage-index",
  "gage-session",
  "gage-store",
  "indicatif",
