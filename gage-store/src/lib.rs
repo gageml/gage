@@ -1,9 +1,14 @@
 //! Git backed Gage store.
 //!
-//! Every store operation runs the `git` binary found on `PATH`. No Git
-//! library is linked: the store must interoperate with other Git
+//! No Git library is linked: the store must interoperate with other Git
 //! repositories (clone, push, pull), and the binary is the only complete
-//! implementation of that surface.
+//! implementation of that surface. Most operations run the `git` binary
+//! found on `PATH`. Two paths are not shell-outs: [`writer`] writes
+//! loose objects (blobs, trees, and commits) directly into `objects/`,
+//! and [`git::CatFile`] holds one long-lived `git cat-file
+//! --batch-command` child per store so reads cost a pipe round trip
+//! rather than a process launch. Ref updates and store administration
+//! stay with the `git` binary.
 //!
 //! A program opens the store once with [`Store::open`] and reaches each
 //! object type through a typed view over the handle: `NoteStore::from(&store)`,

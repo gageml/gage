@@ -5,11 +5,15 @@ Benchmarks for the Gage store.
 ## Background
 
 The Gage store is a bare Git repository. Every object is a commit under
-`refs/gage/object/<id>`, every read and write runs the `git` binary, and
-selection is served by a SQLite index rebuilt from the refs. None of these
-choices are conventional for a data store, so their behavior at scale has to be
-measured rather than assumed. This crate exists to keep those measurements
-repeatable.
+`refs/gage/object/<id>`. Reads go through one long-lived `git cat-file
+--batch-command` child per store, so a lookup costs a pipe round trip;
+writes emit loose objects (blob, tree, commit) directly into `objects/`
+and use `git update-ref` for the ref. Selection is served by a SQLite
+index rebuilt from the refs. None of these choices are conventional for
+a data store, so their behavior at scale has to be measured rather than
+assumed. This crate exists to keep those measurements repeatable. See
+`results/store/` for the results that document the shift from a
+process-per-op shape to the current one.
 
 The bench answers four questions:
 
