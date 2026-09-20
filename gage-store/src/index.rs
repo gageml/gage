@@ -10,8 +10,8 @@
 //! the index already holds. Any change that reaches the repository by
 //! any path, including a store write, a fetch, or a direct
 //! `git update-ref`, moves a tip and is caught by the same diff. The
-//! store's own writes also go through [`Store::index_commit`] so a
-//! process sees its writes without a second reconcile.
+//! store's own writes are recorded by [`Store::record_write`] as they
+//! happen, so a process sees its writes without a second reconcile.
 //!
 //! What the index holds is defined by the object model, not by any
 //! type: every commit's markers, every ref's tip, and every link. Type
@@ -140,6 +140,11 @@ impl Store {
     /// ref map against the index's tips, index every commit reachable
     /// from a changed tip that the index does not hold, and drop refs
     /// that no longer exist.
+    ///
+    /// The whole diff is one index transaction. With one commit per
+    /// object, each a WAL sync, a rebuild of the bench population took
+    /// 11.6 s; as one transaction it takes 251 ms, a factor of 46. See
+    /// footnote 2 of `gage-bench/results/store/README.md`.
     pub(crate) fn reconcile(&self) -> Result<(), StoreError> {
         // Both reads happen inside the transaction so the diff and the
         // writes see one state.
@@ -217,6 +222,11 @@ impl Store {
     /// write leaves the ref where it was and `Err` means the object is
     /// not published. `previous_tip` is the ref value the update
     /// requires; empty means the ref must not exist yet.
+    ///
+    /// Nothing is read back from the repository. That holds only while
+    /// what this records equals what [`Store::index_commit`] records
+    /// for the same commit on a rebuild, row for row;
+    /// `rebuild_matches_write_through_after_gc` pins it.
     pub(crate) fn record_write(
         &self,
         object: &Object,

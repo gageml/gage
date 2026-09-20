@@ -1,5 +1,16 @@
 //! Object writing: blobs, trees, and commits are written as loose
-//! objects directly into `objects/`, without a `git` process.
+//! objects directly into `objects/`, without a `git` process. A create
+//! that took eight `git` launches takes one, `update-ref`, and a note
+//! create went from 5.6 ms to 1.3 ms; see footnote 3 of
+//! `gage-bench/results/store/README.md`.
+//!
+//! Nothing here calls fsync. Git's own default is
+//! `core.fsync=committed,-loose-object`, so git does not sync loose
+//! objects either, and the store's durability equals git's default: an
+//! unclean shutdown can leave an empty or partial object under its
+//! final name on a filesystem that persists the rename before the
+//! data. `fsck` reports such an object, and the reader treats it as
+//! missing.
 //!
 //! A loose object is `zlib(<kind> SP <size> NUL <bytes>)` stored at
 //! `objects/<2 hex>/<38 hex>`, named by the SHA-1 of the uncompressed

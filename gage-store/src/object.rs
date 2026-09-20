@@ -128,6 +128,12 @@ impl Store {
     /// Resolve a full id or unique prefix to `(id, tip_sha)`. The
     /// namespace is flat, so a prefix matches objects of every type;
     /// callers that need a type decode the object and check.
+    ///
+    /// This is the one read still on a `git` launch, a `for-each-ref`
+    /// glob whose cost grows with the loose ref count until `gc`. It
+    /// is why an edit or delete costs more than a create; see footnote
+    /// 5 of `gage-bench/results/store/README.md`. The index holds the
+    /// ref table and is the known replacement.
     pub fn resolve_id(&self, id_or_prefix: &str) -> Result<(String, String), StoreError> {
         let pattern = format!("{}*", object_ref(id_or_prefix));
         let matches = run(git_in(

@@ -5,8 +5,12 @@
 //! through one long-lived `git cat-file --batch-command` process per
 //! store ([`CatFile`]): a request is a line on its stdin and the reply
 //! is the raw object, so a read costs a pipe round-trip rather than a
-//! process launch. Writes and administration launch `git` per call.
-//! Gage-object concepts live in [`crate::object`].
+//! process launch. Measured against one launch per read, a single
+//! object read is ten times faster and anything that reads many
+//! objects, a query or a full iteration, about fifty times; see
+//! footnote 1 of `gage-bench/results/store/README.md`. Writes and
+//! administration launch `git` per call. Gage-object concepts live in
+//! [`crate::object`].
 
 use std::cell::RefCell;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -82,9 +86,12 @@ const ATTEMPTS: usize = 3;
 ///
 /// The reader supervises its own child process: a transport fault
 /// tears the process down and reruns the request on a fresh one, so
-/// callers never see a transient failure. A fault that survives
-/// [`ATTEMPTS`], or a process that cannot be started again, is a
-/// process fault and panics with git's reason.
+/// callers never see a transient failure. The faults it is built for
+/// are a `gc` or repack running under an open reader, whose lifetime
+/// spans every read the `Store` makes, and a process killed from
+/// outside. A fault that survives [`ATTEMPTS`], or a process that
+/// cannot be started again, is a process fault and panics with git's
+/// reason.
 pub(crate) struct CatFile {
     path: PathBuf,
     /// `None` only between a teardown and the next spawn.
@@ -440,7 +447,9 @@ impl Store {
 
     /// Depth-first walk of every entry beneath `tree_ish`, calling
     /// `visit` with the entry's path relative to `tree_ish` in `name`.
-    /// Blob sizes are filled in.
+    /// Blob sizes are filled in, at one reader round-trip per blob; a
+    /// batched size query would serve a large tree in one, and is the
+    /// known step if this walk shows up in a measurement.
     pub(crate) fn walk_tree(
         &self,
         tree_ish: &str,
