@@ -508,7 +508,7 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<(),
             .sessions_list(id)
             .map_err(|e| format!("verify: dataset {id}: {e}"))?
             .into_iter()
-            .map(|s| s.session_id)
+            .map(|s| s.native_id)
             .collect();
         let start = (d * params.dataset_size) % params.sessions.max(1);
         let expected: Vec<String> = population

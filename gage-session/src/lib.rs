@@ -2,7 +2,7 @@
 //!
 //! A driver enumerates and reads sessions from one source (Claude Code
 //! on disk, a future codex source, a database). It exposes a
-//! [`SourceSession`] whose `files` method streams the session's content
+//! [`NativeSession`] whose `files` method streams the session's content
 //! into a dataset without materializing it in memory.
 //!
 //! `StoreSession` will be the read-side counterpart: a session already
@@ -24,8 +24,8 @@ pub trait Driver: Send + Sync {
     fn version(&self) -> &'static str;
 
     /// Resolve `id` (the part after `<name>:` in a spec) into a
-    /// [`SourceSession`].
-    fn resolve(&self, id: &str) -> Result<Box<dyn SourceSession>, DriverError>;
+    /// [`NativeSession`].
+    fn resolve(&self, id: &str) -> Result<Box<dyn NativeSession>, DriverError>;
 
     /// Open a stored session for reading. `access` is scoped to the
     /// session's `content/` subtree; `session_id`, `session_type`, and
@@ -55,10 +55,11 @@ pub struct SessionSummary {
     pub size: Option<u64>,
 }
 
-/// A view of one session ready to be written into a dataset.
-pub trait SourceSession {
-    /// The source-assigned id, preserved verbatim.
-    fn session_id(&self) -> &str;
+/// A native session as its harness wrote it, ready to be written into
+/// the store.
+pub trait NativeSession {
+    /// The id the harness gave the session, preserved verbatim.
+    fn native_id(&self) -> &str;
 
     /// The session type: name + version, dispatch key for parsers.
     fn session_type(&self) -> &SessionType;

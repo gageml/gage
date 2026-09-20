@@ -472,7 +472,7 @@ fn dataset_session_list(datasets: &DatasetStore, args: DatasetSessionListArgs) {
             vec![
                 s.session_num.to_string(),
                 type_name,
-                s.session_id.clone(),
+                s.native_id.clone(),
                 s.size.map(|b| format_size(b as i64)).unwrap_or_default(),
             ]
         })
@@ -524,7 +524,7 @@ fn dataset_session_show(datasets: &DatasetStore, args: DatasetSessionShowArgs) {
         }
     };
     let mut session = match driver.open(
-        meta.session_id,
+        meta.native_id,
         meta.session_type,
         meta.content_format,
         access,
@@ -563,7 +563,7 @@ fn dataset_session_add(datasets: &DatasetStore, args: DatasetSessionAddArgs) {
     struct Resolved {
         driver_name: &'static str,
         driver_version: &'static str,
-        reader: Box<dyn gage_session::SourceSession>,
+        reader: Box<dyn gage_session::NativeSession>,
     }
     let mut resolved: Vec<Resolved> = Vec::with_capacity(args.spec.len());
     for spec in &args.spec {

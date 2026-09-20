@@ -152,11 +152,12 @@ pub async fn run_agent_def(
         }
     });
 
-    // The proxy scan's single task, named `agent:<fn>` to mark it as
-    // an agent run rather than a scanner task. `ScanContext.task_name`
-    // uses the same string so the `task_agent` rows written by
-    // `call_agent` reference this row.
-    let task_name = format!("agent:{fn_name}");
+    // The proxy scan's single task, named for the agent fn. Whether a
+    // name is a task or an agent entry is a fact of the scanner def,
+    // not of the task name. `ScanContext.task_name` uses the same
+    // string so the `task_agent` rows written by `call_agent` reference
+    // this row.
+    let task_name = fn_name.to_string();
     {
         let conn = db.lock().unwrap();
         insert_task(

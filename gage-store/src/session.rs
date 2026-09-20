@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use gage_core::uuid::derive_id;
-use gage_session::{SessionSummary, SessionType, SourceSession};
+use gage_session::{NativeSession, SessionSummary, SessionType};
 use serde::{Deserialize, Serialize};
 
 use crate::index::{ObjectQuery, Order};
@@ -48,8 +48,8 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
 pub struct SessionAttrs {
     /// `"<driver name> <driver version>"`.
     pub driver: String,
-    /// Native session id, as the driver reported it.
-    pub session_id: String,
+    /// The id the harness gave the session, as the driver reported it.
+    pub native_id: String,
     /// `"<type name> <type version>"`, e.g. `"claude 1"`.
     pub session_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,14 +133,14 @@ impl SessionStore<'_> {
         &self,
         driver_name: &str,
         driver_version: &str,
-        reader: &mut dyn SourceSession,
+        reader: &mut dyn NativeSession,
     ) -> Result<SessionAddOutcome, StoreError> {
         let path = self.store.path();
-        let native_session_id = reader.session_id().to_string();
-        let id = session_object_id(driver_name, &native_session_id);
+        let native_id = reader.native_id().to_string();
+        let id = session_object_id(driver_name, &native_id);
         let attrs = SessionAttrs {
             driver: format!("{driver_name} {driver_version}"),
-            session_id: native_session_id,
+            native_id,
             session_type: reader.session_type().to_string(),
             content_format: reader.content_format().map(str::to_string),
             summary: {
@@ -166,7 +166,7 @@ impl SessionStore<'_> {
         };
         tree.subtrees.insert(FILES_TREE.to_string(), files_tree_sha);
 
-        let subject = format!("{driver_name}:{}", attrs.session_id);
+        let subject = format!("{driver_name}:{}", attrs.native_id);
         match self.store.rev_parse(&object_ref(&id))? {
             None => {
                 let message = format!("session: {subject}");
@@ -419,8 +419,8 @@ mod tests {
         session_type: SessionType,
     }
 
-    impl SourceSession for FakeSession {
-        fn session_id(&self) -> &str {
+    impl NativeSession for FakeSession {
+        fn native_id(&self) -> &str {
             &self.id
         }
 
@@ -487,7 +487,7 @@ mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"driver\":\"fake 0.1\",\"session_id\":\"s1\",\"session_type\":\"fake 1\",\"summary\":{\"size\":4}}\n"
+            "{\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"session_type\":\"fake 1\",\"summary\":{\"size\":4}}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(record.driver_name, "fake");
         assert_eq!(record.driver_version, "0.1");
         assert_eq!(record.session_type, SessionType::new("fake", "1"));
-        assert_eq!(record.attrs.session_id, "s1");
+        assert_eq!(record.attrs.native_id, "s1");
         assert_eq!(record.size, Some(4));
     }
 

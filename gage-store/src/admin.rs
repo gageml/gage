@@ -306,7 +306,7 @@ mod tests {
     use crate::note::{NoteInput, NoteStore};
     use crate::object::object_ref;
     use crate::test_support::init_for_test;
-    use crate::writer::commit_tree;
+    use crate::writer::{TreeInput, commit_tree, mktree};
 
     #[test]
     fn init_creates_then_reinitializes() {
@@ -387,18 +387,51 @@ mod tests {
             commit_tree(&source_path, tomb_tree.trim(), "parented", &[&a_second]).unwrap();
         assert_declined(push(&parented, &a_ref), "parentless");
 
-        // The valid tombstone, then nothing more
+        // The valid tombstone; then no edit and no second tombstone
         push(&a_tomb, &a_ref).unwrap();
         assert_declined(push(&a_second, &a_ref), "closed by tombstone");
         let again = commit_tree(&source_path, tomb_tree.trim(), "again", &[]).unwrap();
         assert_declined(push(&again, &a_ref), "closed by tombstone");
+
+        // Resurrection: a parentless live commit with the tombstone's
+        // identity blobs. With a parent it is an edit onto a tombstone;
+        // with another object's identity it is declined.
+        let live_tree = tree_without(&source, &source_path, &a_tomb, "deleted");
+        let parented_live =
+            commit_tree(&source_path, &live_tree, "parented live", &[&a_second]).unwrap();
+        assert_declined(push(&parented_live, &a_ref), "closed by tombstone");
+        let b_live_tree = tree_without(&source, &source_path, &b_tomb, "deleted");
+        let b_live = commit_tree(&source_path, &b_live_tree, "b live", &[]).unwrap();
+        assert_declined(push(&b_live, &a_ref), "object identity");
+        let a_live = commit_tree(&source_path, &live_tree, "live", &[]).unwrap();
+        push(&a_live, &a_ref).unwrap();
+
+        // The resurrected object edits and deletes as any live object
+        assert_declined(push(&a_second, &a_ref), "not a tombstone");
+        let a_tomb_2 = commit_tree(&source_path, tomb_tree.trim(), "tomb 2", &[]).unwrap();
+        push(&a_tomb_2, &a_ref).unwrap();
 
         // Refs outside the namespace are not examined
         push(&a_second, "refs/tags/x").unwrap();
         push(&a_first, "refs/tags/x").unwrap();
 
         let target = Store::open(&target_path).unwrap();
-        assert_eq!(target.rev_parse(&a_ref).unwrap().unwrap(), a_tomb);
+        assert_eq!(target.rev_parse(&a_ref).unwrap().unwrap(), a_tomb_2);
+    }
+
+    /// The tree of `commit` minus the entry named `drop`.
+    fn tree_without(store: &Store, path: &Path, commit: &str, drop: &str) -> String {
+        let entries = store.list_tree(commit).unwrap();
+        let inputs: Vec<TreeInput<'_>> = entries
+            .iter()
+            .filter(|e| e.name != drop)
+            .map(|e| TreeInput {
+                mode: &e.mode,
+                sha: &e.sha,
+                name: &e.name,
+            })
+            .collect();
+        mktree(path, &inputs).unwrap()
     }
 
     fn note(notes: &NoteStore<'_>, name: &str) -> String {

@@ -3,7 +3,7 @@
 
 use std::io::{Cursor, Read};
 
-use gage_session::{DriverError, SessionFile, SessionSummary, SessionType, SourceSession};
+use gage_session::{DriverError, NativeSession, SessionFile, SessionSummary, SessionType};
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 
@@ -134,8 +134,8 @@ impl SyntheticSession {
     }
 }
 
-impl SourceSession for SyntheticSession {
-    fn session_id(&self) -> &str {
+impl NativeSession for SyntheticSession {
+    fn native_id(&self) -> &str {
         &self.id
     }
 

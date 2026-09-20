@@ -26,14 +26,11 @@ if [ "$new" = "$zero" ]; then
     exit 1
 fi
 
-# Old is a tombstone: the object is closed.
-if git cat-file -e "$old:deleted" 2>/dev/null; then
-    echo "gage: $refname is closed by tombstone" >&2
-    exit 1
-fi
+if git cat-file -e "$old:deleted" 2>/dev/null; then old_dead=1; else old_dead=0; fi
+if git cat-file -e "$new:deleted" 2>/dev/null; then new_dead=1; else new_dead=0; fi
 
-# New is not a tombstone: it must be a fast-forward edit.
-if ! git cat-file -e "$new:deleted" 2>/dev/null; then
+# Live to live: must be a fast-forward edit.
+if [ "$old_dead" = 0 ] && [ "$new_dead" = 0 ]; then
     if git merge-base --is-ancestor "$old" "$new" 2>/dev/null; then
         exit 0
     fi
@@ -41,11 +38,26 @@ if ! git cat-file -e "$new:deleted" 2>/dev/null; then
     exit 1
 fi
 
-# New is a tombstone: it must be parentless and name the same object as
-# old. Identity is compared by blob SHA; a tombstone copies these entries
+# Tombstone onto tombstone: the object is closed.
+if [ "$old_dead" = 1 ] && [ "$new_dead" = 1 ]; then
+    echo "gage: $refname is closed by tombstone" >&2
+    exit 1
+fi
+
+# The remaining shapes are the identity-preserving exception: live to
+# tombstone (delete) and tombstone to live (resurrection of a derived-id
+# object). Both must be parentless and name the same object as old.
+# Identity is compared by blob SHA; the new commit copies these entries
 # from the commit it replaces.
+if [ "$new_dead" = 1 ]; then shape=tombstone; else shape=resurrection; fi
+
 if git rev-parse --verify -q "$new^1" >/dev/null 2>&1; then
-    echo "gage: tombstone $refname must be parentless" >&2
+    if [ "$old_dead" = 1 ]; then
+        # A parented live commit onto a tombstone is an edit attempt
+        echo "gage: $refname is closed by tombstone" >&2
+    else
+        echo "gage: tombstone $refname must be parentless" >&2
+    fi
     exit 1
 fi
 
@@ -53,7 +65,7 @@ for entry in type id created; do
     old_sha=$(git rev-parse --verify -q "$old:$entry" 2>/dev/null)
     new_sha=$(git rev-parse --verify -q "$new:$entry" 2>/dev/null)
     if [ -z "$old_sha" ] || [ "$old_sha" != "$new_sha" ]; then
-        echo "gage: tombstone $refname does not match object identity ($entry)" >&2
+        echo "gage: $shape $refname does not match object identity ($entry)" >&2
         exit 1
     fi
 done

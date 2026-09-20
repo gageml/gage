@@ -2,7 +2,7 @@
 //!
 //! Given `<uuid>`, scans `$CLAUDE_CONFIG_DIR/projects/*` (or the default
 //! `~/.claude/projects/*`) for `<uuid>.jsonl` and returns a
-//! [`SourceSession`] that streams the transcript plus the adjacent
+//! [`NativeSession`] that streams the transcript plus the adjacent
 //! subagent sidecar directory.
 
 use std::fs::File;
@@ -10,8 +10,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 
 use gage_session::{
-    ContentAccess, Driver, DriverError, Entry, SessionFile, SessionSummary, SessionType,
-    SourceSession, StoreSession,
+    ContentAccess, Driver, DriverError, Entry, NativeSession, SessionFile, SessionSummary,
+    SessionType, StoreSession,
 };
 
 use crate::session::find_session;
@@ -44,13 +44,13 @@ impl Driver for ClaudeDriver {
         VERSION
     }
 
-    fn resolve(&self, id: &str) -> Result<Box<dyn SourceSession>, DriverError> {
+    fn resolve(&self, id: &str) -> Result<Box<dyn NativeSession>, DriverError> {
         let matches = find_session(id);
         let hit = matches
             .into_iter()
             .find(|info| info.id == id)
             .ok_or_else(|| DriverError::SessionNotFound(format!("{NAME}:{id}")))?;
-        Ok(Box::new(ClaudeSourceSession {
+        Ok(Box::new(ClaudeNativeSession {
             session_id: hit.id,
             session_type: SessionType::new(SESSION_TYPE, SESSION_TYPE_VERSION),
             session_path: hit.src,
@@ -106,7 +106,7 @@ impl StoreSession for ClaudeStoreSession {
     }
 }
 
-struct ClaudeSourceSession {
+struct ClaudeNativeSession {
     session_id: String,
     session_type: SessionType,
     /// The primary transcript file, e.g.
@@ -114,7 +114,7 @@ struct ClaudeSourceSession {
     session_path: PathBuf,
 }
 
-impl ClaudeSourceSession {
+impl ClaudeNativeSession {
     /// Sidecar directory for subagent files:
     /// `<parent>/<session_id>/subagents/`.
     fn subagents_dir(&self) -> PathBuf {
@@ -126,8 +126,8 @@ impl ClaudeSourceSession {
     }
 }
 
-impl SourceSession for ClaudeSourceSession {
-    fn session_id(&self) -> &str {
+impl NativeSession for ClaudeNativeSession {
+    fn native_id(&self) -> &str {
         &self.session_id
     }
 

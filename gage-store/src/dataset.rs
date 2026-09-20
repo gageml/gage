@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use gage_core::uuid::new_uuid;
-use gage_session::{ContentAccess, SessionType, SourceSession};
+use gage_session::{ContentAccess, NativeSession, SessionType};
 
 use crate::git::{git_in, run};
 use crate::index::{ObjectQuery, Order};
@@ -52,8 +52,8 @@ pub struct DatasetRecord {
 pub struct SessionMeta {
     /// 1-based index in `sessions.link`.
     pub session_num: u32,
-    /// Native session id (`attrs.session_id`).
-    pub session_id: String,
+    /// Native session id (`attrs.native_id`).
+    pub native_id: String,
     pub driver_name: String,
     pub driver_version: String,
     pub session_type: SessionType,
@@ -65,7 +65,7 @@ pub struct SessionMeta {
 pub struct DatasetSessionSummary {
     pub session_num: u32,
     /// Native session id.
-    pub session_id: String,
+    pub native_id: String,
     /// Contents of the session's `attrs.session_type` (e.g. `"claude 1"`).
     pub session_type: String,
     /// The driver's size of the session's own files, when reported.
@@ -87,7 +87,7 @@ pub struct DatasetSessionAddOutcome {
 pub struct SessionSpec<'a> {
     pub driver_name: &'a str,
     pub driver_version: &'a str,
-    pub reader: &'a mut dyn SourceSession,
+    pub reader: &'a mut dyn NativeSession,
 }
 
 impl DatasetStore<'_> {
@@ -143,7 +143,7 @@ impl DatasetStore<'_> {
         let record = SessionStore::from(self.store).at_commit(commit_sha)?;
         Ok(SessionMeta {
             session_num,
-            session_id: record.attrs.session_id,
+            native_id: record.attrs.native_id,
             driver_name: record.driver_name,
             driver_version: record.driver_version,
             session_type: record.session_type,
@@ -165,7 +165,7 @@ impl DatasetStore<'_> {
         let sessions = SessionStore::from(self.store);
         for (idx, sha) in members.iter().enumerate() {
             let record = sessions.at_commit(sha)?;
-            if record.attrs.session_id == session_ref {
+            if record.attrs.native_id == session_ref {
                 return Ok((idx + 1) as u32);
             }
         }
@@ -206,7 +206,7 @@ impl DatasetStore<'_> {
             let record = sessions.at_commit(session_commit)?;
             out.push(DatasetSessionSummary {
                 session_num: (idx + 1) as u32,
-                session_id: record.attrs.session_id,
+                native_id: record.attrs.native_id,
                 session_type: record.attrs.session_type,
                 size: record.size,
             });
@@ -453,8 +453,8 @@ mod tests {
         files: Vec<(String, String)>,
     }
 
-    impl SourceSession for FakeSession {
-        fn session_id(&self) -> &str {
+    impl NativeSession for FakeSession {
+        fn native_id(&self) -> &str {
             &self.id
         }
 
@@ -641,8 +641,8 @@ mod tests {
 
         let listed = datasets.sessions_list(&dataset).unwrap();
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].session_id, "s1");
-        assert_eq!(listed[1].session_id, "s2");
+        assert_eq!(listed[0].native_id, "s1");
+        assert_eq!(listed[1].native_id, "s2");
         assert_eq!(listed[0].session_type, "fake 1");
     }
 

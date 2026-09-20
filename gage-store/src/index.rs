@@ -268,7 +268,7 @@ mod tests {
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
     use crate::test_support::{FsckGuard, fsck_guard, init_for_test, open_store};
     use crate::writer::{TreeInput, mktree, write_blob};
-    use gage_session::{DriverError, SessionFile, SessionSummary, SessionType, SourceSession};
+    use gage_session::{DriverError, NativeSession, SessionFile, SessionSummary, SessionType};
     use serde_json::json;
     use std::cell::RefCell;
     use std::path::Path;
@@ -527,8 +527,8 @@ mod tests {
         id: String,
     }
 
-    impl SourceSession for FakeSession {
-        fn session_id(&self) -> &str {
+    impl NativeSession for FakeSession {
+        fn native_id(&self) -> &str {
             &self.id
         }
 
