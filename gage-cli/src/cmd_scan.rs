@@ -2149,10 +2149,10 @@ async fn run_scan_tui(
 /// Resolve a session's display title the same way the `session` query
 /// table does: summary cache first, deriving (and re-caching) on a
 /// miss. Falls back to the project name when the session has no title.
-fn session_title(store: &gage_index::IndexStore, s: &SessionInfo) -> String {
+fn session_title(store: &gage_claude::index::IndexStore, s: &SessionInfo) -> String {
     let title = match store.session_summary(&s.id, s.mtime) {
         Some(summary) => summary.title,
-        None => match gage_index::derive_session(&s.id, &s.src) {
+        None => match gage_claude::index::derive_session(&s.id, &s.src) {
             Ok(d) => {
                 if let Err(e) = store.put_session_summary(&s.id, &d.summary) {
                     tracing::warn!(session_id = %s.id, "failed to write summary cache: {e}");

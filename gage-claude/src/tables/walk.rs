@@ -6,17 +6,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::index::{IndexStore, LockMode};
 use datafusion::catalog::Session;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
-use gage_claude::session::{SessionInfo, SessionListBuilder};
-use gage_index::{IndexStore, LockMode};
 
-use crate::cache::SessionCache;
-use crate::filter::IdFilter;
+use crate::session::{SessionInfo, SessionListBuilder};
+use crate::tables::cache::SessionCache;
+use crate::tables::filter::IdFilter;
 
 /// Pull the per-context `SessionCache` from session config extensions.
-pub(crate) fn session_cache(state: &dyn Session) -> Result<Arc<SessionCache>> {
+pub fn session_cache(state: &dyn Session) -> Result<Arc<SessionCache>> {
     state
         .config()
         .get_extension::<SessionCache>()
@@ -28,7 +28,7 @@ pub(crate) fn session_cache(state: &dyn Session) -> Result<Arc<SessionCache>> {
 /// Try-reconcile the corpus before a query. Lock contention is
 /// expected (another query is reconciling the same corpus); we serve
 /// the current committed snapshot instead.
-pub(crate) async fn reconcile_for_query(store: &Arc<IndexStore>) -> Result<()> {
+pub async fn reconcile_for_query(store: &Arc<IndexStore>) -> Result<()> {
     let store = Arc::clone(store);
     let outcome = tokio::task::spawn_blocking(move || store.reconcile(LockMode::Try))
         .await

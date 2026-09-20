@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::index::{DerivedSession, Fingerprint, derive_session};
 use datafusion::error::{DataFusionError, Result};
-use gage_index::{DerivedSession, Fingerprint, derive_session};
 use tokio::sync::OnceCell;
 
 type Slot = Arc<OnceCell<Arc<DerivedSession>>>;

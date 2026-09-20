@@ -18,10 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
-use crate::derive::{Fingerprint, SessionSummary, derive_session};
-use crate::summary_cache;
-use crate::text_index::{Hit, INDEX_FORMAT_VERSION, TOKENIZER_CHAIN, TextIndex};
+use super::Result;
+use super::derive::{Fingerprint, SessionSummary, derive_session};
+use super::summary_cache;
+use super::text_index::{Hit, INDEX_FORMAT_VERSION, TOKENIZER_CHAIN, TextIndex};
 
 /// How to take the reconcile lock. Queries use `Try` —
 /// skip-with-stale on contention. Explicit maintenance (`gage index`)
@@ -352,27 +352,26 @@ impl IndexStore {
         let index_dir = self.index_dir();
 
         // 1. Walk: (mtime, size) per session, no file reads.
-        let walked: Vec<(String, PathBuf, Fingerprint)> =
-            gage_claude::session::SessionListBuilder::new()
-                .root(&self.root)
-                .build()
-                .into_iter()
-                .map(|s| {
-                    let mtime_ms = s
-                        .mtime
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    (
-                        s.id,
-                        s.src,
-                        Fingerprint {
-                            mtime_ms,
-                            size: s.size,
-                        },
-                    )
-                })
-                .collect();
+        let walked: Vec<(String, PathBuf, Fingerprint)> = crate::session::SessionListBuilder::new()
+            .root(&self.root)
+            .build()
+            .into_iter()
+            .map(|s| {
+                let mtime_ms = s
+                    .mtime
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                (
+                    s.id,
+                    s.src,
+                    Fingerprint {
+                        mtime_ms,
+                        size: s.size,
+                    },
+                )
+            })
+            .collect();
         let walked_ids: BTreeSet<&str> = walked.iter().map(|(id, _, _)| id.as_str()).collect();
 
         let mut manifest = load_manifest(&self.manifest_path());
@@ -484,7 +483,7 @@ impl IndexStore {
     /// count, on-disk sizes, last reconcile time. Read-only — takes
     /// no lock.
     pub fn status(&self) -> Status {
-        let walked: HashMap<String, Fingerprint> = gage_claude::session::SessionListBuilder::new()
+        let walked: HashMap<String, Fingerprint> = crate::session::SessionListBuilder::new()
             .root(&self.root)
             .build()
             .into_iter()
@@ -576,7 +575,7 @@ fn message_rows_of(
 ) -> Vec<(i64, Option<&str>, Option<&str>, &str)> {
     use arrow::array::{Array, Int64Array, StringArray};
 
-    use crate::derive::{COL_LINE, COL_MESSAGE_SUBTYPE, COL_TEXT, COL_TYPE};
+    use super::derive::{COL_LINE, COL_MESSAGE_SUBTYPE, COL_TEXT, COL_TYPE};
 
     let lines = batch
         .columns()

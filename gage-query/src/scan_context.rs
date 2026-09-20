@@ -14,8 +14,8 @@ use gage_claude::home::ClaudeHome;
 use gage_claude::session::SessionInfo;
 use tracing::warn;
 
-use crate::cache::SessionCache;
 use crate::tables::{ConfigTable, EntryTable, MessageTable};
+use gage_claude::tables::SessionCache;
 
 pub struct ScanSessionContext {
     inner: SessionContext,

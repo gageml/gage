@@ -7,13 +7,22 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+arrow = { workspace = true }
+async-trait = { workspace = true }
+datafusion = { workspace = true }
+futures = { workspace = true }
+fs4 = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-session = { path = "../gage-session" }
 chrono = { workspace = true }
 regex = { workspace = true }
+rmp-serde = { workspace = true }
 rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tantivy = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 

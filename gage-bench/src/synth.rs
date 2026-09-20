@@ -5,8 +5,8 @@ use std::any::Any;
 use std::io::Write as _;
 
 use gage_session::{
-    ContentSink, ContentSource, Driver, DriverError, NativeLookupError, NativeSession,
-    NativeSessions, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
+    ContentSink, ContentSource, Driver, DriverError, DriverTables, NativeLookupError,
+    NativeSession, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
@@ -187,8 +187,10 @@ impl Driver for SyntheticDriver {
         "0"
     }
 
-    fn sessions<'a>(&'a self, _source: &'a SourceUrl) -> Result<NativeSessions<'a>, DriverError> {
-        Ok(Box::new(std::iter::empty()))
+    fn tables(&self, _source: &SourceUrl) -> Result<DriverTables, DriverError> {
+        Err(DriverError::Other(
+            "SyntheticDriver::tables is not implemented".into(),
+        ))
     }
 
     fn find_native(&self, _source: &SourceUrl, _prefix: &str) -> Result<String, NativeLookupError> {

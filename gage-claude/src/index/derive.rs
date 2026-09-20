@@ -9,17 +9,17 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::UNIX_EPOCH;
 
+use crate::entry::{
+    entry_attachment_blocks, entry_subtype, entry_to_text, message_subtype, split_ide_tags,
+};
+use crate::session_reader::SessionReader;
 use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::DateTime;
-use gage_claude::entry::{
-    entry_attachment_blocks, entry_subtype, entry_to_text, message_subtype, split_ide_tags,
-};
-use gage_claude::session_reader::SessionReader;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use super::Result;
 
 // Derived column indices. The derived schema is a superset serving
 // two tables: `entry` is a projection of every row; `message` is a

@@ -467,8 +467,8 @@ mod tests {
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
     use gage_session::{
-        ContentSource, Driver as DriverTrait, DriverError, Entry, NativeLookupError,
-        NativeSessions, Project, ProjectSpec, SourceUrl, StoredSession,
+        ContentSource, Driver as DriverTrait, DriverError, DriverTables, Entry, NativeLookupError,
+        Project, ProjectSpec, SourceUrl, StoredSession,
     };
     use std::any::Any;
     use std::io::Cursor;
@@ -519,11 +519,10 @@ mod tests {
         fn version(&self) -> &'static str {
             "0.1"
         }
-        fn sessions<'a>(
-            &'a self,
-            _source: &'a SourceUrl,
-        ) -> Result<NativeSessions<'a>, DriverError> {
-            Ok(Box::new(std::iter::empty()))
+        fn tables(&self, _source: &SourceUrl) -> Result<DriverTables, DriverError> {
+            Err(DriverError::Other(
+                "FakeDriver::tables is not implemented".into(),
+            ))
         }
         fn find_native(
             &self,

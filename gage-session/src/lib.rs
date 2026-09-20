@@ -9,13 +9,20 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+use datafusion::datasource::TableProvider;
 
 pub trait Driver: Send + Sync {
     fn name(&self) -> &'static str;
     fn version(&self) -> &'static str;
 
-    fn sessions<'a>(&'a self, source: &'a SourceUrl) -> Result<NativeSessions<'a>, DriverError>;
+    /// Return the driver's session-derived table providers, bound to
+    /// `source`. Consumers register the returned providers on a
+    /// DataFusion context; every read pushes filters, sort, projection,
+    /// and limit through DataFusion into the driver's storage.
+    fn tables(&self, source: &SourceUrl) -> Result<DriverTables, DriverError>;
 
     fn find_native(&self, source: &SourceUrl, prefix: &str) -> Result<String, NativeLookupError>;
 
@@ -50,11 +57,14 @@ pub trait Driver: Send + Sync {
     ) -> Result<Box<dyn StoredSession>, DriverError>;
 }
 
-/// Iterator returned by [`Driver::sessions`]. One yield per native
-/// session; per-yield errors surface driver-side read failures without
-/// aborting the walk.
-pub type NativeSessions<'a> =
-    Box<dyn Iterator<Item = Result<Box<dyn NativeSession>, DriverError>> + 'a>;
+/// The session-derived tables a driver exposes to gage-query. Every
+/// table returned here is registered on the DataFusion context under a
+/// well-known name matching its field.
+pub struct DriverTables {
+    pub session: Arc<dyn TableProvider>,
+    pub message: Arc<dyn TableProvider>,
+    pub entry: Arc<dyn TableProvider>,
+}
 
 pub trait NativeSession {
     fn native_id(&self) -> &str;

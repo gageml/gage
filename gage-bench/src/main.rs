@@ -5,9 +5,6 @@ use std::time::Duration;
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use gage_bench::report::{self, Results};
-use gage_bench::session_list_bench::{
-    self, BENCH_NAME as SESSION_LIST_BENCH_NAME, Params as SessionListParams,
-};
 use gage_bench::store_bench::{self, BENCH_NAME, Params};
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -29,44 +26,6 @@ struct Cli {
 enum Command {
     /// Populate a fresh store, report sizes, verify, and time reads
     Store(StoreArgs),
-
-    /// Bench `gage session list` against the Claude driver
-    ClaudeSessionList(ClaudeSessionListArgs),
-}
-
-#[derive(Args, Debug)]
-struct ClaudeSessionListArgs {
-    /// Total session files to generate
-    #[arg(long, default_value_t = 500)]
-    sessions: usize,
-
-    /// Number of project slugs the sessions are distributed across
-    #[arg(long, default_value_t = 5)]
-    projects: usize,
-
-    /// KiB of JSONL content per session file
-    #[arg(long, default_value_t = 32)]
-    session_kb: usize,
-
-    /// List --limit value used for each iteration
-    #[arg(long, default_value_t = 20)]
-    limit: usize,
-
-    /// Iterations of the list operation per scenario
-    #[arg(long, default_value_t = 5)]
-    iterations: usize,
-
-    /// Generator seed
-    #[arg(long, default_value_t = 1)]
-    seed: u64,
-
-    /// Compare against a saved run: `latest` or a results file path
-    #[arg(long, value_name = "FILE|latest")]
-    baseline: Option<String>,
-
-    /// Keep the run directory instead of deleting it on success
-    #[arg(long)]
-    keep: bool,
 }
 
 #[derive(Args, Debug)]
@@ -148,75 +107,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse_from(args);
     match cli.command {
         Command::Store(args) => store(args),
-        Command::ClaudeSessionList(args) => claude_session_list(args),
     }
-}
-
-fn claude_session_list(args: ClaudeSessionListArgs) -> ExitCode {
-    let params = SessionListParams {
-        sessions: args.sessions,
-        projects: args.projects.max(1),
-        session_kb: args.session_kb,
-        limit: args.limit,
-        iterations: args.iterations.max(1),
-        seed: args.seed,
-    };
-    let baseline = match args
-        .baseline
-        .as_deref()
-        .map(|s| resolve_baseline_for(SESSION_LIST_BENCH_NAME, s))
-    {
-        Some(Ok(results)) => Some(results),
-        Some(Err(e)) => {
-            eprintln!("gage-bench: baseline: {e}");
-            return ExitCode::from(2);
-        }
-        None => None,
-    };
-
-    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let run_dir = std::env::temp_dir().join(format!("gage-bench-{stamp}"));
-    if let Err(e) = std::fs::create_dir_all(&run_dir) {
-        eprintln!("gage-bench: create {}: {e}", run_dir.display());
-        return ExitCode::from(1);
-    }
-
-    let bar = progress_bar();
-    let results = session_list_bench::run(&params, &stamp, &run_dir, &bar);
-    bar.finish_and_clear();
-    let results = match results {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("gage-bench: {e}");
-            eprintln!("Run dir: {}", run_dir.display());
-            return ExitCode::from(1);
-        }
-    };
-
-    println!("Run {} {}", results.stamp, results.code_version);
-    println!("Params: {}", results.params);
-    report::print_metrics("Timings", &results.metrics);
-    report::print_sizes("Sizes", &results.sizes);
-    report::print_counts("Counts", &results.counts);
-    if let Some(baseline) = &baseline {
-        report::print_comparison(baseline, &results);
-    }
-
-    let saved = match results.save() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("gage-bench: save results: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    println!();
-    println!("Results: {}", saved.display());
-    if args.keep {
-        println!("Run dir: {}", run_dir.display());
-    } else if let Err(e) = std::fs::remove_dir_all(&run_dir) {
-        eprintln!("gage-bench: remove {}: {e}", run_dir.display());
-    }
-    ExitCode::SUCCESS
 }
 
 fn store(args: StoreArgs) -> ExitCode {

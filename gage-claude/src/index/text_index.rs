@@ -21,7 +21,7 @@ use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
 use tantivy::{Index, IndexWriter, Score, TantivyDocument, Term};
 
-use crate::{IndexError, Result};
+use super::{IndexError, Result};
 
 /// Index format version: covers the index schema and tokenizer chain.
 /// Bumping it changes the `v{N}` path component.

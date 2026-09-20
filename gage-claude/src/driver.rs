@@ -14,13 +14,17 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+use std::sync::Arc;
+
 use gage_session::{
-    ContentSink, ContentSource, Driver, DriverError, Entry, Message, NativeLookupError,
-    NativeSession, NativeSessions, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
+    ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry, Message,
+    NativeLookupError, NativeSession, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
 };
 
 use crate::home::ClaudeHome;
+use crate::index::IndexStore;
 use crate::session::{SESSION_RE, encode_project_dir, is_agent_tmp_slug, is_empty_session};
+use crate::tables::{EntryTable, MessageTable, SessionTable};
 
 const NAME: &str = "claude";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -53,10 +57,16 @@ impl Driver for ClaudeDriver {
         VERSION
     }
 
-    fn sessions<'a>(&'a self, source: &'a SourceUrl) -> Result<NativeSessions<'a>, DriverError> {
+    fn tables(&self, source: &SourceUrl) -> Result<DriverTables, DriverError> {
         let root = resolve_root(source)?;
         let projects_dir = root.join("projects");
-        enumerate_sessions(projects_dir, root)
+        let cache_dir = default_cache_dir(&projects_dir);
+        let store = Arc::new(IndexStore::new(projects_dir, cache_dir));
+        Ok(DriverTables {
+            session: Arc::new(SessionTable::new(Arc::clone(&store))),
+            message: Arc::new(MessageTable::new(Arc::clone(&store))),
+            entry: Arc::new(EntryTable::new(store)),
+        })
     }
 
     fn find_native(&self, source: &SourceUrl, prefix: &str) -> Result<String, NativeLookupError> {
@@ -204,6 +214,21 @@ fn subagents_dir_for(session_path: &Path, native_id: &str) -> PathBuf {
         .join("subagents")
 }
 
+/// Where the index cache lives for a Claude projects directory. Two
+/// origins are recognized so the default corpus and the gage-agent
+/// corpus never share a summary cache, text index, or reconcile
+/// manifest.
+fn default_cache_dir(projects_dir: &Path) -> PathBuf {
+    let gage_home = gage_core::config::gage_home();
+    let agent_projects_dir = gage_home.join("claude");
+    let origin = if projects_dir == agent_projects_dir {
+        "agent"
+    } else {
+        "default"
+    };
+    gage_home.join("cache").join(origin)
+}
+
 /// Resolve the filesystem root from a `claude:` source URL. Empty
 /// body -> the ambient Claude home. Non-empty body is treated as a
 /// path (`~` expanded).
@@ -234,65 +259,6 @@ fn expand_tilde(s: &str) -> PathBuf {
         return PathBuf::from(home);
     }
     PathBuf::from(s)
-}
-
-fn enumerate_sessions(
-    projects_dir: PathBuf,
-    root: PathBuf,
-) -> Result<NativeSessions<'static>, DriverError> {
-    let entries = match fs::read_dir(&projects_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(Box::new(std::iter::empty()));
-        }
-        Err(e) => return Err(DriverError::Io(e)),
-    };
-    let mut hits: Vec<(String, PathBuf, fs::Metadata)> = Vec::new();
-    for entry in entries {
-        let project_path = entry.map_err(DriverError::Io)?.path();
-        if !project_path.is_dir() {
-            continue;
-        }
-        let slug = project_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if is_agent_tmp_slug(&slug) {
-            continue;
-        }
-        let dir_entries = match fs::read_dir(&project_path) {
-            Ok(e) => e,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(DriverError::Io(e)),
-        };
-        for f in dir_entries {
-            let path = f.map_err(DriverError::Io)?.path();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if !SESSION_RE.is_match(&name) {
-                continue;
-            }
-            let id = name[..36].to_string();
-            let meta = match path.metadata() {
-                Ok(m) => m,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(DriverError::Io(e)),
-            };
-            hits.push((id, path, meta));
-        }
-    }
-    let root_for_iter = root;
-    let iter = hits.into_iter().map(move |(id, path, meta)| {
-        Ok(Box::new(ClaudeNativeSession::new(
-            id,
-            path,
-            meta,
-            root_for_iter.clone(),
-        )) as Box<dyn NativeSession>)
-    });
-    Ok(Box::new(iter))
 }
 
 fn walk_session_files(
@@ -583,36 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn sessions_lists_files_and_populates_cheap_attrs() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        seed_session(
-            root,
-            "/Users/alice/Code/gage",
-            uuid,
-            "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n",
-        );
-
-        let driver = ClaudeDriver::new();
-        let source = source_for(root);
-        let sessions: Vec<Box<dyn NativeSession>> = driver
-            .sessions(&source)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(sessions.len(), 1);
-        let s = &sessions[0];
-        assert_eq!(s.native_id(), uuid);
-        assert_eq!(s.session_type(), "claude");
-        let attrs = s.attrs();
-        assert!(attrs.mtime().is_some());
-        assert!(attrs.size().unwrap() > 0);
-        assert_eq!(attrs.project_name(), Some("-Users-alice-Code-gage"));
-        assert_eq!(attrs.is_empty(), Some(false));
-    }
-
-    #[test]
     fn find_native_disambiguates_prefix() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -629,12 +565,11 @@ mod tests {
     }
 
     #[test]
-    fn project_from_path_matches_sessions_by_slug() {
+    fn project_from_path_encodes_slug() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let cwd = "/Users/alice/Code/gage";
-        let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        seed_session(root, cwd, uuid, "");
+        seed_session(root, cwd, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "");
 
         let driver = ClaudeDriver::new();
         let source = source_for(root);
@@ -643,33 +578,5 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(project.name(), "-Users-alice-Code-gage");
-
-        let sessions: Vec<Box<dyn NativeSession>> = driver
-            .sessions(&source)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(project.is_for(&*sessions[0]));
-    }
-
-    #[test]
-    fn agent_tmp_slug_hidden_from_listing() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        seed_session(
-            root,
-            "/Users/alice/.gage/tmp/run-1/cwd",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff",
-            "",
-        );
-
-        let driver = ClaudeDriver::new();
-        let source = source_for(root);
-        let sessions: Vec<Box<dyn NativeSession>> = driver
-            .sessions(&source)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(sessions.is_empty());
     }
 }

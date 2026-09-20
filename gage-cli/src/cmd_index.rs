@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use gage_index::{LockMode, ReconcileEvent, Status};
+use gage_claude::index::{LockMode, ReconcileEvent, Status};
 use indicatif::{ProgressBar, ProgressStyle};
 use tabled::{
     Table,

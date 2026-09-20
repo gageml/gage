@@ -1,14 +1,13 @@
-//! Derived data layer for session-file queries.
+//! Derived data layer for Claude session files.
 //!
 //! One artifact shadows the session corpus, maintained by one
 //! reconcile pass: a Tantivy full-text index over message text. The
 //! index lives under a cache directory and is ephemeral: deleting the
 //! cache is a complete reset.
 //!
-//! Layering: `gage-claude` (source reading) → `gage-index` (derived
-//! artifacts) → `gage-query` (SQL surface). This crate owns
-//! derivation, the Tantivy index, its tokenizer chain, and the
-//! reconcile pass end to end.
+//! Layering: [`crate::session`] and [`crate::entry`] (source reading)
+//! feed this module (derived artifacts); the DataFusion table
+//! providers in [`crate::tables`] read through it.
 
 mod derive;
 mod reconcile;

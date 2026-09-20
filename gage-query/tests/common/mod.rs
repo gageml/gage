@@ -33,8 +33,8 @@ fn cache_dir() -> &'static Path {
         .get_or_init(|| tempfile::tempdir().expect("create cache tempdir"))
         .path();
     WARM.get_or_init(|| {
-        gage_index::IndexStore::new(testdata(), dir)
-            .reconcile(gage_index::LockMode::Wait)
+        gage_claude::index::IndexStore::new(testdata(), dir)
+            .reconcile(gage_claude::index::LockMode::Wait)
             .expect("warm reconcile");
     });
     dir

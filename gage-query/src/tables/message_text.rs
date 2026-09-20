@@ -20,10 +20,10 @@ use datafusion::datasource::{MemTable, TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
-use gage_index::{DEFAULT_SNIPPET_CHARS, IndexStore};
+use gage_claude::index::{DEFAULT_SNIPPET_CHARS, IndexStore};
 
-use super::walk::reconcile_for_query;
 use crate::scope::Scope;
+use gage_claude::tables::reconcile_for_query;
 
 /// Default cap when no `LIMIT` is supplied. Explicit user limits pass
 /// through verbatim with no ceiling.
@@ -186,7 +186,7 @@ impl TableProvider for MessageTextTable {
     }
 }
 
-fn build_batch(hits: Vec<gage_index::Hit>) -> Result<RecordBatch> {
+fn build_batch(hits: Vec<gage_claude::index::Hit>) -> Result<RecordBatch> {
     let len = hits.len();
     let mut session_ids = StringBuilder::with_capacity(len, len * 36);
     let mut lines = Int64Builder::with_capacity(len);

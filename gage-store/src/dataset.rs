@@ -449,7 +449,7 @@ mod tests {
     use crate::test_support::open_store;
     use crate::{NoteInput, NoteStore};
     use gage_session::{
-        ContentSink, DriverError, NativeLookupError, NativeSessions, Project, ProjectSpec,
+        ContentSink, DriverError, DriverTables, NativeLookupError, Project, ProjectSpec,
         SessionAttrs, SourceUrl, StoredSession,
     };
     use std::any::Any;
@@ -498,11 +498,10 @@ mod tests {
         fn version(&self) -> &'static str {
             "0.1"
         }
-        fn sessions<'a>(
-            &'a self,
-            _source: &'a SourceUrl,
-        ) -> Result<NativeSessions<'a>, DriverError> {
-            Ok(Box::new(std::iter::empty()))
+        fn tables(&self, _source: &SourceUrl) -> Result<DriverTables, DriverError> {
+            Err(DriverError::Other(
+                "FakeDriver::tables is not implemented".into(),
+            ))
         }
         fn find_native(
             &self,

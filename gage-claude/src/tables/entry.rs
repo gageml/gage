@@ -4,6 +4,9 @@ use std::fmt::{self, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
+use crate::index::{
+    COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -20,14 +23,11 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::StreamExt;
-use gage_index::{
-    COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
-};
 
 use super::SessionSource;
+use super::cache::SessionCache;
+use super::filter;
 use super::walk::{lookup_paths, session_cache, session_paths};
-use crate::cache::SessionCache;
-use crate::filter;
 
 const PROJECTION: &[usize] = &[
     COL_SESSION_ID,
@@ -41,7 +41,7 @@ const PROJECTION: &[usize] = &[
 
 static ENTRY_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(
-        gage_index::derived_schema()
+        crate::index::derived_schema()
             .project(PROJECTION)
             .expect("derived schema serves entry projection"),
     )

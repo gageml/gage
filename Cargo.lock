@@ -2458,7 +2458,6 @@ dependencies = [
  "chrono",
  "clap",
  "gage-claude",
- "gage-index",
  "gage-session",
  "gage-store",
  "indicatif",
@@ -2472,14 +2471,23 @@ dependencies = [
 name = "gage-claude"
 version = "0.2.0-dev"
 dependencies = [
+ "arrow",
+ "async-trait",
  "chrono",
+ "datafusion",
+ "fs4 1.1.0",
+ "futures",
  "gage-core",
  "gage-session",
  "regex",
+ "rmp-serde",
  "rust-embed",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "tantivy",
  "tempfile",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -2498,7 +2506,6 @@ dependencies = [
  "gage-claude",
  "gage-core",
  "gage-db",
- "gage-index",
  "gage-log",
  "gage-mcp",
  "gage-query",
@@ -2547,23 +2554,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "gage-index"
-version = "0.2.0-dev"
-dependencies = [
- "arrow",
- "chrono",
- "fs4 1.1.0",
- "gage-claude",
- "rmp-serde",
- "serde",
- "serde_json",
- "serde_yaml",
- "tantivy",
  "tempfile",
  "tracing",
 ]
@@ -2634,7 +2624,6 @@ dependencies = [
  "gage-claude",
  "gage-core",
  "gage-db",
- "gage-index",
  "gage-registry",
  "rusqlite",
  "rustyline",
@@ -2717,6 +2706,9 @@ dependencies = [
 [[package]]
 name = "gage-session"
 version = "0.2.0-dev"
+dependencies = [
+ "datafusion",
+]
 
 [[package]]
 name = "gage-store"
@@ -2780,7 +2772,6 @@ dependencies = [
  "gage-claude",
  "gage-core",
  "gage-db",
- "gage-index",
  "gage-query",
  "gage-store",
  "pulldown-cmark",

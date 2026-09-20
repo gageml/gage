@@ -30,12 +30,12 @@ use datafusion::datasource::{MemTable, TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
+use gage_claude::index::{COL_LINE, COL_TEXT, IndexStore};
 use gage_claude::session::SessionListBuilder;
-use gage_index::{COL_LINE, COL_TEXT, IndexStore};
 
-use super::message::{into_message_batch, message_schema};
-use super::walk::session_cache;
 use crate::scope::Scope;
+use gage_claude::tables::message::{into_message_batch, message_schema};
+use gage_claude::tables::walk::session_cache;
 
 /// Argument-list display string for `\df`.
 pub const NOTE_MESSAGE_CONTEXT_ARGS: &str = "note_id text, before integer, after integer";

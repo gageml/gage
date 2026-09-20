@@ -4,6 +4,10 @@ use std::fmt::{self, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
+use crate::index::{
+    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
+    COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+};
 use async_trait::async_trait;
 use datafusion::arrow::array::{Array, BooleanArray, StringArray};
 use datafusion::arrow::compute::filter_record_batch;
@@ -22,15 +26,11 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::StreamExt;
-use gage_index::{
-    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
-    COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
-};
 
 use super::SessionSource;
+use super::cache::SessionCache;
+use super::filter;
 use super::walk::{lookup_paths, session_cache, session_paths};
-use crate::cache::SessionCache;
-use crate::filter;
 
 /// The derived columns serving the `message` table, in table-column
 /// order. `text` is non-null exactly for message rows: user/assistant
@@ -56,7 +56,7 @@ pub(crate) const PROJECTION: &[usize] = &[
 const PROJECTED_SUBTYPE: usize = 4;
 
 static MESSAGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    let projected = gage_index::derived_schema()
+    let projected = crate::index::derived_schema()
         .project(PROJECTION)
         .expect("derived schema serves message projection");
     let fields: Vec<Field> = projected
@@ -74,7 +74,7 @@ static MESSAGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(fields))
 });
 
-pub(crate) fn message_schema() -> SchemaRef {
+pub fn message_schema() -> SchemaRef {
     MESSAGE_SCHEMA.clone()
 }
 
@@ -341,7 +341,7 @@ fn message_rows(batch: &RecordBatch) -> Result<RecordBatch> {
 /// which DataFusion rejects at scan time with "Mismatch between schema
 /// and batches". Always route message-shaped output through this
 /// helper.
-pub(crate) fn into_message_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+pub fn into_message_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     let projected = batch.project(PROJECTION)?;
     Ok(RecordBatch::try_new(
         message_schema(),

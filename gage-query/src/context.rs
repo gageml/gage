@@ -10,19 +10,17 @@ use datafusion_table_providers::sql::db_connection_pool::Mode;
 use datafusion_table_providers::sql::db_connection_pool::sqlitepool::SqliteConnectionPoolFactory;
 use datafusion_table_providers::sqlite::SqliteTableFactory;
 use gage_claude::home::ClaudeHome;
-use gage_index::IndexStore;
+use gage_claude::index::IndexStore;
 
-use crate::cache::SessionCache;
+use gage_claude::tables::{EntryTable, MessageTable, SessionCache, SessionTable};
+
 use crate::scope::{Scope, ScopeEdge, ScopedTable, SessionScope};
 use crate::tables::config::ConfigTable;
-use crate::tables::entry::EntryTable;
 use crate::tables::issue_report::IssueReportFn;
-use crate::tables::message::MessageTable;
 use crate::tables::message_text::MessageTextFn;
 use crate::tables::note_doc::note_doc_table;
 use crate::tables::note_message_context::NoteMessageContextFn;
 use crate::tables::related_issue::RelatedIssueFn;
-use crate::tables::session::SessionTable;
 
 fn default_root() -> PathBuf {
     gage_claude::session::projects_dir().expect("CLAUDE_PROJECTS_DIR or HOME must be set")

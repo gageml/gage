@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::derive::SessionSummary;
+use super::derive::SessionSummary;
 
 /// Cache format version. Bumped on any schema or semantic change to
 /// `SessionSummary` (new field, changed title heuristic, fixed token

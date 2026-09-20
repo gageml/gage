@@ -21,7 +21,6 @@ gage-test = { path = "../gage-test" }
 gage-mcp = { path = "../gage-mcp" }
 gage-tui = { path = "../gage-tui" }
 gage-claude = { path = "../gage-claude" }
-gage-index = { path = "../gage-index" }
 gage-log = { path = "../gage-log" }
 humantime = "2"
 libc = "0.2"

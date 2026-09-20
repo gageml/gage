@@ -3,6 +3,7 @@ use std::fmt::{self, Formatter};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use crate::index::{IndexStore, SessionSummary};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
     BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
@@ -25,12 +26,11 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::stream;
-use gage_claude::session::SessionInfo;
-use gage_index::{IndexStore, SessionSummary};
 
+use super::cache::SessionCache;
+use super::filter;
 use super::walk::{session_cache, walk_sessions};
-use crate::cache::SessionCache;
-use crate::filter;
+use crate::session::SessionInfo;
 
 /// Index of the first column whose value comes from parsing the
 /// session JSONL (`title` and everything after). Columns before this
