@@ -366,7 +366,7 @@ impl ContentAccess for GitContentAccess {
                 "-r",
                 "-z",
                 "--name-only",
-                &format!("{}:files", self.session_commit),
+                &format!("{}:files.d", self.session_commit),
             ],
         ))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -378,7 +378,7 @@ impl ContentAccess for GitContentAccess {
     }
 
     fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>> {
-        let target = format!("{}:files/{}", self.session_commit, path);
+        let target = format!("{}:files.d/{}", self.session_commit, path);
         let mut cmd: Command = git_in(&self.store_path, ["cat-file", "-p", &target]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn()?;

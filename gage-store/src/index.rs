@@ -213,20 +213,15 @@ impl Store {
     /// the ref value the update requires; empty means the ref must
     /// not exist yet.
     ///
-    /// Nothing is read back: the writer holds the header, the content,
-    /// and the top-level link files. Link files inside an opaque
-    /// subtree are found by walking it, which only happens when the
-    /// object has one.
+    /// Nothing is read back: link files live at the tree root (see
+    /// object-trees.md), and any nested `.link` file inside an opaque
+    /// `.d` subtree is producer content that Gage does not index.
     pub(crate) fn record_write(
         &self,
         object: &Object,
         previous_tip: &str,
     ) -> Result<(), StoreError> {
-        let links = if object.tree.subtrees.is_empty() {
-            object.top_level_links()
-        } else {
-            self.find_link_files(&object.commit_sha)?
-        };
+        let links = object.top_level_links();
         let attrs = extract_attrs(object);
         self.in_index_transaction(|| {
             self.index.put(object, &links, &attrs)?;

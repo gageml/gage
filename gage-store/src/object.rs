@@ -7,7 +7,9 @@
 //! `parent` holding the previous version's SHA. Type-specific content
 //! is `attrs.json`, blob-valued attribute files (`value.txt`), link
 //! files (`*.link`, one commit SHA per line), and opaque subtrees
-//! (`files/`). See README: Appendix: Object tree layout.
+//! whose name ends in `.d` (`files.d/`). Gage schema walkers stop at
+//! the root of a `.d` subtree; its interior is producer-owned. See
+//! README: Appendix: Object tree layout.
 //!
 //! The rules that make a commit well formed live here and nowhere
 //! else: the `parent` SHA is the first commit parent, every SHA in
@@ -475,16 +477,16 @@ impl Store {
         Ok(Some(ms))
     }
 
-    /// Walk the commit tree recursively and return every `.link` file
-    /// with its listed SHAs. The path is relative to the commit's root.
+    /// Walk the commit tree and return every `.link` file with its
+    /// listed SHAs. The path is relative to the commit's root.
+    ///
+    /// Subtrees whose name ends in `.d` are opaque: their contents are
+    /// producer-owned and Gage schema walkers stop at the root of such
+    /// a subtree. A `.link` blob inside a `.d` subtree is producer
+    /// content, not a Gage link.
     pub fn find_link_files(&self, commit: &str) -> Result<Vec<LinkFile>, StoreError> {
         let mut link_blobs: Vec<(String, String)> = Vec::new();
-        self.walk_tree(commit, "", &mut |entry| {
-            if entry.kind == EntryKind::Blob && entry.name.ends_with(".link") {
-                link_blobs.push((entry.name, entry.sha));
-            }
-            Ok(())
-        })?;
+        self.walk_link_scannable(commit, "", &mut link_blobs)?;
         let mut files = Vec::with_capacity(link_blobs.len());
         for (path, sha) in link_blobs {
             let bytes = self.read_blob_bytes(&sha)?;
@@ -492,6 +494,31 @@ impl Store {
             files.push(LinkFile { path, shas });
         }
         Ok(files)
+    }
+
+    fn walk_link_scannable(
+        &self,
+        tree_ish: &str,
+        prefix: &str,
+        out: &mut Vec<(String, String)>,
+    ) -> Result<(), StoreError> {
+        for entry in self.read_tree(tree_ish)? {
+            let path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{prefix}/{}", entry.name)
+            };
+            match entry.kind {
+                EntryKind::Blob if entry.name.ends_with(".link") => {
+                    out.push((path, entry.sha));
+                }
+                EntryKind::Tree if !entry.name.ends_with(".d") => {
+                    self.walk_link_scannable(&entry.sha, &path, out)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Split a commit's parents into `parent`, link parents (attributed
@@ -840,6 +867,51 @@ mod tests {
             }
             other => panic!("expected a parse error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn find_link_files_skips_opaque_d_subtrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let target = note(&store, "target", &[]);
+        let target_sha = store.resolve_id(&target).unwrap().1;
+        let holder = note(&store, "holder", &[format!("note:{target}")]);
+
+        // The producer put a `.link`-suffixed blob inside an opaque
+        // `.d` subtree. Its content is not a SHA, which would fail
+        // `parse_link` if it were read. The walker must not descend.
+        let (_, holder_sha) = store.resolve_id(&holder).unwrap();
+        let mut entries = store.read_entries(&holder_sha).unwrap();
+        let inner_blob = write_blob(store.path(), b"not a sha\n").unwrap();
+        let inner_tree = mktree(
+            store.path(),
+            &[TreeInput {
+                mode: "100644",
+                sha: &inner_blob,
+                name: "leaf.link",
+            }],
+        )
+        .unwrap();
+        entries.insert(
+            "producer.d".to_string(),
+            TreeEntryRef {
+                mode: "040000".to_string(),
+                kind: "tree".to_string(),
+                sha: inner_tree,
+            },
+        );
+        let tree = mktree(store.path(), &tree_lines(&entries)).unwrap();
+        let commit = commit_tree(store.path(), &tree, "planted", &[]).unwrap();
+        run(git_in(
+            store.path(),
+            ["update-ref", &object_ref(&holder), &commit],
+        ))
+        .unwrap();
+
+        let files = store.find_link_files(&commit).unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, "target.link");
+        assert_eq!(files[0].shas, vec![target_sha]);
     }
 
     fn note(store: &Store, name: &str, targets: &[String]) -> String {

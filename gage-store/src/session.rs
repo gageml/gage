@@ -1,7 +1,7 @@
 //! Session objects: `gage::session 1`, reached through [`SessionStore`].
 //!
 //! Content is `attrs.json` (driver, native session id, session type,
-//! optional content format) and the opaque `files/**` subtree holding
+//! optional content format) and the opaque `files.d/**` subtree holding
 //! the session content as provided by the driver. The object id is
 //! derived from `(driver_name, native_session_id)`, so the same native
 //! session maps to the same object over time. Adding a session whose
@@ -27,7 +27,10 @@ const OBJECT_VERSION: &str = "1";
 /// `summary` is a driver projection; until a driver writes it the
 /// `model` filter selects nothing.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];
-const FILES_TREE: &str = "files";
+/// Top-level subtree name for the session's opaque file content. The
+/// `.d` suffix marks the subtree as producer-owned; Gage schema
+/// walkers do not descend into it. See object-trees.md.
+const FILES_TREE: &str = "files.d";
 
 /// Session operations over an opened store.
 pub struct SessionStore<'a> {
@@ -285,7 +288,7 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
     })
 }
 
-/// Build the `files/` tree from `(relative_path, blob_sha)` pairs.
+/// Build the `files.d/` tree from `(relative_path, blob_sha)` pairs.
 /// Validates the full path set once, then recurses on subdirectories.
 fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<String, StoreError> {
     validate_session_paths(&entries)?;
@@ -476,7 +479,7 @@ mod tests {
         let listing = run(git_in(store.path(), ["ls-tree", "--name-only", &ref_path])).unwrap();
         assert_eq!(
             listing.lines().collect::<Vec<_>>(),
-            vec!["attrs.json", "created", "files", "id", "modified", "type"]
+            vec!["attrs.json", "created", "files.d", "id", "modified", "type"]
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:type")),
@@ -486,7 +489,7 @@ mod tests {
             cat(&store, &format!("{ref_path}:attrs.json")),
             "{\"driver\":\"fake 0.1\",\"session_id\":\"s1\",\"session_type\":\"fake 1\",\"summary\":{\"size\":4}}\n"
         );
-        assert_eq!(cat(&store, &format!("{ref_path}:files/sub/a.txt")), "a");
+        assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
         let record = sessions.at_commit(&outcome.commit_sha).unwrap();
         assert_eq!(record.id, outcome.id);
@@ -554,7 +557,12 @@ mod tests {
         let ref_path = object_ref(&outcome.id);
         let listing = run(git_in(
             store.path(),
-            ["ls-tree", "-r", "--name-only", &format!("{ref_path}:files")],
+            [
+                "ls-tree",
+                "-r",
+                "--name-only",
+                &format!("{ref_path}:files.d"),
+            ],
         ))
         .unwrap();
         assert_eq!(
