@@ -5,8 +5,8 @@ use std::any::Any;
 use std::io::Write as _;
 
 use gage_session::{
-    ContentSink, ContentSource, Driver, DriverError, DriverTables, NativeLookupError,
-    NativeSession, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
+    ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
+    StoredSession,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
@@ -187,32 +187,12 @@ impl Driver for SyntheticDriver {
         "0"
     }
 
-    fn tables(&self, _source: &SourceUrl) -> Result<DriverTables, DriverError> {
-        Err(DriverError::Other(
-            "SyntheticDriver::tables is not implemented".into(),
-        ))
+    fn schemes(&self) -> &'static [&'static str] {
+        &["bench"]
     }
-
-    fn find_native(&self, _source: &SourceUrl, _prefix: &str) -> Result<String, NativeLookupError> {
-        Err(NativeLookupError::NoMatch(String::new()))
+    fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        Err(DriverError::Other("open_source not used".into()))
     }
-
-    fn open_native(
-        &self,
-        _source: &SourceUrl,
-        _native_id: &str,
-    ) -> Result<Box<dyn NativeSession>, DriverError> {
-        Err(DriverError::Other("open_native not used".into()))
-    }
-
-    fn project(
-        &self,
-        _source: &SourceUrl,
-        _spec: ProjectSpec,
-    ) -> Result<Option<Box<dyn Project>>, DriverError> {
-        Ok(None)
-    }
-
     fn write_native(
         &self,
         session: &mut dyn NativeSession,

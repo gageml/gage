@@ -136,11 +136,7 @@ fn write_counts(out: &mut String) {
     w(out, format!("  Scans:    {scans}"));
 
     let sessions = SessionListBuilder::new().build().len();
-    let agent_sessions = count_agent_sessions();
-    w(
-        out,
-        format!("  Sessions: {sessions} Claude Code, {agent_sessions} agent"),
-    );
+    w(out, format!("  Sessions: {sessions}"));
 }
 
 fn issue_count(conn: &gage_db::rusqlite::Connection, status: IssueStatusFilter) -> u32 {
@@ -152,34 +148,6 @@ fn issue_count(conn: &gage_db::rusqlite::Connection, status: IssueStatusFilter) 
         },
     )
     .unwrap()
-}
-
-fn count_agent_sessions() -> usize {
-    let root = gage_home().join("claude");
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return 0,
-        Err(e) => panic!("failed to read {}: {e}", root.display()),
-    };
-    let mut n = 0;
-    for entry in entries {
-        let path = entry.unwrap().path();
-        if !path.is_dir() {
-            continue;
-        }
-        for file in fs::read_dir(&path).unwrap() {
-            if file
-                .unwrap()
-                .path()
-                .extension()
-                .and_then(|s| s.to_str())
-                .is_some_and(|ext| ext == "jsonl")
-            {
-                n += 1;
-            }
-        }
-    }
-    n
 }
 
 fn write_storage(out: &mut String, verbose: bool) {

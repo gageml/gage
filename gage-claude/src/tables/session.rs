@@ -31,17 +31,23 @@ use super::cache::SessionCache;
 use super::filter;
 use super::walk::{session_cache, walk_sessions};
 use crate::session::SessionInfo;
+use gage_core::uuid::short_uuid;
 
 /// Index of the first column whose value comes from parsing the
 /// session JSONL (`title` and everything after). Columns before this
 /// are filled from the directory walk. A projection that touches none
 /// of these — `SELECT COUNT(*)`, `SELECT id FROM session WHERE ...` —
 /// can skip per-row derivation entirely.
-const SUMMARY_COL_START: usize = 5;
+const SUMMARY_COL_START: usize = 7;
 
 fn session_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
+        // The driver's short display form of `id`
+        Field::new("id_display", DataType::Utf8, false),
+        // The shortest prefix of `id` unique among every session in
+        // the source
+        Field::new("id_prefix", DataType::Utf8, false),
         Field::new("project", DataType::Utf8, true),
         Field::new("path", DataType::Utf8, false),
         Field::new(
@@ -271,7 +277,7 @@ impl ExecutionPlan for SessionExec {
 impl SessionExec {
     async fn build_batch(self) -> Result<RecordBatch> {
         let exec_start = std::time::Instant::now();
-        let outcome = walk_sessions(&self.store, &self.filters, "id", self.limit)?;
+        let outcome = walk_sessions(&self.store, &self.filters, "id", self.limit, true)?;
         let sessions: Vec<SessionInfo> = outcome.sessions;
 
         let needs_summary = self.projection_needs_summary();
@@ -287,6 +293,8 @@ impl SessionExec {
 
         let len = sessions.len();
         let mut ids = StringBuilder::with_capacity(len, len * 36);
+        let mut id_displays = StringBuilder::with_capacity(len, len * 8);
+        let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
         let mut projects = StringBuilder::with_capacity(len, len * 32);
         let mut paths = StringBuilder::with_capacity(len, len * 64);
         let mut mtimes = TimestampMillisecondBuilder::with_capacity(len);
@@ -307,6 +315,13 @@ impl SessionExec {
 
         for s in &sessions {
             ids.append_value(&s.id);
+            id_displays.append_value(short_uuid(&s.id));
+            let prefix_len = outcome
+                .id_prefix_len
+                .get(&s.id)
+                .copied()
+                .expect("walk computed a prefix for every walked id");
+            id_prefixes.append_value(s.id.chars().take(prefix_len).collect::<String>());
             projects.append_value(s.project_name().as_ref());
             paths.append_value(s.src.to_string_lossy().as_ref());
             let millis = s
@@ -359,6 +374,8 @@ impl SessionExec {
             self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
+                Arc::new(id_displays.finish()),
+                Arc::new(id_prefixes.finish()),
                 Arc::new(projects.finish()),
                 Arc::new(paths.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),

@@ -3,10 +3,6 @@ use gage_query::PrintFormat;
 
 #[derive(Args)]
 pub struct QueryArgs {
-    /// Operate on agent sessions instead of Claude Code sessions
-    #[arg(short = 'A', long)]
-    pub agent: bool,
-
     /// Execute SQL and exit
     ///
     /// May be given multiple times; statements run in order.

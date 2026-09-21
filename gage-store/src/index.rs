@@ -269,8 +269,8 @@ mod tests {
     use crate::test_support::{FsckGuard, fsck_guard, init_for_test, open_store};
     use crate::writer::{TreeInput, mktree, write_blob};
     use gage_session::{
-        ContentSink, ContentSource, Driver, DriverError, DriverTables, NativeLookupError,
-        NativeSession, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
+        ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
+        StoredSession,
     };
     use serde_json::json;
     use std::any::Any;
@@ -568,31 +568,11 @@ mod tests {
         fn version(&self) -> &'static str {
             "0.1"
         }
-        fn tables(&self, _source: &SourceUrl) -> Result<DriverTables, DriverError> {
-            Err(DriverError::Other(
-                "FakeDriver::tables is not implemented".into(),
-            ))
+        fn schemes(&self) -> &'static [&'static str] {
+            &["fake"]
         }
-        fn find_native(
-            &self,
-            _source: &SourceUrl,
-            _prefix: &str,
-        ) -> Result<String, NativeLookupError> {
-            Err(NativeLookupError::NoMatch(String::new()))
-        }
-        fn open_native(
-            &self,
-            _source: &SourceUrl,
-            _native_id: &str,
-        ) -> Result<Box<dyn NativeSession>, DriverError> {
-            Err(DriverError::Other("open_native not used".into()))
-        }
-        fn project(
-            &self,
-            _source: &SourceUrl,
-            _spec: ProjectSpec,
-        ) -> Result<Option<Box<dyn Project>>, DriverError> {
-            Ok(None)
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(
             &self,

@@ -2629,6 +2629,7 @@ dependencies = [
  "gage-core",
  "gage-db",
  "gage-registry",
+ "gage-session",
  "rusqlite",
  "rustyline",
  "serde_json",

@@ -1,16 +1,18 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
-use datafusion::arrow::array::{
-    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
-};
+use console::style as cstyle;
+use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_claude::home::claude_home;
+use gage_claude::project::shorten_home_path;
 use gage_claude::session::{delete_session, encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
+use gage_session::Source;
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
@@ -21,6 +23,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
+use crate::source;
 use crate::style;
 
 #[derive(Subcommand)]
@@ -43,20 +46,19 @@ pub struct SessionListArgs {
     #[command(flatten)]
     pub limit: crate::limit::LimitArgs,
 
-    /// Filter by project. Accepts a filesystem path or a slug
-    /// (e.g. `-home-me-code-foo`).
-    #[arg(long, value_name = "PROJECT")]
+    /// Filter by project (path or name)
+    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
 
-    /// Filter by how long ago the session was modified (e.g. 1h, 30m, 7d).
+    /// Filter by how long ago the session was modified
     #[arg(long, value_parser = super::parse_duration)]
     pub since: Option<Duration>,
 
-    /// Only show empty sessions.
+    /// Only show empty sessions
     #[arg(long)]
     pub empty: bool,
 
-    /// Show the full session ID, never truncating it.
+    /// Show the full session ID
     #[arg(long)]
     pub full_id: bool,
 }
@@ -104,24 +106,65 @@ pub struct SessionDeleteArgs {
 }
 
 pub async fn list(source: Option<String>, args: SessionListArgs) {
-    if source.is_some() {
-        eprintln!("gage session list: --source is not yet wired for SQL contexts");
-        std::process::exit(1);
-    }
-    let ctx = gage_query::create_context_default().await;
-    let (rows, total) = match query_sessions(&ctx, &args).await {
+    let registry = source::driver_registry();
+    let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("gage session list: {e}");
             std::process::exit(1);
         }
     };
-    if total == 0 {
+    let source = match driver.open_source(&spec) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gage session list: {spec}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let tables = match source.tables() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("gage session list: {spec}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let ctx = gage_query::create_source_context(tables);
+    let project = match args.project.as_deref() {
+        Some(text) => match resolve_project(source.as_ref(), text) {
+            Ok(name) => Some(name),
+            Err(e) => {
+                eprintln!("gage session list: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    let (rows, total) = query_sessions(&ctx, &args, project.as_deref()).await;
+    if total > 0 {
+        let labels = project_labels(source.as_ref(), &rows);
+        render_table(&rows, &labels, args.full_id);
+        args.limit.print_summary(rows.len(), total, "session");
+    } else {
         println!("No sessions found");
-        return;
     }
-    render_table(&rows, args.full_id);
-    args.limit.print_summary(rows.len(), total, "session");
+    if let Err(e) = source.close() {
+        eprintln!("gage session list: {spec}: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Resolve a `--project` value to the driver's project name: an
+/// existing directory is named by the driver, anything else is taken
+/// as a name.
+fn resolve_project(source: &dyn Source, text: &str) -> Result<String, String> {
+    let path = Path::new(text);
+    if path.is_dir() {
+        source
+            .project_name(path)
+            .map_err(|e| format!("project {text}: {e}"))
+    } else {
+        Ok(text.to_string())
+    }
 }
 
 /// Run one SQL query for the shown rows and a second for the total
@@ -131,13 +174,17 @@ pub async fn list(source: Option<String>, args: SessionListArgs) {
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
-) -> Result<(Vec<Row>, usize), String> {
-    let where_clause = build_where_clause(args)?;
-    let limit = args.limit.show_count(usize::MAX);
+    project: Option<&str>,
+) -> (Vec<Row>, usize) {
+    let where_clause = build_where_clause(args, project);
+    let limit_clause = match args.limit.fetch_limit() {
+        Some(n) => format!(" LIMIT {n}"),
+        None => String::new(),
+    };
     let sql = format!(
-        "SELECT id, project, title, model, size, message_count, mtime, is_empty \
+        "SELECT id, id_display, id_prefix, project, title, model, size, message_count, mtime \
          FROM session{where_clause} \
-         ORDER BY mtime DESC LIMIT {limit}",
+         ORDER BY mtime DESC{limit_clause}",
     );
     let batches = run_query(ctx, &sql).await;
     let rows = rows_from_batches(&batches);
@@ -149,14 +196,13 @@ async fn query_sessions(
         .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
         .map(|a| a.value(0) as usize)
         .unwrap_or(0);
-    Ok((rows, total))
+    (rows, total)
 }
 
-fn build_where_clause(args: &SessionListArgs) -> Result<String, String> {
+fn build_where_clause(args: &SessionListArgs, project: Option<&str>) -> String {
     let mut clauses: Vec<String> = Vec::new();
-    if let Some(text) = args.project.as_deref() {
-        let slug = project_slug(text);
-        clauses.push(format!("project = '{}'", slug.replace('\'', "''")));
+    if let Some(name) = project {
+        clauses.push(format!("project = '{}'", name.replace('\'', "''")));
     }
     if let Some(d) = args.since {
         let cutoff_ms = std::time::SystemTime::now()
@@ -164,87 +210,56 @@ fn build_where_clause(args: &SessionListArgs) -> Result<String, String> {
             .unwrap_or_default()
             .as_millis()
             .saturating_sub(d.as_millis()) as i64;
-        clauses.push(format!(
-            "mtime >= CAST({cutoff_ms} AS TIMESTAMP) AT TIME ZONE 'UTC'"
-        ));
+        clauses.push(format!("mtime >= to_timestamp_millis({cutoff_ms})"));
     }
     if args.empty {
         clauses.push("is_empty".to_string());
     }
     if clauses.is_empty() {
-        Ok(String::new())
+        String::new()
     } else {
-        Ok(format!(" WHERE {}", clauses.join(" AND ")))
-    }
-}
-
-/// Encode a `--project` value to the slug used in the `session.project`
-/// column. A filesystem path is encoded through
-/// [`encode_project_dir`]; anything else is treated as an already
-/// encoded slug.
-fn project_slug(text: &str) -> String {
-    let looks_like_path = text.starts_with('/')
-        || text.starts_with('~')
-        || text.starts_with('.')
-        || text.contains('/');
-    if looks_like_path {
-        let path = PathBuf::from(text);
-        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-        encode_project_dir(&canonical)
-    } else {
-        text.to_string()
+        format!(" WHERE {}", clauses.join(" AND "))
     }
 }
 
 struct Row {
     id: String,
-    project_home_stripped: String,
+    /// The driver's short display form of `id`
+    id_display: String,
+    /// The shortest prefix of `id` unique in the source
+    id_prefix: String,
+    /// Driver project name, as the `project` column reports it
+    project: String,
     title: String,
     model: String,
     size: i64,
     message_count: i64,
     mtime_ms: i64,
-    is_empty: bool,
 }
 
 fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
     let mut out = Vec::new();
-    let prefix = home_slug_prefix();
     for batch in batches {
         let ids = column::<StringArray>(batch, 0);
-        let projects = column::<StringArray>(batch, 1);
-        let titles = column::<StringArray>(batch, 2);
-        let models = column::<StringArray>(batch, 3);
-        let sizes = column::<Int64Array>(batch, 4);
-        let counts = column::<Int64Array>(batch, 5);
-        let mtimes = column::<TimestampMillisecondArray>(batch, 6);
-        let is_empty = column::<BooleanArray>(batch, 7);
+        let id_displays = column::<StringArray>(batch, 1);
+        let id_prefixes = column::<StringArray>(batch, 2);
+        let projects = column::<StringArray>(batch, 3);
+        let titles = column::<StringArray>(batch, 4);
+        let models = column::<StringArray>(batch, 5);
+        let sizes = column::<Int64Array>(batch, 6);
+        let counts = column::<Int64Array>(batch, 7);
+        let mtimes = column::<TimestampMillisecondArray>(batch, 8);
         for i in 0..batch.num_rows() {
-            let project_name = projects.value(i);
-            let stripped = project_name
-                .strip_prefix(&prefix)
-                .unwrap_or(project_name)
-                .to_string();
-            let model = if models.is_null(i) {
-                String::new()
-            } else {
-                let m = models.value(i);
-                m.strip_prefix("claude-").unwrap_or(m).to_string()
-            };
-            let title = if titles.is_null(i) {
-                String::new()
-            } else {
-                titles.value(i).to_string()
-            };
             out.push(Row {
                 id: ids.value(i).to_string(),
-                project_home_stripped: stripped,
-                title,
-                model,
+                id_display: id_displays.value(i).to_string(),
+                id_prefix: id_prefixes.value(i).to_string(),
+                project: projects.value(i).to_string(),
+                title: string_or_empty(titles, i),
+                model: string_or_empty(models, i),
                 size: sizes.value(i),
                 message_count: counts.value(i),
                 mtime_ms: mtimes.value(i),
-                is_empty: is_empty.value(i),
             });
         }
     }
@@ -259,44 +274,67 @@ fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
         .expect("column type matches session-table schema")
 }
 
-/// Prefix used to strip the home portion of a Claude project slug so
-/// the visible slug is shorter. The old builder computed this the
-/// same way from `$HOME`.
-fn home_slug_prefix() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut slug = String::with_capacity(home.len() + 1);
-    for c in home.chars() {
-        slug.push(if c.is_ascii_alphanumeric() { c } else { '-' });
+fn string_or_empty(col: &StringArray, i: usize) -> String {
+    if col.is_null(i) {
+        String::new()
+    } else {
+        col.value(i).to_string()
     }
-    slug.push('-');
-    slug
 }
 
-fn render_table(rows: &[Row], full_id: bool) {
-    let all_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
-    let highlighter = style::IdHighlighter::new(all_ids);
+/// Project column label per distinct project name in `rows`: the
+/// project's path with `~` substituted when the source records one,
+/// else the name.
+fn project_labels(source: &dyn Source, rows: &[Row]) -> HashMap<String, String> {
+    let mut labels: HashMap<String, String> = HashMap::new();
+    for r in rows {
+        if labels.contains_key(&r.project) {
+            continue;
+        }
+        let label = match source.project_path(&r.project) {
+            Ok(Some(path)) => shorten_home_path(&path),
+            Ok(None) => r.project.clone(),
+            Err(e) => {
+                eprintln!("warning: project {}: {e}", r.project);
+                r.project.clone()
+            }
+        };
+        labels.insert(r.project.clone(), label);
+    }
+    labels
+}
 
+/// Styled id: bright yellow over the unique prefix, dark yellow for
+/// the rest of the shown form.
+fn styled_id(shown: &str, prefix: &str) -> String {
+    let split = shown
+        .char_indices()
+        .nth(prefix.chars().count())
+        .map(|(i, _)| i)
+        .unwrap_or(shown.len());
+    let (head, tail) = shown.split_at(split);
+    format!(
+        "{}{}",
+        cstyle(head).yellow().bright(),
+        cstyle(tail).yellow()
+    )
+}
+
+fn render_table(rows: &[Row], labels: &HashMap<String, String>, full_id: bool) {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for r in rows {
-        let id_display = if full_id {
-            highlighter.full(&r.id)
-        } else {
-            highlighter.short(&r.id)
-        };
+        let shown = if full_id { &r.id } else { &r.id_display };
+        let id_display = styled_id(shown, &r.id_prefix);
+        let project = labels.get(&r.project).cloned().unwrap_or_default();
         let modified = crate::human::format_elapsed_ms(r.mtime_ms);
         let size = crate::human::format_size(r.size);
-        let count = if r.is_empty && r.message_count == 0 {
-            "0".to_string()
-        } else {
-            r.message_count.to_string()
-        };
         table_rows.push(vec![
             id_display,
-            r.project_home_stripped.clone(),
+            project,
             r.title.clone(),
             r.model.clone(),
             size,
-            count,
+            r.message_count.to_string(),
             modified,
         ]);
     }
@@ -321,7 +359,7 @@ fn render_table(rows: &[Row], full_id: bool) {
             .suffix("…")
             .priority(style::IdAwarePriority::new(full_id)),
     );
-    println!("{}", table);
+    println!("{table}");
 }
 
 async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {

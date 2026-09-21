@@ -22,7 +22,6 @@ const SESSION_B: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 /// in the fresh GAGE_HOME but the scan still validates the declared
 /// schema against an empty stream.
 const TABLES: &[&str] = &[
-    "agent_session",
     "config",
     "entry",
     "issue",

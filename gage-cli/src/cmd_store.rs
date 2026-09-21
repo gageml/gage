@@ -571,8 +571,7 @@ fn dataset_session_add(datasets: &DatasetStore, args: DatasetSessionAddArgs) {
                 std::process::exit(1);
             }
         };
-        let source = gage_session::SourceUrl::new(driver.name(), "");
-        let reader = match driver.open_native(&source, id) {
+        let reader = match driver.open_source("").and_then(|s| s.open_native(id)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("gage store dataset session add: {spec}: {e}");

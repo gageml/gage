@@ -10,9 +10,10 @@ use datafusion_table_providers::sql::db_connection_pool::Mode;
 use datafusion_table_providers::sql::db_connection_pool::sqlitepool::SqliteConnectionPoolFactory;
 use datafusion_table_providers::sqlite::SqliteTableFactory;
 use gage_claude::home::ClaudeHome;
-use gage_claude::index::IndexStore;
+use gage_claude::index::{IndexStore, cache_dir_for};
 
 use gage_claude::tables::{EntryTable, MessageTable, SessionCache, SessionTable};
+use gage_session::DriverTables;
 
 use crate::scope::{Scope, ScopeEdge, ScopedTable, SessionScope};
 use crate::tables::config::ConfigTable;
@@ -26,43 +27,29 @@ fn default_root() -> PathBuf {
     gage_claude::session::projects_dir().expect("CLAUDE_PROJECTS_DIR or HOME must be set")
 }
 
-/// Cache location for a given corpus `root`. Namespaced by origin so the
-/// two corpora — the user's Claude sessions and the gage agent corpus —
-/// never share a summary cache, text index, or reconcile manifest. They
-/// are keyed by session id, which collides across origins, and reconcile
-/// GCs against a single root walk. There are exactly two origins by
-/// definition, so the segment is a literal: `agent` for the gage agent
-/// corpus (`<gage_home>/claude`, what `gage session -A` selects),
-/// `default` for everything else.
-fn default_cache_dir(root: &Path) -> PathBuf {
-    let gage_home = gage_core::config::gage_home();
-    let origin = if root == gage_home.join("claude") {
-        "agent"
-    } else {
-        "default"
-    };
-    gage_home.join("cache").join(origin)
-}
-
 /// The text-index handle for the default corpus and cache locations
 /// — what `gage query`, the MCP server, and `gage index` all share.
 pub fn default_index_store() -> IndexStore {
     let root = default_root();
-    let cache_dir = default_cache_dir(&root);
-    IndexStore::new(root, cache_dir)
-}
-/// The text-index handle for the agent corpus, cached separately from
-/// the default corpus (see `default_cache_dir`).
-pub fn agent_index_store() -> IndexStore {
-    let root = gage_core::config::agent_sessions_dir();
-    let cache_dir = default_cache_dir(&root);
+    let cache_dir = cache_dir_for(&root);
     IndexStore::new(root, cache_dir)
 }
 
 pub async fn create_context_default() -> SessionContext {
     let root = default_root();
-    let cache_dir = default_cache_dir(&root);
+    let cache_dir = cache_dir_for(&root);
     create_context(&root, &cache_dir).await
+}
+
+/// Build a query context over one driver source. Registers the
+/// driver's `session`, `message`, and `entry` tables and the UDF
+/// suite; no Gage state tables.
+pub fn create_source_context(tables: DriverTables) -> SessionContext {
+    let ctx = new_session_context();
+    ctx.register_table("session", tables.session).unwrap();
+    ctx.register_table("message", tables.message).unwrap();
+    ctx.register_table("entry", tables.entry).unwrap();
+    ctx
 }
 
 /// What an agent context is scoped to: a scan, optionally narrowed to
@@ -95,7 +82,7 @@ pub async fn create_agent_context(scan_id: impl Into<String>) -> SessionContext 
 /// optional session narrowing and line ranges.
 pub async fn create_agent_context_scoped(scope: AgentScope) -> SessionContext {
     let root = default_root();
-    let cache_dir = default_cache_dir(&root);
+    let cache_dir = cache_dir_for(&root);
     build_context(&root, &cache_dir, Some(scope)).await
 }
 
@@ -119,17 +106,7 @@ async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>)
     // The sqlite connection pool below opens the db file directly and
     // neither creates nor migrates it; a fresh gage home needs both.
     gage_db::db::ensure_db().expect("ensure gage db");
-    let cache = Arc::new(SessionCache::new());
-    let config = SessionConfig::new()
-        .with_information_schema(true)
-        .with_extension(Arc::clone(&cache))
-        .set_str("datafusion.sql_parser.dialect", "PostgreSQL");
-    let state = SessionStateBuilder::new()
-        .with_config(config)
-        .with_default_features()
-        .build();
-    let ctx = SessionContext::new_with_state(state);
-    install_udfs(&ctx);
+    let ctx = new_session_context();
     let store = Arc::new(IndexStore::new(root, cache_dir));
 
     // One session scope shared by the session-serving tables and TVFs
@@ -198,26 +175,23 @@ async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>)
     ctx.register_table("note_doc", note_doc_table().unwrap())
         .unwrap();
 
-    // Agent sessions — `call_agent` transcripts under
-    // `<gage_home>/claude/`. Same directory layout as the Claude
-    // projects dir, so the session provider works unchanged; the
-    // `project` column carries the agent name and `task_agent.
-    // session_id` joins on `id`. Own store + cache origin so the two
-    // corpora never share an index (see `default_cache_dir`). When the
-    // context is already rooted at the agent corpus (`gage session
-    // --agent`), reuse the existing store.
-    let agent_root = gage_core::config::gage_home().join("claude");
-    let agent_store = if agent_root == root {
-        store
-    } else {
-        Arc::new(IndexStore::new(
-            agent_root.clone(),
-            default_cache_dir(&agent_root),
-        ))
-    };
-    ctx.register_table("agent_session", Arc::new(SessionTable::new(agent_store)))
-        .unwrap();
+    ctx
+}
 
+/// A bare context with the session cache extension, the PostgreSQL
+/// dialect, and the UDF suite installed. No tables.
+fn new_session_context() -> SessionContext {
+    let cache = Arc::new(SessionCache::new());
+    let config = SessionConfig::new()
+        .with_information_schema(true)
+        .with_extension(cache)
+        .set_str("datafusion.sql_parser.dialect", "PostgreSQL");
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_default_features()
+        .build();
+    let ctx = SessionContext::new_with_state(state);
+    install_udfs(&ctx);
     ctx
 }
 

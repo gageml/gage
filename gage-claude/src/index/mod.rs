@@ -15,14 +15,37 @@ mod summary_cache;
 mod text_index;
 
 use std::fmt;
+use std::path::{Path, PathBuf};
+
+use gage_core::config::gage_home;
+
+use crate::session::encode_project_dir;
 
 pub use derive::{
     COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
     COL_SUBTYPE, COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, DerivedSession, Fingerprint,
     SessionSummary, derive_session, derived_schema, entry_text, is_message_row,
 };
-pub use reconcile::{IndexStore, LockMode, ReconcileEvent, ReconcileOutcome, Status};
+pub use reconcile::{
+    IndexStore, LockMode, ReconcileEvent, ReconcileOutcome, SOURCE_MARKER, Status,
+};
 pub use text_index::{DEFAULT_SNIPPET_CHARS, Hit, INDEX_FORMAT_VERSION, TOKENIZER_CHAIN};
+
+/// Cache directory for the index artifacts of one projects directory:
+/// `<gage_home>/cache/<slug>`, where the slug is the canonical projects
+/// path with every non-alphanumeric character replaced by `-`. Every
+/// source is keyed the same way; the default Claude location is not
+/// special.
+pub fn cache_dir_for(projects_dir: &Path) -> PathBuf {
+    // A projects dir that cannot be canonicalized (typically: it does
+    // not exist yet) is keyed as given. The only effect of a
+    // non-canonical key is a second cache dir for the same corpus.
+    let canonical =
+        std::fs::canonicalize(projects_dir).unwrap_or_else(|_| projects_dir.to_path_buf());
+    gage_home()
+        .join("cache")
+        .join(encode_project_dir(&canonical))
+}
 
 #[derive(Debug)]
 pub enum IndexError {

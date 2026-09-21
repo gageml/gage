@@ -44,6 +44,7 @@ mod human;
 mod limit;
 mod markdown;
 mod model_prompt;
+mod source;
 mod style;
 mod target_content;
 
@@ -104,9 +105,11 @@ enum Command {
 
     /// Manage sessions
     Session {
-        /// Session source URL (e.g. `claude:`, `claude:/tmp/foo`)
+        /// Session source
         ///
-        /// Default: the default driver's default location.
+        /// A driver scheme selects the driver (`claude:<path>`); a value
+        /// with no scheme goes to the default driver (`<path>`). Defaults
+        /// to the default driver's default location.
         #[arg(short = 's', long, value_name = "SOURCE", global = true)]
         source: Option<String>,
 
@@ -265,12 +268,7 @@ async fn main() {
                 cmd_issue::IssueCommand::Comment(args) => cmd_issue::comment(args),
             },
             Command::Test { command } => cmd_test::run(command).await,
-            Command::Scan(args) => {
-                if args.agent {
-                    set_agent_projects_dir();
-                }
-                cmd_scan::run(*args).await
-            }
+            Command::Scan(args) => cmd_scan::run(*args).await,
             Command::Resolve(args) => cmd_resolve::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
                 McpCommand::Stdio => {
@@ -296,12 +294,7 @@ async fn main() {
                     shutdown_tx.send(()).ok();
                 }
             },
-            Command::Query(args) => {
-                if args.agent {
-                    set_agent_projects_dir();
-                }
-                cmd_query::main(args).await
-            }
+            Command::Query(args) => cmd_query::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_sync::push(args).await,
             Command::Pull(args) => cmd_sync::pull(args).await,
@@ -316,13 +309,4 @@ async fn main() {
             std::process::exit(1);
         }
     }
-}
-
-/// Point session resolution at the agent corpus (`<gage_home>/claude`)
-/// for `-A --agent` invocations.
-fn set_agent_projects_dir() {
-    let dir = gage_core::config::agent_sessions_dir();
-    // SAFETY: set_var is unsafe in edition 2024; we set this once at
-    // startup, before any command work reads the variable.
-    unsafe { std::env::set_var("CLAUDE_PROJECTS_DIR", &dir) };
 }

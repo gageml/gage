@@ -182,6 +182,9 @@ pub struct IndexStore {
     cache_dir: PathBuf,
 }
 
+/// File in a cache dir holding the projects dir the cache is for
+pub const SOURCE_MARKER: &str = "source";
+
 impl IndexStore {
     pub fn new(root: impl Into<PathBuf>, cache_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -226,7 +229,20 @@ impl IndexStore {
     /// session-table lazy path to populate the cache as it derives
     /// sessions on demand, so subsequent queries hit `session_summary`.
     pub fn put_session_summary(&self, id: &str, summary: &SessionSummary) -> std::io::Result<()> {
+        self.ensure_cache_dir()?;
         summary_cache::write(&self.cache_dir, id, summary)
+    }
+
+    /// Create the cache dir and record the projects dir it caches in
+    /// its [`SOURCE_MARKER`] file. A sweep reads the marker to find
+    /// cache dirs whose source no longer exists.
+    pub fn ensure_cache_dir(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.cache_dir)?;
+        let marker = self.cache_dir.join(SOURCE_MARKER);
+        if !marker.exists() {
+            std::fs::write(marker, format!("{}\n", self.root.to_string_lossy()))?;
+        }
+        Ok(())
     }
 
     /// Run a query against the committed index, returning the top
@@ -281,6 +297,7 @@ impl IndexStore {
         mode: LockMode,
         body: impl FnOnce(&Self) -> Result<ReconcileOutcome>,
     ) -> Result<ReconcileOutcome> {
+        self.ensure_cache_dir()?;
         std::fs::create_dir_all(self.index_dir())?;
         self.remove_stale_versions();
 

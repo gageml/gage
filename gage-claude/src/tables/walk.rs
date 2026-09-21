@@ -11,6 +11,8 @@ use datafusion::catalog::Session;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 
+use gage_core::style::IdHighlighter;
+
 use crate::session::{SessionInfo, SessionListBuilder};
 use crate::tables::cache::SessionCache;
 use crate::tables::filter::IdFilter;
@@ -48,34 +50,49 @@ pub(crate) struct WalkOutcome {
     pub walked: usize,
     /// Wall-clock time spent in the directory walk itself.
     pub walk_ms: u128,
-    /// True when `limit` was pushed into the directory walker. Skipped
+    /// True when `limit` was applied to the walk result. Skipped
     /// when an `id_filter` is in effect, since it can reject rows
     /// post-walk.
     pub limit_pushed: bool,
+    /// Length of the shortest prefix of each walked id that is unique
+    /// among every session in the source. Empty unless requested.
+    pub id_prefix_len: HashMap<String, usize>,
 }
 
 /// Walk the corpus and return one entry per session, filtered by an id
-/// predicate over `id_col`. `limit` is a hint pushed into the directory
-/// walker only when no filter would reject rows; callers must still cap
-/// their output if they need a hard limit.
+/// predicate over `id_col`. `limit` caps the result only when no
+/// filter would reject rows; callers must still cap their output if
+/// they need a hard limit. `with_id_prefix` computes the unique id
+/// prefix of every session before the cap, so the prefix set is the
+/// whole source.
 pub(crate) fn walk_sessions(
     store: &IndexStore,
     filters: &[Expr],
     id_col: &str,
     limit: Option<usize>,
+    with_id_prefix: bool,
 ) -> Result<WalkOutcome> {
     let id_filter = IdFilter::new(filters, id_col)?;
-
-    let mut builder = SessionListBuilder::new().root(store.root());
     let limit_pushed = id_filter.is_none() && limit.is_some();
-    if limit_pushed && let Some(n) = limit {
-        builder = builder.limit(n);
-    }
 
     let walk_start = Instant::now();
-    let sessions: Vec<SessionInfo> = builder.build().into_iter().collect();
+    let mut sessions: Vec<SessionInfo> = SessionListBuilder::new()
+        .root(store.root())
+        .build()
+        .into_iter()
+        .collect();
     let walk_ms = walk_start.elapsed().as_millis();
     let walked = sessions.len();
+
+    let id_prefix_len = if with_id_prefix {
+        unique_prefix_lens(&sessions)
+    } else {
+        HashMap::new()
+    };
+
+    if limit_pushed && let Some(n) = limit {
+        sessions.truncate(n);
+    }
 
     let sessions = match &id_filter {
         Some(f) => f.retain(sessions, |s| s.id.as_str())?,
@@ -87,7 +104,18 @@ pub(crate) fn walk_sessions(
         walked,
         walk_ms,
         limit_pushed,
+        id_prefix_len,
     })
+}
+
+/// Unique prefix length of every session id among its peers
+fn unique_prefix_lens(sessions: &[SessionInfo]) -> HashMap<String, usize> {
+    let ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+    let highlighter = IdHighlighter::new(ids);
+    sessions
+        .iter()
+        .map(|s| (s.id.clone(), highlighter.unique_prefix_len(&s.id)))
+        .collect()
 }
 
 /// The same walk, projected to the `(id, path)` pairs the message and
@@ -97,7 +125,7 @@ pub(crate) fn session_paths(
     filters: &[Expr],
     id_col: &str,
 ) -> Result<Vec<(String, PathBuf)>> {
-    Ok(walk_sessions(store, filters, id_col, None)?
+    Ok(walk_sessions(store, filters, id_col, None, false)?
         .sessions
         .into_iter()
         .map(|s| (s.id, s.src))

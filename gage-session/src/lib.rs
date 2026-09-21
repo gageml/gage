@@ -1,9 +1,11 @@
 //! Session driver interface.
 //!
-//! A driver enumerates and reads sessions from one source (Claude Code
-//! on disk, a future OpenCode source, a database). It writes a native
-//! session's bytes into the store through a [`ContentSink`] and reads
-//! a stored session back through a [`ContentSource`].
+//! A driver opens a [`Source`] handle over one container of native
+//! sessions (Claude Code on disk, a future OpenCode source, a
+//! database). The handle serves the source's tables, id lookup, and
+//! project naming, and may cache whatever it reads. A driver writes a
+//! native session's bytes into the store through a [`ContentSink`]
+//! and reads a stored session back through a [`ContentSource`].
 
 use std::borrow::Cow;
 use std::fmt;
@@ -15,28 +17,21 @@ use std::time::SystemTime;
 use datafusion::datasource::TableProvider;
 
 pub trait Driver: Send + Sync {
+    /// The driver's name, recorded on stored sessions. Not a scheme.
     fn name(&self) -> &'static str;
     fn version(&self) -> &'static str;
 
-    /// Return the driver's session-derived table providers, bound to
-    /// `source`. Consumers register the returned providers on a
-    /// DataFusion context; every read pushes filters, sort, projection,
-    /// and limit through DataFusion into the driver's storage.
-    fn tables(&self, source: &SourceUrl) -> Result<DriverTables, DriverError>;
+    /// The source URL schemes this driver serves. A registry routes a
+    /// source with one of these schemes to the driver.
+    fn schemes(&self) -> &'static [&'static str];
 
-    fn find_native(&self, source: &SourceUrl, prefix: &str) -> Result<String, NativeLookupError>;
-
-    fn open_native(
-        &self,
-        source: &SourceUrl,
-        native_id: &str,
-    ) -> Result<Box<dyn NativeSession>, DriverError>;
-
-    fn project(
-        &self,
-        source: &SourceUrl,
-        spec: ProjectSpec,
-    ) -> Result<Option<Box<dyn Project>>, DriverError>;
+    /// Open a handle over a source. `source` is the value as the user
+    /// gave it: empty for the driver's default location, a body under
+    /// one of the driver's schemes, or a scheme-less value the driver
+    /// interprets as it sees fit. The handle is the driver's place to
+    /// hold per-source state (caches, parsed registries, an index) for
+    /// as long as the caller keeps it.
+    fn open_source(&self, source: &str) -> Result<Box<dyn Source>, DriverError>;
 
     /// Serialize `session` into the store through `sink`. The returned
     /// string is the `content_format` value the store persists on the
@@ -55,6 +50,36 @@ pub trait Driver: Send + Sync {
         content_format: &str,
         source: Box<dyn ContentSource>,
     ) -> Result<Box<dyn StoredSession>, DriverError>;
+}
+
+/// A handle over one source of native sessions. Dropping the handle
+/// releases whatever it holds; [`Source::close`] does the same and
+/// reports any failure.
+pub trait Source {
+    /// The source value the handle was opened with, as given
+    fn source(&self) -> &str;
+
+    /// The source's session-derived table providers. Consumers
+    /// register them on a DataFusion context; every read pushes
+    /// filters, sort, projection, and limit through DataFusion into
+    /// the driver's storage.
+    fn tables(&self) -> Result<DriverTables, DriverError>;
+
+    /// Expand a typed id or prefix to exactly one native id.
+    fn find_native(&self, prefix: &str) -> Result<String, NativeLookupError>;
+
+    fn open_native(&self, native_id: &str) -> Result<Box<dyn NativeSession>, DriverError>;
+
+    /// The project name this driver assigns to a directory. Matches
+    /// the `project` column of the `session` table.
+    fn project_name(&self, path: &Path) -> Result<String, DriverError>;
+
+    /// The directory a project name denotes, when the source records
+    /// one.
+    fn project_path(&self, name: &str) -> Result<Option<PathBuf>, DriverError>;
+
+    /// Release the handle.
+    fn close(self: Box<Self>) -> Result<(), DriverError>;
 }
 
 /// The session-derived tables a driver exposes to gage-query. Every
@@ -94,9 +119,6 @@ pub trait SessionAttrs {
     fn project_name(&self) -> Option<&str> {
         None
     }
-    fn project_path(&self) -> Option<&Path> {
-        None
-    }
     fn title(&self) -> Option<&str> {
         None
     }
@@ -106,17 +128,6 @@ pub trait SessionAttrs {
     fn message_count(&self) -> Option<u64> {
         None
     }
-}
-
-pub enum ProjectSpec {
-    Path(PathBuf),
-    Name(String),
-}
-
-pub trait Project {
-    fn name(&self) -> &str;
-    fn path(&self) -> Option<&Path>;
-    fn is_for(&self, session: &dyn NativeSession) -> bool;
 }
 
 pub trait Entry {
@@ -154,66 +165,22 @@ pub trait ContentSink {
     fn create<'a>(&'a mut self, path: &str) -> std::io::Result<Box<dyn Write + 'a>>;
 }
 
-/// A parsed `scheme:body` source URL. Fragment and query are not
-/// modeled; drivers that need them add them separately.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceUrl {
-    scheme: String,
-    body: String,
+/// Split a source value into `(scheme, body)` when it starts with a
+/// URL scheme: an ASCII letter followed by letters, digits, `+`, `-`,
+/// or `.`, then a colon. A value with no such prefix has no scheme
+/// and is returned as `None`.
+pub fn split_scheme(source: &str) -> Option<(&str, &str)> {
+    let (scheme, body) = source.split_once(':')?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+        return None;
+    }
+    Some((scheme, body))
 }
-
-impl SourceUrl {
-    pub fn new(scheme: impl Into<String>, body: impl Into<String>) -> Self {
-        Self {
-            scheme: scheme.into(),
-            body: body.into(),
-        }
-    }
-
-    pub fn parse(s: &str) -> Result<Self, SourceUrlError> {
-        let (scheme, body) = s
-            .split_once(':')
-            .ok_or_else(|| SourceUrlError::NoScheme(s.to_string()))?;
-        if scheme.is_empty() {
-            return Err(SourceUrlError::EmptyScheme(s.to_string()));
-        }
-        Ok(Self {
-            scheme: scheme.to_string(),
-            body: body.to_string(),
-        })
-    }
-
-    pub fn scheme(&self) -> &str {
-        &self.scheme
-    }
-
-    pub fn body(&self) -> &str {
-        &self.body
-    }
-}
-
-impl fmt::Display for SourceUrl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.scheme, self.body)
-    }
-}
-
-#[derive(Debug)]
-pub enum SourceUrlError {
-    NoScheme(String),
-    EmptyScheme(String),
-}
-
-impl fmt::Display for SourceUrlError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SourceUrlError::NoScheme(s) => write!(f, "missing scheme in source URL: {s}"),
-            SourceUrlError::EmptyScheme(s) => write!(f, "empty scheme in source URL: {s}"),
-        }
-    }
-}
-
-impl std::error::Error for SourceUrlError {}
 
 #[derive(Debug)]
 pub enum DriverError {
@@ -284,38 +251,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_url_parses_scheme_and_body() {
-        let u = SourceUrl::parse("claude:/tmp/foo").unwrap();
-        assert_eq!(u.scheme(), "claude");
-        assert_eq!(u.body(), "/tmp/foo");
+    fn split_scheme_recognizes_scheme_and_body() {
+        assert_eq!(
+            split_scheme("claude:/tmp/foo"),
+            Some(("claude", "/tmp/foo"))
+        );
+        assert_eq!(split_scheme("claude:"), Some(("claude", "")));
+        assert_eq!(
+            split_scheme("session+task:x/y"),
+            Some(("session+task", "x/y"))
+        );
     }
 
     #[test]
-    fn source_url_parses_empty_body() {
-        let u = SourceUrl::parse("claude:").unwrap();
-        assert_eq!(u.scheme(), "claude");
-        assert_eq!(u.body(), "");
-    }
-
-    #[test]
-    fn source_url_missing_scheme_rejected() {
-        assert!(matches!(
-            SourceUrl::parse("no-colon-here"),
-            Err(SourceUrlError::NoScheme(_)),
-        ));
-    }
-
-    #[test]
-    fn source_url_empty_scheme_rejected() {
-        assert!(matches!(
-            SourceUrl::parse(":body"),
-            Err(SourceUrlError::EmptyScheme(_)),
-        ));
-    }
-
-    #[test]
-    fn source_url_display_roundtrips() {
-        let u = SourceUrl::new("claude", "/tmp/foo");
-        assert_eq!(u.to_string(), "claude:/tmp/foo");
+    fn split_scheme_rejects_non_scheme_prefixes() {
+        assert_eq!(split_scheme("/tmp/foo"), None);
+        assert_eq!(split_scheme(""), None);
+        assert_eq!(split_scheme(":body"), None);
+        assert_eq!(split_scheme("1abc:x"), None);
+        assert_eq!(split_scheme("~/x:y"), None);
     }
 }

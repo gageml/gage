@@ -1,32 +1,34 @@
 //! `ClaudeDriver` implements `gage_session::Driver` for Claude Code
 //! sessions stored under a projects directory as `<slug>/<uuid>.jsonl`.
 //!
-//! Source URL grammar:
-//! - `claude:` -- default location (`$CLAUDE_CONFIG_DIR` or `$HOME/.claude`)
-//! - `claude:<path>` -- explicit filesystem root; sessions live under
+//! Source grammar, with or without the `claude:` scheme:
+//! - `` (empty) -- default location: `$CLAUDE_PROJECTS_DIR`, else
+//!   `projects/` under `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`
+//! - `<path>` -- explicit filesystem root; sessions live under
 //!   `<path>/projects/**/*.jsonl`
 
 use std::borrow::Cow;
-use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
-
-use std::sync::Arc;
 
 use gage_session::{
     ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry, Message,
-    NativeLookupError, NativeSession, Project, ProjectSpec, SessionAttrs, SourceUrl, StoredSession,
+    NativeLookupError, NativeSession, SessionAttrs, Source, StoredSession, split_scheme,
 };
 
 use crate::home::ClaudeHome;
-use crate::index::IndexStore;
-use crate::session::{SESSION_RE, encode_project_dir, is_agent_tmp_slug, is_empty_session};
+use crate::index::{IndexStore, cache_dir_for};
+use crate::session::{
+    SESSION_RE, encode_project_dir, is_agent_tmp_slug, is_empty_session, projects_dir,
+};
 use crate::tables::{EntryTable, MessageTable, SessionTable};
 
 const NAME: &str = "claude";
+const SCHEMES: &[&str] = &["claude"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SESSION_TYPE: &str = "claude";
 /// `content_format` value returned by `write_native` and expected by
@@ -57,90 +59,12 @@ impl Driver for ClaudeDriver {
         VERSION
     }
 
-    fn tables(&self, source: &SourceUrl) -> Result<DriverTables, DriverError> {
-        let root = resolve_root(source)?;
-        let projects_dir = root.join("projects");
-        let cache_dir = default_cache_dir(&projects_dir);
-        let store = Arc::new(IndexStore::new(projects_dir, cache_dir));
-        Ok(DriverTables {
-            session: Arc::new(SessionTable::new(Arc::clone(&store))),
-            message: Arc::new(MessageTable::new(Arc::clone(&store))),
-            entry: Arc::new(EntryTable::new(store)),
-        })
+    fn schemes(&self) -> &'static [&'static str] {
+        SCHEMES
     }
 
-    fn find_native(&self, source: &SourceUrl, prefix: &str) -> Result<String, NativeLookupError> {
-        let root = resolve_root(source).map_err(NativeLookupError::Driver)?;
-        let projects_dir = root.join("projects");
-        let mut matches = Vec::new();
-        for hit in walk_session_files(&projects_dir) {
-            let (id, _path, _meta) = match hit {
-                Ok(h) => h,
-                Err(e) => return Err(NativeLookupError::Driver(DriverError::Io(e))),
-            };
-            if id.starts_with(prefix) {
-                matches.push(id);
-            }
-        }
-        match matches.len() {
-            0 => Err(NativeLookupError::NoMatch(prefix.to_string())),
-            1 => Ok(matches.pop().unwrap()),
-            _ => {
-                matches.sort();
-                Err(NativeLookupError::TooManyMatches {
-                    prefix: prefix.to_string(),
-                    candidates: matches,
-                })
-            }
-        }
-    }
-
-    fn open_native(
-        &self,
-        source: &SourceUrl,
-        native_id: &str,
-    ) -> Result<Box<dyn NativeSession>, DriverError> {
-        let root = resolve_root(source)?;
-        let projects_dir = root.join("projects");
-        for hit in walk_session_files(&projects_dir) {
-            let (id, path, meta) = hit?;
-            if id == native_id {
-                return Ok(Box::new(ClaudeNativeSession::new(id, path, meta, root)));
-            }
-        }
-        Err(DriverError::Other(format!(
-            "native session not found: {NAME}:{native_id}"
-        )))
-    }
-
-    fn project(
-        &self,
-        source: &SourceUrl,
-        spec: ProjectSpec,
-    ) -> Result<Option<Box<dyn Project>>, DriverError> {
-        let root = resolve_root(source)?;
-        match spec {
-            ProjectSpec::Path(path) => {
-                let canonical = fs::canonicalize(&path).unwrap_or(path);
-                let slug = encode_project_dir(&canonical);
-                Ok(Some(Box::new(ClaudeProject {
-                    slug,
-                    path: Some(canonical),
-                })))
-            }
-            ProjectSpec::Name(name) => {
-                let home = claude_home_for(source, root)?;
-                let path = match home.projects() {
-                    Ok(list) => list
-                        .into_iter()
-                        .find(|p| encode_project_dir(&p.path) == name)
-                        .map(|p| p.path),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-                    Err(e) => return Err(DriverError::Io(e)),
-                };
-                Ok(Some(Box::new(ClaudeProject { slug: name, path })))
-            }
-        }
+    fn open_source(&self, source: &str) -> Result<Box<dyn Source>, DriverError> {
+        Ok(Box::new(ClaudeSource::open(source)?))
     }
 
     fn write_native(
@@ -195,6 +119,126 @@ impl Driver for ClaudeDriver {
     }
 }
 
+/// Handle over one Claude projects directory. Holds the index store
+/// for the directory and the project registry parsed from
+/// `.claude.json` on first use.
+pub struct ClaudeSource {
+    source: String,
+    projects_dir: PathBuf,
+    /// The Claude root the projects dir sits under
+    root: PathBuf,
+    store: Arc<IndexStore>,
+    /// Project slug to recorded cwd, loaded once. The error string is
+    /// kept so every later call reports the same failure.
+    projects: OnceLock<Result<HashMap<String, PathBuf>, String>>,
+}
+
+impl ClaudeSource {
+    fn open(source: &str) -> Result<Self, DriverError> {
+        let projects_dir = resolve_projects_dir(source)?;
+        let root = root_of(&projects_dir);
+        let cache_dir = cache_dir_for(&projects_dir);
+        let store = Arc::new(IndexStore::new(projects_dir.clone(), cache_dir));
+        store.ensure_cache_dir()?;
+        Ok(Self {
+            source: source.to_string(),
+            projects_dir,
+            root,
+            store,
+            projects: OnceLock::new(),
+        })
+    }
+
+    fn projects(&self) -> Result<&HashMap<String, PathBuf>, DriverError> {
+        self.projects
+            .get_or_init(|| load_projects(&self.root).map_err(|e| e.to_string()))
+            .as_ref()
+            .map_err(|e| DriverError::Other(format!("reading project registry: {e}")))
+    }
+}
+
+impl Source for ClaudeSource {
+    fn source(&self) -> &str {
+        &self.source
+    }
+
+    fn tables(&self) -> Result<DriverTables, DriverError> {
+        Ok(DriverTables {
+            session: Arc::new(SessionTable::new(Arc::clone(&self.store))),
+            message: Arc::new(MessageTable::new(Arc::clone(&self.store))),
+            entry: Arc::new(EntryTable::new(Arc::clone(&self.store))),
+        })
+    }
+
+    fn find_native(&self, prefix: &str) -> Result<String, NativeLookupError> {
+        let mut matches = Vec::new();
+        for hit in walk_session_files(&self.projects_dir) {
+            let (id, _path, _meta) = match hit {
+                Ok(h) => h,
+                Err(e) => return Err(NativeLookupError::Driver(DriverError::Io(e))),
+            };
+            if id.starts_with(prefix) {
+                matches.push(id);
+            }
+        }
+        match matches.len() {
+            0 => Err(NativeLookupError::NoMatch(prefix.to_string())),
+            1 => Ok(matches.pop().unwrap()),
+            _ => {
+                matches.sort();
+                Err(NativeLookupError::TooManyMatches {
+                    prefix: prefix.to_string(),
+                    candidates: matches,
+                })
+            }
+        }
+    }
+
+    fn open_native(&self, native_id: &str) -> Result<Box<dyn NativeSession>, DriverError> {
+        for hit in walk_session_files(&self.projects_dir) {
+            let (id, path, meta) = hit?;
+            if id == native_id {
+                return Ok(Box::new(ClaudeNativeSession::new(id, path, meta)));
+            }
+        }
+        Err(DriverError::Other(format!(
+            "native session not found: {NAME}:{native_id}"
+        )))
+    }
+
+    fn project_name(&self, path: &Path) -> Result<String, DriverError> {
+        let canonical = match fs::canonicalize(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
+            Err(e) => return Err(DriverError::Io(e)),
+        };
+        Ok(encode_project_dir(&canonical))
+    }
+
+    fn project_path(&self, name: &str) -> Result<Option<PathBuf>, DriverError> {
+        Ok(self.projects()?.get(name).cloned())
+    }
+
+    fn close(self: Box<Self>) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+/// Slug to cwd for every project the root's registry records. A
+/// missing registry is an empty map.
+fn load_projects(root: &Path) -> io::Result<HashMap<String, PathBuf>> {
+    let home = claude_home_for_root(root)?;
+    let projects = match home.projects() {
+        Ok(list) => list,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    Ok(projects
+        .into_iter()
+        .map(|p| (encode_project_dir(&p.path), p.path))
+        .collect())
+}
+
 fn copy_file_into_sink(
     src: &Path,
     dest_key: &str,
@@ -214,37 +258,35 @@ fn subagents_dir_for(session_path: &Path, native_id: &str) -> PathBuf {
         .join("subagents")
 }
 
-/// Where the index cache lives for a Claude projects directory. Two
-/// origins are recognized so the default corpus and the gage-agent
-/// corpus never share a summary cache, text index, or reconcile
-/// manifest.
-fn default_cache_dir(projects_dir: &Path) -> PathBuf {
-    let gage_home = gage_core::config::gage_home();
-    let agent_projects_dir = gage_home.join("claude");
-    let origin = if projects_dir == agent_projects_dir {
-        "agent"
-    } else {
-        "default"
+/// Resolve the projects directory from a source value. A leading
+/// `claude:` scheme is stripped; any other scheme is an error. An
+/// empty body is the default location (`CLAUDE_PROJECTS_DIR`, else
+/// `projects/` under the Claude home). A non-empty body is a Claude
+/// root path (`~` expanded) whose sessions live under `projects/`.
+fn resolve_projects_dir(source: &str) -> Result<PathBuf, DriverError> {
+    let body = match split_scheme(source) {
+        Some((scheme, body)) if SCHEMES.contains(&scheme) => body,
+        Some((scheme, _)) => {
+            return Err(DriverError::Other(format!(
+                "unsupported source scheme {scheme:?}: {source}"
+            )));
+        }
+        None => source,
     };
-    gage_home.join("cache").join(origin)
+    if body.is_empty() {
+        return projects_dir().ok_or_else(|| {
+            DriverError::Other("CLAUDE_PROJECTS_DIR, CLAUDE_CONFIG_DIR, or HOME must be set".into())
+        });
+    }
+    Ok(expand_tilde(body).join("projects"))
 }
 
-/// Resolve the filesystem root from a `claude:` source URL. Empty
-/// body -> the ambient Claude home. Non-empty body is treated as a
-/// path (`~` expanded).
-fn resolve_root(source: &SourceUrl) -> Result<PathBuf, DriverError> {
-    if source.scheme() != NAME {
-        return Err(DriverError::Other(format!(
-            "expected scheme {NAME}, got {}",
-            source.scheme(),
-        )));
-    }
-    let body = source.body();
-    if body.is_empty() {
-        return crate::home::claude_home()
-            .ok_or_else(|| DriverError::Other("CLAUDE_CONFIG_DIR or HOME must be set".into()));
-    }
-    Ok(expand_tilde(body))
+/// The Claude root a projects directory sits under
+fn root_of(projects_dir: &Path) -> PathBuf {
+    projects_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| projects_dir.to_path_buf())
 }
 
 fn expand_tilde(s: &str) -> PathBuf {
@@ -321,7 +363,7 @@ pub struct ClaudeNativeSession {
 }
 
 impl ClaudeNativeSession {
-    fn new(native_id: String, session_path: PathBuf, meta: fs::Metadata, root: PathBuf) -> Self {
+    fn new(native_id: String, session_path: PathBuf, meta: fs::Metadata) -> Self {
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let size = meta.len();
         let project_slug = session_path
@@ -333,10 +375,8 @@ impl ClaudeNativeSession {
             mtime,
             size,
             project_slug,
-            root,
             session_path: session_path.clone(),
             is_empty: OnceLock::new(),
-            project_path: OnceCell::new(),
         };
         Self {
             native_id,
@@ -370,17 +410,14 @@ impl NativeSession for ClaudeNativeSession {
 
 /// Cheap-to-hold attribute reader. `mtime`, `size`, and
 /// `project_slug` are captured at enumeration time from the directory
-/// walk. `is_empty` reads the session file on first access.
-/// `project_path` reads `~/.claude.json` on first access. `title`,
+/// walk. `is_empty` reads the session file on first access. `title`,
 /// `model`, `message_count` are not answered here.
 struct ClaudeSessionAttrs {
     mtime: SystemTime,
     size: u64,
     project_slug: String,
-    root: PathBuf,
     session_path: PathBuf,
     is_empty: OnceLock<bool>,
-    project_path: OnceCell<Option<PathBuf>>,
 }
 
 impl SessionAttrs for ClaudeSessionAttrs {
@@ -403,62 +440,16 @@ impl SessionAttrs for ClaudeSessionAttrs {
     fn project_name(&self) -> Option<&str> {
         Some(&self.project_slug)
     }
-
-    fn project_path(&self) -> Option<&Path> {
-        let cell = self
-            .project_path
-            .get_or_init(|| resolve_project_path(&self.root, &self.project_slug));
-        cell.as_deref()
-    }
 }
 
-fn resolve_project_path(root: &Path, slug: &str) -> Option<PathBuf> {
-    let home = claude_home_for_root(root).ok()?;
-    let projects = home.projects().ok()?;
-    projects
-        .into_iter()
-        .find(|p| encode_project_dir(&p.path) == slug)
-        .map(|p| p.path)
-}
-
-/// Choose a `ClaudeHome` for the source. Empty body means the default
-/// location, which reads `.claude.json` as a sibling of `.claude/`.
-/// A non-empty body is treated as a self-contained Claude root (test
-/// fixtures and future user layouts put `.claude.json` inside).
-fn claude_home_for(source: &SourceUrl, root: PathBuf) -> Result<ClaudeHome, DriverError> {
-    if source.body().is_empty() {
-        ClaudeHome::from_env().map_err(DriverError::Io)
-    } else {
-        Ok(ClaudeHome::new(root))
-    }
-}
-
+/// The `ClaudeHome` for a resolved root. The env-resolved home carries
+/// the registry location Claude Code uses for it (`$HOME/.claude.json`
+/// as a sibling of `$HOME/.claude`); any other root keeps
+/// `.claude.json` inside itself.
 fn claude_home_for_root(root: &Path) -> Result<ClaudeHome, io::Error> {
     match crate::home::claude_home() {
         Some(default) if default == root => ClaudeHome::from_env(),
         _ => Ok(ClaudeHome::new(root.to_path_buf())),
-    }
-}
-
-pub struct ClaudeProject {
-    slug: String,
-    path: Option<PathBuf>,
-}
-
-impl Project for ClaudeProject {
-    fn name(&self) -> &str {
-        &self.slug
-    }
-
-    fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-
-    fn is_for(&self, session: &dyn NativeSession) -> bool {
-        session
-            .attrs()
-            .project_name()
-            .is_some_and(|n| n == self.slug)
     }
 }
 
@@ -544,8 +535,8 @@ mod tests {
         path
     }
 
-    fn source_for(root: &Path) -> SourceUrl {
-        SourceUrl::new(NAME, root.to_string_lossy().into_owned())
+    fn source_for(root: &Path) -> String {
+        format!("{NAME}:{}", root.to_string_lossy())
     }
 
     #[test]
@@ -557,26 +548,55 @@ mod tests {
         seed_session(root, "/Users/alice/x", a, "");
         seed_session(root, "/Users/alice/y", b, "");
 
-        let driver = ClaudeDriver::new();
-        let source = source_for(root);
-        assert_eq!(driver.find_native(&source, "aaaa").unwrap(), a);
-        let err = driver.find_native(&source, "no-such").unwrap_err();
+        let source = ClaudeDriver::new().open_source(&source_for(root)).unwrap();
+        assert_eq!(source.find_native("aaaa").unwrap(), a);
+        let bare = ClaudeDriver::new()
+            .open_source(&root.to_string_lossy())
+            .unwrap();
+        assert_eq!(bare.find_native("bbbb").unwrap(), b);
+        match ClaudeDriver::new().open_source("zzz:/x") {
+            Err(DriverError::Other(msg)) => assert!(msg.contains("zzz"), "{msg}"),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("unknown scheme was accepted"),
+        }
+        let err = source.find_native("no-such").unwrap_err();
         assert!(matches!(err, NativeLookupError::NoMatch(_)));
     }
 
     #[test]
-    fn project_from_path_encodes_slug() {
+    fn project_name_encodes_slug() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let cwd = "/Users/alice/Code/gage";
         seed_session(root, cwd, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "");
 
-        let driver = ClaudeDriver::new();
-        let source = source_for(root);
-        let project = driver
-            .project(&source, ProjectSpec::Path(PathBuf::from(cwd)))
-            .unwrap()
-            .unwrap();
-        assert_eq!(project.name(), "-Users-alice-Code-gage");
+        let source = ClaudeDriver::new().open_source(&source_for(root)).unwrap();
+        let name = source.project_name(Path::new(cwd)).unwrap();
+        assert_eq!(name, "-Users-alice-Code-gage");
+    }
+
+    #[test]
+    fn project_path_resolves_through_registry() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let cwd = tmp.path().join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        let cwd = fs::canonicalize(&cwd).unwrap();
+        seed_session(
+            root,
+            &cwd.to_string_lossy(),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "",
+        );
+        fs::write(
+            root.join(".claude.json"),
+            format!(r#"{{"projects": {{"{}": {{}}}}}}"#, cwd.display()),
+        )
+        .unwrap();
+
+        let source = ClaudeDriver::new().open_source(&source_for(root)).unwrap();
+        let slug = encode_project_dir(&cwd);
+        assert_eq!(source.project_path(&slug).unwrap(), Some(cwd));
+        assert_eq!(source.project_path("-no-such").unwrap(), None);
     }
 }

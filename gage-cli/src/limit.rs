@@ -32,6 +32,16 @@ impl LimitArgs {
         }
     }
 
+    /// The number of items to fetch before the total is known, or
+    /// `None` when every item is wanted.
+    pub fn fetch_limit(&self) -> Option<usize> {
+        if self.all {
+            None
+        } else {
+            Some(self.show_count(usize::MAX))
+        }
+    }
+
     /// Prints a summary line like "Showing 20 of 142 sessions (use -m for more, -a for all)".
     pub fn print_summary(&self, show: usize, total: usize, noun: &str) {
         let plural = if total == 1 {

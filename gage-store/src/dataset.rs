@@ -448,10 +448,7 @@ mod tests {
     use crate::object::object_ref;
     use crate::test_support::open_store;
     use crate::{NoteInput, NoteStore};
-    use gage_session::{
-        ContentSink, DriverError, DriverTables, NativeLookupError, Project, ProjectSpec,
-        SessionAttrs, SourceUrl, StoredSession,
-    };
+    use gage_session::{ContentSink, DriverError, SessionAttrs, Source, StoredSession};
     use std::any::Any;
     use std::io::{Cursor, Write as _};
 
@@ -498,31 +495,11 @@ mod tests {
         fn version(&self) -> &'static str {
             "0.1"
         }
-        fn tables(&self, _source: &SourceUrl) -> Result<DriverTables, DriverError> {
-            Err(DriverError::Other(
-                "FakeDriver::tables is not implemented".into(),
-            ))
+        fn schemes(&self) -> &'static [&'static str] {
+            &["fake"]
         }
-        fn find_native(
-            &self,
-            _source: &SourceUrl,
-            _prefix: &str,
-        ) -> Result<String, NativeLookupError> {
-            Err(NativeLookupError::NoMatch(String::new()))
-        }
-        fn open_native(
-            &self,
-            _source: &SourceUrl,
-            _native_id: &str,
-        ) -> Result<Box<dyn NativeSession>, DriverError> {
-            Err(DriverError::Other("open_native not used".into()))
-        }
-        fn project(
-            &self,
-            _source: &SourceUrl,
-            _spec: ProjectSpec,
-        ) -> Result<Option<Box<dyn Project>>, DriverError> {
-            Ok(None)
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(
             &self,

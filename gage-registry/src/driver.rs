@@ -7,10 +7,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gage_session::Driver;
+use gage_session::{Driver, split_scheme};
 
 pub struct DriverRegistry {
     default: Option<Arc<dyn Driver>>,
+    /// Each scheme maps to the first added driver that serves it
     by_scheme: HashMap<&'static str, Arc<dyn Driver>>,
 }
 
@@ -22,20 +23,24 @@ impl DriverRegistry {
         }
     }
 
-    /// Register `driver` under its scheme and mark it as the default
-    /// used when no `--source` is given. Panics if a default is
-    /// already set.
+    /// Register `driver` and mark it as the default: the driver a
+    /// scheme-less source is handed to. Panics if a default is already
+    /// set.
     pub fn add_default(mut self, driver: Arc<dyn Driver>) -> Self {
         assert!(self.default.is_none(), "default driver already set");
-        self.by_scheme.insert(driver.name(), driver.clone());
-        self.default = Some(driver);
-        self
+        self.default = Some(driver.clone());
+        self.add(driver)
     }
 
-    /// Register `driver` under its scheme.
+    /// Register `driver` under each scheme it serves that no earlier
+    /// driver claimed.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, driver: Arc<dyn Driver>) -> Self {
-        self.by_scheme.insert(driver.name(), driver);
+        for scheme in driver.schemes() {
+            self.by_scheme
+                .entry(scheme)
+                .or_insert_with(|| driver.clone());
+        }
         self
     }
 
@@ -46,10 +51,78 @@ impl DriverRegistry {
     pub fn default(&self) -> Option<Arc<dyn Driver>> {
         self.default.clone()
     }
+
+    /// The driver that handles `source`: the one registered for its
+    /// scheme when it has a registered scheme, else the default.
+    pub fn driver_for(&self, source: &str) -> Option<Arc<dyn Driver>> {
+        match split_scheme(source) {
+            Some((scheme, _)) if self.by_scheme.contains_key(scheme) => self.for_scheme(scheme),
+            _ => self.default(),
+        }
+    }
 }
 
 impl Default for DriverRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gage_session::{
+        ContentSink, ContentSource, DriverError, NativeSession, Source, StoredSession,
+    };
+
+    struct Fake(&'static str, &'static [&'static str]);
+
+    impl Driver for Fake {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn version(&self) -> &'static str {
+            "0"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            self.1
+        }
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            _sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+    }
+
+    #[test]
+    fn scheme_routes_to_first_driver_that_serves_it() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a", "shared"])))
+            .add(Arc::new(Fake("two", &["b", "shared"])));
+        assert_eq!(registry.driver_for("b:x").unwrap().name(), "two");
+        assert_eq!(registry.driver_for("shared:x").unwrap().name(), "one");
+    }
+
+    #[test]
+    fn scheme_less_and_unknown_scheme_go_to_default() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        assert_eq!(registry.driver_for("").unwrap().name(), "one");
+        assert_eq!(registry.driver_for("/tmp/x").unwrap().name(), "one");
+        assert_eq!(registry.driver_for("zzz:x").unwrap().name(), "one");
     }
 }

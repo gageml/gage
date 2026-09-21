@@ -42,10 +42,6 @@ const DEFAULT_AGENT_JOBS: usize = 8;
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct ScanArgs {
-    /// Operate on agent sessions instead of Claude Code sessions
-    #[arg(short = 'A', long)]
-    pub agent: bool,
-
     #[command(subcommand)]
     pub command: Option<ScanCommand>,
 
@@ -126,7 +122,7 @@ pub struct ScanRunArgs {
     ///
     /// PROJECT is a project directory path (absolute, relative, or
     /// ~-prefixed) or a project slug as shown by 'gage session list'.
-    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true, conflicts_with_all = ["rerun", "scan"])]
+    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true, conflicts_with_all = ["rerun"])]
     project: Option<String>,
 
     /// Scanner to run (repeatable)
@@ -179,18 +175,6 @@ pub struct ScanRunArgs {
         conflicts_with_all = ["sessions", "scanners", "files", "limit", "days", "today", "all", "sample"]
     )]
     rerun: Option<String>,
-
-    /// Scan a scan's agent sessions
-    ///
-    /// SCAN is a scan ID or prefix. Expands to the agent sessions the
-    /// scan's tasks spawned and selects the `eval` scanner group.
-    /// --limit and --sample cap the expanded list.
-    #[arg(
-        long,
-        value_name = "SCAN",
-        conflicts_with_all = ["sessions", "scanners", "files", "groups", "rerun", "days", "today", "all"]
-    )]
-    scan: Option<String>,
 
     /// Label for the scan run
     #[arg(short, long, value_name = "LABEL")]
@@ -514,27 +498,15 @@ fn load_scan_model(
         .map(|c| (c.id.as_str(), (c.notes, c.issues)))
         .collect();
 
-    // Per-corpus lookup: `scan_session.metadata` says where each
-    // session lives, independent of the process's `-A` mode
     let rows = scan::scan_session_rows(conn, &run.id)?;
     let store = gage_query::default_index_store();
     let paths: HashMap<String, PathBuf> = session::ls_sessions().into_iter().collect();
-    let (agent_store, agent_paths) = if rows.iter().any(|r| r.agent) {
-        (Some(gage_query::agent_index_store()), agent_session_paths())
-    } else {
-        (None, HashMap::new())
-    };
     let mut sessions: Vec<SessionItem> = rows
         .into_iter()
         .map(|row| {
-            let (store, paths) = if row.agent {
-                (agent_store.as_ref().unwrap(), &agent_paths)
-            } else {
-                (&store, &paths)
-            };
             let id = row.session_id;
-            let title = stat_session(paths, &id)
-                .map(|info| session_title(store, &info))
+            let title = stat_session(&paths, &id)
+                .map(|info| session_title(&store, &info))
                 .unwrap_or_else(|| "(unavailable)".to_string());
             let (notes, issues) = counts.get(id.as_str()).copied().unwrap_or((0, 0));
             SessionItem {
@@ -933,17 +905,6 @@ impl AgentTimes {
     }
 }
 
-/// Session (id, path) pairs from the agent corpus, for scans whose
-/// `scan_session` rows are marked `corpus=agent`.
-fn agent_session_paths() -> HashMap<String, PathBuf> {
-    SessionListBuilder::new()
-        .root(gage_core::config::agent_sessions_dir())
-        .build()
-        .into_iter()
-        .map(|s| (s.id, s.src))
-        .collect()
-}
-
 /// Locate and stat a session file for title resolution. None when the
 /// session no longer exists on disk — expected for old scans.
 fn stat_session(paths: &HashMap<String, PathBuf>, id: &str) -> Option<SessionInfo> {
@@ -1122,21 +1083,6 @@ async fn run_scan(mut args: ScanRunArgs) {
         }
     }
 
-    // --scan expands into the target scan's agent sessions ("scanning
-    // a scan") and implies the agent corpus; scanner selection narrows
-    // to the `eval` group in run_dialog.
-    if let Some(prefix) = &args.scan {
-        crate::set_agent_projects_dir();
-        let conn = db::open_db().unwrap();
-        match scan_scan_args(&conn, prefix, args.limit, args.sample) {
-            Ok(sessions) => args.sessions = sessions,
-            Err(e) => {
-                eprintln!("gage scan: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-
     // Parse `-f` files into owned ScannerDefs held outside the
     // registry. Each def's declared name is replaced with a composite
     // `{name}[{display_path}]` so ad-hoc references never collide with
@@ -1233,31 +1179,6 @@ fn rerun_args(
     Ok((scanners, sessions))
 }
 
-/// Resolve `--scan` into the target scan's agent session ids, applying
-/// `--sample` (random N) then `--limit` (first N) to the expanded
-/// list.
-fn scan_scan_args(
-    conn: &gage_db::rusqlite::Connection,
-    prefix: &str,
-    limit: Option<usize>,
-    sample: Option<usize>,
-) -> anyhow::Result<Vec<String>> {
-    let run = scan::get_scan(conn, prefix)?;
-    let mut sessions = scan::agent_session_ids_for_scan(conn, &run.id)?;
-    if sessions.is_empty() {
-        anyhow::bail!("scan {} has no agent sessions", short_uuid(&run.id));
-    }
-    if let Some(n) = sample {
-        sessions.shuffle(&mut rand::rng());
-        sessions.truncate(n);
-        sessions.sort();
-    }
-    if let Some(n) = limit {
-        sessions.truncate(n);
-    }
-    Ok(sessions)
-}
-
 /// Capture files for the scan's output streams:
 /// `~/.gage/log/scan/{scan_id}.out` (scanner stdout) and `.err`
 /// (warnings and task failures). Creation failure disables capture
@@ -1350,24 +1271,9 @@ async fn run_dialog(
     let cwd = std::env::current_dir().context("reading current working directory")?;
     let (config, _) = gage_core::config::load_merged(&cwd)
         .with_context(|| format!("loading merged config from {}", cwd.display()))?;
-    // "Scanning a scan" narrows the pickable set to the `eval` group
-    let eval_mode = args.scan.is_some();
     let defs = registry.list_enabled(&config);
-    let mut names: Vec<&str> = if eval_mode {
-        registry
-            .group_members("eval")
-            .into_iter()
-            .filter(|d| config.is_scanner_enabled(&d.name))
-            .map(|d| d.name.as_str())
-            .collect()
-    } else {
-        defs.iter().map(|d| d.name.as_str()).collect()
-    };
+    let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     names.sort();
-    if eval_mode && names.is_empty() {
-        cli::log::error("No scanners for group 'eval'")?;
-        return Err(DialogError::Canceled);
-    }
 
     // `-g` expands to the group's enabled members, unioned with `-s`
     let mut group_names: Vec<String> = Vec::new();
@@ -1390,7 +1296,7 @@ async fn run_dialog(
     }
 
     let selected_names: Vec<String> =
-        if args.scanners.is_empty() && group_names.is_empty() && !args.yes && !eval_mode {
+        if args.scanners.is_empty() && group_names.is_empty() && !args.yes {
             // No selection args: pick interactively — `default` group
             // members pre-selected
             let default_names: Vec<usize> = names
@@ -1423,22 +1329,17 @@ async fn run_dialog(
                 })
                 .collect()
         } else if args.scanners.is_empty() && group_names.is_empty() {
-            // `-y` or `--scan` with no selection args: the `default`
-            // group, or the whole (eval-only) list under `--scan`
-            if eval_mode {
-                names.iter().map(|n| n.to_string()).collect()
-            } else {
-                names
-                    .iter()
-                    .filter(|n| {
-                        registry
-                            .group_members("default")
-                            .iter()
-                            .any(|d| d.name == **n)
-                    })
-                    .map(|n| n.to_string())
-                    .collect()
-            }
+            // `-y` with no selection args: the `default` group
+            names
+                .iter()
+                .filter(|n| {
+                    registry
+                        .group_members("default")
+                        .iter()
+                        .any(|d| d.name == **n)
+                })
+                .map(|n| n.to_string())
+                .collect()
         } else {
             for name in &args.scanners {
                 let bare = name.split("#{").next().unwrap();
@@ -1481,7 +1382,7 @@ async fn run_dialog(
             out
         };
 
-    if !args.scanners.is_empty() || !args.groups.is_empty() || eval_mode || args.yes {
+    if !args.scanners.is_empty() || !args.groups.is_empty() || args.yes {
         let display: Vec<&str> = selected_names
             .iter()
             .map(|n| n.split("#{").next().unwrap())
