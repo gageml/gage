@@ -58,6 +58,10 @@ pub struct SessionAttrsRecord {
     /// The driver's byte-layout string, as returned by
     /// [`Driver::write_native`].
     pub content_format: String,
+    /// The project the session belongs to, as the driver names it.
+    /// Absent when the harness has no such notion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     /// The driver's projection of the session, written at add time.
     /// Absent when the driver reported nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +149,7 @@ impl SessionStore<'_> {
         let path = self.store.path();
         let native_id = session.native_id().to_string();
         let native_source = session.source().to_string();
+        let project = session.attrs().project_name().map(String::from);
         let id = session_object_id(driver.name(), &native_id);
         let session_type = session.session_type().to_string();
         let summary = collect_summary(session.attrs());
@@ -162,6 +167,7 @@ impl SessionStore<'_> {
             native_id,
             session_type,
             content_format,
+            project,
             summary,
         };
 
@@ -509,7 +515,7 @@ mod tests {
             None
         }
         fn project_name(&self) -> Option<&str> {
-            None
+            Some("proj")
         }
         fn title(&self) -> Option<&str> {
             None
@@ -631,7 +637,7 @@ mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"native_source\":\"fake:s1\",\"session_type\":\"fake\",\"summary\":{\"size\":4}}\n"
+            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"native_source\":\"fake:s1\",\"project\":\"proj\",\"session_type\":\"fake\",\"summary\":{\"size\":4}}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
@@ -643,6 +649,8 @@ mod tests {
         assert_eq!(record.attrs.content_format, "fake-lines 1");
         assert_eq!(record.attrs.native_id, "s1");
         assert_eq!(record.attrs.native_source, "fake:s1");
+        assert_eq!(record.attrs.project.as_deref(), Some("proj"));
+        assert_eq!(record.attrs.summary.as_ref().unwrap().size, Some(4));
         assert_eq!(record.size, Some(4));
     }
 

@@ -75,6 +75,8 @@ fn stored_session_schema() -> SchemaRef {
         Field::new("title", DataType::Utf8, true),
         Field::new("model", DataType::Utf8, true),
         Field::new("message_count", DataType::Int64, true),
+        // The project the session belongs to, as the driver names it
+        Field::new("project", DataType::Utf8, true),
     ]))
 }
 
@@ -285,6 +287,7 @@ impl StoredSessionExec {
         let mut titles = StringBuilder::new();
         let mut models = StringBuilder::new();
         let mut message_counts = Int64Builder::with_capacity(len);
+        let mut projects = StringBuilder::new();
 
         for tip in &tips {
             ids.append_value(&tip.id);
@@ -307,6 +310,7 @@ impl StoredSessionExec {
                 titles.append_null();
                 models.append_null();
                 message_counts.append_null();
+                projects.append_null();
                 continue;
             }
             let record = sessions.at_commit(&tip.sha).map_err(external)?;
@@ -319,6 +323,7 @@ impl StoredSessionExec {
             titles.append_option(summary.and_then(|s| s.title.as_deref()));
             models.append_option(summary.and_then(|s| s.model.as_deref()));
             message_counts.append_option(summary.and_then(|s| s.message_count).map(|v| v as i64));
+            projects.append_option(record.attrs.project.as_deref());
         }
 
         let batch = RecordBatch::try_new(
@@ -338,6 +343,7 @@ impl StoredSessionExec {
                 Arc::new(titles.finish()),
                 Arc::new(models.finish()),
                 Arc::new(message_counts.finish()),
+                Arc::new(projects.finish()),
             ],
         )?;
         match &self.projection {

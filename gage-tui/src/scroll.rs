@@ -11,6 +11,14 @@
 //! a single *section* renders through a `Rect`, so rows past 65,535
 //! within one section cannot be displayed — sections are expected to
 //! be message-scale, not document-scale.
+//!
+//! Wrapping is the default. Computing a section's wrapped height means
+//! running the word wrapper over its whole text, once per width, which
+//! is the cost that dominates for multi-megabyte content. A view that
+//! shows such content turns wrapping off with [`ScrollView::set_wrap`]
+//! and pre-wraps its lines to the width in its builder
+//! ([`crate::text::hard_wrap`]); then a section's height is its line
+//! count and no text is walked.
 
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
@@ -20,11 +28,22 @@ use ratatui::widgets::{Block, Clear, Padding, Paragraph, ScrollbarState, Widget,
 use crate::item_table::scrollbar;
 use crate::stack;
 
-#[derive(Default)]
 pub(crate) struct ScrollView {
     /// Desired scroll offset in wrapped rows; clamped at render
     scroll: usize,
     cache: Option<Cache>,
+    /// Word-wrap sections at render. Off when the builder pre-wraps.
+    wrap: bool,
+}
+
+impl Default for ScrollView {
+    fn default() -> Self {
+        Self {
+            scroll: 0,
+            cache: None,
+            wrap: true,
+        }
+    }
 }
 
 struct Cache {
@@ -38,6 +57,16 @@ struct Cache {
 impl ScrollView {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Turn word wrapping on or off. Off, every line is shown as
+    /// built and a section's height is its line count; the builder is
+    /// responsible for fitting lines to the width.
+    pub fn set_wrap(&mut self, wrap: bool) {
+        if self.wrap != wrap {
+            self.wrap = wrap;
+            self.cache = None;
+        }
     }
 
     /// New content is about to be shown: back to the top, rebuild.
@@ -90,18 +119,38 @@ impl ScrollView {
             .padding(Padding::horizontal(1));
         let body = block.inner(area);
         frame.render_widget(block, area);
+        self.render_in(frame, area, body, true, build);
+    }
+
+    /// Render inside a panel the caller has already drawn. `area` is
+    /// the panel's outer rect, which the scrollbar sits on; `body` is
+    /// the rect the content fills. `build` runs only when the body
+    /// width changes.
+    pub fn render_in(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        body: Rect,
+        active: bool,
+        build: impl FnOnce(u16) -> Vec<Vec<Line<'static>>>,
+    ) {
         if body.width == 0 || body.height == 0 {
             return;
         }
 
         if !matches!(&self.cache, Some(c) if c.width == body.width) {
             let sections = build(body.width);
+            let wrap = self.wrap;
             let heights: Vec<u32> = sections
                 .iter()
                 .map(|lines| {
-                    let count = Paragraph::new(lines.clone())
-                        .wrap(Wrap { trim: false })
-                        .line_count(body.width);
+                    let count = if wrap {
+                        Paragraph::new(lines.clone())
+                            .wrap(Wrap { trim: false })
+                            .line_count(body.width)
+                    } else {
+                        lines.len()
+                    };
                     u32::try_from(count).unwrap_or(u32::MAX)
                 })
                 .collect();
@@ -114,6 +163,7 @@ impl ScrollView {
                 viewport: body.height,
             });
         }
+        let wrap = self.wrap;
         let cache = self
             .cache
             .as_mut()
@@ -161,9 +211,12 @@ impl ScrollView {
                     width: body.width,
                     height: u16::try_from(height).unwrap_or(u16::MAX),
                 };
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(rect, &mut virt);
+                let paragraph = Paragraph::new(lines);
+                if wrap {
+                    paragraph.wrap(Wrap { trim: false }).render(rect, &mut virt);
+                } else {
+                    paragraph.render(rect, &mut virt);
+                }
             }
             stack::blit(
                 frame,
@@ -175,7 +228,7 @@ impl ScrollView {
 
         let mut sb_state = ScrollbarState::new(max_scroll).position(scroll);
         frame.render_stateful_widget(
-            scrollbar(true),
+            scrollbar(active),
             area.inner(Margin {
                 vertical: 1,
                 horizontal: 0,

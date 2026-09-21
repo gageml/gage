@@ -21,5 +21,9 @@ unicode-segmentation = "1.13"
 unicode-width = "0.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
+[dev-dependencies]
+gage-session = { path = "../gage-session" }
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

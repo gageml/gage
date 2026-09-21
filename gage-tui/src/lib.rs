@@ -21,5 +21,6 @@ mod syntax;
 pub mod test_view;
 pub mod text;
 mod textarea;
+mod tree;
 
 pub use options::ViewOptions;

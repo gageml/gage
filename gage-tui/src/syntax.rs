@@ -56,6 +56,15 @@ impl Highlighter {
 /// (they sit at `source.yaml`), while keys land at `string.unquoted.plain.out`.
 /// The `constant.*` arms are dormant for YAML and only fire in other languages.
 fn style_for_scope(stack: &ScopeStack) -> ratatui::style::Style {
+    // A JSON object key is a quoted string inside a key scope; the
+    // key scope is outer, so it is checked before the innermost-first
+    // walk below styles the string
+    if stack.as_slice().iter().any(|s| {
+        s.build_string()
+            .starts_with("meta.structure.dictionary.key")
+    }) {
+        return styles::Syntax::key();
+    }
     for scope in stack.as_slice().iter().rev() {
         let s = scope.build_string();
         if s.starts_with("string.unquoted.plain.out") {
