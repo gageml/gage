@@ -1,0 +1,123 @@
+{
+  "bench": "claude-session-list",
+  "stamp": "20260921T000211Z",
+  "code_version": "0.2.0-dev (fd61750-dirty)",
+  "params": {
+    "iterations": 5,
+    "limit": 20,
+    "projects": 10,
+    "seed": 1,
+    "session_kb": 32,
+    "sessions": 1500
+  },
+  "metrics": [
+    {
+      "name": "cold.count",
+      "count": 1,
+      "total_ms": 14.243201000000001,
+      "p50_ms": 14.243201000000001,
+      "p95_ms": 14.243201000000001,
+      "max_ms": 14.243201000000001,
+      "per_sec": 70.20893688153386
+    },
+    {
+      "name": "cold.list_light",
+      "count": 1,
+      "total_ms": 2.36171,
+      "p50_ms": 2.36171,
+      "p95_ms": 2.36171,
+      "max_ms": 2.36171,
+      "per_sec": 423.42201201671674
+    },
+    {
+      "name": "cold.list_full",
+      "count": 1,
+      "total_ms": 6.609273,
+      "p50_ms": 6.609273,
+      "p95_ms": 6.609273,
+      "max_ms": 6.609273,
+      "per_sec": 151.30257140233124
+    },
+    {
+      "name": "reconcile",
+      "count": 1,
+      "total_ms": 2469.784208,
+      "p50_ms": 2469.784208,
+      "p95_ms": 2469.784208,
+      "max_ms": 2469.784208,
+      "per_sec": 0.4048936732046673
+    },
+    {
+      "name": "warm.count",
+      "count": 5,
+      "total_ms": 13.261175999999999,
+      "p50_ms": 2.3343890000000003,
+      "p95_ms": 4.005025,
+      "max_ms": 4.005025,
+      "per_sec": 377.0404676025716
+    },
+    {
+      "name": "warm.list_light",
+      "count": 5,
+      "total_ms": 10.152646,
+      "p50_ms": 1.930438,
+      "p95_ms": 2.444819,
+      "max_ms": 2.444819,
+      "per_sec": 492.48245235774
+    },
+    {
+      "name": "warm.list_full",
+      "count": 5,
+      "total_ms": 11.20682,
+      "p50_ms": 2.0921,
+      "p95_ms": 2.870403,
+      "max_ms": 2.870403,
+      "per_sec": 446.156893748628
+    }
+  ],
+  "sizes": [
+    {
+      "name": "projects dir",
+      "bytes": 49417849
+    },
+    {
+      "name": "summary cache",
+      "bytes": 122992559
+    }
+  ],
+  "counts": [
+    {
+      "name": "cold.count.total",
+      "value": 1500
+    },
+    {
+      "name": "cold.list_light.rows",
+      "value": 20
+    },
+    {
+      "name": "cold.list_full.rows",
+      "value": 20
+    },
+    {
+      "name": "reconcile.discovered",
+      "value": 1500
+    },
+    {
+      "name": "reconcile.indexed",
+      "value": 1500
+    },
+    {
+      "name": "warm.count.total",
+      "value": 1500
+    },
+    {
+      "name": "warm.list_light.rows",
+      "value": 20
+    },
+    {
+      "name": "warm.list_full.rows",
+      "value": 20
+    }
+  ],
+  "fsck": []
+}
