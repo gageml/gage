@@ -161,10 +161,10 @@ pub fn run(
 /// Row counts one iteration observed. Same numbers every iteration
 /// on the same corpus; recorded once per scenario, not per iteration.
 #[derive(Default)]
-struct RowCounts {
-    count_total: u64,
-    list_light_rows: u64,
-    list_full_rows: u64,
+pub(crate) struct RowCounts {
+    pub(crate) count_total: u64,
+    pub(crate) list_light_rows: u64,
+    pub(crate) list_full_rows: u64,
 }
 
 fn run_queries(
@@ -209,7 +209,7 @@ fn run_queries(
     })
 }
 
-fn emit_row_counts(scenario: &str, rows: &RowCounts, counts: &mut Vec<Count>) {
+pub(crate) fn emit_row_counts(scenario: &str, rows: &RowCounts, counts: &mut Vec<Count>) {
     counts.push(Count {
         name: format!("{scenario}.count.total"),
         value: rows.count_total,
@@ -224,7 +224,7 @@ fn emit_row_counts(scenario: &str, rows: &RowCounts, counts: &mut Vec<Count>) {
     });
 }
 
-fn time_query(
+pub(crate) fn time_query(
     name: &str,
     rt: &tokio::runtime::Runtime,
     ctx: &SessionContext,
@@ -249,7 +249,7 @@ async fn execute(
     df.collect().await
 }
 
-fn first_int64(batches: &[arrow::record_batch::RecordBatch]) -> Option<i64> {
+pub(crate) fn first_int64(batches: &[arrow::record_batch::RecordBatch]) -> Option<i64> {
     let batch = batches.first()?;
     let array = batch.column(0).as_any().downcast_ref::<Int64Array>()?;
     if array.is_empty() {
@@ -291,7 +291,7 @@ fn fake_uuid(rng: &mut StdRng) -> String {
     format!("{a:08x}-{b:04x}-{c:04x}-{d:04x}-{e:012x}")
 }
 
-fn dir_size(dir: &Path) -> u64 {
+pub(crate) fn dir_size(dir: &Path) -> u64 {
     let mut total: u64 = 0;
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,

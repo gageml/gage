@@ -9,4 +9,5 @@ pub mod measure;
 pub mod report;
 pub mod session_list_bench;
 pub mod store_bench;
+pub mod stored_session_list_bench;
 pub mod synth;

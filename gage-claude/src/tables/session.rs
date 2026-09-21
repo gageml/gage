@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::fmt::{self, Formatter};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -282,6 +283,13 @@ impl SessionExec {
         let sessions: Vec<SessionInfo> = outcome.sessions;
 
         let needs_summary = self.projection_needs_summary();
+        // The Claude root the projects dir sits under, for session URLs
+        let root = self
+            .store
+            .root()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.store.root().to_path_buf());
         tracing::debug!(
             target: "gage_query::session",
             walked = outcome.walked,
@@ -338,7 +346,8 @@ impl SessionExec {
             let summary = if !needs_summary {
                 default_summary.clone()
             } else {
-                match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, s.size, &self.store) {
+                match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, s.size, &root, &self.store)
+                {
                     Ok(session) => session.summary().clone(),
                     Err(e) => {
                         tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");

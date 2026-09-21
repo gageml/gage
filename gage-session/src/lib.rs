@@ -96,6 +96,10 @@ pub struct DriverTables {
 pub trait NativeSession {
     fn native_id(&self) -> &str;
     fn session_type(&self) -> &str;
+    /// The Gage URL this session was read from, under one of the
+    /// driver's schemes. The driver spells it and reads it back; Gage
+    /// stores it as the session's `native_source`.
+    fn source(&self) -> &str;
     fn attrs(&self) -> &dyn SessionAttrs;
     fn as_any(&self) -> &dyn std::any::Any;
 }

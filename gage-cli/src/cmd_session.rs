@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
@@ -13,6 +14,7 @@ use gage_claude::project::shorten_home_path;
 use gage_claude::session::{delete_session, encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
 use gage_session::Source;
+use gage_store::{SessionOutcome, SessionStore, Store};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
@@ -30,6 +32,13 @@ use crate::style;
 pub enum SessionCommand {
     /// List available sessions
     List(SessionListArgs),
+
+    /// Add native sessions to the store
+    ///
+    /// Each session is read from the selected source and written as a
+    /// session object. Adding a session already in the store updates
+    /// it when its content changed and is otherwise a no-op.
+    Add(SessionAddArgs),
 
     /// Delete sessions
     Delete(SessionDeleteArgs),
@@ -61,6 +70,13 @@ pub struct SessionListArgs {
     /// Show the full session ID
     #[arg(long)]
     pub full_id: bool,
+}
+
+#[derive(Args)]
+pub struct SessionAddArgs {
+    /// Session IDs (or prefixes)
+    #[arg(required = true)]
+    pub sessions: Vec<String>,
 }
 
 #[derive(Args)]
@@ -105,7 +121,15 @@ pub struct SessionDeleteArgs {
     pub yes: bool,
 }
 
-pub async fn list(source: Option<String>, args: SessionListArgs) {
+pub async fn list(source: Option<String>, stored: bool, args: SessionListArgs) {
+    if stored {
+        list_stored(args).await
+    } else {
+        list_native(source, args).await
+    }
+}
+
+async fn list_native(source: Option<String>, args: SessionListArgs) {
     let registry = source::driver_registry();
     let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
         Ok(v) => v,
@@ -138,10 +162,10 @@ pub async fn list(source: Option<String>, args: SessionListArgs) {
         },
         None => None,
     };
-    let (rows, total) = query_sessions(&ctx, &args, project.as_deref()).await;
+    let (rows, total) = query_sessions(&ctx, &args, "project", project.as_deref()).await;
     if total > 0 {
         let labels = project_labels(source.as_ref(), &rows);
-        render_table(&rows, &labels, args.full_id);
+        render_table(&rows, "Project", Some(&labels), args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
@@ -149,6 +173,35 @@ pub async fn list(source: Option<String>, args: SessionListArgs) {
     if let Err(e) = source.close() {
         eprintln!("gage session list: {spec}: {e}");
         std::process::exit(1);
+    }
+}
+
+/// List the sessions in the Gage store. The `session` table is bound
+/// to the store, so filters and limits are the same SQL as the native
+/// listing; `Modified` is when the store last wrote the session.
+async fn list_stored(args: SessionListArgs) {
+    if args.project.is_some() {
+        eprintln!("gage session list: --project does not apply to stored sessions");
+        std::process::exit(1);
+    }
+    if args.empty {
+        eprintln!("gage session list: --empty does not apply to stored sessions");
+        std::process::exit(1);
+    }
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    let ctx = gage_query::create_stored_context(Arc::new(Mutex::new(store)));
+    let (rows, total) = query_sessions(&ctx, &args, "session_type", None).await;
+    if total > 0 {
+        render_table(&rows, "Type", None, args.full_id);
+        args.limit.print_summary(rows.len(), total, "session");
+    } else {
+        println!("No sessions found");
     }
 }
 
@@ -169,10 +222,12 @@ fn resolve_project(source: &dyn Source, text: &str) -> Result<String, String> {
 /// Run one SQL query for the shown rows and a second for the total
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
-/// report a total.
+/// report a total. `group_col` is the column shown beside the title:
+/// `project` for a native source, `session_type` for the store.
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
+    group_col: &str,
     project: Option<&str>,
 ) -> (Vec<Row>, usize) {
     let where_clause = build_where_clause(args, project);
@@ -181,7 +236,7 @@ async fn query_sessions(
         None => String::new(),
     };
     let sql = format!(
-        "SELECT id, id_display, id_prefix, project, title, model, size, message_count, mtime \
+        "SELECT id, id_display, id_prefix, {group_col}, title, model, size, message_count, mtime \
          FROM session{where_clause} \
          ORDER BY mtime DESC{limit_clause}",
     );
@@ -223,17 +278,17 @@ fn build_where_clause(args: &SessionListArgs, project: Option<&str>) -> String {
 
 struct Row {
     id: String,
-    /// The driver's short display form of `id`
+    /// The short display form of `id`
     id_display: String,
-    /// The shortest prefix of `id` unique in the source
+    /// The shortest prefix of `id` unique in its id set
     id_prefix: String,
-    /// Driver project name, as the `project` column reports it
-    project: String,
+    /// The grouping column: project name or session type
+    group: String,
     title: String,
     model: String,
-    size: i64,
-    message_count: i64,
-    mtime_ms: i64,
+    size: Option<i64>,
+    message_count: Option<i64>,
+    mtime_ms: Option<i64>,
 }
 
 fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
@@ -242,7 +297,7 @@ fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
         let ids = column::<StringArray>(batch, 0);
         let id_displays = column::<StringArray>(batch, 1);
         let id_prefixes = column::<StringArray>(batch, 2);
-        let projects = column::<StringArray>(batch, 3);
+        let groups = column::<StringArray>(batch, 3);
         let titles = column::<StringArray>(batch, 4);
         let models = column::<StringArray>(batch, 5);
         let sizes = column::<Int64Array>(batch, 6);
@@ -253,12 +308,12 @@ fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
                 id: ids.value(i).to_string(),
                 id_display: id_displays.value(i).to_string(),
                 id_prefix: id_prefixes.value(i).to_string(),
-                project: projects.value(i).to_string(),
+                group: string_or_empty(groups, i),
                 title: string_or_empty(titles, i),
                 model: string_or_empty(models, i),
-                size: sizes.value(i),
-                message_count: counts.value(i),
-                mtime_ms: mtimes.value(i),
+                size: sizes.is_valid(i).then(|| sizes.value(i)),
+                message_count: counts.is_valid(i).then(|| counts.value(i)),
+                mtime_ms: mtimes.is_valid(i).then(|| mtimes.value(i)),
             });
         }
     }
@@ -287,18 +342,18 @@ fn string_or_empty(col: &StringArray, i: usize) -> String {
 fn project_labels(source: &dyn Source, rows: &[Row]) -> HashMap<String, String> {
     let mut labels: HashMap<String, String> = HashMap::new();
     for r in rows {
-        if labels.contains_key(&r.project) {
+        if labels.contains_key(&r.group) {
             continue;
         }
-        let label = match source.project_path(&r.project) {
+        let label = match source.project_path(&r.group) {
             Ok(Some(path)) => shorten_home_path(&path),
-            Ok(None) => r.project.clone(),
+            Ok(None) => r.group.clone(),
             Err(e) => {
-                eprintln!("warning: project {}: {e}", r.project);
-                r.project.clone()
+                eprintln!("warning: project {}: {e}", r.group);
+                r.group.clone()
             }
         };
-        labels.insert(r.project.clone(), label);
+        labels.insert(r.group.clone(), label);
     }
     labels
 }
@@ -319,27 +374,47 @@ fn styled_id(shown: &str, prefix: &str) -> String {
     )
 }
 
-fn render_table(rows: &[Row], labels: &HashMap<String, String>, full_id: bool) {
+/// Print the listing. `group_header` names the column after Id;
+/// `labels` maps each row's group value to its display form, and
+/// `None` shows the value as is.
+fn render_table(
+    rows: &[Row],
+    group_header: &str,
+    labels: Option<&HashMap<String, String>>,
+    full_id: bool,
+) {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for r in rows {
         let shown = if full_id { &r.id } else { &r.id_display };
         let id_display = styled_id(shown, &r.id_prefix);
-        let project = labels.get(&r.project).cloned().unwrap_or_default();
-        let modified = crate::human::format_elapsed_ms(r.mtime_ms);
-        let size = crate::human::format_size(r.size);
+        let group = labels
+            .and_then(|l| l.get(&r.group).cloned())
+            .unwrap_or_else(|| r.group.clone());
+        let modified = r
+            .mtime_ms
+            .map(crate::human::format_elapsed_ms)
+            .unwrap_or_default();
+        let size = r.size.map(crate::human::format_size).unwrap_or_default();
+        let count = r.message_count.map(|n| n.to_string()).unwrap_or_default();
         table_rows.push(vec![
             id_display,
-            project,
+            group,
             r.title.clone(),
             r.model.clone(),
             size,
-            r.message_count.to_string(),
+            count,
             modified,
         ]);
     }
 
     let header: Vec<String> = [
-        "Id", "Project", "Title", "Model", "Size", "Messages", "Modified",
+        "Id",
+        group_header,
+        "Title",
+        "Model",
+        "Size",
+        "Messages",
+        "Modified",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -374,6 +449,80 @@ async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
+    if stored {
+        eprintln!("gage session add: --stored does not apply; sessions are added from a source");
+        std::process::exit(1);
+    }
+    let registry = source::driver_registry();
+    let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("gage session add: {e}");
+            std::process::exit(1);
+        }
+    };
+    let source = match driver.open_source(&spec) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gage session add: {spec}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut ids: Vec<String> = Vec::with_capacity(args.sessions.len());
+    let mut errors = 0;
+    for prefix in &args.sessions {
+        match source.find_native(prefix) {
+            Ok(id) => ids.push(id),
+            Err(e) => {
+                eprintln!("gage session add: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage session add: {e}");
+            std::process::exit(1);
+        }
+    };
+    let sessions = SessionStore::from(&store);
+    for id in &ids {
+        let mut session = match source.open_native(id) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("gage session add: {id}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let outcome = match sessions.add(driver.as_ref(), session.as_mut()) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("gage session add: {id}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let verb = match outcome.outcome {
+            SessionOutcome::Added => "Added",
+            SessionOutcome::Updated => "Updated",
+            SessionOutcome::Unchanged => "Unchanged",
+        };
+        println!("{verb} {} {id}", short_uuid(&outcome.id));
+    }
+    if let Err(e) = source.close() {
+        eprintln!("gage session add: {spec}: {e}");
+        std::process::exit(1);
     }
 }
 

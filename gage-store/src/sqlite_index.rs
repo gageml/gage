@@ -25,7 +25,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
-use crate::index::{ObjectIndex, ObjectQuery, Order};
+use crate::index::{ObjectIndex, ObjectQuery, Order, SelectedTip};
 use crate::object::{LinkFile, Object};
 
 /// Bumped when the schema changes. A mismatch discards the file and
@@ -282,8 +282,10 @@ impl ObjectIndex for SqliteIndex {
         Ok(())
     }
 
-    fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
-        let mut sql = String::from("SELECT o.sha FROM ref r JOIN object o ON o.sha = r.tip_sha");
+    fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
+        let mut sql = String::from(
+            "SELECT o.id, o.sha, o.created, o.modified FROM ref r JOIN object o ON o.sha = r.tip_sha",
+        );
         let mut args: Vec<String> = Vec::new();
         for (i, (key, value)) in query.attrs.iter().enumerate() {
             let k = args.len() + 1;
@@ -311,14 +313,19 @@ impl ObjectIndex for SqliteIndex {
         let mut stmt = self.conn.prepare(&sql).map_err(sql_err)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(args.iter()), |row| {
-                row.get::<_, String>(0)
+                Ok(SelectedTip {
+                    id: row.get(0)?,
+                    sha: row.get(1)?,
+                    created_ms: row.get(2)?,
+                    modified_ms: row.get(3)?,
+                })
             })
             .map_err(sql_err)?;
-        let mut shas = Vec::new();
+        let mut tips = Vec::new();
         for row in rows {
-            shas.push(row.map_err(sql_err)?);
+            tips.push(row.map_err(sql_err)?);
         }
-        Ok(shas)
+        Ok(tips)
     }
 }
 

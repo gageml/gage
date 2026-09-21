@@ -18,7 +18,7 @@ use gage_core::uuid::derive_id;
 use gage_session::{ContentSink, Driver, NativeSession, SessionAttrs};
 use serde::{Deserialize, Serialize};
 
-use crate::index::{ObjectQuery, Order};
+use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
@@ -48,6 +48,9 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
 pub struct SessionAttrsRecord {
     /// `"<driver name> <driver version>"`.
     pub driver: String,
+    /// The Gage URL the session was read from, as the driver spelled
+    /// it.
+    pub native_source: String,
     /// The id the harness gave the session, as the driver reported it.
     pub native_id: String,
     /// Harness family, e.g. `"claude"`. A category with no version.
@@ -112,6 +115,8 @@ pub enum SessionOutcome {
 pub struct SessionRecord {
     pub id: String,
     pub commit_sha: String,
+    /// UNIX time millis of the version's `modified` marker
+    pub modified_ms: Option<i64>,
     pub attrs: SessionAttrsRecord,
     pub driver_name: String,
     pub driver_version: String,
@@ -139,6 +144,7 @@ impl SessionStore<'_> {
     ) -> Result<SessionAddOutcome, StoreError> {
         let path = self.store.path();
         let native_id = session.native_id().to_string();
+        let native_source = session.source().to_string();
         let id = session_object_id(driver.name(), &native_id);
         let session_type = session.session_type().to_string();
         let summary = collect_summary(session.attrs());
@@ -152,6 +158,7 @@ impl SessionStore<'_> {
 
         let attrs = SessionAttrsRecord {
             driver: format!("{} {}", driver.name(), driver.version()),
+            native_source,
             native_id,
             session_type,
             content_format,
@@ -253,10 +260,15 @@ impl<'a> SessionQuery<'a> {
         self,
     ) -> Result<impl Iterator<Item = Result<SessionRecord, StoreError>> + 'a, StoreError> {
         let store = self.store;
-        let shas = store.select(&self.query)?;
-        Ok(shas
+        let tips = store.select(&self.query)?;
+        Ok(tips
             .into_iter()
-            .map(move |sha| decode(store.read_object(&sha)?)))
+            .map(move |tip| decode(store.read_object(&tip.sha)?)))
+    }
+
+    /// The matching tips, in query order, without reading any object.
+    pub fn tips(self) -> Result<Vec<SelectedTip>, StoreError> {
+        self.store.select(&self.query)
     }
 }
 
@@ -277,6 +289,7 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
     Ok(SessionRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
+        modified_ms: object.header.modified_ms,
         attrs,
         driver_name,
         driver_version,
@@ -476,6 +489,7 @@ mod tests {
     /// A native session with fixed content, for exercising the writer.
     struct FakeSession {
         id: String,
+        source: String,
         files: Vec<(String, Vec<u8>)>,
         summary: FakeAttrs,
     }
@@ -515,6 +529,10 @@ mod tests {
 
         fn session_type(&self) -> &str {
             "fake"
+        }
+
+        fn source(&self) -> &str {
+            &self.source
         }
 
         fn attrs(&self) -> &dyn SessionAttrs {
@@ -580,6 +598,7 @@ mod tests {
         let size = entries.iter().map(|(_, b)| b.len() as u64).sum();
         FakeSession {
             id: id.to_string(),
+            source: format!("fake:{id}"),
             files: entries,
             summary: FakeAttrs { size },
         }
@@ -612,7 +631,7 @@ mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"session_type\":\"fake\",\"summary\":{\"size\":4}}\n"
+            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"native_source\":\"fake:s1\",\"session_type\":\"fake\",\"summary\":{\"size\":4}}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
@@ -623,6 +642,7 @@ mod tests {
         assert_eq!(record.attrs.session_type, "fake");
         assert_eq!(record.attrs.content_format, "fake-lines 1");
         assert_eq!(record.attrs.native_id, "s1");
+        assert_eq!(record.attrs.native_source, "fake:s1");
         assert_eq!(record.size, Some(4));
     }
 

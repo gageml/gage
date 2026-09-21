@@ -1,0 +1,132 @@
+{
+  "bench": "stored-session-list",
+  "stamp": "20260921T130541Z",
+  "code_version": "0.2.0-dev (43e82a4-dirty)",
+  "params": {
+    "iterations": 2,
+    "limit": 20,
+    "seed": 1,
+    "session_kb": 32,
+    "sessions": 200
+  },
+  "metrics": [
+    {
+      "name": "add",
+      "count": 200,
+      "total_ms": 1517.1758499999999,
+      "p50_ms": 7.216789,
+      "p95_ms": 8.948305999999999,
+      "max_ms": 17.849649,
+      "per_sec": 131.8238752613944
+    },
+    {
+      "name": "cold.open",
+      "count": 1,
+      "total_ms": 74.44829299999999,
+      "p50_ms": 74.44829299999999,
+      "p95_ms": 74.44829299999999,
+      "max_ms": 74.44829299999999,
+      "per_sec": 13.432141419280091
+    },
+    {
+      "name": "cold.count",
+      "count": 1,
+      "total_ms": 10.327107999999999,
+      "p50_ms": 10.327107999999999,
+      "p95_ms": 10.327107999999999,
+      "max_ms": 10.327107999999999,
+      "per_sec": 96.83253046254576
+    },
+    {
+      "name": "cold.list_light",
+      "count": 1,
+      "total_ms": 5.920838000000001,
+      "p50_ms": 5.920838000000001,
+      "p95_ms": 5.920838000000001,
+      "max_ms": 5.920838000000001,
+      "per_sec": 168.89501114538177
+    },
+    {
+      "name": "cold.list_full",
+      "count": 1,
+      "total_ms": 10.655091,
+      "p50_ms": 10.655091,
+      "p95_ms": 10.655091,
+      "max_ms": 10.655091,
+      "per_sec": 93.85184978711115
+    },
+    {
+      "name": "warm.open",
+      "count": 1,
+      "total_ms": 4.618118,
+      "p50_ms": 4.618118,
+      "p95_ms": 4.618118,
+      "max_ms": 4.618118,
+      "per_sec": 216.5384253932013
+    },
+    {
+      "name": "warm.count",
+      "count": 2,
+      "total_ms": 15.893305999999999,
+      "p50_ms": 7.177679,
+      "p95_ms": 8.715627,
+      "max_ms": 8.715627,
+      "per_sec": 125.83914259248517
+    },
+    {
+      "name": "warm.list_light",
+      "count": 2,
+      "total_ms": 11.598648,
+      "p50_ms": 5.616478,
+      "p95_ms": 5.98217,
+      "max_ms": 5.98217,
+      "per_sec": 172.43389057069407
+    },
+    {
+      "name": "warm.list_full",
+      "count": 2,
+      "total_ms": 21.758216,
+      "p50_ms": 10.583169,
+      "p95_ms": 11.175047000000001,
+      "max_ms": 11.175047000000001,
+      "per_sec": 91.91930073678834
+    }
+  ],
+  "sizes": [
+    {
+      "name": "store.git",
+      "bytes": 4267622
+    },
+    {
+      "name": "object index",
+      "bytes": 135168
+    }
+  ],
+  "counts": [
+    {
+      "name": "cold.count.total",
+      "value": 200
+    },
+    {
+      "name": "cold.list_light.rows",
+      "value": 20
+    },
+    {
+      "name": "cold.list_full.rows",
+      "value": 20
+    },
+    {
+      "name": "warm.count.total",
+      "value": 200
+    },
+    {
+      "name": "warm.list_light.rows",
+      "value": 20
+    },
+    {
+      "name": "warm.list_full.rows",
+      "value": 20
+    }
+  ],
+  "fsck": []
+}

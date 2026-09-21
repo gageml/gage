@@ -300,9 +300,9 @@ impl<'a> DatasetQuery<'a> {
         self,
     ) -> Result<impl Iterator<Item = Result<DatasetRecord, StoreError>> + 'a, StoreError> {
         let store = self.store;
-        let shas = store.select(&self.query)?;
-        Ok(shas.into_iter().map(move |sha| {
-            let object = store.read_object(&sha)?;
+        let tips = store.select(&self.query)?;
+        Ok(tips.into_iter().map(move |tip| {
+            let object = store.read_object(&tip.sha)?;
             let created_ms = object.header.created_ms.ok_or_else(|| {
                 StoreError::Parse(format!("dataset {}: missing created", object.header.id))
             })?;
@@ -455,6 +455,7 @@ mod tests {
 
     struct FakeSession {
         id: String,
+        source: String,
         files: Vec<(String, String)>,
         attrs: FakeAttrs,
     }
@@ -494,6 +495,10 @@ mod tests {
 
         fn session_type(&self) -> &str {
             "fake"
+        }
+
+        fn source(&self) -> &str {
+            &self.source
         }
 
         fn attrs(&self) -> &dyn SessionAttrs {
@@ -557,6 +562,7 @@ mod tests {
         let size = entries.iter().map(|(_, c)| c.len() as u64).sum();
         FakeSession {
             id: id.to_string(),
+            source: format!("fake:{id}"),
             files: entries,
             attrs: FakeAttrs { size },
         }

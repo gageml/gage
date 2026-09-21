@@ -73,6 +73,17 @@ pub enum Order {
     ModifiedDesc,
 }
 
+/// One tip a selection matched: the object's id, the commit at its
+/// ref, and the commit's timestamps. Everything here comes from the
+/// index; no object is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedTip {
+    pub id: String,
+    pub sha: String,
+    pub created_ms: Option<i64>,
+    pub modified_ms: Option<i64>,
+}
+
 /// A selection over the current version of every object of one type:
 /// an AND of equality tests on declared attribute paths, an order, and
 /// a limit. Tombstones are never selected.
@@ -98,7 +109,7 @@ impl ObjectQuery {
 /// What the store needs from an index. The write side is fed by the
 /// reconcile and by the store's own writes; the read side serves
 /// queries. One implementation exists, [`SqliteIndex`](crate::sqlite_index::SqliteIndex).
-pub trait ObjectIndex {
+pub trait ObjectIndex: Send {
     /// Ref id to tip SHA as last indexed. The reconcile diff runs
     /// against this.
     fn tips(&self) -> Result<BTreeMap<String, String>, StoreError>;
@@ -125,8 +136,8 @@ pub trait ObjectIndex {
     /// of commits dropped. Runs inside the caller's transaction.
     fn prune(&self) -> Result<usize, StoreError>;
 
-    /// Tip SHAs selected by `query`, in query order.
-    fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError>;
+    /// Tips selected by `query`, in query order.
+    fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError>;
 
     /// Start a transaction. Every `put` and `set_tip` until `commit`
     /// or `rollback` is applied as one unit.
@@ -252,8 +263,8 @@ impl Store {
         })
     }
 
-    /// Tip SHAs selected by `query`, in query order.
-    pub(crate) fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
+    /// Tips selected by `query`, in query order.
+    pub(crate) fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
         self.index.select(query)
     }
 }
@@ -274,10 +285,9 @@ mod tests {
     };
     use serde_json::json;
     use std::any::Any;
-    use std::cell::RefCell;
     use std::io::Write as _;
     use std::path::Path;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
     fn init_repo(dir: &Path) -> (std::path::PathBuf, FsckGuard) {
@@ -364,7 +374,7 @@ mod tests {
         fn prune(&self) -> Result<usize, StoreError> {
             self.inner().prune()
         }
-        fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
+        fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
             self.inner().select(query)
         }
         fn begin(&self) -> Result<(), StoreError> {
@@ -382,7 +392,7 @@ mod tests {
     /// `put` receives.
     struct CapturingPut {
         inner: Option<Box<dyn ObjectIndex>>,
-        seen: Rc<RefCell<Vec<LinkFile>>>,
+        seen: Arc<Mutex<Vec<LinkFile>>>,
     }
 
     impl CapturingPut {
@@ -406,7 +416,7 @@ mod tests {
             links: &[LinkFile],
             attrs: &[(&'static str, String)],
         ) -> Result<(), StoreError> {
-            self.seen.borrow_mut().extend(links.iter().cloned());
+            self.seen.lock().unwrap().extend(links.iter().cloned());
             self.inner().put(object, links, attrs)
         }
         fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError> {
@@ -415,7 +425,7 @@ mod tests {
         fn prune(&self) -> Result<usize, StoreError> {
             self.inner().prune()
         }
-        fn select(&self, query: &ObjectQuery) -> Result<Vec<String>, StoreError> {
+        fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
             self.inner().select(query)
         }
         fn begin(&self) -> Result<(), StoreError> {
@@ -475,17 +485,17 @@ mod tests {
         )
         .unwrap();
 
-        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let inner = std::mem::replace(
             &mut store.index,
             Box::new(CapturingPut {
                 inner: None,
-                seen: Rc::clone(&seen),
+                seen: Arc::clone(&seen),
             }),
         );
         store.index = Box::new(CapturingPut {
             inner: Some(inner),
-            seen: Rc::clone(&seen),
+            seen: Arc::clone(&seen),
         });
 
         let mut tree = ObjectTree::default();
@@ -498,7 +508,7 @@ mod tests {
             path: "tasks/x/agent_sessions.link".to_string(),
             shas: vec![target_sha],
         }];
-        assert_eq!(*seen.borrow(), expected, "links indexed on write");
+        assert_eq!(*seen.lock().unwrap(), expected, "links indexed on write");
         assert_eq!(
             store.find_link_files(&commit).unwrap(),
             expected,
@@ -531,6 +541,7 @@ mod tests {
     /// A session with one file under the opaque `files.d` subtree.
     struct FakeSession {
         id: String,
+        source: String,
         attrs: FakeAttrs,
     }
 
@@ -567,6 +578,10 @@ mod tests {
 
         fn session_type(&self) -> &str {
             "fake"
+        }
+
+        fn source(&self) -> &str {
+            &self.source
         }
 
         fn attrs(&self) -> &dyn SessionAttrs {
@@ -681,6 +696,7 @@ mod tests {
                 &FakeDriver,
                 &mut FakeSession {
                     id: "s1".into(),
+                    source: "fake:s1".into(),
                     attrs: FakeAttrs,
                 },
             )
@@ -775,9 +791,12 @@ mod tests {
         run(git_in(&path, ["update-ref", &object_ref(&id), &first])).unwrap();
 
         let reopened = Store::open(&path).unwrap();
-        let shas = reopened
+        let shas: Vec<String> = reopened
             .select(&ObjectQuery::new(note::OBJECT_TYPE))
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(|t| t.sha)
+            .collect();
         assert_eq!(shas, vec![first]);
     }
 

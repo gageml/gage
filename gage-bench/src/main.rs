@@ -9,6 +9,9 @@ use gage_bench::session_list_bench::{
     self, BENCH_NAME as SESSION_LIST_BENCH_NAME, Params as SessionListParams,
 };
 use gage_bench::store_bench::{self, BENCH_NAME, Params};
+use gage_bench::stored_session_list_bench::{
+    self, BENCH_NAME as STORED_SESSION_LIST_BENCH_NAME, Params as StoredSessionListParams,
+};
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser, Debug)]
@@ -32,6 +35,40 @@ enum Command {
 
     /// Bench `gage session list` against the Claude driver
     ClaudeSessionList(ClaudeSessionListArgs),
+
+    /// Bench `gage session list --stored` against the store
+    StoredSessionList(StoredSessionListArgs),
+}
+
+#[derive(Args, Debug)]
+struct StoredSessionListArgs {
+    /// Sessions to add to the store
+    #[arg(long, default_value_t = 500)]
+    sessions: usize,
+
+    /// KiB of content per session
+    #[arg(long, default_value_t = 32)]
+    session_kb: usize,
+
+    /// LIMIT value applied to the list queries
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+
+    /// Warm-scenario iterations
+    #[arg(long, default_value_t = 5)]
+    iterations: usize,
+
+    /// Generator seed
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+
+    /// Compare against a saved run: `latest` or a results file path
+    #[arg(long, value_name = "FILE|latest")]
+    baseline: Option<String>,
+
+    /// Keep the run directory instead of deleting it on success
+    #[arg(long)]
+    keep: bool,
 }
 
 #[derive(Args, Debug)]
@@ -149,7 +186,74 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Store(args) => store(args),
         Command::ClaudeSessionList(args) => claude_session_list(args),
+        Command::StoredSessionList(args) => stored_session_list(args),
     }
+}
+
+fn stored_session_list(args: StoredSessionListArgs) -> ExitCode {
+    let params = StoredSessionListParams {
+        sessions: args.sessions,
+        session_kb: args.session_kb,
+        limit: args.limit.max(1),
+        iterations: args.iterations.max(1),
+        seed: args.seed,
+    };
+    let baseline = match args
+        .baseline
+        .as_deref()
+        .map(|s| resolve_baseline_for(STORED_SESSION_LIST_BENCH_NAME, s))
+    {
+        Some(Ok(results)) => Some(results),
+        Some(Err(e)) => {
+            eprintln!("gage-bench: baseline: {e}");
+            return ExitCode::from(2);
+        }
+        None => None,
+    };
+
+    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let run_dir = std::env::temp_dir().join(format!("gage-bench-{stamp}"));
+    if let Err(e) = std::fs::create_dir_all(&run_dir) {
+        eprintln!("gage-bench: create {}: {e}", run_dir.display());
+        return ExitCode::from(1);
+    }
+
+    let bar = progress_bar();
+    let results = stored_session_list_bench::run(&params, &stamp, &run_dir, &bar);
+    bar.finish_and_clear();
+    let results = match results {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("gage-bench: {e}");
+            eprintln!("Run dir: {}", run_dir.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    println!("Run {} {}", results.stamp, results.code_version);
+    println!("Params: {}", results.params);
+    report::print_metrics("Timings", &results.metrics);
+    report::print_sizes("Sizes", &results.sizes);
+    report::print_counts("Counts", &results.counts);
+    if let Some(baseline) = &baseline {
+        report::print_comparison(baseline, &results);
+    }
+
+    let saved = match results.save() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("gage-bench: save results: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    println!();
+    println!("Results: {}", saved.display());
+    if args.keep {
+        println!("Run dir: {}", run_dir.display());
+    } else if let Err(e) = std::fs::remove_dir_all(&run_dir) {
+        eprintln!("gage-bench: remove {}: {e}", run_dir.display());
+    }
+    ExitCode::SUCCESS
 }
 
 fn claude_session_list(args: ClaudeSessionListArgs) -> ExitCode {

@@ -23,7 +23,7 @@ use datafusion::prelude::Expr;
 /// hand-rolled pattern semantics. This is why `pushdown` returns
 /// `Exact`: the same engine evaluates the predicate either way.
 #[derive(Debug, Clone)]
-pub(crate) struct IdFilter {
+pub struct IdFilter {
     predicate: Arc<dyn PhysicalExpr>,
     schema: SchemaRef,
 }
@@ -32,7 +32,7 @@ impl IdFilter {
     /// Compile the subset of `filters` that reference only `col_name`
     /// into one predicate over a single `[col_name: Utf8]` column.
     /// `None` when no filter prunes this column.
-    pub(crate) fn new(filters: &[Expr], col_name: &str) -> Result<Option<Self>> {
+    pub fn new(filters: &[Expr], col_name: &str) -> Result<Option<Self>> {
         let combined = filters
             .iter()
             .filter(|expr| references_only(expr, col_name))
@@ -48,7 +48,7 @@ impl IdFilter {
     }
 
     /// Retain only the items whose id satisfies the predicate.
-    pub(crate) fn retain<T>(
+    pub fn retain<T>(
         &self,
         items: impl IntoIterator<Item = T>,
         id_of: impl for<'a> Fn(&'a T) -> &'a str,
@@ -87,7 +87,7 @@ impl IdFilter {
 /// [`IdFilter`] evaluates it with DataFusion's engine, so the post-scan
 /// `FilterExec` is redundant and DataFusion drops it. Everything else
 /// (filters touching parsed columns like `text`/`raw`) is `Inexact`.
-pub(crate) fn pushdown(expr: &Expr, col_name: &str) -> TableProviderFilterPushDown {
+pub fn pushdown(expr: &Expr, col_name: &str) -> TableProviderFilterPushDown {
     if references_only(expr, col_name) {
         TableProviderFilterPushDown::Exact
     } else {

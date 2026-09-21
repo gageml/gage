@@ -18,7 +18,8 @@ use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
 
 /// Index file, relative to the store's parent directory (Gage home).
-pub(crate) const INDEX_FILE: &str = "cache/object-index.sqlite";
+/// The object index file, relative to the store's parent directory
+pub const INDEX_FILE: &str = "cache/object-index.sqlite";
 
 /// An opened Gage store: a bare Git repository whose `gage.version`
 /// this build supports.

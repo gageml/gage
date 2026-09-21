@@ -113,6 +113,10 @@ enum Command {
         #[arg(short = 's', long, value_name = "SOURCE", global = true)]
         source: Option<String>,
 
+        /// Operate on sessions in the Gage store
+        #[arg(short = 'S', long, global = true, conflicts_with = "source")]
+        stored: bool,
+
         #[command(subcommand)]
         command: cmd_session::SessionCommand,
     },
@@ -252,8 +256,15 @@ async fn main() {
                 cmd_note::NoteCommand::Edit(args) => cmd_note::edit(args),
                 cmd_note::NoteCommand::Delete(args) => cmd_note::delete(args),
             },
-            Command::Session { source, command } => match command {
-                cmd_session::SessionCommand::List(args) => cmd_session::list(source, args).await,
+            Command::Session {
+                source,
+                stored,
+                command,
+            } => match command {
+                cmd_session::SessionCommand::List(args) => {
+                    cmd_session::list(source, stored, args).await
+                }
+                cmd_session::SessionCommand::Add(args) => cmd_session::add(source, stored, args),
                 cmd_session::SessionCommand::Delete(args) => cmd_session::delete(args).await,
                 cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
                 cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),

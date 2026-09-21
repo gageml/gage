@@ -215,9 +215,9 @@ impl<'a> NoteQuery<'a> {
         self,
     ) -> Result<impl Iterator<Item = Result<NoteRecord, StoreError>> + 'a, StoreError> {
         let store = self.store;
-        let shas = store.select(&self.query)?;
-        Ok(shas.into_iter().map(move |sha| {
-            let object = store.read_object(&sha)?;
+        let tips = store.select(&self.query)?;
+        Ok(tips.into_iter().map(move |tip| {
+            let object = store.read_object(&tip.sha)?;
             let full = decode_full(&object)?;
             Ok(NoteRecord {
                 id: full.id,

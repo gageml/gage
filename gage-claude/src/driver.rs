@@ -6,6 +6,10 @@
 //!   `projects/` under `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`
 //! - `<path>` -- explicit filesystem root; sessions live under
 //!   `<path>/projects/**/*.jsonl`
+//!
+//! A session's own URL is `claude:<absolute root>/<uuid>`, always with
+//! the resolved root, so the same file read through any spelling of
+//! its source records the same `native_source`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -217,6 +221,7 @@ impl Source for ClaudeSource {
                     &path,
                     mtime,
                     meta.len(),
+                    &self.root,
                     &self.store,
                 )?));
             }
@@ -293,12 +298,16 @@ fn resolve_projects_dir(source: &str) -> Result<PathBuf, DriverError> {
         }
         None => source,
     };
-    if body.is_empty() {
-        return projects_dir().ok_or_else(|| {
+    let projects_dir = if body.is_empty() {
+        projects_dir().ok_or_else(|| {
             DriverError::Other("CLAUDE_PROJECTS_DIR, CLAUDE_CONFIG_DIR, or HOME must be set".into())
-        });
-    }
-    Ok(expand_tilde(body).join("projects"))
+        })?
+    } else {
+        expand_tilde(body).join("projects")
+    };
+    // Absolute so a session URL spelled from the root is location
+    // independent
+    std::path::absolute(&projects_dir).map_err(DriverError::Io)
 }
 
 /// The Claude root a projects directory sits under
@@ -383,18 +392,22 @@ fn walk_session_files(
 /// refreshes the cache.
 pub struct ClaudeNativeSession {
     native_id: String,
+    /// `claude:<absolute root>/<uuid>`
+    source: String,
     session_path: PathBuf,
     attrs: ClaudeSessionAttrs,
 }
 
 impl ClaudeNativeSession {
     /// Open the session at `path`. `mtime` and `size` are the file's
-    /// stat values the caller already holds from its directory walk.
+    /// stat values the caller already holds from its directory walk;
+    /// `root` is the absolute Claude root the file sits under.
     pub fn open(
         native_id: &str,
         path: &Path,
         mtime: SystemTime,
         size: u64,
+        root: &Path,
         store: &IndexStore,
     ) -> Result<Self, DriverError> {
         let summary = match store.session_summary(native_id, mtime) {
@@ -413,6 +426,7 @@ impl ClaudeNativeSession {
             .unwrap_or_default();
         Ok(Self {
             native_id: native_id.to_string(),
+            source: format!("{NAME}:{}/{native_id}", root.display()),
             session_path: path.to_path_buf(),
             attrs: ClaudeSessionAttrs {
                 mtime,
@@ -441,6 +455,10 @@ impl NativeSession for ClaudeNativeSession {
 
     fn session_type(&self) -> &str {
         SESSION_TYPE
+    }
+
+    fn source(&self) -> &str {
+        &self.source
     }
 
     fn attrs(&self) -> &dyn SessionAttrs {
@@ -586,6 +604,17 @@ mod tests {
         }
         let err = source.find_native("no-such").unwrap_err();
         assert!(matches!(err, NativeLookupError::NoMatch(_)));
+    }
+
+    #[test]
+    fn native_session_source_is_root_and_id() {
+        let tmp = TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        seed_session(&root, "/Users/alice/x", id, "");
+        let source = ClaudeDriver::new().open_source(&source_for(&root)).unwrap();
+        let session = source.open_native(id).unwrap();
+        assert_eq!(session.source(), format!("claude:{}/{id}", root.display()));
     }
 
     #[test]

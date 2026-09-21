@@ -56,11 +56,11 @@ pub use dataset::{
 };
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
-pub use index::Order;
+pub use index::{Order, SelectedTip};
 pub use note::{NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore};
 pub use session::{
     SessionAddOutcome, SessionAttrsRecord, SessionOutcome, SessionQuery, SessionRecord,
     SessionStore, SummaryAttrs, session_object_id,
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
-pub use store::Store;
+pub use store::{INDEX_FILE, Store};

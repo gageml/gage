@@ -9,7 +9,7 @@ pub mod udf;
 
 pub use context::{
     AgentScope, create_agent_context, create_agent_context_scoped, create_context,
-    create_source_context, index_store, install_udfs,
+    create_source_context, create_stored_context, index_store, install_udfs,
 };
 pub use gage_claude::tables::SessionCache;
 pub use print_format::{PrintFormat, write_yaml, write_yaml_capped};
