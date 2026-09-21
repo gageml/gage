@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,11 +8,11 @@ use datafusion::sql::TableReference;
 use datafusion_table_providers::sql::db_connection_pool::Mode;
 use datafusion_table_providers::sql::db_connection_pool::sqlitepool::SqliteConnectionPoolFactory;
 use datafusion_table_providers::sqlite::SqliteTableFactory;
+use gage_claude::driver::ClaudeSource;
 use gage_claude::home::ClaudeHome;
-use gage_claude::index::{IndexStore, cache_dir_for};
-
-use gage_claude::tables::{EntryTable, MessageTable, SessionCache, SessionTable};
-use gage_session::DriverTables;
+use gage_claude::index::IndexStore;
+use gage_claude::tables::SessionCache;
+use gage_session::{DriverError, Source};
 
 use crate::scope::{Scope, ScopeEdge, ScopedTable, SessionScope};
 use crate::tables::config::ConfigTable;
@@ -23,33 +22,37 @@ use crate::tables::note_doc::note_doc_table;
 use crate::tables::note_message_context::NoteMessageContextFn;
 use crate::tables::related_issue::RelatedIssueFn;
 
-fn default_root() -> PathBuf {
-    gage_claude::session::projects_dir().expect("CLAUDE_PROJECTS_DIR or HOME must be set")
+/// The claude index store behind `source`: the summary cache and
+/// text index the `message_text` and `note_message_context`
+/// functions and `gage index` read. The functions are the one place
+/// gage-query still depends on the claude driver's internals, so the
+/// source must be a claude source.
+pub fn index_store(source: &dyn Source) -> Result<Arc<IndexStore>, DriverError> {
+    Ok(claude_source(source)?.index_store())
 }
 
-/// The text-index handle for the default corpus and cache locations
-/// — what `gage query`, the MCP server, and `gage index` all share.
-pub fn default_index_store() -> IndexStore {
-    let root = default_root();
-    let cache_dir = cache_dir_for(&root);
-    IndexStore::new(root, cache_dir)
+fn claude_source(source: &dyn Source) -> Result<&ClaudeSource, DriverError> {
+    source
+        .as_any()
+        .downcast_ref::<ClaudeSource>()
+        .ok_or_else(|| {
+            DriverError::Other(format!(
+                "query context requires a claude source, got {:?}",
+                source.source()
+            ))
+        })
 }
 
-pub async fn create_context_default() -> SessionContext {
-    let root = default_root();
-    let cache_dir = cache_dir_for(&root);
-    create_context(&root, &cache_dir).await
-}
-
-/// Build a query context over one driver source. Registers the
-/// driver's `session`, `message`, and `entry` tables and the UDF
-/// suite; no Gage state tables.
-pub fn create_source_context(tables: DriverTables) -> SessionContext {
+/// Build a query context over one source: the driver's `session`,
+/// `message`, and `entry` tables and the UDF suite; no Gage state
+/// tables.
+pub fn create_source_context(source: &dyn Source) -> Result<SessionContext, DriverError> {
+    let tables = source.tables()?;
     let ctx = new_session_context();
     ctx.register_table("session", tables.session).unwrap();
     ctx.register_table("message", tables.message).unwrap();
     ctx.register_table("entry", tables.entry).unwrap();
-    ctx
+    Ok(ctx)
 }
 
 /// What an agent context is scoped to: a scan, optionally narrowed to
@@ -70,20 +73,27 @@ pub struct AgentScope {
 /// session-serving TVFs (`message_text`, `note_message_context`) honor
 /// the same session scope. The unscoped metadata tables (`config`,
 /// `note_doc`) are exposed as they are in the default context.
-pub async fn create_agent_context(scan_id: impl Into<String>) -> SessionContext {
-    create_agent_context_scoped(AgentScope {
-        scan_id: scan_id.into(),
-        sessions: None,
-    })
+pub async fn create_agent_context(
+    source: &dyn Source,
+    scan_id: impl Into<String>,
+) -> Result<SessionContext, DriverError> {
+    create_agent_context_scoped(
+        source,
+        AgentScope {
+            scan_id: scan_id.into(),
+            sessions: None,
+        },
+    )
     .await
 }
 
 /// [`create_agent_context`] with the full [`AgentScope`], including the
 /// optional session narrowing and line ranges.
-pub async fn create_agent_context_scoped(scope: AgentScope) -> SessionContext {
-    let root = default_root();
-    let cache_dir = cache_dir_for(&root);
-    build_context(&root, &cache_dir, Some(scope)).await
+pub async fn create_agent_context_scoped(
+    source: &dyn Source,
+    scope: AgentScope,
+) -> Result<SessionContext, DriverError> {
+    build_context(source, Some(scope)).await
 }
 
 /// Register the gage JSON UDF suite on a context. Used by
@@ -95,19 +105,25 @@ pub fn install_udfs(ctx: &SessionContext) {
     ctx.register_udf(crate::udf::resolve_ref_udf());
 }
 
-/// Build a query context over the session corpus at `root`, with the
-/// text index cached under `cache_dir`. Queries reconcile the index
-/// lazily; the per-context session cache parses JSONL on first touch.
-pub async fn create_context(root: &Path, cache_dir: &Path) -> SessionContext {
-    build_context(root, cache_dir, None).await
+/// Build the full query context over an opened source: the driver's
+/// session tables, the session-serving functions, and the Gage state
+/// tables. The caller resolves and opens the source; this function
+/// makes no choice about it.
+pub async fn create_context(source: &dyn Source) -> Result<SessionContext, DriverError> {
+    build_context(source, None).await
 }
 
-async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>) -> SessionContext {
+async fn build_context(
+    source: &dyn Source,
+    agent: Option<AgentScope>,
+) -> Result<SessionContext, DriverError> {
     // The sqlite connection pool below opens the db file directly and
     // neither creates nor migrates it; a fresh gage home needs both.
     gage_db::db::ensure_db().expect("ensure gage db");
     let ctx = new_session_context();
-    let store = Arc::new(IndexStore::new(root, cache_dir));
+    let claude = claude_source(source)?;
+    let store = claude.index_store();
+    let tables = source.tables()?;
 
     // One session scope shared by the session-serving tables and TVFs
     let session_scope = agent.as_ref().map(|a| {
@@ -126,16 +142,14 @@ async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>)
     ctx.register_udtf("issue_report", Arc::new(IssueReportFn::new()));
     ctx.register_udtf("related_issue", Arc::new(RelatedIssueFn::new()));
 
-    register_disk_table(&ctx, "session", "id", None, &session_scope, || {
-        Arc::new(SessionTable::new(store.clone()))
-    });
+    register_disk_table(&ctx, "session", "id", None, &session_scope, tables.session);
     register_disk_table(
         &ctx,
         "entry",
         "session_id",
         Some("line"),
         &session_scope,
-        || Arc::new(EntryTable::new(store.clone())),
+        tables.entry,
     );
     register_disk_table(
         &ctx,
@@ -143,7 +157,7 @@ async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>)
         "session_id",
         Some("line"),
         &session_scope,
-        || Arc::new(MessageTable::new(store.clone())),
+        tables.message,
     );
 
     register_sqlite_tables(
@@ -153,29 +167,20 @@ async fn build_context(root: &Path, cache_dir: &Path, agent: Option<AgentScope>)
     )
     .await;
 
-    // `root` is `<claude_home>/projects`; recover the claude_home dir
-    // for the `config` table. Tests that pass a non-standard `root`
-    // (e.g. a bare `testdata/` dir) get an unrelated home — fine as
-    // long as they don't query `config`.
-    let claude_home_dir = root
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| root.to_path_buf());
-    // Prefer the env-resolved home when it matches: it carries the real
-    // `.claude.json` registry location ($HOME/.claude.json, a sibling of
-    // $HOME/.claude), which `ClaudeHome::new`'s fixture layout
-    // (`<home>/.claude.json`) does not. Non-matching roots (agent
-    // corpus, tests) keep the fixture layout.
+    // The `config` table reads the Claude home the source sits under.
+    // The env-resolved home carries the real `.claude.json` location
+    // ($HOME/.claude.json, a sibling of $HOME/.claude); any other root
+    // keeps the fixture layout (`<root>/.claude.json`).
     let claude_home = match ClaudeHome::from_env() {
-        Ok(h) if h.path() == claude_home_dir => h,
-        Ok(_) | Err(_) => ClaudeHome::new(claude_home_dir),
+        Ok(h) if h.path() == claude.root() => h,
+        Ok(_) | Err(_) => ClaudeHome::new(claude.root().to_path_buf()),
     };
     ctx.register_table("config", Arc::new(ConfigTable::new(claude_home)))
         .unwrap();
     ctx.register_table("note_doc", note_doc_table().unwrap())
         .unwrap();
 
-    ctx
+    Ok(ctx)
 }
 
 /// A bare context with the session cache extension, the PostgreSQL
@@ -198,17 +203,15 @@ fn new_session_context() -> SessionContext {
 /// Register a disk-backed provider, wrapping in [`ScopedTable`] when
 /// the context is agent-scoped. `id_col` is the column the wrapper
 /// filters on; `line_col` declares the table's line column so the
-/// scope's line ranges apply; `make_inner` constructs the unwrapped
-/// provider.
+/// scope's line ranges apply.
 fn register_disk_table(
     ctx: &SessionContext,
     name: &str,
     id_col: &'static str,
     line_col: Option<&'static str>,
     session_scope: &Option<Scope>,
-    make_inner: impl FnOnce() -> Arc<dyn TableProvider>,
+    inner: Arc<dyn TableProvider>,
 ) {
-    let inner = make_inner();
     let provider: Arc<dyn TableProvider> = match session_scope {
         Some(scope) => {
             let mut scoped = ScopedTable::new(inner, id_col, scope.clone());

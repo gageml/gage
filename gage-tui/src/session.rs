@@ -8,12 +8,13 @@ use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
 use gage_db::note::{self, NoteFilters};
 use gage_db::rusqlite::Connection;
+use gage_registry::driver::DriverRegistry;
 use serde_json::Value;
 
 use crate::doc::{Document, Entry, Session};
 
 pub async fn load(session_id: &str, db: &Connection) -> Result<Document, Box<dyn Error>> {
-    let ctx = gage_query::create_context_default().await;
+    let ctx = default_context().await?;
     let session = load_session(&ctx, session_id).await?;
     let entries = load_entries(&ctx, session_id).await?;
     let notes = note::find(
@@ -30,6 +31,13 @@ pub async fn load(session_id: &str, db: &Connection) -> Result<Document, Box<dyn
     })
 }
 
+/// The query context over the default source. The views read the
+/// default source until they are launched with one.
+async fn default_context() -> Result<SessionContext, Box<dyn Error>> {
+    let source = DriverRegistry::builtin().open_source("")?;
+    Ok(gage_query::create_context(source.as_ref()).await?)
+}
+
 /// A row in the session-open picker.
 pub struct SessionListItem {
     pub id: String,
@@ -44,7 +52,7 @@ pub struct SessionListItem {
 pub async fn list_recent(limit: usize) -> Result<Vec<SessionListItem>, Box<dyn Error>> {
     use datafusion::arrow::array::TimestampMillisecondArray;
 
-    let ctx = gage_query::create_context_default().await;
+    let ctx = default_context().await?;
     let sql =
         format!("SELECT id, mtime, title, project FROM session ORDER BY mtime DESC LIMIT {limit}");
     let batches = ctx.sql(&sql).await?.collect().await?;

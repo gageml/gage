@@ -1,8 +1,18 @@
 use clap::Args;
 use gage_query::PrintFormat;
 
+use crate::source;
+
 #[derive(Args)]
 pub struct QueryArgs {
+    /// Session source
+    ///
+    /// A driver scheme selects the driver (`claude:<path>`); a value
+    /// with no scheme goes to the default driver (`<path>`). Defaults
+    /// to the default driver's default location.
+    #[arg(short, long, value_name = "SOURCE")]
+    source: Option<String>,
+
     /// Execute SQL and exit
     ///
     /// May be given multiple times; statements run in order.
@@ -26,7 +36,14 @@ pub struct QueryArgs {
 }
 
 pub async fn main(args: QueryArgs) {
-    let ctx = gage_query::create_context_default().await;
+    let source = source::open_source_or_exit("gage query", args.source.as_deref().unwrap_or(""));
+    let ctx = match gage_query::create_context(source.as_ref()).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("gage query: {e}");
+            std::process::exit(1);
+        }
+    };
     let result = if !args.sql.is_empty() {
         let mut result = Ok(());
         for sql in &args.sql {
@@ -39,7 +56,7 @@ pub async fn main(args: QueryArgs) {
     } else {
         gage_query::run_repl(
             &ctx,
-            Some(gage_query::default_index_store()),
+            Some(source::index_store_or_exit("gage query", source.as_ref())),
             args.format,
             args.quiet,
             args.timing,

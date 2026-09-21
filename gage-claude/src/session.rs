@@ -7,8 +7,7 @@
 //! sessions themselves; it does not resolve them back to project paths.
 
 use std::fmt;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
@@ -95,7 +94,6 @@ pub struct SessionListBuilder {
     projects: Vec<String>,
     since: Option<SystemTime>,
     limit: Option<usize>,
-    empty: bool,
 }
 
 impl SessionListBuilder {
@@ -105,7 +103,6 @@ impl SessionListBuilder {
             projects: Vec::new(),
             since: None,
             limit: None,
-            empty: false,
         }
     }
 
@@ -134,11 +131,6 @@ impl SessionListBuilder {
 
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
-        self
-    }
-
-    pub fn empty(mut self, yes: bool) -> Self {
-        self.empty = yes;
         self
     }
 
@@ -211,15 +203,6 @@ impl SessionListBuilder {
                     && mtime < cutoff
                 {
                     continue;
-                }
-
-                if self.empty {
-                    match is_empty_session(&path) {
-                        Ok(true) => {}
-                        Ok(false) => continue,
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                        Err(e) => panic!("failed to read {}: {e}", path.display()),
-                    }
                 }
 
                 sessions.push(SessionInfo {
@@ -385,22 +368,6 @@ pub fn one_session(prefix: &str) -> Result<SessionInfo, SessionLookupError> {
             Err(SessionLookupError::TooManyMatches((prefix.into(), ids)))
         }
     }
-}
-
-pub fn is_empty_session(path: &Path) -> io::Result<bool> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line?;
-        if line.contains("\"type\":\"user\"")
-            || line.contains("\"type\": \"user\"")
-            || line.contains("\"type\":\"assistant\"")
-            || line.contains("\"type\": \"assistant\"")
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// Delete a session's JSONL file and sidecar directory. Gage notes

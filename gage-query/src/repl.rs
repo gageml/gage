@@ -109,7 +109,7 @@ async fn run_query(
 
 pub async fn run_repl(
     ctx: &SessionContext,
-    index_store: Option<gage_claude::index::IndexStore>,
+    index_store: Option<Arc<gage_claude::index::IndexStore>>,
     mut format: PrintFormat,
     quiet: bool,
     timing: bool,
@@ -193,7 +193,7 @@ struct ReplState<'a> {
     format: &'a mut PrintFormat,
     timing: bool,
     stats: bool,
-    index_store: Option<gage_claude::index::IndexStore>,
+    index_store: Option<Arc<gage_claude::index::IndexStore>>,
 }
 
 fn report(stats: &QueryStats, state: &ReplState<'_>) {

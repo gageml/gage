@@ -284,7 +284,16 @@ pub async fn show(args: NoteShowArgs) {
         .max(20);
 
     let target_cell = if args.short_target {
-        let ctx = gage_query::create_context_default().await;
+        // Note targets name sessions in the default source until a
+        // target carries its own source
+        let source = crate::source::open_source_or_exit("gage note show", "");
+        let ctx = match gage_query::create_context(source.as_ref()).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                eprintln!("gage note show: {e}");
+                std::process::exit(1);
+            }
+        };
         match crate::target_content::render_target_cell(&ctx, &note.target, value_width).await {
             Ok(s) => Some(s),
             Err(e) => {

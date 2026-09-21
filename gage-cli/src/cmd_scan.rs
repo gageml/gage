@@ -499,7 +499,9 @@ fn load_scan_model(
         .collect();
 
     let rows = scan::scan_session_rows(conn, &run.id)?;
-    let store = gage_query::default_index_store();
+    // Scans read the default source until `gage scan` takes a source
+    let source = crate::source::open_source_or_exit("gage scan", "");
+    let store = crate::source::index_store_or_exit("gage scan", source.as_ref());
     let paths: HashMap<String, PathBuf> = session::ls_sessions().into_iter().collect();
     let mut sessions: Vec<SessionItem> = rows
         .into_iter()
@@ -782,7 +784,8 @@ impl SessionDisplays {
                     .entry(encoded)
                     .or_insert_with_key(|encoded| project_display(home.as_ref(), encoded))
                     .clone();
-                let store = gage_query::default_index_store();
+                let source = crate::source::open_source_or_exit("gage scan", "");
+                let store = crate::source::index_store_or_exit("gage scan", source.as_ref());
                 SessionDisplay {
                     project,
                     title: session_title(&store, &info),
@@ -1809,7 +1812,8 @@ fn prompt_limit(initial: Option<usize>) -> io::Result<Option<usize>> {
 async fn known_projects() -> anyhow::Result<std::collections::HashSet<String>> {
     use datafusion::arrow::array::{Array, StringArray};
 
-    let ctx = gage_query::create_context_default().await;
+    let source = crate::source::open_source_or_exit("gage scan", "");
+    let ctx = gage_query::create_context(source.as_ref()).await?;
     let batches = ctx
         .sql("SELECT DISTINCT project FROM session")
         .await?
@@ -1933,7 +1937,8 @@ async fn run_scan_tui(
             })
             .collect(),
         sessions: {
-            let store = gage_query::default_index_store();
+            let source = crate::source::open_source_or_exit("gage scan", "");
+            let store = crate::source::index_store_or_exit("gage scan", source.as_ref());
             selected
                 .iter()
                 .map(|s| SessionEntry {

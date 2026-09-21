@@ -471,6 +471,7 @@ mod tests {
     };
     use std::any::Any;
     use std::io::Cursor;
+    use std::time::SystemTime;
 
     /// A native session with fixed content, for exercising the writer.
     struct FakeSession {
@@ -484,8 +485,26 @@ mod tests {
     }
 
     impl SessionAttrs for FakeAttrs {
+        fn mtime(&self) -> Option<SystemTime> {
+            None
+        }
         fn size(&self) -> Option<u64> {
             Some(self.size)
+        }
+        fn is_empty(&self) -> Option<bool> {
+            None
+        }
+        fn project_name(&self) -> Option<&str> {
+            None
+        }
+        fn title(&self) -> Option<&str> {
+            None
+        }
+        fn model(&self) -> Option<&str> {
+            None
+        }
+        fn message_count(&self) -> Option<u64> {
+            None
         }
     }
 

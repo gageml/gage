@@ -30,6 +30,7 @@ use futures::stream;
 use super::cache::SessionCache;
 use super::filter;
 use super::walk::{session_cache, walk_sessions};
+use crate::driver::ClaudeNativeSession;
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
 
@@ -332,26 +333,17 @@ impl SessionExec {
             mtimes.append_value(millis);
             sizes.append_value(s.size as i64);
 
+            // The native session is the authority on a session's
+            // attributes; the table is one consumer of it.
             let summary = if !needs_summary {
                 default_summary.clone()
             } else {
-                match self.store.session_summary(&s.id, s.mtime) {
-                    Some(cached) => cached,
-                    None => match self.cache.get(&s.id, &s.src).await {
-                        Ok(d) => {
-                            // Populate the on-disk cache so subsequent
-                            // queries hit `session_summary` instead of
-                            // re-parsing the JSONL.
-                            if let Err(e) = self.store.put_session_summary(&s.id, &d.summary) {
-                                tracing::warn!(session_id = %s.id, "failed to write summary cache: {e}");
-                            }
-                            d.summary.clone()
-                        }
-                        Err(e) => {
-                            tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
-                            default_summary.clone()
-                        }
-                    },
+                match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, s.size, &self.store) {
+                    Ok(session) => session.summary().clone(),
+                    Err(e) => {
+                        tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
+                        default_summary.clone()
+                    }
                 }
             };
             match &summary.title {

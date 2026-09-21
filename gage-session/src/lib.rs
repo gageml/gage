@@ -55,9 +55,11 @@ pub trait Driver: Send + Sync {
 /// A handle over one source of native sessions. Dropping the handle
 /// releases whatever it holds; [`Source::close`] does the same and
 /// reports any failure.
-pub trait Source {
+pub trait Source: Send + Sync {
     /// The source value the handle was opened with, as given
     fn source(&self) -> &str;
+
+    fn as_any(&self) -> &dyn std::any::Any;
 
     /// The source's session-derived table providers. Consumers
     /// register them on a DataFusion context; every read pushes
@@ -104,51 +106,23 @@ pub trait StoredSession {
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Box<dyn Entry>, DriverError>> + '_>;
 }
 
-/// Attribute reader for a session. Every method defaults to `None`;
-/// a driver overrides only the attributes it can answer.
+/// The attributes of a native session. An implementation decides how
+/// and when it reads them; `None` means the harness has no such fact,
+/// never that the value was not computed.
 pub trait SessionAttrs {
-    fn mtime(&self) -> Option<SystemTime> {
-        None
-    }
-    fn size(&self) -> Option<u64> {
-        None
-    }
-    fn is_empty(&self) -> Option<bool> {
-        None
-    }
-    fn project_name(&self) -> Option<&str> {
-        None
-    }
-    fn title(&self) -> Option<&str> {
-        None
-    }
-    fn model(&self) -> Option<&str> {
-        None
-    }
-    fn message_count(&self) -> Option<u64> {
-        None
-    }
+    fn mtime(&self) -> Option<SystemTime>;
+    fn size(&self) -> Option<u64>;
+    fn is_empty(&self) -> Option<bool>;
+    fn project_name(&self) -> Option<&str>;
+    fn title(&self) -> Option<&str>;
+    fn model(&self) -> Option<&str>;
+    fn message_count(&self) -> Option<u64>;
 }
 
+/// One raw line of a stored session. Structured reads go through the
+/// driver's tables, not through this trait.
 pub trait Entry {
     fn line(&self) -> u32;
-    fn uuid(&self) -> Option<&str>;
-    fn timestamp(&self) -> Option<SystemTime>;
-    fn raw(&self) -> Cow<'_, str>;
-    fn type_(&self) -> &str;
-    fn subtype(&self) -> Option<&str>;
-    fn to_message(&self) -> Option<&dyn Message>;
-}
-
-pub trait Message {
-    fn line(&self) -> u32;
-    fn uuid(&self) -> Option<&str>;
-    fn type_(&self) -> &str;
-    fn subtype(&self) -> Option<&str>;
-    fn text(&self) -> Cow<'_, str>;
-    fn timestamp(&self) -> Option<SystemTime>;
-    fn attachments(&self) -> Option<Cow<'_, str>>;
-    fn ide_tags(&self) -> Option<Cow<'_, str>>;
     fn raw(&self) -> Cow<'_, str>;
 }
 

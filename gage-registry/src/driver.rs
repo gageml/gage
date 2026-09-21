@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gage_session::{Driver, split_scheme};
+use gage_claude::driver::ClaudeDriver;
+use gage_session::{Driver, DriverError, Source, split_scheme};
 
 pub struct DriverRegistry {
     default: Option<Arc<dyn Driver>>,
@@ -21,6 +22,11 @@ impl DriverRegistry {
             default: None,
             by_scheme: HashMap::new(),
         }
+    }
+
+    /// The drivers bundled with this build. `claude` is the default.
+    pub fn builtin() -> Self {
+        Self::new().add_default(Arc::new(ClaudeDriver::new()))
     }
 
     /// Register `driver` and mark it as the default: the driver a
@@ -59,6 +65,15 @@ impl DriverRegistry {
             Some((scheme, _)) if self.by_scheme.contains_key(scheme) => self.for_scheme(scheme),
             _ => self.default(),
         }
+    }
+
+    /// Route `source` to its driver and open it. The empty source is
+    /// the default driver's default location.
+    pub fn open_source(&self, source: &str) -> Result<Box<dyn Source>, DriverError> {
+        let driver = self
+            .driver_for(source)
+            .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
+        driver.open_source(source)
     }
 }
 

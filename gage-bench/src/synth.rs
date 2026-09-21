@@ -3,6 +3,7 @@
 
 use std::any::Any;
 use std::io::Write as _;
+use std::time::SystemTime;
 
 use gage_session::{
     ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
@@ -133,8 +134,26 @@ struct SyntheticAttrs {
 }
 
 impl SessionAttrs for SyntheticAttrs {
+    fn mtime(&self) -> Option<SystemTime> {
+        None
+    }
     fn size(&self) -> Option<u64> {
         Some(self.size)
+    }
+    fn is_empty(&self) -> Option<bool> {
+        None
+    }
+    fn project_name(&self) -> Option<&str> {
+        None
+    }
+    fn title(&self) -> Option<&str> {
+        None
+    }
+    fn model(&self) -> Option<&str> {
+        None
+    }
+    fn message_count(&self) -> Option<u64> {
+        None
     }
 }
 

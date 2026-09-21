@@ -95,16 +95,25 @@ impl GageServer {
     pub(crate) async fn ctx(&self) -> &SessionContext {
         self.ctx
             .get_or_init(|| async {
-                match &self.tools_config.query.scan {
+                // The server reads the default source until it is
+                // configured with one
+                let source = gage_registry::driver::DriverRegistry::builtin()
+                    .open_source("")
+                    .expect("default session source should open");
+                let ctx = match &self.tools_config.query.scan {
                     Some(scan_id) => {
-                        gage_query::create_agent_context_scoped(gage_query::AgentScope {
-                            scan_id: scan_id.clone(),
-                            sessions: self.tools_config.query.sessions.clone(),
-                        })
+                        gage_query::create_agent_context_scoped(
+                            source.as_ref(),
+                            gage_query::AgentScope {
+                                scan_id: scan_id.clone(),
+                                sessions: self.tools_config.query.sessions.clone(),
+                            },
+                        )
                         .await
                     }
-                    None => gage_query::create_context_default().await,
-                }
+                    None => gage_query::create_context(source.as_ref()).await,
+                };
+                ctx.expect("query context should build over the default source")
             })
             .await
     }

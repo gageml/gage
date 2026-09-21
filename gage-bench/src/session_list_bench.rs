@@ -36,7 +36,8 @@ use std::time::Instant;
 use arrow::array::{Array, Int64Array};
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
-use gage_claude::index::{IndexStore, LockMode};
+use gage_claude::index::{IndexStore, LockMode, cache_dir_for};
+use gage_registry::driver::DriverRegistry;
 use indicatif::ProgressBar;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::Serialize;
@@ -70,7 +71,6 @@ pub fn run(
     progress: &ProgressBar,
 ) -> Result<Results, String> {
     let projects_dir = run_dir.join("projects");
-    let cache_dir = run_dir.join("cache");
     let gage_home = run_dir.join("gage-home");
     std::fs::create_dir_all(&projects_dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&gage_home).map_err(|e| e.to_string())?;
@@ -83,6 +83,10 @@ pub fn run(
         std::env::set_var("CLAUDE_CONFIG_DIR", run_dir);
     }
 
+    // The cache lives where the driver keys it, under GAGE_HOME
+    let cache_dir = cache_dir_for(&projects_dir);
+    let registry = DriverRegistry::builtin();
+
     progress.set_length((params.sessions + params.iterations + 4) as u64);
     progress.set_message("populate");
     populate(&projects_dir, params, progress).map_err(|e| e.to_string())?;
@@ -93,7 +97,10 @@ pub fn run(
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
 
     progress.set_message("cold");
-    let ctx = rt.block_on(gage_query::create_context(&projects_dir, &cache_dir));
+    let source = registry.open_source("").map_err(|e| e.to_string())?;
+    let ctx = rt
+        .block_on(gage_query::create_context(source.as_ref()))
+        .map_err(|e| e.to_string())?;
     let cold_row_counts = run_queries("cold", &rt, &ctx, params.limit, &mut timings)?;
     emit_row_counts("cold", &cold_row_counts, &mut counts);
     // Drop and recreate for reconcile+warm so nothing carries in the
@@ -117,7 +124,9 @@ pub fn run(
     progress.inc(1);
 
     progress.set_message("warm");
-    let ctx = rt.block_on(gage_query::create_context(&projects_dir, &cache_dir));
+    let ctx = rt
+        .block_on(gage_query::create_context(source.as_ref()))
+        .map_err(|e| e.to_string())?;
     let mut warm_row_counts = RowCounts::default();
     for _ in 0..params.iterations {
         warm_row_counts = run_queries("warm", &rt, &ctx, params.limit, &mut timings)?;

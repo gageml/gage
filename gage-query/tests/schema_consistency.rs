@@ -72,7 +72,7 @@ async fn every_table_and_tvf_scans_without_schema_drift() {
     note::insert(&conn, &note).unwrap();
     drop(conn);
 
-    let ctx = gage_query::create_context(&common::testdata(), &tmp.path().join("cache")).await;
+    let ctx = common::testdata_ctx().await;
 
     for table in TABLES {
         let sql = format!("SELECT * FROM {table}");
@@ -109,7 +109,7 @@ async fn coverage_matches_registered_surface() {
     // create_context opens the gage db through a connection pool that
     // does not create the file; ensure it exists first.
     drop(gage_db::db::open_db().unwrap());
-    let ctx = gage_query::create_context(&common::testdata(), &tmp.path().join("cache")).await;
+    let ctx = common::testdata_ctx().await;
 
     let registered_tables: std::collections::BTreeSet<String> = ctx
         .catalog("datafusion")

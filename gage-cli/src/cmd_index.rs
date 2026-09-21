@@ -8,10 +8,19 @@ use tabled::{
     settings::{Style, object::Columns},
 };
 
+use crate::source;
 use crate::style;
 
 #[derive(Args)]
 pub struct IndexArgs {
+    /// Session source whose index to maintain
+    ///
+    /// A driver scheme selects the driver (`claude:<path>`); a value
+    /// with no scheme goes to the default driver (`<path>`). Defaults
+    /// to the default driver's default location.
+    #[arg(short, long, value_name = "SOURCE")]
+    source: Option<String>,
+
     /// Rebuild the index
     #[arg(long)]
     rebuild: bool,
@@ -26,7 +35,8 @@ pub struct IndexArgs {
 /// first-build cost out of interactive queries. Progress is reported
 /// via `tracing` (set GAGE_LOG=info to see per-session output).
 pub async fn run(args: IndexArgs) {
-    let store = gage_query::default_index_store();
+    let source = source::open_source_or_exit("gage index", args.source.as_deref().unwrap_or(""));
+    let store = source::index_store_or_exit("gage index", source.as_ref());
 
     if args.status {
         let status = tokio::task::spawn_blocking(move || store.status())

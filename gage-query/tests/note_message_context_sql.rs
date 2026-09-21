@@ -37,7 +37,7 @@ async fn returns_window_with_renamed_subtype_column() {
     note::insert(&conn, &note).unwrap();
     drop(conn);
 
-    let ctx = gage_query::create_context(&common::testdata(), &tmp.path().join("cache")).await;
+    let ctx = common::testdata_ctx().await;
     let sql = format!(
         "SELECT line, type, subtype FROM note_message_context('{note_id}', 1, 1) \
          ORDER BY line"
@@ -87,7 +87,7 @@ async fn whole_session_note_yields_empty() {
     note::insert(&conn, &note).unwrap();
     drop(conn);
 
-    let ctx = gage_query::create_context(&common::testdata(), &tmp.path().join("cache")).await;
+    let ctx = common::testdata_ctx().await;
     let sql = format!("SELECT line FROM note_message_context('{note_id}', 2, 2)");
     let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();

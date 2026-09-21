@@ -16,15 +16,13 @@ use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use gage_session::{
-    ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry, Message,
-    NativeLookupError, NativeSession, SessionAttrs, Source, StoredSession, split_scheme,
+    ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry, NativeLookupError,
+    NativeSession, SessionAttrs, Source, StoredSession, split_scheme,
 };
 
 use crate::home::ClaudeHome;
-use crate::index::{IndexStore, cache_dir_for};
-use crate::session::{
-    SESSION_RE, encode_project_dir, is_agent_tmp_slug, is_empty_session, projects_dir,
-};
+use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_session};
+use crate::session::{SESSION_RE, encode_project_dir, is_agent_tmp_slug, projects_dir};
 use crate::tables::{EntryTable, MessageTable, SessionTable};
 
 const NAME: &str = "claude";
@@ -149,6 +147,17 @@ impl ClaudeSource {
         })
     }
 
+    /// The index store for this source's projects directory: the
+    /// summary cache and the text index.
+    pub fn index_store(&self) -> Arc<IndexStore> {
+        Arc::clone(&self.store)
+    }
+
+    /// The Claude root the projects directory sits under
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     fn projects(&self) -> Result<&HashMap<String, PathBuf>, DriverError> {
         self.projects
             .get_or_init(|| load_projects(&self.root).map_err(|e| e.to_string()))
@@ -160,6 +169,10 @@ impl ClaudeSource {
 impl Source for ClaudeSource {
     fn source(&self) -> &str {
         &self.source
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn tables(&self) -> Result<DriverTables, DriverError> {
@@ -198,7 +211,14 @@ impl Source for ClaudeSource {
         for hit in walk_session_files(&self.projects_dir) {
             let (id, path, meta) = hit?;
             if id == native_id {
-                return Ok(Box::new(ClaudeNativeSession::new(id, path, meta)));
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                return Ok(Box::new(ClaudeNativeSession::open(
+                    &id,
+                    &path,
+                    mtime,
+                    meta.len(),
+                    &self.store,
+                )?));
             }
         }
         Err(DriverError::Other(format!(
@@ -356,6 +376,11 @@ fn walk_session_files(
     Box::new(it)
 }
 
+/// A native Claude session with its attributes read at open. The
+/// summary (title, model, message count, emptiness, token usage) comes
+/// from the source's summary cache when the cache entry is current for
+/// the file's mtime, else from one parse of the transcript, which then
+/// refreshes the cache.
 pub struct ClaudeNativeSession {
     native_id: String,
     session_path: PathBuf,
@@ -363,30 +388,49 @@ pub struct ClaudeNativeSession {
 }
 
 impl ClaudeNativeSession {
-    fn new(native_id: String, session_path: PathBuf, meta: fs::Metadata) -> Self {
-        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let size = meta.len();
-        let project_slug = session_path
+    /// Open the session at `path`. `mtime` and `size` are the file's
+    /// stat values the caller already holds from its directory walk.
+    pub fn open(
+        native_id: &str,
+        path: &Path,
+        mtime: SystemTime,
+        size: u64,
+        store: &IndexStore,
+    ) -> Result<Self, DriverError> {
+        let summary = match store.session_summary(native_id, mtime) {
+            Some(cached) => cached,
+            None => {
+                let derived = derive_session(native_id, path)
+                    .map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
+                store.put_session_summary(native_id, &derived.summary)?;
+                derived.summary
+            }
+        };
+        let project_slug = path
             .parent()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let attrs = ClaudeSessionAttrs {
-            mtime,
-            size,
-            project_slug,
-            session_path: session_path.clone(),
-            is_empty: OnceLock::new(),
-        };
-        Self {
-            native_id,
-            session_path,
-            attrs,
-        }
+        Ok(Self {
+            native_id: native_id.to_string(),
+            session_path: path.to_path_buf(),
+            attrs: ClaudeSessionAttrs {
+                mtime,
+                size,
+                project_slug,
+                summary,
+            },
+        })
     }
 
     pub fn session_path(&self) -> &Path {
         &self.session_path
+    }
+
+    /// The full derived summary, including the token counts the
+    /// generic [`SessionAttrs`] view does not carry.
+    pub fn summary(&self) -> &SessionSummary {
+        &self.attrs.summary
     }
 }
 
@@ -408,16 +452,11 @@ impl NativeSession for ClaudeNativeSession {
     }
 }
 
-/// Cheap-to-hold attribute reader. `mtime`, `size`, and
-/// `project_slug` are captured at enumeration time from the directory
-/// walk. `is_empty` reads the session file on first access. `title`,
-/// `model`, `message_count` are not answered here.
 struct ClaudeSessionAttrs {
     mtime: SystemTime,
     size: u64,
     project_slug: String,
-    session_path: PathBuf,
-    is_empty: OnceLock<bool>,
+    summary: SessionSummary,
 }
 
 impl SessionAttrs for ClaudeSessionAttrs {
@@ -430,15 +469,23 @@ impl SessionAttrs for ClaudeSessionAttrs {
     }
 
     fn is_empty(&self) -> Option<bool> {
-        Some(
-            *self
-                .is_empty
-                .get_or_init(|| is_empty_session(&self.session_path).unwrap_or(true)),
-        )
+        Some(self.summary.is_empty)
     }
 
     fn project_name(&self) -> Option<&str> {
         Some(&self.project_slug)
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.summary.title.as_deref()
+    }
+
+    fn model(&self) -> Option<&str> {
+        self.summary.model.as_deref()
+    }
+
+    fn message_count(&self) -> Option<u64> {
+        Some(self.summary.message_count.max(0) as u64)
     }
 }
 
@@ -483,9 +530,7 @@ impl StoredSession for ClaudeStoredSession {
     }
 }
 
-/// One entry row read from `session.jsonl`. Rich fields (`type_`,
-/// `subtype`, `uuid`, `timestamp`, `to_message`) are stubbed today;
-/// `raw` is the source line and drives every current consumer.
+/// One raw line of `session.jsonl`
 struct ClaudeEntry {
     line: u32,
     raw: String,
@@ -496,28 +541,8 @@ impl Entry for ClaudeEntry {
         self.line
     }
 
-    fn uuid(&self) -> Option<&str> {
-        None
-    }
-
-    fn timestamp(&self) -> Option<SystemTime> {
-        None
-    }
-
     fn raw(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.raw)
-    }
-
-    fn type_(&self) -> &str {
-        ""
-    }
-
-    fn subtype(&self) -> Option<&str> {
-        None
-    }
-
-    fn to_message(&self) -> Option<&dyn Message> {
-        None
     }
 }
 

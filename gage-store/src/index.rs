@@ -278,6 +278,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::Path;
     use std::rc::Rc;
+    use std::time::SystemTime;
 
     fn init_repo(dir: &Path) -> (std::path::PathBuf, FsckGuard) {
         let path = dir.join("store.git");
@@ -536,8 +537,26 @@ mod tests {
     struct FakeAttrs;
 
     impl SessionAttrs for FakeAttrs {
+        fn mtime(&self) -> Option<SystemTime> {
+            None
+        }
         fn size(&self) -> Option<u64> {
             Some(2)
+        }
+        fn is_empty(&self) -> Option<bool> {
+            None
+        }
+        fn project_name(&self) -> Option<&str> {
+            None
+        }
+        fn title(&self) -> Option<&str> {
+            None
+        }
+        fn model(&self) -> Option<&str> {
+            None
+        }
+        fn message_count(&self) -> Option<u64> {
+            None
         }
     }
 

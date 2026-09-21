@@ -121,14 +121,13 @@ pub async fn list(source: Option<String>, args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let tables = match source.tables() {
-        Ok(t) => t,
+    let ctx = match gage_query::create_source_context(source.as_ref()) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("gage session list: {spec}: {e}");
             std::process::exit(1);
         }
     };
-    let ctx = gage_query::create_source_context(tables);
     let project = match args.project.as_deref() {
         Some(text) => match resolve_project(source.as_ref(), text) {
             Ok(name) => Some(name),
@@ -378,6 +377,20 @@ async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
     }
 }
 
+/// The query context over the default source. `delete` and `view`
+/// resolve sessions through the pre-driver path and are not yet
+/// source-aware; they operate on the default source only.
+async fn default_context(command: &str) -> SessionContext {
+    let source = source::open_source_or_exit(command, "");
+    match gage_query::create_context(source.as_ref()).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub async fn delete(args: SessionDeleteArgs) {
     if args.ids.is_empty() && !args.empty {
         eprintln!(
@@ -393,7 +406,7 @@ pub async fn delete(args: SessionDeleteArgs) {
 
     if args.empty {
         let spinner = style::spinner("Looking for empty sessions...");
-        let ctx = gage_query::create_context_default().await;
+        let ctx = default_context("gage session delete").await;
         let sql = "SELECT id, path FROM session WHERE is_empty";
         let batches = run_query(&ctx, sql).await;
         for batch in &batches {
@@ -415,7 +428,7 @@ pub async fn delete(args: SessionDeleteArgs) {
         empty_count = sessions.len();
         non_empty_count = 0;
     } else {
-        let ctx = gage_query::create_context_default().await;
+        let ctx = default_context("gage session delete").await;
         let mut errors = 0;
         for prefix in &args.ids {
             match one_session(prefix) {

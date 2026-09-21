@@ -28,7 +28,10 @@ async fn value_object_is_queryable_through_json_functions() {
     note::insert(&conn, &note).unwrap();
     drop(conn);
 
-    let ctx = gage_query::create_context(tmp.path(), &tmp.path().join("cache")).await;
+    let source = gage_registry::driver::DriverRegistry::builtin()
+        .open_source(&tmp.path().to_string_lossy())
+        .unwrap();
+    let ctx = gage_query::create_context(source.as_ref()).await.unwrap();
     let batches = ctx
         .sql(
             "SELECT name, json_get_int(value, 'fast', 'count') AS count \
@@ -87,7 +90,10 @@ async fn note_metadata_resolves_to_utf8_not_null() {
     note::insert(&conn, &note).unwrap();
     drop(conn);
 
-    let ctx = gage_query::create_context(tmp.path(), &tmp.path().join("cache")).await;
+    let source = gage_registry::driver::DriverRegistry::builtin()
+        .open_source(&tmp.path().to_string_lossy())
+        .unwrap();
+    let ctx = gage_query::create_context(source.as_ref()).await.unwrap();
     let batches = ctx
         .sql(
             "SELECT data_type FROM information_schema.columns \
