@@ -58,7 +58,7 @@ pub use dataset::{
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{Order, SelectedTip};
-pub use note::{NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue};
+pub use note::{NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue};
 pub use session::{
     SessionAddOutcome, SessionAttrsRecord, SessionOutcome, SessionQuery, SessionRecord,
     SessionRemoveOutcome, SessionStore, SummaryAttrs, session_object_id,

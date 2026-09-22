@@ -865,7 +865,7 @@ pub struct LinkFile {
 mod tests {
     use super::*;
     use crate::DatasetStore;
-    use crate::note::{NoteInput, NoteStore, NoteValue};
+    use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::test_support::open_store;
     use serde_json::json;
 
@@ -1045,7 +1045,13 @@ mod tests {
         let stale = store.read_object(&first).unwrap();
 
         NoteStore::from(&store)
-            .edit(&id, &NoteValue::Text("v2".into()))
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap();
         let second = store.resolve_id(&id).unwrap().1;
         assert_ne!(first, second);
@@ -1441,7 +1447,13 @@ mod tests {
         let child = note(&store, "reply", Some(&format!("note:{root}")));
         let first_child = store.resolve_id(&child).unwrap().1;
         notes
-            .edit(&child, &NoteValue::Text("second".into()))
+            .edit(
+                &child,
+                NoteEdit {
+                    value: Some(NoteValue::Text("second".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap();
 
         let classified = store.classify_parents(&object_ref(&child)).unwrap();
@@ -1460,8 +1472,24 @@ mod tests {
         let notes = NoteStore::from(&store);
 
         let id = note(&store, "n", None);
-        notes.edit(&id, &NoteValue::Text("v2".into())).unwrap();
-        notes.edit(&id, &NoteValue::Text("v3".into())).unwrap();
+        notes
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
+        notes
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v3".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
 
         let tip = store.resolve_id(&id).unwrap().1;
         let chain = store.walk_parent_chain(&tip).unwrap();

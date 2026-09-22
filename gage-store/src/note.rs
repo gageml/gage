@@ -59,6 +59,17 @@ pub struct NoteInput<'a> {
     pub target: Option<&'a str>,
 }
 
+/// Input to [`NoteStore::edit`]. Every field is optional; `None`
+/// keeps the note's current value. The author is never changed.
+#[derive(Default)]
+pub struct NoteEdit<'a> {
+    pub name: Option<&'a str>,
+    pub value: Option<NoteValue>,
+    /// A new target as a full Gage URL, validated as on `create`.
+    /// The existing target cannot be cleared.
+    pub target: Option<&'a str>,
+}
+
 /// A single note read from the store, projected into the fields the
 /// list view needs.
 #[derive(Debug, PartialEq, Eq)]
@@ -184,18 +195,31 @@ impl NoteStore<'_> {
         }
     }
 
-    /// Edit the value of an existing note. `name`, `author`, and the
-    /// target are preserved. Returns the resolved id.
-    pub fn edit(&self, id_or_prefix: &str, value: &NoteValue) -> Result<String, StoreError> {
+    /// Edit an existing note. Fields left `None` in `edit` keep their
+    /// current values; a new target is validated and re-linked, and an
+    /// unchanged target keeps the commit it was linked at. Returns the
+    /// resolved id.
+    pub fn edit(&self, id_or_prefix: &str, edit: NoteEdit) -> Result<String, StoreError> {
         let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
-        let (attrs, _) = decode_content(&object)?;
-        let targets = object
-            .tree
-            .links
-            .get(TARGET_LINK)
-            .cloned()
-            .unwrap_or_default();
-        let tree = build_tree(&attrs, value, targets)?;
+        let (mut attrs, current_value) = decode_content(&object)?;
+        if let Some(name) = edit.name {
+            attrs.name = name.to_string();
+        }
+        let value = edit.value.unwrap_or(current_value);
+        let targets = match edit.target {
+            Some(url) => {
+                let sha = self.resolve_target(url)?;
+                attrs.target = Some(url.to_string());
+                vec![sha]
+            }
+            None => object
+                .tree
+                .links
+                .get(TARGET_LINK)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        let tree = build_tree(&attrs, &value, targets)?;
         let message = format!("note edit: {}", attrs.name);
         match self.store.edit(&object, &tree, &message)? {
             EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(object.header.id),
@@ -545,6 +569,69 @@ mod tests {
     }
 
     #[test]
+    fn edit_changes_name_and_target_and_keeps_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let first = note(&store, "root", "v", None);
+        let session_id = session(&store, "s1");
+        let id = note(&store, "comment", "hello", Some(&format!("note:{first}")));
+
+        // Name only: value and target stay
+        notes
+            .edit(
+                &id,
+                NoteEdit {
+                    name: Some("summary"),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
+        let full = notes.get(&id).unwrap();
+        assert_eq!(full.name, "summary");
+        assert_eq!(full.value, NoteValue::Text("hello".into()));
+        assert_eq!(
+            full.target.as_deref(),
+            Some(format!("note:{first}").as_str())
+        );
+        assert_eq!(full.targets, vec![rev_parse(&store, &first)]);
+
+        // Target only: re-linked to the new object's commit
+        let target = format!("session:{session_id}#3");
+        notes
+            .edit(
+                &id,
+                NoteEdit {
+                    target: Some(&target),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
+        let full = notes.get(&id).unwrap();
+        assert_eq!(full.name, "summary");
+        assert_eq!(full.target.as_deref(), Some(target.as_str()));
+        assert_eq!(full.targets, vec![rev_parse(&store, &session_id)]);
+        let commit = cat_file(&store, &rev_parse(&store, &id));
+        assert!(commit.contains("\nnote edit: summary"), "{commit}");
+
+        // A bad target changes nothing
+        let tip = rev_parse(&store, &id);
+        assert!(matches!(
+            notes
+                .edit(
+                    &id,
+                    NoteEdit {
+                        target: Some("note:missing"),
+                        ..NoteEdit::default()
+                    },
+                )
+                .unwrap_err(),
+            StoreError::TargetNotFound(_)
+        ));
+        assert_eq!(rev_parse(&store, &id), tip);
+    }
+
+    #[test]
     fn json_value_round_trips_through_value_json() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
@@ -577,7 +664,15 @@ mod tests {
         assert_eq!(notes.get(&id).unwrap().value, NoteValue::Json(json));
 
         // An edit may switch the value's form; the old file goes away
-        notes.edit(&id, &NoteValue::Text("plain".into())).unwrap();
+        notes
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("plain".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
         let listing = run(git_in(
             store.path(),
             ["ls-tree", "--name-only", &object_ref(&id)],
@@ -688,7 +783,13 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         NoteStore::from(&store)
-            .edit(&id, &NoteValue::Text("v2".into()))
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap();
 
         let created_after = cat_file(&store, &format!("{ref_path}:created"));
@@ -751,7 +852,13 @@ mod tests {
 
         assert_eq!(
             NoteStore::from(&store)
-                .edit(&id, &NoteValue::Text("second".into()))
+                .edit(
+                    &id,
+                    NoteEdit {
+                        value: Some(NoteValue::Text("second".into())),
+                        ..NoteEdit::default()
+                    }
+                )
                 .unwrap(),
             id
         );
@@ -783,7 +890,13 @@ mod tests {
         let id = note(&store, "n", "same", None);
         let before = rev_parse(&store, &id);
         NoteStore::from(&store)
-            .edit(&id, &NoteValue::Text("same".into()))
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("same".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap();
         assert_eq!(rev_parse(&store, &id), before);
     }
@@ -797,7 +910,13 @@ mod tests {
         let root_commit = rev_parse(&store, &root);
         let child = note(&store, "reply", "first", Some(&format!("note:{root}")));
         NoteStore::from(&store)
-            .edit(&child, &NoteValue::Text("second".into()))
+            .edit(
+                &child,
+                NoteEdit {
+                    value: Some(NoteValue::Text("second".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap();
 
         let target_content = cat_file(&store, &format!("{}:target.link", object_ref(&child)));
@@ -816,7 +935,13 @@ mod tests {
         let id = note(&store, "n", "v", None);
         assert_eq!(
             NoteStore::from(&store)
-                .edit(&id[..8], &NoteValue::Text("v2".into()))
+                .edit(
+                    &id[..8],
+                    NoteEdit {
+                        value: Some(NoteValue::Text("v2".into())),
+                        ..NoteEdit::default()
+                    }
+                )
                 .unwrap(),
             id
         );
@@ -827,7 +952,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let err = NoteStore::from(&store)
-            .edit("doesnotexist", &NoteValue::Text("v".into()))
+            .edit(
+                "doesnotexist",
+                NoteEdit {
+                    value: Some(NoteValue::Text("v".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, StoreError::ObjectNotFound(id) if id == "doesnotexist"));
     }
@@ -888,7 +1019,7 @@ mod tests {
             StoreError::ObjectDeleted(x) if x == id
         ));
         assert!(matches!(
-            notes.edit(&id, &NoteValue::Text("v2".into())).unwrap_err(),
+            notes.edit(&id, NoteEdit { value: Some(NoteValue::Text("v2".into())), ..NoteEdit::default() }).unwrap_err(),
             StoreError::ObjectDeleted(x) if x == id
         ));
         assert!(matches!(

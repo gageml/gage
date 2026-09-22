@@ -6,7 +6,7 @@ use gage_db::db;
 use gage_db::note;
 use gage_db::target::NoteTarget;
 use gage_registry::scanner::ScannerRegistry;
-use gage_store::{NoteInput, NoteRecord, NoteStore, NoteValue, Store, url};
+use gage_store::{NoteEdit, NoteInput, NoteRecord, NoteStore, NoteValue, Store, url};
 use tabled::{
     Table,
     settings::{
@@ -95,9 +95,29 @@ pub struct NoteEditArgs {
     /// Note ID (or prefix)
     id: String,
 
-    /// New value (prompted if omitted)
+    /// New note text
+    text: Option<String>,
+
+    /// New note name
     #[arg(short, long)]
-    value: Option<String>,
+    name: Option<String>,
+
+    /// New note target
+    ///
+    /// An object ID (or unique prefix), optionally followed by '#' and
+    /// a line selection
+    #[arg(short, long)]
+    target: Option<String>,
+
+    /// Store the text as JSON
+    #[arg(long)]
+    json: bool,
+
+    /// Skip prompts
+    ///
+    /// Requires TEXT, --name, or --target; other values are kept
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -514,38 +534,106 @@ pub(crate) fn format_value_cell(value: &note::NoteValue) -> String {
     }
 }
 
-/// Interpret CLI value input as JSON, falling back to a plain string.
-/// `true`, `42`, `{"k":1}` parse as their JSON types; a bare word like
-/// `comment` isn't valid JSON, so it's stored as a JSON string.
-fn parse_note_value(input: &str) -> note::NoteValue {
-    match serde_json::from_str::<serde_json::Value>(input) {
-        Ok(v) => note::NoteValue(v),
-        Err(_) => note::NoteValue::from(input),
-    }
-}
-
 pub fn edit(args: NoteEditArgs) {
-    dialog::run("Edit note", || {
-        let conn = db::open_db().unwrap();
-        let note = note::get(&conn, &args.id)
-            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+    if args.yes && args.text.is_none() && args.name.is_none() && args.target.is_none() {
+        eprintln!("gage note edit: --yes requires TEXT, --name, or --target");
+        std::process::exit(1);
+    }
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage note edit: {e}");
+            std::process::exit(1);
+        }
+    };
+    let notes = NoteStore::from(&store);
+    let current = match notes.get(&args.id) {
+        Ok(full) => full,
+        Err(e) => {
+            eprintln!("gage note edit: {e}");
+            std::process::exit(1);
+        }
+    };
+    let given_target = match args.target.as_deref() {
+        Some(input) => match resolve_target(&store, input) {
+            Ok(url) => Some(url),
+            Err(e) => {
+                eprintln!("gage note edit: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
 
-        let default_input = note.value.to_json();
-        let value: String = match args.value {
-            Some(ref v) => v.clone(),
-            None => cli::input("Value")
-                .default_input(&default_input)
-                .placeholder("new value")
+    dialog::run("Edit note", || {
+        cli::log::step(format!("Note\n{}", style(short_uuid(&current.id)).dim()))?;
+
+        // Target and name are never prompted: the given value or the
+        // current one, shown either way
+        let target: Option<String> = given_target.clone().or_else(|| current.target.clone());
+        if let Some(url) = &target {
+            cli::log::step(format!("Target\n{}", style(url).dim()))?;
+        }
+        let name: String = args.name.clone().unwrap_or_else(|| current.name.clone());
+        cli::log::step(format!("Name\n{}", style(&name).dim()))?;
+
+        // The value keeps its form unless TEXT or --json says otherwise
+        let as_json =
+            args.json || (args.text.is_none() && matches!(current.value, NoteValue::Json(_)));
+        let label = if as_json { "JSON" } else { "Text" };
+        let current_text = match &current.value {
+            NoteValue::Text(text) => text.clone(),
+            NoteValue::Json(json) => json.to_string(),
+        };
+        let text: String = match args.text {
+            Some(ref t) => {
+                cli::log::step(format!("{label}\n{}", style(t).dim()))?;
+                t.clone()
+            }
+            None if args.yes => current_text.clone(),
+            None if as_json => cli::input(label)
+                .default_input(&current_text)
+                .validate(|s: &String| {
+                    serde_json::from_str::<serde_json::Value>(s)
+                        .map(|_| ())
+                        .map_err(|e| format!("not valid JSON: {e}"))
+                })
                 .interact()?,
+            None => cli::input(label).default_input(&current_text).interact()?,
+        };
+        let value = if as_json {
+            let json = serde_json::from_str(&text)
+                .map_err(|e| DialogError::Failed(format!("text is not valid JSON: {e}")))?;
+            NoteValue::Json(json)
+        } else {
+            NoteValue::Text(text)
         };
 
-        let modified = gage_core::datetime::now_ms();
-        let note_value = parse_note_value(&value);
-        note::update(&conn, &note.id, &note_value, modified)
-            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Apply these changes?")
+                .initial_value(true)
+                .interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
 
-        cli::log::remark(format!("id: {}", note.id))?;
-        Ok("Note updated".into())
+        // Only what differs is sent, so an unchanged target keeps the
+        // commit it was linked at
+        let edit = NoteEdit {
+            name: (name != current.name).then_some(name.as_str()),
+            value: (value != current.value).then_some(value),
+            target: target
+                .as_deref()
+                .filter(|url| Some(*url) != current.target.as_deref()),
+        };
+        if edit.name.is_none() && edit.value.is_none() && edit.target.is_none() {
+            return Ok(format!("Note {} unchanged", short_uuid(&current.id)).into());
+        }
+        notes
+            .edit(&current.id, edit)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Note {} updated", short_uuid(&current.id)).into())
     });
 }
 

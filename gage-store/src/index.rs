@@ -273,7 +273,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::DatasetStore;
-    use crate::note::{NoteInput, NoteStore, NoteValue};
+    use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::object::ObjectTree;
     use crate::session::SessionStore;
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
@@ -527,7 +527,13 @@ mod tests {
         store.index = Box::new(FailingPut { inner: Some(inner) });
 
         let err = NoteStore::from(&store)
-            .edit(&id, &NoteValue::Text("v2".into()))
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, StoreError::Index(_)), "{err}");
         assert_eq!(store.rev_parse(&object_ref(&id)).unwrap().unwrap(), before);
@@ -676,7 +682,15 @@ mod tests {
                 target: Some(&format!("note:{a}")),
             })
             .unwrap();
-        notes.edit(&a, &NoteValue::Text("v2".into())).unwrap();
+        notes
+            .edit(
+                &a,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
 
         // Two deletes: c1's first version stays reachable through d's
         // link; c2's first version becomes unreachable
@@ -793,7 +807,13 @@ mod tests {
         // so the first handle's index is stale in both directions.
         let other = Store::open(&path).unwrap();
         NoteStore::from(&other)
-            .edit(&id, &NoteValue::Text("v2".into()))
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
             .unwrap();
         run(git_in(&path, ["update-ref", &object_ref(&id), &first])).unwrap();
 
@@ -848,7 +868,15 @@ mod tests {
                 target: Some(&format!("note:{root}")),
             })
             .unwrap();
-        notes.edit(&root, &NoteValue::Text("v2".into())).unwrap();
+        notes
+            .edit(
+                &root,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
 
         std::fs::remove_file(tmp.path().join("cache/object-index.sqlite")).unwrap();
         let reopened = Store::open(&path).unwrap();

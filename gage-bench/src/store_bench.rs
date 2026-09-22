@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use gage_store::object::ObjectTree;
 use gage_store::{
-    DatasetStore, NoteInput, NoteStore, NoteValue, Order, SessionOutcome, SessionSpec,
+    DatasetStore, NoteEdit, NoteInput, NoteStore, NoteValue, Order, SessionOutcome, SessionSpec,
     SessionStore, Store,
 };
 use indicatif::ProgressBar;
@@ -282,7 +282,13 @@ fn populate(
         let value = generator.text(params.note_bytes);
         timings
             .time("note edit v2", || {
-                notes.edit(id, &NoteValue::Text(value.clone()))
+                notes.edit(
+                    id,
+                    NoteEdit {
+                        value: Some(NoteValue::Text(value.clone())),
+                        ..NoteEdit::default()
+                    },
+                )
             })
             .map_err(|e| e.to_string())?;
         population.note_values.insert(id.clone(), value);
