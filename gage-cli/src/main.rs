@@ -280,6 +280,7 @@ async fn main() {
             },
             Command::Dataset { command } => match command {
                 cmd_dataset::DatasetCommand::New => cmd_dataset::new(),
+                cmd_dataset::DatasetCommand::List(args) => cmd_dataset::list(args),
             },
             Command::Issue { command } => match command {
                 cmd_issue::IssueCommand::List(args) => cmd_issue::list(args),

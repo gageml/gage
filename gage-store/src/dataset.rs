@@ -44,6 +44,8 @@ impl<'a> From<&'a Store> for DatasetStore<'a> {
 pub struct DatasetRecord {
     pub id: String,
     pub created_ms: i64,
+    /// Member sessions listed in `sessions.link`
+    pub session_count: usize,
 }
 
 /// Metadata for one member session in a dataset, resolved through the
@@ -295,6 +297,16 @@ impl<'a> DatasetQuery<'a> {
         self
     }
 
+    /// The number of datasets the selection matches, ignoring any
+    /// limit. Served by the index; no object is read.
+    pub fn count(&self) -> Result<usize, StoreError> {
+        let unlimited = ObjectQuery {
+            limit: None,
+            ..self.query.clone()
+        };
+        Ok(self.store.select(&unlimited)?.len())
+    }
+
     /// Run the selection.
     pub fn iter(
         self,
@@ -306,9 +318,11 @@ impl<'a> DatasetQuery<'a> {
             let created_ms = object.header.created_ms.ok_or_else(|| {
                 StoreError::Parse(format!("dataset {}: missing created", object.header.id))
             })?;
+            let session_count = members(&object).len();
             Ok(DatasetRecord {
                 id: object.header.id,
                 created_ms,
+                session_count,
             })
         }))
     }
@@ -654,6 +668,7 @@ mod tests {
         assert!(ids.contains(&b.as_str()));
         for r in &records {
             assert!(r.created_ms > 0);
+            assert_eq!(r.session_count, 0);
         }
     }
 
@@ -662,6 +677,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         assert_eq!(DatasetStore::from(&store).iter().unwrap().count(), 0);
+        assert_eq!(DatasetStore::from(&store).query().count().unwrap(), 0);
+    }
+
+    #[test]
+    fn count_ignores_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        for _ in 0..3 {
+            datasets.create().unwrap();
+        }
+        note(&store);
+
+        let query = datasets.query().limit(1);
+        assert_eq!(query.count().unwrap(), 3);
+        assert_eq!(query.iter().unwrap().count(), 1);
     }
 
     #[test]
@@ -720,6 +751,11 @@ mod tests {
         assert_eq!(listed[0].native_id, "s1");
         assert_eq!(listed[1].native_id, "s2");
         assert_eq!(listed[0].session_type, "fake");
+
+        let records: Vec<DatasetRecord> =
+            datasets.iter().unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].session_count, 2);
     }
 
     #[test]

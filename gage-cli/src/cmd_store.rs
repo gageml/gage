@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
 use gage_store::{
-    DatasetRecord, DatasetStore, EntryKind, InitOutcome, NoteInput, NoteRecord, NoteStore,
-    SessionOutcome, SessionSpec, Store, StoreStatus, TreeEntry,
+    DatasetStore, EntryKind, InitOutcome, NoteInput, NoteRecord, NoteStore, SessionOutcome,
+    SessionSpec, Store, StoreStatus, TreeEntry,
 };
 use tabled::{
     Table,
@@ -73,9 +73,6 @@ pub enum StoreCommand {
 
 #[derive(Subcommand)]
 pub enum DatasetCommand {
-    /// List datasets
-    List,
-
     /// Manage dataset sessions
     Session {
         #[command(subcommand)]
@@ -231,7 +228,6 @@ pub fn run(command: StoreCommand) {
         StoreCommand::Dataset { command } => {
             let datasets = DatasetStore::from(&store);
             match command {
-                DatasetCommand::List => dataset_list(&datasets),
                 DatasetCommand::Session { command } => match command {
                     DatasetSessionCommand::List(args) => dataset_session_list(&datasets, args),
                     DatasetSessionCommand::Show(args) => dataset_session_show(&datasets, args),
@@ -388,38 +384,6 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .into_iter()
     .map(|(k, before, after)| vec![k.to_string(), before, after])
     .collect()
-}
-
-fn dataset_list(datasets: &DatasetStore) {
-    let records: Vec<DatasetRecord> = match datasets.iter().and_then(|it| it.collect()) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("gage store dataset list: {e}");
-            std::process::exit(1);
-        }
-    };
-    if records.is_empty() {
-        println!("No datasets found");
-        return;
-    }
-
-    let header: Vec<String> = ["Id", "Created"].iter().map(|s| s.to_string()).collect();
-    let rows: Vec<Vec<String>> = records.iter().map(dataset_row).collect();
-
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(
-            Columns::one(0).not(Rows::first()),
-            style::tty(Color::FG_YELLOW),
-        )
-        .modify(Columns::one(1).not(Rows::first()), style::dim())
-        .to_string();
-    println!("{table}");
-}
-
-fn dataset_row(r: &DatasetRecord) -> Vec<String> {
-    vec![r.id.clone(), format_elapsed_ms(r.created_ms)]
 }
 
 fn dataset_session_list(datasets: &DatasetStore, args: DatasetSessionListArgs) {
