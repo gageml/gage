@@ -184,9 +184,9 @@ impl Text {
     }
 
     /// Native session id, assigned by a driver and unique only within
-    /// its source. Green keeps it apart from Gage object ids.
+    /// its source
     pub fn native_id() -> Style {
-        Style::new().fg(Color::Green)
+        Style::new().fg(Color::Cyan)
     }
 
     /// Full-width section header, e.g. message sections in the session

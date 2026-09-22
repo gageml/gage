@@ -8,7 +8,7 @@ use crate::uuid::short_uuid;
 ///
 /// Gage object IDs (sessions in the store, notes, issues, scans) are
 /// yellow. Native session IDs, which a driver assigns and which are
-/// unique only within their source, are green. The two colors keep a
+/// unique only within their source, are cyan. The two colors keep a
 /// stored session and its native counterpart apart when both appear
 /// in the same terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +27,7 @@ impl IdKind {
                 style(prefix).yellow().bright(),
                 style(tail).yellow()
             ),
-            IdKind::Native => format!("{}{}", style(prefix).green().bright(), style(tail).green()),
+            IdKind::Native => format!("{}{}", style(prefix).cyan().bright(), style(tail).cyan()),
         }
     }
 }
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn native_kind_styles_green() {
+    fn native_kind_styles_cyan() {
         console::set_colors_enabled(true);
         let h = IdHighlighter::with_kind(
             vec!["4045c48b-aaaa".into(), "4045c48b-bbbb".into()],
@@ -239,8 +239,8 @@ mod tests {
         // Shared "4045c48b-" needs 10 chars to disambiguate.
         let expected = format!(
             "{}{}",
-            console::style("4045c48b-a").green().bright(),
-            console::style("aaa").green(),
+            console::style("4045c48b-a").cyan().bright(),
+            console::style("aaa").cyan(),
         );
         assert_eq!(h.full("4045c48b-aaaa"), expected);
     }
