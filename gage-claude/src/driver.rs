@@ -74,6 +74,10 @@ impl Driver for ClaudeDriver {
         model.strip_prefix("claude-").unwrap_or(model).to_string()
     }
 
+    fn format_project(&self, name: &str, max_chars: usize) -> String {
+        shorten_project_name(strip_home_prefix(name), max_chars)
+    }
+
     fn write_native(
         &self,
         session: &mut dyn NativeSession,
@@ -256,6 +260,41 @@ impl Source for ClaudeSource {
 
 /// Slug to cwd for every project the root's registry records. A
 /// missing registry is an empty map.
+/// The project name without a leading `-home-<user>-` or
+/// `-Users-<user>-`, the encoded home directory Claude Code puts in
+/// front of nearly every project. The match is on the name's shape,
+/// so names written on another machine shorten the same way.
+fn strip_home_prefix(name: &str) -> &str {
+    ["-home-", "-Users-"]
+        .iter()
+        .find_map(|prefix| {
+            let rest = name.strip_prefix(prefix)?;
+            let (user, project) = rest.split_once('-')?;
+            (!user.is_empty() && !project.is_empty()).then_some(project)
+        })
+        .unwrap_or(name)
+}
+
+/// The name cut to `max_chars` characters. A long name keeps a head
+/// of one quarter of the budget, then `…`, then as many of its final
+/// characters as fill the rest. The tail carries the project's own
+/// directory name, so it gets the larger share.
+fn shorten_project_name(name: &str, max_chars: usize) -> String {
+    const ELLIPSIS: char = '…';
+    let count = name.chars().count();
+    if count <= max_chars {
+        return name.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let head_len = max_chars / 4;
+    let tail_len = max_chars - head_len - 1;
+    let head: String = name.chars().take(head_len).collect();
+    let tail: String = name.chars().skip(count - tail_len).collect();
+    format!("{head}{ELLIPSIS}{tail}")
+}
+
 fn load_projects(root: &Path) -> io::Result<HashMap<String, PathBuf>> {
     let home = claude_home_for_root(root)?;
     let projects = match home.projects() {
@@ -573,6 +612,51 @@ impl Entry for ClaudeEntry {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn format_project_strips_home_prefix() {
+        let driver = ClaudeDriver::new();
+        assert_eq!(
+            driver.format_project("-home-garrett-Code-gage", 25),
+            "Code-gage"
+        );
+        assert_eq!(
+            driver.format_project("-Users-alice-Code-gage", 25),
+            "Code-gage"
+        );
+        assert_eq!(driver.format_project("-tmp-scratch", 25), "-tmp-scratch");
+        assert_eq!(driver.format_project("-home-garrett", 25), "-home-garrett");
+        assert_eq!(
+            driver.format_project("-home-garrett-", 25),
+            "-home-garrett-"
+        );
+    }
+
+    #[test]
+    fn format_project_splits_head_and_tail_by_quarter() {
+        let driver = ClaudeDriver::new();
+        let short = "-home-garrett-Code-gage";
+        let long = "-home-garrett-Code-gage-crates-gage-cli-src";
+        let deep = "-home-garrett-Projects-abcdef-ghijk-7654-90876-hajhasd-1232132";
+        assert_eq!(driver.format_project(short, 7), "C…-gage");
+        assert_eq!(driver.format_project(long, 7), "C…i-src");
+        assert_eq!(driver.format_project(deep, 7), "P…32132");
+        assert_eq!(driver.format_project(short, 12), "Code-gage");
+        assert_eq!(driver.format_project(long, 12), "Cod…-cli-src");
+        assert_eq!(driver.format_project(deep, 12), "Pro…-1232132");
+        assert_eq!(driver.format_project(long, 18), "Code…-gage-cli-src");
+        assert_eq!(driver.format_project(deep, 18), "Proj…jhasd-1232132");
+    }
+
+    #[test]
+    fn format_project_tiny_budgets() {
+        let driver = ClaudeDriver::new();
+        let name = "averylongprojectname";
+        assert_eq!(driver.format_project(name, 3), "…me");
+        assert_eq!(driver.format_project(name, 2), "…e");
+        assert_eq!(driver.format_project(name, 1), "…");
+        assert_eq!(driver.format_project(name, 0), "");
+    }
 
     #[test]
     fn format_model_strips_vendor_prefix() {

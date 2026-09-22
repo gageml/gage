@@ -56,6 +56,13 @@ pub trait Driver: Send + Sync {
     fn format_model(&self, model: &str) -> String {
         model.to_string()
     }
+
+    /// The display form of a project name from this driver's sessions,
+    /// shortened to at most `max_chars` characters. The default shows
+    /// the name as stored.
+    fn format_project(&self, name: &str, _max_chars: usize) -> String {
+        name.to_string()
+    }
 }
 
 /// A handle over one source of native sessions. Dropping the handle

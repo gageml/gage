@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,7 +9,6 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisec
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_claude::home::claude_home;
-use gage_claude::project::shorten_home_path;
 use gage_claude::session::{delete_session, encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
 use gage_registry::driver::DriverRegistry;
@@ -19,6 +17,7 @@ use gage_store::{SessionOutcome, SessionStore, Store};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
+    grid::{config::Position, records::RecordsMut},
     settings::{
         Alignment, Color, Style, Width,
         object::{Columns, Object, Rows},
@@ -165,15 +164,8 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
     };
     let (rows, total) = query_sessions(&ctx, &args, Listing::Native, project.as_deref()).await;
     if total > 0 {
-        let labels = project_labels(source.as_ref(), &rows);
         let drivers: Vec<Arc<dyn Driver>> = vec![driver.clone(); rows.len()];
-        render_table(
-            &rows,
-            &drivers,
-            Listing::Native,
-            Some(&labels),
-            args.full_id,
-        );
+        render_table(&rows, &drivers, Listing::Native, args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
@@ -216,7 +208,7 @@ async fn list_stored(args: SessionListArgs) {
                 std::process::exit(1);
             }
         };
-        render_table(&rows, &drivers, Listing::Stored, None, args.full_id);
+        render_table(&rows, &drivers, Listing::Stored, args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
@@ -402,28 +394,6 @@ fn string_or_empty(col: &StringArray, i: usize) -> String {
     }
 }
 
-/// Project column label per distinct project name in `rows`: the
-/// project's path with `~` substituted when the source records one,
-/// else the name.
-fn project_labels(source: &dyn Source, rows: &[Row]) -> HashMap<String, String> {
-    let mut labels: HashMap<String, String> = HashMap::new();
-    for r in rows {
-        if labels.contains_key(&r.project) {
-            continue;
-        }
-        let label = match source.project_path(&r.project) {
-            Ok(Some(path)) => shorten_home_path(&path),
-            Ok(None) => r.project.clone(),
-            Err(e) => {
-                eprintln!("warning: project {}: {e}", r.project);
-                r.project.clone()
-            }
-        };
-        labels.insert(r.project.clone(), label);
-    }
-    labels
-}
-
 /// Styled id: bright yellow over the unique prefix, dark yellow for
 /// the rest of the shown form.
 fn styled_id(shown: &str, prefix: &str) -> String {
@@ -441,22 +411,18 @@ fn styled_id(shown: &str, prefix: &str) -> String {
 }
 
 /// Print the listing. `drivers` holds the driver of each row in
-/// `rows`, which formats the row's model name. `labels` maps a
-/// project name to its display form; `None` shows the name as stored.
-fn render_table(
-    rows: &[Row],
-    drivers: &[Arc<dyn Driver>],
-    listing: Listing,
-    labels: Option<&HashMap<String, String>>,
-    full_id: bool,
-) {
+/// `rows`, which formats the row's model and project names.
+///
+/// The project cell is seeded with the driver's unbounded form of the
+/// name, so the width pass lays out the column against the most it
+/// could show. When the pass shrinks the column, each project cell is
+/// rewritten with the driver's form for the width the column got.
+fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, full_id: bool) {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for (r, driver) in rows.iter().zip(drivers) {
         let shown = if full_id { &r.id } else { &r.id_display };
         let id_display = styled_id(shown, &r.id_prefix);
-        let project = labels
-            .and_then(|l| l.get(&r.project).cloned())
-            .unwrap_or_else(|| r.project.clone());
+        let project = driver.format_project(&r.project, usize::MAX);
         let time = r
             .time_ms
             .map(crate::human::format_elapsed_ms)
@@ -502,7 +468,36 @@ fn render_table(
             .suffix("…")
             .priority(style::IdAwarePriority::new(full_id)),
     );
+    refit_project_cells(&mut table, rows, drivers);
     println!("{table}");
+}
+
+/// Column index of the project cell in the listing
+const PROJECT_COL: usize = 1;
+
+/// Rewrite each project cell to the driver's form for the width the
+/// width pass gave the column. A table that fit the terminal has no
+/// stored widths and keeps its seeded cells.
+fn refit_project_cells(table: &mut Table, rows: &[Row], drivers: &[Arc<dyn Driver>]) {
+    let Some(width) = table
+        .get_dimension()
+        .get_widths()
+        .and_then(|w| w.get(PROJECT_COL).copied())
+    else {
+        return;
+    };
+    let budgets: Vec<usize> = (0..rows.len())
+        .map(|i| {
+            let pos = Position::new(i + 1, PROJECT_COL);
+            let padding = table.get_config().get_padding(pos);
+            width.saturating_sub(padding.left.size + padding.right.size)
+        })
+        .collect();
+    let records = table.get_records_mut();
+    for (i, ((r, driver), budget)) in rows.iter().zip(drivers).zip(budgets).enumerate() {
+        let pos = Position::new(i + 1, PROJECT_COL);
+        records.set(pos, driver.format_project(&r.project, budget));
+    }
 }
 
 async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
