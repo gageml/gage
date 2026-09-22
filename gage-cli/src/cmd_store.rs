@@ -76,9 +76,6 @@ pub enum DatasetCommand {
     /// List datasets
     List,
 
-    /// Create an empty dataset
-    New,
-
     /// Manage dataset sessions
     Session {
         #[command(subcommand)]
@@ -235,7 +232,6 @@ pub fn run(command: StoreCommand) {
             let datasets = DatasetStore::from(&store);
             match command {
                 DatasetCommand::List => dataset_list(&datasets),
-                DatasetCommand::New => dataset_new(&datasets),
                 DatasetCommand::Session { command } => match command {
                     DatasetSessionCommand::List(args) => dataset_session_list(&datasets, args),
                     DatasetSessionCommand::Show(args) => dataset_session_show(&datasets, args),
@@ -392,17 +388,6 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .into_iter()
     .map(|(k, before, after)| vec![k.to_string(), before, after])
     .collect()
-}
-
-fn dataset_new(datasets: &DatasetStore) {
-    let id = match datasets.create() {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage store dataset new: {e}");
-            std::process::exit(1);
-        }
-    };
-    println!("{id}");
 }
 
 fn dataset_list(datasets: &DatasetStore) {

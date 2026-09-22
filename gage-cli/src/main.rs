@@ -27,6 +27,7 @@ fn install_panic_hook() {
 mod author;
 mod cmd_agent;
 mod cmd_config;
+mod cmd_dataset;
 mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
@@ -119,6 +120,12 @@ enum Command {
 
         #[command(subcommand)]
         command: cmd_session::SessionCommand,
+    },
+
+    /// Manage datasets
+    Dataset {
+        #[command(subcommand)]
+        command: cmd_dataset::DatasetCommand,
     },
 
     /// Manage issues
@@ -270,6 +277,9 @@ async fn main() {
                 }
                 cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
                 cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),
+            },
+            Command::Dataset { command } => match command {
+                cmd_dataset::DatasetCommand::New => cmd_dataset::new(),
             },
             Command::Issue { command } => match command {
                 cmd_issue::IssueCommand::List(args) => cmd_issue::list(args),
