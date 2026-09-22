@@ -162,10 +162,10 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
         },
         None => None,
     };
-    let (rows, total) = query_sessions(&ctx, &args, "project", project.as_deref()).await;
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Native, project.as_deref()).await;
     if total > 0 {
         let labels = project_labels(source.as_ref(), &rows);
-        render_table(&rows, "Project", Some(&labels), args.full_id);
+        render_table(&rows, Listing::Native, Some(&labels), args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
@@ -178,7 +178,9 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
 
 /// List the sessions in the Gage store. The `session` table is bound
 /// to the store, so filters and limits are the same SQL as the native
-/// listing; `Modified` is when the store last wrote the session.
+/// listing. Rows are in the store's `modified` order, newest first,
+/// and `--since` filters on it; the `Created` column shows when the
+/// session was first added.
 async fn list_stored(args: SessionListArgs) {
     if args.project.is_some() {
         eprintln!("gage session list: --project does not apply to stored sessions");
@@ -196,9 +198,9 @@ async fn list_stored(args: SessionListArgs) {
         }
     };
     let ctx = gage_query::create_stored_context(Arc::new(Mutex::new(store)));
-    let (rows, total) = query_sessions(&ctx, &args, "session_type", None).await;
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, None).await;
     if total > 0 {
-        render_table(&rows, "Type", None, args.full_id);
+        render_table(&rows, Listing::Stored, None, args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
@@ -219,15 +221,28 @@ fn resolve_project(source: &dyn Source, text: &str) -> Result<String, String> {
     }
 }
 
+/// Which `session` table binding a listing reads, and therefore
+/// which columns it shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// A native source: Id, Project, Title, Model, Size, Messages,
+    /// Modified
+    Native,
+    /// The store: Id, Project, Title, Type, Model, Size, Messages,
+    /// Created
+    Stored,
+}
+
 /// Run one SQL query for the shown rows and a second for the total
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
-/// report a total. `group_col` is the column shown beside the title:
-/// `project` for a native source, `session_type` for the store.
+/// report a total. Both bindings select the same column list; the
+/// native binding has no type and fills it with an empty literal, and
+/// its time column is `mtime` where the store's is `created`.
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
-    group_col: &str,
+    listing: Listing,
     project: Option<&str>,
 ) -> (Vec<Row>, usize) {
     let where_clause = build_where_clause(args, project);
@@ -235,8 +250,13 @@ async fn query_sessions(
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
+    let (type_col, time_col) = match listing {
+        Listing::Native => ("'' AS session_type", "mtime AS time"),
+        Listing::Stored => ("session_type", "created AS time"),
+    };
     let sql = format!(
-        "SELECT id, id_display, id_prefix, {group_col}, title, model, size, message_count, mtime \
+        "SELECT id, id_display, id_prefix, project, title, {type_col}, model, size, \
+         message_count, {time_col} \
          FROM session{where_clause} \
          ORDER BY mtime DESC{limit_clause}",
     );
@@ -282,13 +302,16 @@ struct Row {
     id_display: String,
     /// The shortest prefix of `id` unique in its id set
     id_prefix: String,
-    /// The grouping column: project name or session type
-    group: String,
+    /// The driver's project name; empty when the row has none
+    project: String,
     title: String,
+    /// The session type; empty for a native listing
+    session_type: String,
     model: String,
     size: Option<i64>,
     message_count: Option<i64>,
-    mtime_ms: Option<i64>,
+    /// `mtime` for a native listing, `created` for the store
+    time_ms: Option<i64>,
 }
 
 fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
@@ -297,23 +320,25 @@ fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
         let ids = column::<StringArray>(batch, 0);
         let id_displays = column::<StringArray>(batch, 1);
         let id_prefixes = column::<StringArray>(batch, 2);
-        let groups = column::<StringArray>(batch, 3);
+        let projects = column::<StringArray>(batch, 3);
         let titles = column::<StringArray>(batch, 4);
-        let models = column::<StringArray>(batch, 5);
-        let sizes = column::<Int64Array>(batch, 6);
-        let counts = column::<Int64Array>(batch, 7);
-        let mtimes = column::<TimestampMillisecondArray>(batch, 8);
+        let types = column::<StringArray>(batch, 5);
+        let models = column::<StringArray>(batch, 6);
+        let sizes = column::<Int64Array>(batch, 7);
+        let counts = column::<Int64Array>(batch, 8);
+        let times = column::<TimestampMillisecondArray>(batch, 9);
         for i in 0..batch.num_rows() {
             out.push(Row {
                 id: ids.value(i).to_string(),
                 id_display: id_displays.value(i).to_string(),
                 id_prefix: id_prefixes.value(i).to_string(),
-                group: string_or_empty(groups, i),
+                project: string_or_empty(projects, i),
                 title: string_or_empty(titles, i),
+                session_type: string_or_empty(types, i),
                 model: string_or_empty(models, i),
                 size: sizes.is_valid(i).then(|| sizes.value(i)),
                 message_count: counts.is_valid(i).then(|| counts.value(i)),
-                mtime_ms: mtimes.is_valid(i).then(|| mtimes.value(i)),
+                time_ms: times.is_valid(i).then(|| times.value(i)),
             });
         }
     }
@@ -342,18 +367,18 @@ fn string_or_empty(col: &StringArray, i: usize) -> String {
 fn project_labels(source: &dyn Source, rows: &[Row]) -> HashMap<String, String> {
     let mut labels: HashMap<String, String> = HashMap::new();
     for r in rows {
-        if labels.contains_key(&r.group) {
+        if labels.contains_key(&r.project) {
             continue;
         }
-        let label = match source.project_path(&r.group) {
+        let label = match source.project_path(&r.project) {
             Ok(Some(path)) => shorten_home_path(&path),
-            Ok(None) => r.group.clone(),
+            Ok(None) => r.project.clone(),
             Err(e) => {
-                eprintln!("warning: project {}: {e}", r.group);
-                r.group.clone()
+                eprintln!("warning: project {}: {e}", r.project);
+                r.project.clone()
             }
         };
-        labels.insert(r.group.clone(), label);
+        labels.insert(r.project.clone(), label);
     }
     labels
 }
@@ -374,12 +399,11 @@ fn styled_id(shown: &str, prefix: &str) -> String {
     )
 }
 
-/// Print the listing. `group_header` names the column after Id;
-/// `labels` maps each row's group value to its display form, and
-/// `None` shows the value as is.
+/// Print the listing. `labels` maps a project name to its display
+/// form; `None` shows the name as stored.
 fn render_table(
     rows: &[Row],
-    group_header: &str,
+    listing: Listing,
     labels: Option<&HashMap<String, String>>,
     full_id: bool,
 ) {
@@ -387,46 +411,47 @@ fn render_table(
     for r in rows {
         let shown = if full_id { &r.id } else { &r.id_display };
         let id_display = styled_id(shown, &r.id_prefix);
-        let group = labels
-            .and_then(|l| l.get(&r.group).cloned())
-            .unwrap_or_else(|| r.group.clone());
-        let modified = r
-            .mtime_ms
+        let project = labels
+            .and_then(|l| l.get(&r.project).cloned())
+            .unwrap_or_else(|| r.project.clone());
+        let time = r
+            .time_ms
             .map(crate::human::format_elapsed_ms)
             .unwrap_or_default();
         let size = r.size.map(crate::human::format_size).unwrap_or_default();
         let count = r.message_count.map(|n| n.to_string()).unwrap_or_default();
-        table_rows.push(vec![
-            id_display,
-            group,
-            r.title.clone(),
-            r.model.clone(),
-            size,
-            count,
-            modified,
-        ]);
+        let mut cells = vec![id_display, project, r.title.clone()];
+        if listing == Listing::Stored {
+            cells.push(r.session_type.clone());
+        }
+        cells.extend([r.model.clone(), size, count, time]);
+        table_rows.push(cells);
     }
 
-    let header: Vec<String> = [
-        "Id",
-        group_header,
-        "Title",
-        "Model",
-        "Size",
-        "Messages",
-        "Modified",
-    ]
-    .iter()
-    .map(|s| s.to_string())
+    let header: Vec<String> = match listing {
+        Listing::Native => vec![
+            "Id", "Project", "Title", "Model", "Size", "Messages", "Modified",
+        ],
+        Listing::Stored => vec![
+            "Id", "Project", "Title", "Type", "Model", "Size", "Messages", "Created",
+        ],
+    }
+    .into_iter()
+    .map(String::from)
     .collect();
     let col_count = header.len();
+    // Messages is the second column from the right
+    let messages_col = col_count - 2;
 
     let mut table = Table::from_iter(std::iter::once(header).chain(table_rows));
     table
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(2..col_count).not(Rows::first()), style::dim())
-        .modify(Columns::new(5..6), Alignment::right());
+        .modify(
+            Columns::new(messages_col..messages_col + 1),
+            Alignment::right(),
+        );
     let term_width = console::Term::stdout().size().1 as usize;
     table.with(
         Width::truncate(term_width)
