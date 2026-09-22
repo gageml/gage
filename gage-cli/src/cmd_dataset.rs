@@ -9,7 +9,7 @@ use tabled::{
 };
 
 use crate::human::format_elapsed_ms;
-use crate::style;
+use crate::style::{self, IdHighlighter};
 
 #[derive(Subcommand)]
 pub enum DatasetCommand {
@@ -66,13 +66,24 @@ pub fn list(args: DatasetListArgs) {
         }
     };
 
+    // A prefix resolves against every object ref in the store, not
+    // only datasets, so the peer set is every object id
+    let peers: Vec<String> = match store.list_object_refs() {
+        Ok(refs) => refs.into_iter().map(|r| r.id).collect(),
+        Err(e) => {
+            eprintln!("gage dataset list: {e}");
+            std::process::exit(1);
+        }
+    };
+    let highlighter = IdHighlighter::new(peers);
+
     let header: Vec<String> = ["Id", "Sessions", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     let rows = records.iter().map(|r| {
         vec![
-            r.id.clone(),
+            highlighter.short(&r.id),
             r.session_count.to_string(),
             format_elapsed_ms(r.created_ms),
         ]
@@ -80,10 +91,6 @@ pub fn list(args: DatasetListArgs) {
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(
-            Columns::one(0).not(Rows::first()),
-            style::tty(Color::FG_YELLOW),
-        )
         .modify(Columns::one(1), Alignment::right())
         .modify(Columns::new(1..).not(Rows::first()), style::dim())
         .to_string();
