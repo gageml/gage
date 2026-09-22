@@ -188,17 +188,17 @@ pub fn list(args: NoteListArgs) {
     args.limit.print_summary(records.len(), total, "note");
 }
 
-/// Target cell: a bracketed type letter, the short id, and any line
-/// selection, e.g. `[s] 6tyx7fs2#12-20`. A value that is not a Gage
-/// URL is shown as stored.
+/// Target cell: the type name, a space, and the short id with any
+/// line selection, e.g. `session 6tyx7fs2#12-20`. A value that is not
+/// a Gage URL is shown as stored.
 fn target_cell(target: &str) -> String {
     let Ok(parsed) = url::parse(target) else {
         return target.to_string();
     };
-    let kind = parsed.scheme.chars().next().unwrap_or('?');
+    let id = short_uuid(parsed.body);
     match parsed.fragment {
-        Some(fragment) => format!("[{kind}] {}#{fragment}", short_uuid(parsed.body)),
-        None => format!("[{kind}] {}", short_uuid(parsed.body)),
+        Some(fragment) => format!("{} {id}#{fragment}", parsed.scheme),
+        None => format!("{} {id}", parsed.scheme),
     }
 }
 

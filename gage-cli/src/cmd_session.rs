@@ -851,8 +851,13 @@ fn print_add_outcome(outcome: &SessionOutcome, id: &str, native_id: &str, datase
         SessionOutcome::Updated => "Updated",
         SessionOutcome::Unchanged => "Unchanged",
     };
+    let id = short_uuid(id);
+    let native_id = short_uuid(native_id);
     match dataset {
-        Some(dataset) => println!("{verb} session {id} (native {native_id}) to dataset {dataset}"),
+        Some(dataset) => println!(
+            "{verb} session {id} (native {native_id}) to dataset {}",
+            short_uuid(dataset)
+        ),
         None => println!("{verb} session {id} (native {native_id})"),
     }
 }
@@ -901,8 +906,10 @@ fn remove_from_dataset(store: &Store, dataset_prefix: &str, ids: &[String]) {
     };
     for o in &outcomes {
         println!(
-            "Removed session {} (native {}) from dataset {dataset_id}",
-            o.id, o.native_id
+            "Removed session {} (native {}) from dataset {}",
+            short_uuid(&o.id),
+            short_uuid(&o.native_id),
+            short_uuid(&dataset_id)
         );
     }
 }
@@ -940,15 +947,18 @@ fn remove_from_store(store: &Store, ids: &[String]) {
                 .map(|r| r.attrs.native_id.as_str())
                 .unwrap_or_default();
             println!(
-                "Removed session {id} (native {native_id}) from dataset {}",
-                members.dataset_id
+                "Removed session {} (native {}) from dataset {}",
+                short_uuid(id),
+                short_uuid(native_id),
+                short_uuid(&members.dataset_id)
             );
         }
     }
     for record in &outcome.sessions {
         println!(
             "Removed session {} (native {})",
-            record.id, record.attrs.native_id
+            short_uuid(&record.id),
+            short_uuid(&record.attrs.native_id)
         );
     }
 }
