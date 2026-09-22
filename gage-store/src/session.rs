@@ -131,6 +131,8 @@ pub struct SessionRemoveOutcome {
 pub struct SessionRecord {
     pub id: String,
     pub commit_sha: String,
+    /// UNIX time millis of the object's `created` marker
+    pub created_ms: Option<i64>,
     /// UNIX time millis of the version's `modified` marker
     pub modified_ms: Option<i64>,
     pub attrs: SessionAttrsRecord,
@@ -361,6 +363,7 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
     Ok(SessionRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
+        created_ms: object.header.created_ms,
         modified_ms: object.header.modified_ms,
         attrs,
         driver_name,

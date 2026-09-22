@@ -19,7 +19,7 @@ use gage_session::{ContentSource, Driver, NativeSession};
 use crate::git::{git_in, run};
 use crate::index::{ObjectQuery, Order};
 use crate::object::{EditOutcome, Object, ObjectTree};
-use crate::session::{SessionAddOutcome, SessionOutcome, SessionStore};
+use crate::session::{SessionAddOutcome, SessionOutcome, SessionRecord, SessionStore};
 use crate::{Store, StoreError};
 
 pub(crate) const OBJECT_TYPE: &str = "gage::dataset";
@@ -223,19 +223,26 @@ impl DatasetStore<'_> {
         &self,
         dataset_id: &str,
     ) -> Result<Vec<DatasetSessionSummary>, StoreError> {
-        let members = members(&self.current(dataset_id)?);
-        let sessions = SessionStore::from(self.store);
-        let mut out = Vec::with_capacity(members.len());
-        for (idx, session_commit) in members.iter().enumerate() {
-            let record = sessions.at_commit(session_commit)?;
-            out.push(DatasetSessionSummary {
+        Ok(self
+            .sessions(dataset_id)?
+            .into_iter()
+            .enumerate()
+            .map(|(idx, record)| DatasetSessionSummary {
                 session_num: (idx + 1) as u32,
                 native_id: record.attrs.native_id,
                 session_type: record.attrs.session_type,
                 size: record.size,
-            });
-        }
-        Ok(out)
+            })
+            .collect())
+    }
+
+    /// The member sessions of a dataset in member order, each read at
+    /// the commit the dataset links, which is the version a scan of
+    /// the dataset reads.
+    pub fn sessions(&self, dataset_id: &str) -> Result<Vec<SessionRecord>, StoreError> {
+        let members = members(&self.current(dataset_id)?);
+        let sessions = SessionStore::from(self.store);
+        members.iter().map(|sha| sessions.at_commit(sha)).collect()
     }
 
     /// Add or update one or more sessions in the given dataset in a
@@ -1160,6 +1167,38 @@ mod tests {
         assert!(
             datasets
                 .containing(&["nope".to_string()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sessions_reads_members_at_linked_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        let added = add(
+            &store,
+            &dataset,
+            &mut [fake("s1", "a\n"), fake("s2", "b\n")],
+        );
+
+        // s1 grows outside the dataset: the member stays at the linked
+        // commit
+        SessionStore::from(&store)
+            .add(&FakeDriver, &mut fake("s1", "a\nmore\n"))
+            .unwrap();
+
+        let records = datasets.sessions(&dataset).unwrap();
+        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec![added[0].id.as_str(), added[1].id.as_str()]);
+        assert_eq!(records[0].size, Some(2));
+        assert!(records[0].created_ms.is_some());
+        assert_eq!(records[1].attrs.native_id, "s2");
+        assert!(
+            datasets
+                .sessions(&datasets.create().unwrap())
                 .unwrap()
                 .is_empty()
         );

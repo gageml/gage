@@ -27,7 +27,7 @@ use tabled::{
 
 use crate::dialog::{self, DialogError};
 use crate::source;
-use crate::style::{self, IdKind};
+use crate::style::{self, IdHighlighter, IdKind};
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
@@ -83,6 +83,13 @@ pub struct SessionListArgs {
     /// Show the full session ID
     #[arg(long)]
     pub full_id: bool,
+
+    /// List the sessions in a dataset
+    ///
+    /// Dataset ID (or prefix). Implies --stored; rows are in dataset
+    /// member order
+    #[arg(short, long, value_name = "DATASET")]
+    pub dataset: Option<String>,
 }
 
 #[derive(Args)]
@@ -159,7 +166,18 @@ pub struct SessionDeleteArgs {
 }
 
 pub async fn list(source: Option<String>, stored: bool, args: SessionListArgs) {
-    if stored {
+    if args.dataset.is_some() {
+        if source.is_some() {
+            eprintln!(
+                "gage session list: --source does not apply with --dataset; a dataset holds stored sessions"
+            );
+            std::process::exit(1);
+        }
+        if stored {
+            eprintln!("warning: --stored is redundant with --dataset");
+        }
+        list_dataset(args)
+    } else if stored {
         list_stored(args).await
     } else {
         list_native(source, args).await
@@ -250,6 +268,109 @@ async fn list_stored(args: SessionListArgs) {
     } else {
         println!("No sessions found");
     }
+}
+
+/// List the member sessions of a dataset, each at the commit the
+/// dataset links, in member order. The stored columns apply;
+/// `--since` filters on the member version's `modified`.
+fn list_dataset(args: SessionListArgs) {
+    if args.project.is_some() {
+        eprintln!("gage session list: --project does not apply to stored sessions");
+        std::process::exit(1);
+    }
+    if args.empty {
+        eprintln!("gage session list: --empty does not apply to stored sessions");
+        std::process::exit(1);
+    }
+    let prefix = args
+        .dataset
+        .as_deref()
+        .expect("list_dataset is called with --dataset");
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    let datasets = DatasetStore::from(&store);
+    let dataset_id = match datasets.resolve_id(prefix) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage session list: --dataset {prefix}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let records = match datasets.sessions(&dataset_id) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("gage session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    let cutoff_ms = args.since.map(|d| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .saturating_sub(d.as_millis()) as i64
+    });
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|r| match cutoff_ms {
+            Some(cutoff) => r.modified_ms.is_some_and(|ms| ms >= cutoff),
+            None => true,
+        })
+        .collect();
+    let total = records.len();
+    if total == 0 {
+        println!("No sessions found");
+        return;
+    }
+    let show = args.limit.show_count(total);
+
+    // The unique prefix is computed over every live session plus the
+    // members, the same peer set the stored listing uses
+    let mut peers: Vec<String> = match SessionStore::from(&store).query().tips() {
+        Ok(tips) => tips.into_iter().map(|t| t.id).collect(),
+        Err(e) => {
+            eprintln!("gage session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    peers.extend(records.iter().map(|r| r.id.clone()));
+    let highlighter = IdHighlighter::new(peers);
+    let rows: Vec<Row> = records
+        .iter()
+        .take(show)
+        .map(|r| {
+            let prefix_len = highlighter.unique_prefix_len(&r.id);
+            let summary = r.attrs.summary.clone().unwrap_or_default();
+            Row {
+                id: r.id.clone(),
+                id_display: short_uuid(&r.id).to_string(),
+                id_prefix: r.id.chars().take(prefix_len).collect(),
+                project: r.attrs.project.clone().unwrap_or_default(),
+                title: summary.title.unwrap_or_default(),
+                session_type: r.attrs.session_type.clone(),
+                model: summary.model.unwrap_or_default(),
+                size: summary.size.map(|n| n as i64),
+                message_count: summary.message_count.map(|n| n as i64),
+                time_ms: r.created_ms,
+                driver_name: r.driver_name.clone(),
+            }
+        })
+        .collect();
+    let registry = source::driver_registry();
+    let drivers = match stored_drivers(&registry, &rows) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("gage session list: {e}");
+            std::process::exit(1);
+        }
+    };
+    render_table(&rows, &drivers, Listing::Stored, args.full_id);
+    args.limit.print_summary(rows.len(), total, "session");
 }
 
 /// The driver that wrote each stored row, by the name the store
