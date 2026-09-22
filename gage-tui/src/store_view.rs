@@ -79,7 +79,14 @@ enum Focus {
 
 /// A node of the left pane
 enum Node {
-    /// A root: one object ref, with the type name read from its tip
+    /// A root grouping objects by whether their tip is a tombstone
+    Group {
+        label: &'static str,
+        /// Objects under the group
+        count: usize,
+    },
+    /// One object ref under a group, with the type name read from its
+    /// tip
     Object {
         object_ref: ObjectRef,
         /// Type name without the `gage::` prefix, or `?` when the tip
@@ -120,6 +127,8 @@ struct ViewState {
     /// A load or refresh error; shown in the footer until the next
     /// keypress.
     error: Option<String>,
+    /// Object refs at the last reload, live and deleted
+    object_count: usize,
 }
 
 impl ViewState {
@@ -139,37 +148,35 @@ impl ViewState {
             blob: None,
             highlighter: Highlighter::new(),
             error: None,
+            object_count: 0,
         }
     }
 
-    /// Rebuild the roots from the ref list. Expansion state is
-    /// discarded; listings already read stay cached by SHA.
+    /// Rebuild the tree from the ref list: a `Live` group and a
+    /// `Deleted` group, each expanded over its objects. Expansion
+    /// state is discarded; listings already read stay cached by SHA.
     fn reload(&mut self) {
         self.tree.clear();
+        self.object_count = 0;
         match self.store.list_object_refs() {
             Ok(refs) => {
-                let mut roots: Vec<(ObjectRef, String)> = refs
+                let mut objects: Vec<(ObjectRef, String, bool)> = refs
                     .into_iter()
                     .map(|object_ref| {
-                        let type_name = self
-                            .store
-                            .read_header(&object_ref.tip_sha)
-                            .map(|h| type_display(&h.object_type))
-                            .unwrap_or_else(|_| "?".to_string());
-                        (object_ref, type_name)
+                        let (type_name, deleted) = match self.store.read_header(&object_ref.tip_sha)
+                        {
+                            Ok(h) => (type_display(&h.object_type), h.is_tombstone()),
+                            Err(_) => ("?".to_string(), false),
+                        };
+                        (object_ref, type_name, deleted)
                     })
                     .collect();
-                roots.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id)));
-                for (object_ref, type_name) in roots {
-                    self.tree.add_root(
-                        object_ref.ref_name.clone(),
-                        Node::Object {
-                            object_ref,
-                            type_name,
-                        },
-                        true,
-                    );
-                }
+                objects.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id)));
+                self.object_count = objects.len();
+                let (deleted, live): (Vec<_>, Vec<_>) =
+                    objects.into_iter().partition(|(_, _, deleted)| *deleted);
+                self.add_group("Live", live);
+                self.add_group("Deleted", deleted);
             }
             Err(e) => {
                 self.error = Some(format!("list refs: {e}"));
@@ -177,6 +184,34 @@ impl ViewState {
         }
         self.sync_table();
         self.selection_changed();
+    }
+
+    /// Add a group root expanded over `objects`. An empty group is a
+    /// leaf.
+    fn add_group(&mut self, label: &'static str, objects: Vec<(ObjectRef, String, bool)>) {
+        let count = objects.len();
+        let node = self.tree.add_root(
+            label.to_ascii_lowercase(),
+            Node::Group { label, count },
+            count > 0,
+        );
+        if count == 0 {
+            return;
+        }
+        let children = objects
+            .into_iter()
+            .map(|(object_ref, type_name, _)| {
+                (
+                    object_ref.ref_name.clone(),
+                    Node::Object {
+                        object_ref,
+                        type_name,
+                    },
+                    true,
+                )
+            })
+            .collect();
+        self.tree.set_children(node, children);
     }
 
     /// Reconcile the selection table with the visible rows
@@ -260,6 +295,7 @@ impl ViewState {
                 (object_ref.tip_sha.clone(), key.to_string())
             }
             (Some(Node::Entry(entry)), Some(key)) => (entry.sha.clone(), key.to_string()),
+            // A group's children are supplied at reload
             _ => return,
         };
         let entries = match self.listing(&sha) {
@@ -466,6 +502,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             };
             let mut spans = vec![Span::raw(format!("{indent}{glyph}"))];
             match node {
+                Node::Group { label, .. } => spans.push(Span::raw(*label)),
                 Node::Object {
                     object_ref,
                     type_name,
@@ -488,11 +525,12 @@ fn draw_tree(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         })
         .collect();
     let count = rows.len();
-    let root_count = state.tree.rows().iter().filter(|r| r.level == 0).count();
     let table = Table::new(rows, [Constraint::Fill(1)])
-        .header(header_row(["Object"]))
         .row_highlight_style(styles::Panel::selection(active))
-        .block(panel_block(format!(" Objects ({root_count}) "), active));
+        .block(panel_block(
+            format!(" Objects ({}) ", state.object_count),
+            active,
+        ));
     state.table.render(frame, area, table, count, active);
 }
 
@@ -517,6 +555,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 
     enum Selected {
         None,
+        Group { label: &'static str, count: usize },
         Object { commit: String, ref_name: String },
         Tree(String),
         Blob { sha: String, name: String },
@@ -524,6 +563,10 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     }
     let selected = match state.selected_node() {
         None => Selected::None,
+        Some(Node::Group { label, count }) => Selected::Group {
+            label,
+            count: *count,
+        },
         Some(Node::Object { object_ref, .. }) => Selected::Object {
             commit: object_ref.tip_sha.clone(),
             ref_name: object_ref.ref_name.clone(),
@@ -543,6 +586,16 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "No objects in this store.",
+                    styles::Text::dim(),
+                )),
+                inner,
+            );
+        }
+        Selected::Group { label, count } => {
+            let noun = if count == 1 { "object" } else { "objects" };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{count} {} {noun}", label.to_ascii_lowercase()),
                     styles::Text::dim(),
                 )),
                 inner,
@@ -777,13 +830,9 @@ fn header_section(
         lines.push(kv("modified", ms_to_iso8601(ms)));
     }
     if let Some(ms) = header.deleted_ms {
-        lines.push(kv("deleted", ms_to_iso8601(ms)));
-    }
-    if header.is_tombstone() {
-        lines.push(Line::from(Span::styled(
-            "  (tombstone)",
-            styles::LogLevel::warn(),
-        )));
+        let mut line = kv("deleted", ms_to_iso8601(ms));
+        line.push_span(Span::styled(" (tombstone)", styles::LogLevel::warn()));
+        lines.push(line);
     }
     lines.push(kv("author", commit_meta.author.clone()));
     lines.push(kv("committer", commit_meta.committer.clone()));
@@ -1013,28 +1062,34 @@ mod tests {
 
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
+        assert!(text.contains("▼ Live"), "{text}");
+        assert!(text.contains("  Deleted"), "empty group is a leaf: {text}");
         assert!(
-            text.contains(&format!("▶ note {}", short_uuid(&note_id))),
+            text.contains(&format!("  ▶ note {}", short_uuid(&note_id))),
             "{text}"
         );
         assert!(!text.contains("attrs.json"), "nothing expanded yet: {text}");
+        assert!(text.contains("1 live object"), "group detail: {text}");
+
+        // Expand the object: its commit tree appears, name-sorted
+        let keys = state.tree.visible_keys();
+        state.table.select_by(1, &keys);
+        state.selection_changed();
+        state.expand_selected();
+        terminal.draw(|f| draw(f, &mut state)).unwrap();
+        let text = screen(&terminal);
         assert!(
             text.contains("Object"),
             "object detail on the right: {text}"
         );
-
-        // Expand the object: its commit tree appears, name-sorted
-        state.expand_selected();
-        terminal.draw(|f| draw(f, &mut state)).unwrap();
-        let text = screen(&terminal);
         let names: Vec<&str> = state
             .tree
             .rows()
             .iter()
-            .skip(1)
+            .skip(2)
             .filter_map(|r| match state.tree.data(r.node)? {
                 Node::Entry(e) => Some(e.name.as_str()),
-                Node::Object { .. } => None,
+                Node::Group { .. } | Node::Object { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -1067,11 +1122,69 @@ mod tests {
         assert!(text.contains("  \"author\": \"user:test\""), "{text}");
 
         // Collapse from a leaf moves to the parent; collapsing the
-        // parent hides the entries
+        // parent hides the entries, leaving the two groups and the
+        // object
         state.collapse_selected();
-        assert_eq!(state.table.selected_index(), Some(0));
+        assert_eq!(state.table.selected_index(), Some(1));
         state.collapse_selected();
-        assert_eq!(state.tree.rows().len(), 1);
+        assert_eq!(state.tree.rows().len(), 3);
+    }
+
+    #[test]
+    fn deleted_objects_group_under_deleted_with_tombstone_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        let notes = NoteStore::from(&store);
+        let keep = notes
+            .create(NoteInput {
+                name: "keep",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            })
+            .unwrap();
+        let gone = notes
+            .create(NoteInput {
+                name: "gone",
+                value: "v",
+                author: "user:test",
+                targets: &[],
+            })
+            .unwrap();
+        notes.delete(&gone).unwrap();
+
+        let mut state = ViewState::new(store);
+        state.reload();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Objects (2)"), "{text}");
+        let live_row = text.find("▼ Live").unwrap();
+        let keep_row = text.find(&short_uuid(&keep).to_string()).unwrap();
+        let deleted_row = text.find("▼ Deleted").unwrap();
+        let gone_row = text.find(&short_uuid(&gone).to_string()).unwrap();
+        assert!(
+            live_row < keep_row && keep_row < deleted_row && deleted_row < gone_row,
+            "{text}"
+        );
+
+        // Select the deleted object: the tombstone marker follows the
+        // deleted timestamp on its own line
+        let keys = state.tree.visible_keys();
+        state.table.select_by(3, &keys);
+        state.selection_changed();
+        terminal.draw(|f| draw(f, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let deleted_line = text
+            .lines()
+            .find(|l| l.contains("deleted") && l.contains("(tombstone)"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            deleted_line.contains("T"),
+            "timestamp on the same line: {deleted_line}"
+        );
     }
 
     /// A driver whose sessions carry a `files.d/` subtree, so the
@@ -1177,15 +1290,18 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
 
         // Expand the session: the tree lists first, then the blobs
+        let keys = state.tree.visible_keys();
+        state.table.select_by(1, &keys);
+        state.selection_changed();
         state.expand_selected();
         let names: Vec<&str> = state
             .tree
             .rows()
             .iter()
-            .skip(1)
+            .skip(2)
             .filter_map(|r| match state.tree.data(r.node)? {
                 Node::Entry(e) => Some(e.name.as_str()),
-                Node::Object { .. } => None,
+                Node::Group { .. } | Node::Object { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -1201,7 +1317,10 @@ mod tests {
             )
             .unwrap();
         let keys = state.tree.visible_keys();
-        state.table.select_by(files_row as isize, &keys);
+        let current = state.table.selected_index().unwrap();
+        state
+            .table
+            .select_by(files_row as isize - current as isize, &keys);
         state.selection_changed();
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
