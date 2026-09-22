@@ -16,7 +16,7 @@ use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::url;
 use crate::{Store, StoreError};
 
-pub(crate) const OBJECT_TYPE: &str = "gage::note";
+pub const OBJECT_TYPE: &str = "gage::note";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from a note's `attrs.json`.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["name"];

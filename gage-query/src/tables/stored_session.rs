@@ -3,8 +3,8 @@
 //!
 //! The store's index serves everything the listing sorts, filters, and
 //! counts on (id, commit, timestamps) in one query over every live
-//! session. `id_prefix` is computed over every object id in the store,
-//! the set a prefix resolves against.
+//! session. `id_prefix` is computed over the store's short-prefix set
+//! of sessions, the set a session prefix resolves against first.
 //! The attribute columns (`native_id`, `session_type`, `summary.*`)
 //! live in each object's `attrs.json` and are read from the repository
 //! only for the rows a projection needs, one `cat-file` round trip
@@ -40,7 +40,7 @@ use futures::stream;
 use gage_claude::tables::filter::{self, IdFilter};
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
-use gage_store::{Order, SelectedTip, SessionStore, Store, StoreError};
+use gage_store::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
 
 /// Index of the first column read from the object rather than the
 /// index. A projection below this bound never opens an object.
@@ -257,14 +257,11 @@ impl StoredSessionExec {
             .order(Order::ModifiedDesc)
             .tips()
             .map_err(external)?;
-        // A prefix resolves against every object ref in the store, not
-        // only sessions, so id_prefix is unique among every object id
-        let peers: Vec<String> = store
-            .list_object_refs()
-            .map_err(external)?
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
+        // id_prefix is unique within the short-prefix set of sessions,
+        // where a session prefix resolves first
+        let peers = store
+            .short_prefix_ids(Some(SESSION_TYPE))
+            .map_err(external)?;
         let prefix_len = unique_prefix_lens(peers);
 
         let since = self.filters.iter().filter_map(mtime_lower_bound).max();

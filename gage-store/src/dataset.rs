@@ -22,7 +22,7 @@ use crate::object::{EditOutcome, Object, ObjectTree};
 use crate::session::{SessionAddOutcome, SessionOutcome, SessionRecord, SessionStore};
 use crate::{Store, StoreError};
 
-pub(crate) const OBJECT_TYPE: &str = "gage::dataset";
+pub const OBJECT_TYPE: &str = "gage::dataset";
 const OBJECT_VERSION: &str = "1";
 /// Datasets declare no indexed attributes.
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];

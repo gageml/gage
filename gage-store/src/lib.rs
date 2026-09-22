@@ -53,15 +53,20 @@ mod writer;
 pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init, store_path};
 pub use dataset::{
     DatasetMembers, DatasetQuery, DatasetRecord, DatasetSessionAddOutcome, DatasetSessionSummary,
-    DatasetSessionUnlinkOutcome, DatasetStore, SessionSpec,
+    DatasetSessionUnlinkOutcome, DatasetStore, OBJECT_TYPE as DATASET_TYPE, SessionSpec,
 };
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
-pub use index::{Order, SelectedTip};
-pub use note::{NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue};
+pub use index::{IdMatch, Order, SelectedTip};
+pub use note::{
+    NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue,
+    OBJECT_TYPE as NOTE_TYPE,
+};
+pub use object::SHORT_PREFIX_SET_SIZE;
 pub use session::{
-    SessionAddOutcome, SessionAttrsRecord, SessionOutcome, SessionQuery, SessionRecord,
-    SessionRemoveOutcome, SessionStore, SummaryAttrs, session_object_id,
+    OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,
+    SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore, SummaryAttrs,
+    session_object_id,
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::{INDEX_FILE, Store};

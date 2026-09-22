@@ -24,7 +24,7 @@ use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
-pub(crate) const OBJECT_TYPE: &str = "gage::session";
+pub const OBJECT_TYPE: &str = "gage::session";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from a session's `attrs.json`.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];

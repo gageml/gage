@@ -22,17 +22,21 @@
 //! The Git primitives these operations compose from live in
 //! [`crate::git`] and [`crate::writer`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use gage_core::datetime::now_ms;
 use serde_json::Value as JsonValue;
 
 use crate::git::{EntryKind, git_in, run};
+use crate::index::IdMatch;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
 use crate::{Store, StoreError};
 
 /// Full ref name of the object with the given id.
+/// Size of the short-prefix set; see [`Store::resolve_in`].
+pub const SHORT_PREFIX_SET_SIZE: usize = 10_000;
+
 pub(crate) fn object_ref(id: &str) -> String {
     format!("refs/gage/object/{id}")
 }
@@ -125,39 +129,73 @@ pub(crate) enum EditOutcome {
 }
 
 impl Store {
-    /// Resolve a full id or unique prefix to `(id, tip_sha)`. The
-    /// namespace is flat, so a prefix matches objects of every type;
-    /// callers that need a type decode the object and check.
-    ///
-    /// This is the one read still on a `git` launch, a `for-each-ref`
-    /// glob whose cost grows with the loose ref count until `gc`. It
-    /// is why an edit or delete costs more than a create; see footnote
-    /// 5 of `gage-bench/results/store/README.md`. The index holds the
-    /// ref table and is the known replacement.
+    /// Resolve an id or unique prefix to `(id, tip SHA)` across every
+    /// object type. See [`Store::resolve_in`] for the scoping rule.
     pub fn resolve_id(&self, id_or_prefix: &str) -> Result<(String, String), StoreError> {
-        let pattern = format!("{}*", object_ref(id_or_prefix));
-        let matches = run(git_in(
-            self.path(),
-            [
-                "for-each-ref",
-                "--format=%(refname:strip=3) %(objectname)",
-                &pattern,
-            ],
-        ))?;
-        let lines: Vec<&str> = matches.lines().collect();
-        match lines.as_slice() {
-            [] => Err(StoreError::ObjectNotFound(id_or_prefix.to_string())),
-            [only] => {
-                let (id, sha) = only
-                    .split_once(' ')
-                    .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {only}")))?;
-                Ok((id.to_string(), sha.to_string()))
-            }
-            many => Err(StoreError::AmbiguousId(
-                id_or_prefix.to_string(),
-                many.len(),
-            )),
+        let found = self.resolve_in(id_or_prefix, None)?;
+        Ok((found.id, found.tip_sha))
+    }
+
+    /// Resolve an id or prefix, live or tombstoned, preferring the
+    /// short-prefix set: the [`SHORT_PREFIX_SET_SIZE`] most recently
+    /// modified live objects, of `object_type` when given. A prefix
+    /// that matches exactly one object in that set names it even when
+    /// the prefix is ambiguous store-wide; one that matches several in
+    /// the set is ambiguous; one that matches none falls back to the
+    /// whole store, where it must be unique among objects of the type
+    /// when the type has any match, else among all objects. Listings
+    /// highlight the prefix unique within the same set, so a shown
+    /// prefix resolves.
+    pub fn resolve_in(
+        &self,
+        id_or_prefix: &str,
+        object_type: Option<&str>,
+    ) -> Result<IdMatch, StoreError> {
+        self.resolve_scoped(id_or_prefix, object_type, SHORT_PREFIX_SET_SIZE)
+    }
+
+    fn resolve_scoped(
+        &self,
+        id_or_prefix: &str,
+        object_type: Option<&str>,
+        set_size: usize,
+    ) -> Result<IdMatch, StoreError> {
+        if id_or_prefix.is_empty() {
+            return Err(StoreError::ObjectNotFound(id_or_prefix.to_string()));
         }
+        let all = self.index.ids_with_prefix(id_or_prefix)?;
+        let recent: HashSet<String> = self
+            .index
+            .recent_ids(object_type, set_size)?
+            .into_iter()
+            .collect();
+        let in_set: Vec<IdMatch> = all
+            .iter()
+            .filter(|m| recent.contains(&m.id))
+            .cloned()
+            .collect();
+        match in_set.len() {
+            1 => return Ok(in_set.into_iter().next().expect("len is 1")),
+            0 => {}
+            _ => return Err(StoreError::AmbiguousId(id_or_prefix.to_string(), in_set)),
+        }
+        let typed: Vec<IdMatch> = match object_type {
+            Some(t) => all.iter().filter(|m| m.object_type == t).cloned().collect(),
+            None => Vec::new(),
+        };
+        let mut global = if typed.is_empty() { all } else { typed };
+        match global.len() {
+            0 => Err(StoreError::ObjectNotFound(id_or_prefix.to_string())),
+            1 => Ok(global.remove(0)),
+            _ => Err(StoreError::AmbiguousId(id_or_prefix.to_string(), global)),
+        }
+    }
+
+    /// Ids of the short-prefix set: the [`SHORT_PREFIX_SET_SIZE`] most
+    /// recently modified live objects, of `object_type` when given.
+    /// Listings compute their highlighted prefix over this set.
+    pub fn short_prefix_ids(&self, object_type: Option<&str>) -> Result<Vec<String>, StoreError> {
+        self.index.recent_ids(object_type, SHORT_PREFIX_SET_SIZE)
     }
 
     /// Read the object at `commit` (any commit-ish): markers,
@@ -219,11 +257,11 @@ impl Store {
         id_or_prefix: &str,
         object_type: &str,
     ) -> Result<Object, StoreError> {
-        let (id, sha) = self.resolve_id(id_or_prefix)?;
-        let object = self.read_object(&sha)?;
+        let found = self.resolve_in(id_or_prefix, Some(object_type))?;
+        let object = self.read_object(&found.tip_sha)?;
         require_type(&object, object_type)?;
         if object.header.is_tombstone() {
-            return Err(StoreError::ObjectDeleted(id));
+            return Err(StoreError::ObjectDeleted(found.id));
         }
         Ok(object)
     }
@@ -1394,9 +1432,75 @@ mod tests {
         ));
         assert!(matches!(
             store.resolve_id("abc").unwrap_err(),
-            StoreError::AmbiguousId(p, 2) if p == "abc"
+            StoreError::AmbiguousId(p, c) if p == "abc" && c.len() == 2
         ));
         assert_eq!(store.resolve_id("abc1").unwrap().0, "abc1");
+    }
+
+    #[test]
+    fn resolve_prefers_the_short_prefix_set_then_falls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tree = ObjectTree::default();
+        store.create("gage::test", "1", "abc1", &tree, "t").unwrap();
+        // Written second, so newest modified
+        store.create("gage::note", "1", "abc2", &tree, "t").unwrap();
+
+        // A set of one holds only the newest object: the shared prefix
+        // names it even though it is ambiguous store-wide
+        let found = store.resolve_scoped("abc", None, 1).unwrap();
+        assert_eq!(found.id, "abc2");
+        assert_eq!(found.object_type, "gage::note");
+        // A set of two holds both: ambiguous within the set
+        assert!(matches!(
+            store.resolve_scoped("abc", None, 2).unwrap_err(),
+            StoreError::AmbiguousId(p, c) if p == "abc" && c.len() == 2
+        ));
+        // An empty set falls back to the whole store
+        assert!(matches!(
+            store.resolve_scoped("abc", None, 0).unwrap_err(),
+            StoreError::AmbiguousId(..)
+        ));
+        // A type narrows both tiers
+        assert_eq!(
+            store
+                .resolve_scoped("abc", Some("gage::test"), 1)
+                .unwrap()
+                .id,
+            "abc1"
+        );
+        assert_eq!(
+            store
+                .resolve_scoped("abc", Some("gage::test"), 0)
+                .unwrap()
+                .id,
+            "abc1"
+        );
+        // A full id of another type still resolves, so the caller can
+        // report the type mismatch
+        assert_eq!(
+            store
+                .resolve_scoped("abc1", Some("gage::note"), 0)
+                .unwrap()
+                .id,
+            "abc1"
+        );
+        assert!(matches!(
+            store.resolve_scoped("", None, 1).unwrap_err(),
+            StoreError::ObjectNotFound(_)
+        ));
+
+        // A tombstone stays resolvable, and is reported as such
+        let current = store
+            .read_object(&store.rev_parse(&object_ref("abc2")).unwrap().unwrap())
+            .unwrap();
+        store.delete(&current, "x").unwrap();
+        let found = store.resolve_in("abc2", None).unwrap();
+        assert!(found.deleted);
+        assert_eq!(
+            store.short_prefix_ids(None).unwrap(),
+            vec!["abc1".to_string()]
+        );
     }
 
     #[test]

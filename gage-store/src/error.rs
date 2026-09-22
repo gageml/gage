@@ -5,6 +5,8 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+use crate::index::IdMatch;
+
 #[derive(Debug)]
 pub enum StoreError {
     /// No repository at the path
@@ -38,8 +40,9 @@ pub enum StoreError {
     TargetNotFound(String),
     /// No object matched the given id or prefix
     ObjectNotFound(String),
-    /// More than one object matched the given prefix
-    AmbiguousId(String, usize),
+    /// More than one object matched the given prefix; the candidates
+    /// are what the prefix could name
+    AmbiguousId(String, Vec<IdMatch>),
     /// Operation refused because the object's current commit is a tombstone
     ObjectDeleted(String),
     /// Resurrection refused because the object's current commit is live
@@ -104,8 +107,21 @@ impl fmt::Display for StoreError {
             StoreError::BadTarget(t) => write!(f, "invalid target: {t}"),
             StoreError::TargetNotFound(t) => write!(f, "target not found: {t}"),
             StoreError::ObjectNotFound(id) => write!(f, "object not found: {id}"),
-            StoreError::AmbiguousId(id, n) => {
-                write!(f, "id {id} is ambiguous ({n} matches)")
+            StoreError::AmbiguousId(prefix, candidates) => {
+                write!(
+                    f,
+                    "ambiguous id prefix {prefix}: matches {} objects:",
+                    candidates.len()
+                )?;
+                for c in candidates {
+                    let type_name = c
+                        .object_type
+                        .strip_prefix("gage::")
+                        .unwrap_or(&c.object_type);
+                    let state = if c.deleted { " (deleted)" } else { "" };
+                    write!(f, "\n  {type_name} {}{state}", c.id)?;
+                }
+                Ok(())
             }
             StoreError::ObjectDeleted(id) => write!(f, "object is deleted: {id}"),
             StoreError::ObjectLive(id) => write!(f, "object is not deleted: {id}"),
@@ -141,7 +157,7 @@ impl std::error::Error for StoreError {
             | StoreError::BadTarget(_)
             | StoreError::TargetNotFound(_)
             | StoreError::ObjectNotFound(_)
-            | StoreError::AmbiguousId(_, _)
+            | StoreError::AmbiguousId(..)
             | StoreError::ObjectDeleted(_)
             | StoreError::ObjectLive(_)
             | StoreError::InvalidPath { .. }

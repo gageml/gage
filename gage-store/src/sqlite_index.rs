@@ -25,12 +25,12 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
-use crate::index::{ObjectIndex, ObjectQuery, Order, SelectedTip};
+use crate::index::{IdMatch, ObjectIndex, ObjectQuery, Order, SelectedTip};
 use crate::object::{LinkFile, Object};
 
 /// Bumped when the schema changes. A mismatch discards the file and
 /// rebuilds from an empty ref table.
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (schema_version INTEGER NOT NULL);
@@ -47,6 +47,7 @@ CREATE TABLE object (
 );
 CREATE INDEX object_type_created ON object (type, created);
 CREATE INDEX object_type_modified ON object (type, modified);
+CREATE INDEX object_modified ON object (modified);
 CREATE TABLE link (
     commit_sha TEXT NOT NULL,
     link_file TEXT NOT NULL,
@@ -326,6 +327,62 @@ impl ObjectIndex for SqliteIndex {
             tips.push(row.map_err(sql_err)?);
         }
         Ok(tips)
+    }
+
+    fn recent_ids(
+        &self,
+        object_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut sql = String::from(
+            "SELECT o.id FROM ref r JOIN object o ON o.sha = r.tip_sha WHERE o.deleted IS NULL",
+        );
+        let mut args: Vec<String> = Vec::new();
+        if let Some(object_type) = object_type {
+            sql.push_str(" AND o.type = ?1");
+            args.push(object_type.to_string());
+        }
+        sql.push_str(&format!(
+            " ORDER BY o.modified DESC, o.sha ASC LIMIT {limit}"
+        ));
+        let mut stmt = self.conn.prepare(&sql).map_err(sql_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), |row| row.get(0))
+            .map_err(sql_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(sql_err)?);
+        }
+        Ok(ids)
+    }
+
+    fn ids_with_prefix(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError> {
+        // A range on the primary key: every id at or above the prefix
+        // and below the prefix followed by a byte above any id char
+        let upper = format!("{prefix}~");
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT r.id, r.tip_sha, o.type, o.deleted IS NOT NULL \
+                 FROM ref r JOIN object o ON o.sha = r.tip_sha \
+                 WHERE r.id >= ?1 AND r.id < ?2 ORDER BY r.id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![prefix, upper], |row| {
+                Ok(IdMatch {
+                    id: row.get(0)?,
+                    tip_sha: row.get(1)?,
+                    object_type: row.get(2)?,
+                    deleted: row.get(3)?,
+                })
+            })
+            .map_err(sql_err)?;
+        let mut matches = Vec::new();
+        for row in rows {
+            matches.push(row.map_err(sql_err)?);
+        }
+        Ok(matches)
     }
 }
 

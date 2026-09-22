@@ -5,7 +5,9 @@ use gage_core::uuid::short_uuid;
 use gage_db::note;
 use gage_db::target::NoteTarget;
 use gage_registry::scanner::ScannerRegistry;
-use gage_store::{NoteEdit, NoteInput, NoteRecord, NoteStore, NoteValue, Store, url};
+use gage_store::{
+    NOTE_TYPE, NoteEdit, NoteInput, NoteRecord, NoteStore, NoteValue, SESSION_TYPE, Store, url,
+};
 use tabled::{
     Table,
     settings::{
@@ -156,10 +158,10 @@ pub fn list(args: NoteListArgs) {
             }
         };
 
-    // A prefix resolves against every object ref in the store, not
-    // only notes, so the peer set is every object id
-    let peers: Vec<String> = match store.list_object_refs() {
-        Ok(refs) => refs.into_iter().map(|r| r.id).collect(),
+    // The highlighted prefix is unique within the short-prefix set
+    // of notes, which is where `note show` and friends resolve first
+    let peers = match store.short_prefix_ids(Some(NOTE_TYPE)) {
+        Ok(ids) => ids,
         Err(e) => {
             eprintln!("gage note list: {e}");
             std::process::exit(1);
@@ -343,8 +345,9 @@ fn env_user() -> Option<String> {
 
 /// Resolve a `--target` value, an object id prefix with an optional
 /// `#<line selection>`, to a Gage URL with the full id. The prefix
-/// must match exactly one object; with a line selection only sessions
-/// are candidates. The line selection itself is checked by the store.
+/// resolves as any other, preferring recent objects; with a line
+/// selection only sessions are candidates. The line selection itself
+/// is checked by the store.
 fn resolve_target(store: &Store, input: &str) -> Result<String, String> {
     let (prefix, fragment) = match input.split_once('#') {
         Some((p, f)) => (p, Some(f)),
@@ -353,48 +356,29 @@ fn resolve_target(store: &Store, input: &str) -> Result<String, String> {
     if prefix.is_empty() {
         return Err(format!("target {input:?}: missing object ID"));
     }
-    let refs = store.list_object_refs().map_err(|e| e.to_string())?;
-    let mut matches: Vec<(String, String, bool)> = Vec::new();
-    for r in refs.into_iter().filter(|r| r.id.starts_with(prefix)) {
-        let header = store
-            .read_header(&r.tip_sha)
-            .map_err(|e| format!("{}: {e}", r.id))?;
-        let type_name = header
-            .object_type
-            .strip_prefix("gage::")
-            .unwrap_or(&header.object_type)
-            .to_string();
-        matches.push((r.id, type_name, header.is_tombstone()));
+    let scope = fragment.map(|_| SESSION_TYPE);
+    let found = store
+        .resolve_in(prefix, scope)
+        .map_err(|e| format!("target {prefix}: {e}"))?;
+    if found.deleted {
+        return Err(format!("target {prefix}: object is deleted: {}", found.id));
     }
-    if fragment.is_some() {
-        matches.retain(|(_, type_name, _)| type_name == "session");
+    if fragment.is_some() && found.object_type != SESSION_TYPE {
+        return Err(format!(
+            "target {prefix}: a line selection applies to a session, not a {}",
+            type_name(&found.object_type)
+        ));
     }
-    match matches.as_slice() {
-        [] => {
-            let what = if fragment.is_some() {
-                "session"
-            } else {
-                "object"
-            };
-            Err(format!("target {prefix}: no {what} matches"))
-        }
-        [(id, _, true)] => Err(format!("target {prefix}: object is deleted: {id}")),
-        [(id, type_name, false)] => Ok(match fragment {
-            Some(f) => format!("{type_name}:{id}#{f}"),
-            None => format!("{type_name}:{id}"),
-        }),
-        many => {
-            let mut lines = vec![format!(
-                "target {prefix}: ambiguous prefix matches {} objects:",
-                many.len()
-            )];
-            lines.extend(
-                many.iter()
-                    .map(|(id, type_name, _)| format!("  {type_name} {id}")),
-            );
-            Err(lines.join("\n"))
-        }
-    }
+    let type_name = type_name(&found.object_type);
+    Ok(match fragment {
+        Some(f) => format!("{type_name}:{}#{f}", found.id),
+        None => format!("{type_name}:{}", found.id),
+    })
+}
+
+/// `gage::note` displays as `note`
+fn type_name(object_type: &str) -> &str {
+    object_type.strip_prefix("gage::").unwrap_or(object_type)
 }
 
 pub fn show(args: NoteShowArgs) {

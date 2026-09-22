@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use gage_store::{DatasetRecord, DatasetStore, Store};
+use gage_store::{DATASET_TYPE, DatasetRecord, DatasetStore, Store};
 use tabled::{
     Table,
     settings::{
@@ -66,10 +66,10 @@ pub fn list(args: DatasetListArgs) {
         }
     };
 
-    // A prefix resolves against every object ref in the store, not
-    // only datasets, so the peer set is every object id
-    let peers: Vec<String> = match store.list_object_refs() {
-        Ok(refs) => refs.into_iter().map(|r| r.id).collect(),
+    // The highlighted prefix is unique within the short-prefix set
+    // of datasets, where a dataset prefix resolves first
+    let peers = match store.short_prefix_ids(Some(DATASET_TYPE)) {
+        Ok(ids) => ids,
         Err(e) => {
             eprintln!("gage dataset list: {e}");
             std::process::exit(1);

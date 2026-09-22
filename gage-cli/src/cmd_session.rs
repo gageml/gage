@@ -14,7 +14,7 @@ use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source};
-use gage_store::{DatasetStore, SessionOutcome, SessionSpec, SessionStore, Store};
+use gage_store::{DatasetStore, SESSION_TYPE, SessionOutcome, SessionSpec, SessionStore, Store};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
@@ -329,10 +329,10 @@ fn list_dataset(args: SessionListArgs) {
     }
     let show = args.limit.show_count(total);
 
-    // The unique prefix is computed over every live session plus the
-    // members, the same peer set the stored listing uses
-    let mut peers: Vec<String> = match SessionStore::from(&store).query().tips() {
-        Ok(tips) => tips.into_iter().map(|t| t.id).collect(),
+    // The highlighted prefix is unique within the short-prefix set of
+    // sessions plus the members, the same peers the stored listing uses
+    let mut peers = match store.short_prefix_ids(Some(SESSION_TYPE)) {
+        Ok(ids) => ids,
         Err(e) => {
             eprintln!("gage session list: {e}");
             std::process::exit(1);

@@ -106,6 +106,18 @@ impl ObjectQuery {
     }
 }
 
+/// One ref matched by an id prefix, with what a caller needs to
+/// present or reject it without reading the object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdMatch {
+    pub id: String,
+    pub tip_sha: String,
+    /// The object type at the tip, e.g. `gage::note`.
+    pub object_type: String,
+    /// True when the tip is a tombstone.
+    pub deleted: bool,
+}
+
 /// What the store needs from an index. The write side is fed by the
 /// reconcile and by the store's own writes; the read side serves
 /// queries. One implementation exists, [`SqliteIndex`](crate::sqlite_index::SqliteIndex).
@@ -138,6 +150,18 @@ pub trait ObjectIndex: Send {
 
     /// Tips selected by `query`, in query order.
     fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError>;
+
+    /// Ids of the most recently modified live tips, newest first,
+    /// restricted to `object_type` when given.
+    fn recent_ids(
+        &self,
+        object_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError>;
+
+    /// Every ref whose id starts with `prefix`, live or tombstoned, in
+    /// id order.
+    fn ids_with_prefix(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError>;
 
     /// Start a transaction. Every `put` and `set_tip` until `commit`
     /// or `rollback` is applied as one unit.
@@ -377,6 +401,16 @@ mod tests {
         fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
             self.inner().select(query)
         }
+        fn recent_ids(
+            &self,
+            object_type: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<String>, StoreError> {
+            self.inner().recent_ids(object_type, limit)
+        }
+        fn ids_with_prefix(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError> {
+            self.inner().ids_with_prefix(prefix)
+        }
         fn begin(&self) -> Result<(), StoreError> {
             self.inner().begin()
         }
@@ -427,6 +461,16 @@ mod tests {
         }
         fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
             self.inner().select(query)
+        }
+        fn recent_ids(
+            &self,
+            object_type: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<String>, StoreError> {
+            self.inner().recent_ids(object_type, limit)
+        }
+        fn ids_with_prefix(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError> {
+            self.inner().ids_with_prefix(prefix)
         }
         fn begin(&self) -> Result<(), StoreError> {
             self.inner().begin()
