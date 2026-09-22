@@ -13,8 +13,8 @@ use crate::style;
 
 #[derive(Subcommand)]
 pub enum DatasetCommand {
-    /// Create a new dataset
-    New,
+    /// Add an empty dataset
+    Add,
 
     /// List datasets
     List(DatasetListArgs),
@@ -26,12 +26,12 @@ pub struct DatasetListArgs {
     limit: crate::limit::LimitArgs,
 }
 
-pub fn new() {
-    let store = open_store("gage dataset new");
+pub fn add() {
+    let store = open_store("gage dataset add");
     let id = match DatasetStore::from(&store).create() {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("gage dataset new: {e}");
+            eprintln!("gage dataset add: {e}");
             std::process::exit(1);
         }
     };

@@ -42,7 +42,10 @@ pub enum SessionCommand {
     /// it when its content changed and is otherwise a no-op.
     Add(SessionAddArgs),
 
-    /// Delete sessions
+    /// Delete native sessions
+    ///
+    /// Removes each session's files from the selected source. Stored
+    /// sessions are not affected.
     Delete(SessionDeleteArgs),
 
     /// View a session

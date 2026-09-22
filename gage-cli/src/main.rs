@@ -279,7 +279,7 @@ async fn main() {
                 cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),
             },
             Command::Dataset { command } => match command {
-                cmd_dataset::DatasetCommand::New => cmd_dataset::new(),
+                cmd_dataset::DatasetCommand::Add => cmd_dataset::add(),
                 cmd_dataset::DatasetCommand::List(args) => cmd_dataset::list(args),
             },
             Command::Issue { command } => match command {
