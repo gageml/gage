@@ -29,11 +29,11 @@ use datafusion::prelude::*;
 use futures::stream;
 
 use super::cache::SessionCache;
-use super::filter;
 use super::walk::{session_cache, walk_sessions};
 use crate::driver::ClaudeNativeSession;
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
+use gage_session::filter;
 
 /// Index of the first column whose value comes from parsing the
 /// session JSONL (`title` and everything after). Columns before this

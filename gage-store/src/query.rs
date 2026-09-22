@@ -37,10 +37,11 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::Expr;
 use futures::stream;
-use gage_claude::tables::filter::{self, IdFilter};
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
-use gage_store::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
+use gage_session::filter::{self, IdFilter};
+
+use crate::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
 
 /// Index of the first column read from the object rather than the
 /// index. A projection below this bound never opens an object.
@@ -446,5 +447,67 @@ impl ExecutionPlan for StoredSessionExec {
         let schema = self.projected_schema.clone();
         let stream = stream::once(async move { work.build_batch() });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use datafusion::arrow::array::StringArray;
+    use datafusion::prelude::SessionContext;
+
+    use super::StoredSessionTable;
+    use crate::SessionStore;
+    use crate::session::tests::{FakeDriver, fake};
+    use crate::test_support::open_store;
+
+    /// The store-bound `session` table projects one row per live
+    /// session, reading `native_id` and `project` from each object's
+    /// attrs.
+    #[tokio::test]
+    async fn session_table_projects_stored_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        {
+            let sessions = SessionStore::from(&store);
+            sessions
+                .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
+                .unwrap();
+            sessions
+                .add(&FakeDriver, &mut fake("s2", &[("session.jsonl", "{}\n")]))
+                .unwrap();
+        }
+
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "session",
+            Arc::new(StoredSessionTable::new(Arc::new(Mutex::new(store)))),
+        )
+        .unwrap();
+        let batches = ctx
+            .sql("SELECT native_id, project FROM session ORDER BY native_id")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let batch = batches.first().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let native = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let project = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(native.value(0), "s1");
+        assert_eq!(native.value(1), "s2");
+        assert_eq!(project.value(0), "proj");
+        assert_eq!(project.value(1), "proj");
     }
 }

@@ -15,7 +15,7 @@ use gage_core::style::IdHighlighter;
 
 use crate::session::{SessionInfo, SessionListBuilder};
 use crate::tables::cache::SessionCache;
-use crate::tables::filter::IdFilter;
+use gage_session::filter::IdFilter;
 
 /// Pull the per-context `SessionCache` from session config extensions.
 pub fn session_cache(state: &dyn Session) -> Result<Arc<SessionCache>> {

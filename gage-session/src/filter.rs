@@ -99,7 +99,7 @@ pub fn pushdown(expr: &Expr, col_name: &str) -> TableProviderFilterPushDown {
 /// `{col_name, line}` is `Exact` because the scan applies it — id-only
 /// filters through [`IdFilter`] path pruning, line-involving filters
 /// through [`RowFilter`] row masking.
-pub(crate) fn pushdown_lines(expr: &Expr, col_name: &str) -> TableProviderFilterPushDown {
+pub fn pushdown_lines(expr: &Expr, col_name: &str) -> TableProviderFilterPushDown {
     if references_only_set(expr, &[col_name, LINE_COL]) {
         TableProviderFilterPushDown::Exact
     } else {
@@ -128,7 +128,7 @@ const LINE_COL: &str = "line";
 /// referencing only the id column are excluded — [`IdFilter`] already
 /// enforces those by path pruning.
 #[derive(Debug, Clone)]
-pub(crate) struct RowFilter {
+pub struct RowFilter {
     predicate: Arc<dyn PhysicalExpr>,
     schema: SchemaRef,
 }
@@ -136,7 +136,7 @@ pub(crate) struct RowFilter {
 impl RowFilter {
     /// Compile the line-involving subset of `filters`. `None` when no
     /// filter constrains `line`.
-    pub(crate) fn new(filters: &[Expr], id_col: &str) -> Result<Option<Self>> {
+    pub fn new(filters: &[Expr], id_col: &str) -> Result<Option<Self>> {
         let combined = filters
             .iter()
             .filter(|expr| {
@@ -161,7 +161,7 @@ impl RowFilter {
     /// predicate. `id_idx`/`line_idx` locate the two columns in
     /// `batch`. A null predicate result drops the row, matching SQL
     /// `WHERE` semantics.
-    pub(crate) fn filter_batch(
+    pub fn filter_batch(
         &self,
         batch: &RecordBatch,
         id_idx: usize,

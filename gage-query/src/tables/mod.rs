@@ -4,7 +4,6 @@ pub mod message_text;
 pub mod note_doc;
 pub mod note_message_context;
 pub mod related_issue;
-pub mod stored_session;
 
 pub use config::ConfigTable;
 pub use gage_claude::index::entry_text;
@@ -13,7 +12,6 @@ pub use issue_report::IssueReportFn;
 pub use message_text::MessageTextFn;
 pub use note_message_context::NoteMessageContextFn;
 pub use related_issue::RelatedIssueFn;
-pub use stored_session::StoredSessionTable;
 
 use datafusion::arrow::datatypes::SchemaRef;
 

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use datafusion::datasource::TableProvider;
@@ -13,7 +13,6 @@ use gage_claude::home::ClaudeHome;
 use gage_claude::index::IndexStore;
 use gage_claude::tables::SessionCache;
 use gage_session::{DriverError, Source};
-use gage_store::Store;
 
 use crate::scope::{Scope, ScopeEdge, ScopedTable, SessionScope};
 use crate::tables::config::ConfigTable;
@@ -22,7 +21,6 @@ use crate::tables::message_text::MessageTextFn;
 use crate::tables::note_doc::note_doc_table;
 use crate::tables::note_message_context::NoteMessageContextFn;
 use crate::tables::related_issue::RelatedIssueFn;
-use crate::tables::stored_session::StoredSessionTable;
 
 /// The claude index store behind `source`: the summary cache and
 /// text index the `message_text` and `note_message_context`
@@ -43,27 +41,6 @@ fn claude_source(source: &dyn Source) -> Result<&ClaudeSource, DriverError> {
                 source.source()
             ))
         })
-}
-
-/// Build a query context over one source: the driver's `session`,
-/// `message`, and `entry` tables and the UDF suite; no Gage state
-/// tables.
-pub fn create_source_context(source: &dyn Source) -> Result<SessionContext, DriverError> {
-    let tables = source.tables()?;
-    let ctx = new_session_context();
-    ctx.register_table("session", tables.session).unwrap();
-    ctx.register_table("message", tables.message).unwrap();
-    ctx.register_table("entry", tables.entry).unwrap();
-    Ok(ctx)
-}
-
-/// Build a query context whose `session` table is the Gage store: one
-/// row per live session object. The caller opens the store.
-pub fn create_stored_context(store: Arc<Mutex<Store>>) -> SessionContext {
-    let ctx = new_session_context();
-    ctx.register_table("session", Arc::new(StoredSessionTable::new(store)))
-        .unwrap();
-    ctx
 }
 
 /// What an agent context is scoped to: a scan, optionally narrowed to

@@ -16,6 +16,8 @@ use std::time::SystemTime;
 
 use datafusion::datasource::TableProvider;
 
+pub mod filter;
+
 pub trait Driver: Send + Sync {
     /// The driver's name, recorded on stored sessions. Not a scheme.
     fn name(&self) -> &'static str;

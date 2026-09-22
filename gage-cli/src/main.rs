@@ -33,6 +33,7 @@ mod cmd_init;
 mod cmd_issue;
 mod cmd_note;
 mod cmd_query;
+mod cmd_query2;
 mod cmd_resolve;
 mod cmd_scan;
 mod cmd_session;
@@ -163,6 +164,9 @@ enum Command {
 
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
+
+    /// Query stored sessions with SQL (new runtime)
+    Query2(cmd_query2::Query2Args),
 
     /// Update the Gage index
     Index(cmd_index::IndexArgs),
@@ -322,6 +326,7 @@ async fn main() {
                 }
             },
             Command::Query(args) => cmd_query::main(args).await,
+            Command::Query2(args) => cmd_query2::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_sync::push(args).await,
             Command::Pull(args) => cmd_sync::pull(args).await,

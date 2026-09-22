@@ -42,6 +42,7 @@ pub mod git;
 pub mod index;
 mod note;
 pub mod object;
+pub mod query;
 mod session;
 mod sqlite_index;
 mod store;
@@ -63,6 +64,7 @@ pub use note::{
     OBJECT_TYPE as NOTE_TYPE,
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
+pub use query::StoredSessionTable;
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,
     SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore, SummaryAttrs,

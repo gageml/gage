@@ -200,7 +200,7 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let ctx = match gage_query::create_source_context(source.as_ref()) {
+    let ctx = match gage_query2::context(gage_query2::SessionBacking::Source(source.as_ref())) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("gage session list: {spec}: {e}");
@@ -252,7 +252,15 @@ async fn list_stored(args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let ctx = gage_query::create_stored_context(Arc::new(Mutex::new(store)));
+    let ctx = match gage_query2::context(gage_query2::SessionBacking::Store(Arc::new(Mutex::new(
+        store,
+    )))) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("gage session list: {e}");
+            std::process::exit(1);
+        }
+    };
     let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, None).await;
     if total > 0 {
         let registry = source::driver_registry();
@@ -996,7 +1004,7 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
             std::process::exit(1);
         }
     };
-    let ctx = match gage_query::create_source_context(source.as_ref()) {
+    let ctx = match gage_query2::context(gage_query2::SessionBacking::Source(source.as_ref())) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("gage session delete: {spec}: {e}");

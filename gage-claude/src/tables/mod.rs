@@ -9,7 +9,6 @@
 
 pub mod cache;
 pub mod entry;
-pub mod filter;
 pub mod message;
 pub mod session;
 pub mod walk;

@@ -1,0 +1,20 @@
+[package]
+name = "gage-query2"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datafusion = { workspace = true }
+gage-query = { path = "../gage-query" }
+gage-session = { path = "../gage-session" }
+gage-store = { path = "../gage-store" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

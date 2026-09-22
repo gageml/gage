@@ -11,6 +11,7 @@ members = [
     "gage-lsp",
     "gage-mcp",
     "gage-query",
+    "gage-query2",
     "gage-registry",
     "gage-runtime",
     "gage-scan",

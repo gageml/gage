@@ -12,6 +12,7 @@ arrow = { workspace = true }
 datafusion = { workspace = true }
 gage-claude = { path = "../gage-claude" }
 gage-query = { path = "../gage-query" }
+gage-query2 = { path = "../gage-query2" }
 gage-registry = { path = "../gage-registry" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }

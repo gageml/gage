@@ -29,8 +29,8 @@ use futures::StreamExt;
 
 use super::SessionSource;
 use super::cache::SessionCache;
-use super::filter;
 use super::walk::{lookup_paths, session_cache, session_paths};
+use gage_session::filter;
 
 /// The derived columns serving the `message` table, in table-column
 /// order. `text` is non-null exactly for message rows: user/assistant

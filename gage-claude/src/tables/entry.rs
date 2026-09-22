@@ -26,8 +26,8 @@ use futures::StreamExt;
 
 use super::SessionSource;
 use super::cache::SessionCache;
-use super::filter;
 use super::walk::{lookup_paths, session_cache, session_paths};
+use gage_session::filter;
 
 const PROJECTION: &[usize] = &[
     COL_SESSION_ID,

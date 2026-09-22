@@ -2461,6 +2461,7 @@ dependencies = [
  "datafusion",
  "gage-claude",
  "gage-query",
+ "gage-query2",
  "gage-registry",
  "gage-session",
  "gage-store",
@@ -2514,6 +2515,7 @@ dependencies = [
  "gage-log",
  "gage-mcp",
  "gage-query",
+ "gage-query2",
  "gage-registry",
  "gage-scan",
  "gage-session",
@@ -2632,7 +2634,6 @@ dependencies = [
  "gage-db",
  "gage-registry",
  "gage-session",
- "gage-store",
  "rusqlite",
  "rustyline",
  "serde_json",
@@ -2641,6 +2642,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "gage-query2"
+version = "0.2.0-dev"
+dependencies = [
+ "datafusion",
+ "gage-query",
+ "gage-session",
+ "gage-store",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2723,7 +2736,10 @@ dependencies = [
 name = "gage-store"
 version = "0.2.0-dev"
 dependencies = [
+ "async-trait",
+ "datafusion",
  "flate2",
+ "futures",
  "gage-core",
  "gage-session",
  "rusqlite",
@@ -2731,6 +2747,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 

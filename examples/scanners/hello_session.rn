@@ -1,0 +1,13 @@
+use gage::scan;
+
+pub const SCANNER = #{
+    name: "hello-session",
+    description: "Simple session iteration",
+    tasks: #{hello: #{}}
+};
+
+pub async fn hello() {
+    for s in scan().sessions() {
+        println!("Hello {}", s.id);
+    }
+}
