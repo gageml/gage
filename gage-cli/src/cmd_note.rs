@@ -2,7 +2,6 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use console::style;
 use gage_core::uuid::short_uuid;
-use gage_db::db;
 use gage_db::note;
 use gage_db::target::NoteTarget;
 use gage_registry::scanner::ScannerRegistry;
@@ -80,10 +79,6 @@ pub struct NoteAddArgs {
 pub struct NoteShowArgs {
     /// Note ID (or prefix)
     id: String,
-
-    /// Show target content
-    #[arg(short = 't', long = "target")]
-    short_target: bool,
 
     /// Show note docs
     #[arg(short, long)]
@@ -402,12 +397,18 @@ fn resolve_target(store: &Store, input: &str) -> Result<String, String> {
     }
 }
 
-pub async fn show(args: NoteShowArgs) {
-    let conn = db::open_db().unwrap();
-    let note = match note::get(&conn, &args.id) {
+pub fn show(args: NoteShowArgs) {
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage note show: {e}");
+            std::process::exit(1);
+        }
+    };
+    let note = match NoteStore::from(&store).get(&args.id) {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("gage note show: {e}");
             std::process::exit(1);
         }
     };
@@ -415,25 +416,18 @@ pub async fn show(args: NoteShowArgs) {
     let mut attrs = vec![
         ("id", note.id.clone()),
         ("name", note.name.clone()),
-        ("value", format_value(&note.value)),
-        ("target", note.target.to_uri()),
+        ("value", String::new()),
+        ("target", note.target.clone().unwrap_or_default()),
         ("author", note.author.clone()),
-        ("created", gage_core::datetime::ms_to_iso8601(note.created)),
+        (
+            "created",
+            gage_core::datetime::ms_to_iso8601(note.created_ms),
+        ),
         (
             "modified",
-            note.modified
-                .map(gage_core::datetime::ms_to_iso8601)
-                .unwrap_or_default(),
-        ),
-        (
-            "metadata",
-            note.metadata
-                .as_deref()
-                .map(pretty_json)
-                .unwrap_or_default(),
+            gage_core::datetime::ms_to_iso8601(note.modified_ms),
         ),
     ];
-
     if args.doc {
         let registry = ScannerRegistry::load();
         let doc = registry
@@ -449,53 +443,31 @@ pub async fn show(args: NoteShowArgs) {
         .saturating_sub(label_width + 8)
         .max(20);
 
-    let target_cell = if args.short_target {
-        // Note targets name sessions in the default source until a
-        // target carries its own source
-        let source = crate::source::open_source_or_exit("gage note show", "");
-        let ctx = match gage_query::create_context(source.as_ref()).await {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                eprintln!("gage note show: {e}");
-                std::process::exit(1);
-            }
-        };
-        match crate::target_content::render_target_cell(&ctx, &note.target, value_width).await {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("Error rendering target content: {e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        None
+    // A JSON value is pretty-printed and colored token by token; text
+    // is wrapped and colored as one cell
+    let (value_cell, value_is_json) = match &note.value {
+        NoteValue::Text(text) => (textwrap::fill(text, value_width), false),
+        NoteValue::Json(json) => (crate::json::render(json), true),
     };
-
     let rows: Vec<Vec<String>> = attrs
         .into_iter()
         .map(|(k, v)| {
-            let value = if k == "target" {
-                if let Some(ref cell) = target_cell {
-                    cell.clone()
-                } else {
-                    textwrap::fill(&v, value_width)
-                }
-            } else if k == "doc" {
-                crate::markdown::render(&v, value_width)
-            } else if k == "metadata" {
-                v
-            } else {
-                textwrap::fill(&v, value_width)
+            let value = match k {
+                "value" => value_cell.clone(),
+                "doc" => crate::markdown::render(&v, value_width),
+                _ => textwrap::fill(&v, value_width),
             };
             vec![k.to_string(), value]
         })
         .collect();
 
-    let table = Table::from_iter(rows)
+    let mut table = Table::from_iter(rows);
+    table
         .with(Style::rounded())
-        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Cell::new(2, 1), style::tty(Color::FG_BRIGHT_CYAN))
-        .to_string();
+        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW));
+    if !value_is_json {
+        table.modify(Cell::new(2, 1), style::tty(Color::FG_BRIGHT_CYAN));
+    }
     println!("{table}");
 }
 
@@ -504,14 +476,6 @@ pub(crate) fn format_value(value: &note::NoteValue) -> String {
         serde_json::Value::String(s) => s.clone(),
         _ => value.to_json(),
     }
-}
-
-/// Pretty-print a raw JSON string (2-space indent). Falls back to the
-/// raw text if the string does not parse as JSON.
-fn pretty_json(raw: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .and_then(|v| serde_json::to_string_pretty(&v))
-        .unwrap_or_else(|_| raw.to_string())
 }
 
 /// One-line display form of a note value: bare strings unquoted,

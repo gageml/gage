@@ -42,12 +42,12 @@ mod cmd_sync;
 mod cmd_test;
 mod dialog;
 mod human;
+mod json;
 mod limit;
 mod markdown;
 mod model_prompt;
 mod source;
 mod style;
-mod target_content;
 
 /// Version string baked at build time: a real semver for official release
 /// builds, otherwise `git-<hash>` for source builds. See build.rs.
@@ -259,7 +259,7 @@ async fn main() {
             Command::Note { command } => match command {
                 cmd_note::NoteCommand::List(args) => cmd_note::list(args),
                 cmd_note::NoteCommand::Add(args) => cmd_note::add(args),
-                cmd_note::NoteCommand::Show(args) => cmd_note::show(args).await,
+                cmd_note::NoteCommand::Show(args) => cmd_note::show(args),
                 cmd_note::NoteCommand::Edit(args) => cmd_note::edit(args),
                 cmd_note::NoteCommand::Delete(args) => cmd_note::delete(args),
             },
