@@ -1,6 +1,6 @@
 use tabled::settings::{Color, peaker::Peaker};
 
-pub use gage_core::style::IdHighlighter;
+pub use gage_core::style::{IdHighlighter, IdKind};
 
 pub fn spinner(message: &str) -> indicatif::ProgressBar {
     let spinner = indicatif::ProgressBar::new_spinner();

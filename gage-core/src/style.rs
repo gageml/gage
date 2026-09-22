@@ -4,8 +4,37 @@ use console::style;
 
 use crate::uuid::short_uuid;
 
+/// The namespace an ID belongs to, which fixes its terminal color.
+///
+/// Gage object IDs (sessions in the store, notes, issues, scans) are
+/// yellow. Native session IDs, which a driver assigns and which are
+/// unique only within their source, are green. The two colors keep a
+/// stored session and its native counterpart apart when both appear
+/// in the same terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdKind {
+    Gage,
+    Native,
+}
+
+impl IdKind {
+    /// Styled display of an ID split at its disambiguating prefix:
+    /// the bright shade over `prefix`, the dark shade over `tail`
+    pub fn style(self, prefix: &str, tail: &str) -> String {
+        match self {
+            IdKind::Gage => format!(
+                "{}{}",
+                style(prefix).yellow().bright(),
+                style(tail).yellow()
+            ),
+            IdKind::Native => format!("{}{}", style(prefix).green().bright(), style(tail).green()),
+        }
+    }
+}
+
 /// Renders IDs as short, jj-style displays where the disambiguating
-/// prefix is bright yellow and the rest of the shown ID is dark yellow.
+/// prefix is the bright shade of the kind's color and the rest of the
+/// shown ID is the dark shade.
 ///
 /// Construct with the full peer set for the entity kind — i.e. every ID
 /// that the corresponding `get(id_prefix)` lookup resolves against, not
@@ -15,13 +44,20 @@ pub struct IdHighlighter {
     /// Peers sorted lexicographically so neighbors bound the longest
     /// common prefix with any query id.
     sorted_peers: Vec<String>,
+    kind: IdKind,
 }
 
 impl IdHighlighter {
+    /// Highlighter for Gage object IDs
     pub fn new(peers: Vec<String>) -> Self {
+        Self::with_kind(peers, IdKind::Gage)
+    }
+
+    /// Highlighter for IDs of `kind`
+    pub fn with_kind(peers: Vec<String>, kind: IdKind) -> Self {
         let mut sorted_peers = peers;
         sorted_peers.sort_unstable();
-        Self { sorted_peers }
+        Self { sorted_peers, kind }
     }
 
     /// Length in characters of the shortest prefix of `id` that resolves
@@ -50,21 +86,21 @@ impl IdHighlighter {
         max_common + 1
     }
 
-    /// Styled 8-char short display: bright yellow up to the unique
-    /// prefix, dark yellow for the tail. If the unique prefix reaches
-    /// or exceeds the 8-char display length, the whole short display
-    /// is bright yellow — the display is ambiguous and the caller may
+    /// Styled 8-char short display: the bright shade up to the unique
+    /// prefix, the dark shade for the tail. If the unique prefix
+    /// reaches or exceeds the 8-char display length, the whole short
+    /// display is bright — the display is ambiguous and the caller may
     /// want to widen it (see `full`), but the coloring at least signals
     /// which chars carry disambiguation weight.
     pub fn short(&self, id: &str) -> String {
         self.styled(id, short_uuid(id))
     }
 
-    /// Styled full-length display: bright yellow up to the unique
-    /// prefix, dark yellow for the tail. If the unique prefix reaches
-    /// or exceeds the ID length — only when a peer duplicates the ID
-    /// character-for-character, which Gage does not construct — the
-    /// whole ID is bright yellow.
+    /// Styled full-length display: the bright shade up to the unique
+    /// prefix, the dark shade for the tail. If the unique prefix
+    /// reaches or exceeds the ID length — only when a peer duplicates
+    /// the ID character-for-character, which Gage does not construct —
+    /// the whole ID is bright.
     pub fn full(&self, id: &str) -> String {
         self.styled(id, id)
     }
@@ -77,11 +113,7 @@ impl IdHighlighter {
             .map(|(i, _)| i)
             .unwrap_or(display.len());
         let (prefix, tail) = display.split_at(split_bytes);
-        format!(
-            "{}{}",
-            style(prefix).yellow().bright(),
-            style(tail).yellow(),
-        )
+        self.kind.style(prefix, tail)
     }
 }
 
@@ -195,6 +227,22 @@ mod tests {
         let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into()]);
         // No neighbor to disambiguate against: unique_prefix_len is 1.
         assert_eq!(h.short("01k2h4t9aaaa"), expected_styled("0", "1k2h4t9"));
+    }
+
+    #[test]
+    fn native_kind_styles_green() {
+        console::set_colors_enabled(true);
+        let h = IdHighlighter::with_kind(
+            vec!["4045c48b-aaaa".into(), "4045c48b-bbbb".into()],
+            IdKind::Native,
+        );
+        // Shared "4045c48b-" needs 10 chars to disambiguate.
+        let expected = format!(
+            "{}{}",
+            console::style("4045c48b-a").green().bright(),
+            console::style("aaa").green(),
+        );
+        assert_eq!(h.full("4045c48b-aaaa"), expected);
     }
 
     #[test]

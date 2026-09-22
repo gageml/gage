@@ -142,7 +142,7 @@ fn session_picker(current: Option<&str>) -> io::Result<Picker> {
                 .clone();
             PickItem {
                 cells: vec![
-                    Span::styled(short, styles::Text::id()),
+                    Span::styled(short, styles::Text::native_id()),
                     Span::raw(project),
                     Span::raw(item.title),
                     Span::styled(picker::ago(item.mtime_ms), styles::Text::dim()),
@@ -152,7 +152,7 @@ fn session_picker(current: Option<&str>) -> io::Result<Picker> {
         })
         .collect();
     let columns = vec![
-        PickColumn::new("Id", 8),
+        PickColumn::new("Native Id", 9),
         PickColumn::fit("Project", 24),
         PickColumn::fill("Title"),
         PickColumn::right("Modified", 8),

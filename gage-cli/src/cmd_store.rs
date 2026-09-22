@@ -15,7 +15,7 @@ use tabled::{
 
 use crate::author::resolve_author;
 use crate::human::{format_elapsed_ms, format_size};
-use crate::style;
+use crate::style::{self, IdHighlighter, IdKind};
 
 #[derive(Subcommand)]
 pub enum StoreCommand {
@@ -405,17 +405,21 @@ fn dataset_session_list(datasets: &DatasetStore, args: DatasetSessionListArgs) {
         println!("No sessions found");
         return;
     }
-    let header: Vec<String> = ["Num", "Type", "Session Id", "Size"]
+    let header: Vec<String> = ["Num", "Type", "Native Id", "Size"]
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let highlighter = IdHighlighter::with_kind(
+        sessions.iter().map(|s| s.native_id.clone()).collect(),
+        IdKind::Native,
+    );
     let rows: Vec<Vec<String>> = sessions
         .iter()
         .map(|s| {
             vec![
                 s.session_num.to_string(),
                 s.session_type.clone(),
-                s.native_id.clone(),
+                highlighter.full(&s.native_id),
                 s.size.map(|b| format_size(b as i64)).unwrap_or_default(),
             ]
         })

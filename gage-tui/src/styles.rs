@@ -178,9 +178,15 @@ impl Text {
         Style::new().fg(Color::LightCyan)
     }
 
-    /// Object id, e.g. the scan id in the scan header
+    /// Gage object id, e.g. the scan id in the scan header
     pub fn id() -> Style {
         Style::new().fg(Color::Cyan)
+    }
+
+    /// Native session id, assigned by a driver and unique only within
+    /// its source. Green keeps it apart from Gage object ids.
+    pub fn native_id() -> Style {
+        Style::new().fg(Color::Green)
     }
 
     /// Full-width section header, e.g. message sections in the session

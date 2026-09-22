@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
-use console::style as cstyle;
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
@@ -28,7 +27,7 @@ use tabled::{
 
 use crate::dialog::{self, DialogError};
 use crate::source;
-use crate::style;
+use crate::style::{self, IdKind};
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
@@ -251,8 +250,8 @@ fn resolve_project(source: &dyn Source, text: &str) -> Result<String, String> {
 /// which columns it shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Listing {
-    /// A native source: Id, Project, Title, Model, Size, Messages,
-    /// Modified
+    /// A native source: Native Id, Project, Title, Model, Size,
+    /// Messages, Modified
     Native,
     /// The store: Id, Project, Title, Type, Model, Size, Messages,
     /// Created
@@ -399,20 +398,16 @@ fn string_or_empty(col: &StringArray, i: usize) -> String {
     }
 }
 
-/// Styled id: bright yellow over the unique prefix, dark yellow for
-/// the rest of the shown form.
-fn styled_id(shown: &str, prefix: &str) -> String {
+/// Styled id: the kind's bright shade over the unique prefix, its dark
+/// shade for the rest of the shown form.
+fn styled_id(shown: &str, prefix: &str, kind: IdKind) -> String {
     let split = shown
         .char_indices()
         .nth(prefix.chars().count())
         .map(|(i, _)| i)
         .unwrap_or(shown.len());
     let (head, tail) = shown.split_at(split);
-    format!(
-        "{}{}",
-        cstyle(head).yellow().bright(),
-        cstyle(tail).yellow()
-    )
+    kind.style(head, tail)
 }
 
 /// Print the listing. `drivers` holds the driver of each row in
@@ -423,10 +418,14 @@ fn styled_id(shown: &str, prefix: &str) -> String {
 /// could show. When the pass shrinks the column, each project cell is
 /// rewritten with the driver's form for the width the column got.
 fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, full_id: bool) {
+    let id_kind = match listing {
+        Listing::Native => IdKind::Native,
+        Listing::Stored => IdKind::Gage,
+    };
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for (r, driver) in rows.iter().zip(drivers) {
         let shown = if full_id { &r.id } else { &r.id_display };
-        let id_display = styled_id(shown, &r.id_prefix);
+        let id_display = styled_id(shown, &r.id_prefix, id_kind);
         let project = driver.format_project(&r.project, usize::MAX);
         let time = r
             .time_ms
@@ -445,7 +444,13 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
 
     let header: Vec<String> = match listing {
         Listing::Native => vec![
-            "Id", "Project", "Title", "Model", "Size", "Messages", "Modified",
+            "Native Id",
+            "Project",
+            "Title",
+            "Model",
+            "Size",
+            "Messages",
+            "Modified",
         ],
         Listing::Stored => vec![
             "Id", "Project", "Title", "Type", "Model", "Size", "Messages", "Created",
