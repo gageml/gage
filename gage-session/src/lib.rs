@@ -50,6 +50,12 @@ pub trait Driver: Send + Sync {
         content_format: &str,
         source: Box<dyn ContentSource>,
     ) -> Result<Box<dyn StoredSession>, DriverError>;
+
+    /// The display form of a model name from this driver's sessions.
+    /// The default shows the name as stored.
+    fn format_model(&self, model: &str) -> String {
+        model.to_string()
+    }
 }
 
 /// A handle over one source of native sessions. Dropping the handle

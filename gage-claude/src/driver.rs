@@ -69,6 +69,11 @@ impl Driver for ClaudeDriver {
         Ok(Box::new(ClaudeSource::open(source)?))
     }
 
+    /// Drops the `claude-` vendor prefix every Claude model name carries
+    fn format_model(&self, model: &str) -> String {
+        model.strip_prefix("claude-").unwrap_or(model).to_string()
+    }
+
     fn write_native(
         &self,
         session: &mut dyn NativeSession,
@@ -568,6 +573,14 @@ impl Entry for ClaudeEntry {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn format_model_strips_vendor_prefix() {
+        let driver = ClaudeDriver::new();
+        assert_eq!(driver.format_model("claude-fable-5-1"), "fable-5-1");
+        assert_eq!(driver.format_model("gpt-x"), "gpt-x");
+        assert_eq!(driver.format_model(""), "");
+    }
 
     fn seed_session(root: &Path, cwd: &str, id: &str, contents: &str) -> PathBuf {
         let slug = encode_project_dir(Path::new(cwd));

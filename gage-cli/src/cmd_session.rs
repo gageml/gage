@@ -13,7 +13,8 @@ use gage_claude::home::claude_home;
 use gage_claude::project::shorten_home_path;
 use gage_claude::session::{delete_session, encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
-use gage_session::Source;
+use gage_registry::driver::DriverRegistry;
+use gage_session::{Driver, Source};
 use gage_store::{SessionOutcome, SessionStore, Store};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
@@ -165,7 +166,14 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
     let (rows, total) = query_sessions(&ctx, &args, Listing::Native, project.as_deref()).await;
     if total > 0 {
         let labels = project_labels(source.as_ref(), &rows);
-        render_table(&rows, Listing::Native, Some(&labels), args.full_id);
+        let drivers: Vec<Arc<dyn Driver>> = vec![driver.clone(); rows.len()];
+        render_table(
+            &rows,
+            &drivers,
+            Listing::Native,
+            Some(&labels),
+            args.full_id,
+        );
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
@@ -200,11 +208,32 @@ async fn list_stored(args: SessionListArgs) {
     let ctx = gage_query::create_stored_context(Arc::new(Mutex::new(store)));
     let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, None).await;
     if total > 0 {
-        render_table(&rows, Listing::Stored, None, args.full_id);
+        let registry = source::driver_registry();
+        let drivers = match stored_drivers(&registry, &rows) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("gage session list: {e}");
+                std::process::exit(1);
+            }
+        };
+        render_table(&rows, &drivers, Listing::Stored, None, args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
     }
+}
+
+/// The driver that wrote each stored row, by the name the store
+/// recorded. A stored session whose driver this build lacks is an
+/// error: its rows cannot be presented.
+fn stored_drivers(registry: &DriverRegistry, rows: &[Row]) -> Result<Vec<Arc<dyn Driver>>, String> {
+    rows.iter()
+        .map(|r| {
+            registry
+                .for_name(&r.driver_name)
+                .ok_or_else(|| format!("{}: unknown session driver '{}'", r.id, r.driver_name))
+        })
+        .collect()
 }
 
 /// Resolve a `--project` value to the driver's project name: an
@@ -250,13 +279,13 @@ async fn query_sessions(
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let (type_col, time_col) = match listing {
-        Listing::Native => ("'' AS session_type", "mtime AS time"),
-        Listing::Stored => ("session_type", "created AS time"),
+    let (type_col, time_col, driver_col) = match listing {
+        Listing::Native => ("'' AS session_type", "mtime AS time", "'' AS driver"),
+        Listing::Stored => ("session_type", "created AS time", "driver"),
     };
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, title, {type_col}, model, size, \
-         message_count, {time_col} \
+         message_count, {time_col}, {driver_col} \
          FROM session{where_clause} \
          ORDER BY mtime DESC{limit_clause}",
     );
@@ -312,6 +341,10 @@ struct Row {
     message_count: Option<i64>,
     /// `mtime` for a native listing, `created` for the store
     time_ms: Option<i64>,
+    /// The name of the driver that wrote a stored row; empty for a
+    /// native listing, whose driver is the one the source was opened
+    /// with
+    driver_name: String,
 }
 
 fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
@@ -327,6 +360,7 @@ fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
         let sizes = column::<Int64Array>(batch, 7);
         let counts = column::<Int64Array>(batch, 8);
         let times = column::<TimestampMillisecondArray>(batch, 9);
+        let drivers = column::<StringArray>(batch, 10);
         for i in 0..batch.num_rows() {
             out.push(Row {
                 id: ids.value(i).to_string(),
@@ -339,10 +373,17 @@ fn rows_from_batches(batches: &[RecordBatch]) -> Vec<Row> {
                 size: sizes.is_valid(i).then(|| sizes.value(i)),
                 message_count: counts.is_valid(i).then(|| counts.value(i)),
                 time_ms: times.is_valid(i).then(|| times.value(i)),
+                driver_name: driver_name_of(drivers.value(i)).to_string(),
             });
         }
     }
     out
+}
+
+/// The name part of a stored session's `driver` value, which the
+/// store records as `"<name> <version>"`.
+fn driver_name_of(driver: &str) -> &str {
+    driver.split_once(' ').map_or(driver, |(name, _)| name)
 }
 
 fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
@@ -399,16 +440,18 @@ fn styled_id(shown: &str, prefix: &str) -> String {
     )
 }
 
-/// Print the listing. `labels` maps a project name to its display
-/// form; `None` shows the name as stored.
+/// Print the listing. `drivers` holds the driver of each row in
+/// `rows`, which formats the row's model name. `labels` maps a
+/// project name to its display form; `None` shows the name as stored.
 fn render_table(
     rows: &[Row],
+    drivers: &[Arc<dyn Driver>],
     listing: Listing,
     labels: Option<&HashMap<String, String>>,
     full_id: bool,
 ) {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
-    for r in rows {
+    for (r, driver) in rows.iter().zip(drivers) {
         let shown = if full_id { &r.id } else { &r.id_display };
         let id_display = styled_id(shown, &r.id_prefix);
         let project = labels
@@ -424,7 +467,8 @@ fn render_table(
         if listing == Listing::Stored {
             cells.push(r.session_type.clone());
         }
-        cells.extend([r.model.clone(), size, count, time]);
+        let model = driver.format_model(&r.model);
+        cells.extend([model, size, count, time]);
         table_rows.push(cells);
     }
 

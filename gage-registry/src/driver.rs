@@ -14,6 +14,8 @@ pub struct DriverRegistry {
     default: Option<Arc<dyn Driver>>,
     /// Each scheme maps to the first added driver that serves it
     by_scheme: HashMap<&'static str, Arc<dyn Driver>>,
+    /// Every added driver, in registration order
+    drivers: Vec<Arc<dyn Driver>>,
 }
 
 impl DriverRegistry {
@@ -21,6 +23,7 @@ impl DriverRegistry {
         Self {
             default: None,
             by_scheme: HashMap::new(),
+            drivers: Vec::new(),
         }
     }
 
@@ -47,11 +50,19 @@ impl DriverRegistry {
                 .entry(scheme)
                 .or_insert_with(|| driver.clone());
         }
+        self.drivers.push(driver);
         self
     }
 
     pub fn for_scheme(&self, scheme: &str) -> Option<Arc<dyn Driver>> {
         self.by_scheme.get(scheme).cloned()
+    }
+
+    /// The first added driver whose [`Driver::name`] is `name`. This
+    /// is the lookup for a stored session, which records its driver's
+    /// name rather than a scheme.
+    pub fn for_name(&self, name: &str) -> Option<Arc<dyn Driver>> {
+        self.drivers.iter().find(|d| d.name() == name).cloned()
     }
 
     pub fn default(&self) -> Option<Arc<dyn Driver>> {
@@ -129,6 +140,15 @@ mod tests {
             .add(Arc::new(Fake("two", &["b", "shared"])));
         assert_eq!(registry.driver_for("b:x").unwrap().name(), "two");
         assert_eq!(registry.driver_for("shared:x").unwrap().name(), "one");
+    }
+
+    #[test]
+    fn name_lookup_finds_any_added_driver() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        assert_eq!(registry.for_name("two").unwrap().name(), "two");
+        assert!(registry.for_name("three").is_none());
     }
 
     #[test]
