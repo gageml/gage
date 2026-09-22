@@ -48,23 +48,6 @@ pub struct DatasetRecord {
     pub session_count: usize,
 }
 
-/// Metadata for one member session in a dataset, resolved through the
-/// dataset's `sessions.link` file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionMeta {
-    /// 1-based index in `sessions.link`.
-    pub session_num: u32,
-    /// Native session id (`attrs.native_id`).
-    pub native_id: String,
-    pub driver_name: String,
-    pub driver_version: String,
-    /// Harness family (`attrs.session_type`).
-    pub session_type: String,
-    /// Driver-owned byte-layout string as returned by
-    /// [`Driver::write_native`].
-    pub content_format: String,
-}
-
 /// Summary of one member session in a dataset, for list views.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DatasetSessionSummary {
@@ -154,48 +137,6 @@ impl DatasetStore<'_> {
 
     /// Read a member session's metadata, resolving `session_ref` as
     /// either a decimal `<n>` or a native session id.
-    pub fn session_meta(
-        &self,
-        dataset_id: &str,
-        session_ref: &str,
-    ) -> Result<SessionMeta, StoreError> {
-        let members = members(&self.current(dataset_id)?);
-        let session_num = self.resolve_session_num(&members, session_ref)?;
-        let commit_sha = members
-            .get((session_num - 1) as usize)
-            .expect("resolve_session_num returns a valid 1-based index");
-        let record = SessionStore::from(self.store).at_commit(commit_sha)?;
-        Ok(SessionMeta {
-            session_num,
-            native_id: record.attrs.native_id,
-            driver_name: record.driver_name,
-            driver_version: record.driver_version,
-            session_type: record.attrs.session_type,
-            content_format: record.attrs.content_format,
-        })
-    }
-
-    fn resolve_session_num(
-        &self,
-        members: &[String],
-        session_ref: &str,
-    ) -> Result<u32, StoreError> {
-        if let Ok(n) = session_ref.parse::<u32>() {
-            if n == 0 || (n as usize) > members.len() {
-                return Err(StoreError::SessionNotFound(session_ref.to_string()));
-            }
-            return Ok(n);
-        }
-        let sessions = SessionStore::from(self.store);
-        for (idx, sha) in members.iter().enumerate() {
-            let record = sessions.at_commit(sha)?;
-            if record.attrs.native_id == session_ref {
-                return Ok((idx + 1) as u32);
-            }
-        }
-        Err(StoreError::SessionNotFound(session_ref.to_string()))
-    }
-
     /// Build a [`ContentSource`] backed by git for the session at
     /// position `session_num` in the given dataset.
     pub fn session_content(
@@ -970,14 +911,9 @@ mod tests {
 
         let listed = datasets.sessions_list(&dataset).unwrap();
         assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].session_num, 1);
+        assert_eq!(listed[0].native_id, "s1");
         assert_eq!(listed[0].size, Some(7));
-        let meta = datasets.session_meta(&dataset, "s1").unwrap();
-        assert_eq!(meta.session_num, 1);
-        assert_eq!(meta.driver_name, "fake");
-        assert!(matches!(
-            datasets.session_meta(&dataset, "3").unwrap_err(),
-            StoreError::SessionNotFound(s) if s == "3"
-        ));
     }
 
     #[test]

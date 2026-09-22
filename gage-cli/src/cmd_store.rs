@@ -1,8 +1,7 @@
 use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
 use gage_store::{
-    DatasetStore, EntryKind, InitOutcome, NoteInput, NoteRecord, NoteStore, SessionOutcome,
-    SessionSpec, Store, StoreStatus, TreeEntry,
+    EntryKind, InitOutcome, NoteInput, NoteRecord, NoteStore, Store, StoreStatus, TreeEntry,
 };
 use tabled::{
     Table,
@@ -15,7 +14,7 @@ use tabled::{
 
 use crate::author::resolve_author;
 use crate::human::{format_elapsed_ms, format_size};
-use crate::style::{self, IdHighlighter, IdKind};
+use crate::style;
 
 #[derive(Subcommand)]
 pub enum StoreCommand {
@@ -55,12 +54,6 @@ pub enum StoreCommand {
         command: NoteCommand,
     },
 
-    /// Manage store datasets
-    Dataset {
-        #[command(subcommand)]
-        command: DatasetCommand,
-    },
-
     /// Browse the store's object graph
     ///
     /// Opens an interactive view of `refs/gage/object/*`: refs listing
@@ -69,52 +62,6 @@ pub enum StoreCommand {
     /// chain) on the right. Payload agnostic --- object type names are
     /// shown but no `attrs.json` is interpreted.
     View,
-}
-
-#[derive(Subcommand)]
-pub enum DatasetCommand {
-    /// Manage dataset sessions
-    Session {
-        #[command(subcommand)]
-        command: DatasetSessionCommand,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum DatasetSessionCommand {
-    /// List sessions in a dataset
-    List(DatasetSessionListArgs),
-
-    /// Show a session's entry lines
-    Show(DatasetSessionShowArgs),
-
-    /// Add a session to a dataset
-    Add(DatasetSessionAddArgs),
-}
-
-#[derive(Args)]
-pub struct DatasetSessionListArgs {
-    /// Dataset id or unique prefix
-    dataset: String,
-}
-
-#[derive(Args)]
-pub struct DatasetSessionShowArgs {
-    /// Dataset id or unique prefix
-    dataset: String,
-
-    /// Session number (decimal `<n>`) or the native session id
-    session: String,
-}
-
-#[derive(Args)]
-pub struct DatasetSessionAddArgs {
-    /// Dataset id or unique prefix
-    dataset: String,
-
-    /// One or more session source specs, e.g. `claude:<session_id>`
-    #[arg(required = true)]
-    spec: Vec<String>,
 }
 
 #[derive(Args)]
@@ -223,16 +170,6 @@ pub fn run(command: StoreCommand) {
                 NoteCommand::New(args) => note_new(&notes, args),
                 NoteCommand::Edit(args) => note_edit(&notes, args),
                 NoteCommand::Delete(args) => note_delete(&notes, args),
-            }
-        }
-        StoreCommand::Dataset { command } => {
-            let datasets = DatasetStore::from(&store);
-            match command {
-                DatasetCommand::Session { command } => match command {
-                    DatasetSessionCommand::List(args) => dataset_session_list(&datasets, args),
-                    DatasetSessionCommand::Show(args) => dataset_session_show(&datasets, args),
-                    DatasetSessionCommand::Add(args) => dataset_session_add(&datasets, args),
-                },
             }
         }
         StoreCommand::View => view(store),
@@ -384,180 +321,6 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .into_iter()
     .map(|(k, before, after)| vec![k.to_string(), before, after])
     .collect()
-}
-
-fn dataset_session_list(datasets: &DatasetStore, args: DatasetSessionListArgs) {
-    let dataset_id = match datasets.resolve_id(&args.dataset) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage store dataset session list: {e}");
-            std::process::exit(1);
-        }
-    };
-    let sessions = match datasets.sessions_list(&dataset_id) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("gage store dataset session list: {e}");
-            std::process::exit(1);
-        }
-    };
-    if sessions.is_empty() {
-        println!("No sessions found");
-        return;
-    }
-    let header: Vec<String> = ["Num", "Type", "Native Id", "Size"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let highlighter = IdHighlighter::with_kind(
-        sessions.iter().map(|s| s.native_id.clone()).collect(),
-        IdKind::Native,
-    );
-    let rows: Vec<Vec<String>> = sessions
-        .iter()
-        .map(|s| {
-            vec![
-                s.session_num.to_string(),
-                s.session_type.clone(),
-                highlighter.full(&s.native_id),
-                s.size.map(|b| format_size(b as i64)).unwrap_or_default(),
-            ]
-        })
-        .collect();
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(
-            Columns::one(0).not(Rows::first()),
-            style::tty(Color::FG_YELLOW),
-        )
-        .modify(Columns::one(3).not(Rows::first()), style::dim())
-        .to_string();
-    println!("{table}");
-}
-
-fn dataset_session_show(datasets: &DatasetStore, args: DatasetSessionShowArgs) {
-    let dataset_id = match datasets.resolve_id(&args.dataset) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage store dataset session show: {e}");
-            std::process::exit(1);
-        }
-    };
-    let meta = match datasets.session_meta(&dataset_id, &args.session) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("gage store dataset session show: {e}");
-            std::process::exit(1);
-        }
-    };
-    let registry = gage_registry::driver::DriverRegistry::new()
-        .add(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
-    let driver = match registry.for_scheme(&meta.driver_name) {
-        Some(d) => d,
-        None => {
-            eprintln!(
-                "gage store dataset session show: unknown driver {:?}",
-                meta.driver_name
-            );
-            std::process::exit(1);
-        }
-    };
-    let source = match datasets.session_content(&dataset_id, meta.session_num) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("gage store dataset session show: {e}");
-            std::process::exit(1);
-        }
-    };
-    let mut session = match driver.read_stored(meta.native_id, &meta.content_format, source) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("gage store dataset session show: {e}");
-            std::process::exit(1);
-        }
-    };
-    for entry in session.entries() {
-        match entry {
-            Ok(e) => println!("{}", e.raw()),
-            Err(e) => {
-                eprintln!("gage store dataset session show: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
-fn dataset_session_add(datasets: &DatasetStore, args: DatasetSessionAddArgs) {
-    let dataset_id = match datasets.resolve_id(&args.dataset) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage store dataset session add: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let registry = gage_registry::driver::DriverRegistry::new()
-        .add(std::sync::Arc::new(gage_claude::driver::ClaudeDriver::new()));
-
-    // Resolve every spec into a reader before touching the store, so any
-    // driver failure short-circuits without a partial write.
-    struct Resolved {
-        driver: std::sync::Arc<dyn gage_session::Driver>,
-        reader: Box<dyn gage_session::NativeSession>,
-    }
-    let mut resolved: Vec<Resolved> = Vec::with_capacity(args.spec.len());
-    for spec in &args.spec {
-        let (scheme, id) = match spec.split_once(':') {
-            Some((s, i)) if !s.is_empty() && !i.is_empty() => (s, i),
-            _ => {
-                eprintln!(
-                    "gage store dataset session add: invalid spec {spec:?}: expected <driver>:<session_id>"
-                );
-                std::process::exit(1);
-            }
-        };
-        let driver = match registry.for_scheme(scheme) {
-            Some(d) => d,
-            None => {
-                eprintln!("gage store dataset session add: unknown driver {scheme:?}");
-                std::process::exit(1);
-            }
-        };
-        let reader = match driver.open_source("").and_then(|s| s.open_native(id)) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("gage store dataset session add: {spec}: {e}");
-                std::process::exit(1);
-            }
-        };
-        resolved.push(Resolved { driver, reader });
-    }
-
-    let specs: Vec<SessionSpec<'_>> = resolved
-        .iter_mut()
-        .map(|r| SessionSpec {
-            driver: r.driver.as_ref(),
-            session: r.reader.as_mut(),
-        })
-        .collect();
-
-    let outcomes = match datasets.sessions_add(&dataset_id, specs) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage store dataset session add: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    for outcome in &outcomes {
-        let verb = match outcome.outcome {
-            SessionOutcome::Added => "Added",
-            SessionOutcome::Updated => "Updated",
-            SessionOutcome::Unchanged => "Unchanged",
-        };
-        println!("{verb} session {}", outcome.session_num);
-    }
 }
 
 fn ls(store: &Store, args: LsArgs) {

@@ -47,7 +47,7 @@ pub enum StoreError {
         expected: String,
         actual: String,
     },
-    /// No session in the dataset matched the given num or session_id
+    /// No session in the dataset matched the given id
     SessionNotFound(String),
     /// The object index could not be opened, written, or queried
     Index(String),

@@ -52,7 +52,7 @@ mod writer;
 pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init, store_path};
 pub use dataset::{
     DatasetMembers, DatasetQuery, DatasetRecord, DatasetSessionAddOutcome, DatasetSessionSummary,
-    DatasetSessionUnlinkOutcome, DatasetStore, SessionMeta, SessionSpec,
+    DatasetSessionUnlinkOutcome, DatasetStore, SessionSpec,
 };
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
