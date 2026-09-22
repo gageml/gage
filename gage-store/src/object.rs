@@ -361,6 +361,52 @@ impl Store {
         Ok(commit_sha)
     }
 
+    /// Supersede the tombstone `current` with a parentless live commit
+    /// carrying `tree` as its content. `type`, `id`, and `created` are
+    /// the tombstone's entries, so the object keeps its identity;
+    /// `modified` is now; `deleted` and `parent` are absent. Prior
+    /// content is not restored. Applies to objects whose id is derived
+    /// from external inputs, where re-adding the same input after a
+    /// delete names the same object. Returns the new commit's SHA.
+    pub(crate) fn resurrect(
+        &self,
+        current: &Object,
+        tree: &ObjectTree,
+        message: &str,
+    ) -> Result<String, StoreError> {
+        if !current.header.is_tombstone() {
+            return Err(StoreError::ObjectLive(current.header.id.clone()));
+        }
+        let path = self.path();
+        let now = now_ms();
+        let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
+        let content = write_content(path, tree)?;
+        let mut entries = content.entries;
+        entries.insert("type".to_string(), current.marker("type")?);
+        entries.insert("id".to_string(), current.marker("id")?);
+        entries.insert("created".to_string(), current.marker("created")?);
+        entries.insert("modified".to_string(), blob_entry(&modified_sha));
+        let tree_sha = mktree(path, &tree_lines(&entries))?;
+
+        let links = self.link_files_for_write(tree, &tree_sha)?;
+        let parents = link_parents(None, &links);
+        let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
+        let commit_sha = commit_tree(path, &tree_sha, message, &parents)?;
+        let object = Object {
+            commit_sha: commit_sha.clone(),
+            header: ObjectHeader {
+                modified_ms: Some(now),
+                deleted_ms: None,
+                parent: None,
+                ..current.header.clone()
+            },
+            tree: tree.clone(),
+            entries,
+        };
+        self.record_write(&object, &links, &current.commit_sha)?;
+        Ok(commit_sha)
+    }
+
     /// List every ref under `refs/gage/object/` with its id and tip
     /// SHA.
     pub fn list_object_refs(&self) -> Result<Vec<ObjectRef>, StoreError> {
@@ -1250,6 +1296,74 @@ mod tests {
             store.delete(&object, "x").unwrap_err(),
             StoreError::ObjectDeleted(id) if id == "abc"
         ));
+    }
+
+    #[test]
+    fn resurrect_writes_parentless_live_commit_with_tombstone_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut tree = ObjectTree::default();
+        tree.attrs = Some(json!({ "n": 1 }));
+        tree.blobs.insert("body.txt".into(), b"x".to_vec());
+        let first = store
+            .create("gage::test", "1", "abc", &tree, "test")
+            .unwrap();
+        let live = store.read_object(&first).unwrap();
+        assert!(matches!(
+            store.resurrect(&live, &tree, "x").unwrap_err(),
+            StoreError::ObjectLive(id) if id == "abc"
+        ));
+
+        let tomb = store.delete(&live, "test: delete").unwrap();
+        let tombstone = store.read_object(&tomb).unwrap();
+        let mut new_tree = ObjectTree::default();
+        new_tree.attrs = Some(json!({ "n": 2 }));
+        new_tree.blobs.insert("body.txt".into(), b"y".to_vec());
+
+        let revived = store
+            .resurrect(&tombstone, &new_tree, "test: resurrect")
+            .unwrap();
+        assert!(commit_parents(&store, &revived).is_empty());
+        assert_eq!(
+            tree_names(&store, &revived),
+            vec![
+                "attrs.json",
+                "body.txt",
+                "created",
+                "id",
+                "modified",
+                "type"
+            ]
+        );
+        for marker in ["type", "id", "created"] {
+            assert_eq!(
+                cat(&store, &format!("{revived}:{marker}")),
+                cat(&store, &format!("{tomb}:{marker}")),
+                "{marker}"
+            );
+        }
+        assert_eq!(cat(&store, &format!("{revived}:body.txt")), "y");
+        assert_eq!(
+            store.rev_parse(&object_ref("abc")).unwrap().unwrap(),
+            revived
+        );
+
+        let object = store.read_object(&revived).unwrap();
+        assert!(!object.header.is_tombstone());
+        assert_eq!(object.header.created_ms, tombstone.header.created_ms);
+        assert_eq!(object.header.parent, None);
+        assert_eq!(object.tree, new_tree);
+
+        // The revived object edits as any live object, chaining from
+        // the resurrection commit
+        let edited = match store.edit(&object, &tree, "test: edit").unwrap() {
+            EditOutcome::Written(sha) => sha,
+            EditOutcome::Unchanged => panic!("content differs"),
+        };
+        assert_eq!(
+            cat(&store, &format!("{edited}:parent")),
+            format!("{revived}\n")
+        );
     }
 
     #[test]

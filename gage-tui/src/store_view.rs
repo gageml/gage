@@ -442,7 +442,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     let [body, footer] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
     let [tree_area, detail_area] =
-        Layout::horizontal([Constraint::Length(44), Constraint::Min(0)]).areas(body);
+        Layout::horizontal([Constraint::Length(30), Constraint::Min(0)]).areas(body);
     draw_tree(frame, tree_area, state);
     draw_detail(frame, detail_area, state);
     draw_footer(frame, footer, state);

@@ -41,6 +41,12 @@ pub enum SessionCommand {
     /// it when its content changed and is otherwise a no-op.
     Add(SessionAddArgs),
 
+    /// Remove stored sessions from the store
+    ///
+    /// Each session is marked removed in the store and no longer
+    /// listed. The native session in its source is not affected.
+    Remove(SessionRemoveArgs),
+
     /// Delete native sessions
     ///
     /// Removes each session's files from the selected source. Stored
@@ -81,6 +87,13 @@ pub struct SessionAddArgs {
     /// Session IDs (or prefixes)
     #[arg(required = true)]
     pub sessions: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct SessionRemoveArgs {
+    /// Stored session IDs (or prefixes)
+    #[arg(required = true)]
+    pub ids: Vec<String>,
 }
 
 #[derive(Args)]
@@ -476,7 +489,7 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
     table.with(
         Width::truncate(term_width)
             .suffix("…")
-            .priority(style::IdAwarePriority::new(full_id)),
+            .priority(style::IdAwarePriority::new(full_id).weight(TITLE_COL, 2)),
     );
     refit_project_cells(&mut table, rows, drivers);
     println!("{table}");
@@ -484,6 +497,9 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
 
 /// Column index of the project cell in the listing
 const PROJECT_COL: usize = 1;
+
+/// Column index of the title cell in the listing
+const TITLE_COL: usize = 2;
 
 /// Rewrite each project cell to the driver's form for the width the
 /// width pass gave the column. A table that fit the terminal has no
@@ -592,11 +608,62 @@ pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
             SessionOutcome::Updated => "Updated",
             SessionOutcome::Unchanged => "Unchanged",
         };
-        println!("{verb} {} {id}", short_uuid(&outcome.id));
+        println!("{verb} session {} (native {id})", outcome.id);
     }
     if let Err(e) = source.close() {
         eprintln!("gage session add: {spec}: {e}");
         std::process::exit(1);
+    }
+}
+
+pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
+    if source.is_some() {
+        eprintln!(
+            "gage session remove: --source does not apply; sessions are removed from the store"
+        );
+        std::process::exit(1);
+    }
+    if stored {
+        eprintln!("warning: --stored is redundant; sessions are removed from the store");
+    }
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage session remove: {e}");
+            std::process::exit(1);
+        }
+    };
+    let sessions = SessionStore::from(&store);
+
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut records = Vec::with_capacity(args.ids.len());
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match sessions.get(prefix) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                eprintln!("gage session remove: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    for record in &records {
+        let removed = match sessions.remove(&record.id) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("gage session remove: {}: {e}", short_uuid(&record.id));
+                std::process::exit(1);
+            }
+        };
+        println!(
+            "Removed session {} (native {})",
+            removed.id, removed.attrs.native_id
+        );
     }
 }
 

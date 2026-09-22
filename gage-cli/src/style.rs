@@ -35,13 +35,37 @@ pub fn dim_italic() -> Color {
 /// Truncates the biggest column first (like `PriorityMax::left`), but never
 /// picks the Id column (index 0) when `protect_id` is set, so a full ID is
 /// preserved while the other columns absorb the shrink.
+///
+/// A column's weight scales its width for the comparison: a column of
+/// weight 2 is picked only when it is more than twice as wide as a
+/// column of weight 1, so at equilibrium it holds twice the width.
+/// Columns without an explicit weight have weight 1.
 pub struct IdAwarePriority {
     protect_id: bool,
+    weights: Vec<usize>,
 }
 
 impl IdAwarePriority {
     pub fn new(protect_id: bool) -> Self {
-        Self { protect_id }
+        Self {
+            protect_id,
+            weights: Vec::new(),
+        }
+    }
+
+    /// Set the weight of column `col`. A weight of zero is treated as 1.
+    pub fn weight(mut self, col: usize, weight: usize) -> Self {
+        if self.weights.len() <= col {
+            self.weights.resize(col + 1, 1);
+        }
+        if let Some(slot) = self.weights.get_mut(col) {
+            *slot = weight.max(1);
+        }
+        self
+    }
+
+    fn weight_of(&self, col: usize) -> usize {
+        self.weights.get(col).copied().unwrap_or(1)
     }
 }
 
@@ -55,7 +79,8 @@ impl Peaker for IdAwarePriority {
             .skip(start)
             .rev()
             .filter(|&(i, w)| w != 0 && (mins.is_empty() || mins.get(i).is_none_or(|&m| w > m)))
-            .max_by_key(|&(_, w)| w)
+            // Compare w_a / weight_a against w_b / weight_b without division
+            .max_by(|&(a, wa), &(b, wb)| (wa * self.weight_of(b)).cmp(&(wb * self.weight_of(a))))
             .map(|(i, _)| i)
     }
 }

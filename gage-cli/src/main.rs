@@ -272,6 +272,9 @@ async fn main() {
                     cmd_session::list(source, stored, args).await
                 }
                 cmd_session::SessionCommand::Add(args) => cmd_session::add(source, stored, args),
+                cmd_session::SessionCommand::Remove(args) => {
+                    cmd_session::remove(source, stored, args)
+                }
                 cmd_session::SessionCommand::Delete(args) => {
                     cmd_session::delete(source, stored, args).await
                 }

@@ -196,6 +196,18 @@ impl SessionStore<'_> {
             Some(sha) => {
                 let current = self.store.read_object(&sha)?;
                 require_type(&current, OBJECT_TYPE)?;
+                if current.header.is_tombstone() {
+                    // Re-add after remove: the derived id names the
+                    // same object, so a live commit supersedes the
+                    // tombstone under the object's identity
+                    let message = format!("session: {subject}");
+                    let commit_sha = self.store.resurrect(&current, &tree, &message)?;
+                    return Ok(SessionAddOutcome {
+                        id,
+                        commit_sha,
+                        outcome: SessionOutcome::Added,
+                    });
+                }
                 let message = format!("session edit: {subject}");
                 match self.store.edit(&current, &tree, &message)? {
                     EditOutcome::Unchanged => Ok(SessionAddOutcome {
@@ -211,6 +223,25 @@ impl SessionStore<'_> {
                 }
             }
         }
+    }
+
+    /// Remove a stored session by writing a parentless tombstone
+    /// commit. The native session in its source is not touched.
+    /// Returns the session as it was before removal.
+    pub fn remove(&self, id_or_prefix: &str) -> Result<SessionRecord, StoreError> {
+        let record = self.get(id_or_prefix)?;
+        let object = self.store.read_object(&record.commit_sha)?;
+        let message = format!(
+            "session remove: {}:{}",
+            record.driver_name, record.attrs.native_id
+        );
+        self.store.delete(&object, &message)?;
+        Ok(record)
+    }
+
+    /// Read the live session for `id_or_prefix`.
+    pub fn get(&self, id_or_prefix: &str) -> Result<SessionRecord, StoreError> {
+        decode(self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?)
     }
 
     /// Every live session, newest created first, read lazily.
@@ -682,6 +713,135 @@ mod tests {
             cat(&store, &format!("{}:parent", grown.commit_sha)),
             format!("{}\n", first.commit_sha)
         );
+    }
+
+    #[test]
+    fn remove_writes_parentless_tombstone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let added = sessions
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let ref_path = object_ref(&added.id);
+        let created_before = cat(&store, &format!("{ref_path}:created"));
+
+        let removed = sessions.remove(&added.id).unwrap();
+        assert_eq!(removed.id, added.id);
+        assert_eq!(removed.commit_sha, added.commit_sha);
+        assert_eq!(removed.attrs.native_id, "s1");
+
+        let tip = store.rev_parse(&ref_path).unwrap().unwrap();
+        let commit = cat(&store, &tip);
+        assert!(!commit.contains("\nparent "), "{commit}");
+        assert!(commit.contains("\nsession remove: fake:s1"), "{commit}");
+
+        let listing = run(git_in(store.path(), ["ls-tree", "--name-only", &ref_path])).unwrap();
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec!["created", "deleted", "id", "modified", "type"]
+        );
+        assert_eq!(cat(&store, &format!("{ref_path}:created")), created_before);
+        assert_eq!(
+            cat(&store, &format!("{ref_path}:deleted")),
+            cat(&store, &format!("{ref_path}:modified"))
+        );
+    }
+
+    #[test]
+    fn remove_hides_from_iter_and_refuses_repeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let keep = sessions
+            .add(&FakeDriver, &mut fake("keep", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let gone = sessions
+            .add(&FakeDriver, &mut fake("gone", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+
+        sessions.remove(&gone.id).unwrap();
+
+        let ids: Vec<String> = sessions.iter().unwrap().map(|r| r.unwrap().id).collect();
+        assert_eq!(ids, vec![keep.id]);
+        assert!(matches!(
+            sessions.remove(&gone.id).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == gone.id
+        ));
+        assert!(matches!(
+            sessions.get(&gone.id).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == gone.id
+        ));
+    }
+
+    #[test]
+    fn add_after_remove_supersedes_tombstone_with_same_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let first = sessions
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let ref_path = object_ref(&first.id);
+        let created = cat(&store, &format!("{ref_path}:created"));
+        sessions.remove(&first.id).unwrap();
+
+        let again = sessions
+            .add(
+                &FakeDriver,
+                &mut fake("s1", &[("session.jsonl", "{}\n{}\n")]),
+            )
+            .unwrap();
+        assert_eq!(again.outcome, SessionOutcome::Added);
+        assert_eq!(again.id, first.id);
+        assert_ne!(again.commit_sha, first.commit_sha);
+
+        let tip = store.rev_parse(&ref_path).unwrap().unwrap();
+        assert_eq!(tip, again.commit_sha);
+        let commit = cat(&store, &tip);
+        assert!(!commit.contains("\nparent "), "{commit}");
+        assert!(commit.contains("\nsession: fake:s1"), "{commit}");
+        let listing = run(git_in(store.path(), ["ls-tree", "--name-only", &ref_path])).unwrap();
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec!["attrs.json", "created", "files.d", "id", "modified", "type"]
+        );
+        assert_eq!(cat(&store, &format!("{ref_path}:created")), created);
+        assert_eq!(
+            cat(&store, &format!("{ref_path}:files.d/session.jsonl")),
+            "{}\n{}\n"
+        );
+
+        let ids: Vec<String> = sessions.iter().unwrap().map(|r| r.unwrap().id).collect();
+        assert_eq!(ids, vec![first.id.clone()]);
+        assert_eq!(sessions.get(&first.id).unwrap().attrs.native_id, "s1");
+
+        // A later changed add edits the revived session, chaining from
+        // the resurrection commit
+        let grown = sessions
+            .add(
+                &FakeDriver,
+                &mut fake("s1", &[("session.jsonl", "{}\n{}\n{}\n")]),
+            )
+            .unwrap();
+        assert_eq!(grown.outcome, SessionOutcome::Updated);
+        assert_eq!(
+            cat(&store, &format!("{}:parent", grown.commit_sha)),
+            format!("{}\n", again.commit_sha)
+        );
+    }
+
+    #[test]
+    fn get_resolves_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let added = sessions
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let record = sessions.get(&added.id[..8]).unwrap();
+        assert_eq!(record.id, added.id);
+        assert_eq!(record.attrs.native_id, "s1");
     }
 
     #[test]
