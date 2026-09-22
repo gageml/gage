@@ -85,6 +85,10 @@ pub trait Source: Send + Sync {
 
     fn open_native(&self, native_id: &str) -> Result<Box<dyn NativeSession>, DriverError>;
 
+    /// Remove a native session and any content stored alongside it.
+    /// An unknown id is an error.
+    fn delete_native(&self, native_id: &str) -> Result<(), DriverError>;
+
     /// The project name this driver assigns to a directory. Matches
     /// the `project` column of the `session` table.
     fn project_name(&self, path: &Path) -> Result<String, DriverError>;

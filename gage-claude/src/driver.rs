@@ -26,7 +26,9 @@ use gage_session::{
 
 use crate::home::ClaudeHome;
 use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_session};
-use crate::session::{SESSION_RE, encode_project_dir, is_agent_tmp_slug, projects_dir};
+use crate::session::{
+    SESSION_RE, delete_session, encode_project_dir, is_agent_tmp_slug, projects_dir,
+};
 use crate::tables::{EntryTable, MessageTable, SessionTable};
 
 const NAME: &str = "claude";
@@ -221,23 +223,21 @@ impl Source for ClaudeSource {
     }
 
     fn open_native(&self, native_id: &str) -> Result<Box<dyn NativeSession>, DriverError> {
-        for hit in walk_session_files(&self.projects_dir) {
-            let (id, path, meta) = hit?;
-            if id == native_id {
-                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                return Ok(Box::new(ClaudeNativeSession::open(
-                    &id,
-                    &path,
-                    mtime,
-                    meta.len(),
-                    &self.root,
-                    &self.store,
-                )?));
-            }
-        }
-        Err(DriverError::Other(format!(
-            "native session not found: {NAME}:{native_id}"
-        )))
+        let (path, meta) = self.session_file(native_id)?;
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        Ok(Box::new(ClaudeNativeSession::open(
+            native_id,
+            &path,
+            mtime,
+            meta.len(),
+            &self.root,
+            &self.store,
+        )?))
+    }
+
+    fn delete_native(&self, native_id: &str) -> Result<(), DriverError> {
+        let (path, _meta) = self.session_file(native_id)?;
+        Ok(delete_session(&path)?)
     }
 
     fn project_name(&self, path: &Path) -> Result<String, DriverError> {
@@ -293,6 +293,21 @@ fn shorten_project_name(name: &str, max_chars: usize) -> String {
     let head: String = name.chars().take(head_len).collect();
     let tail: String = name.chars().skip(count - tail_len).collect();
     format!("{head}{ELLIPSIS}{tail}")
+}
+
+impl ClaudeSource {
+    /// The session file for `native_id` and its metadata
+    fn session_file(&self, native_id: &str) -> Result<(PathBuf, fs::Metadata), DriverError> {
+        for hit in walk_session_files(&self.projects_dir) {
+            let (id, path, meta) = hit?;
+            if id == native_id {
+                return Ok((path, meta));
+            }
+        }
+        Err(DriverError::Other(format!(
+            "native session not found: {NAME}:{native_id}"
+        )))
+    }
 }
 
 fn load_projects(root: &Path) -> io::Result<HashMap<String, PathBuf>> {
@@ -612,6 +627,32 @@ impl Entry for ClaudeEntry {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn delete_native_removes_session_and_sidecar() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let path = seed_session(root, "/Users/alice/Code/gage", id, "");
+        let sidecar = path.with_extension("");
+        fs::create_dir_all(sidecar.join("subagents")).unwrap();
+
+        let source = ClaudeDriver::new().open_source(&source_for(root)).unwrap();
+        source.delete_native(id).unwrap();
+        assert!(!path.exists());
+        assert!(!sidecar.exists());
+        assert!(source.open_native(id).is_err());
+    }
+
+    #[test]
+    fn delete_native_unknown_id_errors() {
+        let tmp = TempDir::new().unwrap();
+        let source = ClaudeDriver::new()
+            .open_source(&source_for(tmp.path()))
+            .unwrap();
+        let err = source.delete_native("nope").unwrap_err();
+        assert!(err.to_string().contains("native session not found"));
+    }
 
     #[test]
     fn format_project_strips_home_prefix() {

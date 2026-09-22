@@ -5,11 +5,13 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use console::style as cstyle;
-use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::array::{
+    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
+};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_claude::home::claude_home;
-use gage_claude::session::{delete_session, encode_project_dir, one_session};
+use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source};
@@ -593,18 +595,13 @@ pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
 /// The query context over the default source. `delete` and `view`
 /// resolve sessions through the pre-driver path and are not yet
 /// source-aware; they operate on the default source only.
-async fn default_context(command: &str) -> SessionContext {
-    let source = source::open_source_or_exit(command, "");
-    match gage_query::create_context(source.as_ref()).await {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
+pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArgs) {
+    if stored {
+        eprintln!(
+            "gage session delete: --stored does not apply; sessions are deleted from a source"
+        );
+        std::process::exit(1);
     }
-}
-
-pub async fn delete(args: SessionDeleteArgs) {
     if args.ids.is_empty() && !args.empty {
         eprintln!(
             "gage session delete: provide session IDs or --empty\n\n\
@@ -613,41 +610,44 @@ pub async fn delete(args: SessionDeleteArgs) {
         std::process::exit(1);
     }
 
-    let mut sessions: Vec<(String, PathBuf)> = Vec::new();
-    let empty_count;
-    let non_empty_count;
-
-    if args.empty {
-        let spinner = style::spinner("Looking for empty sessions...");
-        let ctx = default_context("gage session delete").await;
-        let sql = "SELECT id, path FROM session WHERE is_empty";
-        let batches = run_query(&ctx, sql).await;
-        for batch in &batches {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let paths = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                sessions.push((ids.value(i).to_string(), PathBuf::from(paths.value(i))));
-            }
+    let registry = source::driver_registry();
+    let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("gage session delete: {e}");
+            std::process::exit(1);
         }
+    };
+    let source = match driver.open_source(&spec) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gage session delete: {spec}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let ctx = match gage_query::create_source_context(source.as_ref()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("gage session delete: {spec}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let targets = if args.empty {
+        let spinner = style::spinner("Looking for empty sessions...");
+        let targets = delete_targets(&ctx, "SELECT id, is_empty FROM session WHERE is_empty").await;
         spinner.finish_and_clear();
-        empty_count = sessions.len();
-        non_empty_count = 0;
+        targets
     } else {
-        let ctx = default_context("gage session delete").await;
+        // Resolve every argument before deleting anything, so one bad
+        // argument leaves the source untouched
+        let mut ids: Vec<String> = Vec::with_capacity(args.ids.len());
         let mut errors = 0;
         for prefix in &args.ids {
-            match one_session(prefix) {
-                Ok(session) => sessions.push((session.id, session.src)),
+            match source.find_native(prefix) {
+                Ok(id) => ids.push(id),
                 Err(e) => {
-                    eprintln!("{e}");
+                    eprintln!("gage session delete: {e}");
                     errors += 1;
                 }
             }
@@ -655,33 +655,18 @@ pub async fn delete(args: SessionDeleteArgs) {
         if errors > 0 {
             std::process::exit(1);
         }
-
-        let in_list = sessions
+        let in_list = ids
             .iter()
-            .map(|(id, _)| format!("'{}'", id.replace('\'', "''")))
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("SELECT id FROM session WHERE NOT is_empty AND id IN ({in_list})");
-        let batches = run_query(&ctx, &sql).await;
-        let mut has_messages = std::collections::HashSet::new();
-        for batch in &batches {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                has_messages.insert(ids.value(i).to_string());
-            }
-        }
-        non_empty_count = sessions
-            .iter()
-            .filter(|(id, _)| has_messages.contains(id))
-            .count();
-        empty_count = sessions.len() - non_empty_count;
-    }
+        let sql = format!("SELECT id, is_empty FROM session WHERE id IN ({in_list})");
+        delete_targets(&ctx, &sql).await
+    };
+    let empty_count = targets.iter().filter(|t| t.is_empty).count();
+    let non_empty_count = targets.len() - empty_count;
 
-    if sessions.is_empty() {
+    if targets.is_empty() {
         dialog::run("Delete sessions", || Ok("Nothing to delete".into()));
         return;
     }
@@ -705,9 +690,9 @@ pub async fn delete(args: SessionDeleteArgs) {
         }
 
         let mut deleted = 0;
-        for (id, path) in &sessions {
-            if let Err(e) = delete_session(path) {
-                eprintln!("warning: failed to delete {}: {e}", short_uuid(id));
+        for t in &targets {
+            if let Err(e) = source.delete_native(&t.id) {
+                eprintln!("warning: failed to delete {}: {e}", short_uuid(&t.id));
             } else {
                 deleted += 1;
             }
@@ -716,6 +701,32 @@ pub async fn delete(args: SessionDeleteArgs) {
         let plural = if deleted == 1 { "session" } else { "sessions" };
         Ok(format!("Deleted {deleted} {plural}").into())
     });
+    if let Err(e) = source.close() {
+        eprintln!("gage session delete: {spec}: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// A session selected for deletion
+struct DeleteTarget {
+    id: String,
+    is_empty: bool,
+}
+
+/// Run `sql`, which selects `id` and `is_empty`, as the delete targets
+async fn delete_targets(ctx: &SessionContext, sql: &str) -> Vec<DeleteTarget> {
+    let mut targets = Vec::new();
+    for batch in &run_query(ctx, sql).await {
+        let ids = column::<StringArray>(batch, 0);
+        let empties = column::<BooleanArray>(batch, 1);
+        for i in 0..batch.num_rows() {
+            targets.push(DeleteTarget {
+                id: ids.value(i).to_string(),
+                is_empty: empties.is_valid(i) && empties.value(i),
+            });
+        }
+    }
+    targets
 }
 
 pub async fn view(args: SessionViewArgs) {
