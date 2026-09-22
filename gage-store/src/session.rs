@@ -18,6 +18,7 @@ use gage_core::uuid::derive_id;
 use gage_session::{ContentSink, Driver, NativeSession, SessionAttrs};
 use serde::{Deserialize, Serialize};
 
+use crate::dataset::{DatasetMembers, DatasetStore};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
@@ -112,6 +113,17 @@ pub enum SessionOutcome {
     Updated,
     /// Existing session content matched; no commit was written.
     Unchanged,
+}
+
+/// Outcome of removing sessions from the store.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SessionRemoveOutcome {
+    /// The removed sessions as they were before removal, in argument
+    /// order with duplicates dropped.
+    pub sessions: Vec<SessionRecord>,
+    /// The datasets that held any of the sessions, each with the
+    /// members unlinked from it.
+    pub datasets: Vec<DatasetMembers>,
 }
 
 /// A stored session presented for reading, resolved to its commit.
@@ -225,18 +237,41 @@ impl SessionStore<'_> {
         }
     }
 
-    /// Remove a stored session by writing a parentless tombstone
-    /// commit. The native session in its source is not touched.
-    /// Returns the session as it was before removal.
-    pub fn remove(&self, id_or_prefix: &str) -> Result<SessionRecord, StoreError> {
-        let record = self.get(id_or_prefix)?;
-        let object = self.store.read_object(&record.commit_sha)?;
-        let message = format!(
-            "session remove: {}:{}",
-            record.driver_name, record.attrs.native_id
-        );
-        self.store.delete(&object, &message)?;
-        Ok(record)
+    /// Remove stored sessions. Every id or prefix is resolved to a live
+    /// session before anything is written. Each dataset that currently
+    /// holds any of the sessions is edited once to unlink all of them,
+    /// then each session's ref gets a parentless tombstone commit. The
+    /// native sessions in their sources are not touched. A failure
+    /// after the dataset edits leaves the sessions live and unlinked,
+    /// which `add` with a dataset repairs.
+    pub fn remove(&self, ids_or_prefixes: &[String]) -> Result<SessionRemoveOutcome, StoreError> {
+        let mut sessions: Vec<SessionRecord> = Vec::with_capacity(ids_or_prefixes.len());
+        for id_or_prefix in ids_or_prefixes {
+            let record = self.get(id_or_prefix)?;
+            if !sessions.iter().any(|r| r.id == record.id) {
+                sessions.push(record);
+            }
+        }
+        let ids: Vec<String> = sessions.iter().map(|r| r.id.clone()).collect();
+
+        let datasets = DatasetStore::from(self.store);
+        let held = datasets.containing(&ids)?;
+        for members in &held {
+            datasets.sessions_unlink(&members.dataset_id, &members.session_ids)?;
+        }
+
+        for record in &sessions {
+            let object = self.store.read_object(&record.commit_sha)?;
+            let message = format!(
+                "session remove: {}:{}",
+                record.driver_name, record.attrs.native_id
+            );
+            self.store.delete(&object, &message)?;
+        }
+        Ok(SessionRemoveOutcome {
+            sessions,
+            datasets: held,
+        })
     }
 
     /// Read the live session for `id_or_prefix`.
@@ -726,7 +761,9 @@ mod tests {
         let ref_path = object_ref(&added.id);
         let created_before = cat(&store, &format!("{ref_path}:created"));
 
-        let removed = sessions.remove(&added.id).unwrap();
+        let outcome = sessions.remove(&[added.id.clone()]).unwrap();
+        assert!(outcome.datasets.is_empty());
+        let removed = &outcome.sessions[0];
         assert_eq!(removed.id, added.id);
         assert_eq!(removed.commit_sha, added.commit_sha);
         assert_eq!(removed.attrs.native_id, "s1");
@@ -760,14 +797,22 @@ mod tests {
             .add(&FakeDriver, &mut fake("gone", &[("session.jsonl", "{}\n")]))
             .unwrap();
 
-        sessions.remove(&gone.id).unwrap();
+        sessions.remove(&[gone.id.clone()]).unwrap();
 
         let ids: Vec<String> = sessions.iter().unwrap().map(|r| r.unwrap().id).collect();
-        assert_eq!(ids, vec![keep.id]);
+        assert_eq!(ids, vec![keep.id.clone()]);
         assert!(matches!(
-            sessions.remove(&gone.id).unwrap_err(),
+            sessions.remove(&[gone.id.clone()]).unwrap_err(),
             StoreError::ObjectDeleted(id) if id == gone.id
         ));
+        // One bad argument leaves every session untouched
+        assert!(matches!(
+            sessions
+                .remove(&[keep.id.clone(), "zzz".to_string()])
+                .unwrap_err(),
+            StoreError::ObjectNotFound(p) if p == "zzz"
+        ));
+        assert_eq!(sessions.get(&keep.id).unwrap().id, keep.id);
         assert!(matches!(
             sessions.get(&gone.id).unwrap_err(),
             StoreError::ObjectDeleted(id) if id == gone.id
@@ -784,7 +829,7 @@ mod tests {
             .unwrap();
         let ref_path = object_ref(&first.id);
         let created = cat(&store, &format!("{ref_path}:created"));
-        sessions.remove(&first.id).unwrap();
+        sessions.remove(&[first.id.clone()]).unwrap();
 
         let again = sessions
             .add(
@@ -829,6 +874,71 @@ mod tests {
             cat(&store, &format!("{}:parent", grown.commit_sha)),
             format!("{}\n", again.commit_sha)
         );
+    }
+
+    #[test]
+    fn remove_unlinks_from_every_dataset_in_one_commit_each() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let datasets = DatasetStore::from(&store);
+        let s1 = sessions
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "a\n")]))
+            .unwrap();
+        let s2 = sessions
+            .add(&FakeDriver, &mut fake("s2", &[("session.jsonl", "b\n")]))
+            .unwrap();
+        let s3 = sessions
+            .add(&FakeDriver, &mut fake("s3", &[("session.jsonl", "c\n")]))
+            .unwrap();
+        let a = datasets.create().unwrap();
+        let b = datasets.create().unwrap();
+        datasets
+            .sessions_link(&a, &[s1.id.clone(), s2.id.clone(), s3.id.clone()])
+            .unwrap();
+        datasets.sessions_link(&b, &[s2.id.clone()]).unwrap();
+        let a_before = store.rev_parse(&object_ref(&a)).unwrap().unwrap();
+        let b_before = store.rev_parse(&object_ref(&b)).unwrap().unwrap();
+
+        let outcome = sessions.remove(&[s1.id.clone(), s2.id.clone()]).unwrap();
+        assert_eq!(outcome.sessions.len(), 2);
+        let mut held = outcome.datasets;
+        held.sort_by(|x, y| x.dataset_id.cmp(&y.dataset_id));
+        let mut expected = vec![
+            DatasetMembers {
+                dataset_id: a.clone(),
+                session_ids: vec![s1.id.clone(), s2.id.clone()],
+            },
+            DatasetMembers {
+                dataset_id: b.clone(),
+                session_ids: vec![s2.id.clone()],
+            },
+        ];
+        expected.sort_by(|x, y| x.dataset_id.cmp(&y.dataset_id));
+        assert_eq!(held, expected);
+
+        // Each dataset advanced by exactly one commit that drops the
+        // members and chains from the previous commit
+        for (dataset, before, remaining) in [(&a, &a_before, vec!["s3"]), (&b, &b_before, vec![])] {
+            let tip = store.rev_parse(&object_ref(dataset)).unwrap().unwrap();
+            assert_ne!(&tip, before);
+            assert_eq!(cat(&store, &format!("{tip}:parent")), format!("{before}\n"));
+            let listed: Vec<String> = datasets
+                .sessions_list(dataset)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.native_id)
+                .collect();
+            assert_eq!(listed, remaining);
+        }
+        assert!(sessions.get(&s1.id).is_err());
+        assert!(sessions.get(&s2.id).is_err());
+        assert_eq!(sessions.get(&s3.id).unwrap().id, s3.id);
+
+        // The removed session content stays reachable from the dataset
+        let a_tip = store.rev_parse(&object_ref(&a)).unwrap().unwrap();
+        let reachable = run(git_in(store.path(), ["rev-list", &a_tip])).unwrap();
+        assert!(reachable.lines().any(|l| l == s1.commit_sha), "{reachable}");
     }
 
     #[test]

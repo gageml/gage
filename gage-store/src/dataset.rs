@@ -87,6 +87,25 @@ pub struct DatasetSessionAddOutcome {
     pub outcome: SessionOutcome,
 }
 
+/// Outcome of unlinking one session from a dataset.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetSessionUnlinkOutcome {
+    /// Position in `sessions.link` before the operation.
+    pub session_num: u32,
+    /// Gage object id of the session.
+    pub id: String,
+    /// Native session id, read from the member commit.
+    pub native_id: String,
+}
+
+/// The current members of one dataset that belong to a queried set of
+/// sessions, in member order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetMembers {
+    pub dataset_id: String,
+    pub session_ids: Vec<String>,
+}
+
 /// One session to add to a dataset. The driver drives the serialization
 /// via [`Driver::write_native`]; `session` supplies the native id,
 /// type, and attributes.
@@ -250,31 +269,186 @@ impl DatasetStore<'_> {
                 commit_sha,
                 outcome,
             } = sessions.add(spec.driver, spec.session)?;
-            let session_num = match member_ids.iter().position(|m| m == &id) {
-                Some(idx) => {
-                    *members
-                        .get_mut(idx)
-                        .expect("idx came from member_ids, which parallels members") = commit_sha;
-                    (idx + 1) as u32
-                }
-                None => {
-                    members.push(commit_sha);
-                    member_ids.push(id.clone());
-                    members.len() as u32
-                }
-            };
+            let session_num = place_member(&mut members, &mut member_ids, &id, commit_sha);
             outcomes.push(DatasetSessionAddOutcome {
                 session_num,
                 id,
                 outcome,
             });
         }
+        let message = format_session_commit_message(&outcomes);
+        self.write_members(&dataset, members, &message)?;
+        Ok(outcomes)
+    }
 
+    /// Link already-stored sessions as members of the given dataset in
+    /// a single commit. Each id or prefix resolves to a live session
+    /// whose current commit takes the member's slot: a new slot is
+    /// [`SessionOutcome::Added`], an existing slot advanced to a newer
+    /// commit is [`SessionOutcome::Updated`], and a slot already at the
+    /// current commit is [`SessionOutcome::Unchanged`]. No session
+    /// object is written. When no member SHA changes, no dataset commit
+    /// is written.
+    pub fn sessions_link(
+        &self,
+        dataset_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dataset = self.current(dataset_id)?;
+        let mut members = members(&dataset);
+        let mut member_ids: Vec<String> = Vec::with_capacity(members.len());
+        for sha in &members {
+            member_ids.push(self.store.read_object(sha)?.header.id);
+        }
+
+        let sessions = SessionStore::from(self.store);
+        let mut outcomes: Vec<DatasetSessionAddOutcome> = Vec::with_capacity(ids.len());
+        for id_or_prefix in ids {
+            let record = sessions.get(id_or_prefix)?;
+            let outcome = match member_ids
+                .iter()
+                .position(|m| m == &record.id)
+                .and_then(|idx| members.get(idx))
+            {
+                Some(sha) if *sha == record.commit_sha => SessionOutcome::Unchanged,
+                Some(_) => SessionOutcome::Updated,
+                None => SessionOutcome::Added,
+            };
+            let session_num =
+                place_member(&mut members, &mut member_ids, &record.id, record.commit_sha);
+            outcomes.push(DatasetSessionAddOutcome {
+                session_num,
+                id: record.id,
+                outcome,
+            });
+        }
+        let message = format_session_commit_message(&outcomes);
+        self.write_members(&dataset, members, &message)?;
+        Ok(outcomes)
+    }
+
+    /// Unlink sessions from the given dataset in a single commit. Each
+    /// id or prefix resolves to a session object, live or removed,
+    /// that is a current member; a non-member is
+    /// [`StoreError::SessionNotFound`] and nothing is written. Later
+    /// members move up to fill the vacated positions. The session
+    /// objects are not touched, and the previous dataset commit keeps
+    /// the unlinked commits reachable.
+    pub fn sessions_unlink(
+        &self,
+        dataset_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<DatasetSessionUnlinkOutcome>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dataset = self.current(dataset_id)?;
+        let members = members(&dataset);
+        let mut member_ids: Vec<String> = Vec::with_capacity(members.len());
+        for sha in &members {
+            member_ids.push(self.store.read_header(sha)?.id);
+        }
+
+        let sessions = SessionStore::from(self.store);
+        let mut drop: Vec<usize> = Vec::with_capacity(ids.len());
+        let mut outcomes: Vec<DatasetSessionUnlinkOutcome> = Vec::with_capacity(ids.len());
+        for id_or_prefix in ids {
+            let (id, _) = self.store.resolve_id(id_or_prefix)?;
+            let idx = member_ids
+                .iter()
+                .position(|m| *m == id)
+                .ok_or_else(|| StoreError::SessionNotFound(id_or_prefix.clone()))?;
+            if drop.contains(&idx) {
+                continue;
+            }
+            let sha = members
+                .get(idx)
+                .expect("idx came from member_ids, which parallels members");
+            let record = sessions.at_commit(sha)?;
+            drop.push(idx);
+            outcomes.push(DatasetSessionUnlinkOutcome {
+                session_num: (idx + 1) as u32,
+                id,
+                native_id: record.attrs.native_id,
+            });
+        }
+
+        let kept: Vec<String> = members
+            .into_iter()
+            .enumerate()
+            .filter(|(idx, _)| !drop.contains(idx))
+            .map(|(_, sha)| sha)
+            .collect();
+        let mut nums: Vec<u32> = outcomes.iter().map(|o| o.session_num).collect();
+        nums.sort();
+        let message = format!("sessions: remove {}", join_nums(&nums));
+        self.write_members(&dataset, kept, &message)?;
+        Ok(outcomes)
+    }
+
+    /// The datasets whose current members include any of
+    /// `session_ids`, each with the subset it holds in member order.
+    /// Datasets holding none are omitted.
+    pub fn containing(&self, session_ids: &[String]) -> Result<Vec<DatasetMembers>, StoreError> {
+        let mut out = Vec::new();
+        for tip in self.store.select(&ObjectQuery::new(OBJECT_TYPE))? {
+            let dataset = self.store.read_object(&tip.sha)?;
+            let mut held = Vec::new();
+            for sha in members(&dataset) {
+                let id = self.store.read_header(&sha)?.id;
+                if session_ids.contains(&id) && !held.contains(&id) {
+                    held.push(id);
+                }
+            }
+            if !held.is_empty() {
+                out.push(DatasetMembers {
+                    dataset_id: dataset.header.id,
+                    session_ids: held,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Write `members` as the dataset's `sessions.link` in one edit
+    /// commit. Unchanged content writes nothing.
+    fn write_members(
+        &self,
+        dataset: &Object,
+        members: Vec<String>,
+        message: &str,
+    ) -> Result<(), StoreError> {
         let mut tree = ObjectTree::default();
         tree.links.insert(SESSIONS_LINK.to_string(), members);
-        let message = format_session_commit_message(&outcomes);
-        match self.store.edit(&dataset, &tree, &message)? {
-            EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(outcomes),
+        match self.store.edit(dataset, &tree, message)? {
+            EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(()),
+        }
+    }
+}
+
+/// Put `commit_sha` in the slot of member `id`, replacing the slot
+/// when the session is already a member and appending otherwise.
+/// `member_ids` parallels `members`. Returns the 1-based slot.
+fn place_member(
+    members: &mut Vec<String>,
+    member_ids: &mut Vec<String>,
+    id: &str,
+    commit_sha: String,
+) -> u32 {
+    match member_ids.iter().position(|m| m == id) {
+        Some(idx) => {
+            *members
+                .get_mut(idx)
+                .expect("idx came from member_ids, which parallels members") = commit_sha;
+            (idx + 1) as u32
+        }
+        None => {
+            members.push(commit_sha);
+            member_ids.push(id.to_string());
+            members.len() as u32
         }
     }
 }
@@ -797,6 +971,198 @@ mod tests {
             datasets.session_meta(&dataset, "3").unwrap_err(),
             StoreError::SessionNotFound(s) if s == "3"
         ));
+    }
+
+    #[test]
+    fn sessions_link_links_stored_sessions_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let sessions = SessionStore::from(&store);
+        let driver = FakeDriver;
+        let s1 = sessions.add(&driver, &mut fake("s1", "a\n")).unwrap();
+        let s2 = sessions.add(&driver, &mut fake("s2", "b\n")).unwrap();
+        let dataset = datasets.create().unwrap();
+        let before = rev_parse(&store, &dataset);
+
+        let outcomes = datasets
+            .sessions_link(&dataset, &[s1.id[..8].to_string(), s2.id.clone()])
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].id, s1.id);
+        assert_eq!(outcomes[0].session_num, 1);
+        assert_eq!(outcomes[1].id, s2.id);
+        assert_eq!(outcomes[1].session_num, 2);
+        assert!(outcomes.iter().all(|o| o.outcome == SessionOutcome::Added));
+
+        let tip = rev_parse(&store, &dataset);
+        let meta = store.read_commit(&tip).unwrap();
+        assert_eq!(
+            meta.parents,
+            vec![before, s1.commit_sha.clone(), s2.commit_sha.clone()]
+        );
+        assert!(
+            meta.message.starts_with("sessions: add 1, 2"),
+            "{}",
+            meta.message
+        );
+        let listed = datasets.sessions_list(&dataset).unwrap();
+        assert_eq!(listed[0].native_id, "s1");
+        assert_eq!(listed[1].native_id, "s2");
+
+        // Linking again at the same commits writes nothing
+        let again = datasets.sessions_link(&dataset, &[s1.id.clone()]).unwrap();
+        assert_eq!(again[0].outcome, SessionOutcome::Unchanged);
+        assert_eq!(rev_parse(&store, &dataset), tip);
+
+        // A grown session advances its slot to the current commit
+        let grown = sessions.add(&driver, &mut fake("s1", "a\nmore\n")).unwrap();
+        assert_eq!(grown.outcome, SessionOutcome::Updated);
+        let advanced = datasets.sessions_link(&dataset, &[s1.id.clone()]).unwrap();
+        assert_eq!(advanced[0].outcome, SessionOutcome::Updated);
+        assert_eq!(advanced[0].session_num, 1);
+        assert_ne!(rev_parse(&store, &dataset), tip);
+        let listed = datasets.sessions_list(&dataset).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].size, Some(7));
+    }
+
+    #[test]
+    fn sessions_link_rejects_removed_and_unknown_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let sessions = SessionStore::from(&store);
+        let s1 = sessions.add(&FakeDriver, &mut fake("s1", "a\n")).unwrap();
+        sessions.remove(&[s1.id.clone()]).unwrap();
+        let dataset = datasets.create().unwrap();
+        let tip = rev_parse(&store, &dataset);
+
+        assert!(matches!(
+            datasets.sessions_link(&dataset, &[s1.id.clone()]).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == s1.id
+        ));
+        assert!(matches!(
+            datasets.sessions_link(&dataset, &["zzz".to_string()]).unwrap_err(),
+            StoreError::ObjectNotFound(p) if p == "zzz"
+        ));
+        assert!(matches!(
+            datasets
+                .sessions_link(&dataset, &[dataset.clone()])
+                .unwrap_err(),
+            StoreError::WrongType { .. }
+        ));
+        assert_eq!(rev_parse(&store, &dataset), tip);
+    }
+
+    #[test]
+    fn sessions_unlink_drops_members_in_one_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        let added = add(
+            &store,
+            &dataset,
+            &mut [fake("s1", "a\n"), fake("s2", "b\n"), fake("s3", "c\n")],
+        );
+        let before = rev_parse(&store, &dataset);
+        let s1 = rev_parse(&store, &added[0].id);
+        let s2 = rev_parse(&store, &added[1].id);
+
+        let outcomes = datasets
+            .sessions_unlink(
+                &dataset,
+                &[added[2].id.clone(), added[0].id[..8].to_string()],
+            )
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].session_num, 3);
+        assert_eq!(outcomes[0].native_id, "s3");
+        assert_eq!(outcomes[1].session_num, 1);
+        assert_eq!(outcomes[1].id, added[0].id);
+        assert_eq!(outcomes[1].native_id, "s1");
+
+        let tip = rev_parse(&store, &dataset);
+        let meta = store.read_commit(&tip).unwrap();
+        assert_eq!(meta.parents, vec![before.clone(), s2]);
+        assert_eq!(meta.message.trim(), "sessions: remove 1, 3");
+        let listed = datasets.sessions_list(&dataset).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_num, 1);
+        assert_eq!(listed[0].native_id, "s2");
+
+        // The previous dataset commit keeps the unlinked commit reachable
+        let reachable = run(git_in(store.path(), ["rev-list", &tip])).unwrap();
+        assert!(reachable.lines().any(|l| l == s1), "{reachable}");
+
+        // A non-member, live or not, is refused and nothing is written
+        assert!(matches!(
+            datasets
+                .sessions_unlink(&dataset, &[added[0].id.clone()])
+                .unwrap_err(),
+            StoreError::SessionNotFound(p) if p == added[0].id
+        ));
+        assert_eq!(rev_parse(&store, &dataset), tip);
+    }
+
+    #[test]
+    fn sessions_unlink_accepts_removed_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        let added = add(&store, &dataset, &mut [fake("s1", "a\n")]);
+        store
+            .delete(
+                &store.read_object(&rev_parse(&store, &added[0].id)).unwrap(),
+                "x",
+            )
+            .unwrap();
+
+        let outcomes = datasets
+            .sessions_unlink(&dataset, &[added[0].id.clone()])
+            .unwrap();
+        assert_eq!(outcomes[0].native_id, "s1");
+        assert!(datasets.sessions_list(&dataset).unwrap().is_empty());
+    }
+
+    #[test]
+    fn containing_reports_datasets_holding_the_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let a = datasets.create().unwrap();
+        let b = datasets.create().unwrap();
+        let _empty = datasets.create().unwrap();
+        let in_a = add(&store, &a, &mut [fake("s1", "a\n"), fake("s2", "b\n")]);
+        add(&store, &b, &mut [fake("s2", "b\n")]);
+        let (s1, s2) = (in_a[0].id.clone(), in_a[1].id.clone());
+
+        let mut found = datasets.containing(&[s1.clone(), s2.clone()]).unwrap();
+        found.sort_by(|x, y| x.dataset_id.cmp(&y.dataset_id));
+        let mut expected = vec![
+            DatasetMembers {
+                dataset_id: a.clone(),
+                session_ids: vec![s1.clone(), s2.clone()],
+            },
+            DatasetMembers {
+                dataset_id: b.clone(),
+                session_ids: vec![s2.clone()],
+            },
+        ];
+        expected.sort_by(|x, y| x.dataset_id.cmp(&y.dataset_id));
+        assert_eq!(found, expected);
+
+        let only_s1 = datasets.containing(&[s1.clone()]).unwrap();
+        assert_eq!(only_s1.len(), 1);
+        assert_eq!(only_s1[0].dataset_id, a);
+        assert!(
+            datasets
+                .containing(&["nope".to_string()])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

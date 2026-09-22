@@ -14,7 +14,7 @@ use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source};
-use gage_store::{SessionOutcome, SessionStore, Store};
+use gage_store::{DatasetStore, SessionOutcome, SessionSpec, SessionStore, Store};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
@@ -41,10 +41,13 @@ pub enum SessionCommand {
     /// it when its content changed and is otherwise a no-op.
     Add(SessionAddArgs),
 
-    /// Remove stored sessions from the store
+    /// Remove stored sessions from the store or from a dataset
     ///
-    /// Each session is marked removed in the store and no longer
-    /// listed. The native session in its source is not affected.
+    /// Without --dataset, each session is unlinked from every dataset
+    /// that holds it, then marked removed in the store. With
+    /// --dataset, each session is unlinked from that dataset only and
+    /// stays in the store. The native session in its source is never
+    /// affected.
     Remove(SessionRemoveArgs),
 
     /// Delete native sessions
@@ -85,8 +88,19 @@ pub struct SessionListArgs {
 #[derive(Args)]
 pub struct SessionAddArgs {
     /// Session IDs (or prefixes)
+    ///
+    /// Native session IDs from the selected source, or stored session
+    /// IDs with --stored --dataset
     #[arg(required = true)]
     pub sessions: Vec<String>,
+
+    /// Add the sessions to a dataset
+    ///
+    /// Dataset ID (or prefix). Native sessions are added to the store
+    /// and linked in one step; with --stored, sessions already in the
+    /// store are linked
+    #[arg(short, long, value_name = "DATASET")]
+    pub dataset: Option<String>,
 }
 
 #[derive(Args)]
@@ -94,6 +108,12 @@ pub struct SessionRemoveArgs {
     /// Stored session IDs (or prefixes)
     #[arg(required = true)]
     pub ids: Vec<String>,
+
+    /// Remove the sessions from a dataset only
+    ///
+    /// Dataset ID (or prefix). The sessions stay in the store
+    #[arg(short, long, value_name = "DATASET")]
+    pub dataset: Option<String>,
 }
 
 #[derive(Args)]
@@ -543,10 +563,83 @@ async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
 }
 
 pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
-    if stored {
-        eprintln!("gage session add: --stored does not apply; sessions are added from a source");
+    if stored && args.dataset.is_none() {
+        eprintln!(
+            "gage session add: --stored applies only with --dataset; sessions are added from a source"
+        );
         std::process::exit(1);
     }
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage session add: {e}");
+            std::process::exit(1);
+        }
+    };
+    let dataset_id =
+        args.dataset.as_deref().map(
+            |prefix| match DatasetStore::from(&store).resolve_id(prefix) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("gage session add: --dataset {prefix}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        );
+    match dataset_id {
+        Some(dataset_id) if stored => add_stored_to_dataset(&store, &dataset_id, &args.sessions),
+        _ => add_native(&store, source, dataset_id.as_deref(), &args.sessions),
+    }
+}
+
+/// Link sessions already in the store, given by Gage id or prefix, as
+/// members of `dataset_id`.
+fn add_stored_to_dataset(store: &Store, dataset_id: &str, prefixes: &[String]) {
+    let sessions = SessionStore::from(store);
+
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut records = Vec::with_capacity(prefixes.len());
+    let mut errors = 0;
+    for prefix in prefixes {
+        match sessions.get(prefix) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                eprintln!("gage session add: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+    let outcomes = match DatasetStore::from(store).sessions_link(dataset_id, &ids) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("gage session add: {e}");
+            std::process::exit(1);
+        }
+    };
+    for (outcome, record) in outcomes.iter().zip(&records) {
+        print_add_outcome(
+            &outcome.outcome,
+            &outcome.id,
+            &record.attrs.native_id,
+            Some(dataset_id),
+        );
+    }
+}
+
+/// Add native sessions from `source` to the store and, when
+/// `dataset_id` is given, link them as members in the same operation.
+fn add_native(
+    store: &Store,
+    source: Option<String>,
+    dataset_id: Option<&str>,
+    prefixes: &[String],
+) {
     let registry = source::driver_registry();
     let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
         Ok(v) => v,
@@ -565,9 +658,9 @@ pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
 
     // Resolve every argument before writing anything, so one bad
     // argument leaves the store untouched
-    let mut ids: Vec<String> = Vec::with_capacity(args.sessions.len());
+    let mut ids: Vec<String> = Vec::with_capacity(prefixes.len());
     let mut errors = 0;
-    for prefix in &args.sessions {
+    for prefix in prefixes {
         match source.find_native(prefix) {
             Ok(id) => ids.push(id),
             Err(e) => {
@@ -580,39 +673,66 @@ pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
         std::process::exit(1);
     }
 
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage session add: {e}");
-            std::process::exit(1);
-        }
-    };
-    let sessions = SessionStore::from(&store);
+    let mut natives = Vec::with_capacity(ids.len());
     for id in &ids {
-        let mut session = match source.open_native(id) {
-            Ok(s) => s,
+        match source.open_native(id) {
+            Ok(s) => natives.push(s),
             Err(e) => {
                 eprintln!("gage session add: {id}: {e}");
                 std::process::exit(1);
             }
-        };
-        let outcome = match sessions.add(driver.as_ref(), session.as_mut()) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("gage session add: {id}: {e}");
-                std::process::exit(1);
+        }
+    }
+
+    match dataset_id {
+        Some(dataset_id) => {
+            let specs: Vec<SessionSpec<'_>> = natives
+                .iter_mut()
+                .map(|session| SessionSpec {
+                    driver: driver.as_ref(),
+                    session: session.as_mut(),
+                })
+                .collect();
+            let outcomes = match DatasetStore::from(store).sessions_add(dataset_id, specs) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("gage session add: {e}");
+                    std::process::exit(1);
+                }
+            };
+            for (outcome, id) in outcomes.iter().zip(&ids) {
+                print_add_outcome(&outcome.outcome, &outcome.id, id, Some(dataset_id));
             }
-        };
-        let verb = match outcome.outcome {
-            SessionOutcome::Added => "Added",
-            SessionOutcome::Updated => "Updated",
-            SessionOutcome::Unchanged => "Unchanged",
-        };
-        println!("{verb} session {} (native {id})", outcome.id);
+        }
+        None => {
+            let sessions = SessionStore::from(store);
+            for (session, id) in natives.iter_mut().zip(&ids) {
+                let outcome = match sessions.add(driver.as_ref(), session.as_mut()) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("gage session add: {id}: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                print_add_outcome(&outcome.outcome, &outcome.id, id, None);
+            }
+        }
     }
     if let Err(e) = source.close() {
         eprintln!("gage session add: {spec}: {e}");
         std::process::exit(1);
+    }
+}
+
+fn print_add_outcome(outcome: &SessionOutcome, id: &str, native_id: &str, dataset: Option<&str>) {
+    let verb = match outcome {
+        SessionOutcome::Added => "Added",
+        SessionOutcome::Updated => "Updated",
+        SessionOutcome::Unchanged => "Unchanged",
+    };
+    match dataset {
+        Some(dataset) => println!("{verb} session {id} (native {native_id}) to dataset {dataset}"),
+        None => println!("{verb} session {id} (native {native_id})"),
     }
 }
 
@@ -633,36 +753,81 @@ pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
             std::process::exit(1);
         }
     };
-    let sessions = SessionStore::from(&store);
+    match args.dataset.as_deref() {
+        Some(prefix) => remove_from_dataset(&store, prefix, &args.ids),
+        None => remove_from_store(&store, &args.ids),
+    }
+}
+
+/// Unlink sessions from one dataset; the session objects stay
+fn remove_from_dataset(store: &Store, dataset_prefix: &str, ids: &[String]) {
+    let datasets = DatasetStore::from(store);
+    let dataset_id = match datasets.resolve_id(dataset_prefix) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage session remove: --dataset {dataset_prefix}: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Every argument is resolved before the single dataset commit, so
+    // one bad argument leaves the dataset untouched
+    let outcomes = match datasets.sessions_unlink(&dataset_id, ids) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("gage session remove: {e}");
+            std::process::exit(1);
+        }
+    };
+    for o in &outcomes {
+        println!(
+            "Removed session {} (native {}) from dataset {dataset_id}",
+            o.id, o.native_id
+        );
+    }
+}
+
+/// Unlink sessions from every dataset holding them and tombstone them
+fn remove_from_store(store: &Store, ids: &[String]) {
+    let sessions = SessionStore::from(store);
 
     // Resolve every argument before writing anything, so one bad
     // argument leaves the store untouched
-    let mut records = Vec::with_capacity(args.ids.len());
     let mut errors = 0;
-    for prefix in &args.ids {
-        match sessions.get(prefix) {
-            Ok(record) => records.push(record),
-            Err(e) => {
-                eprintln!("gage session remove: {e}");
-                errors += 1;
-            }
+    for prefix in ids {
+        if let Err(e) = sessions.get(prefix) {
+            eprintln!("gage session remove: {e}");
+            errors += 1;
         }
     }
     if errors > 0 {
         std::process::exit(1);
     }
 
-    for record in &records {
-        let removed = match sessions.remove(&record.id) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("gage session remove: {}: {e}", short_uuid(&record.id));
-                std::process::exit(1);
-            }
-        };
+    let outcome = match sessions.remove(ids) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("gage session remove: {e}");
+            std::process::exit(1);
+        }
+    };
+    for members in &outcome.datasets {
+        for id in &members.session_ids {
+            let native_id = outcome
+                .sessions
+                .iter()
+                .find(|r| &r.id == id)
+                .map(|r| r.attrs.native_id.as_str())
+                .unwrap_or_default();
+            println!(
+                "Removed session {id} (native {native_id}) from dataset {}",
+                members.dataset_id
+            );
+        }
+    }
+    for record in &outcome.sessions {
         println!(
             "Removed session {} (native {})",
-            removed.id, removed.attrs.native_id
+            record.id, record.attrs.native_id
         );
     }
 }
