@@ -3,7 +3,7 @@ use cliclack as cli;
 use console::style;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
-use gage_db::note::{self, Note};
+use gage_db::note;
 use gage_db::target::NoteTarget;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{NoteInput, NoteRecord, NoteStore, NoteValue, Store, url};
@@ -102,7 +102,8 @@ pub struct NoteEditArgs {
 
 #[derive(Args)]
 pub struct NoteDeleteArgs {
-    /// Note IDs (or prefix)
+    /// Note IDs (or prefixes)
+    #[arg(required = true)]
     ids: Vec<String>,
 
     /// Skip confirmation prompt
@@ -549,23 +550,24 @@ pub fn edit(args: NoteEditArgs) {
 }
 
 pub fn delete(args: NoteDeleteArgs) {
-    if args.ids.is_empty() {
-        eprintln!(
-            "gage note delete: provide one or more note IDs\n\n\
-             Use 'gage note list' to show notes"
-        );
-        std::process::exit(1);
-    }
+    let store = match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("gage note delete: {e}");
+            std::process::exit(1);
+        }
+    };
+    let notes = NoteStore::from(&store);
 
-    let conn = db::open_db().unwrap();
-
-    let mut notes: Vec<Note> = Vec::new();
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut ids: Vec<String> = Vec::with_capacity(args.ids.len());
     let mut errors = 0;
     for prefix in &args.ids {
-        match note::get(&conn, prefix) {
-            Ok(n) => notes.push(n),
+        match notes.get(prefix) {
+            Ok(full) => ids.push(full.id),
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("gage note delete: {e}");
                 errors += 1;
             }
         }
@@ -574,8 +576,7 @@ pub fn delete(args: NoteDeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = notes.len();
-
+    let count = ids.len();
     dialog::run("Delete notes", || {
         let plural = if count == 1 { "note" } else { "notes" };
         cli::log::remark(format!("{count} {plural}"))?;
@@ -589,9 +590,9 @@ pub fn delete(args: NoteDeleteArgs) {
         }
 
         let mut deleted = 0;
-        for note in &notes {
-            if let Err(e) = note::delete(&conn, &note.id) {
-                eprintln!("warning: failed to delete {}: {e}", short_uuid(&note.id));
+        for id in &ids {
+            if let Err(e) = notes.delete(id) {
+                eprintln!("warning: failed to delete {}: {e}", short_uuid(id));
             } else {
                 deleted += 1;
             }
