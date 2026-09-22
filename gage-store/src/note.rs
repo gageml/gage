@@ -1,10 +1,11 @@
 //! Note objects: `gage::note 1`, reached through [`NoteStore`].
 //!
-//! Content is `attrs.json` (name, author, and the optional spec
-//! fields), `value.txt` (the note value as plain text), and, when at
-//! least one target is given, `target.link` listing the target commit
-//! SHAs. Tree construction, commit parents, edits, and tombstones are
-//! the generic object model's job; see [`crate::object`].
+//! Content is `attrs.json` (name, author, target URL, and the optional
+//! spec fields), the value as `value.txt` (plain text) or `value.json`
+//! (structured), and, when a target is given, `target.link` naming
+//! the target's commit. Tree construction, commit parents, edits, and
+//! tombstones are the generic object model's job; see
+//! [`crate::object`].
 
 use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
@@ -12,14 +13,18 @@ use serde_json::Value as JsonValue;
 
 use crate::index::{ObjectQuery, Order};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
+use crate::url;
 use crate::{Store, StoreError};
 
 pub(crate) const OBJECT_TYPE: &str = "gage::note";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from a note's `attrs.json`.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["name"];
-const VALUE_FILE: &str = "value.txt";
+const TEXT_VALUE_FILE: &str = "value.txt";
+const JSON_VALUE_FILE: &str = "value.json";
 const TARGET_LINK: &str = "target.link";
+/// The one scheme whose URLs may carry a fragment
+const SESSION_SCHEME: &str = "session";
 
 /// Note operations over an opened store.
 pub struct NoteStore<'a> {
@@ -32,16 +37,26 @@ impl<'a> From<&'a Store> for NoteStore<'a> {
     }
 }
 
+/// A note's value: plain text in `value.txt` or structured data in
+/// `value.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoteValue {
+    Text(String),
+    Json(JsonValue),
+}
+
 /// Input to [`NoteStore::create`]. Every string is stored verbatim; the
-/// caller is responsible for producing `author` in the
-/// `user:`/`scanner:`/`agent:` URI form.
+/// caller is responsible for producing `author` in the `user:` or
+/// `task:` URL form.
 pub struct NoteInput<'a> {
     pub name: &'a str,
-    pub value: &'a str,
+    pub value: NoteValue,
     pub author: &'a str,
-    /// Each target must have the form `note:<id>` and reference an
-    /// existing note in the store.
-    pub targets: &'a [String],
+    /// A Gage URL under an object scheme with a full id, e.g.
+    /// `session:<id>#12-20` or `note:<id>`. The object must exist and
+    /// be live, its type must match the scheme, and only `session:`
+    /// accepts a fragment, which must be a line selection.
+    pub target: Option<&'a str>,
 }
 
 /// A single note read from the store, projected into the fields the
@@ -50,8 +65,10 @@ pub struct NoteInput<'a> {
 pub struct NoteRecord {
     pub id: String,
     pub name: String,
-    pub value: String,
+    pub value: NoteValue,
     pub author: String,
+    /// The target URL from `attrs.target`, with the full id.
+    pub target: Option<String>,
     /// From the `created` blob: milliseconds since the Unix epoch.
     pub created_ms: i64,
     /// From the `modified` blob: milliseconds since the Unix epoch.
@@ -63,8 +80,10 @@ pub struct NoteRecord {
 pub struct NoteFull {
     pub id: String,
     pub name: String,
-    pub value: String,
+    pub value: NoteValue,
     pub author: String,
+    /// The target URL from `attrs.target`, with the full id.
+    pub target: Option<String>,
     /// Commit SHAs from the `target.link` file, in file order. Empty
     /// when the note has no `target.link` file.
     pub targets: Vec<String>,
@@ -73,7 +92,8 @@ pub struct NoteFull {
 }
 
 /// The `attrs.json` shape. Optional fields defined by the spec are held
-/// so an edit round-trip preserves them; no writer sets them today.
+/// so an edit round-trip preserves them; `target` is written by
+/// `create`, the others by no writer today.
 #[derive(Deserialize, Serialize)]
 struct NoteAttrs {
     name: String,
@@ -93,17 +113,20 @@ struct NoteAttrs {
 impl NoteStore<'_> {
     /// Create a note. Returns the new note's id.
     pub fn create(&self, input: NoteInput) -> Result<String, StoreError> {
-        let target_shas = self.resolve_target_shas(input.targets)?;
+        let target_sha = match input.target {
+            Some(url) => Some(self.resolve_target(url)?),
+            None => None,
+        };
         let attrs = NoteAttrs {
             name: input.name.to_string(),
             author: input.author.to_string(),
-            target: None,
+            target: input.target.map(String::from),
             line: None,
             line_end: None,
             metadata: None,
             scan: None,
         };
-        let tree = build_tree(&attrs, input.value, target_shas)?;
+        let tree = build_tree(&attrs, &input.value, target_sha.into_iter().collect())?;
         let id = new_uuid();
         let message = format!("note: {}", input.name);
         self.store
@@ -111,23 +134,29 @@ impl NoteStore<'_> {
         Ok(id)
     }
 
-    /// Parse `note:<id>` targets, verify each references an existing
-    /// note, and return the corresponding tip SHAs in input order.
-    fn resolve_target_shas(&self, targets: &[String]) -> Result<Vec<String>, StoreError> {
-        let mut shas = Vec::with_capacity(targets.len());
-        for raw in targets {
-            let id = raw
-                .strip_prefix("note:")
-                .ok_or_else(|| StoreError::BadTarget(raw.clone()))?;
-            let sha = self
-                .store
-                .rev_parse(&object_ref(id))?
-                .ok_or_else(|| StoreError::TargetNotFound(raw.clone()))?;
-            let target = self.store.read_object(&sha)?;
-            require_type(&target, OBJECT_TYPE)?;
-            shas.push(sha);
+    /// Validate a target URL and return the tip SHA of the object it
+    /// names. The body is a full id; the object must be live and of
+    /// the scheme's type; a fragment is accepted for `session:` only
+    /// and must be a line selection.
+    fn resolve_target(&self, raw: &str) -> Result<String, StoreError> {
+        let parsed = url::parse(raw)?;
+        match parsed.fragment {
+            Some(fragment) if parsed.scheme == SESSION_SCHEME => {
+                url::validate_line_selection(fragment)?
+            }
+            Some(_) => return Err(StoreError::BadTarget(raw.to_string())),
+            None => {}
         }
-        Ok(shas)
+        let sha = self
+            .store
+            .rev_parse(&object_ref(parsed.body))?
+            .ok_or_else(|| StoreError::TargetNotFound(raw.to_string()))?;
+        let target = self.store.read_object(&sha)?;
+        require_type(&target, &format!("gage::{}", parsed.scheme))?;
+        if target.header.is_tombstone() {
+            return Err(StoreError::ObjectDeleted(target.header.id));
+        }
+        Ok(sha)
     }
 
     /// Look up one note by full id or unique prefix.
@@ -155,9 +184,9 @@ impl NoteStore<'_> {
         }
     }
 
-    /// Edit the value of an existing note. `name`, `author`, and any
-    /// existing targets are preserved. Returns the resolved id.
-    pub fn edit(&self, id_or_prefix: &str, value: &str) -> Result<String, StoreError> {
+    /// Edit the value of an existing note. `name`, `author`, and the
+    /// target are preserved. Returns the resolved id.
+    pub fn edit(&self, id_or_prefix: &str, value: &NoteValue) -> Result<String, StoreError> {
         let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
         let (attrs, _) = decode_content(&object)?;
         let targets = object
@@ -208,6 +237,16 @@ impl<'a> NoteQuery<'a> {
         self
     }
 
+    /// The number of notes the selection matches, ignoring any limit.
+    /// Served by the index; no object is read.
+    pub fn count(&self) -> Result<usize, StoreError> {
+        let unlimited = ObjectQuery {
+            limit: None,
+            ..self.query.clone()
+        };
+        Ok(self.store.select(&unlimited)?.len())
+    }
+
     /// Run the selection. Matching tips are resolved by the index in
     /// one step; each note is read from the repository as the iterator
     /// advances.
@@ -224,6 +263,7 @@ impl<'a> NoteQuery<'a> {
                 name: full.name,
                 value: full.value,
                 author: full.author,
+                target: full.target,
                 created_ms: full.created_ms,
                 modified_ms: full.modified_ms,
             })
@@ -233,7 +273,7 @@ impl<'a> NoteQuery<'a> {
 
 fn build_tree(
     attrs: &NoteAttrs,
-    value: &str,
+    value: &NoteValue,
     target_shas: Vec<String>,
 ) -> Result<ObjectTree, StoreError> {
     let mut tree = ObjectTree {
@@ -243,8 +283,16 @@ fn build_tree(
         ),
         ..ObjectTree::default()
     };
-    tree.blobs
-        .insert(VALUE_FILE.to_string(), value.as_bytes().to_vec());
+    let (file, bytes) = match value {
+        NoteValue::Text(text) => (TEXT_VALUE_FILE, text.as_bytes().to_vec()),
+        NoteValue::Json(json) => {
+            let mut bytes = serde_json::to_vec(json)
+                .map_err(|e| StoreError::Parse(format!("note value encode: {e}")))?;
+            bytes.push(b'\n');
+            (JSON_VALUE_FILE, bytes)
+        }
+    };
+    tree.blobs.insert(file.to_string(), bytes);
     if !target_shas.is_empty() {
         tree.links.insert(TARGET_LINK.to_string(), target_shas);
     }
@@ -258,6 +306,7 @@ fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
         name: attrs.name,
         value,
         author: attrs.author,
+        target: attrs.target,
         targets: object
             .tree
             .links
@@ -269,17 +318,30 @@ fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
     })
 }
 
-fn decode_content(object: &Object) -> Result<(NoteAttrs, String), StoreError> {
-    let attrs_value = object.tree.attrs.clone().ok_or_else(|| {
-        StoreError::Parse(format!("note {}: missing attrs.json", object.header.id))
-    })?;
+fn decode_content(object: &Object) -> Result<(NoteAttrs, NoteValue), StoreError> {
+    let id = &object.header.id;
+    let attrs_value = object
+        .tree
+        .attrs
+        .clone()
+        .ok_or_else(|| StoreError::Parse(format!("note {id}: missing attrs.json")))?;
     let attrs: NoteAttrs = serde_json::from_value(attrs_value)
-        .map_err(|e| StoreError::Parse(format!("note {} attrs.json: {e}", object.header.id)))?;
-    let value_bytes = object.tree.blobs.get(VALUE_FILE).ok_or_else(|| {
-        StoreError::Parse(format!("note {}: missing {VALUE_FILE}", object.header.id))
-    })?;
-    let value = String::from_utf8(value_bytes.clone())
-        .map_err(|e| StoreError::Parse(format!("note {} {VALUE_FILE}: {e}", object.header.id)))?;
+        .map_err(|e| StoreError::Parse(format!("note {id} attrs.json: {e}")))?;
+    let value = if let Some(bytes) = object.tree.blobs.get(TEXT_VALUE_FILE) {
+        NoteValue::Text(
+            String::from_utf8(bytes.clone())
+                .map_err(|e| StoreError::Parse(format!("note {id} {TEXT_VALUE_FILE}: {e}")))?,
+        )
+    } else if let Some(bytes) = object.tree.blobs.get(JSON_VALUE_FILE) {
+        NoteValue::Json(
+            serde_json::from_slice(bytes)
+                .map_err(|e| StoreError::Parse(format!("note {id} {JSON_VALUE_FILE}: {e}")))?,
+        )
+    } else {
+        return Err(StoreError::Parse(format!(
+            "note {id}: missing {TEXT_VALUE_FILE} or {JSON_VALUE_FILE}"
+        )));
+    };
     Ok((attrs, value))
 }
 
@@ -290,9 +352,9 @@ fn marker_ms(object: &Object, name: &str, value: Option<i64>) -> Result<i64, Sto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
+    use crate::{DatasetStore, SessionStore};
 
     fn cat_file(store: &Store, spec: &str) -> String {
         run(git_in(store.path(), ["cat-file", "-p", spec])).unwrap()
@@ -302,15 +364,26 @@ mod tests {
         store.rev_parse(&object_ref(id)).unwrap().unwrap()
     }
 
-    fn note(store: &Store, name: &str, value: &str, targets: &[String]) -> String {
+    fn note(store: &Store, name: &str, value: &str, target: Option<&str>) -> String {
         NoteStore::from(store)
             .create(NoteInput {
                 name,
-                value,
+                value: NoteValue::Text(value.to_string()),
                 author: "user:test",
-                targets,
+                target,
             })
             .unwrap()
+    }
+
+    fn session(store: &Store, native_id: &str) -> String {
+        use crate::session::tests::{FakeDriver, fake};
+        SessionStore::from(store)
+            .add(
+                &FakeDriver,
+                &mut fake(native_id, &[("session.jsonl", "{}\n")]),
+            )
+            .unwrap()
+            .id
     }
 
     #[test]
@@ -318,7 +391,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let id = note(&store, "comment", "looks fine", &[]);
+        let id = note(&store, "comment", "looks fine", None);
         assert_eq!(id.len(), 26);
 
         let ref_path = object_ref(&id);
@@ -371,9 +444,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let first = note(&store, "root", "v", &[]);
+        let first = note(&store, "root", "v", None);
         let first_commit = rev_parse(&store, &first);
-        let second = note(&store, "reply", "v2", &[format!("note:{first}")]);
+        let second = note(&store, "reply", "v2", Some(&format!("note:{first}")));
 
         let target_content = cat_file(&store, &format!("{}:target.link", object_ref(&second)));
         assert_eq!(target_content, format!("{first_commit}\n"));
@@ -385,34 +458,33 @@ mod tests {
         );
     }
 
+    fn create_with_target(store: &Store, target: &str) -> Result<String, StoreError> {
+        NoteStore::from(store).create(NoteInput {
+            name: "n",
+            value: NoteValue::Text("v".into()),
+            author: "user:test",
+            target: Some(target),
+        })
+    }
+
     #[test]
     fn create_rejects_target_missing_scheme() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let err = NoteStore::from(&store)
-            .create(NoteInput {
-                name: "n",
-                value: "v",
-                author: "user:test",
-                targets: &["abc".to_string()],
-            })
-            .unwrap_err();
-        assert!(matches!(err, StoreError::BadTarget(t) if t == "abc"));
+        assert!(matches!(
+            create_with_target(&store, "abc").unwrap_err(),
+            StoreError::BadUrl(t) if t == "abc"
+        ));
     }
 
     #[test]
     fn create_rejects_target_pointing_at_missing_ref() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let err = NoteStore::from(&store)
-            .create(NoteInput {
-                name: "n",
-                value: "v",
-                author: "user:test",
-                targets: &["note:doesnotexist".to_string()],
-            })
-            .unwrap_err();
-        assert!(matches!(err, StoreError::TargetNotFound(t) if t == "note:doesnotexist"));
+        assert!(matches!(
+            create_with_target(&store, "note:doesnotexist").unwrap_err(),
+            StoreError::TargetNotFound(t) if t == "note:doesnotexist"
+        ));
     }
 
     #[test]
@@ -420,19 +492,105 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let dataset = DatasetStore::from(&store).create().unwrap();
-        let err = NoteStore::from(&store)
-            .create(NoteInput {
-                name: "n",
-                value: "v",
-                author: "user:test",
-                targets: &[format!("note:{dataset}")],
-            })
-            .unwrap_err();
         assert!(matches!(
-            err,
+            create_with_target(&store, &format!("note:{dataset}")).unwrap_err(),
             StoreError::WrongType { id, expected, actual }
                 if id == dataset && expected == "gage::note" && actual == "gage::dataset"
         ));
+        // The scheme is what fixes the expected type
+        assert!(create_with_target(&store, &format!("dataset:{dataset}")).is_ok());
+    }
+
+    #[test]
+    fn create_rejects_deleted_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let gone = note(&store, "gone", "v", None);
+        NoteStore::from(&store).delete(&gone).unwrap();
+        assert!(matches!(
+            create_with_target(&store, &format!("note:{gone}")).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == gone
+        ));
+    }
+
+    #[test]
+    fn session_target_carries_line_selection_and_others_refuse_fragments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let session_id = session(&store, "s1");
+        let session_commit = rev_parse(&store, &session_id);
+        let target = format!("session:{session_id}#12-20,31");
+
+        let id = create_with_target(&store, &target).unwrap();
+        let full = NoteStore::from(&store).get(&id).unwrap();
+        assert_eq!(full.target.as_deref(), Some(target.as_str()));
+        assert_eq!(full.targets, vec![session_commit.clone()]);
+        let attrs = cat_file(&store, &format!("{}:attrs.json", object_ref(&id)));
+        assert!(
+            attrs.contains(&format!("\"target\":\"{target}\"")),
+            "{attrs}"
+        );
+
+        assert!(matches!(
+            create_with_target(&store, &format!("session:{session_id}#0")).unwrap_err(),
+            StoreError::BadLineSelection(f) if f == "0"
+        ));
+        let other = note(&store, "n", "v", None);
+        let bad = format!("note:{other}#1");
+        assert!(matches!(
+            create_with_target(&store, &bad).unwrap_err(),
+            StoreError::BadTarget(t) if t == bad
+        ));
+        assert!(create_with_target(&store, &format!("session:{session_id}")).is_ok());
+    }
+
+    #[test]
+    fn json_value_round_trips_through_value_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let json = serde_json::json!({"score": 3, "tags": ["a", "b"]});
+        let id = notes
+            .create(NoteInput {
+                name: "rating",
+                value: NoteValue::Json(json.clone()),
+                author: "user:test",
+                target: None,
+            })
+            .unwrap();
+        let listing = run(git_in(
+            store.path(),
+            ["ls-tree", "--name-only", &object_ref(&id)],
+        ))
+        .unwrap();
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec![
+                "attrs.json",
+                "created",
+                "id",
+                "modified",
+                "type",
+                "value.json"
+            ]
+        );
+        assert_eq!(notes.get(&id).unwrap().value, NoteValue::Json(json));
+
+        // An edit may switch the value's form; the old file goes away
+        notes.edit(&id, &NoteValue::Text("plain".into())).unwrap();
+        let listing = run(git_in(
+            store.path(),
+            ["ls-tree", "--name-only", &object_ref(&id)],
+        ))
+        .unwrap();
+        assert!(
+            listing.contains("value.txt") && !listing.contains("value.json"),
+            "{listing}"
+        );
+        assert_eq!(
+            notes.get(&id).unwrap().value,
+            NoteValue::Text("plain".into())
+        );
     }
 
     #[test]
@@ -440,8 +598,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let first = note(&store, "a", "one", &[]);
-        let second = note(&store, "b", "two", &[]);
+        let first = note(&store, "a", "one", None);
+        let second = note(&store, "b", "two", None);
         DatasetStore::from(&store).create().unwrap();
 
         let records: Vec<NoteRecord> = NoteStore::from(&store)
@@ -464,14 +622,19 @@ mod tests {
     fn get_returns_full_record() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let root = note(&store, "root", "v", &[]);
+        let root = note(&store, "root", "v", None);
         let root_commit = rev_parse(&store, &root);
-        let id = note(&store, "reply", "hello\nworld", &[format!("note:{root}")]);
+        let id = note(
+            &store,
+            "reply",
+            "hello\nworld",
+            Some(&format!("note:{root}")),
+        );
 
         let full = NoteStore::from(&store).get(&id[..8]).unwrap();
         assert_eq!(full.id, id);
         assert_eq!(full.name, "reply");
-        assert_eq!(full.value, "hello\nworld");
+        assert_eq!(full.value, NoteValue::Text("hello\nworld".into()));
         assert_eq!(full.author, "user:test");
         assert_eq!(full.targets, vec![root_commit]);
         assert_eq!(full.created_ms, full.modified_ms);
@@ -494,7 +657,7 @@ mod tests {
         let (store, _fsck) = open_store(tmp.path());
 
         let before = gage_core::datetime::now_ms();
-        let id = note(&store, "n", "v", &[]);
+        let id = note(&store, "n", "v", None);
         let after = gage_core::datetime::now_ms();
 
         let ref_path = object_ref(&id);
@@ -515,7 +678,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let id = note(&store, "n", "v", &[]);
+        let id = note(&store, "n", "v", None);
         let ref_path = object_ref(&id);
         let created_before = cat_file(&store, &format!("{ref_path}:created"));
         let modified_before = cat_file(&store, &format!("{ref_path}:modified"))
@@ -524,7 +687,9 @@ mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2));
-        NoteStore::from(&store).edit(&id, "v2").unwrap();
+        NoteStore::from(&store)
+            .edit(&id, &NoteValue::Text("v2".into()))
+            .unwrap();
 
         let created_after = cat_file(&store, &format!("{ref_path}:created"));
         let modified_after = cat_file(&store, &format!("{ref_path}:modified"))
@@ -547,10 +712,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
-        let a1 = note(&store, "a", "1", &[]);
+        let a1 = note(&store, "a", "1", None);
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let a2 = note(&store, "a", "2", &[]);
-        note(&store, "b", "3", &[]);
+        let a2 = note(&store, "a", "2", None);
+        note(&store, "b", "3", None);
 
         let ids: Vec<String> = notes
             .query()
@@ -580,11 +745,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let id = note(&store, "comment", "first", &[]);
+        let id = note(&store, "comment", "first", None);
         let ref_path = object_ref(&id);
         let original_commit = rev_parse(&store, &id);
 
-        assert_eq!(NoteStore::from(&store).edit(&id, "second").unwrap(), id);
+        assert_eq!(
+            NoteStore::from(&store)
+                .edit(&id, &NoteValue::Text("second".into()))
+                .unwrap(),
+            id
+        );
 
         let new_commit = rev_parse(&store, &id);
         assert_ne!(new_commit, original_commit);
@@ -610,9 +780,11 @@ mod tests {
     fn edit_with_same_value_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let id = note(&store, "n", "same", &[]);
+        let id = note(&store, "n", "same", None);
         let before = rev_parse(&store, &id);
-        NoteStore::from(&store).edit(&id, "same").unwrap();
+        NoteStore::from(&store)
+            .edit(&id, &NoteValue::Text("same".into()))
+            .unwrap();
         assert_eq!(rev_parse(&store, &id), before);
     }
 
@@ -621,10 +793,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let root = note(&store, "root", "v", &[]);
+        let root = note(&store, "root", "v", None);
         let root_commit = rev_parse(&store, &root);
-        let child = note(&store, "reply", "first", &[format!("note:{root}")]);
-        NoteStore::from(&store).edit(&child, "second").unwrap();
+        let child = note(&store, "reply", "first", Some(&format!("note:{root}")));
+        NoteStore::from(&store)
+            .edit(&child, &NoteValue::Text("second".into()))
+            .unwrap();
 
         let target_content = cat_file(&store, &format!("{}:target.link", object_ref(&child)));
         assert_eq!(target_content, format!("{root_commit}\n"));
@@ -639,8 +813,13 @@ mod tests {
     fn edit_accepts_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let id = note(&store, "n", "v", &[]);
-        assert_eq!(NoteStore::from(&store).edit(&id[..8], "v2").unwrap(), id);
+        let id = note(&store, "n", "v", None);
+        assert_eq!(
+            NoteStore::from(&store)
+                .edit(&id[..8], &NoteValue::Text("v2".into()))
+                .unwrap(),
+            id
+        );
     }
 
     #[test]
@@ -648,7 +827,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let err = NoteStore::from(&store)
-            .edit("doesnotexist", "v")
+            .edit("doesnotexist", &NoteValue::Text("v".into()))
             .unwrap_err();
         assert!(matches!(err, StoreError::ObjectNotFound(id) if id == "doesnotexist"));
     }
@@ -658,7 +837,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let id = note(&store, "n", "v", &[]);
+        let id = note(&store, "n", "v", None);
         let ref_path = object_ref(&id);
         let created_before = cat_file(&store, &format!("{ref_path}:created"));
 
@@ -687,8 +866,8 @@ mod tests {
         let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
-        let keep = note(&store, "keep", "v", &[]);
-        let gone = note(&store, "gone", "v", &[]);
+        let keep = note(&store, "keep", "v", None);
+        let gone = note(&store, "gone", "v", None);
         notes.delete(&gone).unwrap();
 
         let ids: Vec<String> = notes.iter().unwrap().map(|r| r.unwrap().id).collect();
@@ -701,7 +880,7 @@ mod tests {
         let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
-        let id = note(&store, "n", "v", &[]);
+        let id = note(&store, "n", "v", None);
         notes.delete(&id).unwrap();
 
         assert!(matches!(
@@ -709,7 +888,7 @@ mod tests {
             StoreError::ObjectDeleted(x) if x == id
         ));
         assert!(matches!(
-            notes.edit(&id, "v2").unwrap_err(),
+            notes.edit(&id, &NoteValue::Text("v2".into())).unwrap_err(),
             StoreError::ObjectDeleted(x) if x == id
         ));
         assert!(matches!(

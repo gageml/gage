@@ -47,6 +47,7 @@ mod sqlite_index;
 mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod url;
 mod writer;
 
 pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init, store_path};
@@ -57,7 +58,7 @@ pub use dataset::{
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{Order, SelectedTip};
-pub use note::{NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore};
+pub use note::{NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue};
 pub use session::{
     SessionAddOutcome, SessionAttrsRecord, SessionOutcome, SessionQuery, SessionRecord,
     SessionRemoveOutcome, SessionStore, SummaryAttrs, session_object_id,

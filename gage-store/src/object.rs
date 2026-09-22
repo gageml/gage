@@ -865,7 +865,7 @@ pub struct LinkFile {
 mod tests {
     use super::*;
     use crate::DatasetStore;
-    use crate::note::{NoteInput, NoteStore};
+    use crate::note::{NoteInput, NoteStore, NoteValue};
     use crate::test_support::open_store;
     use serde_json::json;
 
@@ -911,7 +911,7 @@ mod tests {
         std::thread::spawn(move || {
             let tmp = tempfile::tempdir().unwrap();
             let (store, _fsck) = open_store(tmp.path());
-            let id = note(&store, "n", &[]);
+            let id = note(&store, "n", None);
             let commit = plant_blob(&store, &id, "parent", &format!("{}\n", object_ref(&id)));
             let walk = store.walk_parent_chain(&commit).map_err(|e| e.to_string());
             let path = store.path().to_path_buf();
@@ -936,7 +936,7 @@ mod tests {
     fn link_line_naming_a_ref_is_a_parse_error() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let id = note(&store, "n", &[]);
+        let id = note(&store, "n", None);
         let commit = plant_blob(&store, &id, "things.link", "refs/gage/object/x\n");
 
         match store.read_object(&commit) {
@@ -993,8 +993,8 @@ mod tests {
     fn nested_links_become_commit_parents_on_create_and_edit() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let a = store.resolve_id(&note(&store, "a", &[])).unwrap().1;
-        let b = store.resolve_id(&note(&store, "b", &[])).unwrap().1;
+        let a = store.resolve_id(&note(&store, "a", None)).unwrap().1;
+        let b = store.resolve_id(&note(&store, "b", None)).unwrap().1;
         // The nested link lists b and a; the root link lists a. Every
         // SHA becomes a parent, and a is written once. Git sorts
         // `tasks/` before `things.link`, so the nested SHAs come first.
@@ -1040,11 +1040,13 @@ mod tests {
     fn stale_current_and_duplicate_create_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let id = note(&store, "a", &[]);
+        let id = note(&store, "a", None);
         let first = store.resolve_id(&id).unwrap().1;
         let stale = store.read_object(&first).unwrap();
 
-        NoteStore::from(&store).edit(&id, "v2").unwrap();
+        NoteStore::from(&store)
+            .edit(&id, &NoteValue::Text("v2".into()))
+            .unwrap();
         let second = store.resolve_id(&id).unwrap().1;
         assert_ne!(first, second);
 
@@ -1064,18 +1066,24 @@ mod tests {
         ));
 
         assert_eq!(store.resolve_id(&id).unwrap().1, second);
-        assert_eq!(NoteStore::from(&store).get(&id).unwrap().value, "v2");
+        assert_eq!(
+            NoteStore::from(&store).get(&id).unwrap().value,
+            NoteValue::Text("v2".into())
+        );
         let reopened = Store::open(store.path()).unwrap();
-        assert_eq!(NoteStore::from(&reopened).get(&id).unwrap().value, "v2");
+        assert_eq!(
+            NoteStore::from(&reopened).get(&id).unwrap().value,
+            NoteValue::Text("v2".into())
+        );
     }
 
     #[test]
     fn find_link_files_skips_opaque_d_subtrees() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let target = note(&store, "target", &[]);
+        let target = note(&store, "target", None);
         let target_sha = store.resolve_id(&target).unwrap().1;
-        let holder = note(&store, "holder", &[format!("note:{target}")]);
+        let holder = note(&store, "holder", Some(&format!("note:{target}")));
 
         // The producer put a `.link`-suffixed blob inside an opaque
         // `.d` subtree. Its content is not a SHA, which would fail
@@ -1114,13 +1122,13 @@ mod tests {
         assert_eq!(files[0].shas, vec![target_sha]);
     }
 
-    fn note(store: &Store, name: &str, targets: &[String]) -> String {
+    fn note(store: &Store, name: &str, target: Option<&str>) -> String {
         NoteStore::from(store)
             .create(NoteInput {
                 name,
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets,
+                target,
             })
             .unwrap()
     }
@@ -1129,7 +1137,7 @@ mod tests {
     fn create_writes_markers_content_and_link_parents() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let linked = note(&store, "linked", &[]);
+        let linked = note(&store, "linked", None);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
         let mut tree = ObjectTree::default();
@@ -1172,7 +1180,7 @@ mod tests {
     fn read_object_round_trips_content() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let linked = note(&store, "linked", &[]);
+        let linked = note(&store, "linked", None);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
         let mut tree = ObjectTree::default();
@@ -1197,7 +1205,7 @@ mod tests {
     fn edit_writes_parent_first_then_links_and_bumps_modified() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let linked = note(&store, "linked", &[]);
+        let linked = note(&store, "linked", None);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
         let mut tree = ObjectTree::default();
@@ -1413,7 +1421,7 @@ mod tests {
     fn list_object_refs_returns_every_object() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let note_id = note(&store, "n", &[]);
+        let note_id = note(&store, "n", None);
         let dataset_id = DatasetStore::from(&store).create().unwrap();
 
         let refs = store.list_object_refs().unwrap();
@@ -1428,11 +1436,13 @@ mod tests {
         let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
-        let root = note(&store, "root", &[]);
+        let root = note(&store, "root", None);
         let root_commit = store.resolve_id(&root).unwrap().1;
-        let child = note(&store, "reply", &[format!("note:{root}")]);
+        let child = note(&store, "reply", Some(&format!("note:{root}")));
         let first_child = store.resolve_id(&child).unwrap().1;
-        notes.edit(&child, "second").unwrap();
+        notes
+            .edit(&child, &NoteValue::Text("second".into()))
+            .unwrap();
 
         let classified = store.classify_parents(&object_ref(&child)).unwrap();
         assert_eq!(classified.parent.as_deref(), Some(first_child.as_str()));
@@ -1449,9 +1459,9 @@ mod tests {
         let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
 
-        let id = note(&store, "n", &[]);
-        notes.edit(&id, "v2").unwrap();
-        notes.edit(&id, "v3").unwrap();
+        let id = note(&store, "n", None);
+        notes.edit(&id, &NoteValue::Text("v2".into())).unwrap();
+        notes.edit(&id, &NoteValue::Text("v3".into())).unwrap();
 
         let tip = store.resolve_id(&id).unwrap().1;
         let chain = store.walk_parent_chain(&tip).unwrap();
@@ -1464,9 +1474,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        let root = note(&store, "root", &[]);
+        let root = note(&store, "root", None);
         let root_commit = store.resolve_id(&root).unwrap().1;
-        let child = note(&store, "reply", &[format!("note:{root}")]);
+        let child = note(&store, "reply", Some(&format!("note:{root}")));
         let files = store.find_link_files(&object_ref(&child)).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "target.link");

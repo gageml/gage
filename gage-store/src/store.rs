@@ -190,9 +190,9 @@ mod tests {
             crate::NoteStore::from(&store)
                 .create(crate::NoteInput {
                     name: "n",
-                    value: "v",
+                    value: crate::NoteValue::Text("v".into()),
                     author: "user:test",
-                    targets: &[],
+                    target: None,
                 })
                 .unwrap();
             assert!(store.wrote.get());

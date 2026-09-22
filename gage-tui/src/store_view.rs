@@ -1024,7 +1024,7 @@ fn err_line(text: String) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gage_store::{NoteInput, NoteStore};
+    use gage_store::{NoteInput, NoteStore, NoteValue};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1050,9 +1050,9 @@ mod tests {
         let note_id = NoteStore::from(&store)
             .create(NoteInput {
                 name: "n",
-                value: "the note value",
+                value: NoteValue::Text("the note value".into()),
                 author: "user:test",
-                targets: &[],
+                target: None,
             })
             .unwrap();
 
@@ -1140,17 +1140,17 @@ mod tests {
         let keep = notes
             .create(NoteInput {
                 name: "keep",
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets: &[],
+                target: None,
             })
             .unwrap();
         let gone = notes
             .create(NoteInput {
                 name: "gone",
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets: &[],
+                target: None,
             })
             .unwrap();
         notes.delete(&gone).unwrap();

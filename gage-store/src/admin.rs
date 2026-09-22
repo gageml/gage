@@ -303,7 +303,7 @@ fn parse_remotes(output: &str) -> Vec<Remote> {
 mod tests {
     use super::*;
     use crate::git::{git_in, run};
-    use crate::note::{NoteInput, NoteStore};
+    use crate::note::{NoteInput, NoteStore, NoteValue};
     use crate::object::object_ref;
     use crate::test_support::init_for_test;
     use crate::writer::{TreeInput, commit_tree, mktree};
@@ -354,7 +354,7 @@ mod tests {
 
         let a = note(&notes, "a");
         let a_first = tip(&a);
-        notes.edit(&a, "v2").unwrap();
+        notes.edit(&a, &NoteValue::Text("v2".into())).unwrap();
         let a_second = tip(&a);
         let b = note(&notes, "b");
         let b_first = tip(&b);
@@ -438,9 +438,9 @@ mod tests {
         notes
             .create(NoteInput {
                 name,
-                value: "v1",
+                value: NoteValue::Text("v1".into()),
                 author: "user:test",
-                targets: &[],
+                target: None,
             })
             .unwrap()
     }

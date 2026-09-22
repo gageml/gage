@@ -583,7 +583,7 @@ mod tests {
     use super::*;
     use crate::object::object_ref;
     use crate::test_support::open_store;
-    use crate::{NoteInput, NoteStore};
+    use crate::{NoteInput, NoteStore, NoteValue};
     use gage_session::{ContentSink, DriverError, SessionAttrs, Source, StoredSession};
     use std::any::Any;
     use std::io::{Cursor, Write as _};
@@ -737,9 +737,9 @@ mod tests {
         NoteStore::from(store)
             .create(NoteInput {
                 name: "n",
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets: &[],
+                target: None,
             })
             .unwrap()
     }

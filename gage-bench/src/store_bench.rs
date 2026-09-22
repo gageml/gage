@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 
 use gage_store::object::ObjectTree;
 use gage_store::{
-    DatasetStore, NoteInput, NoteStore, Order, SessionOutcome, SessionSpec, SessionStore, Store,
+    DatasetStore, NoteInput, NoteStore, NoteValue, Order, SessionOutcome, SessionSpec,
+    SessionStore, Store,
 };
 use indicatif::ProgressBar;
 use rand::rngs::StdRng;
@@ -176,14 +177,13 @@ fn populate(
         } else {
             None
         };
-        let targets: Vec<String> = target.iter().map(|(t, _)| t.clone()).collect();
         let id = timings
             .time("note create v2", || {
                 notes.create(NoteInput {
                     name,
-                    value: &value,
+                    value: NoteValue::Text(value.clone()),
                     author: "user:bench",
-                    targets: &targets,
+                    target: target.as_ref().map(|(t, _)| t.as_str()),
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -281,7 +281,9 @@ fn populate(
     for id in population.note_ids.iter().take(edit_count) {
         let value = generator.text(params.note_bytes);
         timings
-            .time("note edit v2", || notes.edit(id, &value))
+            .time("note edit v2", || {
+                notes.edit(id, &NoteValue::Text(value.clone()))
+            })
             .map_err(|e| e.to_string())?;
         population.note_values.insert(id.clone(), value);
     }
@@ -457,7 +459,11 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<(),
         let full = notes
             .get(id)
             .map_err(|e| format!("verify: get {id}: {e}"))?;
-        if Some(&full.value) != population.note_values.get(id) {
+        let expected = population
+            .note_values
+            .get(id)
+            .map(|v| NoteValue::Text(v.clone()));
+        if Some(full.value) != expected {
             return Err(format!("verify: {id} value differs from what was written"));
         }
     }

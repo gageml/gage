@@ -27,9 +27,14 @@ pub enum StoreError {
     Parse(String),
     /// An object name did not resolve in the repository
     MissingObject(String),
-    /// A `--target` value did not match the `note:<id>` form
+    /// A Gage URL has no scheme or a malformed one
+    BadUrl(String),
+    /// A line selection fragment does not follow the grammar
+    BadLineSelection(String),
+    /// A target URL is well-formed but not allowed here, e.g. a
+    /// fragment on a scheme that defines none
     BadTarget(String),
-    /// A `--target` referenced an object that does not exist
+    /// A target URL names an object that does not exist
     TargetNotFound(String),
     /// No object matched the given id or prefix
     ObjectNotFound(String),
@@ -92,9 +97,11 @@ impl fmt::Display for StoreError {
             StoreError::Git { status, stderr } => write!(f, "git {status}: {stderr}"),
             StoreError::Parse(what) => write!(f, "unexpected git output: {what}"),
             StoreError::MissingObject(name) => write!(f, "no such object: {name}"),
-            StoreError::BadTarget(t) => {
-                write!(f, "invalid target {t:?}: expected `note:<id>`")
+            StoreError::BadUrl(u) => write!(f, "not a Gage URL (scheme:body): {u}"),
+            StoreError::BadLineSelection(sel) => {
+                write!(f, "invalid line selection: {sel}")
             }
+            StoreError::BadTarget(t) => write!(f, "invalid target: {t}"),
             StoreError::TargetNotFound(t) => write!(f, "target not found: {t}"),
             StoreError::ObjectNotFound(id) => write!(f, "object not found: {id}"),
             StoreError::AmbiguousId(id, n) => {
@@ -129,6 +136,8 @@ impl std::error::Error for StoreError {
             | StoreError::Git { .. }
             | StoreError::Parse(_)
             | StoreError::MissingObject(_)
+            | StoreError::BadUrl(_)
+            | StoreError::BadLineSelection(_)
             | StoreError::BadTarget(_)
             | StoreError::TargetNotFound(_)
             | StoreError::ObjectNotFound(_)

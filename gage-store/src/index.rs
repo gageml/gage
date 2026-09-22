@@ -273,7 +273,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::DatasetStore;
-    use crate::note::{NoteInput, NoteStore};
+    use crate::note::{NoteInput, NoteStore, NoteValue};
     use crate::object::ObjectTree;
     use crate::session::SessionStore;
     use crate::sqlite_index::INDEX_SCHEMA_VERSION;
@@ -301,9 +301,9 @@ mod tests {
         NoteStore::from(store)
             .create(NoteInput {
                 name,
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets: &[],
+                target: None,
             })
             .unwrap()
     }
@@ -526,7 +526,9 @@ mod tests {
         let inner = std::mem::replace(&mut store.index, Box::new(FailingPut { inner: None }));
         store.index = Box::new(FailingPut { inner: Some(inner) });
 
-        let err = NoteStore::from(&store).edit(&id, "v2").unwrap_err();
+        let err = NoteStore::from(&store)
+            .edit(&id, &NoteValue::Text("v2".into()))
+            .unwrap_err();
         assert!(matches!(err, StoreError::Index(_)), "{err}");
         assert_eq!(store.rev_parse(&object_ref(&id)).unwrap().unwrap(), before);
 
@@ -535,7 +537,10 @@ mod tests {
             reopened.rev_parse(&object_ref(&id)).unwrap().unwrap(),
             before
         );
-        assert_eq!(NoteStore::from(&reopened).get(&id).unwrap().value, "v");
+        assert_eq!(
+            NoteStore::from(&reopened).get(&id).unwrap().value,
+            NoteValue::Text("v".into())
+        );
     }
 
     /// A session with one file under the opaque `files.d` subtree.
@@ -666,12 +671,12 @@ mod tests {
         notes
             .create(NoteInput {
                 name: "b",
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets: &[format!("note:{a}")],
+                target: Some(&format!("note:{a}")),
             })
             .unwrap();
-        notes.edit(&a, "v2").unwrap();
+        notes.edit(&a, &NoteValue::Text("v2".into())).unwrap();
 
         // Two deletes: c1's first version stays reachable through d's
         // link; c2's first version becomes unreachable
@@ -680,9 +685,9 @@ mod tests {
         notes
             .create(NoteInput {
                 name: "d",
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets: &[format!("note:{c1}")],
+                target: Some(&format!("note:{c1}")),
             })
             .unwrap();
         let c2 = note(&store, "c2");
@@ -787,7 +792,9 @@ mod tests {
         // connection to the same file, then move the ref back with git
         // so the first handle's index is stale in both directions.
         let other = Store::open(&path).unwrap();
-        NoteStore::from(&other).edit(&id, "v2").unwrap();
+        NoteStore::from(&other)
+            .edit(&id, &NoteValue::Text("v2".into()))
+            .unwrap();
         run(git_in(&path, ["update-ref", &object_ref(&id), &first])).unwrap();
 
         let reopened = Store::open(&path).unwrap();
@@ -836,12 +843,12 @@ mod tests {
         notes
             .create(NoteInput {
                 name: "reply",
-                value: "v",
+                value: NoteValue::Text("v".into()),
                 author: "user:test",
-                targets: &[format!("note:{root}")],
+                target: Some(&format!("note:{root}")),
             })
             .unwrap();
-        notes.edit(&root, "v2").unwrap();
+        notes.edit(&root, &NoteValue::Text("v2".into())).unwrap();
 
         std::fs::remove_file(tmp.path().join("cache/object-index.sqlite")).unwrap();
         let reopened = Store::open(&path).unwrap();

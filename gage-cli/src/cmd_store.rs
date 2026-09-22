@@ -1,19 +1,15 @@
 use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
-use gage_store::{
-    EntryKind, InitOutcome, NoteInput, NoteRecord, NoteStore, Store, StoreStatus, TreeEntry,
-};
+use gage_store::{EntryKind, InitOutcome, Store, StoreStatus, TreeEntry};
 use tabled::{
     Table,
     settings::{
-        Color, Style, Width,
-        object::{Cell, Columns, Object, Rows},
-        peaker::PriorityMax,
+        Color, Style,
+        object::{Columns, Object, Rows},
     },
 };
 
-use crate::author::resolve_author;
-use crate::human::{format_elapsed_ms, format_size};
+use crate::human::format_size;
 use crate::style;
 
 #[derive(Subcommand)]
@@ -47,12 +43,6 @@ pub enum StoreCommand {
     /// Runs `git cat-file -p <REF>`. `<REF>` is any git tree-ish or
     /// object sha.
     Cat(CatArgs),
-
-    /// Manage store notes
-    Note {
-        #[command(subcommand)]
-        command: NoteCommand,
-    },
 
     /// Browse the store's object graph
     ///
@@ -94,62 +84,6 @@ pub struct GcArgs {
     prune: Option<String>,
 }
 
-#[derive(Subcommand)]
-pub enum NoteCommand {
-    /// List notes
-    List,
-
-    /// Show a note
-    Show(NoteShowArgs),
-
-    /// Create a note
-    New(NoteNewArgs),
-
-    /// Edit a note's value
-    Edit(NoteEditArgs),
-
-    /// Delete a note
-    Delete(NoteDeleteArgs),
-}
-
-#[derive(Args)]
-pub struct NoteEditArgs {
-    /// Note id or unique prefix
-    id: String,
-
-    /// Replacement value
-    value: String,
-}
-
-#[derive(Args)]
-pub struct NoteDeleteArgs {
-    /// Note id or unique prefix
-    id: String,
-}
-
-#[derive(Args)]
-pub struct NoteShowArgs {
-    /// Note id or unique prefix
-    id: String,
-}
-
-#[derive(Args)]
-pub struct NoteNewArgs {
-    /// Note name
-    name: String,
-
-    /// Note value
-    value: String,
-
-    /// Target note in the form `note:<id>` (repeatable)
-    #[arg(short, long)]
-    target: Vec<String>,
-
-    /// Author username (default: $USER)
-    #[arg(short, long)]
-    user: Option<String>,
-}
-
 pub fn run(command: StoreCommand) {
     if let StoreCommand::Init = command {
         init();
@@ -162,16 +96,6 @@ pub fn run(command: StoreCommand) {
         StoreCommand::Gc(args) => gc(&store, args),
         StoreCommand::Ls(args) => ls(&store, args),
         StoreCommand::Cat(args) => cat(&store, args),
-        StoreCommand::Note { command } => {
-            let notes = NoteStore::from(&store);
-            match command {
-                NoteCommand::List => note_list(&notes),
-                NoteCommand::Show(args) => note_show(&notes, args),
-                NoteCommand::New(args) => note_new(&notes, args),
-                NoteCommand::Edit(args) => note_edit(&notes, args),
-                NoteCommand::Delete(args) => note_delete(&notes, args),
-            }
-        }
         StoreCommand::View => view(store),
     }
 }
@@ -373,172 +297,4 @@ fn cat(store: &Store, args: CatArgs) {
         eprintln!("gage store cat: {e}");
         std::process::exit(1);
     }
-}
-
-fn note_list(notes: &NoteStore) {
-    let records: Vec<NoteRecord> = match notes.iter().and_then(|it| it.collect()) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("gage store note list: {e}");
-            std::process::exit(1);
-        }
-    };
-    if records.is_empty() {
-        println!("No notes found");
-        return;
-    }
-
-    let header: Vec<String> = ["Id", "Name", "Value", "Author", "Created"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let rows: Vec<Vec<String>> = records.iter().map(note_row).collect();
-
-    let term_width = console::Term::stdout().size().1 as usize;
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .with(
-            Width::truncate(term_width)
-                .suffix("…")
-                .priority(PriorityMax::left()),
-        )
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(
-            Columns::one(0).not(Rows::first()),
-            style::tty(Color::FG_YELLOW),
-        )
-        .modify(
-            Columns::one(2).not(Rows::first()),
-            style::tty(Color::FG_BRIGHT_CYAN),
-        )
-        .modify(Columns::new(3..5).not(Rows::first()), style::dim())
-        .to_string();
-    println!("{table}");
-}
-
-fn note_row(r: &NoteRecord) -> Vec<String> {
-    vec![
-        r.id.clone(),
-        r.name.clone(),
-        format_value_cell(&r.value),
-        r.author.clone(),
-        format_elapsed_ms(r.created_ms),
-    ]
-}
-
-/// Collapse newlines and truncate long values to a table-friendly cell.
-/// Mirrors `cmd_note::format_value_cell` for the plain-string values the
-/// store currently produces.
-fn format_value_cell(value: &str) -> String {
-    let flattened: String = value
-        .split(['\n', '\r'])
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if flattened.len() > 400 {
-        let mut end = 400;
-        while !flattened.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &flattened[..end])
-    } else {
-        flattened
-    }
-}
-
-fn note_show(notes: &NoteStore, args: NoteShowArgs) {
-    let note = match notes.get(&args.id) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("gage store note show: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let attrs: Vec<(&str, String)> = vec![
-        ("id", note.id),
-        ("name", note.name),
-        ("value", note.value),
-        ("author", note.author),
-        ("target", note.targets.join("\n")),
-        (
-            "created",
-            gage_core::datetime::ms_to_iso8601(note.created_ms),
-        ),
-        (
-            "modified",
-            gage_core::datetime::ms_to_iso8601(note.modified_ms),
-        ),
-    ];
-
-    let label_width = attrs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let (_, term_width) = console::Term::stdout().size();
-    // Borders + padding: "│ " + " │ " + " │" = 8 chars
-    let value_width = (term_width as usize)
-        .saturating_sub(label_width + 8)
-        .max(20);
-
-    let id_row_idx = attrs.iter().position(|(k, _)| *k == "id").unwrap();
-    let value_row_idx = attrs.iter().position(|(k, _)| *k == "value").unwrap();
-    let rows: Vec<Vec<String>> = attrs
-        .into_iter()
-        .map(|(k, v)| {
-            let value = if k == "target" {
-                v
-            } else {
-                textwrap::fill(&v, value_width)
-            };
-            vec![k.to_string(), value]
-        })
-        .collect();
-
-    let table = Table::from_iter(rows)
-        .with(Style::rounded())
-        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Cell::new(id_row_idx, 1), style::tty(Color::FG_YELLOW))
-        .modify(
-            Cell::new(value_row_idx, 1),
-            style::tty(Color::FG_BRIGHT_CYAN),
-        )
-        .to_string();
-    println!("{table}");
-}
-
-fn note_delete(notes: &NoteStore, args: NoteDeleteArgs) {
-    let id = match notes.delete(&args.id) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage store note delete: {e}");
-            std::process::exit(1);
-        }
-    };
-    println!("{id}");
-}
-
-fn note_edit(notes: &NoteStore, args: NoteEditArgs) {
-    let id = match notes.edit(&args.id, &args.value) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage store note edit: {e}");
-            std::process::exit(1);
-        }
-    };
-    println!("{id}");
-}
-
-fn note_new(notes: &NoteStore, args: NoteNewArgs) {
-    let author = resolve_author(args.user);
-    let id = match notes.create(NoteInput {
-        name: &args.name,
-        value: &args.value,
-        author: &author,
-        targets: &args.target,
-    }) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage store note new: {e}");
-            std::process::exit(1);
-        }
-    };
-    println!("{id}");
 }

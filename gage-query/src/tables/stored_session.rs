@@ -3,7 +3,8 @@
 //!
 //! The store's index serves everything the listing sorts, filters, and
 //! counts on (id, commit, timestamps) in one query over every live
-//! session, and that full id set is what `id_prefix` is computed over.
+//! session. `id_prefix` is computed over every object id in the store,
+//! the set a prefix resolves against.
 //! The attribute columns (`native_id`, `session_type`, `summary.*`)
 //! live in each object's `attrs.json` and are read from the repository
 //! only for the rows a projection needs, one `cat-file` round trip
@@ -250,14 +251,21 @@ impl StoredSessionExec {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sessions = SessionStore::from(&*store);
 
-        // Every live session, newest modified first: the peer set for
-        // id_prefix and the rows to filter
+        // Every live session, newest modified first: the rows to filter
         let all = sessions
             .query()
             .order(Order::ModifiedDesc)
             .tips()
             .map_err(external)?;
-        let prefix_len = unique_prefix_lens(&all);
+        // A prefix resolves against every object ref in the store, not
+        // only sessions, so id_prefix is unique among every object id
+        let peers: Vec<String> = store
+            .list_object_refs()
+            .map_err(external)?
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let prefix_len = unique_prefix_lens(peers);
 
         let since = self.filters.iter().filter_map(mtime_lower_bound).max();
         let mut tips: Vec<SelectedTip> = all
@@ -354,11 +362,13 @@ impl StoredSessionExec {
 }
 
 /// Unique prefix length of every id among its peers
-fn unique_prefix_lens(tips: &[SelectedTip]) -> HashMap<String, usize> {
-    let ids: Vec<String> = tips.iter().map(|t| t.id.clone()).collect();
-    let highlighter = IdHighlighter::new(ids);
-    tips.iter()
-        .map(|t| (t.id.clone(), highlighter.unique_prefix_len(&t.id)))
+fn unique_prefix_lens(ids: Vec<String>) -> HashMap<String, usize> {
+    let highlighter = IdHighlighter::new(ids.clone());
+    ids.into_iter()
+        .map(|id| {
+            let n = highlighter.unique_prefix_len(&id);
+            (id, n)
+        })
         .collect()
 }
 

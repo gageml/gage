@@ -549,7 +549,7 @@ fn build_files_tree_inner(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::DatasetStore;
     use crate::git::{git_in, run};
@@ -562,7 +562,7 @@ mod tests {
     use std::time::SystemTime;
 
     /// A native session with fixed content, for exercising the writer.
-    struct FakeSession {
+    pub(crate) struct FakeSession {
         id: String,
         source: String,
         files: Vec<(String, Vec<u8>)>,
@@ -621,7 +621,7 @@ mod tests {
 
     /// A driver whose `write_native` iterates the fake session's
     /// in-memory files into the sink.
-    struct FakeDriver;
+    pub(crate) struct FakeDriver;
 
     impl DriverTrait for FakeDriver {
         fn name(&self) -> &'static str {
@@ -665,7 +665,7 @@ mod tests {
     #[allow(dead_code)]
     fn _entry_trait_is_object_safe(_: &dyn Entry) {}
 
-    fn fake(id: &str, files: &[(&str, &str)]) -> FakeSession {
+    pub(crate) fn fake(id: &str, files: &[(&str, &str)]) -> FakeSession {
         let entries: Vec<(String, Vec<u8>)> = files
             .iter()
             .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
