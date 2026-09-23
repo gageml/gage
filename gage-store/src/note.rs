@@ -11,7 +11,7 @@ use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::index::{ObjectQuery, Order};
+use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::url;
 use crate::{Store, StoreError};
@@ -84,6 +84,8 @@ pub struct NoteRecord {
     /// The target URL from `attrs.target`, with the full id.
     pub target: Option<String>,
     pub metadata: Option<JsonValue>,
+    /// The scan the note was written during, from `attrs.scan`
+    pub scan: Option<String>,
     /// From the `created` blob: milliseconds since the Unix epoch.
     pub created_ms: i64,
     /// From the `modified` blob: milliseconds since the Unix epoch.
@@ -100,6 +102,8 @@ pub struct NoteFull {
     /// The target URL from `attrs.target`, with the full id.
     pub target: Option<String>,
     pub metadata: Option<JsonValue>,
+    /// The scan the note was written during, from `attrs.scan`
+    pub scan: Option<String>,
     /// Commit SHAs from the `target.link` file, in file order. Empty
     /// when the note has no `target.link` file.
     pub targets: Vec<String>,
@@ -183,6 +187,11 @@ impl NoteStore<'_> {
     pub fn get(&self, id_or_prefix: &str) -> Result<NoteFull, StoreError> {
         let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
         decode_full(&object)
+    }
+
+    /// Read the note at the given commit SHA.
+    pub fn at_commit(&self, commit_sha: &str) -> Result<NoteFull, StoreError> {
+        decode_full(&self.store.read_object(commit_sha)?)
     }
 
     /// Every live note, newest created first, read lazily.
@@ -276,6 +285,11 @@ impl<'a> NoteQuery<'a> {
         Ok(self.store.select(&unlimited)?.len())
     }
 
+    /// The matching tips, in query order, without reading any object.
+    pub fn tips(self) -> Result<Vec<SelectedTip>, StoreError> {
+        self.store.select(&self.query)
+    }
+
     /// Run the selection. Matching tips are resolved by the index in
     /// one step; each note is read from the repository as the iterator
     /// advances.
@@ -294,6 +308,7 @@ impl<'a> NoteQuery<'a> {
                 author: full.author,
                 target: full.target,
                 metadata: full.metadata,
+                scan: full.scan,
                 created_ms: full.created_ms,
                 modified_ms: full.modified_ms,
             })
@@ -338,6 +353,7 @@ fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
         author: attrs.author,
         target: attrs.target,
         metadata: attrs.metadata,
+        scan: attrs.scan,
         targets: object
             .tree
             .links

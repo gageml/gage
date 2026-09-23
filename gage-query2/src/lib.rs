@@ -12,7 +12,9 @@
 //! the session set and plans every read ([`scope`]), and the driver
 //! that wrote each session deserializes its bytes into normalized
 //! entries the core turns into batches ([`rows`], [`stored_rows`]).
-//! `note`, `dataset`, `scan`, and `issue` join as the crate grows.
+//! `note` is one row per live note object, from
+//! [`gage_store::StoredNoteTable`]. `dataset`, `scan`, and `issue`
+//! join as the crate grows.
 //!
 //! Native session data is reached through driver-provided functions,
 //! present on every context: `native_session`, `native_message`, and
@@ -39,7 +41,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
-use gage_store::{Store, StoredSessionTable};
+use gage_store::{Store, StoredNoteTable, StoredSessionTable};
 
 use crate::native::{NativeTable, NativeTableFn};
 use crate::project::project_for_path_udf;
@@ -77,19 +79,23 @@ impl ContextBuilder {
         if let Some(store) = self.store {
             let session: Arc<dyn TableProvider> =
                 Arc::new(StoredSessionTable::new(Arc::clone(&store)));
-            let session = if self.skip_system_cols {
-                Arc::new(SkipSystemCols::new(session))
-            } else {
-                session
-            };
+            let note: Arc<dyn TableProvider> = Arc::new(StoredNoteTable::new(Arc::clone(&store)));
             let scope = Arc::new(SessionScope::new(store));
-            let entry = StoredRowsTable::new(RowKind::Entry, Arc::clone(&scope));
-            let message = StoredRowsTable::new(RowKind::Message, scope);
+            let entry: Arc<dyn TableProvider> =
+                Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&scope)));
+            let message: Arc<dyn TableProvider> =
+                Arc::new(StoredRowsTable::new(RowKind::Message, scope));
             for (name, table) in [
                 ("session", session),
-                ("entry", Arc::new(entry) as Arc<dyn TableProvider>),
-                ("message", Arc::new(message)),
+                ("entry", entry),
+                ("message", message),
+                ("note", note),
             ] {
+                let table = if self.skip_system_cols {
+                    Arc::new(SkipSystemCols::new(table))
+                } else {
+                    table
+                };
                 ctx.register_table(name, table)
                     .expect("register store tables on a fresh context");
             }
@@ -271,5 +277,8 @@ mod tests {
                 .iter()
                 .any(|c| c == "id_display" || c == "id_prefix" || c == "locator")
         );
+        let note_cols = strings(&ctx, &sql.replace("'session'", "'note'")).await;
+        assert_eq!(note_cols.first().map(String::as_str), Some("id"));
+        assert_eq!(note_cols.last().map(String::as_str), Some("scan"));
     }
 }
