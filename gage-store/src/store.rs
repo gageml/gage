@@ -193,6 +193,7 @@ mod tests {
                     value: crate::NoteValue::Text("v".into()),
                     author: "user:test",
                     target: None,
+                    metadata: None,
                 })
                 .unwrap();
             assert!(store.wrote.get());

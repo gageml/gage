@@ -1173,6 +1173,7 @@ mod tests {
                 value: NoteValue::Text("v".into()),
                 author: "user:test",
                 target,
+                metadata: None,
             })
             .unwrap()
     }

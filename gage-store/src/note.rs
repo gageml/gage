@@ -57,6 +57,9 @@ pub struct NoteInput<'a> {
     /// be live, its type must match the scheme, and only `session:`
     /// accepts a fragment, which must be a line selection.
     pub target: Option<&'a str>,
+    /// Writer-defined payload, stored and returned verbatim. Has no
+    /// Gage schema.
+    pub metadata: Option<JsonValue>,
 }
 
 /// Input to [`NoteStore::edit`]. Every field is optional; `None`
@@ -80,6 +83,7 @@ pub struct NoteRecord {
     pub author: String,
     /// The target URL from `attrs.target`, with the full id.
     pub target: Option<String>,
+    pub metadata: Option<JsonValue>,
     /// From the `created` blob: milliseconds since the Unix epoch.
     pub created_ms: i64,
     /// From the `modified` blob: milliseconds since the Unix epoch.
@@ -95,6 +99,7 @@ pub struct NoteFull {
     pub author: String,
     /// The target URL from `attrs.target`, with the full id.
     pub target: Option<String>,
+    pub metadata: Option<JsonValue>,
     /// Commit SHAs from the `target.link` file, in file order. Empty
     /// when the note has no `target.link` file.
     pub targets: Vec<String>,
@@ -103,8 +108,8 @@ pub struct NoteFull {
 }
 
 /// The `attrs.json` shape. Optional fields defined by the spec are held
-/// so an edit round-trip preserves them; `target` is written by
-/// `create`, the others by no writer today.
+/// so an edit round-trip preserves them; `target` and `metadata` are
+/// written by `create`, the others by no writer today.
 #[derive(Deserialize, Serialize)]
 struct NoteAttrs {
     name: String,
@@ -134,7 +139,7 @@ impl NoteStore<'_> {
             target: input.target.map(String::from),
             line: None,
             line_end: None,
-            metadata: None,
+            metadata: input.metadata,
             scan: None,
         };
         let tree = build_tree(&attrs, &input.value, target_sha.into_iter().collect())?;
@@ -288,6 +293,7 @@ impl<'a> NoteQuery<'a> {
                 value: full.value,
                 author: full.author,
                 target: full.target,
+                metadata: full.metadata,
                 created_ms: full.created_ms,
                 modified_ms: full.modified_ms,
             })
@@ -331,6 +337,7 @@ fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
         value,
         author: attrs.author,
         target: attrs.target,
+        metadata: attrs.metadata,
         targets: object
             .tree
             .links
@@ -395,6 +402,7 @@ mod tests {
                 value: NoteValue::Text(value.to_string()),
                 author: "user:test",
                 target,
+                metadata: None,
             })
             .unwrap()
     }
@@ -488,6 +496,7 @@ mod tests {
             value: NoteValue::Text("v".into()),
             author: "user:test",
             target: Some(target),
+            metadata: None,
         })
     }
 
@@ -631,6 +640,42 @@ mod tests {
         assert_eq!(rev_parse(&store, &id), tip);
     }
 
+    /// `metadata` is written to `attrs.json` verbatim and comes back
+    /// on both the full and the list record; a note without it reads
+    /// as `None`.
+    #[test]
+    fn metadata_round_trips_through_attrs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let metadata = serde_json::json!({"model": "m", "lines": [1, 2]});
+        let with = notes
+            .create(NoteInput {
+                name: "summary",
+                value: NoteValue::Text("t".into()),
+                author: "user:test",
+                target: None,
+                metadata: Some(metadata.clone()),
+            })
+            .unwrap();
+        let without = notes
+            .create(NoteInput {
+                name: "summary",
+                value: NoteValue::Text("t".into()),
+                author: "user:test",
+                target: None,
+                metadata: None,
+            })
+            .unwrap();
+
+        assert_eq!(notes.get(&with).unwrap().metadata, Some(metadata.clone()));
+        assert_eq!(notes.get(&without).unwrap().metadata, None);
+        let listed: Vec<NoteRecord> = notes.iter().unwrap().map(Result::unwrap).collect();
+        let by_id = |id: &str| listed.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(by_id(&with).metadata, Some(metadata));
+        assert_eq!(by_id(&without).metadata, None);
+    }
+
     #[test]
     fn json_value_round_trips_through_value_json() {
         let tmp = tempfile::tempdir().unwrap();
@@ -643,6 +688,7 @@ mod tests {
                 value: NoteValue::Json(json.clone()),
                 author: "user:test",
                 target: None,
+                metadata: None,
             })
             .unwrap();
         let listing = run(git_in(

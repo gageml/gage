@@ -70,6 +70,10 @@ pub struct NoteAddArgs {
     #[arg(long)]
     json: bool,
 
+    /// Note metadata as a JSON object
+    #[arg(short, long, value_name = "JSON")]
+    metadata: Option<String>,
+
     /// Skip prompts
     ///
     /// Requires TEXT; other values take their defaults
@@ -265,10 +269,21 @@ pub fn add(args: NoteAddArgs) {
         },
         None => None,
     };
+    let metadata = match args.metadata.as_deref().map(parse_metadata) {
+        Some(Ok(m)) => Some(m),
+        Some(Err(e)) => {
+            eprintln!("gage note add: {e}");
+            std::process::exit(1);
+        }
+        None => None,
+    };
 
     dialog::run("Add note", || {
         if let Some(url) = &target {
             cli::log::step(format!("Target\n{}", style(url).dim()))?;
+        }
+        if let Some(m) = &metadata {
+            cli::log::step(format!("Metadata\n{}", style(m).dim()))?;
         }
         let label = if args.json { "JSON" } else { "Text" };
         let text: String = match args.text {
@@ -330,10 +345,21 @@ pub fn add(args: NoteAddArgs) {
                 value,
                 author: &author,
                 target: target.as_deref(),
+                metadata: metadata.clone(),
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Note {} added", short_uuid(&id)).into())
     });
+}
+
+/// A `--metadata` argument as a JSON object
+fn parse_metadata(raw: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("--metadata is not valid JSON: {e}"))?;
+    if !value.is_object() {
+        return Err("--metadata must be a JSON object".to_string());
+    }
+    Ok(value)
 }
 
 /// `$USER` when set and non-empty
@@ -403,6 +429,7 @@ pub fn show(args: NoteShowArgs) {
         ("value", String::new()),
         ("target", note.target.clone().unwrap_or_default()),
         ("author", note.author.clone()),
+        ("metadata", String::new()),
         (
             "created",
             gage_core::datetime::ms_to_iso8601(note.created_ms),
@@ -433,11 +460,17 @@ pub fn show(args: NoteShowArgs) {
         NoteValue::Text(text) => (textwrap::fill(text, value_width), false),
         NoteValue::Json(json) => (crate::json::render(json), true),
     };
+    let metadata_cell = note
+        .metadata
+        .as_ref()
+        .map(crate::json::render)
+        .unwrap_or_default();
     let rows: Vec<Vec<String>> = attrs
         .into_iter()
         .map(|(k, v)| {
             let value = match k {
                 "value" => value_cell.clone(),
+                "metadata" => metadata_cell.clone(),
                 "doc" => crate::markdown::render(&v, value_width),
                 _ => textwrap::fill(&v, value_width),
             };

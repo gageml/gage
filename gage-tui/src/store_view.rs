@@ -1053,6 +1053,7 @@ mod tests {
                 value: NoteValue::Text("the note value".into()),
                 author: "user:test",
                 target: None,
+                metadata: None,
             })
             .unwrap();
 
@@ -1143,6 +1144,7 @@ mod tests {
                 value: NoteValue::Text("v".into()),
                 author: "user:test",
                 target: None,
+                metadata: None,
             })
             .unwrap();
         let gone = notes
@@ -1151,6 +1153,7 @@ mod tests {
                 value: NoteValue::Text("v".into()),
                 author: "user:test",
                 target: None,
+                metadata: None,
             })
             .unwrap();
         notes.delete(&gone).unwrap();

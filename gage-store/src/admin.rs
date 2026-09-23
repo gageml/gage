@@ -449,6 +449,7 @@ mod tests {
                 value: NoteValue::Text("v1".into()),
                 author: "user:test",
                 target: None,
+                metadata: None,
             })
             .unwrap()
     }

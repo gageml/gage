@@ -328,6 +328,7 @@ mod tests {
                 value: NoteValue::Text("v".into()),
                 author: "user:test",
                 target: None,
+                metadata: None,
             })
             .unwrap()
     }
@@ -724,6 +725,7 @@ mod tests {
                 value: NoteValue::Text("v".into()),
                 author: "user:test",
                 target: Some(&format!("note:{a}")),
+                metadata: None,
             })
             .unwrap();
         notes
@@ -746,6 +748,7 @@ mod tests {
                 value: NoteValue::Text("v".into()),
                 author: "user:test",
                 target: Some(&format!("note:{c1}")),
+                metadata: None,
             })
             .unwrap();
         let c2 = note(&store, "c2");
@@ -910,6 +913,7 @@ mod tests {
                 value: NoteValue::Text("v".into()),
                 author: "user:test",
                 target: Some(&format!("note:{root}")),
+                metadata: None,
             })
             .unwrap();
         notes
