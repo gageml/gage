@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
-use gage_query::{SessionCache, install_udfs};
+use gage_query::SessionCache;
 use gage_store::{Store, StoredSessionTable};
 
 use crate::native_session::NativeSessionFn;
@@ -43,10 +43,22 @@ pub fn context(store: Option<Arc<Mutex<Store>>>) -> SessionContext {
     ctx
 }
 
+/// The table functions this crate's contexts expose, for the repl's
+/// `\df`. `native_session`'s result columns depend on the source's
+/// driver, so it advertises no fixed schema.
+pub fn repl_functions() -> Vec<gage_query::tables::TvfInfo> {
+    vec![gage_query::tables::TvfInfo {
+        name: "native_session",
+        args: "[source text]",
+        schema: None,
+    }]
+}
+
 /// A context carrying the shared configuration --- the `SessionCache`
-/// extension, the PostgreSQL SQL dialect, `information_schema`, the UDF
-/// suite, the `native_session` table function, and the
-/// `project_for_path` UDF --- with no named tables registered.
+/// extension, the PostgreSQL SQL dialect, `information_schema`, the
+/// `native_session` table function, and the `project_for_path` UDF ---
+/// with no named tables registered. It carries only what this crate
+/// installs; gage-query's function suite is not pulled in.
 fn new_context() -> SessionContext {
     let cache = Arc::new(SessionCache::new());
     let config = SessionConfig::new()
@@ -58,7 +70,6 @@ fn new_context() -> SessionContext {
         .with_default_features()
         .build();
     let ctx = SessionContext::new_with_state(state);
-    install_udfs(&ctx);
     ctx.register_udtf("native_session", Arc::new(NativeSessionFn));
     ctx.register_udf(project_for_path_udf());
     ctx

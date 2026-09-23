@@ -57,6 +57,7 @@ pub async fn main(args: QueryArgs) {
         gage_query::run_repl(
             &ctx,
             Some(source::index_store_or_exit("gage query", source.as_ref())),
+            gage_query::tables::registered_tvfs(),
             args.format,
             args.quiet,
             args.timing,

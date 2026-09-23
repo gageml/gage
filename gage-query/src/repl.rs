@@ -12,7 +12,7 @@ use rustyline::error::ReadlineError;
 
 use crate::print_format::PrintFormat;
 use crate::slow_log;
-use crate::tables::{TvfInfo, registered_tvfs};
+use crate::tables::TvfInfo;
 
 pub async fn exec_command(
     ctx: &SessionContext,
@@ -110,6 +110,7 @@ async fn run_query(
 pub async fn run_repl(
     ctx: &SessionContext,
     index_store: Option<Arc<gage_claude::index::IndexStore>>,
+    functions: Vec<TvfInfo>,
     mut format: PrintFormat,
     quiet: bool,
     timing: bool,
@@ -134,6 +135,7 @@ pub async fn run_repl(
         timing,
         stats,
         index_store,
+        functions,
     };
     let mut buf = String::new();
 
@@ -194,6 +196,10 @@ struct ReplState<'a> {
     timing: bool,
     stats: bool,
     index_store: Option<Arc<gage_claude::index::IndexStore>>,
+    /// The table functions this context exposes, for `\df`. Each caller
+    /// supplies its own set; the repl advertises no function the
+    /// context does not register.
+    functions: Vec<TvfInfo>,
 }
 
 fn report(stats: &QueryStats, state: &ReplState<'_>) {
@@ -243,7 +249,7 @@ async fn handle_backslash(
             }
         }
         "\\df" => {
-            if let Err(e) = print_df(arg, *state.format) {
+            if let Err(e) = print_df(arg, &state.functions, *state.format) {
                 eprintln!("Error: {e}");
             }
         }
@@ -292,22 +298,26 @@ async fn handle_backslash(
     BackslashResult::Continue
 }
 
-fn print_df(arg: Option<&str>, format: PrintFormat) -> Result<(), Box<dyn std::error::Error>> {
-    let tvfs = registered_tvfs();
+fn print_df(
+    arg: Option<&str>,
+    functions: &[TvfInfo],
+    format: PrintFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
     match arg {
         // The default table renderer overflows on the wide `returns`
         // column and the terminal wraps its borders into noise. Print a
         // plain per-function block instead, which wraps as text. The
         // machine-readable formats keep the batch form.
-        None if format == PrintFormat::Table => print_tvf_overview(&tvfs),
+        None if format == PrintFormat::Table => print_tvf_overview(functions),
         None => {
-            let batch = list_tvfs_batch(&tvfs)?;
+            let batch = list_tvfs_batch(functions)?;
             format.print_batch(&batch, true)?;
         }
-        Some(name) => match tvfs.iter().find(|t| t.name == name) {
+        Some(name) => match functions.iter().find(|t| t.name == name) {
             Some(tvf) => {
-                let batch = describe_tvf_batch(tvf)?;
-                format.print_batch(&batch, true)?;
+                if let Some(batch) = describe_tvf_batch(tvf)? {
+                    format.print_batch(&batch, true)?;
+                }
             }
             None => eprintln!("No table-valued function named: {name}"),
         },
@@ -317,20 +327,22 @@ fn print_df(arg: Option<&str>, format: PrintFormat) -> Result<(), Box<dyn std::e
 
 /// Print the table functions as one block each: the signature, then
 /// the result columns on an indented line. Text, so a long result list
-/// wraps cleanly instead of breaking a table's borders.
+/// wraps cleanly instead of breaking a table's borders. A function
+/// with no fixed schema prints its signature only.
 fn print_tvf_overview(tvfs: &[TvfInfo]) {
     for (i, tvf) in tvfs.iter().enumerate() {
         if i > 0 {
             println!();
         }
         println!("{}({})", tvf.name, tvf.args);
-        let cols: Vec<String> = tvf
-            .schema
-            .fields()
-            .iter()
-            .map(|f| format!("{} {}", f.name(), f.data_type()))
-            .collect();
-        println!("  returns: {}", cols.join(", "));
+        if let Some(schema) = &tvf.schema {
+            let cols: Vec<String> = schema
+                .fields()
+                .iter()
+                .map(|f| format!("{} {}", f.name(), f.data_type()))
+                .collect();
+            println!("  returns: {}", cols.join(", "));
+        }
     }
 }
 
@@ -342,7 +354,10 @@ fn list_tvfs_batch(tvfs: &[TvfInfo]) -> Result<RecordBatch, Box<dyn std::error::
     ]));
     let names: Vec<&str> = tvfs.iter().map(|t| t.name).collect();
     let args: Vec<&str> = tvfs.iter().map(|t| t.args).collect();
-    let returns: Vec<String> = tvfs.iter().map(|t| format_returns(&t.schema)).collect();
+    let returns: Vec<String> = tvfs
+        .iter()
+        .map(|t| format_returns(t.schema.as_ref()))
+        .collect();
     let batch = RecordBatch::try_new(
         schema,
         vec![
@@ -354,31 +369,34 @@ fn list_tvfs_batch(tvfs: &[TvfInfo]) -> Result<RecordBatch, Box<dyn std::error::
     Ok(batch)
 }
 
-fn describe_tvf_batch(tvf: &TvfInfo) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+/// The result-column table for one function, or `None` when the
+/// function has no fixed schema (its columns depend on the source).
+fn describe_tvf_batch(tvf: &TvfInfo) -> Result<Option<RecordBatch>, Box<dyn std::error::Error>> {
+    println!("Function: {}({})", tvf.name, tvf.args);
+    let Some(fn_schema) = &tvf.schema else {
+        println!("  result columns depend on the source");
+        return Ok(None);
+    };
     let schema: SchemaRef = std::sync::Arc::new(Schema::new(vec![
         Field::new("column_name", DataType::Utf8, false),
         Field::new("data_type", DataType::Utf8, false),
         Field::new("is_nullable", DataType::Utf8, false),
     ]));
-    let names: Vec<String> = tvf
-        .schema
+    let names: Vec<String> = fn_schema
         .fields()
         .iter()
         .map(|f| f.name().clone())
         .collect();
-    let types: Vec<String> = tvf
-        .schema
+    let types: Vec<String> = fn_schema
         .fields()
         .iter()
         .map(|f| format!("{}", f.data_type()))
         .collect();
-    let nulls: Vec<&str> = tvf
-        .schema
+    let nulls: Vec<&str> = fn_schema
         .fields()
         .iter()
         .map(|f| if f.is_nullable() { "YES" } else { "NO" })
         .collect();
-    println!("Function: {}({})", tvf.name, tvf.args);
     let batch = RecordBatch::try_new(
         schema,
         vec![
@@ -387,10 +405,13 @@ fn describe_tvf_batch(tvf: &TvfInfo) -> Result<RecordBatch, Box<dyn std::error::
             std::sync::Arc::new(StringArray::from(nulls)),
         ],
     )?;
-    Ok(batch)
+    Ok(Some(batch))
 }
 
-fn format_returns(schema: &SchemaRef) -> String {
+fn format_returns(schema: Option<&SchemaRef>) -> String {
+    let Some(schema) = schema else {
+        return "(depends on the source)".to_string();
+    };
     let cols: Vec<String> = schema
         .fields()
         .iter()

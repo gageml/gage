@@ -38,7 +38,16 @@ pub async fn main(args: Query2Args) {
     };
     let ctx = gage_query2::context(Some(Arc::new(Mutex::new(store))));
     let result = if args.sql.is_empty() {
-        gage_query::run_repl(&ctx, None, args.format, args.quiet, args.timing, args.stats).await
+        gage_query::run_repl(
+            &ctx,
+            None,
+            gage_query2::repl_functions(),
+            args.format,
+            args.quiet,
+            args.timing,
+            args.stats,
+        )
+        .await
     } else {
         let mut result = Ok(());
         for sql in &args.sql {
