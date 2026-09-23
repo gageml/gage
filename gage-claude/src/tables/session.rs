@@ -43,28 +43,38 @@ use gage_session::filter;
 const SUMMARY_COL_START: usize = 7;
 
 fn session_schema() -> SchemaRef {
+    // Column order is shared with the store's `session` table:
+    // identity, location, timestamps and size, content summary, token
+    // usage, derived flags. A new column joins the category it belongs
+    // to.
     Arc::new(Schema::new(vec![
+        // Identity
         Field::new("id", DataType::Utf8, false),
         // The driver's short display form of `id`
         Field::new("id_display", DataType::Utf8, false),
         // The shortest prefix of `id` unique among every session in
         // the source
         Field::new("id_prefix", DataType::Utf8, false),
+        // Location
         Field::new("project", DataType::Utf8, true),
         Field::new("path", DataType::Utf8, false),
+        // Timestamps and size
         Field::new(
             "mtime",
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             false,
         ),
         Field::new("size", DataType::Int64, false),
+        // Content summary
         Field::new("title", DataType::Utf8, true),
         Field::new("model", DataType::Utf8, true),
         Field::new("message_count", DataType::Int64, false),
+        // Token usage
         Field::new("input_tokens", DataType::Int64, false),
         Field::new("output_tokens", DataType::Int64, false),
         Field::new("cache_read_input_tokens", DataType::Int64, false),
         Field::new("cache_creation_input_tokens", DataType::Int64, false),
+        // Derived flags
         Field::new("is_empty", DataType::Boolean, false),
     ]))
 }

@@ -5,10 +5,10 @@
 //! counts on (id, commit, timestamps) in one query over every live
 //! session. `id_prefix` is computed over the store's short-prefix set
 //! of sessions, the set a session prefix resolves against first.
-//! The attribute columns (`native_id`, `session_type`, `summary.*`)
-//! live in each object's `attrs.json` and are read from the repository
-//! only for the rows a projection needs, one `cat-file` round trip
-//! each. Filters on `id` and lower bounds on `mtime` are applied to
+//! The attribute columns (`project`, `native_id`, `session_type`,
+//! `summary.*`) live in each object's `attrs.json` and are read from
+//! the repository only for the rows a projection needs, one `cat-file`
+//! round trip each. Filters on `id` and lower bounds on `mtime` are applied to
 //! the index rows before any object is read.
 
 use std::any::Any;
@@ -43,21 +43,39 @@ use gage_session::filter::{self, IdFilter};
 
 use crate::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
 
-/// Index of the first column read from the object rather than the
-/// index. A projection below this bound never opens an object.
-const ATTRS_COL_START: usize = 6;
+/// Columns read from the object's `attrs.json` rather than the index.
+/// A projection touching none of these never opens an object.
+const ATTRS_COLS: &[&str] = &[
+    "project",
+    "size",
+    "native_id",
+    "native_source",
+    "session_type",
+    "driver",
+    "title",
+    "model",
+    "message_count",
+];
 
 const MTIME_COL: &str = "mtime";
 
 fn stored_session_schema() -> SchemaRef {
+    // Column order is shared with the driver `native_session` table:
+    // identity, location, timestamps and size, provenance, content
+    // summary. A new column joins the category it belongs to.
     Arc::new(Schema::new(vec![
+        // Identity
         Field::new("id", DataType::Utf8, false),
         // Short display form of the Gage id
         Field::new("id_display", DataType::Utf8, false),
         // Shortest prefix of `id` unique among every live session
         Field::new("id_prefix", DataType::Utf8, false),
+        // Location
+        // The project the session belongs to, as the driver names it
+        Field::new("project", DataType::Utf8, true),
         // `git:<commit sha>` of the version listed
         Field::new("locator", DataType::Utf8, false),
+        // Timestamps and size
         // The commit's `modified` marker
         Field::new(
             MTIME_COL,
@@ -69,16 +87,16 @@ fn stored_session_schema() -> SchemaRef {
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             true,
         ),
+        Field::new("size", DataType::Int64, true),
+        // Provenance
         Field::new("native_id", DataType::Utf8, false),
         Field::new("native_source", DataType::Utf8, false),
         Field::new("session_type", DataType::Utf8, false),
         Field::new("driver", DataType::Utf8, false),
-        Field::new("size", DataType::Int64, true),
+        // Content summary
         Field::new("title", DataType::Utf8, true),
         Field::new("model", DataType::Utf8, true),
         Field::new("message_count", DataType::Int64, true),
-        // The project the session belongs to, as the driver names it
-        Field::new("project", DataType::Utf8, true),
     ]))
 }
 
@@ -240,7 +258,9 @@ impl StoredSessionExec {
     /// the index.
     fn projection_needs_attrs(&self) -> bool {
         match &self.projection {
-            Some(indices) => indices.iter().any(|&i| i >= ATTRS_COL_START),
+            Some(indices) => indices
+                .iter()
+                .any(|&i| ATTRS_COLS.contains(&self.full_schema.field(i).name().as_str())),
             None => true,
         }
     }
@@ -338,18 +358,18 @@ impl StoredSessionExec {
                 Arc::new(ids.finish()),
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
+                Arc::new(projects.finish()),
                 Arc::new(locators.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
                 Arc::new(createds.finish().with_timezone("UTC")),
+                Arc::new(sizes.finish()),
                 Arc::new(native_ids.finish()),
                 Arc::new(native_sources.finish()),
                 Arc::new(session_types.finish()),
                 Arc::new(drivers.finish()),
-                Arc::new(sizes.finish()),
                 Arc::new(titles.finish()),
                 Arc::new(models.finish()),
                 Arc::new(message_counts.finish()),
-                Arc::new(projects.finish()),
             ],
         )?;
         match &self.projection {
