@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use gage_claude::home::claude_home;
 use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::uuid::short_uuid;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, Source};
+use gage_session::Driver;
 use gage_store::{DatasetStore, SESSION_TYPE, SessionOutcome, SessionSpec, SessionStore, Store};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
@@ -193,41 +193,24 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let source = match driver.open_source(&spec) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("gage session list: {spec}: {e}");
-            std::process::exit(1);
-        }
-    };
-    let ctx = match gage_query2::context(gage_query2::SessionBacking::Source(source.as_ref())) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("gage session list: {spec}: {e}");
-            std::process::exit(1);
-        }
-    };
-    let project = match args.project.as_deref() {
-        Some(text) => match resolve_project(source.as_ref(), text) {
-            Ok(name) => Some(name),
-            Err(e) => {
-                eprintln!("gage session list: {e}");
-                std::process::exit(1);
-            }
-        },
-        None => None,
-    };
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Native, project.as_deref()).await;
+    // The native session rows, the project filter, and the driver
+    // encoding all reach the source through SQL: `native_session`
+    // opens it, `project_for_path` resolves a directory to its project
+    // name. The command holds no source handle.
+    let ctx = gage_query2::context(None);
+    let from = format!("native_session('{}')", spec.replace('\'', "''"));
+    let project_pred = args
+        .project
+        .as_deref()
+        .map(|p| format!("project = project_for_path('{}')", p.replace('\'', "''")));
+    let (rows, total) =
+        query_sessions(&ctx, &args, Listing::Native, &from, project_pred.as_deref()).await;
     if total > 0 {
         let drivers: Vec<Arc<dyn Driver>> = vec![driver.clone(); rows.len()];
         render_table(&rows, &drivers, Listing::Native, args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
-    }
-    if let Err(e) = source.close() {
-        eprintln!("gage session list: {spec}: {e}");
-        std::process::exit(1);
     }
 }
 
@@ -252,16 +235,8 @@ async fn list_stored(args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let ctx = match gage_query2::context(gage_query2::SessionBacking::Store(Arc::new(Mutex::new(
-        store,
-    )))) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("gage session list: {e}");
-            std::process::exit(1);
-        }
-    };
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, None).await;
+    let ctx = gage_query2::context(Some(Arc::new(Mutex::new(store))));
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", None).await;
     if total > 0 {
         let registry = source::driver_registry();
         let drivers = match stored_drivers(&registry, &rows) {
@@ -397,17 +372,6 @@ fn stored_drivers(registry: &DriverRegistry, rows: &[Row]) -> Result<Vec<Arc<dyn
 /// Resolve a `--project` value to the driver's project name: an
 /// existing directory is named by the driver, anything else is taken
 /// as a name.
-fn resolve_project(source: &dyn Source, text: &str) -> Result<String, String> {
-    let path = Path::new(text);
-    if path.is_dir() {
-        source
-            .project_name(path)
-            .map_err(|e| format!("project {text}: {e}"))
-    } else {
-        Ok(text.to_string())
-    }
-}
-
 /// Which `session` table binding a listing reads, and therefore
 /// which columns it shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -430,9 +394,10 @@ async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
     listing: Listing,
-    project: Option<&str>,
+    from: &str,
+    project_pred: Option<&str>,
 ) -> (Vec<Row>, usize) {
-    let where_clause = build_where_clause(args, project);
+    let where_clause = build_where_clause(args, project_pred);
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
@@ -444,13 +409,13 @@ async fn query_sessions(
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, title, {type_col}, model, size, \
          message_count, {time_col}, {driver_col} \
-         FROM session{where_clause} \
+         FROM {from}{where_clause} \
          ORDER BY mtime DESC{limit_clause}",
     );
     let batches = run_query(ctx, &sql).await;
     let rows = rows_from_batches(&batches);
 
-    let count_sql = format!("SELECT COUNT(*) FROM session{where_clause}");
+    let count_sql = format!("SELECT COUNT(*) FROM {from}{where_clause}");
     let count_batches = run_query(ctx, &count_sql).await;
     let total = count_batches
         .first()
@@ -460,10 +425,10 @@ async fn query_sessions(
     (rows, total)
 }
 
-fn build_where_clause(args: &SessionListArgs, project: Option<&str>) -> String {
+fn build_where_clause(args: &SessionListArgs, project_pred: Option<&str>) -> String {
     let mut clauses: Vec<String> = Vec::new();
-    if let Some(name) = project {
-        clauses.push(format!("project = '{}'", name.replace('\'', "''")));
+    if let Some(pred) = project_pred {
+        clauses.push(pred.to_string());
     }
     if let Some(d) = args.since {
         let cutoff_ms = std::time::SystemTime::now()
@@ -1004,17 +969,19 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
             std::process::exit(1);
         }
     };
-    let ctx = match gage_query2::context(gage_query2::SessionBacking::Source(source.as_ref())) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("gage session delete: {spec}: {e}");
-            std::process::exit(1);
-        }
-    };
+    // The empty-session and id-resolution queries run against the
+    // native session rows through the `native_session` table function;
+    // the source handle stays only for the driver deletes below.
+    let ctx = gage_query2::context(None);
+    let from = format!("native_session('{}')", spec.replace('\'', "''"));
 
     let targets = if args.empty {
         let spinner = style::spinner("Looking for empty sessions...");
-        let targets = delete_targets(&ctx, "SELECT id, is_empty FROM session WHERE is_empty").await;
+        let targets = delete_targets(
+            &ctx,
+            &format!("SELECT id, is_empty FROM {from} WHERE is_empty"),
+        )
+        .await;
         spinner.finish_and_clear();
         targets
     } else {
@@ -1039,7 +1006,7 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
             .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("SELECT id, is_empty FROM session WHERE id IN ({in_list})");
+        let sql = format!("SELECT id, is_empty FROM {from} WHERE id IN ({in_list})");
         delete_targets(&ctx, &sql).await
     };
     let empty_count = targets.iter().filter(|t| t.is_empty).count();

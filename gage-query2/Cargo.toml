@@ -9,6 +9,7 @@ path = "src/lib.rs"
 [dependencies]
 datafusion = { workspace = true }
 gage-query = { path = "../gage-query" }
+gage-registry = { path = "../gage-registry" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 

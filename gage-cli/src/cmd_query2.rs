@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex};
 
 use clap::Args;
 use gage_query::PrintFormat;
-use gage_query2::SessionBacking;
 use gage_store::Store;
 
 #[derive(Args)]
@@ -37,13 +36,7 @@ pub async fn main(args: Query2Args) {
             std::process::exit(1);
         }
     };
-    let ctx = match gage_query2::context(SessionBacking::Store(Arc::new(Mutex::new(store)))) {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            eprintln!("gage query2: {e}");
-            std::process::exit(1);
-        }
-    };
+    let ctx = gage_query2::context(Some(Arc::new(Mutex::new(store))));
     let result = if args.sql.is_empty() {
         gage_query::run_repl(&ctx, None, args.format, args.quiet, args.timing, args.stats).await
     } else {

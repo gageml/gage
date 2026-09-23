@@ -2650,6 +2650,7 @@ version = "0.2.0-dev"
 dependencies = [
  "datafusion",
  "gage-query",
+ "gage-registry",
  "gage-session",
  "gage-store",
  "tempfile",
