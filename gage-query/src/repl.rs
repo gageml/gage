@@ -295,6 +295,11 @@ async fn handle_backslash(
 fn print_df(arg: Option<&str>, format: PrintFormat) -> Result<(), Box<dyn std::error::Error>> {
     let tvfs = registered_tvfs();
     match arg {
+        // The default table renderer overflows on the wide `returns`
+        // column and the terminal wraps its borders into noise. Print a
+        // plain per-function block instead, which wraps as text. The
+        // machine-readable formats keep the batch form.
+        None if format == PrintFormat::Table => print_tvf_overview(&tvfs),
         None => {
             let batch = list_tvfs_batch(&tvfs)?;
             format.print_batch(&batch, true)?;
@@ -308,6 +313,25 @@ fn print_df(arg: Option<&str>, format: PrintFormat) -> Result<(), Box<dyn std::e
         },
     }
     Ok(())
+}
+
+/// Print the table functions as one block each: the signature, then
+/// the result columns on an indented line. Text, so a long result list
+/// wraps cleanly instead of breaking a table's borders.
+fn print_tvf_overview(tvfs: &[TvfInfo]) {
+    for (i, tvf) in tvfs.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!("{}({})", tvf.name, tvf.args);
+        let cols: Vec<String> = tvf
+            .schema
+            .fields()
+            .iter()
+            .map(|f| format!("{} {}", f.name(), f.data_type()))
+            .collect();
+        println!("  returns: {}", cols.join(", "));
+    }
 }
 
 fn list_tvfs_batch(tvfs: &[TvfInfo]) -> Result<RecordBatch, Box<dyn std::error::Error>> {
