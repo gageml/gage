@@ -11,6 +11,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_claude::home::claude_home;
 use gage_claude::session::{encode_project_dir, one_session};
+use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
@@ -108,6 +109,24 @@ pub struct SessionAddArgs {
     /// store are linked
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    /// Maximum stored size per session
+    ///
+    /// Overrides the configured default. Accepts a byte count or a
+    /// unit suffix, such as 256MB or 1GB. A session whose stored files
+    /// exceed this is refused.
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
+    pub max_session_size: Option<ByteSize>,
+
+    /// Add regardless of size
+    ///
+    /// Stores the session even when it exceeds the size limit.
+    #[arg(long)]
+    pub force: bool,
+}
+
+fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
+    s.parse()
 }
 
 #[derive(Args)]
@@ -680,9 +699,25 @@ pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
                 }
             },
         );
+    // --force lifts the cap; otherwise the flag overrides the
+    // configured default.
+    let max_bytes = if args.force {
+        None
+    } else {
+        let configured = Config::load_user()
+            .map(|c| c.storage.max_session_size)
+            .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
+        Some(args.max_session_size.unwrap_or(configured).bytes())
+    };
     match dataset_id {
         Some(dataset_id) if stored => add_stored_to_dataset(&store, &dataset_id, &args.sessions),
-        _ => add_native(&store, source, dataset_id.as_deref(), &args.sessions),
+        _ => add_native(
+            &store,
+            source,
+            dataset_id.as_deref(),
+            &args.sessions,
+            max_bytes,
+        ),
     }
 }
 
@@ -733,6 +768,7 @@ fn add_native(
     source: Option<String>,
     dataset_id: Option<&str>,
     prefixes: &[String],
+    max_bytes: Option<u64>,
 ) {
     let registry = source::driver_registry();
     let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
@@ -787,7 +823,11 @@ fn add_native(
                     session: session.as_mut(),
                 })
                 .collect();
-            let outcomes = match DatasetStore::from(store).sessions_add(dataset_id, specs) {
+            let datasets = match max_bytes {
+                Some(max) => DatasetStore::from(store).with_max_session_size(max),
+                None => DatasetStore::from(store),
+            };
+            let outcomes = match datasets.sessions_add(dataset_id, specs) {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("gage session add: {e}");
@@ -799,7 +839,10 @@ fn add_native(
             }
         }
         None => {
-            let sessions = SessionStore::from(store);
+            let sessions = match max_bytes {
+                Some(max) => SessionStore::from(store).with_max_session_size(max),
+                None => SessionStore::from(store),
+            };
             for (session, id) in natives.iter_mut().zip(&ids) {
                 let outcome = match sessions.add(driver.as_ref(), session.as_mut()) {
                     Ok(o) => o,

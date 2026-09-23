@@ -1,11 +1,105 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 
 use crate::glob::glob_match;
+
+/// A byte count parsed from and rendered as a human string. Accepts a
+/// bare integer (bytes) or a `<number><unit>` form with a `B`, `KB`,
+/// `MB`, or `GB` suffix, base 1024 and case-insensitive. Serializes to
+/// the largest unit that divides it exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteSize(pub u64);
+
+const KB: u64 = 1024;
+const MB: u64 = 1024 * KB;
+const GB: u64 = 1024 * MB;
+
+impl ByteSize {
+    pub fn bytes(self) -> u64 {
+        self.0
+    }
+}
+
+impl FromStr for ByteSize {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        let upper = s.to_ascii_uppercase();
+        let (num, unit) = match upper.strip_suffix("GB") {
+            Some(n) => (n, GB),
+            None => match upper.strip_suffix("MB") {
+                Some(n) => (n, MB),
+                None => match upper.strip_suffix("KB") {
+                    Some(n) => (n, KB),
+                    None => match upper.strip_suffix('B') {
+                        Some(n) => (n, 1),
+                        None => (upper.as_str(), 1),
+                    },
+                },
+            },
+        };
+        let value: u64 = num
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid size {s:?}: {e}"))?;
+        value
+            .checked_mul(unit)
+            .map(ByteSize)
+            .ok_or_else(|| format!("size overflows: {s}"))
+    }
+}
+
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n = self.0;
+        if n != 0 && n.is_multiple_of(GB) {
+            write!(f, "{}GB", n / GB)
+        } else if n != 0 && n.is_multiple_of(MB) {
+            write!(f, "{}MB", n / MB)
+        } else if n != 0 && n.is_multiple_of(KB) {
+            write!(f, "{}KB", n / KB)
+        } else {
+            write!(f, "{n}B")
+        }
+    }
+}
+
+impl Serialize for ByteSize {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl de::Visitor<'_> for V {
+            type Value = ByteSize;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a byte count as an integer or a string like \"256MB\"")
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<ByteSize, E> {
+                Ok(ByteSize(v))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<ByteSize, E> {
+                u64::try_from(v)
+                    .map(ByteSize)
+                    .map_err(|_e| E::custom("size must not be negative"))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ByteSize, E> {
+                v.parse().map_err(E::custom)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
 
 /// Returns the gage home directory.
 ///
@@ -63,6 +157,31 @@ pub struct Config {
 
     #[serde(default)]
     pub issues: IssuesConfig,
+
+    #[serde(default)]
+    pub storage: StorageConfig,
+}
+
+/// Session storage settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// The largest total content a single session may write to the
+    /// store. `gage session add` refuses a session whose stored files
+    /// exceed this, unless `--force` is given.
+    #[serde(default = "default_max_session_size")]
+    pub max_session_size: ByteSize,
+}
+
+fn default_max_session_size() -> ByteSize {
+    ByteSize(256 * MB)
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            max_session_size: default_max_session_size(),
+        }
+    }
 }
 
 /// Issue settings.

@@ -91,30 +91,12 @@ impl Driver for ClaudeDriver {
             .ok_or_else(|| {
                 DriverError::Other("write_native: session is not a ClaudeNativeSession".into())
             })?;
+        // Only the session transcript is stored. Subagent and sidecar
+        // content is intentionally left out until a consumer exists for
+        // it; a session is re-added over time, so that content can join
+        // later at no duplication cost (git shares identical blobs).
         let session_path = claude.session_path().to_path_buf();
         copy_file_into_sink(&session_path, "session.jsonl", sink)?;
-        let subagents_dir = subagents_dir_for(&session_path, claude.native_id());
-        match fs::read_dir(&subagents_dir) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry.map_err(DriverError::Io)?;
-                    let path = entry.path();
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .ok_or_else(|| {
-                            DriverError::Other(format!(
-                                "non-UTF-8 name under {}",
-                                subagents_dir.display()
-                            ))
-                        })?
-                        .to_string();
-                    copy_file_into_sink(&path, &format!("subagents/{name}"), sink)?;
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(DriverError::Io(e)),
-        }
         Ok(CONTENT_FORMAT.to_string())
     }
 
@@ -332,14 +314,6 @@ fn copy_file_into_sink(
     let mut file = File::open(src).map_err(DriverError::Io)?;
     io::copy(&mut file, &mut writer).map_err(DriverError::Io)?;
     Ok(())
-}
-
-fn subagents_dir_for(session_path: &Path, native_id: &str) -> PathBuf {
-    session_path
-        .parent()
-        .expect("session path has a parent")
-        .join(native_id)
-        .join("subagents")
 }
 
 /// Resolve the projects directory from a source value. A leading

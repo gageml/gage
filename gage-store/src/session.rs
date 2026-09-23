@@ -36,11 +36,15 @@ const FILES_TREE: &str = "files.d";
 /// Session operations over an opened store.
 pub struct SessionStore<'a> {
     store: &'a Store,
+    max_session_bytes: Option<u64>,
 }
 
 impl<'a> From<&'a Store> for SessionStore<'a> {
     fn from(store: &'a Store) -> Self {
-        SessionStore { store }
+        SessionStore {
+            store,
+            max_session_bytes: None,
+        }
     }
 }
 
@@ -149,7 +153,30 @@ pub fn session_object_id(driver_name: &str, native_session_id: &str) -> String {
     derive_id(&format!("session\0{driver_name}\0{native_session_id}"))
 }
 
-impl SessionStore<'_> {
+impl<'a> SessionStore<'a> {
+    /// Cap the total content one `add` may write to the store. A
+    /// session whose stored files exceed `max` bytes fails with
+    /// [`StoreError::SessionTooLarge`] and writes no object. Without
+    /// this, `add` stores content of any size.
+    ///
+    /// # Future storage selection
+    ///
+    /// Today a driver stores only the session's own transcript. Two
+    /// extensions are planned around this cap. A scanner definition
+    /// will declare what extra content it wants --- subagent
+    /// transcripts, sidecar files matching a path or type --- and the
+    /// scan command will refresh session records to include what the
+    /// selected scanners need, subject to this same limit. `gage
+    /// session add` will grow storage-selection options
+    /// (`--store-subagents`, `--store-attachments`, `--store-all`).
+    /// Because sessions are re-added over time and git shares identical
+    /// blobs, content withheld today can be added later at no
+    /// duplication cost.
+    pub fn with_max_session_size(mut self, max: u64) -> Self {
+        self.max_session_bytes = Some(max);
+        self
+    }
+
     /// Write `session`'s content as a session object. `driver` drives
     /// the serialization through [`Driver::write_native`]; the
     /// returned string is stored as the session's `content_format`.
@@ -168,10 +195,17 @@ impl SessionStore<'_> {
         let session_type = session.session_type().to_string();
         let summary = collect_summary(session.attrs());
 
-        let mut sink = GitContentSink::new(path.to_path_buf());
-        let content_format = driver
-            .write_native(session, &mut sink)
-            .map_err(|e| StoreError::Parse(format!("driver: {e}")))?;
+        let mut sink = GitContentSink::new(path.to_path_buf(), self.max_session_bytes);
+        let content_format = match driver.write_native(session, &mut sink) {
+            Ok(cf) => cf,
+            // A size-cap abort surfaces through the sink, not as the
+            // driver's own error, so report it as such.
+            Err(e) => {
+                return Err(sink
+                    .take_write_error()
+                    .unwrap_or_else(|| StoreError::Parse(format!("driver: {e}"))));
+            }
+        };
         let file_entries = sink.into_entries()?;
         let files_tree_sha = build_files_tree(path, file_entries)?;
 
@@ -380,14 +414,21 @@ pub(crate) struct GitContentSink {
     store_path: PathBuf,
     entries: Vec<(String, String)>,
     write_error: Option<StoreError>,
+    /// The cap on total bytes across every file written for one
+    /// session; `None` is unlimited.
+    max_bytes: Option<u64>,
+    /// Bytes accumulated across every writer opened so far.
+    total_bytes: u64,
 }
 
 impl GitContentSink {
-    pub(crate) fn new(store_path: PathBuf) -> Self {
+    pub(crate) fn new(store_path: PathBuf, max_bytes: Option<u64>) -> Self {
         Self {
             store_path,
             entries: Vec::new(),
             write_error: None,
+            max_bytes,
+            total_bytes: 0,
         }
     }
 
@@ -396,6 +437,13 @@ impl GitContentSink {
             return Err(e);
         }
         Ok(self.entries)
+    }
+
+    /// Take a recorded write error, leaving none. The caller uses this
+    /// to prefer a size-cap failure over the driver's own error when
+    /// `write_native` aborts.
+    pub(crate) fn take_write_error(&mut self) -> Option<StoreError> {
+        self.write_error.take()
     }
 }
 
@@ -417,6 +465,21 @@ struct GitBlobWriter<'a> {
 
 impl Write for GitBlobWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Enforce the cap as bytes arrive, so a runaway session stops at
+        // the limit rather than buffering to exhaustion. On breach the
+        // sink records `SessionTooLarge` and the write errors, which
+        // aborts the copy before any blob is finalized.
+        if let Some(max) = self.sink.max_bytes {
+            let projected = self.sink.total_bytes + buf.len() as u64;
+            if projected > max {
+                self.sink.write_error = Some(StoreError::SessionTooLarge {
+                    size: projected,
+                    max,
+                });
+                return Err(io::Error::other("session exceeds max storage size"));
+            }
+        }
+        self.sink.total_bytes += buf.len() as u64;
         self.buffer.extend_from_slice(buf);
         Ok(buf.len())
     }

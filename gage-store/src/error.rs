@@ -59,6 +59,8 @@ pub enum StoreError {
     SessionNotFound(String),
     /// The object index could not be opened, written, or queried
     Index(String),
+    /// A session's content exceeds the configured maximum storage size
+    SessionTooLarge { size: u64, max: u64 },
 }
 
 impl fmt::Display for StoreError {
@@ -135,6 +137,11 @@ impl fmt::Display for StoreError {
             } => write!(f, "{id} is a {actual}, not a {expected}"),
             StoreError::SessionNotFound(s) => write!(f, "session not found: {s}"),
             StoreError::Index(what) => write!(f, "object index: {what}"),
+            StoreError::SessionTooLarge { size, max } => write!(
+                f,
+                "session content reached {size} bytes, over the {max}-byte limit \
+                 (raise it with --max-session-size or override with --force)"
+            ),
         }
     }
 }
@@ -163,7 +170,8 @@ impl std::error::Error for StoreError {
             | StoreError::InvalidPath { .. }
             | StoreError::WrongType { .. }
             | StoreError::SessionNotFound(_)
-            | StoreError::Index(_) => None,
+            | StoreError::Index(_)
+            | StoreError::SessionTooLarge { .. } => None,
         }
     }
 }

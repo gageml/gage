@@ -31,11 +31,15 @@ const SESSIONS_LINK: &str = "sessions.link";
 /// Dataset operations over an opened store.
 pub struct DatasetStore<'a> {
     store: &'a Store,
+    max_session_bytes: Option<u64>,
 }
 
 impl<'a> From<&'a Store> for DatasetStore<'a> {
     fn from(store: &'a Store) -> Self {
-        DatasetStore { store }
+        DatasetStore {
+            store,
+            max_session_bytes: None,
+        }
     }
 }
 
@@ -98,6 +102,14 @@ pub struct SessionSpec<'a> {
 }
 
 impl DatasetStore<'_> {
+    /// Cap the total content each session added through this store may
+    /// write, as [`SessionStore::with_max_session_size`] does for a
+    /// direct add. Applies to every session in a `sessions_add` call.
+    pub fn with_max_session_size(mut self, max: u64) -> Self {
+        self.max_session_bytes = Some(max);
+        self
+    }
+
     /// Create an empty dataset. Returns the new id.
     pub fn create(&self) -> Result<String, StoreError> {
         let id = new_uuid();
@@ -209,7 +221,10 @@ impl DatasetStore<'_> {
             member_ids.push(self.store.read_object(sha)?.header.id);
         }
 
-        let sessions = SessionStore::from(self.store);
+        let sessions = match self.max_session_bytes {
+            Some(max) => SessionStore::from(self.store).with_max_session_size(max),
+            None => SessionStore::from(self.store),
+        };
         let mut outcomes: Vec<DatasetSessionAddOutcome> = Vec::with_capacity(specs.len());
         for spec in specs.iter_mut() {
             let SessionAddOutcome {
