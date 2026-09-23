@@ -7,7 +7,6 @@
 //! native session's bytes into the store through a [`ContentSink`]
 //! and reads a stored session back through a [`ContentSource`].
 
-use std::borrow::Cow;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -126,7 +125,10 @@ pub trait NativeSession {
 pub trait StoredSession {
     fn native_id(&self) -> &str;
     fn content_format(&self) -> &str;
-    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Box<dyn Entry>, DriverError>> + '_>;
+    /// The session's rows in `entry` table shape, in line order. The
+    /// driver deserializes its opaque bytes here; the core builds the
+    /// `entry` and `message` tables from the result.
+    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_>;
 }
 
 /// The attributes of a native session. An implementation decides how
@@ -142,11 +144,31 @@ pub trait SessionAttrs {
     fn message_count(&self) -> Option<u64>;
 }
 
-/// One raw line of a stored session. Structured reads go through the
-/// driver's tables, not through this trait.
-pub trait Entry {
-    fn line(&self) -> u32;
-    fn raw(&self) -> Cow<'_, str>;
+/// One normalized row of a stored session, in `entry` table shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// 1-based line in the session's native content
+    pub line: u32,
+    pub uuid: Option<String>,
+    pub entry_type: Option<String>,
+    pub subtype: Option<String>,
+    /// Epoch milliseconds, UTC
+    pub timestamp_ms: Option<i64>,
+    /// The native row as the harness wrote it
+    pub raw: String,
+    /// Present for exactly the rows the `message` table contains
+    pub message: Option<Message>,
+}
+
+/// The message-derived columns of an entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub subtype: Option<String>,
+    pub text: String,
+    /// JSON array of attachment blocks, each carrying a `ref` of
+    /// `[line, content_index]`
+    pub attachments: Option<String>,
+    pub ide_tags: Option<String>,
 }
 
 /// A read-only view of the byte tree a stored session carries.

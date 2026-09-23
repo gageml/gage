@@ -15,9 +15,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use gage_core::uuid::derive_id;
-use gage_session::{ContentSink, Driver, NativeSession, SessionAttrs};
+use gage_session::{ContentSink, ContentSource, Driver, NativeSession, SessionAttrs};
 use serde::{Deserialize, Serialize};
 
+use crate::content::GitContentSource;
 use crate::dataset::{DatasetMembers, DatasetStore};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
@@ -335,6 +336,16 @@ impl<'a> SessionStore<'a> {
         let object = self.store.read_object(commit_sha)?;
         decode(object)
     }
+
+    /// The byte tree of the session version at `commit_sha`, for the
+    /// driver that wrote it to read back through
+    /// [`Driver::read_stored`].
+    pub fn content(&self, commit_sha: &str) -> Box<dyn ContentSource> {
+        Box::new(GitContentSource::new(
+            self.store.path().to_path_buf(),
+            commit_sha.to_string(),
+        ))
+    }
 }
 
 /// A selection over sessions: filters on the indexed attributes, an
@@ -617,9 +628,7 @@ pub(crate) mod tests {
     use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
-    use gage_session::{
-        ContentSource, Driver as DriverTrait, DriverError, Entry, Source, StoredSession,
-    };
+    use gage_session::{ContentSource, Driver as DriverTrait, DriverError, Source, StoredSession};
     use std::any::Any;
     use std::io::Cursor;
     use std::time::SystemTime;
@@ -724,9 +733,6 @@ pub(crate) mod tests {
             Err(DriverError::Other("read_stored not used in tests".into()))
         }
     }
-
-    #[allow(dead_code)]
-    fn _entry_trait_is_object_safe(_: &dyn Entry) {}
 
     pub(crate) fn fake(id: &str, files: &[(&str, &str)]) -> FakeSession {
         let entries: Vec<(String, Vec<u8>)> = files

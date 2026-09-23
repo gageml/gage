@@ -24,7 +24,7 @@ use crate::session::encode_project_dir;
 pub use derive::{
     COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
     COL_SUBTYPE, COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, DerivedSession, Fingerprint,
-    SessionSummary, derive_session, derived_schema, entry_text, is_message_row,
+    SessionSummary, derive_entry, derive_session, derived_schema, entry_text, is_message_row,
 };
 pub use reconcile::{
     IndexStore, LockMode, ReconcileEvent, ReconcileOutcome, SOURCE_MARKER, Status,

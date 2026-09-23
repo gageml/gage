@@ -36,6 +36,7 @@
 //!   store.
 
 mod admin;
+mod content;
 mod dataset;
 mod error;
 pub mod git;

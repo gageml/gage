@@ -11,10 +11,9 @@
 //! the resolved root, so the same file read through any spelling of
 //! its source records the same `native_source`.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
@@ -25,10 +24,11 @@ use gage_session::{
 };
 
 use crate::home::ClaudeHome;
-use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_session};
+use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_entry, derive_session};
 use crate::session::{
     SESSION_RE, delete_session, encode_project_dir, is_agent_tmp_slug, projects_dir,
 };
+use crate::session_reader::SessionReader;
 use crate::tables::{EntryTable, MessageTable, SessionTable};
 
 const NAME: &str = "claude";
@@ -566,34 +566,20 @@ impl StoredSession for ClaudeStoredSession {
         &self.content_format
     }
 
-    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Box<dyn Entry>, DriverError>> + '_> {
+    /// One normalized row per parsed line of `session.jsonl`, through
+    /// the same derivation the native tables use. Blank and
+    /// unparseable lines consume a line number and yield no row, as
+    /// they do for a native session.
+    fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_> {
         let reader = match self.source.open("session.jsonl") {
-            Ok(r) => BufReader::new(r as Box<dyn Read + Send>),
+            Ok(r) => SessionReader::new(r),
             Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
         };
-        Box::new(reader.lines().enumerate().map(|(idx, line)| {
-            let raw = line.map_err(DriverError::Io)?;
-            Ok(Box::new(ClaudeEntry {
-                line: (idx as u32) + 1,
-                raw,
-            }) as Box<dyn Entry>)
+        let native_id = self.native_id.clone();
+        Box::new(reader.map(move |item| {
+            let (line_num, value) = item.map_err(DriverError::Io)?;
+            Ok(derive_entry(&native_id, line_num, &value))
         }))
-    }
-}
-
-/// One raw line of `session.jsonl`
-struct ClaudeEntry {
-    line: u32,
-    raw: String,
-}
-
-impl Entry for ClaudeEntry {
-    fn line(&self) -> u32 {
-        self.line
-    }
-
-    fn raw(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.raw)
     }
 }
 

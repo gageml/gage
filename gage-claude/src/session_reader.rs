@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 
 use serde_json::Value;
@@ -7,25 +7,30 @@ use serde_json::Value;
 /// Iterator over parsed NDJSON session lines.
 ///
 /// Yields `(line_number, parsed_value)` pairs where `line_number` is
-/// the 1-based position in the file (including empty and malformed
+/// the 1-based position in the input (including empty and malformed
 /// lines in the count). Empty lines and lines that fail JSON parsing
 /// are skipped — they consume a line number but produce no item.
-pub struct SessionReader {
-    reader: io::Lines<BufReader<File>>,
+pub struct SessionReader<R: Read = File> {
+    reader: io::Lines<BufReader<R>>,
     line_num: u32,
 }
 
-impl SessionReader {
+impl SessionReader<File> {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let file = File::open(path)?;
-        Ok(Self {
-            reader: BufReader::new(file).lines(),
-            line_num: 0,
-        })
+        Ok(Self::new(File::open(path)?))
     }
 }
 
-impl Iterator for SessionReader {
+impl<R: Read> SessionReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader: BufReader::new(reader).lines(),
+            line_num: 0,
+        }
+    }
+}
+
+impl<R: Read> Iterator for SessionReader<R> {
     type Item = io::Result<(u32, Value)>;
 
     fn next(&mut self) -> Option<Self::Item> {

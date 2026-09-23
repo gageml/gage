@@ -17,6 +17,7 @@ use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::DateTime;
+use gage_session::{Entry, Message};
 use serde::{Deserialize, Serialize};
 
 use super::Result;
@@ -331,6 +332,24 @@ impl RowBuilders {
         }
     }
 
+    fn push(&mut self, session_id: &str, e: &Entry) {
+        self.session_ids.append_value(session_id);
+        self.lines.append_value(e.line as i64);
+        self.uuids.append_option(e.uuid.as_deref());
+        self.types.append_option(e.entry_type.as_deref());
+        self.subtypes.append_option(e.subtype.as_deref());
+        self.timestamps.append_option(e.timestamp_ms);
+        self.raws.append_value(&e.raw);
+        let m = e.message.as_ref();
+        self.texts.append_option(m.map(|m| m.text.as_str()));
+        self.attachments
+            .append_option(m.and_then(|m| m.attachments.as_deref()));
+        self.ide_tags
+            .append_option(m.and_then(|m| m.ide_tags.as_deref()));
+        self.message_subtypes
+            .append_option(m.and_then(|m| m.subtype.as_deref()));
+    }
+
     fn finish(mut self) -> Result<RecordBatch> {
         Ok(RecordBatch::try_new(
             derived_schema(),
@@ -391,22 +410,6 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         };
 
         let entry_type = entry.get("type").and_then(|v| v.as_str());
-        let entry_uuid = entry.get("uuid").and_then(|v| v.as_str());
-        let ts_ms = match entry.get("timestamp").and_then(|v| v.as_str()) {
-            Some(s) => match DateTime::parse_from_rfc3339(s) {
-                Ok(dt) => Some(dt.timestamp_millis()),
-                Err(e) => {
-                    tracing::warn!(
-                        session_id,
-                        line = line_num,
-                        timestamp = s,
-                        "unparseable entry timestamp: {e}"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
 
         if summary.is_empty && entry_has_content(&entry) {
             summary.is_empty = false;
@@ -461,75 +464,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             _ => {}
         }
 
-        // Derived row
-        b.session_ids.append_value(session_id);
-        b.lines.append_value(line_num as i64);
-        match entry_uuid {
-            Some(v) => b.uuids.append_value(v),
-            None => b.uuids.append_null(),
-        }
-        match entry_type {
-            Some(v) => b.types.append_value(v),
-            None => b.types.append_null(),
-        }
-        b.timestamps.append_option(ts_ms);
-        b.raws.append_value(entry.to_string());
-
-        match entry_subtype(&entry) {
-            Some(v) => b.subtypes.append_value(v),
-            None => b.subtypes.append_null(),
-        }
-
-        if is_message_row(&entry) {
-            let msg_subtype = message_subtype(&entry);
-            match msg_subtype {
-                Some(v) => b.message_subtypes.append_value(v),
-                None => b.message_subtypes.append_null(),
-            }
-
-            let mut attachments: Vec<serde_json::Value> = Vec::new();
-            for block in entry_attachment_blocks(&entry) {
-                let content_index = entry
-                    .pointer("/message/content")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.iter().position(|b| std::ptr::eq(b, block)))
-                    .unwrap_or(0);
-                let mut att = block.clone();
-                if let Some(obj) = att.as_object_mut() {
-                    obj.insert(
-                        "ref".to_string(),
-                        serde_json::json!([line_num, content_index]),
-                    );
-                }
-                attachments.push(att);
-            }
-
-            let joined = entry_text(&entry).unwrap_or_default();
-            // Out-of-band tags are prepended to user prompts only. A
-            // tool result or assistant turn that opens with a
-            // tag-shaped pair (e.g. <tool_use_error>) is content.
-            let (text, ide_tags) = match (entry_type, msg_subtype) {
-                (Some("user"), Some("text" | "meta")) => split_ide_tags(&joined),
-                _ => (joined, None),
-            };
-
-            b.texts.append_value(&text);
-            match attachments.is_empty() {
-                true => b.attachments.append_null(),
-                false => b
-                    .attachments
-                    .append_value(serde_json::Value::Array(attachments).to_string()),
-            }
-            match &ide_tags {
-                Some(v) => b.ide_tags.append_value(v),
-                None => b.ide_tags.append_null(),
-            }
-        } else {
-            b.message_subtypes.append_null();
-            b.texts.append_null();
-            b.attachments.append_null();
-            b.ide_tags.append_null();
-        }
+        b.push(session_id, &derive_entry(session_id, line_num, &entry));
     }
 
     Ok(DerivedSession {
@@ -538,6 +473,76 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         summary,
         fingerprint,
     })
+}
+
+/// Normalize one parsed session line into `entry` table shape. This
+/// is the row half of [`derive_session`]; the stored-session reader
+/// calls it per line without the session aggregates. `session_id`
+/// labels diagnostics only.
+pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) -> Entry {
+    let entry_type = entry.get("type").and_then(|v| v.as_str());
+    let timestamp_ms = match entry.get("timestamp").and_then(|v| v.as_str()) {
+        Some(s) => match DateTime::parse_from_rfc3339(s) {
+            Ok(dt) => Some(dt.timestamp_millis()),
+            Err(e) => {
+                tracing::warn!(
+                    session_id,
+                    line = line_num,
+                    timestamp = s,
+                    "unparseable entry timestamp: {e}"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    let message = is_message_row(entry).then(|| {
+        let msg_subtype = message_subtype(entry);
+
+        let mut attachments: Vec<serde_json::Value> = Vec::new();
+        for block in entry_attachment_blocks(entry) {
+            let content_index = entry
+                .pointer("/message/content")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.iter().position(|b| std::ptr::eq(b, block)))
+                .unwrap_or(0);
+            let mut att = block.clone();
+            if let Some(obj) = att.as_object_mut() {
+                obj.insert(
+                    "ref".to_string(),
+                    serde_json::json!([line_num, content_index]),
+                );
+            }
+            attachments.push(att);
+        }
+
+        let joined = entry_text(entry).unwrap_or_default();
+        // Out-of-band tags are prepended to user prompts only. A
+        // tool result or assistant turn that opens with a
+        // tag-shaped pair (e.g. <tool_use_error>) is content.
+        let (text, ide_tags) = match (entry_type, msg_subtype) {
+            (Some("user"), Some("text" | "meta")) => split_ide_tags(&joined),
+            _ => (joined, None),
+        };
+        Message {
+            subtype: msg_subtype.map(String::from),
+            text,
+            attachments: (!attachments.is_empty())
+                .then(|| serde_json::Value::Array(attachments).to_string()),
+            ide_tags,
+        }
+    });
+
+    Entry {
+        line: line_num,
+        uuid: entry.get("uuid").and_then(|v| v.as_str()).map(String::from),
+        entry_type: entry_type.map(String::from),
+        subtype: entry_subtype(entry).map(String::from),
+        timestamp_ms,
+        raw: entry.to_string(),
+        message,
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = { workspace = true }
 datafusion = { workspace = true }
+futures = { workspace = true }
 gage-query = { path = "../gage-query" }
 gage-registry = { path = "../gage-registry" }
 gage-session = { path = "../gage-session" }
