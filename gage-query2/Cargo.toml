@@ -7,6 +7,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 datafusion = { workspace = true }
 gage-query = { path = "../gage-query" }
 gage-registry = { path = "../gage-registry" }

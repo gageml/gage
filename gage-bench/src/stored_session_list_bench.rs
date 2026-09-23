@@ -26,6 +26,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use gage_query2::ContextBuilder;
 use gage_store::{INDEX_FILE, SessionStore, Store};
 use indicatif::ProgressBar;
 use serde::Serialize;
@@ -97,7 +98,7 @@ pub fn run(
     let store = timings
         .time("cold.open", || Store::open(&store_path))
         .map_err(|e| e.to_string())?;
-    let ctx = gage_query2::context(Some(Arc::new(Mutex::new(store))));
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
     let cold_row_counts = run_queries("cold", &rt, &ctx, params.limit, &mut timings)?;
     emit_row_counts("cold", &cold_row_counts, &mut counts);
     drop(ctx);
@@ -107,7 +108,7 @@ pub fn run(
     let store = timings
         .time("warm.open", || Store::open(&store_path))
         .map_err(|e| e.to_string())?;
-    let ctx = gage_query2::context(Some(Arc::new(Mutex::new(store))));
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
     let mut warm_row_counts = RowCounts::default();
     for _ in 0..params.iterations {
         warm_row_counts = run_queries("warm", &rt, &ctx, params.limit, &mut timings)?;

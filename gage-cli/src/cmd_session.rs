@@ -13,6 +13,7 @@ use gage_claude::home::claude_home;
 use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
+use gage_query2::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_store::{DatasetStore, SESSION_TYPE, SessionOutcome, SessionSpec, SessionStore, Store};
@@ -216,7 +217,7 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
     // encoding all reach the source through SQL: `native_session`
     // opens it, `project_for_path` resolves a directory to its project
     // name. The command holds no source handle.
-    let ctx = gage_query2::context(None);
+    let ctx = ContextBuilder::new(None).build();
     let from = format!("native_session('{}')", spec.replace('\'', "''"));
     let project_pred = args
         .project
@@ -254,7 +255,7 @@ async fn list_stored(args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let ctx = gage_query2::context(Some(Arc::new(Mutex::new(store))));
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
     let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", None).await;
     if total > 0 {
         let registry = source::driver_registry();
@@ -1015,7 +1016,7 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
     // The empty-session and id-resolution queries run against the
     // native session rows through the `native_session` table function;
     // the source handle stays only for the driver deletes below.
-    let ctx = gage_query2::context(None);
+    let ctx = ContextBuilder::new(None).build();
     let from = format!("native_session('{}')", spec.replace('\'', "''"));
 
     let targets = if args.empty {

@@ -35,29 +35,31 @@ use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
 use gage_session::filter;
 
-/// Index of the first column whose value comes from parsing the
-/// session JSONL (`title` and everything after). Columns before this
-/// are filled from the directory walk. A projection that touches none
-/// of these — `SELECT COUNT(*)`, `SELECT id FROM session WHERE ...` —
-/// can skip per-row derivation entirely.
-const SUMMARY_COL_START: usize = 7;
+/// Columns whose value comes from parsing the session JSONL. Every
+/// other column is filled from the directory walk. A projection that
+/// touches none of these — `SELECT COUNT(*)`, `SELECT id FROM session
+/// WHERE ...` — can skip per-row derivation entirely.
+const SUMMARY_COLS: &[&str] = &[
+    "title",
+    "model",
+    "message_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "is_empty",
+];
 
 fn session_schema() -> SchemaRef {
     // Column order is shared with the store's `session` table:
     // identity, location, timestamps and size, content summary, token
-    // usage, derived flags. A new column joins the category it belongs
-    // to.
+    // usage, derived flags, system. A new column joins the category it
+    // belongs to.
     Arc::new(Schema::new(vec![
         // Identity
         Field::new("id", DataType::Utf8, false),
-        // The driver's short display form of `id`
-        Field::new("id_display", DataType::Utf8, false),
-        // The shortest prefix of `id` unique among every session in
-        // the source
-        Field::new("id_prefix", DataType::Utf8, false),
         // Location
         Field::new("project", DataType::Utf8, true),
-        Field::new("path", DataType::Utf8, false),
         // Timestamps and size
         Field::new(
             "mtime",
@@ -76,6 +78,13 @@ fn session_schema() -> SchemaRef {
         Field::new("cache_creation_input_tokens", DataType::Int64, false),
         // Derived flags
         Field::new("is_empty", DataType::Boolean, false),
+        // System
+        // The driver's short display form of `id`
+        Field::new("id_display", DataType::Utf8, false),
+        // The shortest prefix of `id` unique among every session in
+        // the source
+        Field::new("id_prefix", DataType::Utf8, false),
+        Field::new("path", DataType::Utf8, false),
     ]))
 }
 
@@ -195,7 +204,9 @@ impl SessionExec {
     /// directory-walk speed regardless of cache state.
     fn projection_needs_summary(&self) -> bool {
         match &self.projection {
-            Some(indices) => indices.iter().any(|&i| i >= SUMMARY_COL_START),
+            Some(indices) => indices
+                .iter()
+                .any(|&i| SUMMARY_COLS.contains(&self.full_schema.field(i).name().as_str())),
             None => true,
         }
     }
@@ -385,10 +396,7 @@ impl SessionExec {
             self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
-                Arc::new(id_displays.finish()),
-                Arc::new(id_prefixes.finish()),
                 Arc::new(projects.finish()),
-                Arc::new(paths.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
                 Arc::new(sizes.finish()),
                 Arc::new(titles.finish()),
@@ -399,6 +407,9 @@ impl SessionExec {
                 Arc::new(cache_read.finish()),
                 Arc::new(cache_creation.finish()),
                 Arc::new(is_empty.finish()),
+                Arc::new(id_displays.finish()),
+                Arc::new(id_prefixes.finish()),
+                Arc::new(paths.finish()),
             ],
         )?;
 

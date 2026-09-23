@@ -2648,6 +2648,7 @@ dependencies = [
 name = "gage-query2"
 version = "0.2.0-dev"
 dependencies = [
+ "async-trait",
  "datafusion",
  "gage-query",
  "gage-registry",

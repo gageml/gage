@@ -62,19 +62,13 @@ const MTIME_COL: &str = "mtime";
 fn stored_session_schema() -> SchemaRef {
     // Column order is shared with the driver `native_session` table:
     // identity, location, timestamps and size, provenance, content
-    // summary. A new column joins the category it belongs to.
+    // summary, system. A new column joins the category it belongs to.
     Arc::new(Schema::new(vec![
         // Identity
         Field::new("id", DataType::Utf8, false),
-        // Short display form of the Gage id
-        Field::new("id_display", DataType::Utf8, false),
-        // Shortest prefix of `id` unique among every live session
-        Field::new("id_prefix", DataType::Utf8, false),
         // Location
         // The project the session belongs to, as the driver names it
         Field::new("project", DataType::Utf8, true),
-        // `git:<commit sha>` of the version listed
-        Field::new("locator", DataType::Utf8, false),
         // Timestamps and size
         // The commit's `modified` marker
         Field::new(
@@ -97,6 +91,13 @@ fn stored_session_schema() -> SchemaRef {
         Field::new("title", DataType::Utf8, true),
         Field::new("model", DataType::Utf8, true),
         Field::new("message_count", DataType::Int64, true),
+        // System
+        // Short display form of the Gage id
+        Field::new("id_display", DataType::Utf8, false),
+        // Shortest prefix of `id` unique among every live session
+        Field::new("id_prefix", DataType::Utf8, false),
+        // `git:<commit sha>` of the version listed
+        Field::new("locator", DataType::Utf8, false),
     ]))
 }
 
@@ -356,10 +357,7 @@ impl StoredSessionExec {
             self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
-                Arc::new(id_displays.finish()),
-                Arc::new(id_prefixes.finish()),
                 Arc::new(projects.finish()),
-                Arc::new(locators.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
                 Arc::new(createds.finish().with_timezone("UTC")),
                 Arc::new(sizes.finish()),
@@ -370,6 +368,9 @@ impl StoredSessionExec {
                 Arc::new(titles.finish()),
                 Arc::new(models.finish()),
                 Arc::new(message_counts.finish()),
+                Arc::new(id_displays.finish()),
+                Arc::new(id_prefixes.finish()),
+                Arc::new(locators.finish()),
             ],
         )?;
         match &self.projection {

@@ -16,8 +16,13 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
 
+use crate::system_cols::SkipSystemCols;
+
 #[derive(Debug)]
-pub struct NativeSessionFn;
+pub struct NativeSessionFn {
+    /// Hide the system columns of the returned table
+    pub skip_system_cols: bool,
+}
 
 impl TableFunctionImpl for NativeSessionFn {
     fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
@@ -39,7 +44,11 @@ impl TableFunctionImpl for NativeSessionFn {
         // The provider holds its own handle to the driver's index; the
         // opened source may drop once the tables are taken.
         let tables = opened.tables().map_err(external)?;
-        Ok(tables.session)
+        if self.skip_system_cols {
+            Ok(Arc::new(SkipSystemCols::new(tables.session)))
+        } else {
+            Ok(tables.session)
+        }
     }
 }
 

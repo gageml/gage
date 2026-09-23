@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Args;
 use gage_query::PrintFormat;
+use gage_query2::ContextBuilder;
 use gage_store::Store;
 
 #[derive(Args)]
@@ -26,6 +27,13 @@ pub struct Query2Args {
     /// Enable query stats
     #[arg(long)]
     stats: bool,
+
+    /// Include system columns
+    ///
+    /// Session tables hide `id_display`, `id_prefix`, and the row
+    /// locator by default. This option adds them to the schema.
+    #[arg(long)]
+    system: bool,
 }
 
 pub async fn main(args: Query2Args) {
@@ -36,7 +44,11 @@ pub async fn main(args: Query2Args) {
             std::process::exit(1);
         }
     };
-    let ctx = gage_query2::context(Some(Arc::new(Mutex::new(store))));
+    let mut builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store))));
+    if !args.system {
+        builder = builder.skip_system_cols();
+    }
+    let ctx = builder.build();
     let result = if args.sql.is_empty() {
         gage_query::run_repl(
             &ctx,
