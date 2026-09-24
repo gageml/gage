@@ -10,10 +10,14 @@
 
 use std::sync::{Arc, Mutex};
 
+use datafusion::prelude::SessionContext;
+use gage_query2::ContextBuilder;
+use gage_query2::scope::{SessionScope, StoredSessionRef};
 use gage_runtime::datetime::{self, DateTime};
 use gage_store::{DatasetStore, SessionRecord, Store};
 use rune::runtime::{Protocol, VmError};
 use rune::{Any, ContextError, Module};
+use tokio::sync::OnceCell;
 
 tokio::task_local! {
     /// The running task's scan, read by [`scan`]
@@ -22,13 +26,59 @@ tokio::task_local! {
 
 /// The scan a task runs under: its id, its dataset, and the store
 /// the dataset is read from. The store is shared under a mutex
-/// because its git reader is single-threaded.
+/// because its git reader is single-threaded. The query context over
+/// the dataset's members is built on first use and shared by every
+/// task, so a session's rows are derived once per scan.
 #[derive(Clone)]
 pub struct ScanContext {
     pub scan_id: String,
     /// `None` when the scan has no dataset; `sessions()` is then empty
     pub dataset: Option<ScanDatasetRef>,
     pub store: Arc<Mutex<Store>>,
+    query: Arc<OnceCell<SessionContext>>,
+}
+
+impl ScanContext {
+    pub fn new(scan_id: String, dataset: Option<ScanDatasetRef>, store: Arc<Mutex<Store>>) -> Self {
+        ScanContext {
+            scan_id,
+            dataset,
+            store,
+            query: Arc::new(OnceCell::new()),
+        }
+    }
+
+    /// The query context over the dataset's members at the commit
+    /// the scan links, built on first use.
+    pub(crate) async fn query_context(&self) -> Result<&SessionContext, VmError> {
+        self.query
+            .get_or_try_init(|| async {
+                let members = self.members()?;
+                let scope = Arc::new(SessionScope::with_sessions(
+                    Arc::clone(&self.store),
+                    members
+                        .into_iter()
+                        .map(StoredSessionRef::from_record)
+                        .collect(),
+                ));
+                Ok(ContextBuilder::new(Some(Arc::clone(&self.store)))
+                    .scope(scope)
+                    .build())
+            })
+            .await
+    }
+
+    /// The dataset's member records at the linked commit; empty
+    /// without a dataset.
+    fn members(&self) -> Result<Vec<SessionRecord>, VmError> {
+        let Some(dataset) = &self.dataset else {
+            return Ok(Vec::new());
+        };
+        let store = self.store.lock().unwrap();
+        DatasetStore::from(&*store)
+            .sessions_at(&dataset.commit_sha)
+            .map_err(|e| VmError::panic(format!("read dataset {}: {e}", dataset.id)))
+    }
 }
 
 /// The dataset a scan links: the object id and the commit it reads.
@@ -76,7 +126,7 @@ fn scan() -> Result<Scan, VmError> {
     })
 }
 
-fn current() -> Result<ScanContext, VmError> {
+pub(crate) fn current() -> Result<ScanContext, VmError> {
     SCAN_CTX
         .try_with(|ctx| ctx.clone())
         .map_err(|_outside_scope| {
@@ -124,14 +174,7 @@ impl rune::alloc::prelude::TryClone for ScanDataset {
 pub struct SessionsQuery;
 
 fn fetch_sessions(_query: SessionsQuery) -> Result<Sessions, VmError> {
-    let ctx = current()?;
-    let Some(dataset) = &ctx.dataset else {
-        return Ok(Sessions::new(Vec::new()));
-    };
-    let store = ctx.store.lock().unwrap();
-    let records = DatasetStore::from(&*store)
-        .sessions_at(&dataset.commit_sha)
-        .map_err(|e| VmError::panic(format!("read dataset {}: {e}", dataset.id)))?;
+    let records = current()?.members()?;
     Ok(Sessions::new(
         records.into_iter().map(Session::from_record).collect(),
     ))

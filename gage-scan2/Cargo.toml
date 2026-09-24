@@ -22,6 +22,8 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+gage-claude = { path = "../gage-claude" }
+gage-session = { path = "../gage-session" }
 tempfile = { workspace = true }
 
 [lints]

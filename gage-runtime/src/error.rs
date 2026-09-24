@@ -96,7 +96,7 @@ impl std::fmt::Debug for Error {
 
 impl std::error::Error for Error {}
 
-pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
+pub fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Error>()?;
     m.function_meta(Error::debug)?;
     Ok(())

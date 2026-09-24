@@ -1,0 +1,26 @@
+pub const SCANNER = #{
+    name: "hello-message",
+    description: "Message greeting",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    for s in gage::scan().sessions().await {
+        for m in s.messages().await {
+            println!(
+                "Hello, msg {}:{} ({})!",
+                s.id,
+                m.line,
+                msg_type(m),
+            );
+        }
+    }
+}
+
+fn msg_type(m) {
+    if let Some(subtype) = m.subtype {
+        format!("{}/{}", m.type, subtype)
+    } else {
+        m.type
+    }
+}

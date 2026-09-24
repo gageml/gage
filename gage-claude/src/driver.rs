@@ -567,18 +567,19 @@ impl StoredSession for ClaudeStoredSession {
     }
 
     /// One normalized row per parsed line of `session.jsonl`, through
-    /// the same derivation the native tables use. Blank and
-    /// unparseable lines consume a line number and yield no row, as
-    /// they do for a native session.
+    /// the same derivation the native tables use. Blank lines,
+    /// unparseable lines, and lines without a type consume a line
+    /// number and yield no row, as they do for a native session.
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_> {
         let reader = match self.source.open("session.jsonl") {
             Ok(r) => SessionReader::new(r),
             Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
         };
         let native_id = self.native_id.clone();
-        Box::new(reader.map(move |item| {
-            let (line_num, value) = item.map_err(DriverError::Io)?;
-            Ok(derive_entry(&native_id, line_num, &value))
+        // Read failures pass through; only a typeless line is dropped
+        Box::new(reader.filter_map(move |item| match item {
+            Ok((line_num, value)) => derive_entry(&native_id, line_num, &value).map(Ok),
+            Err(e) => Some(Err(DriverError::Io(e))),
         }))
     }
 }

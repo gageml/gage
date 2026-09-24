@@ -55,6 +55,7 @@ use crate::system_cols::SkipSystemCols;
 /// discovery functions are available.
 pub struct ContextBuilder {
     store: Option<Arc<Mutex<Store>>>,
+    scope: Option<Arc<SessionScope>>,
     skip_system_cols: bool,
 }
 
@@ -62,8 +63,16 @@ impl ContextBuilder {
     pub fn new(store: Option<Arc<Mutex<Store>>>) -> Self {
         Self {
             store,
+            scope: None,
             skip_system_cols: false,
         }
+    }
+
+    /// Serve `entry` and `message` from `scope` instead of every live
+    /// session in the store. The `session` table stays store-wide.
+    pub fn scope(mut self, scope: Arc<SessionScope>) -> Self {
+        self.scope = Some(scope);
+        self
     }
 
     /// Hide the system columns of every session table. The columns
@@ -80,7 +89,9 @@ impl ContextBuilder {
             let session: Arc<dyn TableProvider> =
                 Arc::new(StoredSessionTable::new(Arc::clone(&store)));
             let note: Arc<dyn TableProvider> = Arc::new(StoredNoteTable::new(Arc::clone(&store)));
-            let scope = Arc::new(SessionScope::new(store));
+            let scope = self
+                .scope
+                .unwrap_or_else(|| Arc::new(SessionScope::new(store)));
             let entry: Arc<dyn TableProvider> =
                 Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&scope)));
             let message: Arc<dyn TableProvider> =

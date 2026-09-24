@@ -2708,10 +2708,13 @@ dependencies = [
 name = "gage-runtime2"
 version = "0.2.0-dev"
 dependencies = [
+ "datafusion",
+ "gage-query2",
  "gage-runtime",
  "gage-store",
  "percent-encoding",
  "rune",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -2747,10 +2750,12 @@ name = "gage-scan2"
 version = "0.2.0-dev"
 dependencies = [
  "codespan-reporting",
+ "gage-claude",
  "gage-core",
  "gage-registry",
  "gage-runtime2",
  "gage-scan",
+ "gage-session",
  "gage-store",
  "rune",
  "serde",

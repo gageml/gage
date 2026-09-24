@@ -7,8 +7,11 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+datafusion = { workspace = true }
+gage-query2 = { path = "../gage-query2" }
 gage-runtime = { path = "../gage-runtime" }
 gage-store = { path = "../gage-store" }
+serde_json = { workspace = true }
 percent-encoding = { workspace = true }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }

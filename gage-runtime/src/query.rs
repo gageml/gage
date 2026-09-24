@@ -171,7 +171,7 @@ async fn do_fetch_messages(q: MessageQuery) -> super::Result<Vec<Message>> {
 }
 
 /// Constrain `line` to the session's range when one is set.
-fn push_lines_clause(
+pub fn push_lines_clause(
     lines: Option<(u64, u64)>,
     clauses: &mut Vec<String>,
     params: &mut Vec<ScalarValue>,
@@ -184,7 +184,10 @@ fn push_lines_clause(
     }
 }
 
-fn type_clause(spec: &serde_json::Value, params: &mut Vec<ScalarValue>) -> super::Result<String> {
+pub fn type_clause(
+    spec: &serde_json::Value,
+    params: &mut Vec<ScalarValue>,
+) -> std::result::Result<String, Error> {
     use serde_json::Value as J;
     match spec {
         J::String(s) => {
@@ -257,7 +260,10 @@ async fn do_query(sql: String) -> super::Result<Vec<Value>> {
     Ok(rows_from_batches(batches))
 }
 
-pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
+/// Register the `Message` and `Entry` row values without the query
+/// builders that produce them, for a runtime with builders of its
+/// own.
+pub fn register_row_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Message>()?;
     m.field_function(&Protocol::GET, "session_id", |m: &Message| {
         m.get("session_id")
@@ -280,8 +286,6 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(Message::to_json)?;
     m.function_meta(Message::debug)?;
 
-    m.ty::<MessageQuery>()?;
-
     m.ty::<Entry>()?;
     m.field_function(&Protocol::GET, "session_id", |e: &Entry| {
         e.get("session_id")
@@ -295,9 +299,13 @@ pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.function_meta(Entry::as_object)?;
     m.function_meta(Entry::to_json)?;
     m.function_meta(Entry::debug)?;
+    Ok(())
+}
 
+pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
+    register_row_types(m)?;
+    m.ty::<MessageQuery>()?;
     m.ty::<EntryQuery>()?;
-
     Ok(())
 }
 
@@ -427,7 +435,7 @@ impl Message {
     }
 }
 
-pub(crate) fn messages_from_batches(batches: Vec<RecordBatch>) -> Vec<Message> {
+pub fn messages_from_batches(batches: Vec<RecordBatch>) -> Vec<Message> {
     let mut messages = Vec::new();
     for batch in &batches {
         if batch.num_rows() == 0 {
@@ -582,7 +590,7 @@ impl Entry {
     }
 }
 
-pub(crate) fn entries_from_batches(batches: Vec<RecordBatch>) -> Vec<Entry> {
+pub fn entries_from_batches(batches: Vec<RecordBatch>) -> Vec<Entry> {
     let mut entries = Vec::new();
     for batch in &batches {
         if batch.num_rows() == 0 {
@@ -645,7 +653,7 @@ pub(crate) fn entries_from_batches(batches: Vec<RecordBatch>) -> Vec<Entry> {
                 .insert(key("uuid"), optional_str_to_val(uuid_arr, row))
                 .unwrap();
             inner
-                .insert(key("type"), optional_str_to_val(type_arr, row))
+                .insert(key("type"), str_to_val(type_arr.value(row)))
                 .unwrap();
             inner
                 .insert(key("subtype"), optional_str_to_val(subtype_arr, row))

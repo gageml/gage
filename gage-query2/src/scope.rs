@@ -14,7 +14,7 @@ use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::filter::IdFilter;
-use gage_store::{Order, SessionStore, Store, StoreError};
+use gage_store::{Order, SessionRecord, SessionStore, Store, StoreError};
 
 use crate::rows::{RowCache, derive_batch};
 
@@ -30,10 +30,26 @@ pub struct StoredSessionRef {
     pub driver_name: String,
 }
 
-/// The session set of a store-backed query context
+impl StoredSessionRef {
+    /// The reference to a session record at the commit it was read.
+    pub fn from_record(record: SessionRecord) -> Self {
+        StoredSessionRef {
+            id: record.id,
+            commit: record.commit_sha,
+            native_id: record.attrs.native_id,
+            content_format: record.attrs.content_format,
+            driver_name: record.driver_name,
+        }
+    }
+}
+
+/// The session set of a store-backed query context: every live
+/// session at its tip, or a fixed set of versions such as a dataset's
+/// members at the commit a scan links.
 pub struct SessionScope {
     store: Arc<Mutex<Store>>,
     drivers: DriverRegistry,
+    fixed: Option<Vec<StoredSessionRef>>,
 }
 
 impl SessionScope {
@@ -41,12 +57,30 @@ impl SessionScope {
         Self {
             store,
             drivers: DriverRegistry::builtin(),
+            fixed: None,
         }
     }
 
-    /// Every live stored session, narrowed by the `session_id`
-    /// predicates in `filters`, newest modified first.
+    /// A scope over exactly `sessions`, each at the version it names.
+    pub fn with_sessions(store: Arc<Mutex<Store>>, sessions: Vec<StoredSessionRef>) -> Self {
+        Self {
+            store,
+            drivers: DriverRegistry::builtin(),
+            fixed: Some(sessions),
+        }
+    }
+
+    /// The scope's sessions, narrowed by the `session_id` predicates
+    /// in `filters`. A store-wide scope lists every live session
+    /// newest modified first; a fixed scope keeps its own order.
     pub fn sessions(&self, filters: &[Expr]) -> Result<Vec<StoredSessionRef>> {
+        if let Some(fixed) = &self.fixed {
+            let mut sessions = fixed.clone();
+            if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
+                sessions = id_filter.retain(sessions, |s| s.id.as_str())?;
+            }
+            return Ok(sessions);
+        }
         let store = self.lock();
         let sessions = SessionStore::from(&*store);
         let mut tips = sessions
@@ -60,13 +94,7 @@ impl SessionScope {
         tips.into_iter()
             .map(|tip| {
                 let record = sessions.at_commit(&tip.sha).map_err(external)?;
-                Ok(StoredSessionRef {
-                    id: record.id,
-                    commit: record.commit_sha,
-                    native_id: record.attrs.native_id,
-                    content_format: record.attrs.content_format,
-                    driver_name: record.driver_name,
-                })
+                Ok(StoredSessionRef::from_record(record))
             })
             .collect()
     }

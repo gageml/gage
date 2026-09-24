@@ -336,7 +336,7 @@ impl RowBuilders {
         self.session_ids.append_value(session_id);
         self.lines.append_value(e.line as i64);
         self.uuids.append_option(e.uuid.as_deref());
-        self.types.append_option(e.entry_type.as_deref());
+        self.types.append_value(&e.entry_type);
         self.subtypes.append_option(e.subtype.as_deref());
         self.timestamps.append_option(e.timestamp_ms);
         self.raws.append_option(e.raw.as_deref());
@@ -464,7 +464,9 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             _ => {}
         }
 
-        b.push(session_id, &derive_entry(session_id, line_num, &entry));
+        if let Some(row) = derive_entry(session_id, line_num, &entry) {
+            b.push(session_id, &row);
+        }
     }
 
     Ok(DerivedSession {
@@ -478,9 +480,13 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
 /// Normalize one parsed session line into `entry` table shape. This
 /// is the row half of [`derive_session`]; the stored-session reader
 /// calls it per line without the session aggregates. `session_id`
-/// labels diagnostics only.
-pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) -> Entry {
-    let entry_type = entry.get("type").and_then(|v| v.as_str());
+/// labels diagnostics only. A line without a `type` is not an entry
+/// and yields `None`, as an unparseable line yields no row.
+pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) -> Option<Entry> {
+    let Some(entry_type) = entry.get("type").and_then(|v| v.as_str()) else {
+        tracing::warn!(session_id, line = line_num, "entry without a type");
+        return None;
+    };
     let timestamp_ms = match entry.get("timestamp").and_then(|v| v.as_str()) {
         Some(s) => match DateTime::parse_from_rfc3339(s) {
             Ok(dt) => Some(dt.timestamp_millis()),
@@ -522,13 +528,11 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
         // tool result or assistant turn that opens with a
         // tag-shaped pair (e.g. <tool_use_error>) is content.
         let (text, ide_tags) = match (entry_type, msg_subtype) {
-            (Some("user"), Some("text" | "meta")) => split_ide_tags(&joined),
+            ("user", Some("text" | "meta")) => split_ide_tags(&joined),
             _ => (joined, None),
         };
         Message {
-            message_type: entry_type
-                .expect("is_message_row admits only typed entries")
-                .to_string(),
+            message_type: entry_type.to_string(),
             subtype: msg_subtype.map(String::from),
             text,
             attachments: (!attachments.is_empty())
@@ -537,15 +541,15 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
         }
     });
 
-    Entry {
+    Some(Entry {
         line: line_num,
         uuid: entry.get("uuid").and_then(|v| v.as_str()).map(String::from),
-        entry_type: entry_type.map(String::from),
+        entry_type: entry_type.to_string(),
         subtype: entry_subtype(entry).map(String::from),
         timestamp_ms,
         raw: Some(entry.to_string()),
         message,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -297,11 +297,11 @@ pub async fn scan(
         }),
         None => None,
     };
-    let scan_ctx = ScanContext {
-        scan_id: id.clone(),
+    let scan_ctx = ScanContext::new(
+        id.clone(),
         dataset,
-        store: Arc::new(Mutex::new(Store::open(store.path())?)),
-    };
+        Arc::new(Mutex::new(Store::open(store.path())?)),
+    );
     let scanner_plans: Vec<ScannerPlan<'_>> = scanners
         .iter()
         .map(|s| ScannerPlan {
@@ -1382,6 +1382,111 @@ mod tests {
                 &Output::Println(outcome.id.clone()),
                 &Output::Println("no dataset".into()),
                 &Output::Println("0 sessions".into()),
+            ]
+        );
+    }
+
+    /// `messages()` and `entries()` read a member session through
+    /// its driver at the commit the dataset links, scoped to that
+    /// session, with `.type(spec)` and `.latest_first()` applied.
+    #[tokio::test]
+    async fn tasks_read_session_messages_and_entries() {
+        use gage_session::Driver;
+        use gage_store::SessionSpec;
+
+        const SCANNER: &str = r#"
+            use gage::scan;
+
+            pub const SCANNER = #{
+                name: "rows",
+                description: "Session rows",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                for s in scan().sessions().await {
+                    for m in s.messages().await? {
+                        println!("{}/{}: {}", m.type, m.subtype.unwrap_or("-"), m.text);
+                    }
+                    for m in s.messages().type("assistant").latest_first().await? {
+                        println!("latest assistant: {}", m.text);
+                    }
+                    println!("{} entries", s.entries().await?.len());
+                    for e in s.entries().type("summary").await? {
+                        println!("entry {}: {}", e.line, e.type);
+                    }
+                    match s.messages().type(#{}).await {
+                        Err(gage::Error::Args(msg)) => println!("args error: {msg}"),
+                        other => println!("unexpected: {other:?}"),
+                    }
+                }
+                Ok(())
+            }
+        "#;
+        const SESSION: &str = concat!(
+            r#"{"type":"summary","summary":"A chat"}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"hi there"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a2","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"anything else?"}]}}"#,
+            "\n",
+        );
+
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("claude");
+        let native_id = "11111111-2222-3333-4444-555555555555";
+        let dir = root.join("projects").join("-home-alice-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{native_id}.jsonl")), SESSION).unwrap();
+        let driver = gage_claude::driver::ClaudeDriver::new();
+        let source = driver
+            .open_source(&format!("claude:{}", root.display()))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+
+        let datasets = DatasetStore::from(&store);
+        let dataset_id = datasets.create().unwrap();
+        datasets
+            .sessions_add(
+                &dataset_id,
+                vec![SessionSpec {
+                    driver: &driver,
+                    session: &mut *native,
+                }],
+            )
+            .unwrap();
+        let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println("user/text: hello".into()),
+                &Output::Println("assistant/text: hi there".into()),
+                &Output::Println("assistant/text: anything else?".into()),
+                &Output::Println("latest assistant: anything else?".into()),
+                &Output::Println("latest assistant: hi there".into()),
+                &Output::Println("4 entries".into()),
+                &Output::Println("entry 1: summary".into()),
+                &Output::Println("args error: `.type()` object must name at least one type".into()),
             ]
         );
     }

@@ -71,7 +71,7 @@ fn derived_schema() -> SchemaRef {
         Field::new("session_id", DataType::Utf8, false),
         Field::new("line", DataType::Int64, false),
         Field::new("uuid", DataType::Utf8, true),
-        Field::new("type", DataType::Utf8, true),
+        Field::new("type", DataType::Utf8, false),
         Field::new("subtype", DataType::Utf8, true),
         Field::new(
             "timestamp",
@@ -140,7 +140,7 @@ pub fn derive_batch(
         session_ids.append_value(session_id);
         lines.append_value(e.line as i64);
         uuids.append_option(e.uuid.as_deref());
-        types.append_option(e.entry_type.as_deref());
+        types.append_value(&e.entry_type);
         subtypes.append_option(e.subtype.as_deref());
         timestamps.append_option(e.timestamp_ms);
         raws.append_option(e.raw.as_deref());

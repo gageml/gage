@@ -155,7 +155,9 @@ pub struct Entry {
     /// 1-based line in the session's native content
     pub line: u32,
     pub uuid: Option<String>,
-    pub entry_type: Option<String>,
+    /// The entry type, as the harness names it. Every entry has one;
+    /// a native row without a type is not an entry.
+    pub entry_type: String,
     pub subtype: Option<String>,
     /// Epoch milliseconds, UTC
     pub timestamp_ms: Option<i64>,
