@@ -8,6 +8,7 @@
 //! runs under a [`ScanContext`], scoped by the orchestrator through
 //! [`SCAN_CTX`]; `scan()` outside one is a VM error.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use datafusion::prelude::SessionContext;
@@ -35,17 +36,36 @@ pub struct ScanContext {
     /// `None` when the scan has no dataset; `sessions()` is then empty
     pub dataset: Option<ScanDatasetRef>,
     pub store: Arc<Mutex<Store>>,
+    /// The staging directory the scan's notes are written under,
+    /// `staging/<scan_id>/notes/`
+    pub notes_dir: PathBuf,
     query: Arc<OnceCell<SessionContext>>,
 }
 
 impl ScanContext {
-    pub fn new(scan_id: String, dataset: Option<ScanDatasetRef>, store: Arc<Mutex<Store>>) -> Self {
+    pub fn new(
+        scan_id: String,
+        dataset: Option<ScanDatasetRef>,
+        store: Arc<Mutex<Store>>,
+        notes_dir: PathBuf,
+    ) -> Self {
         ScanContext {
             scan_id,
             dataset,
             store,
+            notes_dir,
             query: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// The commit the scan reads for the member session `session_id`,
+    /// or `None` when it is not a member.
+    pub(crate) fn member_commit(&self, session_id: &str) -> Result<Option<String>, VmError> {
+        Ok(self
+            .members()?
+            .into_iter()
+            .find(|r| r.id == session_id)
+            .map(|r| r.commit_sha))
     }
 
     /// The query context over the dataset's members at the commit

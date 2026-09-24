@@ -12,6 +12,8 @@
 //! applied                                # present once written to the store
 //! scan/attrs.json                        # written at the terminal state
 //! scan/dataset.link                      # the scanned dataset's commit, written at create
+//! scan/notes.link                        # the notes' commits, written at apply
+//! notes/<id>/**                          # note trees, written by write_note
 //! scan/logs/out                          # output lines, the scan's own and every task's
 //! scan/logs/err                          # error lines: task failures, the cancel notice, panics
 //! scan/logs/records                      # log records, runtime and scanner
@@ -39,6 +41,8 @@ const STATE_FILE: &str = "state";
 const PID_FILE: &str = "pid";
 const APPLIED_FILE: &str = "applied";
 const SCAN_DIR: &str = "scan";
+const NOTES_DIR: &str = "notes";
+const NOTES_LINK: &str = "notes.link";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
@@ -150,6 +154,39 @@ impl Staging {
     /// The `scan/` subtree, the content applied to the store.
     pub fn scan_dir(&self) -> PathBuf {
         self.dir.join(SCAN_DIR)
+    }
+
+    /// The `notes/` directory `write_note` stages note trees under.
+    pub fn notes_dir(&self) -> PathBuf {
+        self.dir.join(NOTES_DIR)
+    }
+
+    /// The staged note directories, in id order. Empty when no note
+    /// was written.
+    pub fn staged_notes(&self) -> io::Result<Vec<PathBuf>> {
+        let entries = match fs::read_dir(self.notes_dir()) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut dirs = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+        dirs.sort();
+        Ok(dirs)
+    }
+
+    /// Write `scan/notes.link` listing `shas`; nothing when empty.
+    pub fn write_notes_link(&self, shas: &[String]) -> io::Result<()> {
+        if shas.is_empty() {
+            return Ok(());
+        }
+        let content: String = shas.iter().map(|s| format!("{s}\n")).collect();
+        write_atomic(&self.scan_dir().join(NOTES_LINK), content.as_bytes())
     }
 
     pub fn set_state(&self, state: State) -> io::Result<()> {

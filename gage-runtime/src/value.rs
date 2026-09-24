@@ -16,7 +16,7 @@ pub(crate) fn json_to_object(val: &json::Value) -> Object {
     obj
 }
 
-pub(crate) fn json_to_value(val: &json::Value) -> Value {
+pub fn json_to_value(val: &json::Value) -> Value {
     match val {
         json::Value::Null => rune::to_value(Null).unwrap(),
         json::Value::Bool(b) => rune::to_value(*b).unwrap(),
@@ -46,7 +46,7 @@ pub(crate) fn json_to_value(val: &json::Value) -> Value {
 /// types by type-hash and rejects any it doesn't know with "cannot serialize
 /// external references", so we have to intercept `Null` before falling back
 /// to it. Object and Vec values are walked recursively for the same reason.
-pub(crate) fn value_to_json(v: &Value) -> Result<json::Value, String> {
+pub fn value_to_json(v: &Value) -> Result<json::Value, String> {
     if v.borrow_ref::<Null>().is_ok() {
         return Ok(json::Value::Null);
     }

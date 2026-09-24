@@ -45,7 +45,8 @@ use gage_runtime2::{
 };
 use gage_scan::error::render_task_error;
 use gage_store::{
-    DatasetStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts, TaskStatus,
+    DatasetStore, NoteStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts,
+    TaskStatus,
 };
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
@@ -297,11 +298,6 @@ pub async fn scan(
         }),
         None => None,
     };
-    let scan_ctx = ScanContext::new(
-        id.clone(),
-        dataset,
-        Arc::new(Mutex::new(Store::open(store.path())?)),
-    );
     let scanner_plans: Vec<ScannerPlan<'_>> = scanners
         .iter()
         .map(|s| ScannerPlan {
@@ -311,6 +307,12 @@ pub async fn scan(
         })
         .collect();
     let staging = Staging::create(config.staging_root, &id, config.dataset, &scanner_plans)?;
+    let scan_ctx = ScanContext::new(
+        id.clone(),
+        dataset,
+        Arc::new(Mutex::new(Store::open(store.path())?)),
+        staging.notes_dir(),
+    );
     trace::install_panic_hook();
     let scope = LogScope {
         scan_dir: staging.scan_dir(),
@@ -457,6 +459,15 @@ impl<F: FnMut(Event)> Run<'_, F> {
         } else {
             State::Completed
         })?;
+        // Apply: the staged notes become objects first, so the scan
+        // can link them
+        let notes = NoteStore::from(store);
+        let mut note_shas = Vec::new();
+        for dir in self.staging.staged_notes()? {
+            let (_, sha) = notes.create_staged(&dir)?;
+            note_shas.push(sha);
+        }
+        self.staging.write_notes_link(&note_shas)?;
         let commit_sha = ScanStore::from(store).create(&self.id, &self.staging.scan_dir())?;
         self.staging.mark_applied()?;
         self.staging.remove()?;
@@ -1386,14 +1397,47 @@ mod tests {
         );
     }
 
+    /// A dataset holding one `claude` session seeded from `jsonl`.
+    /// Returns the dataset id, its commit, and the session's Gage id.
+    fn seeded_dataset(
+        root: &std::path::Path,
+        store: &Store,
+        jsonl: &str,
+    ) -> (String, String, String) {
+        use gage_session::Driver;
+        use gage_store::SessionSpec;
+
+        let claude = root.join("claude");
+        let native_id = "11111111-2222-3333-4444-555555555555";
+        let dir = claude.join("projects").join("-home-alice-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
+        let driver = gage_claude::driver::ClaudeDriver::new();
+        let source = driver
+            .open_source(&format!("claude:{}", claude.display()))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+
+        let datasets = DatasetStore::from(store);
+        let dataset_id = datasets.create().unwrap();
+        let outcomes = datasets
+            .sessions_add(
+                &dataset_id,
+                vec![SessionSpec {
+                    driver: &driver,
+                    session: &mut *native,
+                }],
+            )
+            .unwrap();
+        let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
+        (dataset_id, dataset_sha, outcomes[0].id.clone())
+    }
+
     /// `messages()` and `entries()` read a member session through
     /// its driver at the commit the dataset links, scoped to that
     /// session, with `.type(spec)` and `.latest_first()` applied.
     #[tokio::test]
     async fn tasks_read_session_messages_and_entries() {
-        use gage_session::Driver;
-        use gage_store::SessionSpec;
-
         const SCANNER: &str = r#"
             use gage::scan;
 
@@ -1435,29 +1479,7 @@ mod tests {
         );
 
         let (tmp, store) = open_store();
-        let root = tmp.path().join("claude");
-        let native_id = "11111111-2222-3333-4444-555555555555";
-        let dir = root.join("projects").join("-home-alice-proj");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(format!("{native_id}.jsonl")), SESSION).unwrap();
-        let driver = gage_claude::driver::ClaudeDriver::new();
-        let source = driver
-            .open_source(&format!("claude:{}", root.display()))
-            .unwrap();
-        let mut native = source.open_native(native_id).unwrap();
-
-        let datasets = DatasetStore::from(&store);
-        let dataset_id = datasets.create().unwrap();
-        datasets
-            .sessions_add(
-                &dataset_id,
-                vec![SessionSpec {
-                    driver: &driver,
-                    session: &mut *native,
-                }],
-            )
-            .unwrap();
-        let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
+        let (_, dataset_sha, _) = seeded_dataset(tmp.path(), &store, SESSION);
 
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
@@ -1488,6 +1510,124 @@ mod tests {
                 &Output::Println("entry 1: summary".into()),
                 &Output::Println("args error: `.type()` object must name at least one type".into()),
             ]
+        );
+    }
+
+    /// `write_note` stages a note the apply creates and the scan links:
+    /// the author is the task, `attrs.scan` is the scan, a session
+    /// target pins the member commit, and bad lines are the scanner's
+    /// error.
+    #[tokio::test]
+    async fn tasks_write_notes_that_the_scan_links() {
+        use gage_store::NoteStore;
+
+        const SCANNER: &str = r#"
+            use gage::{scan, write_note};
+
+            pub const SCANNER = #{
+                name: "notes",
+                description: "Notes",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                for s in scan().sessions().await {
+                    let n = write_note("thinking.empty", true)
+                        .for_session_line(s.id, "2")
+                        .metadata(#{ model: "m" })
+                        .await?;
+                    println!("{} {} {:?}", n.name, n.author, n.target);
+                    let n = write_note("comment", "whole")
+                        .for_session_lines(s.id, "")
+                        .await?;
+                    println!("{:?}", n.target);
+                    let n = write_note("comment", "ranged")
+                        .for_session_range(s.id, 1, 3)
+                        .await?;
+                    println!("{:?}", n.target);
+                    match write_note("bad", 1).for_session_line(s.id, 0).await {
+                        Err(gage::Error::Args(m)) => println!("args: {m}"),
+                        other => println!("unexpected: {other:?}"),
+                    }
+                }
+                let n = write_note("scan.fact", #{ ok: true }).await?;
+                println!("{:?} {}", n.target, n.metadata.len());
+                Ok(())
+            }
+        "#;
+        const SESSION: &str = concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","content":[{"type":"thinking","thinking":""}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a2","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        );
+
+        let (tmp, store) = open_store();
+        let (_, dataset_sha, session_id) = seeded_dataset(tmp.path(), &store, SESSION);
+        let member_sha = DatasetStore::from(&store)
+            .sessions_at(&dataset_sha)
+            .unwrap()[0]
+            .commit_sha
+            .clone();
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(format!(
+                    "thinking.empty task:notes:main Some(\"session:{session_id}#2\")"
+                )),
+                &Output::Println(format!("Some(\"session:{session_id}\")")),
+                &Output::Println(format!("Some(\"session:{session_id}#1-3\")")),
+                &Output::Println("args: line must be 1 or greater, got 0".into()),
+                &Output::Println("None 0".into()),
+            ]
+        );
+
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        assert_eq!(record.content.notes.len(), 4);
+        let parents = store.read_commit(&outcome.commit_sha).unwrap().parents;
+        for sha in &record.content.notes {
+            assert!(parents.contains(sha), "note {sha} is a scan parent");
+        }
+        // notes.link is in id order, not write order
+        let notes = NoteStore::from(&store);
+        let first = record
+            .content
+            .notes
+            .iter()
+            .map(|sha| notes.at_commit(sha).unwrap())
+            .find(|n| n.name == "thinking.empty")
+            .expect("the scanner wrote thinking.empty");
+        assert_eq!(first.scan.as_deref(), Some(outcome.id.as_str()));
+        assert_eq!(first.author, "task:notes:main");
+        assert_eq!(
+            first.targets,
+            [member_sha],
+            "the note links the member commit the scan read"
+        );
+        assert_eq!(first.metadata, Some(serde_json::json!({"model": "m"})));
+        assert!(
+            !tmp.path().join("staging").join(&outcome.id).exists(),
+            "staging is removed after apply"
         );
     }
 }

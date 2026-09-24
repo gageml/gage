@@ -7,6 +7,9 @@
 //! tombstones are the generic object model's job; see
 //! [`crate::object`].
 
+use std::fs;
+use std::path::Path;
+
 use gage_core::uuid::new_uuid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -23,6 +26,7 @@ pub(crate) const INDEXED_ATTRS: &[&str] = &["name"];
 const TEXT_VALUE_FILE: &str = "value.txt";
 const JSON_VALUE_FILE: &str = "value.json";
 const TARGET_LINK: &str = "target.link";
+const ATTRS_FILE: &str = "attrs.json";
 /// The one scheme whose URLs may carry a fragment
 const SESSION_SCHEME: &str = "session";
 
@@ -152,6 +156,120 @@ impl NoteStore<'_> {
         self.store
             .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
         Ok(id)
+    }
+
+    /// Write a note as a staged tree under `dir`, the object tree the
+    /// note will carry, for a scan to create at apply. `id` is the
+    /// note's id, `scan` the writing scan's id, and `target_commit`,
+    /// when given, the commit `target.link` names in place of the
+    /// target's tip: a scan links the version it read. The target is
+    /// validated as on [`NoteStore::create`].
+    pub fn stage(
+        &self,
+        dir: &Path,
+        id: &str,
+        input: &NoteInput,
+        scan: &str,
+        target_commit: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let link = match input.target {
+            Some(url) => {
+                let tip = self.resolve_target(url)?;
+                Some(target_commit.map_or(tip, String::from))
+            }
+            None => None,
+        };
+        let attrs = NoteAttrs {
+            name: input.name.to_string(),
+            author: input.author.to_string(),
+            target: input.target.map(String::from),
+            line: None,
+            line_end: None,
+            metadata: input.metadata.clone(),
+            scan: Some(scan.to_string()),
+        };
+        let tree = build_tree(&attrs, &input.value, link.into_iter().collect())?;
+        let write = |name: &str, bytes: &[u8]| -> Result<(), StoreError> {
+            fs::write(dir.join(name), bytes).map_err(|e| StoreError::Write {
+                path: dir.join(name),
+                source: e,
+            })
+        };
+        fs::create_dir_all(dir).map_err(|e| StoreError::Write {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+        let mut json = serde_json::to_string(&tree.attrs)
+            .map_err(|e| StoreError::Parse(format!("note attrs encode: {e}")))?;
+        json.push('\n');
+        write(ATTRS_FILE, json.as_bytes())?;
+        for (name, bytes) in &tree.blobs {
+            write(name, bytes)?;
+        }
+        for (name, shas) in &tree.links {
+            let content: String = shas.iter().map(|s| format!("{s}\n")).collect();
+            write(name, content.as_bytes())?;
+        }
+        let _ = id;
+        Ok(())
+    }
+
+    /// Create the note staged under `dir` by [`NoteStore::stage`]. The
+    /// directory name is the note's id. Idempotent: a note whose ref
+    /// already exists is not rewritten. Returns `(id, commit SHA)`.
+    pub fn create_staged(&self, dir: &Path) -> Result<(String, String), StoreError> {
+        let id = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| StoreError::InvalidPath {
+                path: dir.display().to_string(),
+                reason: "a staged note directory is named by its id".to_string(),
+            })?;
+        if let Some(sha) = self.store.rev_parse(&object_ref(&id))? {
+            return Ok((id, sha));
+        }
+        let read = |name: &str| -> Result<Option<Vec<u8>>, StoreError> {
+            match fs::read(dir.join(name)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(StoreError::Write {
+                    path: dir.join(name),
+                    source: e,
+                }),
+            }
+        };
+        let attrs_bytes = read(ATTRS_FILE)?
+            .ok_or_else(|| StoreError::Parse(format!("staged note {id}: missing {ATTRS_FILE}")))?;
+        let attrs: NoteAttrs = serde_json::from_slice(&attrs_bytes)
+            .map_err(|e| StoreError::Parse(format!("staged note {id} {ATTRS_FILE}: {e}")))?;
+        let value = if let Some(bytes) = read(TEXT_VALUE_FILE)? {
+            NoteValue::Text(String::from_utf8(bytes).map_err(|e| {
+                StoreError::Parse(format!("staged note {id} {TEXT_VALUE_FILE}: {e}"))
+            })?)
+        } else if let Some(bytes) = read(JSON_VALUE_FILE)? {
+            NoteValue::Json(serde_json::from_slice(&bytes).map_err(|e| {
+                StoreError::Parse(format!("staged note {id} {JSON_VALUE_FILE}: {e}"))
+            })?)
+        } else {
+            return Err(StoreError::Parse(format!(
+                "staged note {id}: missing {TEXT_VALUE_FILE} or {JSON_VALUE_FILE}"
+            )));
+        };
+        let targets: Vec<String> = match read(TARGET_LINK)? {
+            Some(bytes) => String::from_utf8_lossy(&bytes)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect(),
+            None => Vec::new(),
+        };
+        let tree = build_tree(&attrs, &value, targets)?;
+        let message = format!("note: {}", attrs.name);
+        let sha = self
+            .store
+            .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
+        Ok((id, sha))
     }
 
     /// Validate a target URL and return the tip SHA of the object it
@@ -1088,5 +1206,99 @@ mod tests {
             notes.delete(&id).unwrap_err(),
             StoreError::ObjectDeleted(x) if x == id
         ));
+    }
+
+    /// A staged note carries the writing scan and the pinned target
+    /// commit; creating it is idempotent.
+    #[test]
+    fn stage_then_create_staged_round_trips_with_scan_and_pinned_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let target_id = notes
+            .create(NoteInput {
+                name: "target",
+                value: NoteValue::Text("t".into()),
+                author: "user:a",
+                target: None,
+                metadata: None,
+            })
+            .unwrap();
+        let target_sha = store.rev_parse(&object_ref(&target_id)).unwrap().unwrap();
+        let pinned = store
+            .create(
+                "gage::note",
+                "1",
+                "pinnedpinnedpinnedpinned00",
+                &ObjectTree::default(),
+                "x",
+            )
+            .unwrap();
+
+        let id = "stagedstagedstagedstaged00";
+        let dir = tmp.path().join("notes").join(id);
+        let url = format!("note:{target_id}");
+        notes
+            .stage(
+                &dir,
+                id,
+                &NoteInput {
+                    name: "finding",
+                    value: NoteValue::Json(serde_json::json!({"n": 1})),
+                    author: "task:s:t",
+                    target: Some(&url),
+                    metadata: Some(serde_json::json!({"k": "v"})),
+                },
+                "SCAN1",
+                Some(&pinned),
+            )
+            .unwrap();
+        assert!(dir.join("attrs.json").is_file());
+        assert!(dir.join("value.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("target.link")).unwrap(),
+            format!("{pinned}\n")
+        );
+
+        let (created_id, sha) = notes.create_staged(&dir).unwrap();
+        assert_eq!(created_id, id);
+        let full = notes.get(id).unwrap();
+        assert_eq!(full.name, "finding");
+        assert_eq!(full.author, "task:s:t");
+        assert_eq!(full.scan.as_deref(), Some("SCAN1"));
+        assert_eq!(full.target.as_deref(), Some(url.as_str()));
+        assert_eq!(full.targets, [pinned.clone()]);
+        assert_eq!(full.value, NoteValue::Json(serde_json::json!({"n": 1})));
+        assert_ne!(full.targets, [target_sha]);
+        assert_eq!(
+            store.read_commit(&sha).unwrap().parents,
+            [pinned],
+            "the pinned commit is the link parent"
+        );
+        assert_eq!(notes.create_staged(&dir).unwrap(), (id.to_string(), sha));
+    }
+
+    #[test]
+    fn stage_rejects_a_bad_target_before_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let dir = tmp.path().join("notes").join("badbadbadbadbadbadbadbad00");
+        let err = NoteStore::from(&store)
+            .stage(
+                &dir,
+                "badbadbadbadbadbadbadbad00",
+                &NoteInput {
+                    name: "n",
+                    value: NoteValue::Text("v".into()),
+                    author: "task:s:t",
+                    target: Some("session:nope#1"),
+                    metadata: None,
+                },
+                "SCAN1",
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::TargetNotFound(_)), "{err}");
+        assert!(!dir.exists());
     }
 }

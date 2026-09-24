@@ -1,0 +1,9 @@
+pub const SCANNER = #{
+    name: "hello-note",
+    description: "Write a note",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    gage::write_note("greeting", "Hello, Robert").await?
+}

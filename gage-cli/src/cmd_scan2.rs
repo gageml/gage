@@ -175,7 +175,7 @@ fn list(args: Scan2ListArgs) {
 }
 
 /// One listing row. Sessions is blank for a scan with no dataset;
-/// Issues, Notes, Cost, and Label are blank: nothing writes them yet.
+/// Issues, Cost, and Label are blank: nothing writes them yet.
 fn list_row(
     record: &ScanRecord,
     sessions: Option<usize>,
@@ -193,7 +193,7 @@ fn list_row(
         attrs.tasks.total.to_string(),
         sessions.map(|n| n.to_string()).unwrap_or_default(),
         String::new(),
-        String::new(),
+        record.content.notes.len().to_string(),
         attrs.tasks.failed.to_string(),
         String::new(),
         status.to_string(),

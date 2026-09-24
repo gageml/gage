@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::dataset::OBJECT_TYPE as DATASET_TYPE;
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order};
+use crate::note::OBJECT_TYPE as NOTE_TYPE;
 use crate::object::{ObjectTree, require_type};
 use crate::session::build_files_tree_inner;
 use crate::writer::{TreeInput, mktree, write_blob};
@@ -35,6 +36,7 @@ const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const ATTRS_FILE: &str = "attrs.json";
 const DATASET_LINK: &str = "dataset.link";
+const NOTES_LINK: &str = "notes.link";
 const LOGS_DIR: &str = "logs";
 /// The blobs `logs/` may hold
 pub const LOG_NAMES: [&str; 3] = ["out", "err", "records"];
@@ -136,6 +138,9 @@ pub struct ScanContent {
     /// The commit SHA of the scanned dataset, from `dataset.link`.
     /// `None` when the scan had no dataset.
     pub dataset: Option<String>,
+    /// The commit SHAs of the notes the scan wrote, from `notes.link`,
+    /// in file order. Empty when it wrote none.
+    pub notes: Vec<String>,
     /// The names present under the scan's `logs/`, sorted; each one
     /// of [`LOG_NAMES`]
     pub logs: Vec<String>,
@@ -198,9 +203,16 @@ impl ScanStore<'_> {
             ..ObjectTree::default()
         };
         if let Some(sha) = &content.dataset {
-            self.require_dataset(sha)?;
+            self.require_live(sha, DATASET_TYPE)?;
             tree.links
                 .insert(DATASET_LINK.to_string(), vec![sha.clone()]);
+        }
+        if !content.notes.is_empty() {
+            for sha in &content.notes {
+                self.require_live(sha, NOTE_TYPE)?;
+            }
+            tree.links
+                .insert(NOTES_LINK.to_string(), content.notes.clone());
         }
         let logs_dir = scan_dir.join(LOGS_DIR);
         if logs_dir.is_dir() {
@@ -275,10 +287,10 @@ impl ScanStore<'_> {
         .read(&format!("{SCANNERS_DIR}/{scanner}/{SOURCE_DIR}/{path}"))
     }
 
-    /// The commit at `sha` must be a live dataset.
-    fn require_dataset(&self, sha: &str) -> Result<(), StoreError> {
+    /// The commit at `sha` must be a live object of `object_type`.
+    fn require_live(&self, sha: &str, object_type: &str) -> Result<(), StoreError> {
         let object = self.store.read_object(sha)?;
-        require_type(&object, DATASET_TYPE)?;
+        require_type(&object, object_type)?;
         if object.header.is_tombstone() {
             return Err(StoreError::ObjectDeleted(object.header.id));
         }
@@ -347,7 +359,19 @@ impl ScanContent {
     /// must list exactly one SHA.
     pub fn from_files(files: &dyn ScanFiles) -> Result<ScanContent, StoreError> {
         let attrs = read_json(files, ATTRS_FILE)?;
-        let dataset = read_dataset_link(files)?;
+        let dataset = match read_link(files, DATASET_LINK)? {
+            None => None,
+            Some(shas) => match shas.as_slice() {
+                [sha] => Some(sha.clone()),
+                _ => {
+                    return Err(StoreError::Parse(format!(
+                        "scan file {DATASET_LINK}: expected one SHA, found {}",
+                        shas.len()
+                    )));
+                }
+            },
+        };
+        let notes = read_link(files, NOTES_LINK)?.unwrap_or_default();
         let logs = files.list_files(LOGS_DIR)?;
         let mut tasks = Vec::new();
         for scanner in files.list_dirs(TASKS_DIR)? {
@@ -372,6 +396,7 @@ impl ScanContent {
         Ok(ScanContent {
             attrs,
             dataset,
+            notes,
             logs,
             tasks,
             scanners,
@@ -379,27 +404,23 @@ impl ScanContent {
     }
 }
 
-/// The one SHA in `dataset.link`, or `None` when the file is absent.
-fn read_dataset_link(files: &dyn ScanFiles) -> Result<Option<String>, StoreError> {
-    let Some(bytes) = files.read(DATASET_LINK)? else {
+/// The SHAs in the link file `name`, one per line, or `None` when
+/// the file is absent.
+fn read_link(files: &dyn ScanFiles, name: &str) -> Result<Option<Vec<String>>, StoreError> {
+    let Some(bytes) = files.read(name)? else {
         return Ok(None);
     };
     let text = String::from_utf8_lossy(&bytes);
-    let shas: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    match shas.as_slice() {
-        [sha] if is_sha(sha) => Ok(Some(sha.to_string())),
-        [sha] => Err(StoreError::Parse(format!(
-            "scan file {DATASET_LINK}: {sha:?} is not a commit SHA"
-        ))),
-        _ => Err(StoreError::Parse(format!(
-            "scan file {DATASET_LINK}: expected one SHA, found {}",
-            shas.len()
-        ))),
+    let mut shas = Vec::new();
+    for line in text.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        if !is_sha(line) {
+            return Err(StoreError::Parse(format!(
+                "scan file {name}: {line:?} is not a commit SHA"
+            )));
+        }
+        shas.push(line.to_string());
     }
+    Ok(Some(shas))
 }
 
 /// True for a 40-character lowercase hex SHA, as the store writes them.
@@ -1116,5 +1137,56 @@ mod tests {
                 "{content:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn create_links_every_note_in_notes_link() {
+        use crate::{NoteInput, NoteStore, NoteValue};
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let mut shas = Vec::new();
+        for name in ["a", "b"] {
+            let id = notes
+                .create(NoteInput {
+                    name,
+                    value: NoteValue::Text(name.into()),
+                    author: "task:s:t",
+                    target: None,
+                    metadata: None,
+                })
+                .unwrap();
+            shas.push(
+                store
+                    .rev_parse(&crate::object::object_ref(&id))
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let scan_dir = staged_scan(tmp.path());
+        write(
+            &scan_dir.join("notes.link"),
+            &format!("{}\n{}\n", shas[0], shas[1]),
+        );
+        let scans = ScanStore::from(&store);
+        let commit = scans.create("SCAN12", &scan_dir).unwrap();
+        assert_eq!(store.read_commit(&commit).unwrap().parents, shas);
+        assert_eq!(scans.get("SCAN12").unwrap().content.notes, shas);
+    }
+
+    #[test]
+    fn create_rejects_a_notes_link_to_a_non_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        let other = ScanStore::from(&store).create("SCAN13", &scan_dir).unwrap();
+        write(&scan_dir.join("notes.link"), &format!("{other}\n"));
+        let err = ScanStore::from(&store)
+            .create("SCAN14", &scan_dir)
+            .unwrap_err();
+        assert!(
+            matches!(&err, StoreError::WrongType { expected, .. } if expected == NOTE_TYPE),
+            "{err}"
+        );
     }
 }
