@@ -36,6 +36,7 @@ mod cmd_query;
 mod cmd_query2;
 mod cmd_resolve;
 mod cmd_scan;
+mod cmd_scan2;
 mod cmd_session;
 mod cmd_status;
 mod cmd_store;
@@ -82,7 +83,9 @@ const GAGE_LOG_TARGETS: &[&str] = &[
     "gage_query",
     "gage_registry",
     "gage_runtime",
+    "gage_runtime2",
     "gage_scan",
+    "gage_scan2",
     "gage_scan_ui",
     "gage_sync",
     "gage_tui",
@@ -98,6 +101,9 @@ enum Command {
     /// With no session selection options, scans sessions from the
     /// last 30 days, up to 20.
     Scan(Box<cmd_scan::ScanArgs>),
+
+    /// Run scanners (new runtime)
+    Scan2(cmd_scan2::Scan2Args),
 
     /// Resolve issues in a Claude Code session
     ///
@@ -300,6 +306,7 @@ async fn main() {
             },
             Command::Test { command } => cmd_test::run(command).await,
             Command::Scan(args) => cmd_scan::run(*args).await,
+            Command::Scan2(args) => cmd_scan2::main(args).await,
             Command::Resolve(args) => cmd_resolve::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
                 McpCommand::Stdio => {

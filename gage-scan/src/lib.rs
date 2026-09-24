@@ -1,5 +1,5 @@
 pub mod agent_def;
-mod error;
+pub mod error;
 pub mod event;
 pub mod resolve;
 pub mod runner;

@@ -36,6 +36,8 @@ gage-query = { path = "../gage-query" }
 gage-query2 = { path = "../gage-query2" }
 gage-registry = { path = "../gage-registry" }
 gage-scan = { path = "../gage-scan" }
+gage-runtime2 = { path = "../gage-runtime2" }
+gage-scan2 = { path = "../gage-scan2" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 gage-sync = { path = "../gage-sync" }

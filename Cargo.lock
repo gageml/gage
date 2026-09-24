@@ -2517,7 +2517,9 @@ dependencies = [
  "gage-query",
  "gage-query2",
  "gage-registry",
+ "gage-runtime2",
  "gage-scan",
+ "gage-scan2",
  "gage-session",
  "gage-store",
  "gage-sync",
@@ -2703,6 +2705,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-runtime2"
+version = "0.2.0-dev"
+dependencies = [
+ "rune",
+ "tokio",
+]
+
+[[package]]
 name = "gage-scan"
 version = "0.2.0-dev"
 dependencies = [
@@ -2726,6 +2736,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "gage-scan2"
+version = "0.2.0-dev"
+dependencies = [
+ "gage-registry",
+ "gage-runtime2",
+ "gage-scan",
+ "rune",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

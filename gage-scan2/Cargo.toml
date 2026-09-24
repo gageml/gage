@@ -1,0 +1,20 @@
+[package]
+name = "gage-scan2"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gage-registry = { path = "../gage-registry" }
+gage-runtime2 = { path = "../gage-runtime2" }
+gage-scan = { path = "../gage-scan" }
+rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

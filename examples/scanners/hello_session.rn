@@ -1,4 +1,4 @@
-use gage::scan;
+// use gage::scan;
 
 pub const SCANNER = #{
     name: "hello-session",
@@ -7,7 +7,8 @@ pub const SCANNER = #{
 };
 
 pub async fn hello() {
-    for s in scan().sessions() {
-        println!("Hello {}", s.id);
-    }
+    print("Hello Gage!");
+    // for s in scan().sessions() {
+    //     println!("Hello {}", s.id);
+    // }
 }
