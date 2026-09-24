@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use gage_registry::scanner::parse_scanner_file;
+use gage_registry::scanner::{ScannerRegistry, parse_scanner_file};
 use gage_runtime2::Output;
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanOutcome};
@@ -40,6 +40,10 @@ pub struct Scan2RunArgs {
     /// Scanner file to run (repeatable)
     #[arg(short, long = "file", value_name = "PATH")]
     files: Vec<PathBuf>,
+
+    /// Show available scanners and exit
+    #[arg(long)]
+    list_scanners: bool,
 }
 
 #[derive(Args)]
@@ -143,6 +147,10 @@ fn list_row(record: &ScanRecord, highlighter: &s::IdHighlighter) -> Vec<String> 
 }
 
 async fn run_scan(args: Scan2RunArgs) {
+    if args.list_scanners {
+        crate::cmd_scan::list_scanners(&ScannerRegistry::load());
+        return;
+    }
     if args.files.is_empty() {
         eprintln!("gage scan2: at least one --file is required");
         std::process::exit(2);

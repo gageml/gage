@@ -2244,7 +2244,7 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-fn list_scanners(registry: &ScannerRegistry) {
+pub(crate) fn list_scanners(registry: &ScannerRegistry) {
     let header: Vec<String> = ["Scanner", "Source", "Groups", "Description"]
         .iter()
         .map(|s| s.to_string())
