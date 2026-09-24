@@ -72,11 +72,42 @@ impl Level {
     }
 }
 
+/// One item of task output with the task that produced it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TaskOutput {
+    pub scanner: String,
+    pub task: String,
+    pub output: Output,
+}
+
+/// The running task's identity and the scan's output channel. The
+/// task orchestrator scopes one per task execution; every task of a
+/// scan shares the sender, and the orchestrator is the only receiver,
+/// so receive order is the order of the scan.
+#[derive(Debug, Clone)]
+pub struct OutputSink {
+    pub scanner: String,
+    pub task: String,
+    pub tx: mpsc::UnboundedSender<TaskOutput>,
+}
+
 tokio::task_local! {
-    /// Sender for the running task's output, read by the `std::io`
-    /// replacement in [`io`]. The task orchestrator scopes one sender
-    /// per task execution.
-    pub static OUTPUT_TX: mpsc::UnboundedSender<Output>;
+    /// The running task's sink, read by the `std::io` replacement in
+    /// [`io`] and the `log` macros in [`log`]
+    pub static OUTPUT_SINK: OutputSink;
+}
+
+/// Send one output item from the running task.
+pub(crate) fn send(output: Output) {
+    OUTPUT_SINK.with(|sink| {
+        sink.tx
+            .send(TaskOutput {
+                scanner: sink.scanner.clone(),
+                task: sink.task.clone(),
+                output,
+            })
+            .expect("output receiver should be held open for the task's lifetime")
+    });
 }
 
 /// The Rune context every scanner compiles against: the standard
@@ -115,8 +146,13 @@ mod tests {
             .unwrap();
         let unit = RuneArc::try_new(unit).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        OUTPUT_TX
-            .scope(tx, async move {
+        let sink = OutputSink {
+            scanner: "s".into(),
+            task: "main".into(),
+            tx,
+        };
+        OUTPUT_SINK
+            .scope(sink, async move {
                 let vm = Vm::new(rt, unit);
                 vm.send_execute(["main"], ())
                     .unwrap()
@@ -127,7 +163,8 @@ mod tests {
             .await;
         let mut out = Vec::new();
         while let Ok(o) = rx.try_recv() {
-            out.push(o);
+            assert_eq!((o.scanner.as_str(), o.task.as_str()), ("s", "main"));
+            out.push(o.output);
         }
         out
     }

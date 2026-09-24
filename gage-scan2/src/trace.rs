@@ -1,12 +1,13 @@
 //! Runtime records and panics into the scan record.
 //!
 //! [`layer`] is a `tracing` layer the CLI installs. Every event it
-//! admits is appended as one record to the running scan's staging:
-//! to the task's `logs/records` when a task is running, otherwise to
-//! the scan's `logs/records`. A runtime record carries the Rust target
-//! after the level, `… INFO gage_store: …`, which a scanner's own
-//! records lack. Outside a scan the layer drops events; the CLI's
-//! stderr layer still shows them.
+//! admits is appended as one record to the running scan's
+//! `logs/records` in staging. A runtime record carries the Rust
+//! target as its origin, `… INFO gage_store: …`, where a scanner's
+//! own record carries `<scanner>:<task>`; a runtime record raised
+//! while a task runs ends with `task=<scanner>:<task>`. Outside a
+//! scan the layer drops events; the CLI's stderr layer still shows
+//! them.
 //!
 //! The scan sets the destination through a task-local [`LogScope`],
 //! so no handle is shared with the layer. [`install_panic_hook`] uses
@@ -32,7 +33,7 @@ tokio::task_local! {
 }
 
 /// The running scan's staging `scan/` directory and, while a task
-/// runs, the task.
+/// runs, the task, which runtime records name.
 #[derive(Clone)]
 pub(crate) struct LogScope {
     pub scan_dir: PathBuf,
@@ -44,15 +45,8 @@ pub(crate) struct LogScope {
 }
 
 impl LogScope {
-    fn logs_dir(&self) -> PathBuf {
-        match &self.task {
-            Some((scanner, task)) => staging::task_logs_dir(&self.scan_dir, scanner, task),
-            None => staging::scan_logs_dir(&self.scan_dir),
-        }
-    }
-
     fn append(&self, name: &str, bytes: &[u8]) {
-        if let Err(e) = staging::append(&self.logs_dir(), name, bytes) {
+        if let Err(e) = staging::append(&staging::scan_logs_dir(&self.scan_dir), name, bytes) {
             let mut failure = self.failure.lock().unwrap();
             if failure.is_none() {
                 *failure = Some(e);
@@ -77,13 +71,17 @@ impl<S: Subscriber> Layer<S> for RecordsLayer {
         let mut message = MessageVisitor::default();
         event.record(&mut message);
         let meta = event.metadata();
-        let line = format!(
-            "{} {} {}: {}\n",
+        let mut line = format!(
+            "{} {} {}: {}",
             ms_to_iso8601(now_ms()),
             meta.level(),
             meta.target(),
             message.text
         );
+        if let Some((scanner, task)) = &scope.task {
+            write!(line, " task={scanner}:{task}").unwrap();
+        }
+        line.push('\n');
         scope.append(staging::RECORDS_LOG, line.as_bytes());
     }
 }
@@ -124,11 +122,7 @@ pub fn install_panic_hook() {
             if let Ok(scope) = LOG_SCOPE.try_with(|s| s.clone()) {
                 let backtrace = std::backtrace::Backtrace::force_capture();
                 let text = format!("{} PANIC {info}\n{backtrace}\n", ms_to_iso8601(now_ms()));
-                let scan_scope = LogScope {
-                    task: None,
-                    ..scope
-                };
-                scan_scope.append(staging::ERR_LOG, text.as_bytes());
+                scope.append(staging::ERR_LOG, text.as_bytes());
             }
             previous(info);
         }));

@@ -12,14 +12,11 @@
 //! applied                                # present once written to the store
 //! scan/attrs.json                        # written at the terminal state
 //! scan/dataset.link                      # the scanned dataset's commit, written at create
-//! scan/logs/out                          # the scan's output lines, appended as they happen
-//! scan/logs/err                          # the scan's error lines, and panics
-//! scan/logs/records                      # runtime records raised outside any task
+//! scan/logs/out                          # output lines, the scan's own and every task's
+//! scan/logs/err                          # error lines: task failures, the cancel notice, panics
+//! scan/logs/records                      # log records, runtime and scanner
 //! scan/scanners/<name>/sourcecode.d/<f>  # scanner source as run, copied at create
 //! scan/tasks/<scanner>/<task>/attrs.json # pending at create, rewritten on start and finish
-//! scan/tasks/<scanner>/<task>/logs/out   # print output, appended as it happens
-//! scan/tasks/<scanner>/<task>/logs/err   # error output: the failure message
-//! scan/tasks/<scanner>/<task>/logs/records # log records, appended as they happen
 //! ```
 //!
 //! Every file except the logs is written whole through a temp file
@@ -169,13 +166,9 @@ impl Staging {
         write_json(&dir.join(ATTRS_FILE), attrs)
     }
 
-    /// The log appenders of a task. Each log is created on its first
-    /// write, so a task that produced nothing has no `logs/` entry.
-    pub fn task_logs(&self, scanner: &str, task: &str) -> Logs {
-        Logs::new(task_logs_dir(&self.scan_dir(), scanner, task))
-    }
-
-    /// The log appenders of the scan itself.
+    /// The log appenders of the scan. Each log is created on its
+    /// first write, so a scan that produced nothing has no `logs/`
+    /// entry.
     pub fn scan_logs(&self) -> Logs {
         Logs::new(scan_logs_dir(&self.scan_dir()))
     }
@@ -198,15 +191,6 @@ impl Staging {
     fn task_dir(&self, scanner: &str, task: &str) -> PathBuf {
         self.scan_dir().join(TASKS_DIR).join(scanner).join(task)
     }
-}
-
-/// The `logs/` directory of a task under a staging `scan/` directory
-pub(crate) fn task_logs_dir(scan_dir: &Path, scanner: &str, task: &str) -> PathBuf {
-    scan_dir
-        .join(TASKS_DIR)
-        .join(scanner)
-        .join(task)
-        .join(LOGS_DIR)
 }
 
 /// The `logs/` directory of the scan under a staging `scan/` directory
@@ -262,15 +246,17 @@ impl Logs {
         Ok(())
     }
 
-    /// Append one record: `<ISO 8601 ms UTC> <LEVEL> <message>`.
-    pub fn record(&mut self, level: Level, message: &str) -> io::Result<()> {
+    /// Append one record: `<ISO 8601 ms UTC> <LEVEL> <origin>:
+    /// <message>`. `origin` is `<scanner>:<task>` for a scanner's
+    /// record.
+    pub fn record(&mut self, level: Level, origin: &str, message: &str) -> io::Result<()> {
         let dir = &self.dir;
         let file = match &mut self.records {
             Some(file) => file,
             None => self.records.insert(open_append(dir, RECORDS_LOG)?),
         };
         let line = format!(
-            "{} {} {message}\n",
+            "{} {} {origin}: {message}\n",
             ms_to_iso8601(now_ms()),
             level.as_str().to_uppercase()
         );
@@ -355,21 +341,23 @@ mod tests {
                 },
             )
             .unwrap();
-        staging.task_logs("hello", "fail").err("boom").unwrap();
-        let mut logs = staging.task_logs("hello", "greet");
+        let mut logs = staging.scan_logs();
+        logs.err("boom").unwrap();
         logs.out("hello, ").unwrap();
         logs.out("world\n").unwrap();
-        logs.record(Level::Info, "started").unwrap();
+        logs.record(Level::Info, "hello:greet", "started").unwrap();
         drop(logs);
         assert_eq!(
-            fs::read_to_string(staging.scan_dir().join("tasks/hello/greet/logs/out")).unwrap(),
+            fs::read_to_string(staging.scan_dir().join("logs/out")).unwrap(),
             "hello, world\n"
         );
-        let records =
-            fs::read_to_string(staging.scan_dir().join("tasks/hello/greet/logs/records")).unwrap();
-        assert!(records.ends_with("Z INFO started\n"), "{records}");
+        let records = fs::read_to_string(staging.scan_dir().join("logs/records")).unwrap();
+        assert!(
+            records.ends_with("Z INFO hello:greet: started\n"),
+            "{records}"
+        );
         assert_eq!(
-            fs::read_to_string(staging.scan_dir().join("tasks/hello/fail/logs/err")).unwrap(),
+            fs::read_to_string(staging.scan_dir().join("logs/err")).unwrap(),
             "boom\n",
             "err is newline-terminated"
         );
@@ -393,10 +381,9 @@ mod tests {
         assert_eq!(content.tasks.len(), 2);
         assert_eq!(content.tasks[0].task, "fail");
         assert_eq!(content.tasks[0].attrs.status, TaskStatus::Failed);
-        assert_eq!(content.tasks[0].logs, ["err"]);
         assert_eq!(content.tasks[1].task, "greet");
         assert_eq!(content.tasks[1].attrs.status, TaskStatus::Pending);
-        assert_eq!(content.tasks[1].logs, ["out", "records"]);
+        assert_eq!(content.logs, ["err", "out", "records"]);
         assert_eq!(
             content.scanners,
             BTreeMap::from([("hello".to_string(), vec!["hello.rn".to_string()])])

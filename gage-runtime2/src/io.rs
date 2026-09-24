@@ -9,7 +9,7 @@
 
 use rune::{ContextError, Module};
 
-use crate::{OUTPUT_TX, Output};
+use crate::{Output, send};
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate_item("std", ["io"])?;
@@ -24,11 +24,4 @@ fn print(s: &str) {
 
 fn println(s: &str) {
     send(Output::Println(s.to_string()));
-}
-
-fn send(output: Output) {
-    OUTPUT_TX.with(|tx| {
-        tx.send(output)
-            .expect("output receiver should be held open for the task's lifetime")
-    });
 }

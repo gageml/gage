@@ -2,9 +2,9 @@
 //!
 //! `log::trace!` through `log::error!` accept the full format grammar
 //! and expand to `::log::__write(level, message)`, which sends one
-//! [`Output::Log`] record through the task's output channel. The scan
-//! writes records to the task's `logs/records`. Distinct from
-//! `println`, which is task output and lands in `logs/out`.
+//! [`Output::Log`] record through the task's output sink. The scan
+//! writes records to its `logs/records`. Distinct from `println`,
+//! which is task output and lands in `logs/out`.
 //!
 //! The module lives at the root (`::log`), not under `::gage`: Rune
 //! resolves macro paths literally, so `log::info!(...)` only works if
@@ -14,7 +14,7 @@ use rune::macros::FormatArgs;
 use rune::parse::Parser;
 use rune::{ContextError, Module};
 
-use crate::{Level, OUTPUT_TX, Output};
+use crate::{Level, Output, send};
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("log")?;
@@ -40,11 +40,8 @@ fn __write(level: &str, message: &str) {
         .into_iter()
         .find(|l| l.as_str() == level)
         .unwrap_or(Level::Error);
-    OUTPUT_TX.with(|tx| {
-        tx.send(Output::Log {
-            level,
-            message: message.to_string(),
-        })
-        .expect("output receiver should be held open for the task's lifetime")
+    send(Output::Log {
+        level,
+        message: message.to_string(),
     });
 }

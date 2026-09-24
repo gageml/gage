@@ -40,7 +40,7 @@ use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
 use gage_registry::scanner::ScannerDef;
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
-use gage_runtime2::{OUTPUT_TX, Output};
+use gage_runtime2::{OUTPUT_SINK, Output, OutputSink, TaskOutput};
 use gage_scan::error::render_task_error;
 use gage_store::{ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts, TaskStatus};
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
@@ -55,8 +55,8 @@ use crate::trace::{LOG_SCOPE, LogScope};
 /// One item of run output, in the order it happened.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
-    /// Task output
-    Output(Output),
+    /// Task output, already recorded in the scan's `logs/`
+    Output(TaskOutput),
     /// The scan's own output for a person, already recorded in the
     /// scan's `logs/`
     Scan(ScanOutput),
@@ -299,6 +299,10 @@ pub async fn scan(
         task: None,
         failure: Arc::new(Mutex::new(None)),
     };
+    // One channel for the whole scan: every task sends through it and
+    // the run loop is the only receiver, so receive order is the order
+    // of the scan
+    let (output_tx, output_rx) = mpsc::unbounded_channel();
     let run = Run {
         id,
         config,
@@ -307,6 +311,8 @@ pub async fn scan(
         staging,
         cancel,
         scope: scope.clone(),
+        output_tx,
+        output_rx,
         on_event,
     };
     LOG_SCOPE.scope(scope, run.execute(store)).await
@@ -321,6 +327,8 @@ struct Run<'a, F: FnMut(Event)> {
     staging: Staging,
     cancel: &'a CancellationToken,
     scope: LogScope,
+    output_tx: mpsc::UnboundedSender<TaskOutput>,
+    output_rx: mpsc::UnboundedReceiver<TaskOutput>,
     on_event: F,
 }
 
@@ -369,7 +377,6 @@ impl<F: FnMut(Event)> Run<'_, F> {
                 scanner: scanner.clone(),
                 task: task.clone(),
             });
-            let mut logs = self.staging.task_logs(scanner, task);
             let task_scope = LogScope {
                 task: Some((scanner.clone(), task.clone())),
                 ..self.scope.clone()
@@ -377,7 +384,15 @@ impl<F: FnMut(Event)> Run<'_, F> {
             let outcome = LOG_SCOPE
                 .scope(
                     task_scope,
-                    run_task(compiled, task, self.cancel, &mut logs, &mut self.on_event),
+                    run_task(
+                        compiled,
+                        task,
+                        self.cancel,
+                        &self.output_tx,
+                        &mut self.output_rx,
+                        &mut scan_logs,
+                        &mut self.on_event,
+                    ),
                 )
                 .await?;
             let (status, error) = match outcome {
@@ -395,10 +410,6 @@ impl<F: FnMut(Event)> Run<'_, F> {
                 task,
                 &task_attrs(status, Some(task_started), Some(now_ms())),
             )?;
-            if let Some(message) = &error {
-                logs.err(message)?;
-            }
-            drop(logs);
             if let Some(message) = &error {
                 self.say(
                     &mut scan_logs,
@@ -517,16 +528,24 @@ enum TaskOutcome {
 
 /// Run one task on a fresh VM, writing its output to `logs` and
 /// forwarding it to `on_event` as it happens.
+/// Run one task under its output sink, delivering what it sends
+/// through the scan's channel as it arrives.
 async fn run_task(
     scanner: &CompiledScanner,
     task: &str,
     cancel: &CancellationToken,
+    output_tx: &mpsc::UnboundedSender<TaskOutput>,
+    output_rx: &mut mpsc::UnboundedReceiver<TaskOutput>,
     logs: &mut Logs,
     on_event: &mut impl FnMut(Event),
 ) -> Result<TaskOutcome, ScanError> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let sink = OutputSink {
+        scanner: scanner.name.clone(),
+        task: task.to_string(),
+        tx: output_tx.clone(),
+    };
     let outcome = {
-        let exec = OUTPUT_TX.scope(tx, execute(scanner, task));
+        let exec = OUTPUT_SINK.scope(sink, execute(scanner, task));
         tokio::pin!(exec);
         loop {
             tokio::select! {
@@ -534,32 +553,35 @@ async fn run_task(
                     Ok(()) => TaskOutcome::Completed,
                     Err(message) => TaskOutcome::Failed(message),
                 },
-                Some(output) = rx.recv() => deliver(output, logs, on_event)?,
+                Some(output) = output_rx.recv() => deliver(output, logs, on_event)?,
                 _ = cancel.cancelled() => break TaskOutcome::Canceled,
             }
         }
     };
-    // The block dropped the execution and with it the sender; drain
-    // what the task sent between the last poll and completion.
-    while let Ok(output) = rx.try_recv() {
+    // The block dropped the execution; drain what the task sent
+    // between the last poll and completion.
+    while let Ok(output) = output_rx.try_recv() {
         deliver(output, logs, on_event)?;
     }
     Ok(outcome)
 }
 
-/// Record one output in the task's logs, then hand it to the sink.
+/// Record one output in the scan's logs, then hand it to the sink.
 fn deliver(
-    output: Output,
+    output: TaskOutput,
     logs: &mut Logs,
     on_event: &mut impl FnMut(Event),
 ) -> Result<(), ScanError> {
-    match &output {
+    match &output.output {
         Output::Print(s) => logs.out(s)?,
         Output::Println(s) => {
             logs.out(s)?;
             logs.out("\n")?;
         }
-        Output::Log { level, message } => logs.record(*level, message)?,
+        Output::Log { level, message } => {
+            let origin = format!("{}:{}", output.scanner, output.task);
+            logs.record(*level, &origin, message)?;
+        }
     }
     on_event(Event::Output(output));
     Ok(())
@@ -689,7 +711,7 @@ mod tests {
         events
             .iter()
             .filter_map(|e| match e {
-                Event::Output(o) => Some(o),
+                Event::Output(o) => Some(&o.output),
                 _ => None,
             })
             .collect()
@@ -828,7 +850,11 @@ mod tests {
                     scanner: "fail".into(),
                     task: "b".into(),
                 },
-                Event::Output(Output::Println("b ran".into())),
+                Event::Output(TaskOutput {
+                    scanner: "fail".into(),
+                    task: "b".into(),
+                    output: Output::Println("b ran".into()),
+                }),
                 Event::TaskFinished {
                     scanner: "fail".into(),
                     task: "b".into(),
@@ -881,7 +907,7 @@ mod tests {
         let scans = ScanStore::from(&store);
         assert_eq!(
             scans.scan_log(&outcome.commit_sha, "out").unwrap(),
-            Some(summary.into_bytes()),
+            Some(format!("b ran\n{summary}").into_bytes()),
             "the scan's out holds what the terminal showed"
         );
         assert_eq!(
@@ -908,18 +934,9 @@ mod tests {
         };
         assert_eq!(a.task, "a");
         assert_eq!(a.attrs.status, TaskStatus::Failed);
-        assert_eq!(a.logs, ["err"]);
-        assert_eq!(
-            ScanStore::from(&store)
-                .task_log(&outcome.commit_sha, "fail", "a", "err")
-                .unwrap(),
-            Some(failure.into_bytes()),
-            "err holds the full diagnostic"
-        );
         assert!(a.attrs.started.is_some() && a.attrs.stopped.is_some());
         assert_eq!(b.task, "b");
         assert_eq!(b.attrs.status, TaskStatus::Completed);
-        assert_eq!(b.logs, ["out"]);
 
         assert!(
             !root.join(&outcome.id).exists(),
@@ -927,10 +944,10 @@ mod tests {
         );
     }
 
-    /// Print output and log records land in the task's `logs/`, and a
-    /// task that produced neither has no logs.
+    /// Print output lands in the scan's `logs/out` in delivery order,
+    /// and log records in `logs/records` with the task as origin.
     #[tokio::test]
-    async fn task_output_and_records_are_stored_under_logs() {
+    async fn task_output_and_records_are_stored_under_the_scan_logs() {
         let (_dir, compiled) = compile_source(
             r#"
             pub const SCANNER = #{
@@ -958,37 +975,34 @@ mod tests {
         )
         .await;
         let outcome = outcome.unwrap();
-        assert!(events.contains(&Event::Output(Output::Log {
-            level: gage_runtime2::Level::Warn,
-            message: "careful".into(),
+        assert!(events.contains(&Event::Output(TaskOutput {
+            scanner: "logs".into(),
+            task: "loud".into(),
+            output: Output::Log {
+                level: gage_runtime2::Level::Warn,
+                message: "careful".into(),
+            },
         })));
         let scans = ScanStore::from(&store);
-        let record = scans.get(&outcome.id).unwrap();
-        assert_eq!(record.content.tasks[0].task, "loud");
-        assert_eq!(record.content.tasks[0].logs, ["out", "records"]);
-        assert_eq!(record.content.tasks[1].task, "quiet");
-        assert!(record.content.tasks[1].logs.is_empty());
+        let out = scans.scan_log(&outcome.commit_sha, "out").unwrap().unwrap();
         assert_eq!(
-            scans
-                .task_log(&outcome.commit_sha, "logs", "loud", "out")
-                .unwrap(),
-            Some(b"ab\n".to_vec())
+            String::from_utf8(out).unwrap(),
+            format!("ab\n{}\n", summary_line(&outcome.id, &outcome.attrs))
         );
         let records = scans
-            .task_log(&outcome.commit_sha, "logs", "loud", "records")
+            .scan_log(&outcome.commit_sha, "records")
             .unwrap()
             .unwrap();
         let records = String::from_utf8(records).unwrap();
-        let lines: Vec<&str> = records.lines().collect();
+        // Runtime records share the file when another test has
+        // installed the process-wide records layer
+        let lines: Vec<&str> = records
+            .lines()
+            .filter(|l| l.contains(" logs:loud: "))
+            .collect();
         assert_eq!(lines.len(), 2, "{records}");
-        assert!(lines[0].ends_with("Z INFO count 3"), "{records}");
-        assert!(lines[1].ends_with("Z WARN careful"), "{records}");
-        assert_eq!(
-            scans
-                .task_log(&outcome.commit_sha, "logs", "quiet", "out")
-                .unwrap(),
-            None
-        );
+        assert!(lines[0].ends_with("Z INFO logs:loud: count 3"), "{records}");
+        assert!(lines[1].ends_with("Z WARN logs:loud: careful"), "{records}");
     }
 
     /// A scanner's includes are stored beside it under their literal
@@ -1151,11 +1165,11 @@ mod tests {
         );
     }
 
-    /// Runtime `tracing` events go to the scan's `records` outside a
-    /// task and to the task's `records` inside one, each with the
-    /// Rust target after the level.
+    /// Runtime `tracing` events go to the scan's `records` with the
+    /// Rust target after the level, and carry the running task as an
+    /// attribute when raised inside one.
     #[tokio::test]
-    async fn runtime_records_route_to_the_scan_or_the_running_task() {
+    async fn runtime_records_name_the_running_task() {
         use std::sync::Once;
         use tracing_subscriber::layer::SubscriberExt;
 
@@ -1187,7 +1201,10 @@ mod tests {
                 // Emitted from the scan loop, outside any task
                 Event::TaskStarted { .. } => tracing::warn!("outside the task"),
                 // Delivered from inside the running task's scope
-                Event::Output(Output::Print(_)) => tracing::warn!("inside the task"),
+                Event::Output(TaskOutput {
+                    output: Output::Print(_),
+                    ..
+                }) => tracing::warn!("inside the task"),
                 _ => {}
             },
         )
@@ -1195,35 +1212,26 @@ mod tests {
         .unwrap();
 
         let scans = ScanStore::from(&store);
-        let scan_records = String::from_utf8(
+        let records = String::from_utf8(
             scans
                 .scan_log(&outcome.commit_sha, "records")
                 .unwrap()
                 .unwrap(),
         )
         .unwrap();
-        let task_records = String::from_utf8(
-            scans
-                .task_log(&outcome.commit_sha, "hello", "hello", "records")
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
         assert!(
-            scan_records.contains(" INFO gage_scan2: scan ")
-                && scan_records.contains(" started with 1 tasks\n"),
-            "{scan_records}"
+            records.contains(" INFO gage_scan2: scan ")
+                && records.contains(" started with 1 tasks\n"),
+            "{records}"
         );
         assert!(
-            scan_records.contains(" WARN gage_scan2::tests: outside the task\n"),
-            "{scan_records}"
+            records.contains(" WARN gage_scan2::tests: outside the task\n"),
+            "{records}"
         );
-        assert!(!scan_records.contains("inside the task"), "{scan_records}");
         assert!(
-            task_records.contains(" WARN gage_scan2::tests: inside the task\n"),
-            "{task_records}"
+            records.contains(" WARN gage_scan2::tests: inside the task task=hello:hello\n"),
+            "{records}"
         );
-        assert!(!task_records.contains("outside the task"), "{task_records}");
     }
 
     #[tokio::test]

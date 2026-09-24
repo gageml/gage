@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
-use gage_runtime2::Output;
+use gage_runtime2::{Output, TaskOutput};
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
 use gage_store::{DatasetStore, SCAN_TYPE, ScanRecord, ScanStore, Store};
@@ -308,11 +308,14 @@ async fn run_scan(args: Scan2RunArgs) {
         dataset: dataset_sha.as_deref(),
     };
     // Headless: task output and the scan's own lines go to the
-    // terminal as they happen; records go to the scan record only
+    // terminal as they happen, unprefixed; records go to the scan
+    // record only
     let result = gage_scan2::scan(&store, &config, &scanners, &cancel, |event| match event {
-        Event::Output(Output::Print(s)) => print!("{s}"),
-        Event::Output(Output::Println(s)) => println!("{s}"),
-        Event::Output(Output::Log { .. }) => {}
+        Event::Output(TaskOutput { output, .. }) => match output {
+            Output::Print(s) => print!("{s}"),
+            Output::Println(s) => println!("{s}"),
+            Output::Log { .. } => {}
+        },
         Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
         Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
         Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
