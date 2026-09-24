@@ -1,0 +1,9 @@
+pub const SCANNER = #{
+    name: "hello-session",
+    description: "Greeting",
+    tasks: #{main: #{}}
+};
+
+pub async fn main() {
+    println("Hello scan!");
+}

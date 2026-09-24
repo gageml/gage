@@ -17,32 +17,48 @@
 //!   revision history at promotion.
 //!
 //! This crate owns task orchestration: it compiles scanners against
-//! the `gage-runtime2` context and runs their tasks. The runtime is a
-//! pure event emitter: [`run`] hands each [`Event`] to the caller's
-//! sink, which owns rendering.
+//! the `gage-runtime2` context, runs their tasks, and records the run
+//! in [`staging`] and then the store. The runtime is a pure event
+//! emitter: [`scan`] hands each [`Event`] to the caller's sink, which
+//! owns rendering.
+
+pub mod staging;
 
 use std::fmt;
+use std::io;
 use std::sync::Arc;
 
+use gage_core::datetime::now_ms;
+use gage_core::uuid::new_uuid;
 use gage_registry::scanner::ScannerDef;
 use gage_runtime2::{OUTPUT_TX, Output};
 use gage_scan::error::render_task_error;
 use gage_scan::runner::render_vm_error;
+use gage_store::{ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts, TaskStatus};
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
 use rune::{Diagnostics, Source, Sources, Vm};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::staging::{Staging, State};
 
 /// One item of run output, in the order it happened.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     /// Task output
     Output(Output),
-    /// A task returned an `Err` or the VM raised an error
-    TaskFailed {
+    TaskStarted {
         scanner: String,
         task: String,
-        message: String,
+    },
+    /// A task reached a terminal status. `error` is the rendered
+    /// failure for `Failed`.
+    TaskFinished {
+        scanner: String,
+        task: String,
+        status: TaskStatus,
+        error: Option<String>,
     },
 }
 
@@ -149,56 +165,209 @@ pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
     })
 }
 
-/// End-of-run task accounting.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RunSummary {
-    pub total: usize,
-    pub completed: usize,
-    pub failed: usize,
+/// A failure of the scan lifecycle itself, as opposed to a task
+/// failure, which the scan records and continues past.
+#[derive(Debug)]
+pub enum ScanError {
+    /// Two scanners share a name; `tasks/<scanner>/` cannot hold both
+    DuplicateScanner(String),
+    /// Staging could not be written
+    Staging(io::Error),
+    /// The scan could not be applied to the store
+    Store(StoreError),
 }
 
-/// Run every task of every scanner, in order, one at a time. Output
-/// reaches `on_output` as it happens; a failed task is reported
-/// through the same sink and the run continues with the next task.
-pub async fn run(scanners: &[CompiledScanner], mut on_event: impl FnMut(Event)) -> RunSummary {
-    let mut summary = RunSummary::default();
-    for scanner in scanners {
-        for task in &scanner.tasks {
-            summary.total += 1;
-            match run_task(scanner, task, &mut on_event).await {
-                Ok(()) => summary.completed += 1,
-                Err(message) => {
-                    summary.failed += 1;
-                    on_event(Event::TaskFailed {
-                        scanner: scanner.name.clone(),
-                        task: task.clone(),
-                        message,
-                    });
-                }
+impl fmt::Display for ScanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScanError::DuplicateScanner(name) => {
+                write!(f, "scanner {name} is given more than once")
             }
+            ScanError::Staging(e) => write!(f, "writing scan staging: {e}"),
+            ScanError::Store(e) => write!(f, "writing scan to the store: {e}"),
         }
     }
-    summary
+}
+
+impl std::error::Error for ScanError {}
+
+impl From<io::Error> for ScanError {
+    fn from(e: io::Error) -> Self {
+        ScanError::Staging(e)
+    }
+}
+
+impl From<StoreError> for ScanError {
+    fn from(e: StoreError) -> Self {
+        ScanError::Store(e)
+    }
+}
+
+/// What a finished scan wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanOutcome {
+    pub id: String,
+    pub commit_sha: String,
+    pub attrs: ScanAttrs,
+}
+
+/// Run every task of every scanner, in order, one at a time, and
+/// record the scan in `store`.
+///
+/// The scan is staged under `staging_root/<id>/` while it runs (see
+/// [`staging`]) and applied to the store at its terminal state, after
+/// which the staging directory is removed. Output and task status
+/// reach `on_event` as they happen. A failed task is recorded and the
+/// run continues with the next task. Cancelling `cancel` abandons the
+/// running task at its next await point, marks it and every task not
+/// yet started `canceled`, and applies what ran.
+pub async fn scan(
+    store: &Store,
+    staging_root: &std::path::Path,
+    scanners: &[CompiledScanner],
+    cancel: &CancellationToken,
+    mut on_event: impl FnMut(Event),
+) -> Result<ScanOutcome, ScanError> {
+    let plan = plan_tasks(scanners)?;
+    let id = new_uuid();
+    let staging = Staging::create(staging_root, &id, &plan)?;
+
+    let started = now_ms();
+    let mut counts = TaskCounts {
+        total: plan.len(),
+        ..TaskCounts::default()
+    };
+    let mut canceled = false;
+    for (scanner, task) in &plan {
+        if cancel.is_cancelled() {
+            canceled = true;
+            staging.write_task(scanner, task, &task_attrs(TaskStatus::Canceled, None, None))?;
+            on_event(Event::TaskFinished {
+                scanner: scanner.clone(),
+                task: task.clone(),
+                status: TaskStatus::Canceled,
+                error: None,
+            });
+            continue;
+        }
+        let compiled = scanners
+            .iter()
+            .find(|s| &s.name == scanner)
+            .expect("plan names a compiled scanner");
+        let task_started = now_ms();
+        staging.write_task(
+            scanner,
+            task,
+            &task_attrs(TaskStatus::Started, Some(task_started), None),
+        )?;
+        on_event(Event::TaskStarted {
+            scanner: scanner.clone(),
+            task: task.clone(),
+        });
+        let outcome = run_task(compiled, task, cancel, &mut on_event).await;
+        let (status, error) = match outcome {
+            TaskOutcome::Completed => (TaskStatus::Completed, None),
+            TaskOutcome::Failed(message) => (TaskStatus::Failed, Some(message)),
+            TaskOutcome::Canceled => (TaskStatus::Canceled, None),
+        };
+        match status {
+            TaskStatus::Completed => counts.completed += 1,
+            TaskStatus::Failed => counts.failed += 1,
+            _ => canceled = true,
+        }
+        staging.write_task(
+            scanner,
+            task,
+            &task_attrs(status, Some(task_started), Some(now_ms())),
+        )?;
+        if let Some(message) = &error {
+            staging.write_task_error(scanner, task, message)?;
+        }
+        on_event(Event::TaskFinished {
+            scanner: scanner.clone(),
+            task: task.clone(),
+            status,
+            error,
+        });
+    }
+
+    let attrs = ScanAttrs {
+        started,
+        stopped: now_ms(),
+        canceled,
+        tasks: counts,
+    };
+    staging.write_scan(&attrs)?;
+    staging.set_state(if canceled {
+        State::Canceled
+    } else {
+        State::Completed
+    })?;
+    let commit_sha = ScanStore::from(store).create(&id, &staging.scan_dir())?;
+    staging.mark_applied()?;
+    staging.remove()?;
+    Ok(ScanOutcome {
+        id,
+        commit_sha,
+        attrs,
+    })
+}
+
+/// The `(scanner, task)` pairs to run, in scanner order then task
+/// order. Scanner names must be unique.
+fn plan_tasks(scanners: &[CompiledScanner]) -> Result<Vec<(String, String)>, ScanError> {
+    let mut plan = Vec::new();
+    for (i, scanner) in scanners.iter().enumerate() {
+        if scanners.iter().take(i).any(|s| s.name == scanner.name) {
+            return Err(ScanError::DuplicateScanner(scanner.name.clone()));
+        }
+        for task in &scanner.tasks {
+            plan.push((scanner.name.clone(), task.clone()));
+        }
+    }
+    Ok(plan)
+}
+
+fn task_attrs(status: TaskStatus, started: Option<i64>, stopped: Option<i64>) -> TaskAttrs {
+    TaskAttrs {
+        status,
+        started,
+        stopped,
+        worked_ms: None,
+    }
+}
+
+enum TaskOutcome {
+    Completed,
+    /// The rendered failure message
+    Failed(String),
+    Canceled,
 }
 
 /// Run one task on a fresh VM, forwarding its output while it runs.
-/// The error is the rendered failure message.
 async fn run_task(
     scanner: &CompiledScanner,
     task: &str,
+    cancel: &CancellationToken,
     on_event: &mut impl FnMut(Event),
-) -> Result<(), String> {
+) -> TaskOutcome {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let exec = OUTPUT_TX.scope(tx, execute(scanner, task));
-    tokio::pin!(exec);
-    let outcome = loop {
-        tokio::select! {
-            outcome = &mut exec => break outcome,
-            Some(output) = rx.recv() => on_event(Event::Output(output)),
+    let outcome = {
+        let exec = OUTPUT_TX.scope(tx, execute(scanner, task));
+        tokio::pin!(exec);
+        loop {
+            tokio::select! {
+                result = &mut exec => break match result {
+                    Ok(()) => TaskOutcome::Completed,
+                    Err(message) => TaskOutcome::Failed(message),
+                },
+                Some(output) = rx.recv() => on_event(Event::Output(output)),
+                _ = cancel.cancelled() => break TaskOutcome::Canceled,
+            }
         }
     };
-    // The scope dropped the sender when the task finished; drain what
-    // it sent between the last poll and completion.
+    // The block dropped the execution and with it the sender; drain
+    // what the task sent between the last poll and completion.
     while let Ok(output) = rx.try_recv() {
         on_event(Event::Output(output));
     }
@@ -239,12 +408,13 @@ fn task_result(value: Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use gage_registry::scanner::parse_scanner_file;
+    use tempfile::TempDir;
 
     use super::*;
 
     /// Write `source` as a scanner file and compile it. The directory
     /// guard is returned so the file outlives the compiled scanner.
-    fn compile_source(source: &str) -> (tempfile::TempDir, Result<CompiledScanner, Error>) {
+    fn compile_source(source: &str) -> (TempDir, Result<CompiledScanner, Error>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scanner.rn");
         std::fs::write(&path, source).unwrap();
@@ -253,46 +423,97 @@ mod tests {
         (dir, compiled)
     }
 
-    async fn collect(scanner: CompiledScanner) -> (RunSummary, Vec<Event>) {
-        let mut events = Vec::new();
-        let summary = run(&[scanner], |e| events.push(e)).await;
-        (summary, events)
+    /// A fresh store and staging root under one directory.
+    fn open_store() -> (TempDir, Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        (tmp, store)
     }
+
+    /// Run `scanners` to completion, collecting every event.
+    async fn run_all(
+        store: &Store,
+        root: &std::path::Path,
+        scanners: &[CompiledScanner],
+        cancel: &CancellationToken,
+    ) -> (Result<ScanOutcome, ScanError>, Vec<Event>) {
+        let mut events = Vec::new();
+        let outcome = scan(store, root, scanners, cancel, |e| events.push(e)).await;
+        (outcome, events)
+    }
+
+    fn outputs(events: &[Event]) -> Vec<&Output> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Output(o) => Some(o),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const HELLO: &str = r#"
+        pub const SCANNER = #{
+            name: "hello",
+            description: "Prints",
+            tasks: #{ hello: #{} },
+        };
+
+        pub fn hello() {
+            print!("a");
+            println!("b {}", 1 + 1);
+            print("c");
+        }
+    "#;
+
+    const FAIL_THEN_RUN: &str = r#"
+        pub const SCANNER = #{
+            name: "fail",
+            description: "Fails",
+            tasks: #{ a: #{}, b: #{} },
+        };
+
+        pub fn a() {
+            Err("boom")
+        }
+
+        pub fn b() {
+            println!("b ran");
+        }
+    "#;
 
     #[tokio::test]
     async fn print_and_println_reach_the_sink_in_order() {
-        let (_dir, compiled) = compile_source(
-            r#"
-            pub const SCANNER = #{
-                name: "hello",
-                description: "Prints",
-                tasks: #{ hello: #{} },
-            };
-
-            pub fn hello() {
-                print!("a");
-                println!("b {}", 1 + 1);
-                print("c");
-            }
-            "#,
-        );
-        let (summary, events) = collect(compiled.unwrap()).await;
+        let (_dir, compiled) = compile_source(HELLO);
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
         assert_eq!(
-            events,
+            outputs(&events),
             [
-                Event::Output(Output::Print("a".into())),
-                Event::Output(Output::Println("b 2".into())),
-                Event::Output(Output::Print("c".into())),
+                &Output::Print("a".into()),
+                &Output::Println("b 2".into()),
+                &Output::Print("c".into()),
             ]
         );
+        let outcome = outcome.unwrap();
         assert_eq!(
-            summary,
-            RunSummary {
+            outcome.attrs.tasks,
+            TaskCounts {
                 total: 1,
                 completed: 1,
-                failed: 0
+                failed: 0,
+                skipped: 0,
             }
         );
+        assert!(!outcome.attrs.canceled);
     }
 
     #[tokio::test]
@@ -311,49 +532,88 @@ mod tests {
             }
             "#,
         );
-        let (summary, events) = collect(compiled.unwrap()).await;
-        assert_eq!(events, [Event::Output(Output::Println("go".into()))]);
-        assert_eq!(summary.completed, 1);
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outputs(&events), [&Output::Println("go".into())]);
+        assert_eq!(outcome.unwrap().attrs.tasks.completed, 1);
     }
 
+    /// The scan record lands in the store with one task record per
+    /// task, the failed task's message in `error.txt`, and staging
+    /// removed once applied.
     #[tokio::test]
-    async fn failing_task_is_reported_and_the_run_continues() {
-        let (_dir, compiled) = compile_source(
-            r#"
-            pub const SCANNER = #{
-                name: "fail",
-                description: "Fails",
-                tasks: #{ a: #{}, b: #{} },
-            };
-
-            pub fn a() {
-                Err("boom")
-            }
-
-            pub fn b() {
-                println!("b ran");
-            }
-            "#,
-        );
-        let (summary, events) = collect(compiled.unwrap()).await;
+    async fn scan_records_every_task_and_removes_staging() {
+        let (_dir, compiled) = compile_source(FAIL_THEN_RUN);
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("staging");
+        let (outcome, events) = run_all(
+            &store,
+            &root,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        let outcome = outcome.unwrap();
         assert_eq!(
             events,
             [
-                Event::TaskFailed {
+                Event::TaskStarted {
                     scanner: "fail".into(),
                     task: "a".into(),
-                    message: "boom".into(),
+                },
+                Event::TaskFinished {
+                    scanner: "fail".into(),
+                    task: "a".into(),
+                    status: TaskStatus::Failed,
+                    error: Some("boom".into()),
+                },
+                Event::TaskStarted {
+                    scanner: "fail".into(),
+                    task: "b".into(),
                 },
                 Event::Output(Output::Println("b ran".into())),
+                Event::TaskFinished {
+                    scanner: "fail".into(),
+                    task: "b".into(),
+                    status: TaskStatus::Completed,
+                    error: None,
+                },
             ]
         );
         assert_eq!(
-            summary,
-            RunSummary {
+            outcome.attrs.tasks,
+            TaskCounts {
                 total: 2,
                 completed: 1,
-                failed: 1
+                failed: 1,
+                skipped: 0,
             }
+        );
+        assert!(outcome.attrs.started <= outcome.attrs.stopped);
+
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        assert_eq!(record.commit_sha, outcome.commit_sha);
+        assert_eq!(record.content.attrs, outcome.attrs);
+        let [a, b] = record.content.tasks.as_slice() else {
+            panic!("two task records: {:?}", record.content.tasks);
+        };
+        assert_eq!(a.task, "a");
+        assert_eq!(a.attrs.status, TaskStatus::Failed);
+        assert_eq!(a.error.as_deref(), Some("boom"));
+        assert!(a.attrs.started.is_some() && a.attrs.stopped.is_some());
+        assert_eq!(b.task, "b");
+        assert_eq!(b.attrs.status, TaskStatus::Completed);
+        assert_eq!(b.error, None);
+
+        assert!(
+            !root.join(&outcome.id).exists(),
+            "staging is removed after apply"
         );
     }
 
@@ -373,12 +633,79 @@ mod tests {
             }
             "#,
         );
-        let (summary, events) = collect(compiled.unwrap()).await;
-        assert_eq!(summary.failed, 1);
-        let [Event::TaskFailed { message, .. }] = events.as_slice() else {
-            panic!("expected one failure, got {events:?}");
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outcome.unwrap().attrs.tasks.failed, 1);
+        let Some(Event::TaskFinished {
+            error: Some(message),
+            ..
+        }) = events.last()
+        else {
+            panic!("expected a failure, got {events:?}");
         };
         assert!(message.contains("v[3]"), "{message}");
+    }
+
+    /// A token cancelled before the run starts marks every task
+    /// `canceled` without a start time and applies the scan as
+    /// canceled.
+    #[tokio::test]
+    async fn cancelled_token_marks_every_task_canceled() {
+        let (_dir, compiled) = compile_source(FAIL_THEN_RUN);
+        let (tmp, store) = open_store();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &cancel,
+        )
+        .await;
+        let outcome = outcome.unwrap();
+        assert!(outcome.attrs.canceled);
+        assert_eq!(
+            outcome.attrs.tasks.completed + outcome.attrs.tasks.failed,
+            0
+        );
+        assert!(events.iter().all(|e| matches!(
+            e,
+            Event::TaskFinished {
+                status: TaskStatus::Canceled,
+                ..
+            }
+        )));
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        assert!(
+            record
+                .content
+                .tasks
+                .iter()
+                .all(|t| { t.attrs.status == TaskStatus::Canceled && t.attrs.started.is_none() })
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_scanner_names_are_rejected_before_staging() {
+        let (_a, first) = compile_source(HELLO);
+        let (_b, second) = compile_source(HELLO);
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("staging");
+        let (outcome, _) = run_all(
+            &store,
+            &root,
+            &[first.unwrap(), second.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, Err(ScanError::DuplicateScanner(ref n)) if n == "hello"));
+        assert!(!root.exists());
     }
 
     #[test]

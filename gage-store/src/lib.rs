@@ -31,7 +31,7 @@
 //!   reconcile that keeps it current, and the query core. Type modules
 //!   opt attributes in through `INDEXED_ATTRS`.
 //! - [`sqlite_index`] --- the SQLite implementation of the index.
-//! - `note`, `dataset`, `session` --- object types: each supplies its
+//! - `note`, `dataset`, `session`, `scan` --- object types: each supplies its
 //!   `attrs.json` shape, its content files, its decoder, and its typed
 //!   store.
 
@@ -44,6 +44,7 @@ pub mod index;
 mod note;
 pub mod object;
 pub mod query;
+mod scan;
 mod session;
 mod sqlite_index;
 mod store;
@@ -66,6 +67,10 @@ pub use note::{
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{StoredNoteTable, StoredSessionTable};
+pub use scan::{
+    DirFiles, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanRecord, ScanStore,
+    ScanTask, TaskAttrs, TaskCounts, TaskStatus,
+};
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,
     SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore, SummaryAttrs,

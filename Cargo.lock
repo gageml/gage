@@ -2742,12 +2742,17 @@ dependencies = [
 name = "gage-scan2"
 version = "0.2.0-dev"
 dependencies = [
+ "gage-core",
  "gage-registry",
  "gage-runtime2",
  "gage-scan",
+ "gage-store",
  "rune",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
