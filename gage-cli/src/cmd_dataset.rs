@@ -42,7 +42,7 @@ pub fn add() {
             std::process::exit(1);
         }
     };
-    println!("Created dataset {id}");
+    println!("Created dataset {}", short_uuid(&id));
 }
 
 pub async fn list(args: DatasetListArgs) {

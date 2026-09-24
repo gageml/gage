@@ -454,7 +454,7 @@ pub async fn show(args: NoteShowArgs) {
     // The prefix resolves through the store; the row comes from SQL
     let id = match store.resolve_in(&args.id, Some(NOTE_TYPE)) {
         Ok(found) if found.deleted => {
-            eprintln!("gage note show: note {} is deleted", found.id);
+            eprintln!("gage note show: note {} is deleted", short_uuid(&found.id));
             std::process::exit(1);
         }
         Ok(found) => found.id,
