@@ -68,8 +68,8 @@ pub use note::{
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{StoredNoteTable, StoredSessionTable};
 pub use scan::{
-    DirFiles, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanRecord, ScanStore,
-    ScanTask, TaskAttrs, TaskCounts, TaskStatus,
+    DirFiles, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanQuery, ScanRecord,
+    ScanStore, ScanTask, TaskAttrs, TaskCounts, TaskStatus,
 };
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,

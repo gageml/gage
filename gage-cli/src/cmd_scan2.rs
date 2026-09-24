@@ -1,30 +1,156 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
-use clap::Args;
+use clap::{Args, Subcommand};
 use gage_registry::scanner::parse_scanner_file;
 use gage_runtime2::Output;
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanOutcome};
-use gage_store::{Store, TaskStatus};
+use gage_store::{SCAN_TYPE, ScanRecord, ScanStore, Store, TaskStatus};
+use tabled::{
+    Table,
+    settings::{
+        Alignment, Color, Style, Width,
+        object::{Columns, Object, Rows},
+    },
+};
+
+use crate::human::{format_duration, format_elapsed_ms};
+use crate::style as s;
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Scan2Args {
+    #[command(subcommand)]
+    command: Option<Scan2Command>,
+
+    #[command(flatten)]
+    run_args: Scan2RunArgs,
+}
+
+#[derive(Subcommand)]
+enum Scan2Command {
+    /// List scan runs
+    List(Scan2ListArgs),
+}
+
+#[derive(Args)]
+pub struct Scan2RunArgs {
     /// Scanner file to run (repeatable)
-    #[arg(short, long = "file", value_name = "PATH", required = true)]
+    #[arg(short, long = "file", value_name = "PATH")]
     files: Vec<PathBuf>,
 }
 
+#[derive(Args)]
+pub struct Scan2ListArgs {
+    #[command(flatten)]
+    limit: crate::limit::LimitArgs,
+}
+
 pub async fn main(args: Scan2Args) {
-    // The store is needed only at the end, but a missing store is a
-    // full stop before any work.
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
+    match args.command {
+        Some(Scan2Command::List(a)) => list(a),
+        None => run_scan(args.run_args).await,
+    }
+}
+
+fn list(args: Scan2ListArgs) {
+    let store = open_store("gage scan2 list");
+    let scans = ScanStore::from(&store);
+    let total = match scans.query().count() {
+        Ok(n) => n,
         Err(e) => {
-            eprintln!("gage scan2: {e}");
+            eprintln!("gage scan2 list: {e}");
             std::process::exit(1);
         }
     };
+    if total == 0 {
+        println!("No scan runs found");
+        return;
+    }
+    let show = args.limit.show_count(total);
+    let records: Vec<ScanRecord> =
+        match scans.query().limit(show).iter().and_then(|it| it.collect()) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("gage scan2 list: {e}");
+                std::process::exit(1);
+            }
+        };
+
+    // The highlighted prefix is unique within the short-prefix set
+    // of scans, where a scan prefix resolves first
+    let peers = match store.short_prefix_ids(Some(SCAN_TYPE)) {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("gage scan2 list: {e}");
+            std::process::exit(1);
+        }
+    };
+    let highlighter = s::IdHighlighter::new(peers);
+
+    let header: Vec<String> = [
+        "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
+        "Label", "Created",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let rows = records.iter().map(|r| list_row(r, &highlighter));
+
+    let term_width = console::Term::stdout().size().1 as usize;
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .with(
+            Width::truncate(term_width)
+                .suffix("…")
+                .priority(s::IdAwarePriority::new(true)),
+        )
+        .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Columns::new(1..7), Alignment::right())
+        .modify(Columns::one(7).not(Rows::first()), s::dim())
+        .modify(Columns::last().not(Rows::first()), s::dim())
+        .to_string();
+    println!("{table}");
+
+    args.limit.print_summary(records.len(), total, "scan run");
+}
+
+/// One listing row. Sessions, Issues, Notes, Cost, and Label are
+/// blank: nothing writes them yet.
+fn list_row(record: &ScanRecord, highlighter: &s::IdHighlighter) -> Vec<String> {
+    let attrs = &record.content.attrs;
+    let status = if attrs.canceled {
+        "canceled"
+    } else {
+        "completed"
+    };
+    let elapsed = attrs.stopped.saturating_sub(attrs.started).max(0) as u64;
+    vec![
+        highlighter.short(&record.id),
+        attrs.tasks.total.to_string(),
+        String::new(),
+        String::new(),
+        String::new(),
+        attrs.tasks.failed.to_string(),
+        String::new(),
+        status.to_string(),
+        format_duration(Duration::from_millis(elapsed)),
+        String::new(),
+        format_elapsed_ms(attrs.started),
+    ]
+}
+
+async fn run_scan(args: Scan2RunArgs) {
+    if args.files.is_empty() {
+        eprintln!("gage scan2: at least one --file is required");
+        std::process::exit(2);
+    }
+
+    // The store is needed only at the end, but a missing store is a
+    // full stop before any work.
+    let store = open_store("gage scan2");
 
     let mut defs = Vec::new();
     let mut errors = 0;
@@ -136,4 +262,14 @@ fn summary_line(outcome: &ScanOutcome) -> String {
         counts.total,
         parts.join(", ")
     )
+}
+
+fn open_store(command: &str) -> Store {
+    match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
+    }
 }

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::git::EntryKind;
+use crate::index::{ObjectQuery, Order};
 use crate::object::{ObjectTree, require_type};
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
@@ -195,6 +196,21 @@ impl ScanStore<'_> {
         self.record(&object.commit_sha)
     }
 
+    /// Every live scan, newest created first, read lazily.
+    pub fn iter(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<ScanRecord, StoreError>> + '_, StoreError> {
+        self.query().iter()
+    }
+
+    /// Start a selection over scans.
+    pub fn query(&self) -> ScanQuery<'_> {
+        ScanQuery {
+            store: self.store,
+            query: ObjectQuery::new(OBJECT_TYPE),
+        }
+    }
+
     fn record(&self, commit_sha: &str) -> Result<ScanRecord, StoreError> {
         let header = self.store.read_header(commit_sha)?;
         let content = ScanContent::from_files(&CommitFiles {
@@ -208,6 +224,46 @@ impl ScanStore<'_> {
             created_ms: header.created_ms.unwrap_or_default(),
             modified_ms: header.modified_ms.unwrap_or_default(),
         })
+    }
+}
+
+/// A selection over scans: an order and a limit. `iter` reads matching
+/// scans one at a time, content included.
+pub struct ScanQuery<'a> {
+    store: &'a Store,
+    query: ObjectQuery,
+}
+
+impl<'a> ScanQuery<'a> {
+    pub fn order(mut self, order: Order) -> Self {
+        self.query.order = order;
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.query.limit = Some(limit);
+        self
+    }
+
+    /// The number of scans the selection matches, ignoring any limit.
+    /// Served by the index; no object is read.
+    pub fn count(&self) -> Result<usize, StoreError> {
+        let unlimited = ObjectQuery {
+            limit: None,
+            ..self.query.clone()
+        };
+        Ok(self.store.select(&unlimited)?.len())
+    }
+
+    /// Run the selection.
+    pub fn iter(
+        self,
+    ) -> Result<impl Iterator<Item = Result<ScanRecord, StoreError>> + 'a, StoreError> {
+        let store = self.store;
+        let tips = store.select(&self.query)?;
+        Ok(tips
+            .into_iter()
+            .map(move |tip| ScanStore::from(store).record(&tip.sha)))
     }
 }
 
@@ -541,6 +597,39 @@ mod tests {
             .collect();
         assert_eq!(paths, ["attrs.json", "created", "id", "modified", "type"]);
         assert!(scans.get("SCAN2").unwrap().content.tasks.is_empty());
+    }
+
+    #[test]
+    fn query_lists_scans_newest_first_with_count_ignoring_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        let scans = ScanStore::from(&store);
+        for id in ["SCANA", "SCANB", "SCANC"] {
+            scans.create(id, &scan_dir).unwrap();
+            // Distinct `created` stamps so the order is deterministic
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(scans.query().limit(2).count().unwrap(), 3);
+        let ids: Vec<String> = scans
+            .query()
+            .limit(2)
+            .iter()
+            .unwrap()
+            .map(|r| r.unwrap().id)
+            .collect();
+        assert_eq!(ids, ["SCANC", "SCANB"]);
+        let all: Vec<String> = scans.iter().unwrap().map(|r| r.unwrap().id).collect();
+        assert_eq!(all, ["SCANC", "SCANB", "SCANA"]);
+        assert_eq!(
+            scans
+                .query()
+                .order(Order::CreatedAsc)
+                .iter()
+                .unwrap()
+                .count(),
+            3
+        );
     }
 
     #[test]
