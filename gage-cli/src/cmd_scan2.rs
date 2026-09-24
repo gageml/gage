@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
 use gage_runtime2::Output;
 use gage_scan2::staging::staging_root;
-use gage_scan2::{CompiledScanner, Event, ScanOutcome};
+use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutcome};
 use gage_store::{SCAN_TYPE, ScanRecord, ScanStore, Store, TaskStatus};
 use tabled::{
     Table,
@@ -240,27 +240,25 @@ async fn run_scan(args: Scan2RunArgs) {
         })
     };
 
-    let result = gage_scan2::scan(
-        &store,
-        &staging_root(),
-        &scanners,
-        &cancel,
-        |event| match event {
-            Event::Output(Output::Print(s)) => print!("{s}"),
-            Event::Output(Output::Println(s)) => println!("{s}"),
-            Event::TaskStarted { .. } => {}
-            Event::TaskFinished {
-                scanner,
-                task,
-                status: TaskStatus::Failed,
-                error,
-            } => {
-                let message = error.unwrap_or_default();
-                eprintln!("gage scan2: {scanner}:{task}: {message}");
-            }
-            Event::TaskFinished { .. } => {}
-        },
-    )
+    let config = ScanConfig {
+        staging_root: &staging_root(),
+        gage_version: crate::VERSION,
+    };
+    let result = gage_scan2::scan(&store, &config, &scanners, &cancel, |event| match event {
+        Event::Output(Output::Print(s)) => print!("{s}"),
+        Event::Output(Output::Println(s)) => println!("{s}"),
+        Event::TaskStarted { .. } => {}
+        Event::TaskFinished {
+            scanner,
+            task,
+            status: TaskStatus::Failed,
+            error,
+        } => {
+            let message = error.unwrap_or_default();
+            eprintln!("gage scan2: {scanner}:{task}: {message}");
+        }
+        Event::TaskFinished { .. } => {}
+    })
     .await;
     io::stdout().flush().unwrap();
     cancel.cancel();

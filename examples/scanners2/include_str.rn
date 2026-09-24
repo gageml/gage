@@ -1,0 +1,11 @@
+pub const SCANNER = #{
+    name: "include-str",
+    description: "Include string val from file.",
+    tasks: #{main: #{}}
+};
+
+const MSG = include_str!("msg.txt");
+
+pub async fn main() {
+    print(MSG);
+}

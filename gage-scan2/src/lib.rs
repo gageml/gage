@@ -31,6 +31,7 @@ use std::sync::Arc;
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
 use gage_registry::scanner::ScannerDef;
+use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{OUTPUT_TX, Output};
 use gage_scan::error::render_task_error;
 use gage_scan::runner::render_vm_error;
@@ -41,7 +42,7 @@ use rune::{Diagnostics, Source, Sources, Vm};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::staging::{Staging, State};
+use crate::staging::{ScannerPlan, Staging, State};
 
 /// One item of run output, in the order it happened.
 #[derive(Debug, PartialEq, Eq)]
@@ -64,8 +65,19 @@ pub enum Event {
 
 #[derive(Debug)]
 pub enum Error {
-    Compile { name: String, diagnostics: String },
-    MissingTask { scanner: String, task: String },
+    Compile {
+        name: String,
+        diagnostics: String,
+    },
+    MissingTask {
+        scanner: String,
+        task: String,
+    },
+    /// The scanner's source files cannot be enumerated or stored
+    Source {
+        name: String,
+        source: SourceError,
+    },
 }
 
 impl fmt::Display for Error {
@@ -80,6 +92,7 @@ impl fmt::Display for Error {
                     "scanner {scanner} declares task {task} but defines no such function"
                 )
             }
+            Error::Source { name, source } => write!(f, "scanner {name}: {source}"),
         }
     }
 }
@@ -92,6 +105,8 @@ pub struct CompiledScanner {
     name: String,
     /// Declared task names, sorted by name
     tasks: Vec<String>,
+    /// The files the scanner is built from, recorded with the scan
+    source_files: Vec<SourceFile>,
     rt: RuneArc<RuntimeContext>,
     unit: RuneArc<Unit>,
     sources: Arc<Sources>,
@@ -146,6 +161,13 @@ pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
         }
     };
 
+    // Enumerated after the build so a malformed scanner reports
+    // Rune's diagnostics rather than a tokenizer error.
+    let files = source_files(&def.path).map_err(|source| Error::Source {
+        name: def.name.clone(),
+        source,
+    })?;
+
     let vm = Vm::new(rt.clone(), unit.clone());
     for task in def.tasks.keys() {
         if vm.lookup_function([task.as_str()]).is_err() {
@@ -159,6 +181,7 @@ pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
     Ok(CompiledScanner {
         name: def.name.clone(),
         tasks: def.tasks.keys().cloned().collect(),
+        source_files: files,
         rt,
         unit,
         sources: Arc::new(sources),
@@ -203,6 +226,15 @@ impl From<StoreError> for ScanError {
     }
 }
 
+/// Where a scan stages and what it records about its runtime.
+pub struct ScanConfig<'a> {
+    /// The staging root, `staging/` under Gage home in production
+    pub staging_root: &'a std::path::Path,
+    /// The Gage build version; the scan records `gage <version>` as
+    /// its `runtime`
+    pub gage_version: &'a str,
+}
+
 /// What a finished scan wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOutcome {
@@ -214,23 +246,31 @@ pub struct ScanOutcome {
 /// Run every task of every scanner, in order, one at a time, and
 /// record the scan in `store`.
 ///
-/// The scan is staged under `staging_root/<id>/` while it runs (see
-/// [`staging`]) and applied to the store at its terminal state, after
-/// which the staging directory is removed. Output and task status
-/// reach `on_event` as they happen. A failed task is recorded and the
-/// run continues with the next task. Cancelling `cancel` abandons the
-/// running task at its next await point, marks it and every task not
-/// yet started `canceled`, and applies what ran.
+/// The scan is staged under `config.staging_root/<id>/` while it runs
+/// (see [`staging`]) and applied to the store at its terminal state,
+/// after which the staging directory is removed. Output and task
+/// status reach `on_event` as they happen. A failed task is recorded
+/// and the run continues with the next task. Cancelling `cancel`
+/// abandons the running task at its next await point, marks it and
+/// every task not yet started `canceled`, and applies what ran.
 pub async fn scan(
     store: &Store,
-    staging_root: &std::path::Path,
+    config: &ScanConfig<'_>,
     scanners: &[CompiledScanner],
     cancel: &CancellationToken,
     mut on_event: impl FnMut(Event),
 ) -> Result<ScanOutcome, ScanError> {
     let plan = plan_tasks(scanners)?;
     let id = new_uuid();
-    let staging = Staging::create(staging_root, &id, &plan)?;
+    let scanner_plans: Vec<ScannerPlan<'_>> = scanners
+        .iter()
+        .map(|s| ScannerPlan {
+            name: &s.name,
+            tasks: &s.tasks,
+            sources: &s.source_files,
+        })
+        .collect();
+    let staging = Staging::create(config.staging_root, &id, &scanner_plans)?;
 
     let started = now_ms();
     let mut counts = TaskCounts {
@@ -292,6 +332,7 @@ pub async fn scan(
     }
 
     let attrs = ScanAttrs {
+        runtime: format!("gage {}", config.gage_version),
         started,
         stopped: now_ms(),
         canceled,
@@ -440,7 +481,11 @@ mod tests {
         cancel: &CancellationToken,
     ) -> (Result<ScanOutcome, ScanError>, Vec<Event>) {
         let mut events = Vec::new();
-        let outcome = scan(store, root, scanners, cancel, |e| events.push(e)).await;
+        let config = ScanConfig {
+            staging_root: root,
+            gage_version: "test-version",
+        };
+        let outcome = scan(store, &config, scanners, cancel, |e| events.push(e)).await;
         (outcome, events)
     }
 
@@ -600,6 +645,22 @@ mod tests {
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
         assert_eq!(record.commit_sha, outcome.commit_sha);
         assert_eq!(record.content.attrs, outcome.attrs);
+        assert_eq!(record.content.attrs.runtime, "gage test-version");
+        assert_eq!(
+            record.content.scanners,
+            std::collections::BTreeMap::from([(
+                "fail".to_string(),
+                vec!["scanner.rn".to_string()]
+            )])
+        );
+        assert_eq!(
+            ScanStore::from(&store)
+                .source_file(&outcome.commit_sha, "fail", "scanner.rn")
+                .unwrap()
+                .as_deref(),
+            Some(FAIL_THEN_RUN.as_bytes()),
+            "the stored source is the file byte for byte"
+        );
         let [a, b] = record.content.tasks.as_slice() else {
             panic!("two task records: {:?}", record.content.tasks);
         };
@@ -614,6 +675,68 @@ mod tests {
         assert!(
             !root.join(&outcome.id).exists(),
             "staging is removed after apply"
+        );
+    }
+
+    /// A scanner's includes are stored beside it under their literal
+    /// names, and the task sees the included text.
+    #[tokio::test]
+    async fn included_files_are_stored_as_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("shared")).unwrap();
+        std::fs::write(dir.path().join("shared/msg.txt"), "from shared\n").unwrap();
+        let scanner_dir = dir.path().join("s");
+        std::fs::create_dir_all(&scanner_dir).unwrap();
+        std::fs::write(scanner_dir.join("local.txt"), "from local\n").unwrap();
+        let path = scanner_dir.join("scanner.rn");
+        std::fs::write(
+            &path,
+            r#"
+            pub const SCANNER = #{
+                name: "inc",
+                description: "Includes",
+                tasks: #{ go: #{} },
+            };
+
+            const LOCAL = include_str!("local.txt");
+            const SHARED = include_str!("../shared/msg.txt");
+
+            pub fn go() {
+                print(LOCAL);
+                print(SHARED);
+            }
+            "#,
+        )
+        .unwrap();
+        let compiled = compile(&parse_scanner_file(&path).unwrap()).unwrap();
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled],
+            &CancellationToken::new(),
+        )
+        .await;
+        let outcome = outcome.unwrap();
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Print("from local\n".into()),
+                &Output::Print("from shared\n".into()),
+            ]
+        );
+        let scans = ScanStore::from(&store);
+        let record = scans.get(&outcome.id).unwrap();
+        assert_eq!(
+            record.content.scanners["inc"],
+            ["..%2Fshared%2Fmsg.txt", "local.txt", "scanner.rn"]
+        );
+        assert_eq!(
+            scans
+                .source_file(&outcome.commit_sha, "inc", "..%2Fshared%2Fmsg.txt")
+                .unwrap()
+                .as_deref(),
+            Some(b"from shared\n".as_slice())
         );
     }
 

@@ -1,12 +1,13 @@
 //! Scan objects: `gage::scan 1`, reached through [`ScanStore`].
 //!
-//! Content is `attrs.json` and, under `tasks/<scanner>/<task>/`, each
-//! task's `attrs.json` and, for a failed task, `error.txt`. The layout
-//! is the same in a scan's staging directory and in the store, so one
-//! decoder serves both through [`ScanFiles`]: [`DirFiles`] over a
-//! directory and the store's own view over a commit.
-//! [`ScanStore::create`] imports a staging `scan/` directory as the
-//! object's content. Links, scanner source, agent records, logs, and
+//! Content is `attrs.json`; under `tasks/<scanner>/<task>/`, each
+//! task's `attrs.json` and, for a failed task, `error.txt`; and under
+//! `scanners/<name>/sourcecode.d/`, the scanner's source files as run,
+//! opaque to the store. The layout is the same in a scan's staging
+//! directory and in the store, so one decoder serves both through
+//! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
+//! view over a commit. [`ScanStore::create`] imports a staging `scan/`
+//! directory as the object's content. Links, agent records, logs, and
 //! validation records are not written yet.
 
 use std::collections::BTreeMap;
@@ -19,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order};
 use crate::object::{ObjectTree, require_type};
+use crate::session::build_files_tree_inner;
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
@@ -26,6 +28,8 @@ pub const OBJECT_TYPE: &str = "gage::scan";
 const OBJECT_VERSION: &str = "1";
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 const TASKS_DIR: &str = "tasks";
+const SCANNERS_DIR: &str = "scanners";
+const SOURCE_DIR: &str = "sourcecode.d";
 const ATTRS_FILE: &str = "attrs.json";
 const ERROR_FILE: &str = "error.txt";
 
@@ -43,6 +47,9 @@ impl<'a> From<&'a Store> for ScanStore<'a> {
 /// The scan's `attrs.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanAttrs {
+    /// The runtime that ran the scan, `gage <version>`; the runtime
+    /// is the binary
+    pub runtime: String,
     /// UNIX time millis, run start
     pub started: i64,
     /// UNIX time millis, run end
@@ -124,6 +131,10 @@ pub struct ScanContent {
     pub attrs: ScanAttrs,
     /// In `tasks/` tree order: by scanner name, then task name
     pub tasks: Vec<ScanTask>,
+    /// Scanner name to the paths under its `sourcecode.d/`, sorted.
+    /// The paths are opaque names; the runtime that wrote them
+    /// defines their meaning.
+    pub scanners: BTreeMap<String, Vec<String>>,
 }
 
 /// A scan read from the store: its content plus the object markers.
@@ -146,6 +157,9 @@ pub trait ScanFiles {
     /// The names of the directories directly under `path`, sorted.
     /// Empty when `path` does not exist.
     fn list_dirs(&self, path: &str) -> Result<Vec<String>, StoreError>;
+    /// The names of the files directly under `path`, sorted. Empty
+    /// when `path` does not exist.
+    fn list_files(&self, path: &str) -> Result<Vec<String>, StoreError>;
 }
 
 impl ScanStore<'_> {
@@ -174,6 +188,9 @@ impl ScanStore<'_> {
         };
         if let Some(sha) = import_tasks_tree(self.store.path(), &scan_dir.join(TASKS_DIR))? {
             tree.subtrees.insert(TASKS_DIR.to_string(), sha);
+        }
+        if let Some(sha) = import_scanners_tree(self.store.path(), &scan_dir.join(SCANNERS_DIR))? {
+            tree.subtrees.insert(SCANNERS_DIR.to_string(), sha);
         }
         self.store
             .create(OBJECT_TYPE, OBJECT_VERSION, id, &tree, "scan")
@@ -209,6 +226,22 @@ impl ScanStore<'_> {
             store: self.store,
             query: ObjectQuery::new(OBJECT_TYPE),
         }
+    }
+
+    /// The bytes of one source file of a scanner at `commit_sha`, by
+    /// its path under `sourcecode.d/`. `None` when there is no such
+    /// file.
+    pub fn source_file(
+        &self,
+        commit_sha: &str,
+        scanner: &str,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        CommitFiles {
+            store: self.store,
+            commit: commit_sha,
+        }
+        .read(&format!("{SCANNERS_DIR}/{scanner}/{SOURCE_DIR}/{path}"))
     }
 
     fn record(&self, commit_sha: &str) -> Result<ScanRecord, StoreError> {
@@ -289,8 +322,48 @@ impl ScanContent {
                 });
             }
         }
-        Ok(ScanContent { attrs, tasks })
+        let mut scanners = BTreeMap::new();
+        for scanner in files.list_dirs(SCANNERS_DIR)? {
+            let source = format!("{SCANNERS_DIR}/{scanner}/{SOURCE_DIR}");
+            let mut paths = Vec::new();
+            walk_files(files, &source, "", &mut paths)?;
+            scanners.insert(scanner, paths);
+        }
+        Ok(ScanContent {
+            attrs,
+            tasks,
+            scanners,
+        })
     }
+}
+
+/// Every file under `root`, as paths relative to it, depth first in
+/// name order.
+fn walk_files(
+    files: &dyn ScanFiles,
+    root: &str,
+    rel: &str,
+    out: &mut Vec<String>,
+) -> Result<(), StoreError> {
+    let here = if rel.is_empty() {
+        root.to_string()
+    } else {
+        format!("{root}/{rel}")
+    };
+    let join = |name: &str| {
+        if rel.is_empty() {
+            name.to_string()
+        } else {
+            format!("{rel}/{name}")
+        }
+    };
+    for name in files.list_files(&here)? {
+        out.push(join(&name));
+    }
+    for name in files.list_dirs(&here)? {
+        walk_files(files, root, &join(&name), out)?;
+    }
+    Ok(())
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(
@@ -307,8 +380,10 @@ fn read_json<T: for<'de> Deserialize<'de>>(
 /// `None` when the directory is absent or holds no scanner.
 fn import_tasks_tree(store_path: &Path, tasks_dir: &Path) -> Result<Option<String>, StoreError> {
     let mut scanner_trees: Vec<(String, String)> = Vec::new();
+    require_dirs_only(tasks_dir)?;
     for scanner_dir in subdirs(tasks_dir)? {
         let mut task_trees: Vec<(String, String)> = Vec::new();
+        require_dirs_only(&scanner_dir)?;
         for task_dir in subdirs(&scanner_dir)? {
             task_trees.push((
                 dir_name(&task_dir),
@@ -354,6 +429,82 @@ fn import_task_tree(store_path: &Path, task_dir: &Path) -> Result<String, StoreE
     mktree(store_path, &entries)
 }
 
+/// Build the `scanners/` tree from a staging `scanners/` directory:
+/// one subtree per scanner holding its opaque `sourcecode.d/` tree,
+/// imported as it is. Returns `None` when the directory is absent or
+/// holds no scanner.
+fn import_scanners_tree(
+    store_path: &Path,
+    scanners_dir: &Path,
+) -> Result<Option<String>, StoreError> {
+    let mut scanner_trees: Vec<(String, String)> = Vec::new();
+    require_dirs_only(scanners_dir)?;
+    for scanner_dir in subdirs(scanners_dir)? {
+        for entry in fs::read_dir(&scanner_dir).map_err(|e| read_error(&scanner_dir, e))? {
+            let path = entry.map_err(|e| read_error(&scanner_dir, e))?.path();
+            if !path.is_dir() || path.file_name().is_none_or(|n| n != SOURCE_DIR) {
+                return Err(StoreError::InvalidPath {
+                    path: path.display().to_string(),
+                    reason: "unexpected entry in a scanner directory".to_string(),
+                });
+            }
+        }
+        let mut entries: Vec<TreeInput<'_>> = Vec::new();
+        let source_sha = import_opaque_tree(store_path, &scanner_dir.join(SOURCE_DIR))?;
+        if let Some(sha) = &source_sha {
+            entries.push(TreeInput {
+                mode: "040000",
+                sha,
+                name: SOURCE_DIR,
+            });
+        }
+        scanner_trees.push((dir_name(&scanner_dir), mktree(store_path, &entries)?));
+    }
+    if scanner_trees.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(tree_of_trees(store_path, &scanner_trees)?))
+}
+
+/// Import a directory as an opaque tree: every file beneath it, at its
+/// relative path, bytes preserved. `None` when the directory is absent.
+fn import_opaque_tree(store_path: &Path, dir: &Path) -> Result<Option<String>, StoreError> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let mut entries: Vec<(String, String)> = Vec::new();
+    collect_blobs(store_path, dir, "", &mut entries)?;
+    Ok(Some(build_files_tree_inner(store_path, entries)?))
+}
+
+fn collect_blobs(
+    store_path: &Path,
+    dir: &Path,
+    rel: &str,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), StoreError> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| read_error(dir, e))?
+        .map(|entry| entry.map(|e| e.path()).map_err(|e| read_error(dir, e)))
+        .collect::<Result<_, _>>()?;
+    paths.sort();
+    for path in paths {
+        let name = dir_name(&path);
+        let child = if rel.is_empty() {
+            name
+        } else {
+            format!("{rel}/{name}")
+        };
+        if path.is_dir() {
+            collect_blobs(store_path, &path, &child, out)?;
+        } else {
+            let bytes = fs::read(&path).map_err(|e| read_error(&path, e))?;
+            out.push((child, write_blob(store_path, &bytes)?));
+        }
+    }
+    Ok(())
+}
+
 fn tree_of_trees(store_path: &Path, trees: &[(String, String)]) -> Result<String, StoreError> {
     let entries: Vec<TreeInput<'_>> = trees
         .iter()
@@ -367,8 +518,7 @@ fn tree_of_trees(store_path: &Path, trees: &[(String, String)]) -> Result<String
 }
 
 /// The directories directly under `dir`, sorted by name. Empty when
-/// `dir` does not exist. A non-directory entry is an error: the
-/// `tasks/` levels hold directories only.
+/// `dir` does not exist. Files are not listed.
 fn subdirs(dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -378,16 +528,32 @@ fn subdirs(dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
     let mut out = Vec::new();
     for entry in entries {
         let path = entry.map_err(|e| read_error(dir, e))?.path();
+        if path.is_dir() {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// A non-directory entry under `dir` is an error: the `tasks/` and
+/// `scanners/` levels hold directories only.
+fn require_dirs_only(dir: &Path) -> Result<(), StoreError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(read_error(dir, e)),
+    };
+    for entry in entries {
+        let path = entry.map_err(|e| read_error(dir, e))?.path();
         if !path.is_dir() {
             return Err(StoreError::InvalidPath {
                 path: path.display().to_string(),
                 reason: "expected a directory".to_string(),
             });
         }
-        out.push(path);
     }
-    out.sort();
-    Ok(out)
+    Ok(())
 }
 
 fn dir_name(path: &Path) -> String {
@@ -441,6 +607,24 @@ impl ScanFiles for DirFiles {
             .map(|p| dir_name(p))
             .collect())
     }
+
+    fn list_files(&self, path: &str) -> Result<Vec<String>, StoreError> {
+        let dir = self.join(path);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(read_error(&dir, e)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let path = entry.map_err(|e| read_error(&dir, e))?.path();
+            if path.is_file() {
+                names.push(dir_name(&path));
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
 }
 
 /// [`ScanFiles`] over a commit's tree.
@@ -463,6 +647,16 @@ impl ScanFiles for CommitFiles<'_> {
     }
 
     fn list_dirs(&self, path: &str) -> Result<Vec<String>, StoreError> {
+        self.list_kind(path, EntryKind::Tree)
+    }
+
+    fn list_files(&self, path: &str) -> Result<Vec<String>, StoreError> {
+        self.list_kind(path, EntryKind::Blob)
+    }
+}
+
+impl CommitFiles<'_> {
+    fn list_kind(&self, path: &str, kind: EntryKind) -> Result<Vec<String>, StoreError> {
         let name = format!("{}:{path}", self.commit);
         if self.store.object_info(&name)?.is_none() {
             return Ok(Vec::new());
@@ -471,7 +665,7 @@ impl ScanFiles for CommitFiles<'_> {
             .store
             .read_tree(&name)?
             .into_iter()
-            .filter(|e| e.kind == EntryKind::Tree)
+            .filter(|e| e.kind == kind)
             .map(|e| e.name)
             .collect();
         names.sort();
@@ -495,7 +689,15 @@ mod tests {
         let scan = dir.join("scan");
         write(
             &scan.join("attrs.json"),
-            r#"{"started":1000,"stopped":1500,"canceled":false,"tasks":{"total":2,"completed":1,"failed":1,"skipped":0}}"#,
+            r#"{"runtime":"gage git-abc123","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":2,"completed":1,"failed":1,"skipped":0}}"#,
+        );
+        write(
+            &scan.join("scanners/hello/sourcecode.d/hello.rn"),
+            "pub fn greet() {}\n",
+        );
+        write(
+            &scan.join("scanners/hello/sourcecode.d/..%2Fshared%2Fdoc.md"),
+            "shared\n",
         );
         write(
             &scan.join("tasks/hello/greet/attrs.json"),
@@ -530,6 +732,11 @@ mod tests {
                 "created",
                 "id",
                 "modified",
+                "scanners",
+                "scanners/hello",
+                "scanners/hello/sourcecode.d",
+                "scanners/hello/sourcecode.d/..%2Fshared%2Fdoc.md",
+                "scanners/hello/sourcecode.d/hello.rn",
                 "tasks",
                 "tasks/hello",
                 "tasks/hello/fail",
@@ -554,6 +761,7 @@ mod tests {
         assert_eq!(
             record.content.attrs,
             ScanAttrs {
+                runtime: "gage git-abc123".into(),
                 started: 1000,
                 stopped: 1500,
                 canceled: false,
@@ -564,6 +772,21 @@ mod tests {
                     skipped: 0,
                 },
             }
+        );
+        assert_eq!(
+            record.content.scanners,
+            BTreeMap::from([(
+                "hello".to_string(),
+                vec!["..%2Fshared%2Fdoc.md".to_string(), "hello.rn".to_string()]
+            )])
+        );
+        assert_eq!(
+            scans.source_file(&commit, "hello", "hello.rn").unwrap(),
+            Some(b"pub fn greet() {}\n".to_vec())
+        );
+        assert_eq!(
+            scans.source_file(&commit, "hello", "nope.rn").unwrap(),
+            None
         );
         let failed = &record.content.tasks[0];
         assert_eq!(
@@ -585,7 +808,7 @@ mod tests {
         let scan_dir = tmp.path().join("scan");
         write(
             &scan_dir.join("attrs.json"),
-            r#"{"started":1,"stopped":2,"canceled":false,"tasks":{"total":0,"completed":0,"failed":0,"skipped":0}}"#,
+            r#"{"runtime":"gage 0.2.0","started":1,"stopped":2,"canceled":false,"tasks":{"total":0,"completed":0,"failed":0,"skipped":0}}"#,
         );
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN2", &scan_dir).unwrap();
@@ -649,6 +872,18 @@ mod tests {
             "{err}"
         );
         assert!(store.list_object_refs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_rejects_a_stray_file_in_a_scanner_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        write(&scan_dir.join("scanners/hello/notes.txt"), "x");
+        let err = ScanStore::from(&store)
+            .create("SCAN5", &scan_dir)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InvalidPath { .. }), "{err}");
     }
 
     #[test]

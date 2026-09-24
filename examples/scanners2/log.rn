@@ -5,7 +5,7 @@ pub const SCANNER = #{
 };
 
 pub async fn task() {
-    print("See logs for details");
+    println("See logs for details");
     log::debug!("Debug message");
     log::info!("Informational message");
     log::warn!("Warning message");

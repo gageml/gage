@@ -583,7 +583,7 @@ fn directory_prefixes(path: &str) -> impl Iterator<Item = &str> {
     path.match_indices('/').map(|(i, _)| &path[..i])
 }
 
-fn build_files_tree_inner(
+pub(crate) fn build_files_tree_inner(
     path: &Path,
     entries: Vec<(String, String)>,
 ) -> Result<String, StoreError> {

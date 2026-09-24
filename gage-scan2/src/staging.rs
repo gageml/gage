@@ -11,6 +11,7 @@
 //! pid                                    # writer process, present while running
 //! applied                                # present once written to the store
 //! scan/attrs.json                        # written at the terminal state
+//! scan/scanners/<name>/sourcecode.d/<f>  # scanner source as run, copied at create
 //! scan/tasks/<scanner>/<task>/attrs.json # pending at create, rewritten on start and finish
 //! scan/tasks/<scanner>/<task>/error.txt  # failed tasks only
 //! ```
@@ -24,6 +25,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use gage_runtime2::source::SourceFile;
 use gage_store::{ScanAttrs, TaskAttrs, TaskStatus};
 use serde::Serialize;
 
@@ -31,6 +33,8 @@ const STATE_FILE: &str = "state";
 const PID_FILE: &str = "pid";
 const APPLIED_FILE: &str = "applied";
 const SCAN_DIR: &str = "scan";
+const SCANNERS_DIR: &str = "scanners";
+const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
 const ATTRS_FILE: &str = "attrs.json";
 const ERROR_FILE: &str = "error.txt";
@@ -57,6 +61,13 @@ impl State {
     }
 }
 
+/// One scanner of a planned scan: its tasks and its source files.
+pub struct ScannerPlan<'a> {
+    pub name: &'a str,
+    pub tasks: &'a [String],
+    pub sources: &'a [SourceFile],
+}
+
 /// One scan's staging directory.
 pub struct Staging {
     dir: PathBuf,
@@ -64,9 +75,10 @@ pub struct Staging {
 
 impl Staging {
     /// Create `root/<scan_id>/` in the `running` state with this
-    /// process's pid and one `pending` task record per `(scanner,
-    /// task)`.
-    pub fn create(root: &Path, scan_id: &str, tasks: &[(String, String)]) -> io::Result<Staging> {
+    /// process's pid, every scanner's source copied under
+    /// `scan/scanners/<name>/sourcecode.d/`, and one `pending` task
+    /// record per task.
+    pub fn create(root: &Path, scan_id: &str, scanners: &[ScannerPlan]) -> io::Result<Staging> {
         let dir = root.join(scan_id);
         fs::create_dir_all(dir.join(SCAN_DIR))?;
         let staging = Staging { dir };
@@ -74,20 +86,39 @@ impl Staging {
             &staging.dir.join(PID_FILE),
             format!("{}\n", std::process::id()).as_bytes(),
         )?;
-        for (scanner, task) in tasks {
-            staging.write_task(
-                scanner,
-                task,
-                &TaskAttrs {
-                    status: TaskStatus::Pending,
-                    started: None,
-                    stopped: None,
-                    worked_ms: None,
-                },
-            )?;
+        for scanner in scanners {
+            staging.copy_sources(scanner.name, scanner.sources)?;
+            for task in scanner.tasks {
+                staging.write_task(
+                    scanner.name,
+                    task,
+                    &TaskAttrs {
+                        status: TaskStatus::Pending,
+                        started: None,
+                        stopped: None,
+                        worked_ms: None,
+                    },
+                )?;
+            }
         }
         staging.set_state(State::Running)?;
         Ok(staging)
+    }
+
+    /// Copy a scanner's source files to `scan/scanners/<name>/
+    /// sourcecode.d/`, each under its stored name, bytes preserved.
+    fn copy_sources(&self, scanner: &str, sources: &[SourceFile]) -> io::Result<()> {
+        let dir = self
+            .scan_dir()
+            .join(SCANNERS_DIR)
+            .join(scanner)
+            .join(SOURCE_DIR);
+        fs::create_dir_all(&dir)?;
+        for source in sources {
+            let bytes = fs::read(&source.path)?;
+            write_atomic(&dir.join(&source.name), &bytes)?;
+        }
+        Ok(())
     }
 
     pub fn dir(&self) -> &Path {
@@ -158,6 +189,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use gage_store::{DirFiles, ScanContent, TaskCounts};
 
     use super::*;
@@ -165,12 +198,27 @@ mod tests {
     #[test]
     fn create_records_the_plan_and_writes_round_trip_through_the_store_decoder() {
         let tmp = tempfile::tempdir().unwrap();
-        let tasks = vec![
-            ("hello".to_string(), "greet".to_string()),
-            ("hello".to_string(), "fail".to_string()),
-        ];
-        let staging = Staging::create(tmp.path(), "SCAN1", &tasks).unwrap();
+        let scanner_file = tmp.path().join("src").join("hello.rn");
+        fs::create_dir_all(scanner_file.parent().unwrap()).unwrap();
+        fs::write(&scanner_file, "pub fn greet() {}\n").unwrap();
+        let sources = gage_runtime2::source::source_files(&scanner_file).unwrap();
+        let tasks = vec!["greet".to_string(), "fail".to_string()];
+        let plan = [ScannerPlan {
+            name: "hello",
+            tasks: &tasks,
+            sources: &sources,
+        }];
+        let staging = Staging::create(tmp.path(), "SCAN1", &plan).unwrap();
         assert_eq!(staging.dir(), tmp.path().join("SCAN1"));
+        assert_eq!(
+            fs::read_to_string(
+                staging
+                    .scan_dir()
+                    .join("scanners/hello/sourcecode.d/hello.rn")
+            )
+            .unwrap(),
+            "pub fn greet() {}\n"
+        );
         assert_eq!(
             fs::read_to_string(staging.dir().join("state")).unwrap(),
             "running\n"
@@ -194,6 +242,7 @@ mod tests {
             .unwrap();
         staging.write_task_error("hello", "fail", "boom\n").unwrap();
         let attrs = ScanAttrs {
+            runtime: "gage test".into(),
             started: 1,
             stopped: 2,
             canceled: false,
@@ -215,6 +264,10 @@ mod tests {
         assert_eq!(content.tasks[0].error.as_deref(), Some("boom\n"));
         assert_eq!(content.tasks[1].task, "greet");
         assert_eq!(content.tasks[1].attrs.status, TaskStatus::Pending);
+        assert_eq!(
+            content.scanners,
+            BTreeMap::from([("hello".to_string(), vec!["hello.rn".to_string()])])
+        );
         assert!(
             !staging.scan_dir().join("attrs.json.tmp").exists(),
             "temp file is renamed away"

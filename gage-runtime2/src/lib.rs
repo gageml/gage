@@ -18,10 +18,12 @@
 //!
 //! This crate owns the Rune-facing half of the facility: the context
 //! every scanner compiles against, the native modules installed in
-//! it, and the per-task state those modules read. Task orchestration
-//! lives in `gage-scan2`.
+//! it, the per-task state those modules read, and the rule for which
+//! files are a scanner's source ([`source`]). Task orchestration lives
+//! in `gage-scan2`.
 
 mod io;
+pub mod source;
 
 use rune::{Context, ContextError};
 use tokio::sync::mpsc;
@@ -44,9 +46,12 @@ tokio::task_local! {
 }
 
 /// The Rune context every scanner compiles against: the standard
-/// library without its stdio, plus this crate's `print`/`println`.
+/// library without its stdio, this crate's `print`/`println`, and
+/// the include macros from `gage-runtime`. Every file-reading
+/// facility installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
     let mut context = Context::with_config(false)?;
     context.install(io::module()?)?;
+    context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

@@ -2708,7 +2708,10 @@ dependencies = [
 name = "gage-runtime2"
 version = "0.2.0-dev"
 dependencies = [
+ "gage-runtime",
+ "percent-encoding",
  "rune",
+ "tempfile",
  "tokio",
 ]
 
