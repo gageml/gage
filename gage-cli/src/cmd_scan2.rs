@@ -7,7 +7,7 @@ use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
 use gage_runtime2::Output;
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
-use gage_store::{SCAN_TYPE, ScanRecord, ScanStore, Store};
+use gage_store::{DatasetStore, SCAN_TYPE, ScanRecord, ScanStore, Store};
 use tabled::{
     Table,
     settings::{
@@ -70,6 +70,10 @@ pub struct Scan2RunArgs {
     #[arg(short, long = "file", value_name = "PATH")]
     files: Vec<PathBuf>,
 
+    /// Dataset to scan (ID or prefix)
+    #[arg(short, long, value_name = "DATASET")]
+    dataset: Option<String>,
+
     /// Show available scanners and exit
     #[arg(long)]
     list_scanners: bool,
@@ -123,6 +127,23 @@ fn list(args: Scan2ListArgs) {
     };
     let highlighter = s::IdHighlighter::new(peers);
 
+    // Sessions is the member count of the dataset commit the scan links
+    let datasets = DatasetStore::from(&store);
+    let mut session_counts: Vec<Option<usize>> = Vec::with_capacity(records.len());
+    for record in &records {
+        let count = match &record.content.dataset {
+            Some(sha) => match datasets.at_commit(sha) {
+                Ok(dataset) => Some(dataset.session_count),
+                Err(e) => {
+                    eprintln!("gage scan2 list: {e}");
+                    std::process::exit(1);
+                }
+            },
+            None => None,
+        };
+        session_counts.push(count);
+    }
+
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
         "Label", "Created",
@@ -130,7 +151,10 @@ fn list(args: Scan2ListArgs) {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    let rows = records.iter().map(|r| list_row(r, &highlighter));
+    let rows = records
+        .iter()
+        .zip(&session_counts)
+        .map(|(r, sessions)| list_row(r, *sessions, &highlighter));
 
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
@@ -150,9 +174,13 @@ fn list(args: Scan2ListArgs) {
     args.limit.print_summary(records.len(), total, "scan run");
 }
 
-/// One listing row. Sessions, Issues, Notes, Cost, and Label are
-/// blank: nothing writes them yet.
-fn list_row(record: &ScanRecord, highlighter: &s::IdHighlighter) -> Vec<String> {
+/// One listing row. Sessions is blank for a scan with no dataset;
+/// Issues, Notes, Cost, and Label are blank: nothing writes them yet.
+fn list_row(
+    record: &ScanRecord,
+    sessions: Option<usize>,
+    highlighter: &s::IdHighlighter,
+) -> Vec<String> {
     let attrs = &record.content.attrs;
     let status = if attrs.canceled {
         "canceled"
@@ -163,7 +191,7 @@ fn list_row(record: &ScanRecord, highlighter: &s::IdHighlighter) -> Vec<String> 
     vec![
         highlighter.short(&record.id),
         attrs.tasks.total.to_string(),
-        String::new(),
+        sessions.map(|n| n.to_string()).unwrap_or_default(),
         String::new(),
         String::new(),
         attrs.tasks.failed.to_string(),
@@ -188,6 +216,18 @@ async fn run_scan(args: Scan2RunArgs) {
     // The store is needed only at the end, but a missing store is a
     // full stop before any work.
     let store = open_store("gage scan2");
+
+    // The dataset commit the scan links
+    let dataset_sha =
+        args.dataset
+            .as_deref()
+            .map(|prefix| match DatasetStore::from(&store).get(prefix) {
+                Ok(record) => record.commit_sha,
+                Err(e) => {
+                    eprintln!("gage scan2: --dataset {prefix}: {e}");
+                    std::process::exit(1);
+                }
+            });
 
     // Named scanners come from the registry; `-f` files are parsed on
     // this invocation. Named scanners run first, then files.
@@ -265,6 +305,7 @@ async fn run_scan(args: Scan2RunArgs) {
     let config = ScanConfig {
         staging_root: &staging_root(),
         gage_version: crate::VERSION,
+        dataset: dataset_sha.as_deref(),
     };
     // Headless: task output and the scan's own lines go to the
     // terminal as they happen; records go to the scan record only

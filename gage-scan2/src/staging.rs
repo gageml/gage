@@ -11,6 +11,7 @@
 //! pid                                    # writer process, present while running
 //! applied                                # present once written to the store
 //! scan/attrs.json                        # written at the terminal state
+//! scan/dataset.link                      # the scanned dataset's commit, written at create
 //! scan/logs/out                          # the scan's output lines, appended as they happen
 //! scan/logs/err                          # the scan's error lines, and panics
 //! scan/logs/records                      # runtime records raised outside any task
@@ -45,6 +46,7 @@ const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
 const ATTRS_FILE: &str = "attrs.json";
+const DATASET_LINK: &str = "dataset.link";
 const LOGS_DIR: &str = "logs";
 pub(crate) const OUT_LOG: &str = "out";
 pub(crate) const ERR_LOG: &str = "err";
@@ -86,10 +88,16 @@ pub struct Staging {
 
 impl Staging {
     /// Create `root/<scan_id>/` in the `running` state with this
-    /// process's pid, every scanner's source copied under
+    /// process's pid, `scan/dataset.link` naming `dataset` when the
+    /// scan has one, every scanner's source copied under
     /// `scan/scanners/<name>/sourcecode.d/`, and one `pending` task
     /// record per task.
-    pub fn create(root: &Path, scan_id: &str, scanners: &[ScannerPlan]) -> io::Result<Staging> {
+    pub fn create(
+        root: &Path,
+        scan_id: &str,
+        dataset: Option<&str>,
+        scanners: &[ScannerPlan],
+    ) -> io::Result<Staging> {
         let dir = root.join(scan_id);
         fs::create_dir_all(dir.join(SCAN_DIR))?;
         let staging = Staging { dir };
@@ -97,6 +105,12 @@ impl Staging {
             &staging.dir.join(PID_FILE),
             format!("{}\n", std::process::id()).as_bytes(),
         )?;
+        if let Some(sha) = dataset {
+            write_atomic(
+                &staging.scan_dir().join(DATASET_LINK),
+                format!("{sha}\n").as_bytes(),
+            )?;
+        }
         for scanner in scanners {
             staging.copy_sources(scanner.name, scanner.sources)?;
             for task in scanner.tasks {
@@ -308,8 +322,9 @@ mod tests {
             tasks: &tasks,
             sources: &sources,
         }];
-        let staging = Staging::create(tmp.path(), "SCAN1", &plan).unwrap();
+        let staging = Staging::create(tmp.path(), "SCAN1", None, &plan).unwrap();
         assert_eq!(staging.dir(), tmp.path().join("SCAN1"));
+        assert!(!staging.scan_dir().join("dataset.link").exists());
         assert_eq!(
             fs::read_to_string(
                 staging
@@ -396,5 +411,20 @@ mod tests {
         assert!(dir.join("applied").exists());
         staging.remove().unwrap();
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn create_writes_the_dataset_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let staging = Staging::create(tmp.path(), "SCAN2", Some(sha), &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(staging.scan_dir().join("dataset.link")).unwrap(),
+            format!("{sha}\n")
+        );
+        let content = ScanContent::from_files(&DirFiles::new(&staging.scan_dir()));
+        // attrs.json is absent until the terminal state, so the decoder
+        // stops there; the link itself is what this test checks
+        assert!(content.is_err());
     }
 }

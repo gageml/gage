@@ -1,6 +1,7 @@
 //! Scan objects: `gage::scan 1`, reached through [`ScanStore`].
 //!
-//! Content is `attrs.json`; under `logs/`, the scan's own `out`,
+//! Content is `attrs.json`; `dataset.link`, the scanned dataset's
+//! commit, when the scan had one; under `logs/`, the scan's own `out`,
 //! `err`, and `records`; under `tasks/<scanner>/<task>/`, each task's
 //! `attrs.json` and its own `logs/` with the same three blobs; and
 //! under
@@ -9,8 +10,8 @@
 //! directory and in the store, so one decoder serves both through
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
 //! view over a commit. [`ScanStore::create`] imports a staging `scan/`
-//! directory as the object's content. Links, agent records, logs, and
-//! validation records are not written yet.
+//! directory as the object's content. The note and issue links, agent
+//! records, and validation records are not written yet.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::dataset::OBJECT_TYPE as DATASET_TYPE;
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order};
 use crate::object::{ObjectTree, require_type};
@@ -33,6 +35,7 @@ const TASKS_DIR: &str = "tasks";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const ATTRS_FILE: &str = "attrs.json";
+const DATASET_LINK: &str = "dataset.link";
 const LOGS_DIR: &str = "logs";
 /// The blobs `logs/` may hold
 pub const LOG_NAMES: [&str; 3] = ["out", "err", "records"];
@@ -134,6 +137,9 @@ pub struct ScanTask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanContent {
     pub attrs: ScanAttrs,
+    /// The commit SHA of the scanned dataset, from `dataset.link`.
+    /// `None` when the scan had no dataset.
+    pub dataset: Option<String>,
     /// The names present under the scan's `logs/`, sorted; each one
     /// of [`LOG_NAMES`]
     pub logs: Vec<String>,
@@ -173,8 +179,9 @@ pub trait ScanFiles {
 impl ScanStore<'_> {
     /// Write a scan from its staging `scan/` directory under the given
     /// id. The directory is validated first: every task status must be
-    /// terminal, and a task directory may hold only `attrs.json` and
-    /// `logs/`. Returns the commit SHA.
+    /// terminal, a task directory may hold only `attrs.json` and
+    /// `logs/`, and `dataset.link`, when present, must name a live
+    /// dataset commit. Returns the commit SHA.
     pub fn create(&self, id: &str, scan_dir: &Path) -> Result<String, StoreError> {
         let content = ScanContent::from_files(&DirFiles::new(scan_dir))?;
         for task in &content.tasks {
@@ -194,6 +201,11 @@ impl ScanStore<'_> {
             ),
             ..ObjectTree::default()
         };
+        if let Some(sha) = &content.dataset {
+            self.require_dataset(sha)?;
+            tree.links
+                .insert(DATASET_LINK.to_string(), vec![sha.clone()]);
+        }
         let logs_dir = scan_dir.join(LOGS_DIR);
         if logs_dir.is_dir() {
             let sha = import_fixed_blobs(self.store.path(), &logs_dir, &LOG_NAMES)?;
@@ -283,6 +295,16 @@ impl ScanStore<'_> {
         .read(&format!("{SCANNERS_DIR}/{scanner}/{SOURCE_DIR}/{path}"))
     }
 
+    /// The commit at `sha` must be a live dataset.
+    fn require_dataset(&self, sha: &str) -> Result<(), StoreError> {
+        let object = self.store.read_object(sha)?;
+        require_type(&object, DATASET_TYPE)?;
+        if object.header.is_tombstone() {
+            return Err(StoreError::ObjectDeleted(object.header.id));
+        }
+        Ok(())
+    }
+
     fn record(&self, commit_sha: &str) -> Result<ScanRecord, StoreError> {
         let header = self.store.read_header(commit_sha)?;
         let content = ScanContent::from_files(&CommitFiles {
@@ -341,9 +363,11 @@ impl<'a> ScanQuery<'a> {
 
 impl ScanContent {
     /// Decode a scan from its files. The root `attrs.json` and every
-    /// task `attrs.json` are required.
+    /// task `attrs.json` are required; `dataset.link`, when present,
+    /// must list exactly one SHA.
     pub fn from_files(files: &dyn ScanFiles) -> Result<ScanContent, StoreError> {
         let attrs = read_json(files, ATTRS_FILE)?;
+        let dataset = read_dataset_link(files)?;
         let logs = files.list_files(LOGS_DIR)?;
         let mut tasks = Vec::new();
         for scanner in files.list_dirs(TASKS_DIR)? {
@@ -369,11 +393,43 @@ impl ScanContent {
         }
         Ok(ScanContent {
             attrs,
+            dataset,
             logs,
             tasks,
             scanners,
         })
     }
+}
+
+/// The one SHA in `dataset.link`, or `None` when the file is absent.
+fn read_dataset_link(files: &dyn ScanFiles) -> Result<Option<String>, StoreError> {
+    let Some(bytes) = files.read(DATASET_LINK)? else {
+        return Ok(None);
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let shas: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    match shas.as_slice() {
+        [sha] if is_sha(sha) => Ok(Some(sha.to_string())),
+        [sha] => Err(StoreError::Parse(format!(
+            "scan file {DATASET_LINK}: {sha:?} is not a commit SHA"
+        ))),
+        _ => Err(StoreError::Parse(format!(
+            "scan file {DATASET_LINK}: expected one SHA, found {}",
+            shas.len()
+        ))),
+    }
+}
+
+/// True for a 40-character lowercase hex SHA, as the store writes them.
+fn is_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Every file under `root`, as paths relative to it, depth first in
@@ -760,6 +816,7 @@ impl CommitFiles<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DatasetStore;
     use crate::test_support::open_store;
 
     fn write(path: &Path, content: &str) {
@@ -1032,5 +1089,83 @@ mod tests {
             .create("SCAN4", &scan_dir)
             .unwrap_err();
         assert!(matches!(err, StoreError::InvalidPath { .. }), "{err}");
+    }
+
+    #[test]
+    fn create_links_the_dataset_commit_as_a_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset_id = datasets.create().unwrap();
+        let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
+        let scan_dir = staged_scan(tmp.path());
+        write(&scan_dir.join("dataset.link"), &format!("{dataset_sha}\n"));
+        let scans = ScanStore::from(&store);
+        let commit = scans.create("SCAN7", &scan_dir).unwrap();
+
+        assert_eq!(
+            store.read_commit(&commit).unwrap().parents,
+            [dataset_sha.clone()]
+        );
+        let record = scans.get("SCAN7").unwrap();
+        assert_eq!(record.content.dataset, Some(dataset_sha));
+        assert_eq!(
+            record.content,
+            ScanContent::from_files(&DirFiles::new(&scan_dir)).unwrap()
+        );
+    }
+
+    #[test]
+    fn create_without_a_dataset_link_has_no_parents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        let scans = ScanStore::from(&store);
+        let commit = scans.create("SCAN8", &scan_dir).unwrap();
+        assert!(store.read_commit(&commit).unwrap().parents.is_empty());
+        assert_eq!(scans.get("SCAN8").unwrap().content.dataset, None);
+    }
+
+    #[test]
+    fn create_rejects_a_dataset_link_to_a_non_dataset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        let other = ScanStore::from(&store).create("SCAN9", &scan_dir).unwrap();
+        write(&scan_dir.join("dataset.link"), &format!("{other}\n"));
+        let err = ScanStore::from(&store)
+            .create("SCAN10", &scan_dir)
+            .unwrap_err();
+        assert!(
+            matches!(&err, StoreError::WrongType { expected, actual, .. }
+                if expected == DATASET_TYPE && actual == OBJECT_TYPE),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn create_rejects_a_malformed_dataset_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let sha = datasets
+            .get(&datasets.create().unwrap())
+            .unwrap()
+            .commit_sha;
+        for (content, what) in [
+            (format!("{sha}\n{sha}\n"), "expected one SHA, found 2"),
+            ("\n".to_string(), "expected one SHA, found 0"),
+            ("not-a-sha\n".to_string(), "is not a commit SHA"),
+        ] {
+            let scan_dir = staged_scan(tmp.path());
+            write(&scan_dir.join("dataset.link"), &content);
+            let err = ScanStore::from(&store)
+                .create("SCAN11", &scan_dir)
+                .unwrap_err();
+            assert!(
+                matches!(&err, StoreError::Parse(m) if m.contains(what)),
+                "{content:?}: {err}"
+            );
+        }
     }
 }

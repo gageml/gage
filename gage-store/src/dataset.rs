@@ -14,7 +14,7 @@ use gage_session::{ContentSource, Driver, NativeSession};
 
 use crate::content::GitContentSource;
 use crate::index::{ObjectQuery, Order};
-use crate::object::{EditOutcome, Object, ObjectTree};
+use crate::object::{EditOutcome, Object, ObjectTree, require_type};
 use crate::session::{SessionAddOutcome, SessionOutcome, SessionRecord, SessionStore};
 use crate::{Store, StoreError};
 
@@ -43,6 +43,8 @@ impl<'a> From<&'a Store> for DatasetStore<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct DatasetRecord {
     pub id: String,
+    /// The dataset's current commit
+    pub commit_sha: String,
     pub created_ms: i64,
     /// Member sessions listed in `sessions.link`
     pub session_count: usize,
@@ -137,6 +139,23 @@ impl DatasetStore<'_> {
     /// Resolve a full id or unique prefix to the dataset's full id.
     pub fn resolve_id(&self, id_or_prefix: &str) -> Result<String, StoreError> {
         Ok(self.current(id_or_prefix)?.header.id)
+    }
+
+    /// Look up one dataset by full id or unique prefix.
+    ///
+    /// Returns [`StoreError::ObjectNotFound`] when no object matches,
+    /// [`StoreError::AmbiguousId`] when more than one does, and
+    /// [`StoreError::WrongType`] when the match is not a dataset.
+    pub fn get(&self, id_or_prefix: &str) -> Result<DatasetRecord, StoreError> {
+        record(&self.current(id_or_prefix)?)
+    }
+
+    /// Read the dataset at the given commit SHA, which need not be the
+    /// dataset's current commit.
+    pub fn at_commit(&self, commit_sha: &str) -> Result<DatasetRecord, StoreError> {
+        let object = self.store.read_object(commit_sha)?;
+        require_type(&object, OBJECT_TYPE)?;
+        record(&object)
     }
 
     fn current(&self, id_or_prefix: &str) -> Result<Object, StoreError> {
@@ -446,19 +465,22 @@ impl<'a> DatasetQuery<'a> {
     ) -> Result<impl Iterator<Item = Result<DatasetRecord, StoreError>> + 'a, StoreError> {
         let store = self.store;
         let tips = store.select(&self.query)?;
-        Ok(tips.into_iter().map(move |tip| {
-            let object = store.read_object(&tip.sha)?;
-            let created_ms = object.header.created_ms.ok_or_else(|| {
-                StoreError::Parse(format!("dataset {}: missing created", object.header.id))
-            })?;
-            let session_count = members(&object).len();
-            Ok(DatasetRecord {
-                id: object.header.id,
-                created_ms,
-                session_count,
-            })
-        }))
+        Ok(tips
+            .into_iter()
+            .map(move |tip| record(&store.read_object(&tip.sha)?)))
     }
+}
+
+fn record(object: &Object) -> Result<DatasetRecord, StoreError> {
+    let created_ms = object.header.created_ms.ok_or_else(|| {
+        StoreError::Parse(format!("dataset {}: missing created", object.header.id))
+    })?;
+    Ok(DatasetRecord {
+        id: object.header.id.clone(),
+        commit_sha: object.commit_sha.clone(),
+        created_ms,
+        session_count: members(object).len(),
+    })
 }
 
 fn members(object: &Object) -> Vec<String> {

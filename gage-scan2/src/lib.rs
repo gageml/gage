@@ -252,6 +252,9 @@ pub struct ScanConfig<'a> {
     /// The Gage build version; the scan records `gage <version>` as
     /// its `runtime`
     pub gage_version: &'a str,
+    /// The commit SHA of the dataset to scan, linked from the scan as
+    /// `dataset.link`. `None` runs the scanners with no dataset.
+    pub dataset: Option<&'a str>,
 }
 
 /// What a finished scan wrote.
@@ -289,7 +292,7 @@ pub async fn scan(
             sources: &s.source_files,
         })
         .collect();
-    let staging = Staging::create(config.staging_root, &id, &scanner_plans)?;
+    let staging = Staging::create(config.staging_root, &id, config.dataset, &scanner_plans)?;
     trace::install_panic_hook();
     let scope = LogScope {
         scan_dir: staging.scan_dir(),
@@ -640,6 +643,7 @@ fn returned_error(value: &str, scanner: &CompiledScanner, task: &str) -> String 
 #[cfg(test)]
 mod tests {
     use gage_registry::scanner::parse_scanner_file;
+    use gage_store::DatasetStore;
     use tempfile::TempDir;
 
     use super::*;
@@ -675,6 +679,7 @@ mod tests {
         let config = ScanConfig {
             staging_root: root,
             gage_version: "test-version",
+            dataset: None,
         };
         let outcome = scan(store, &config, scanners, cancel, |e| events.push(e)).await;
         (outcome, events)
@@ -1171,6 +1176,7 @@ mod tests {
         let config = ScanConfig {
             staging_root: &tmp.path().join("staging"),
             gage_version: "test-version",
+            dataset: None,
         };
         let outcome = scan(
             &store,
@@ -1253,5 +1259,37 @@ mod tests {
             matches!(&err, Error::MissingTask { scanner, task } if scanner == "missing" && task == "nope"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn scan_links_the_dataset_commit() {
+        let (_dir, compiled) = compile_source(HELLO);
+        let (tmp, store) = open_store();
+        let datasets = DatasetStore::from(&store);
+        let dataset_sha = datasets
+            .get(&datasets.create().unwrap())
+            .unwrap()
+            .commit_sha;
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store.read_commit(&outcome.commit_sha).unwrap().parents,
+            [dataset_sha.clone()]
+        );
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        assert_eq!(record.content.dataset, Some(dataset_sha));
     }
 }
