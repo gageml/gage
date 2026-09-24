@@ -73,6 +73,11 @@ impl ItemTable {
         self.pin(ids.len().checked_sub(1), ids);
     }
 
+    /// Select the row at `index`, pinning it to the item there.
+    pub fn select_index(&mut self, index: usize, ids: &[&str]) {
+        self.pin(Some(index), ids);
+    }
+
     pub fn selected_index(&self) -> Option<usize> {
         self.table.selected()
     }

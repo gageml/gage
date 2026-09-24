@@ -51,7 +51,14 @@ pub enum StoreCommand {
     /// `parent` vs link, tree, resolved link files, and the `parent`
     /// chain) on the right. Payload agnostic --- object type names are
     /// shown but no `attrs.json` is interpreted.
-    View,
+    View(ViewArgs),
+}
+
+#[derive(Args)]
+pub struct ViewArgs {
+    /// Object id prefix to select when the view opens
+    #[arg(value_name = "OBJECT")]
+    object: Option<String>,
 }
 
 #[derive(Args)]
@@ -96,7 +103,7 @@ pub fn run(command: StoreCommand) {
         StoreCommand::Gc(args) => gc(&store, args),
         StoreCommand::Ls(args) => ls(&store, args),
         StoreCommand::Cat(args) => cat(&store, args),
-        StoreCommand::View => view(store),
+        StoreCommand::View(args) => view(store, args),
     }
 }
 
@@ -127,8 +134,8 @@ fn init() {
     println!("{verb} Gage store in {}/", path.display());
 }
 
-fn view(store: Store) {
-    if let Err(e) = gage_tui::store_view::run(store) {
+fn view(store: Store, args: ViewArgs) {
+    if let Err(e) = gage_tui::store_view::run(store, args.object.as_deref()) {
         eprintln!("gage store view: {e}");
         std::process::exit(1);
     }

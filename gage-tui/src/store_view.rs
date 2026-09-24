@@ -37,11 +37,13 @@ use crate::syntax::Highlighter;
 use crate::text::hard_wrap;
 use crate::tree::{Collapse, Expand, Tree};
 
-/// Run the store viewer against an opened store.
-pub fn run(store: Store) -> io::Result<()> {
+/// Run the store viewer against an opened store. `select` is an object
+/// id prefix; the first object matching it is selected when the view
+/// opens.
+pub fn run(store: Store, select: Option<&str>) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = run_inner(&mut terminal, store);
+    let result = run_inner(&mut terminal, store, select);
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -49,9 +51,12 @@ pub fn run(store: Store) -> io::Result<()> {
     result
 }
 
-fn run_inner(terminal: &mut DefaultTerminal, store: Store) -> io::Result<()> {
+fn run_inner(terminal: &mut DefaultTerminal, store: Store, select: Option<&str>) -> io::Result<()> {
     let mut state = ViewState::new(store);
     state.reload();
+    if let Some(prefix) = select {
+        state.select_object(prefix);
+    }
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
         if let Event::Key(key) = event::read()?
@@ -184,6 +189,29 @@ impl ViewState {
         }
         self.sync_table();
         self.selection_changed();
+    }
+
+    /// Select the first visible object whose id starts with `prefix`,
+    /// in display order: live objects, then deleted. No match leaves
+    /// the selection alone and reports the miss in the footer.
+    fn select_object(&mut self, prefix: &str) {
+        let keys = self.tree.visible_keys();
+        let found = (0..keys.len()).find(|&idx| {
+            let Some(row) = self.tree.row(idx) else {
+                return false;
+            };
+            matches!(
+                self.tree.data(row.node),
+                Some(Node::Object { object_ref, .. }) if object_ref.id.starts_with(prefix)
+            )
+        });
+        match found {
+            Some(idx) => {
+                self.table.select_index(idx, &keys);
+                self.selection_changed();
+            }
+            None => self.error = Some(format!("no object matching {prefix}")),
+        }
     }
 
     /// Add a group root expanded over `objects`. An empty group is a
@@ -1374,5 +1402,63 @@ mod tests {
             classify_blob(b"plain".to_vec()),
             BlobContent::Text(_)
         ));
+    }
+
+    fn store_with_notes(path: &std::path::Path, names: &[&str]) -> (Store, Vec<String>) {
+        gage_store::init(path).unwrap();
+        let store = Store::open(path).unwrap();
+        let notes = NoteStore::from(&store);
+        let ids = names
+            .iter()
+            .map(|name| {
+                notes
+                    .create(NoteInput {
+                        name,
+                        value: NoteValue::Text("v".into()),
+                        author: "user:test",
+                        target: None,
+                        metadata: None,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        (store, ids)
+    }
+
+    fn selected_object_id(state: &ViewState) -> Option<&str> {
+        match state.selected_node()? {
+            Node::Object { object_ref, .. } => Some(object_ref.id.as_str()),
+            Node::Group { .. } | Node::Entry(_) => None,
+        }
+    }
+
+    #[test]
+    fn select_object_picks_first_id_with_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, ids) = store_with_notes(&tmp.path().join("store.git"), &["a", "b"]);
+        let mut state = ViewState::new(store);
+        state.reload();
+        assert_eq!(state.table.selected_index(), Some(0));
+
+        // The full id and a prefix of it both land on the object
+        for target in &ids {
+            state.select_object(target);
+            assert_eq!(selected_object_id(&state), Some(target.as_str()));
+            state.select_object(&target[..8]);
+            assert_eq!(selected_object_id(&state), Some(target.as_str()));
+        }
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn select_object_without_match_keeps_selection_and_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _ids) = store_with_notes(&tmp.path().join("store.git"), &["a"]);
+        let mut state = ViewState::new(store);
+        state.reload();
+
+        state.select_object("zzzz");
+        assert_eq!(state.table.selected_index(), Some(0));
+        assert_eq!(state.error.as_deref(), Some("no object matching zzzz"));
     }
 }
