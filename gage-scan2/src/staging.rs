@@ -11,6 +11,9 @@
 //! pid                                    # writer process, present while running
 //! applied                                # present once written to the store
 //! scan/attrs.json                        # written at the terminal state
+//! scan/logs/out                          # the scan's output lines, appended as they happen
+//! scan/logs/err                          # the scan's error lines, and panics
+//! scan/logs/records                      # runtime records raised outside any task
 //! scan/scanners/<name>/sourcecode.d/<f>  # scanner source as run, copied at create
 //! scan/tasks/<scanner>/<task>/attrs.json # pending at create, rewritten on start and finish
 //! scan/tasks/<scanner>/<task>/logs/out   # print output, appended as it happens
@@ -43,9 +46,9 @@ const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
 const ATTRS_FILE: &str = "attrs.json";
 const LOGS_DIR: &str = "logs";
-const OUT_LOG: &str = "out";
-const ERR_LOG: &str = "err";
-const RECORDS_LOG: &str = "records";
+pub(crate) const OUT_LOG: &str = "out";
+pub(crate) const ERR_LOG: &str = "err";
+pub(crate) const RECORDS_LOG: &str = "records";
 
 /// The staging root under Gage home.
 pub fn staging_root() -> PathBuf {
@@ -154,13 +157,13 @@ impl Staging {
 
     /// The log appenders of a task. Each log is created on its first
     /// write, so a task that produced nothing has no `logs/` entry.
-    pub fn task_logs(&self, scanner: &str, task: &str) -> TaskLogs {
-        TaskLogs {
-            dir: self.task_dir(scanner, task).join(LOGS_DIR),
-            out: None,
-            err: None,
-            records: None,
-        }
+    pub fn task_logs(&self, scanner: &str, task: &str) -> Logs {
+        Logs::new(task_logs_dir(&self.scan_dir(), scanner, task))
+    }
+
+    /// The log appenders of the scan itself.
+    pub fn scan_logs(&self) -> Logs {
+        Logs::new(scan_logs_dir(&self.scan_dir()))
     }
 
     /// Write the scan's `attrs.json`.
@@ -183,16 +186,45 @@ impl Staging {
     }
 }
 
-/// Appenders for one task's `logs/out` and `logs/records`.
-pub struct TaskLogs {
+/// The `logs/` directory of a task under a staging `scan/` directory
+pub(crate) fn task_logs_dir(scan_dir: &Path, scanner: &str, task: &str) -> PathBuf {
+    scan_dir
+        .join(TASKS_DIR)
+        .join(scanner)
+        .join(task)
+        .join(LOGS_DIR)
+}
+
+/// The `logs/` directory of the scan under a staging `scan/` directory
+pub(crate) fn scan_logs_dir(scan_dir: &Path) -> PathBuf {
+    scan_dir.join(LOGS_DIR)
+}
+
+/// Append `bytes` to `dir/name`, creating both as needed. One open
+/// per call; for a stream of writes use [`Logs`].
+pub(crate) fn append(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    open_append(dir, name)?.write_all(bytes)
+}
+
+/// Appenders for one `logs/` directory: `out`, `err`, and `records`.
+pub struct Logs {
     dir: PathBuf,
     out: Option<File>,
     err: Option<File>,
     records: Option<File>,
 }
 
-impl TaskLogs {
-    /// Append task output verbatim.
+impl Logs {
+    fn new(dir: PathBuf) -> Self {
+        Logs {
+            dir,
+            out: None,
+            err: None,
+            records: None,
+        }
+    }
+
+    /// Append output verbatim.
     pub fn out(&mut self, s: &str) -> io::Result<()> {
         let dir = &self.dir;
         let file = match &mut self.out {

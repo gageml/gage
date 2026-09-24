@@ -1,8 +1,9 @@
 //! Scan objects: `gage::scan 1`, reached through [`ScanStore`].
 //!
-//! Content is `attrs.json`; under `tasks/<scanner>/<task>/`, each
-//! task's `attrs.json` and, under `logs/`, the fixed blobs `out`,
-//! `err`, and `records`; and under
+//! Content is `attrs.json`; under `logs/`, the scan's own `out`,
+//! `err`, and `records`; under `tasks/<scanner>/<task>/`, each task's
+//! `attrs.json` and its own `logs/` with the same three blobs; and
+//! under
 //! `scanners/<name>/sourcecode.d/`, the scanner's source files as run,
 //! opaque to the store. The layout is the same in a scan's staging
 //! directory and in the store, so one decoder serves both through
@@ -133,6 +134,9 @@ pub struct ScanTask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanContent {
     pub attrs: ScanAttrs,
+    /// The names present under the scan's `logs/`, sorted; each one
+    /// of [`LOG_NAMES`]
+    pub logs: Vec<String>,
     /// In `tasks/` tree order: by scanner name, then task name
     pub tasks: Vec<ScanTask>,
     /// Scanner name to the paths under its `sourcecode.d/`, sorted.
@@ -190,6 +194,11 @@ impl ScanStore<'_> {
             ),
             ..ObjectTree::default()
         };
+        let logs_dir = scan_dir.join(LOGS_DIR);
+        if logs_dir.is_dir() {
+            let sha = import_fixed_blobs(self.store.path(), &logs_dir, &LOG_NAMES)?;
+            tree.subtrees.insert(LOGS_DIR.to_string(), sha);
+        }
         if let Some(sha) = import_tasks_tree(self.store.path(), &scan_dir.join(TASKS_DIR))? {
             tree.subtrees.insert(TASKS_DIR.to_string(), sha);
         }
@@ -230,6 +239,16 @@ impl ScanStore<'_> {
             store: self.store,
             query: ObjectQuery::new(OBJECT_TYPE),
         }
+    }
+
+    /// The bytes of one log of the scan at `commit_sha`: `name` is
+    /// one of [`LOG_NAMES`]. `None` when the scan did not produce it.
+    pub fn scan_log(&self, commit_sha: &str, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        CommitFiles {
+            store: self.store,
+            commit: commit_sha,
+        }
+        .read(&format!("{LOGS_DIR}/{name}"))
     }
 
     /// The bytes of one log of a task at `commit_sha`: `name` is one
@@ -325,6 +344,7 @@ impl ScanContent {
     /// task `attrs.json` are required.
     pub fn from_files(files: &dyn ScanFiles) -> Result<ScanContent, StoreError> {
         let attrs = read_json(files, ATTRS_FILE)?;
+        let logs = files.list_files(LOGS_DIR)?;
         let mut tasks = Vec::new();
         for scanner in files.list_dirs(TASKS_DIR)? {
             let scanner_path = format!("{TASKS_DIR}/{scanner}");
@@ -349,6 +369,7 @@ impl ScanContent {
         }
         Ok(ScanContent {
             attrs,
+            logs,
             tasks,
             scanners,
         })
@@ -771,6 +792,11 @@ mod tests {
             r#"{"status":"failed","started":1200,"stopped":1500}"#,
         );
         write(&scan.join("tasks/hello/fail/logs/err"), "boom\nline 2\n");
+        write(&scan.join("logs/out"), "scan SCAN1 completed: 2 tasks\n");
+        write(
+            &scan.join("logs/records"),
+            "2026-09-24T15:04:05.000Z INFO gage_scan2: scan started\n",
+        );
         write(&scan.join("tasks/hello/greet/logs/out"), "hello, world\n");
         write(
             &scan.join("tasks/hello/greet/logs/records"),
@@ -799,6 +825,9 @@ mod tests {
                 "attrs.json",
                 "created",
                 "id",
+                "logs",
+                "logs/out",
+                "logs/records",
                 "modified",
                 "scanners",
                 "scanners/hello",
@@ -860,6 +889,12 @@ mod tests {
             scans.source_file(&commit, "hello", "nope.rn").unwrap(),
             None
         );
+        assert_eq!(record.content.logs, ["out", "records"]);
+        assert_eq!(
+            scans.scan_log(&commit, "out").unwrap(),
+            Some(b"scan SCAN1 completed: 2 tasks\n".to_vec())
+        );
+        assert_eq!(scans.scan_log(&commit, "err").unwrap(), None);
         let failed = &record.content.tasks[0];
         assert_eq!(
             (failed.scanner.as_str(), failed.task.as_str()),
@@ -972,14 +1007,19 @@ mod tests {
 
     #[test]
     fn create_rejects_an_unknown_log_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
-        write(&scan_dir.join("tasks/hello/greet/logs/trace"), "x");
-        let err = ScanStore::from(&store)
-            .create("SCAN6", &scan_dir)
-            .unwrap_err();
-        assert!(matches!(err, StoreError::InvalidPath { .. }), "{err}");
+        for path in ["tasks/hello/greet/logs/trace", "logs/trace"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (store, _fsck) = open_store(tmp.path());
+            let scan_dir = staged_scan(tmp.path());
+            write(&scan_dir.join(path), "x");
+            let err = ScanStore::from(&store)
+                .create("SCAN6", &scan_dir)
+                .unwrap_err();
+            assert!(
+                matches!(err, StoreError::InvalidPath { .. }),
+                "{path}: {err}"
+            );
+        }
     }
 
     #[test]

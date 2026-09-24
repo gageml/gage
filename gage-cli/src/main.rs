@@ -254,6 +254,10 @@ async fn main() {
             Some(gage_log::init("scan").expect("init log dir"))
         }
         Command::Scan(_) => None,
+        Command::Scan2(_) => {
+            cmd_scan2::init_logging();
+            None
+        }
         _ => {
             init_logging();
             None

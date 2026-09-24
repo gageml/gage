@@ -18,6 +18,8 @@ serde_json = { workspace = true }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

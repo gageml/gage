@@ -21,12 +21,20 @@
 //! in [`staging`] and then the store. The runtime is a pure event
 //! emitter: [`scan`] hands each [`Event`] to the caller's sink, which
 //! owns rendering.
+//!
+//! Rule: code in this crate and in `gage-runtime2` never calls
+//! `println!` or `eprintln!`. Every line meant for a person is emitted
+//! as [`Event::Scan`] output, which the scan writes to its `logs/out`
+//! or `logs/err` before the sink shows it, so the stored record and
+//! the terminal hold the same text. Runtime diagnostics go through
+//! `tracing` and reach the record through [`trace`].
 
 pub mod staging;
+pub mod trace;
 
 use std::fmt;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
@@ -41,13 +49,17 @@ use rune::{Diagnostics, Source, Sources, Vm};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::staging::{ScannerPlan, Staging, State, TaskLogs};
+use crate::staging::{Logs, ScannerPlan, Staging, State};
+use crate::trace::{LOG_SCOPE, LogScope};
 
 /// One item of run output, in the order it happened.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     /// Task output
     Output(Output),
+    /// The scan's own output for a person, already recorded in the
+    /// scan's `logs/`
+    Scan(ScanOutput),
     TaskStarted {
         scanner: String,
         task: String,
@@ -60,6 +72,14 @@ pub enum Event {
         status: TaskStatus,
         error: Option<String>,
     },
+}
+
+/// A line of the scan's own output. The text is written verbatim,
+/// newline included, to `logs/out` or `logs/err`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanOutput {
+    Out(String),
+    Err(String),
 }
 
 #[derive(Debug)]
@@ -257,7 +277,7 @@ pub async fn scan(
     config: &ScanConfig<'_>,
     scanners: &[CompiledScanner],
     cancel: &CancellationToken,
-    mut on_event: impl FnMut(Event),
+    on_event: impl FnMut(Event),
 ) -> Result<ScanOutcome, ScanError> {
     let plan = plan_tasks(scanners)?;
     let id = new_uuid();
@@ -270,89 +290,195 @@ pub async fn scan(
         })
         .collect();
     let staging = Staging::create(config.staging_root, &id, &scanner_plans)?;
-
-    let started = now_ms();
-    let mut counts = TaskCounts {
-        total: plan.len(),
-        ..TaskCounts::default()
+    trace::install_panic_hook();
+    let scope = LogScope {
+        scan_dir: staging.scan_dir(),
+        task: None,
+        failure: Arc::new(Mutex::new(None)),
     };
-    let mut canceled = false;
-    for (scanner, task) in &plan {
-        if cancel.is_cancelled() {
-            canceled = true;
-            staging.write_task(scanner, task, &task_attrs(TaskStatus::Canceled, None, None))?;
-            on_event(Event::TaskFinished {
+    let run = Run {
+        id,
+        config,
+        scanners,
+        plan,
+        staging,
+        cancel,
+        scope: scope.clone(),
+        on_event,
+    };
+    LOG_SCOPE.scope(scope, run.execute(store)).await
+}
+
+/// One scan in progress.
+struct Run<'a, F: FnMut(Event)> {
+    id: String,
+    config: &'a ScanConfig<'a>,
+    scanners: &'a [CompiledScanner],
+    plan: Vec<(String, String)>,
+    staging: Staging,
+    cancel: &'a CancellationToken,
+    scope: LogScope,
+    on_event: F,
+}
+
+impl<F: FnMut(Event)> Run<'_, F> {
+    async fn execute(mut self, store: &Store) -> Result<ScanOutcome, ScanError> {
+        tracing::info!("scan {} started with {} tasks", self.id, self.plan.len());
+        let mut scan_logs = self.staging.scan_logs();
+        let started = now_ms();
+        let mut counts = TaskCounts {
+            total: self.plan.len(),
+            ..TaskCounts::default()
+        };
+        let mut canceled = false;
+        let plan = std::mem::take(&mut self.plan);
+        for (scanner, task) in &plan {
+            if self.cancel.is_cancelled() {
+                if !canceled {
+                    self.say(&mut scan_logs, ScanOutput::Err("scan canceled\n".into()))?;
+                }
+                canceled = true;
+                self.staging.write_task(
+                    scanner,
+                    task,
+                    &task_attrs(TaskStatus::Canceled, None, None),
+                )?;
+                (self.on_event)(Event::TaskFinished {
+                    scanner: scanner.clone(),
+                    task: task.clone(),
+                    status: TaskStatus::Canceled,
+                    error: None,
+                });
+                continue;
+            }
+            let compiled = self
+                .scanners
+                .iter()
+                .find(|s| &s.name == scanner)
+                .expect("plan names a compiled scanner");
+            let task_started = now_ms();
+            self.staging.write_task(
+                scanner,
+                task,
+                &task_attrs(TaskStatus::Started, Some(task_started), None),
+            )?;
+            (self.on_event)(Event::TaskStarted {
                 scanner: scanner.clone(),
                 task: task.clone(),
-                status: TaskStatus::Canceled,
-                error: None,
             });
-            continue;
+            let mut logs = self.staging.task_logs(scanner, task);
+            let task_scope = LogScope {
+                task: Some((scanner.clone(), task.clone())),
+                ..self.scope.clone()
+            };
+            let outcome = LOG_SCOPE
+                .scope(
+                    task_scope,
+                    run_task(compiled, task, self.cancel, &mut logs, &mut self.on_event),
+                )
+                .await?;
+            let (status, error) = match outcome {
+                TaskOutcome::Completed => (TaskStatus::Completed, None),
+                TaskOutcome::Failed(message) => (TaskStatus::Failed, Some(message)),
+                TaskOutcome::Canceled => (TaskStatus::Canceled, None),
+            };
+            match status {
+                TaskStatus::Completed => counts.completed += 1,
+                TaskStatus::Failed => counts.failed += 1,
+                _ => canceled = true,
+            }
+            self.staging.write_task(
+                scanner,
+                task,
+                &task_attrs(status, Some(task_started), Some(now_ms())),
+            )?;
+            if let Some(message) = &error {
+                logs.err(message)?;
+            }
+            drop(logs);
+            if let Some(message) = &error {
+                self.say(
+                    &mut scan_logs,
+                    ScanOutput::Err(format!("task {scanner}:{task} failed\n{message}")),
+                )?;
+            }
+            if status == TaskStatus::Canceled {
+                self.say(&mut scan_logs, ScanOutput::Err("scan canceled\n".into()))?;
+            }
+            (self.on_event)(Event::TaskFinished {
+                scanner: scanner.clone(),
+                task: task.clone(),
+                status,
+                error,
+            });
         }
-        let compiled = scanners
-            .iter()
-            .find(|s| &s.name == scanner)
-            .expect("plan names a compiled scanner");
-        let task_started = now_ms();
-        staging.write_task(
-            scanner,
-            task,
-            &task_attrs(TaskStatus::Started, Some(task_started), None),
-        )?;
-        on_event(Event::TaskStarted {
-            scanner: scanner.clone(),
-            task: task.clone(),
-        });
-        let mut logs = staging.task_logs(scanner, task);
-        let outcome = run_task(compiled, task, cancel, &mut logs, &mut on_event).await?;
-        let (status, error) = match outcome {
-            TaskOutcome::Completed => (TaskStatus::Completed, None),
-            TaskOutcome::Failed(message) => (TaskStatus::Failed, Some(message)),
-            TaskOutcome::Canceled => (TaskStatus::Canceled, None),
+
+        let attrs = ScanAttrs {
+            runtime: format!("gage {}", self.config.gage_version),
+            started,
+            stopped: now_ms(),
+            canceled,
+            tasks: counts,
         };
-        match status {
-            TaskStatus::Completed => counts.completed += 1,
-            TaskStatus::Failed => counts.failed += 1,
-            _ => canceled = true,
-        }
-        staging.write_task(
-            scanner,
-            task,
-            &task_attrs(status, Some(task_started), Some(now_ms())),
+        self.say(
+            &mut scan_logs,
+            ScanOutput::Out(format!("{}\n", summary_line(&self.id, &attrs))),
         )?;
-        if let Some(message) = &error {
-            logs.err(message)?;
+        drop(scan_logs);
+        if let Some(e) = self.scope.failure.lock().unwrap().take() {
+            return Err(ScanError::Staging(e));
         }
-        drop(logs);
-        on_event(Event::TaskFinished {
-            scanner: scanner.clone(),
-            task: task.clone(),
-            status,
-            error,
-        });
+        self.staging.write_scan(&attrs)?;
+        self.staging.set_state(if canceled {
+            State::Canceled
+        } else {
+            State::Completed
+        })?;
+        let commit_sha = ScanStore::from(store).create(&self.id, &self.staging.scan_dir())?;
+        self.staging.mark_applied()?;
+        self.staging.remove()?;
+        Ok(ScanOutcome {
+            id: self.id,
+            commit_sha,
+            attrs,
+        })
     }
 
-    let attrs = ScanAttrs {
-        runtime: format!("gage {}", config.gage_version),
-        started,
-        stopped: now_ms(),
-        canceled,
-        tasks: counts,
-    };
-    staging.write_scan(&attrs)?;
-    staging.set_state(if canceled {
-        State::Canceled
+    /// Record a line of the scan's own output, then hand it to the
+    /// sink.
+    fn say(&mut self, logs: &mut Logs, output: ScanOutput) -> Result<(), ScanError> {
+        match &output {
+            ScanOutput::Out(s) => logs.out(s)?,
+            ScanOutput::Err(s) => logs.err(s)?,
+        }
+        (self.on_event)(Event::Scan(output));
+        Ok(())
+    }
+}
+
+/// The scan's closing line: `scan <id> completed: 3 tasks: 2
+/// completed, 1 failed`, with a canceled count when the run was cut
+/// short.
+pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
+    let state = if attrs.canceled {
+        "canceled"
     } else {
-        State::Completed
-    })?;
-    let commit_sha = ScanStore::from(store).create(&id, &staging.scan_dir())?;
-    staging.mark_applied()?;
-    staging.remove()?;
-    Ok(ScanOutcome {
-        id,
-        commit_sha,
-        attrs,
-    })
+        "completed"
+    };
+    let counts = &attrs.tasks;
+    let mut parts = vec![
+        format!("{} completed", counts.completed),
+        format!("{} failed", counts.failed),
+    ];
+    let canceled = counts.total - counts.completed - counts.failed - counts.skipped;
+    if canceled > 0 {
+        parts.push(format!("{canceled} canceled"));
+    }
+    format!(
+        "scan {id} {state}: {} tasks: {}",
+        counts.total,
+        parts.join(", ")
+    )
 }
 
 /// The `(scanner, task)` pairs to run, in scanner order then task
@@ -392,7 +518,7 @@ async fn run_task(
     scanner: &CompiledScanner,
     task: &str,
     cancel: &CancellationToken,
-    logs: &mut TaskLogs,
+    logs: &mut Logs,
     on_event: &mut impl FnMut(Event),
 ) -> Result<TaskOutcome, ScanError> {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -421,7 +547,7 @@ async fn run_task(
 /// Record one output in the task's logs, then hand it to the sink.
 fn deliver(
     output: Output,
-    logs: &mut TaskLogs,
+    logs: &mut Logs,
     on_event: &mut impl FnMut(Event),
 ) -> Result<(), ScanError> {
     match &output {
@@ -670,13 +796,15 @@ mod tests {
         )
         .await;
         let outcome = outcome.unwrap();
-        let failure = match &events[1] {
+        let failure = match &events[2] {
             Event::TaskFinished {
                 error: Some(message),
                 ..
             } => message.clone(),
             other => panic!("expected the failure of task a, got {other:?}"),
         };
+        let notice = format!("task fail:a failed\n{failure}");
+        let summary = format!("{}\n", summary_line(&outcome.id, &outcome.attrs));
         assert_eq!(
             events,
             [
@@ -684,6 +812,7 @@ mod tests {
                     scanner: "fail".into(),
                     task: "a".into(),
                 },
+                Event::Scan(ScanOutput::Err(notice.clone())),
                 Event::TaskFinished {
                     scanner: "fail".into(),
                     task: "a".into(),
@@ -701,7 +830,15 @@ mod tests {
                     status: TaskStatus::Completed,
                     error: None,
                 },
+                Event::Scan(ScanOutput::Out(summary.clone())),
             ]
+        );
+        assert_eq!(
+            summary,
+            format!(
+                "scan {} completed: 2 tasks: 1 completed, 1 failed\n",
+                outcome.id
+            )
         );
         assert!(
             failure.starts_with("error: task returned Err: boom\n"),
@@ -726,6 +863,26 @@ mod tests {
         assert_eq!(record.commit_sha, outcome.commit_sha);
         assert_eq!(record.content.attrs, outcome.attrs);
         assert_eq!(record.content.attrs.runtime, "gage test-version");
+        // `records` is present too when another test has installed
+        // the process-wide records layer
+        let logs: Vec<&str> = record
+            .content
+            .logs
+            .iter()
+            .map(String::as_str)
+            .filter(|n| *n != "records")
+            .collect();
+        assert_eq!(logs, ["err", "out"]);
+        let scans = ScanStore::from(&store);
+        assert_eq!(
+            scans.scan_log(&outcome.commit_sha, "out").unwrap(),
+            Some(summary.into_bytes()),
+            "the scan's out holds what the terminal showed"
+        );
+        assert_eq!(
+            scans.scan_log(&outcome.commit_sha, "err").unwrap(),
+            Some(notice.into_bytes())
+        );
         assert_eq!(
             record.content.scanners,
             std::collections::BTreeMap::from([(
@@ -919,7 +1076,9 @@ mod tests {
         let Some(Event::TaskFinished {
             error: Some(message),
             ..
-        }) = events.last()
+        }) = events
+            .iter()
+            .find(|e| matches!(e, Event::TaskFinished { .. }))
         else {
             panic!("expected a failure, got {events:?}");
         };
@@ -953,13 +1112,30 @@ mod tests {
             outcome.attrs.tasks.completed + outcome.attrs.tasks.failed,
             0
         );
-        assert!(events.iter().all(|e| matches!(
+        let finished: Vec<&Event> = events
+            .iter()
+            .filter(|e| matches!(e, Event::TaskFinished { .. }))
+            .collect();
+        assert_eq!(finished.len(), 2);
+        assert!(finished.iter().all(|e| matches!(
             e,
             Event::TaskFinished {
                 status: TaskStatus::Canceled,
                 ..
             }
         )));
+        assert_eq!(
+            events.first(),
+            Some(&Event::Scan(ScanOutput::Err("scan canceled\n".into()))),
+            "the cancel notice is given once, first"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&Event::Scan(ScanOutput::Out(format!(
+                "scan {} canceled: 2 tasks: 0 completed, 0 failed, 2 canceled\n",
+                outcome.id
+            ))))
+        );
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
         assert!(
             record
@@ -968,6 +1144,80 @@ mod tests {
                 .iter()
                 .all(|t| { t.attrs.status == TaskStatus::Canceled && t.attrs.started.is_none() })
         );
+    }
+
+    /// Runtime `tracing` events go to the scan's `records` outside a
+    /// task and to the task's `records` inside one, each with the
+    /// Rust target after the level.
+    #[tokio::test]
+    async fn runtime_records_route_to_the_scan_or_the_running_task() {
+        use std::sync::Once;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Process-wide, once: a thread-scoped subscriber would miss
+        // callsites other tests hit first with no subscriber, whose
+        // cached interest stays disabled. The layer drops events
+        // outside a scan scope, so other tests are unaffected.
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(trace::layer()),
+            )
+            .unwrap();
+        });
+
+        let (_dir, compiled) = compile_source(HELLO);
+        let (tmp, store) = open_store();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |event| match event {
+                // Emitted from the scan loop, outside any task
+                Event::TaskStarted { .. } => tracing::warn!("outside the task"),
+                // Delivered from inside the running task's scope
+                Event::Output(Output::Print(_)) => tracing::warn!("inside the task"),
+                _ => {}
+            },
+        )
+        .await
+        .unwrap();
+
+        let scans = ScanStore::from(&store);
+        let scan_records = String::from_utf8(
+            scans
+                .scan_log(&outcome.commit_sha, "records")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let task_records = String::from_utf8(
+            scans
+                .task_log(&outcome.commit_sha, "hello", "hello", "records")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            scan_records.contains(" INFO gage_scan2: scan ")
+                && scan_records.contains(" started with 1 tasks\n"),
+            "{scan_records}"
+        );
+        assert!(
+            scan_records.contains(" WARN gage_scan2::tests: outside the task\n"),
+            "{scan_records}"
+        );
+        assert!(!scan_records.contains("inside the task"), "{scan_records}");
+        assert!(
+            task_records.contains(" WARN gage_scan2::tests: inside the task\n"),
+            "{task_records}"
+        );
+        assert!(!task_records.contains("outside the task"), "{task_records}");
     }
 
     #[tokio::test]

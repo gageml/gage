@@ -6,8 +6,8 @@ use clap::{Args, Subcommand};
 use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
 use gage_runtime2::Output;
 use gage_scan2::staging::staging_root;
-use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutcome};
-use gage_store::{SCAN_TYPE, ScanRecord, ScanStore, Store, TaskStatus};
+use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
+use gage_store::{SCAN_TYPE, ScanRecord, ScanStore, Store};
 use tabled::{
     Table,
     settings::{
@@ -18,6 +18,31 @@ use tabled::{
 
 use crate::human::{format_duration, format_elapsed_ms};
 use crate::style as s;
+
+/// Install the `tracing` subscriber for a scan: warnings and above to
+/// stderr, and the records layer into the running scan's staging at
+/// `info` and above for the Gage crates. `GAGE_LOG` (set by `--log`)
+/// overrides both.
+pub fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer, fmt};
+
+    let stderr = fmt::layer()
+        .with_writer(std::io::stderr)
+        .without_time()
+        .with_filter(
+            EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
+        );
+    let records =
+        gage_scan2::trace::layer().with_filter(EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(
+            |_| EnvFilter::new("warn,gage_store=info,gage_scan2=info,gage_runtime2=info"),
+        ));
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(records)
+        .init();
+}
 
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -231,10 +256,7 @@ async fn run_scan(args: Scan2RunArgs) {
         let cancel = cancel.clone();
         tokio::spawn(async move {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("gage scan2: canceling");
-                    cancel.cancel();
-                }
+                _ = tokio::signal::ctrl_c() => cancel.cancel(),
                 _ = cancel.cancelled() => {}
             }
         })
@@ -244,23 +266,15 @@ async fn run_scan(args: Scan2RunArgs) {
         staging_root: &staging_root(),
         gage_version: crate::VERSION,
     };
+    // Headless: task output and the scan's own lines go to the
+    // terminal as they happen; records go to the scan record only
     let result = gage_scan2::scan(&store, &config, &scanners, &cancel, |event| match event {
         Event::Output(Output::Print(s)) => print!("{s}"),
         Event::Output(Output::Println(s)) => println!("{s}"),
-        // Records go to the task's logs only, as with `gage scan`
         Event::Output(Output::Log { .. }) => {}
-        Event::TaskStarted { .. } => {}
-        Event::TaskFinished {
-            scanner,
-            task,
-            status: TaskStatus::Failed,
-            error,
-        } => {
-            let message = error.unwrap_or_default();
-            eprintln!("gage scan2: {scanner}:{task} failed");
-            eprint!("{message}");
-        }
-        Event::TaskFinished { .. } => {}
+        Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
+        Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
+        Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
     })
     .await;
     io::stdout().flush().unwrap();
@@ -274,35 +288,10 @@ async fn run_scan(args: Scan2RunArgs) {
             std::process::exit(1);
         }
     };
-    eprintln!("{}", summary_line(&outcome));
     let attrs = &outcome.attrs;
     if attrs.canceled || attrs.tasks.failed > 0 {
         std::process::exit(1);
     }
-}
-
-fn summary_line(outcome: &ScanOutcome) -> String {
-    let attrs = &outcome.attrs;
-    let state = if attrs.canceled {
-        "canceled"
-    } else {
-        "completed"
-    };
-    let counts = &attrs.tasks;
-    let mut parts = vec![
-        format!("{} completed", counts.completed),
-        format!("{} failed", counts.failed),
-    ];
-    let canceled = counts.total - counts.completed - counts.failed - counts.skipped;
-    if canceled > 0 {
-        parts.push(format!("{canceled} canceled"));
-    }
-    format!(
-        "scan {} {state}: {} tasks: {}",
-        outcome.id,
-        counts.total,
-        parts.join(", ")
-    )
 }
 
 fn open_store(command: &str) -> Store {
