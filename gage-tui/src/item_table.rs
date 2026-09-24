@@ -82,6 +82,15 @@ impl ItemTable {
         self.table.selected()
     }
 
+    /// Scroll so the selected row sits at the middle of the last
+    /// rendered viewport
+    pub fn center_selected(&mut self) {
+        let Some(sel) = self.table.selected() else {
+            return;
+        };
+        *self.table.offset_mut() = sel.saturating_sub(self.viewport / 2);
+    }
+
     /// Page size for paging keys — the last rendered viewport
     pub fn page(&self) -> usize {
         self.viewport.max(1)
@@ -124,4 +133,31 @@ pub(crate) fn scrollbar(active: bool) -> Scrollbar<'static> {
         .thumb_symbol("┃")
         .track_symbol(Some("│"))
         .style(styles::Panel::scrollbar(active))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn center_selected_places_the_selection_mid_viewport() {
+        let ids: Vec<String> = (0..50).map(|i| i.to_string()).collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut table = ItemTable::new();
+        table.viewport = 10;
+        table.select_index(30, &ids);
+        table.center_selected();
+        assert_eq!(table.table.offset(), 25);
+
+        // Near the top the offset clamps at zero
+        table.select_index(2, &ids);
+        table.center_selected();
+        assert_eq!(table.table.offset(), 0);
+
+        // No selection leaves the offset alone
+        table.pin(None, &ids);
+        *table.table.offset_mut() = 7;
+        table.center_selected();
+        assert_eq!(table.table.offset(), 7);
+    }
 }

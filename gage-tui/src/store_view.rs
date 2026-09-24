@@ -443,6 +443,9 @@ fn handle_tree_key(state: &mut ViewState, key: KeyEvent) {
         KeyCode::Char('G') | KeyCode::End => state.table.select_last(&keys),
         KeyCode::PageDown => state.table.select_by(page, &keys),
         KeyCode::PageUp => state.table.select_by(-page, &keys),
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.table.center_selected();
+        }
         KeyCode::Char(' ') | KeyCode::Enter => {
             drop(keys);
             state.toggle_selected();
@@ -498,6 +501,9 @@ fn handle_listing_key(state: &mut ViewState, sha: &str, key: KeyEvent) {
         KeyCode::Char('G') | KeyCode::End => state.listing_table.select_last(&names),
         KeyCode::PageDown => state.listing_table.select_by(page, &names),
         KeyCode::PageUp => state.listing_table.select_by(-page, &names),
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.listing_table.center_selected();
+        }
         _ => {}
     }
 }
