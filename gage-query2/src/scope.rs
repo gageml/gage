@@ -14,7 +14,7 @@ use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::filter::IdFilter;
-use gage_store::{Order, SessionRecord, SessionStore, Store, StoreError};
+use gage_store::{DatasetStore, Order, SessionRecord, SessionStore, Store, StoreError};
 
 use crate::rows::{RowCache, derive_batch};
 
@@ -68,6 +68,35 @@ impl SessionScope {
             drivers: DriverRegistry::builtin(),
             fixed: Some(sessions),
         }
+    }
+
+    /// A scope over the members of the dataset at `dataset_commit`,
+    /// each at the version the dataset links, in member order. This
+    /// is the one read a scope makes outside the query interface: it
+    /// pins the versions every table in the context then serves.
+    pub fn for_dataset(store: Arc<Mutex<Store>>, dataset_commit: &str) -> Result<Self> {
+        let members = {
+            let guard = store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            DatasetStore::from(&*guard)
+                .sessions_at(dataset_commit)
+                .map_err(external)?
+        };
+        Ok(Self::with_sessions(
+            store,
+            members
+                .into_iter()
+                .map(StoredSessionRef::from_record)
+                .collect(),
+        ))
+    }
+
+    /// The commits of a fixed scope, in order; `None` store-wide.
+    pub fn fixed_commits(&self) -> Option<Vec<String>> {
+        self.fixed
+            .as_ref()
+            .map(|refs| refs.iter().map(|r| r.commit.clone()).collect())
     }
 
     /// The scope's sessions, narrowed by the `session_id` predicates

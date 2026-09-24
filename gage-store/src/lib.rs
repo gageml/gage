@@ -66,7 +66,9 @@ pub use note::{
     OBJECT_TYPE as NOTE_TYPE,
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
-pub use query::{StoredNoteTable, StoredSessionTable};
+pub use query::{
+    LinkKind, StoredNoteTable, StoredSessionTable, dataset_table, link_table, scan_table,
+};
 pub use scan::{
     DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanQuery,
     ScanRecord, ScanStore, ScanTask, TaskAttrs, TaskCounts, TaskStatus,

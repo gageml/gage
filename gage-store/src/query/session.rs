@@ -115,11 +115,15 @@ fn stored_session_schema() -> SchemaRef {
 }
 
 /// The store-bound `session` table. The store is shared under a mutex
-/// because its git reader is single-threaded.
+/// because its git reader is single-threaded. Store-wide, the rows
+/// are every live session at its tip, served by the index; at fixed
+/// commits, the rows are those versions in the order given, which is
+/// how a dataset or scan scope lists its members.
 #[derive(Debug, Clone)]
 pub struct StoredSessionTable {
     store: Arc<Mutex<Store>>,
     schema: SchemaRef,
+    commits: Option<Vec<String>>,
 }
 
 impl StoredSessionTable {
@@ -127,6 +131,17 @@ impl StoredSessionTable {
         Self {
             store,
             schema: stored_session_schema(),
+            commits: None,
+        }
+    }
+
+    /// The table over exactly the session versions at `commits`, in
+    /// that order.
+    pub fn at_commits(store: Arc<Mutex<Store>>, commits: Vec<String>) -> Self {
+        Self {
+            store,
+            schema: stored_session_schema(),
+            commits: Some(commits),
         }
     }
 }
@@ -176,6 +191,7 @@ impl TableProvider for StoredSessionTable {
         };
         Ok(Arc::new(StoredSessionExec::new(
             Arc::clone(&self.store),
+            self.commits.clone(),
             self.schema.clone(),
             projected_schema,
             projection.cloned(),
@@ -226,6 +242,7 @@ fn timestamp_literal_ms(expr: &Expr) -> Option<i64> {
 #[derive(Clone)]
 struct StoredSessionExec {
     store: Arc<Mutex<Store>>,
+    commits: Option<Vec<String>>,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -246,20 +263,28 @@ impl fmt::Debug for StoredSessionExec {
 impl StoredSessionExec {
     fn new(
         store: Arc<Mutex<Store>>,
+        commits: Option<Vec<String>>,
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
         filters: Vec<Expr>,
         limit: Option<usize>,
     ) -> Self {
+        // Only the index-served rows come newest modified first
+        let equivalence = if commits.is_none() {
+            modified_desc_eq_properties(&projected_schema)
+        } else {
+            EquivalenceProperties::new(projected_schema.clone())
+        };
         let properties = PlanProperties::new(
-            modified_desc_eq_properties(&projected_schema),
+            equivalence,
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
         Self {
             store,
+            commits,
             full_schema,
             projected_schema,
             projection,
@@ -287,17 +312,39 @@ impl StoredSessionExec {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sessions = SessionStore::from(&*store);
 
-        // Every live session, newest modified first: the rows to filter
-        let all = sessions
-            .query()
-            .order(Order::ModifiedDesc)
-            .tips()
-            .map_err(external)?;
+        // The rows to filter: every live session newest modified first,
+        // or the given versions in the given order
+        let all: Vec<SelectedTip> = match &self.commits {
+            None => sessions
+                .query()
+                .order(Order::ModifiedDesc)
+                .tips()
+                .map_err(external)?,
+            Some(commits) => commits
+                .iter()
+                .map(|sha| {
+                    let header = store.read_header(sha).map_err(external)?;
+                    Ok(SelectedTip {
+                        id: header.id,
+                        sha: sha.clone(),
+                        created_ms: header.created_ms,
+                        modified_ms: header.modified_ms,
+                    })
+                })
+                .collect::<Result<_>>()?,
+        };
         // id_prefix is unique within the short-prefix set of sessions,
-        // where a session prefix resolves first
-        let peers = store
+        // where a session prefix resolves first, plus the fixed rows
+        let mut peers = store
             .short_prefix_ids(Some(SESSION_TYPE))
             .map_err(external)?;
+        if self.commits.is_some() {
+            for tip in &all {
+                if !peers.contains(&tip.id) {
+                    peers.push(tip.id.clone());
+                }
+            }
+        }
         let prefix_len = unique_prefix_lens(peers);
 
         let since = self.filters.iter().filter_map(modified_lower_bound).max();
@@ -487,6 +534,7 @@ impl ExecutionPlan for StoredSessionExec {
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         Some(Arc::new(StoredSessionExec::new(
             Arc::clone(&self.store),
+            self.commits.clone(),
             self.full_schema.clone(),
             self.projected_schema.clone(),
             self.projection.clone(),

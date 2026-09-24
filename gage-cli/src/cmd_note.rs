@@ -149,7 +149,9 @@ pub async fn list(args: NoteListArgs) {
             std::process::exit(1);
         }
     };
-    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
     let where_clause = match &args.name {
         Some(name) => format!(" WHERE name = '{}'", name.replace('\'', "''")),
         None => String::new(),
@@ -232,7 +234,7 @@ pub async fn list(args: NoteListArgs) {
 }
 
 /// The single count a `SELECT COUNT(*)` query returns
-async fn count_rows(ctx: &SessionContext, sql: &str) -> usize {
+pub(crate) async fn count_rows(ctx: &SessionContext, sql: &str) -> usize {
     let batches = run_query(ctx, sql).await;
     batches
         .first()
@@ -461,7 +463,9 @@ pub async fn show(args: NoteShowArgs) {
             std::process::exit(1);
         }
     };
-    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
     let sql = format!(
         "SELECT name, value, text, metadata, target, author, created, modified \
          FROM note WHERE id = '{id}'"

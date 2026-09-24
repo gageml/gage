@@ -1,13 +1,19 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
+use datafusion::arrow::array::{
+    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
+};
+use gage_core::uuid::short_uuid;
+use gage_query2::ContextBuilder;
 use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
 use gage_runtime2::{Output, TaskOutput};
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
-use gage_store::{DatasetStore, SCAN_TYPE, ScanRecord, ScanStore, Store};
+use gage_store::{DatasetStore, Store};
 use tabled::{
     Table,
     settings::{
@@ -16,6 +22,8 @@ use tabled::{
     },
 };
 
+use crate::cmd_note::count_rows;
+use crate::cmd_session::{column, run_query};
 use crate::human::{format_duration, format_elapsed_ms};
 use crate::style as s;
 
@@ -87,62 +95,35 @@ pub struct Scan2ListArgs {
 
 pub async fn main(args: Scan2Args) {
     match args.command {
-        Some(Scan2Command::List(a)) => list(a),
+        Some(Scan2Command::List(a)) => list(a).await,
         None => run_scan(args.run_args).await,
     }
 }
 
-fn list(args: Scan2ListArgs) {
+async fn list(args: Scan2ListArgs) {
     let store = open_store("gage scan2 list");
-    let scans = ScanStore::from(&store);
-    let total = match scans.query().count() {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("gage scan2 list: {e}");
-            std::process::exit(1);
-        }
-    };
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
+    let total = count_rows(&ctx, "SELECT COUNT(*) FROM scan").await;
     if total == 0 {
         println!("No scan runs found");
         return;
     }
     let show = args.limit.show_count(total);
-    let records: Vec<ScanRecord> =
-        match scans.query().limit(show).iter().and_then(|it| it.collect()) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("gage scan2 list: {e}");
-                std::process::exit(1);
-            }
-        };
-
-    // The highlighted prefix is unique within the short-prefix set
-    // of scans, where a scan prefix resolves first
-    let peers = match store.short_prefix_ids(Some(SCAN_TYPE)) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("gage scan2 list: {e}");
-            std::process::exit(1);
-        }
-    };
-    let highlighter = s::IdHighlighter::new(peers);
-
-    // Sessions is the member count of the dataset commit the scan links
-    let datasets = DatasetStore::from(&store);
-    let mut session_counts: Vec<Option<usize>> = Vec::with_capacity(records.len());
-    for record in &records {
-        let count = match &record.content.dataset {
-            Some(sha) => match datasets.at_commit(sha) {
-                Ok(dataset) => Some(dataset.session_count),
-                Err(e) => {
-                    eprintln!("gage scan2 list: {e}");
-                    std::process::exit(1);
-                }
-            },
-            None => None,
-        };
-        session_counts.push(count);
-    }
+    // Sessions and Notes are counts over the relation views; a scan
+    // without a dataset has no session count to show
+    let sql = format!(
+        "SELECT s.id, s.id_prefix, s.tasks, s.failed, s.canceled, s.started, s.stopped, \
+                s.dataset, ss.n, sn.n \
+         FROM scan s \
+         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_session GROUP BY scan_id) ss \
+              ON ss.scan_id = s.id \
+         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_note GROUP BY scan_id) sn \
+              ON sn.scan_id = s.id \
+         ORDER BY s.modified DESC LIMIT {show}"
+    );
+    let batches = run_query(&ctx, &sql).await;
 
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
@@ -151,10 +132,46 @@ fn list(args: Scan2ListArgs) {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    let rows = records
-        .iter()
-        .zip(&session_counts)
-        .map(|(r, sessions)| list_row(r, *sessions, &highlighter));
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in &batches {
+        let ids = column::<StringArray>(batch, 0);
+        let prefixes = column::<StringArray>(batch, 1);
+        let tasks = column::<Int64Array>(batch, 2);
+        let failed = column::<Int64Array>(batch, 3);
+        let canceled = column::<BooleanArray>(batch, 4);
+        let started = column::<TimestampMillisecondArray>(batch, 5);
+        let stopped = column::<TimestampMillisecondArray>(batch, 6);
+        let datasets = column::<StringArray>(batch, 7);
+        let sessions = column::<Int64Array>(batch, 8);
+        let notes = column::<Int64Array>(batch, 9);
+        for i in 0..batch.num_rows() {
+            let count = |arr: &Int64Array| if arr.is_valid(i) { arr.value(i) } else { 0 };
+            let elapsed = stopped.value(i).saturating_sub(started.value(i)).max(0) as u64;
+            rows.push(vec![
+                s::styled_id(short_uuid(ids.value(i)), prefixes.value(i), s::IdKind::Gage),
+                tasks.value(i).to_string(),
+                if datasets.is_valid(i) {
+                    count(sessions).to_string()
+                } else {
+                    String::new()
+                },
+                String::new(),
+                count(notes).to_string(),
+                failed.value(i).to_string(),
+                String::new(),
+                if canceled.value(i) {
+                    "canceled"
+                } else {
+                    "completed"
+                }
+                .to_string(),
+                format_duration(Duration::from_millis(elapsed)),
+                String::new(),
+                format_elapsed_ms(started.value(i)),
+            ]);
+        }
+    }
+    let shown = rows.len();
 
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
@@ -171,36 +188,7 @@ fn list(args: Scan2ListArgs) {
         .to_string();
     println!("{table}");
 
-    args.limit.print_summary(records.len(), total, "scan run");
-}
-
-/// One listing row. Sessions is blank for a scan with no dataset;
-/// Issues, Cost, and Label are blank: nothing writes them yet.
-fn list_row(
-    record: &ScanRecord,
-    sessions: Option<usize>,
-    highlighter: &s::IdHighlighter,
-) -> Vec<String> {
-    let attrs = &record.content.attrs;
-    let status = if attrs.canceled {
-        "canceled"
-    } else {
-        "completed"
-    };
-    let elapsed = attrs.stopped.saturating_sub(attrs.started).max(0) as u64;
-    vec![
-        highlighter.short(&record.id),
-        attrs.tasks.total.to_string(),
-        sessions.map(|n| n.to_string()).unwrap_or_default(),
-        String::new(),
-        record.content.notes.len().to_string(),
-        attrs.tasks.failed.to_string(),
-        String::new(),
-        status.to_string(),
-        format_duration(Duration::from_millis(elapsed)),
-        String::new(),
-        format_elapsed_ms(attrs.started),
-    ]
+    args.limit.print_summary(shown, total, "scan run");
 }
 
 async fn run_scan(args: Scan2RunArgs) {

@@ -37,11 +37,13 @@ pub mod system_cols;
 
 use std::sync::{Arc, Mutex};
 
-use datafusion::datasource::TableProvider;
+use datafusion::datasource::{TableProvider, ViewTable};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
-use gage_store::{Store, StoredNoteTable, StoredSessionTable};
+use gage_store::{
+    LinkKind, Store, StoredNoteTable, StoredSessionTable, dataset_table, link_table, scan_table,
+};
 
 use crate::native::{NativeTable, NativeTableFn};
 use crate::project::project_for_path_udf;
@@ -83,37 +85,96 @@ impl ContextBuilder {
         self
     }
 
-    pub fn build(self) -> SessionContext {
+    /// Build the context. A store-backed context registers the base
+    /// tables, the `_link` tables, and the views over them; with
+    /// `skip_system_cols` the `_link` tables are left out and the
+    /// base tables lose their system columns, while the views keep
+    /// reading the link tables they were planned over.
+    pub async fn build(self) -> SessionContext {
         let ctx = new_context(self.skip_system_cols);
-        if let Some(store) = self.store {
-            let session: Arc<dyn TableProvider> =
-                Arc::new(StoredSessionTable::new(Arc::clone(&store)));
-            let note: Arc<dyn TableProvider> = Arc::new(StoredNoteTable::new(Arc::clone(&store)));
-            let scope = self
-                .scope
-                .unwrap_or_else(|| Arc::new(SessionScope::new(store)));
-            let entry: Arc<dyn TableProvider> =
-                Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&scope)));
-            let message: Arc<dyn TableProvider> =
-                Arc::new(StoredRowsTable::new(RowKind::Message, scope));
-            for (name, table) in [
-                ("session", session),
-                ("entry", entry),
-                ("message", message),
-                ("note", note),
-            ] {
-                let table = if self.skip_system_cols {
-                    Arc::new(SkipSystemCols::new(table))
-                } else {
-                    table
-                };
-                ctx.register_table(name, table)
+        let Some(store) = self.store else {
+            return ctx;
+        };
+        let scope = self
+            .scope
+            .unwrap_or_else(|| Arc::new(SessionScope::new(Arc::clone(&store))));
+        let session: Arc<dyn TableProvider> = match scope.fixed_commits() {
+            Some(commits) => Arc::new(StoredSessionTable::at_commits(Arc::clone(&store), commits)),
+            None => Arc::new(StoredSessionTable::new(Arc::clone(&store))),
+        };
+        let base: Vec<(&str, Arc<dyn TableProvider>)> = vec![
+            ("session", session),
+            (
+                "entry",
+                Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&scope))),
+            ),
+            (
+                "message",
+                Arc::new(StoredRowsTable::new(RowKind::Message, scope)),
+            ),
+            ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
+            ("dataset", dataset_table(Arc::clone(&store))),
+            ("scan", scan_table(Arc::clone(&store))),
+        ];
+        for (name, table) in &base {
+            ctx.register_table(*name, Arc::clone(table))
+                .expect("register store tables on a fresh context");
+        }
+        for kind in LinkKind::ALL {
+            ctx.register_table(kind.table_name(), link_table(Arc::clone(&store), kind))
+                .expect("register link tables on a fresh context");
+        }
+        // Views are planned over the raw providers, so they survive the
+        // user-facing context hiding what they read
+        for (name, sql) in VIEWS {
+            let plan = ctx
+                .state()
+                .create_logical_plan(sql)
+                .await
+                .expect("view SQL is fixed and names registered tables");
+            ctx.register_table(*name, Arc::new(ViewTable::new(plan, Some(sql.to_string()))))
+                .expect("register views on a fresh context");
+        }
+        if self.skip_system_cols {
+            for (name, table) in base {
+                ctx.deregister_table(name)
+                    .expect("deregister a table this build registered");
+                ctx.register_table(name, Arc::new(SkipSystemCols::new(table)))
                     .expect("register store tables on a fresh context");
+            }
+            for kind in LinkKind::ALL {
+                ctx.deregister_table(kind.table_name())
+                    .expect("deregister a table this build registered");
             }
         }
         ctx
     }
 }
+
+/// The user-facing relation tables: views over the `_link` tables
+/// with the version already chosen, so a join is on ids.
+const VIEWS: &[(&str, &str)] = &[
+    (
+        "dataset_session",
+        "SELECT l.dataset_id, l.session_num, l.session_id \
+         FROM dataset_session_link l JOIN dataset d ON l.dataset_commit = d.commit",
+    ),
+    (
+        "scan_session",
+        "SELECT s.scan_id, m.session_num, m.session_id \
+         FROM scan_dataset_link s \
+         JOIN dataset_session_link m ON s.dataset_commit = m.dataset_commit",
+    ),
+    (
+        "scan_note",
+        "SELECT scan_id, note_id, carried FROM scan_note_link",
+    ),
+    (
+        "session_note",
+        "SELECT target_id AS session_id, note_id, lines \
+         FROM note_target_link WHERE target_type = 'session'",
+    ),
+];
 
 /// The table functions this crate's contexts expose, for the repl's
 /// `\df`. A native table's columns depend on the source's driver, so
@@ -172,7 +233,9 @@ mod tests {
     use datafusion::arrow::array::StringArray;
     use datafusion::prelude::SessionContext;
     use gage_registry::driver::DriverRegistry;
-    use gage_store::{SessionStore, Store};
+    use gage_store::{
+        DatasetStore, NoteInput, NoteStore, NoteValue, SessionSpec, SessionStore, Store,
+    };
     use tempfile::TempDir;
 
     use super::ContextBuilder;
@@ -204,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn store_backed_context_registers_the_session_table() {
         let (_tmp, store) = open_store();
-        let ctx = ContextBuilder::new(Some(store)).build();
+        let ctx = ContextBuilder::new(Some(store)).build().await;
         let names = strings(
             &ctx,
             "SELECT table_name FROM information_schema.tables WHERE table_name = 'session'",
@@ -247,7 +310,7 @@ mod tests {
                 .unwrap();
         }
 
-        let ctx = ContextBuilder::new(Some(store)).build();
+        let ctx = ContextBuilder::new(Some(store)).build().await;
         let types = strings(&ctx, "SELECT type FROM entry ORDER BY line").await;
         assert_eq!(types, ["user", "assistant", "summary"]);
 
@@ -272,7 +335,7 @@ mod tests {
                    WHERE table_name = 'session' ORDER BY ordinal_position";
 
         let (_tmp, store) = open_store();
-        let ctx = ContextBuilder::new(Some(store)).build();
+        let ctx = ContextBuilder::new(Some(store)).build().await;
         let cols = strings(&ctx, sql).await;
         assert_eq!(
             &cols[cols.len() - 3..],
@@ -280,7 +343,10 @@ mod tests {
         );
 
         let (_tmp, store) = open_store();
-        let ctx = ContextBuilder::new(Some(store)).skip_system_cols().build();
+        let ctx = ContextBuilder::new(Some(store))
+            .skip_system_cols()
+            .build()
+            .await;
         let cols = strings(&ctx, sql).await;
         assert_eq!(cols.first().map(String::as_str), Some("id"));
         assert!(
@@ -291,5 +357,112 @@ mod tests {
         let note_cols = strings(&ctx, &sql.replace("'session'", "'note'")).await;
         assert_eq!(note_cols.first().map(String::as_str), Some("id"));
         assert_eq!(note_cols.last().map(String::as_str), Some("scan"));
+    }
+
+    /// The `_link` tables list the store's link files with both
+    /// commits; the views over them resolve versions to ids; the
+    /// user-facing context has the views and not the link tables or
+    /// the commit columns.
+    #[tokio::test]
+    async fn link_tables_and_views_resolve_relations() {
+        let (_tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let native_id = "11111111-2222-3333-4444-555555555555";
+        let project_dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(format!("{native_id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver.open_source(&spec).unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        let (dataset_id, dataset_commit, session_id, note_id) = {
+            let store = store.lock().unwrap();
+            let datasets = DatasetStore::from(&*store);
+            let dataset_id = datasets.create().unwrap();
+            let added = datasets
+                .sessions_add(
+                    &dataset_id,
+                    vec![SessionSpec {
+                        driver: driver.as_ref(),
+                        session: native.as_mut(),
+                    }],
+                )
+                .unwrap();
+            let session_id = added[0].id.clone();
+            let url = format!("session:{session_id}#1");
+            let note_id = NoteStore::from(&*store)
+                .create(NoteInput {
+                    name: "n",
+                    value: NoteValue::Text("v".into()),
+                    author: "user:t",
+                    target: Some(&url),
+                    metadata: None,
+                })
+                .unwrap();
+            let dataset_commit = datasets.get(&dataset_id).unwrap().commit_sha;
+            (dataset_id, dataset_commit, session_id, note_id)
+        };
+
+        let ctx = ContextBuilder::new(Arc::clone(&store).into()).build().await;
+        assert_eq!(
+            strings(&ctx, "SELECT dataset_commit FROM dataset_session_link").await,
+            [dataset_commit.clone()]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT session_id FROM dataset_session WHERE dataset_id = '{dataset_id}'"
+                )
+            )
+            .await,
+            [session_id.clone()]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT commit FROM dataset").await,
+            [dataset_commit]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT target_type FROM note_target_link").await,
+            ["session"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT lines FROM session_note WHERE session_id = '{session_id}' AND note_id = '{note_id}'")
+            )
+            .await,
+            ["1"]
+        );
+
+        let user = ContextBuilder::new(Some(store))
+            .skip_system_cols()
+            .build()
+            .await;
+        assert_eq!(
+            strings(
+                &user,
+                &format!(
+                    "SELECT session_id FROM dataset_session WHERE dataset_id = '{dataset_id}'"
+                )
+            )
+            .await,
+            [session_id]
+        );
+        let tables = strings(
+            &user,
+            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE '%_link' ORDER BY table_name",
+        )
+        .await;
+        assert!(tables.is_empty(), "{tables:?}");
+        assert!(user.sql("SELECT commit FROM dataset").await.is_err());
     }
 }

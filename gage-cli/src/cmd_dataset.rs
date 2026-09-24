@@ -1,5 +1,10 @@
+use std::sync::{Arc, Mutex};
+
 use clap::{Args, Subcommand};
-use gage_store::{DATASET_TYPE, DatasetRecord, DatasetStore, Store};
+use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
+use gage_core::uuid::short_uuid;
+use gage_query2::ContextBuilder;
+use gage_store::{DatasetStore, Store};
 use tabled::{
     Table,
     settings::{
@@ -8,8 +13,10 @@ use tabled::{
     },
 };
 
+use crate::cmd_note::count_rows;
+use crate::cmd_session::{column, run_query};
 use crate::human::format_elapsed_ms;
-use crate::style::{self, IdHighlighter};
+use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
 pub enum DatasetCommand {
@@ -38,56 +45,44 @@ pub fn add() {
     println!("Created dataset {id}");
 }
 
-pub fn list(args: DatasetListArgs) {
+pub async fn list(args: DatasetListArgs) {
     let store = open_store("gage dataset list");
-    let datasets = DatasetStore::from(&store);
-    let total = match datasets.query().count() {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("gage dataset list: {e}");
-            std::process::exit(1);
-        }
-    };
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
+    let total = count_rows(&ctx, "SELECT COUNT(*) FROM dataset").await;
     if total == 0 {
         println!("No datasets found");
         return;
     }
     let show = args.limit.show_count(total);
-    let records: Vec<DatasetRecord> = match datasets
-        .query()
-        .limit(show)
-        .iter()
-        .and_then(|it| it.collect())
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("gage dataset list: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // The highlighted prefix is unique within the short-prefix set
-    // of datasets, where a dataset prefix resolves first
-    let peers = match store.short_prefix_ids(Some(DATASET_TYPE)) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("gage dataset list: {e}");
-            std::process::exit(1);
-        }
-    };
-    let highlighter = IdHighlighter::new(peers);
+    let sql = format!(
+        "SELECT d.id, d.id_prefix, d.created, COUNT(m.session_id) \
+         FROM dataset d LEFT JOIN dataset_session m ON m.dataset_id = d.id \
+         GROUP BY d.id, d.id_prefix, d.created, d.modified \
+         ORDER BY d.modified DESC LIMIT {show}"
+    );
+    let batches = run_query(&ctx, &sql).await;
 
     let header: Vec<String> = ["Id", "Sessions", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let rows = records.iter().map(|r| {
-        vec![
-            highlighter.short(&r.id),
-            r.session_count.to_string(),
-            format_elapsed_ms(r.created_ms),
-        ]
-    });
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in &batches {
+        let ids = column::<StringArray>(batch, 0);
+        let prefixes = column::<StringArray>(batch, 1);
+        let createds = column::<TimestampMillisecondArray>(batch, 2);
+        let counts = column::<Int64Array>(batch, 3);
+        for i in 0..batch.num_rows() {
+            rows.push(vec![
+                styled_id(short_uuid(ids.value(i)), prefixes.value(i), IdKind::Gage),
+                counts.value(i).to_string(),
+                format_elapsed_ms(createds.value(i)),
+            ]);
+        }
+    }
+    let shown = rows.len();
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
@@ -95,7 +90,7 @@ pub fn list(args: DatasetListArgs) {
         .modify(Columns::new(1..).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
-    args.limit.print_summary(records.len(), total, "dataset");
+    args.limit.print_summary(shown, total, "dataset");
 }
 
 /// Open the default store, or print `command: <error>` and exit

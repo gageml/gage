@@ -13,7 +13,7 @@ use gage_core::uuid::new_uuid;
 use gage_session::{ContentSource, Driver, NativeSession};
 
 use crate::content::GitContentSource;
-use crate::index::{ObjectQuery, Order};
+use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, require_type};
 use crate::session::{SessionAddOutcome, SessionOutcome, SessionRecord, SessionStore};
 use crate::{Store, StoreError};
@@ -473,6 +473,11 @@ impl<'a> DatasetQuery<'a> {
             ..self.query.clone()
         };
         Ok(self.store.select(&unlimited)?.len())
+    }
+
+    /// The matching tips, in query order, without reading any object.
+    pub fn tips(self) -> Result<Vec<SelectedTip>, StoreError> {
+        self.store.select(&self.query)
     }
 
     /// Run the selection.

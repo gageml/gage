@@ -1565,7 +1565,7 @@ mod tests {
         );
 
         let (tmp, store) = open_store();
-        let (_, dataset_sha, session_id) = seeded_dataset(tmp.path(), &store, SESSION);
+        let (dataset_id, dataset_sha, session_id) = seeded_dataset(tmp.path(), &store, SESSION);
         let member_sha = DatasetStore::from(&store)
             .sessions_at(&dataset_sha)
             .unwrap()[0]
@@ -1628,6 +1628,49 @@ mod tests {
         assert!(
             !tmp.path().join("staging").join(&outcome.id).exists(),
             "staging is removed after apply"
+        );
+
+        // The scan and its relations are queryable through the tables
+        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+            Store::open(store.path()).unwrap(),
+        ))))
+        .build()
+        .await;
+        let count = |sql: String| {
+            let ctx = ctx.clone();
+            async move {
+                let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                    .unwrap()
+                    .value(0)
+            }
+        };
+        assert_eq!(
+            count(format!(
+                "SELECT COUNT(*) FROM scan_note WHERE scan_id = '{}'",
+                outcome.id
+            ))
+            .await,
+            4
+        );
+        assert_eq!(
+            count(format!(
+                "SELECT COUNT(*) FROM scan_session WHERE scan_id = '{}'",
+                outcome.id
+            ))
+            .await,
+            1
+        );
+        assert_eq!(
+            count(format!(
+                "SELECT COUNT(*) FROM scan WHERE id = '{}' AND dataset = '{}'",
+                outcome.id, dataset_id
+            ))
+            .await,
+            1
         );
     }
 }

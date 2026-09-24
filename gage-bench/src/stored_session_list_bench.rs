@@ -98,7 +98,7 @@ pub fn run(
     let store = timings
         .time("cold.open", || Store::open(&store_path))
         .map_err(|e| e.to_string())?;
-    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
+    let ctx = rt.block_on(ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build());
     let cold_row_counts = run_queries("cold", &rt, &ctx, params.limit, &mut timings)?;
     emit_row_counts("cold", &cold_row_counts, &mut counts);
     drop(ctx);
@@ -108,7 +108,7 @@ pub fn run(
     let store = timings
         .time("warm.open", || Store::open(&store_path))
         .map_err(|e| e.to_string())?;
-    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
+    let ctx = rt.block_on(ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build());
     let mut warm_row_counts = RowCounts::default();
     for _ in 0..params.iterations {
         warm_row_counts = run_queries("warm", &rt, &ctx, params.limit, &mut timings)?;

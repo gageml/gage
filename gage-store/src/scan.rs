@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dataset::OBJECT_TYPE as DATASET_TYPE;
 use crate::git::EntryKind;
-use crate::index::{ObjectQuery, Order};
+use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
 use crate::object::{ObjectTree, require_type};
 use crate::session::build_files_tree_inner;
@@ -339,6 +339,11 @@ impl<'a> ScanQuery<'a> {
             ..self.query.clone()
         };
         Ok(self.store.select(&unlimited)?.len())
+    }
+
+    /// The matching tips, in query order, without reading any object.
+    pub fn tips(self) -> Result<Vec<SelectedTip>, StoreError> {
+        self.store.select(&self.query)
     }
 
     /// Run the selection.

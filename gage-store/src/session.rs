@@ -61,13 +61,10 @@ pub struct SessionAttrsRecord {
     /// The id the harness gave the session, as the driver reported it.
     pub native_id: String,
     /// UNIX time millis: when the native artifact was last touched at
-    /// its source, as the driver reported it. Zero on objects written
-    /// before the field existed.
-    #[serde(default)]
+    /// its source, as the driver reported it.
     pub native_mtime: i64,
     /// The size in bytes of the native artifact, as the driver
-    /// reported it. Zero on objects written before the field existed.
-    #[serde(default)]
+    /// reported it.
     pub native_size: u64,
     /// Harness family, e.g. `"claude"`. A category with no version.
     pub session_type: String,
@@ -79,8 +76,6 @@ pub struct SessionAttrsRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// The driver's projection of the session, written at add time.
-    /// Default on objects written before every field existed.
-    #[serde(default)]
     pub summary: SummaryAttrs,
 }
 
@@ -95,9 +90,7 @@ pub struct SummaryAttrs {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_count: Option<u64>,
-    /// The session has no entry with content. False on objects
-    /// written before the field existed.
-    #[serde(default)]
+    /// The session has no entry with content
     pub is_empty: bool,
 }
 

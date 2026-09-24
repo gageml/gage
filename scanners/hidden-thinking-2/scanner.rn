@@ -1,0 +1,60 @@
+use gage::{Ignore, write_note, write_issue, user, scan};
+
+pub const SCANNER = #{
+    name: "hidden-thinking",
+    description: "v2 of hidden-thinking",
+    tasks: #{ note: #{} },
+};
+
+pub async fn note() {
+    // let config = format!(
+    //     "{{\"showThinkingSummaries\": {}}}",
+    //     user().config().await.get("showThinkingSummaries").unwrap_or("null")
+    // );
+    let config = "TODO - user config to help assessment";
+
+    // Find the latest thinking block across all sessions. Sessions are
+    // ordered newest-modified first and a session's thinking blocks are
+    // no newer than its modified time, so stop once a session's modified
+    // time can't beat the latest msg.
+    let latest = None;
+    for s in scan().sessions() {
+        if let Some((latest_msg, _)) = latest {
+            if s.modified.millis() <= latest_msg.timestamp.millis() {
+                break;
+            }
+        }
+        for msg in s
+            .messages()
+            .type(#{ "assistant": "thinking" })
+            .latest_first() // only check latest thinking block
+            .await?
+        {
+            let newer = match latest {
+                Some((latest_msg, _)) => msg.timestamp.millis() > latest_msg.timestamp.millis(),
+                None => true,
+            };
+            if newer {
+                latest = Some((msg, s.id));
+            }
+            // Stop after the session's latest block
+            break;
+        }
+    }
+    if let Some((latest_msg, session_id)) = latest {
+        write_note(
+            #{
+                name: "thinking.empty",
+                value: latest_msg.text == "",
+                target: #{ session: session_id, line: latest_msg.line },
+                metadata: #{
+                    msg_timestamp: latest_msg.timestamp.millis(),
+                    model: latest_msg.model(),
+                    config,
+                },
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}

@@ -48,7 +48,7 @@ pub async fn main(args: Query2Args) {
     if !args.system {
         builder = builder.skip_system_cols();
     }
-    let ctx = builder.build();
+    let ctx = builder.build().await;
     let result = if args.sql.is_empty() {
         gage_query::run_repl(
             &ctx,

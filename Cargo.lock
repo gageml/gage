@@ -2752,8 +2752,10 @@ name = "gage-scan2"
 version = "0.2.0-dev"
 dependencies = [
  "codespan-reporting",
+ "datafusion",
  "gage-claude",
  "gage-core",
+ "gage-query2",
  "gage-registry",
  "gage-runtime2",
  "gage-scan",

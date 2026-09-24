@@ -14,9 +14,10 @@ use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
+use gage_query2::scope::SessionScope;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
-use gage_store::{DatasetStore, SESSION_TYPE, SessionOutcome, SessionSpec, SessionStore, Store};
+use gage_store::{DatasetStore, SessionOutcome, SessionSpec, SessionStore, Store};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
@@ -29,7 +30,7 @@ use tabled::{
 
 use crate::dialog::{self, DialogError};
 use crate::source;
-use crate::style::{self, IdHighlighter, IdKind, styled_id};
+use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
@@ -196,7 +197,7 @@ pub async fn list(source: Option<String>, stored: bool, args: SessionListArgs) {
         if stored {
             eprintln!("warning: --stored is redundant with --dataset");
         }
-        list_dataset(args)
+        list_dataset(args).await
     } else if stored {
         list_stored(args).await
     } else {
@@ -217,7 +218,7 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
     // encoding all reach the source through SQL: `native_session`
     // opens it, `project_for_path` resolves a directory to its project
     // name. The command holds no source handle.
-    let ctx = ContextBuilder::new(None).build();
+    let ctx = ContextBuilder::new(None).build().await;
     let from = format!("native_session('{}')", spec.replace('\'', "''"));
     let project_pred = args
         .project
@@ -251,7 +252,9 @@ async fn list_stored(args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
     let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", None).await;
     if total > 0 {
         let registry = source::driver_registry();
@@ -270,9 +273,9 @@ async fn list_stored(args: SessionListArgs) {
 }
 
 /// List the member sessions of a dataset, each at the commit the
-/// dataset links, in member order. The stored columns apply;
-/// `--since` filters on the member version's `modified`.
-fn list_dataset(args: SessionListArgs) {
+/// dataset links, in member order: the `session` table scoped to the
+/// dataset, joined to `dataset_session` for the order.
+async fn list_dataset(args: SessionListArgs) {
     if args.project.is_some() {
         eprintln!("gage session list: --project does not apply to stored sessions");
         std::process::exit(1);
@@ -288,90 +291,41 @@ fn list_dataset(args: SessionListArgs) {
             std::process::exit(1);
         }
     };
-    let datasets = DatasetStore::from(&store);
-    let dataset_id = match datasets.resolve_id(prefix) {
-        Ok(id) => id,
+    let dataset = match DatasetStore::from(&store).get(prefix) {
+        Ok(record) => record,
         Err(e) => {
             eprintln!("gage session list: --dataset {prefix}: {e}");
             std::process::exit(1);
         }
     };
-    let records = match datasets.sessions(&dataset_id) {
-        Ok(r) => r,
+    let store = Arc::new(Mutex::new(store));
+    let scope = match SessionScope::for_dataset(Arc::clone(&store), &dataset.commit_sha) {
+        Ok(scope) => Arc::new(scope),
         Err(e) => {
             eprintln!("gage session list: {e}");
             std::process::exit(1);
         }
     };
-    let cutoff_ms = args.since.map(|d| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .saturating_sub(d.as_millis()) as i64
-    });
-    let records: Vec<_> = records
-        .into_iter()
-        .filter(|r| match cutoff_ms {
-            Some(cutoff) => r.modified_ms.is_some_and(|ms| ms >= cutoff),
-            None => true,
-        })
-        .filter(|r| !args.empty || r.attrs.summary.is_empty)
-        .collect();
-    let total = records.len();
+    let ctx = ContextBuilder::new(Some(store)).scope(scope).build().await;
+    let from = "session JOIN dataset_session m ON m.session_id = session.id";
+    let member = format!("m.dataset_id = '{}'", dataset.id);
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Dataset, from, Some(&member)).await;
     if total == 0 {
         println!("No sessions found");
         return;
     }
-    let show = args.limit.show_count(total);
-
-    // The highlighted prefix is unique within the short-prefix set of
-    // sessions plus the members, the same peers the stored listing uses
-    let mut peers = match store.short_prefix_ids(Some(SESSION_TYPE)) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("gage session list: {e}");
-            std::process::exit(1);
-        }
-    };
-    peers.extend(records.iter().map(|r| r.id.clone()));
-    let highlighter = IdHighlighter::new(peers);
-    let rows: Vec<Row> = records
-        .iter()
-        .take(show)
-        .map(|r| {
-            let prefix_len = highlighter.unique_prefix_len(&r.id);
-            let summary = &r.attrs.summary;
-            Row {
-                id: r.id.clone(),
-                id_display: short_uuid(&r.id).to_string(),
-                id_prefix: r.id.chars().take(prefix_len).collect(),
-                project: r.attrs.project.clone().unwrap_or_default(),
-                title: summary.title.clone().unwrap_or_default(),
-                session_type: r.attrs.session_type.clone(),
-                model: summary.model.clone().unwrap_or_default(),
-                size: Some(r.attrs.native_size as i64),
-                message_count: summary.message_count.map(|n| n as i64),
-                time_ms: r.created_ms,
-                driver_name: r.driver_name.clone(),
-            }
-        })
-        .collect();
     let registry = source::driver_registry();
     let drivers = match stored_drivers(&registry, &rows) {
-        Ok(d) => d,
+        Ok(drivers) => drivers,
         Err(e) => {
             eprintln!("gage session list: {e}");
             std::process::exit(1);
         }
     };
-    render_table(&rows, &drivers, Listing::Stored, args.full_id);
+    render_table(&rows, &drivers, Listing::Dataset, args.full_id);
     args.limit.print_summary(rows.len(), total, "session");
 }
 
-/// The driver that wrote each stored row, by the name the store
-/// recorded. A stored session whose driver this build lacks is an
-/// error: its rows cannot be presented.
 fn stored_drivers(registry: &DriverRegistry, rows: &[Row]) -> Result<Vec<Arc<dyn Driver>>, String> {
     rows.iter()
         .map(|r| {
@@ -395,16 +349,27 @@ enum Listing {
     /// The store: Id, Project, Title, Type, Model, Size, Messages,
     /// Created
     Stored,
+    /// A dataset's members, the stored columns in member order
+    Dataset,
 }
 
 impl Listing {
-    /// The column rows order on, newest first, and `--since` filters
-    /// on: the native mtime for a source, the store's `modified`
-    /// marker for the store
-    fn order_col(self) -> &'static str {
+    /// The column `--since` filters on: the native mtime for a
+    /// source, the store's `modified` marker for the store
+    fn since_col(self) -> &'static str {
         match self {
             Listing::Native => "mtime",
-            Listing::Stored => "modified",
+            Listing::Stored | Listing::Dataset => "modified",
+        }
+    }
+
+    /// The `ORDER BY` clause: newest first for a source and the store,
+    /// member order for a dataset
+    fn order_clause(self) -> &'static str {
+        match self {
+            Listing::Native => "mtime DESC",
+            Listing::Stored => "modified DESC",
+            Listing::Dataset => "m.session_num ASC",
         }
     }
 }
@@ -436,19 +401,19 @@ async fn query_sessions(
             "mtime AS time",
             "'' AS driver",
         ),
-        Listing::Stored => (
+        Listing::Stored | Listing::Dataset => (
             "session_type",
             "native_size AS size",
             "created AS time",
             "driver",
         ),
     };
-    let order_col = listing.order_col();
+    let order_clause = listing.order_clause();
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, title, {type_col}, model, {size_col}, \
          message_count, {time_col}, {driver_col} \
          FROM {from}{where_clause} \
-         ORDER BY {order_col} DESC{limit_clause}",
+         ORDER BY {order_clause}{limit_clause}",
     );
     let batches = run_query(ctx, &sql).await;
     let rows = rows_from_batches(&batches);
@@ -480,7 +445,7 @@ fn build_where_clause(
             .saturating_sub(d.as_millis()) as i64;
         clauses.push(format!(
             "{} >= to_timestamp_millis({cutoff_ms})",
-            listing.order_col()
+            listing.since_col()
         ));
     }
     if args.empty {
@@ -554,7 +519,7 @@ fn driver_name_of(driver: &str) -> &str {
     driver.split_once(' ').map_or(driver, |(name, _)| name)
 }
 
-fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
+pub(crate) fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
     batch
         .column(idx)
         .as_any()
@@ -580,7 +545,7 @@ fn string_or_empty(col: &StringArray, i: usize) -> String {
 fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, full_id: bool) {
     let id_kind = match listing {
         Listing::Native => IdKind::Native,
-        Listing::Stored => IdKind::Gage,
+        Listing::Stored | Listing::Dataset => IdKind::Gage,
     };
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for (r, driver) in rows.iter().zip(drivers) {
@@ -594,7 +559,7 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
         let size = r.size.map(crate::human::format_size).unwrap_or_default();
         let count = r.message_count.map(|n| n.to_string()).unwrap_or_default();
         let mut cells = vec![id_display, project, r.title.clone()];
-        if listing == Listing::Stored {
+        if listing != Listing::Native {
             cells.push(r.session_type.clone());
         }
         let model = driver.format_model(&r.model);
@@ -612,7 +577,7 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
             "Messages",
             "Modified",
         ],
-        Listing::Stored => vec![
+        Listing::Stored | Listing::Dataset => vec![
             "Id", "Project", "Title", "Type", "Model", "Size", "Messages", "Created",
         ],
     }
@@ -1031,7 +996,7 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
     // The empty-session and id-resolution queries run against the
     // native session rows through the `native_session` table function;
     // the source handle stays only for the driver deletes below.
-    let ctx = ContextBuilder::new(None).build();
+    let ctx = ContextBuilder::new(None).build().await;
     let from = format!("native_session('{}')", spec.replace('\'', "''"));
 
     let targets = if args.empty {

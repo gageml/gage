@@ -1,12 +1,12 @@
 //! System columns and the provider wrapper that hides them.
 //!
-//! A session table has two tiers of column. User-facing columns
-//! describe the session for a person or model writing queries. System
-//! columns exist for the program rendering or addressing a row:
-//! `id_display`, `id_prefix`, and the row's locator. Both tiers are
-//! selectable by name; [`SkipSystemCols`] removes the system tier from
-//! a provider's schema so `SELECT *`, `DESCRIBE`, and
-//! `information_schema` show the user-facing tier alone.
+//! A store table has two tiers of column. User-facing columns
+//! describe the object for a person or model writing queries. System
+//! columns exist for the program rendering or addressing a row and
+//! for joins between versions: `id_display`, `id_prefix`, the row's
+//! locator, and every commit column. [`SkipSystemCols`] removes the
+//! system tier from a provider, so in a user-facing context the
+//! columns are absent, not merely hidden from `SELECT *`.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -21,8 +21,15 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 
 /// Column names in the system tier. `path` is the native session
-/// locator until the rename to `locator`.
+/// locator until the rename to `locator`. Commit columns are named by
+/// [`is_system_col`].
 pub const SYSTEM_COLS: &[&str] = &["id_display", "id_prefix", "locator", "path"];
+
+/// True for a column of the system tier: the named columns and every
+/// commit column, `commit` or `*_commit`.
+pub fn is_system_col(name: &str) -> bool {
+    SYSTEM_COLS.contains(&name) || name == "commit" || name.ends_with("_commit")
+}
 
 /// A provider exposing every column of `inner` except the system
 /// columns. Filters and limits pass through unchanged: a filter can
@@ -43,7 +50,7 @@ impl SkipSystemCols {
             .fields()
             .iter()
             .enumerate()
-            .filter(|(_, f)| !SYSTEM_COLS.contains(&f.name().as_str()))
+            .filter(|(_, f)| !is_system_col(f.name()))
             .map(|(i, _)| i)
             .collect();
         let schema = Arc::new(

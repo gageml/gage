@@ -37,7 +37,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(NoteWrite::for_session_lines)?;
     m.function_meta(NoteWrite::metadata)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: NoteWrite| async move {
-        do_write_note(w)
+        do_write_note(w).await
     })?;
     m.ty::<Note>()?;
     m.function_meta(Note::debug)?;
@@ -173,7 +173,7 @@ impl Note {
 /// The outer error is a VM error; the inner is the scanner's `Result`.
 type Written = Result<Result<Note, Error>, VmError>;
 
-fn do_write_note(w: NoteWrite) -> Written {
+async fn do_write_note(w: NoteWrite) -> Written {
     let ctx = current()?;
     let (scanner, task) = OUTPUT_SINK
         .try_with(|sink| (sink.scanner.clone(), sink.task.clone()))
@@ -198,7 +198,7 @@ fn do_write_note(w: NoteWrite) -> Written {
         Err(e) => return Ok(Err(e)),
     };
     let pinned = match &session {
-        Some(id) => ctx.member_commit(id)?,
+        Some(id) => ctx.member_commit(id).await?,
         None => None,
     };
 

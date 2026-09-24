@@ -11,11 +11,12 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use datafusion::arrow::array::{Array, StringArray, TimestampMillisecondArray};
 use datafusion::prelude::SessionContext;
 use gage_query2::ContextBuilder;
-use gage_query2::scope::{SessionScope, StoredSessionRef};
+use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
-use gage_store::{DatasetStore, SessionRecord, Store};
+use gage_store::Store;
 use rune::runtime::{Protocol, VmError};
 use rune::{Any, ContextError, Module};
 use tokio::sync::OnceCell;
@@ -39,7 +40,7 @@ pub struct ScanContext {
     /// The staging directory the scan's notes are written under,
     /// `staging/<scan_id>/notes/`
     pub notes_dir: PathBuf,
-    query: Arc<OnceCell<SessionContext>>,
+    query: Arc<OnceCell<(Arc<SessionScope>, SessionContext)>>,
 }
 
 impl ScanContext {
@@ -58,46 +59,47 @@ impl ScanContext {
         }
     }
 
-    /// The commit the scan reads for the member session `session_id`,
-    /// or `None` when it is not a member.
-    pub(crate) fn member_commit(&self, session_id: &str) -> Result<Option<String>, VmError> {
-        Ok(self
-            .members()?
-            .into_iter()
-            .find(|r| r.id == session_id)
-            .map(|r| r.commit_sha))
-    }
-
-    /// The query context over the dataset's members at the commit
-    /// the scan links, built on first use.
-    pub(crate) async fn query_context(&self) -> Result<&SessionContext, VmError> {
+    /// The scope and query context over the dataset's members at the
+    /// commit the scan links, built on the first read of any kind.
+    /// Without a dataset the scope is empty.
+    async fn scoped(&self) -> Result<&(Arc<SessionScope>, SessionContext), VmError> {
         self.query
             .get_or_try_init(|| async {
-                let members = self.members()?;
-                let scope = Arc::new(SessionScope::with_sessions(
-                    Arc::clone(&self.store),
-                    members
-                        .into_iter()
-                        .map(StoredSessionRef::from_record)
-                        .collect(),
-                ));
-                Ok(ContextBuilder::new(Some(Arc::clone(&self.store)))
-                    .scope(scope)
-                    .build())
+                let scope = match &self.dataset {
+                    Some(dataset) => {
+                        SessionScope::for_dataset(Arc::clone(&self.store), &dataset.commit_sha)
+                            .map_err(|e| {
+                                VmError::panic(format!("read dataset {}: {e}", dataset.id))
+                            })?
+                    }
+                    None => SessionScope::with_sessions(Arc::clone(&self.store), Vec::new()),
+                };
+                let scope = Arc::new(scope);
+                let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
+                    .scope(Arc::clone(&scope))
+                    .build()
+                    .await;
+                Ok((scope, ctx))
             })
             .await
     }
 
-    /// The dataset's member records at the linked commit; empty
-    /// without a dataset.
-    fn members(&self) -> Result<Vec<SessionRecord>, VmError> {
-        let Some(dataset) = &self.dataset else {
-            return Ok(Vec::new());
-        };
-        let store = self.store.lock().unwrap();
-        DatasetStore::from(&*store)
-            .sessions_at(&dataset.commit_sha)
-            .map_err(|e| VmError::panic(format!("read dataset {}: {e}", dataset.id)))
+    /// The query context over the dataset's members.
+    pub(crate) async fn query_context(&self) -> Result<&SessionContext, VmError> {
+        Ok(&self.scoped().await?.1)
+    }
+
+    /// The commit the scan reads for the member session `session_id`,
+    /// or `None` when it is not a member.
+    pub(crate) async fn member_commit(&self, session_id: &str) -> Result<Option<String>, VmError> {
+        let (scope, _) = self.scoped().await?;
+        let members = scope
+            .sessions(&[])
+            .map_err(|e| VmError::panic(format!("scan members: {e}")))?;
+        Ok(members
+            .into_iter()
+            .find(|r| r.id == session_id)
+            .map(|r| r.commit))
     }
 }
 
@@ -121,7 +123,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<ScanDataset>()?;
     m.ty::<SessionsQuery>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
-        fetch_sessions(q)
+        fetch_sessions(q).await
     })?;
     m.ty::<Session>()?;
     m.ty::<Sessions>()?;
@@ -193,11 +195,49 @@ impl rune::alloc::prelude::TryClone for ScanDataset {
 #[rune(item = ::gage)]
 pub struct SessionsQuery;
 
-fn fetch_sessions(_query: SessionsQuery) -> Result<Sessions, VmError> {
-    let records = current()?.members()?;
-    Ok(Sessions::new(
-        records.into_iter().map(Session::from_record).collect(),
-    ))
+/// The scan's sessions, read from the scoped `session` table, whose
+/// rows are the members in member order.
+async fn fetch_sessions(_query: SessionsQuery) -> Result<Sessions, VmError> {
+    const SQL: &str =
+        "SELECT id, native_id, session_type, project, title, native_mtime FROM session";
+    let ctx = current()?;
+    let df_ctx = ctx.query_context().await?;
+    let fail = |e: datafusion::error::DataFusionError| VmError::panic(format!("{SQL}: {e}"));
+    let batches = df_ctx
+        .sql(SQL)
+        .await
+        .map_err(fail)?
+        .collect()
+        .await
+        .map_err(fail)?;
+    let mut items = Vec::new();
+    for batch in &batches {
+        let col = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("session table column types are fixed")
+        };
+        let (ids, native_ids, types, projects, titles) = (col(0), col(1), col(2), col(3), col(4));
+        let mtimes = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("native_mtime is a timestamp column");
+        for i in 0..batch.num_rows() {
+            let optional = |arr: &StringArray| arr.is_valid(i).then(|| arr.value(i).to_string());
+            items.push(Session {
+                id: ids.value(i).to_string(),
+                native_id: native_ids.value(i).to_string(),
+                session_type: types.value(i).to_string(),
+                project: optional(projects),
+                title: optional(titles),
+                mtime: DateTime::from_millis(mtimes.value(i)),
+            });
+        }
+    }
+    Ok(Sessions::new(items))
 }
 
 /// A stored session, as a scanner sees it.
@@ -220,20 +260,6 @@ pub struct Session {
     /// When the native artifact was last touched at its source
     #[rune(get)]
     pub mtime: DateTime,
-}
-
-impl Session {
-    fn from_record(record: SessionRecord) -> Session {
-        let attrs = record.attrs;
-        Session {
-            id: record.id,
-            native_id: attrs.native_id,
-            session_type: attrs.session_type,
-            project: attrs.project,
-            title: attrs.summary.title,
-            mtime: DateTime::from_millis(attrs.native_mtime),
-        }
-    }
 }
 
 /// A double-ended, exact-size iterator over a scan's sessions, in
