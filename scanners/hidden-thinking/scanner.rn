@@ -9,7 +9,7 @@ Detect sessions where model thinking is hidden
 Thinking blocks provide important evidence of model thinking and
 should be visible. Unfortunately, the default settings for Claude
 Code cause thinking blocks to be hidden. This scanner looks for this
-consition and recommends fixes for issues it finds.
+condition and recommends fixes for issues it finds.
 ",
     tasks: #{
         note: #{
@@ -38,11 +38,11 @@ pub async fn note() {
     // Find the latest thinking block across all sessions. Sessions are
     // ordered newest-modified first and a session's thinking blocks are
     // no newer than its modified time, so stop once a session's modified
-    // time can't beat the best candidate.
+    // time can't beat the latest msg.
     let latest = None;
     for s in scan().sessions() {
-        if let Some((best, _)) = latest {
-            if s.modified.millis() <= best.timestamp.millis() {
+        if let Some((latest_msg, _)) = latest {
+            if s.modified.millis() <= latest_msg.timestamp.millis() {
                 break;
             }
         }
@@ -53,7 +53,7 @@ pub async fn note() {
             .await?
         {
             let newer = match latest {
-                Some((best, _)) => msg.timestamp.millis() > best.timestamp.millis(),
+                Some((latest_msg, _)) => msg.timestamp.millis() > latest_msg.timestamp.millis(),
                 None => true,
             };
             if newer {
