@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use gage_registry::scanner::{ScannerRegistry, parse_scanner_file};
+use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
 use gage_runtime2::Output;
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanOutcome};
@@ -37,6 +37,10 @@ enum Scan2Command {
 
 #[derive(Args)]
 pub struct Scan2RunArgs {
+    /// Scanner to run (repeatable)
+    #[arg(short, long = "scanner", value_name = "NAME")]
+    scanners: Vec<String>,
+
     /// Scanner file to run (repeatable)
     #[arg(short, long = "file", value_name = "PATH")]
     files: Vec<PathBuf>,
@@ -151,8 +155,8 @@ async fn run_scan(args: Scan2RunArgs) {
         crate::cmd_scan::list_scanners(&ScannerRegistry::load());
         return;
     }
-    if args.files.is_empty() {
-        eprintln!("gage scan2: at least one --file is required");
+    if args.scanners.is_empty() && args.files.is_empty() {
+        eprintln!("gage scan2: at least one --scanner or --file is required");
         std::process::exit(2);
     }
 
@@ -160,11 +164,38 @@ async fn run_scan(args: Scan2RunArgs) {
     // full stop before any work.
     let store = open_store("gage scan2");
 
-    let mut defs = Vec::new();
+    // Named scanners come from the registry; `-f` files are parsed on
+    // this invocation. Named scanners run first, then files.
+    let registry = ScannerRegistry::load();
     let mut errors = 0;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut defs: Vec<&ScannerDef> = Vec::new();
+    for name in &args.scanners {
+        if name.contains("#{") {
+            eprintln!("gage scan2: scanner params are not supported: {name}");
+            errors += 1;
+            continue;
+        }
+        if seen.contains(&name.as_str()) {
+            eprintln!("gage scan2: Scanner '{name}' specified more than once");
+            errors += 1;
+            continue;
+        }
+        seen.push(name);
+        // Library scanners are not selectable: same error as an
+        // unknown name
+        match registry.get_def(name) {
+            Some(def) if !def.library => defs.push(def),
+            _ => {
+                eprintln!("gage scan2: Unknown scanner: {name}");
+                errors += 1;
+            }
+        }
+    }
+    let mut file_defs = Vec::new();
     for path in &args.files {
         match parse_scanner_file(path) {
-            Ok(def) => defs.push(def),
+            Ok(def) => file_defs.push(def),
             Err(e) => {
                 eprintln!("gage scan2: {e}");
                 errors += 1;
@@ -174,11 +205,12 @@ async fn run_scan(args: Scan2RunArgs) {
     if errors > 0 {
         std::process::exit(1);
     }
+    defs.extend(file_defs.iter());
 
     // Every scanner compiles before any task runs, so a broken
     // scanner is a full stop.
     let mut scanners: Vec<CompiledScanner> = Vec::new();
-    for def in &defs {
+    for def in defs {
         match gage_scan2::compile(def) {
             Ok(s) => scanners.push(s),
             Err(e) => {
