@@ -34,7 +34,6 @@ use gage_registry::scanner::ScannerDef;
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{OUTPUT_TX, Output};
 use gage_scan::error::render_task_error;
-use gage_scan::runner::render_vm_error;
 use gage_store::{ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts, TaskStatus};
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
@@ -42,7 +41,7 @@ use rune::{Diagnostics, Source, Sources, Vm};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::staging::{ScannerPlan, Staging, State};
+use crate::staging::{ScannerPlan, Staging, State, TaskLogs};
 
 /// One item of run output, in the order it happened.
 #[derive(Debug, PartialEq, Eq)]
@@ -304,7 +303,8 @@ pub async fn scan(
             scanner: scanner.clone(),
             task: task.clone(),
         });
-        let outcome = run_task(compiled, task, cancel, &mut on_event).await;
+        let mut logs = staging.task_logs(scanner, task);
+        let outcome = run_task(compiled, task, cancel, &mut logs, &mut on_event).await?;
         let (status, error) = match outcome {
             TaskOutcome::Completed => (TaskStatus::Completed, None),
             TaskOutcome::Failed(message) => (TaskStatus::Failed, Some(message)),
@@ -321,8 +321,9 @@ pub async fn scan(
             &task_attrs(status, Some(task_started), Some(now_ms())),
         )?;
         if let Some(message) = &error {
-            staging.write_task_error(scanner, task, message)?;
+            logs.err(message)?;
         }
+        drop(logs);
         on_event(Event::TaskFinished {
             scanner: scanner.clone(),
             task: task.clone(),
@@ -385,13 +386,15 @@ enum TaskOutcome {
     Canceled,
 }
 
-/// Run one task on a fresh VM, forwarding its output while it runs.
+/// Run one task on a fresh VM, writing its output to `logs` and
+/// forwarding it to `on_event` as it happens.
 async fn run_task(
     scanner: &CompiledScanner,
     task: &str,
     cancel: &CancellationToken,
+    logs: &mut TaskLogs,
     on_event: &mut impl FnMut(Event),
-) -> TaskOutcome {
+) -> Result<TaskOutcome, ScanError> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let outcome = {
         let exec = OUTPUT_TX.scope(tx, execute(scanner, task));
@@ -402,7 +405,7 @@ async fn run_task(
                     Ok(()) => TaskOutcome::Completed,
                     Err(message) => TaskOutcome::Failed(message),
                 },
-                Some(output) = rx.recv() => on_event(Event::Output(output)),
+                Some(output) = rx.recv() => deliver(output, logs, on_event)?,
                 _ = cancel.cancelled() => break TaskOutcome::Canceled,
             }
         }
@@ -410,9 +413,27 @@ async fn run_task(
     // The block dropped the execution and with it the sender; drain
     // what the task sent between the last poll and completion.
     while let Ok(output) = rx.try_recv() {
-        on_event(Event::Output(output));
+        deliver(output, logs, on_event)?;
     }
-    outcome
+    Ok(outcome)
+}
+
+/// Record one output in the task's logs, then hand it to the sink.
+fn deliver(
+    output: Output,
+    logs: &mut TaskLogs,
+    on_event: &mut impl FnMut(Event),
+) -> Result<(), ScanError> {
+    match &output {
+        Output::Print(s) => logs.out(s)?,
+        Output::Println(s) => {
+            logs.out(s)?;
+            logs.out("\n")?;
+        }
+        Output::Log { level, message } => logs.record(*level, message)?,
+    }
+    on_event(Event::Output(output));
+    Ok(())
 }
 
 async fn execute(scanner: &CompiledScanner, task: &str) -> Result<(), String> {
@@ -424,26 +445,70 @@ async fn execute(scanner: &CompiledScanner, task: &str) -> Result<(), String> {
         .complete()
         .await
         .map_err(|e| vm_error(&e, &scanner.sources))?;
-    task_result(value)
+    task_result(value, scanner, task)
 }
 
+/// Render a VM error as Rune does: the diagnostic with its source
+/// excerpt, then a `Backtrace:` section listing every frame.
 fn vm_error(e: &VmError, sources: &Sources) -> String {
-    render_vm_error(e, sources, &e.to_string())
+    let mut buf = rune::termcolor::Buffer::no_color();
+    e.emit(&mut buf, sources).unwrap();
+    String::from_utf8(buf.into_inner()).unwrap()
 }
 
 /// Interpret a task's return value. A task returning unit or `Ok`
-/// succeeded; `Err(e)` fails with `e` rendered.
+/// succeeded; `Err(e)` fails with a diagnostic naming `e` and
+/// pointing at the task function.
 #[expect(
     clippy::disallowed_methods,
     reason = "takes the VM execution's return value; the runtime holds the only live handle"
 )]
-fn task_result(value: Value) -> Result<(), String> {
+fn task_result(value: Value, scanner: &CompiledScanner, task: &str) -> Result<(), String> {
     match rune::from_value::<Result<Value, Value>>(value) {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(err)) => Err(render_task_error(err)),
+        Ok(Err(err)) => Err(returned_error(&render_task_error(err), scanner, task)),
         // Not a Result: a task that returns unit or any other value
         Err(_) => Ok(()),
     }
+}
+
+/// The diagnostic for a task that returned `Err`: an `error:` line
+/// with the value, labelled at the task function's first instruction
+/// when the unit's debug info locates it.
+fn returned_error(value: &str, scanner: &CompiledScanner, task: &str) -> String {
+    use codespan_reporting::diagnostic::{Diagnostic, Label};
+    use codespan_reporting::term;
+
+    let message = format!("task returned Err: {value}");
+    let location = scanner.unit.debug_info().and_then(|info| {
+        let hash = rune::Hash::type_hash([task]);
+        let entry = info
+            .functions_rev
+            .iter()
+            .filter(|(_, h)| **h == hash)
+            .map(|(ip, _)| *ip)
+            .min()?;
+        // The entry instruction itself carries no debug entry; the
+        // first recorded instruction at or after it is the body
+        let ip = info.instructions.keys().filter(|ip| **ip >= entry).min()?;
+        let inst = info.instruction_at(*ip)?;
+        Some((inst.source_id, inst.span))
+    });
+    let mut diagnostic = Diagnostic::error().with_message(&message);
+    if let Some((source_id, span)) = location {
+        diagnostic = diagnostic.with_labels(vec![
+            Label::primary(source_id, span.range()).with_message(format!("in task `{task}`")),
+        ]);
+    }
+    let mut buf = rune::termcolor::Buffer::no_color();
+    term::emit_to_write_style(
+        &mut buf,
+        &term::Config::default(),
+        &*scanner.sources,
+        &diagnostic,
+    )
+    .unwrap();
+    String::from_utf8(buf.into_inner()).unwrap()
 }
 
 #[cfg(test)]
@@ -590,7 +655,7 @@ mod tests {
     }
 
     /// The scan record lands in the store with one task record per
-    /// task, the failed task's message in `error.txt`, and staging
+    /// task, the failed task's message in `logs/err`, and staging
     /// removed once applied.
     #[tokio::test]
     async fn scan_records_every_task_and_removes_staging() {
@@ -605,6 +670,13 @@ mod tests {
         )
         .await;
         let outcome = outcome.unwrap();
+        let failure = match &events[1] {
+            Event::TaskFinished {
+                error: Some(message),
+                ..
+            } => message.clone(),
+            other => panic!("expected the failure of task a, got {other:?}"),
+        };
         assert_eq!(
             events,
             [
@@ -616,7 +688,7 @@ mod tests {
                     scanner: "fail".into(),
                     task: "a".into(),
                     status: TaskStatus::Failed,
-                    error: Some("boom".into()),
+                    error: Some(failure.clone()),
                 },
                 Event::TaskStarted {
                     scanner: "fail".into(),
@@ -630,6 +702,14 @@ mod tests {
                     error: None,
                 },
             ]
+        );
+        assert!(
+            failure.starts_with("error: task returned Err: boom\n"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains("Err(\"boom\")") && failure.contains("in task `a`"),
+            "the diagnostic points into the task function:\n{failure}"
         );
         assert_eq!(
             outcome.attrs.tasks,
@@ -666,15 +746,86 @@ mod tests {
         };
         assert_eq!(a.task, "a");
         assert_eq!(a.attrs.status, TaskStatus::Failed);
-        assert_eq!(a.error.as_deref(), Some("boom"));
+        assert_eq!(a.logs, ["err"]);
+        assert_eq!(
+            ScanStore::from(&store)
+                .task_log(&outcome.commit_sha, "fail", "a", "err")
+                .unwrap(),
+            Some(failure.into_bytes()),
+            "err holds the full diagnostic"
+        );
         assert!(a.attrs.started.is_some() && a.attrs.stopped.is_some());
         assert_eq!(b.task, "b");
         assert_eq!(b.attrs.status, TaskStatus::Completed);
-        assert_eq!(b.error, None);
+        assert_eq!(b.logs, ["out"]);
 
         assert!(
             !root.join(&outcome.id).exists(),
             "staging is removed after apply"
+        );
+    }
+
+    /// Print output and log records land in the task's `logs/`, and a
+    /// task that produced neither has no logs.
+    #[tokio::test]
+    async fn task_output_and_records_are_stored_under_logs() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            pub const SCANNER = #{
+                name: "logs",
+                description: "Logs",
+                tasks: #{ loud: #{}, quiet: #{} },
+            };
+
+            pub fn loud() {
+                print!("a");
+                println!("b");
+                log::info!("count {}", 3);
+                log::warn!("careful");
+            }
+
+            pub fn quiet() {}
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        let outcome = outcome.unwrap();
+        assert!(events.contains(&Event::Output(Output::Log {
+            level: gage_runtime2::Level::Warn,
+            message: "careful".into(),
+        })));
+        let scans = ScanStore::from(&store);
+        let record = scans.get(&outcome.id).unwrap();
+        assert_eq!(record.content.tasks[0].task, "loud");
+        assert_eq!(record.content.tasks[0].logs, ["out", "records"]);
+        assert_eq!(record.content.tasks[1].task, "quiet");
+        assert!(record.content.tasks[1].logs.is_empty());
+        assert_eq!(
+            scans
+                .task_log(&outcome.commit_sha, "logs", "loud", "out")
+                .unwrap(),
+            Some(b"ab\n".to_vec())
+        );
+        let records = scans
+            .task_log(&outcome.commit_sha, "logs", "loud", "records")
+            .unwrap()
+            .unwrap();
+        let records = String::from_utf8(records).unwrap();
+        let lines: Vec<&str> = records.lines().collect();
+        assert_eq!(lines.len(), 2, "{records}");
+        assert!(lines[0].ends_with("Z INFO count 3"), "{records}");
+        assert!(lines[1].ends_with("Z WARN careful"), "{records}");
+        assert_eq!(
+            scans
+                .task_log(&outcome.commit_sha, "logs", "quiet", "out")
+                .unwrap(),
+            None
         );
     }
 
@@ -772,7 +923,12 @@ mod tests {
         else {
             panic!("expected a failure, got {events:?}");
         };
+        assert!(message.starts_with("error: "), "{message}");
         assert!(message.contains("v[3]"), "{message}");
+        assert!(
+            message.contains("Backtrace:"),
+            "the VM error carries its backtrace:\n{message}"
+        );
     }
 
     /// A token cancelled before the run starts marks every task

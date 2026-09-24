@@ -1,0 +1,9 @@
+pub const SCANNER = #{
+    name: "errors",
+    description: "Error output",
+    tasks: #{main: #{}}
+};
+
+pub async fn main() {
+    panic!("Oops!");
+}

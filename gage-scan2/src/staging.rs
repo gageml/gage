@@ -13,18 +13,23 @@
 //! scan/attrs.json                        # written at the terminal state
 //! scan/scanners/<name>/sourcecode.d/<f>  # scanner source as run, copied at create
 //! scan/tasks/<scanner>/<task>/attrs.json # pending at create, rewritten on start and finish
-//! scan/tasks/<scanner>/<task>/error.txt  # failed tasks only
+//! scan/tasks/<scanner>/<task>/logs/out   # print output, appended as it happens
+//! scan/tasks/<scanner>/<task>/logs/err   # error output: the failure message
+//! scan/tasks/<scanner>/<task>/logs/records # log records, appended as they happen
 //! ```
 //!
-//! Every file is written whole through a temp file and a rename, so a
-//! crash never leaves a torn file. A directory left behind by a crash
-//! stays in `running` with a dead pid; recovery is not implemented
-//! yet.
+//! Every file except the logs is written whole through a temp file
+//! and a rename, so a crash never leaves a torn file. The logs are
+//! streams, appended through an open handle; a crash leaves a valid
+//! prefix. A directory left behind by a crash stays in `running` with
+//! a dead pid; recovery is not implemented yet.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use gage_core::datetime::{ms_to_iso8601, now_ms};
+use gage_runtime2::Level;
 use gage_runtime2::source::SourceFile;
 use gage_store::{ScanAttrs, TaskAttrs, TaskStatus};
 use serde::Serialize;
@@ -37,7 +42,10 @@ const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
 const ATTRS_FILE: &str = "attrs.json";
-const ERROR_FILE: &str = "error.txt";
+const LOGS_DIR: &str = "logs";
+const OUT_LOG: &str = "out";
+const ERR_LOG: &str = "err";
+const RECORDS_LOG: &str = "records";
 
 /// The staging root under Gage home.
 pub fn staging_root() -> PathBuf {
@@ -144,12 +152,15 @@ impl Staging {
         write_json(&dir.join(ATTRS_FILE), attrs)
     }
 
-    /// Write a failed task's `error.txt`.
-    pub fn write_task_error(&self, scanner: &str, task: &str, message: &str) -> io::Result<()> {
-        write_atomic(
-            &self.task_dir(scanner, task).join(ERROR_FILE),
-            message.as_bytes(),
-        )
+    /// The log appenders of a task. Each log is created on its first
+    /// write, so a task that produced nothing has no `logs/` entry.
+    pub fn task_logs(&self, scanner: &str, task: &str) -> TaskLogs {
+        TaskLogs {
+            dir: self.task_dir(scanner, task).join(LOGS_DIR),
+            out: None,
+            err: None,
+            records: None,
+        }
     }
 
     /// Write the scan's `attrs.json`.
@@ -170,6 +181,63 @@ impl Staging {
     fn task_dir(&self, scanner: &str, task: &str) -> PathBuf {
         self.scan_dir().join(TASKS_DIR).join(scanner).join(task)
     }
+}
+
+/// Appenders for one task's `logs/out` and `logs/records`.
+pub struct TaskLogs {
+    dir: PathBuf,
+    out: Option<File>,
+    err: Option<File>,
+    records: Option<File>,
+}
+
+impl TaskLogs {
+    /// Append task output verbatim.
+    pub fn out(&mut self, s: &str) -> io::Result<()> {
+        let dir = &self.dir;
+        let file = match &mut self.out {
+            Some(file) => file,
+            None => self.out.insert(open_append(dir, OUT_LOG)?),
+        };
+        file.write_all(s.as_bytes())
+    }
+
+    /// Append error output verbatim, newline-terminated.
+    pub fn err(&mut self, s: &str) -> io::Result<()> {
+        let dir = &self.dir;
+        let file = match &mut self.err {
+            Some(file) => file,
+            None => self.err.insert(open_append(dir, ERR_LOG)?),
+        };
+        file.write_all(s.as_bytes())?;
+        if !s.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+        Ok(())
+    }
+
+    /// Append one record: `<ISO 8601 ms UTC> <LEVEL> <message>`.
+    pub fn record(&mut self, level: Level, message: &str) -> io::Result<()> {
+        let dir = &self.dir;
+        let file = match &mut self.records {
+            Some(file) => file,
+            None => self.records.insert(open_append(dir, RECORDS_LOG)?),
+        };
+        let line = format!(
+            "{} {} {message}\n",
+            ms_to_iso8601(now_ms()),
+            level.as_str().to_uppercase()
+        );
+        file.write_all(line.as_bytes())
+    }
+}
+
+fn open_append(dir: &Path, name: &str) -> io::Result<File> {
+    fs::create_dir_all(dir)?;
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(name))
 }
 
 /// Write `value` as one-line JSON with a trailing newline, the
@@ -240,7 +308,24 @@ mod tests {
                 },
             )
             .unwrap();
-        staging.write_task_error("hello", "fail", "boom\n").unwrap();
+        staging.task_logs("hello", "fail").err("boom").unwrap();
+        let mut logs = staging.task_logs("hello", "greet");
+        logs.out("hello, ").unwrap();
+        logs.out("world\n").unwrap();
+        logs.record(Level::Info, "started").unwrap();
+        drop(logs);
+        assert_eq!(
+            fs::read_to_string(staging.scan_dir().join("tasks/hello/greet/logs/out")).unwrap(),
+            "hello, world\n"
+        );
+        let records =
+            fs::read_to_string(staging.scan_dir().join("tasks/hello/greet/logs/records")).unwrap();
+        assert!(records.ends_with("Z INFO started\n"), "{records}");
+        assert_eq!(
+            fs::read_to_string(staging.scan_dir().join("tasks/hello/fail/logs/err")).unwrap(),
+            "boom\n",
+            "err is newline-terminated"
+        );
         let attrs = ScanAttrs {
             runtime: "gage test".into(),
             started: 1,
@@ -261,9 +346,10 @@ mod tests {
         assert_eq!(content.tasks.len(), 2);
         assert_eq!(content.tasks[0].task, "fail");
         assert_eq!(content.tasks[0].attrs.status, TaskStatus::Failed);
-        assert_eq!(content.tasks[0].error.as_deref(), Some("boom\n"));
+        assert_eq!(content.tasks[0].logs, ["err"]);
         assert_eq!(content.tasks[1].task, "greet");
         assert_eq!(content.tasks[1].attrs.status, TaskStatus::Pending);
+        assert_eq!(content.tasks[1].logs, ["out", "records"]);
         assert_eq!(
             content.scanners,
             BTreeMap::from([("hello".to_string(), vec!["hello.rn".to_string()])])

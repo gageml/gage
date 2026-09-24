@@ -2745,6 +2745,7 @@ dependencies = [
 name = "gage-scan2"
 version = "0.2.0-dev"
 dependencies = [
+ "codespan-reporting",
  "gage-core",
  "gage-registry",
  "gage-runtime2",

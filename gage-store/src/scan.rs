@@ -1,7 +1,8 @@
 //! Scan objects: `gage::scan 1`, reached through [`ScanStore`].
 //!
 //! Content is `attrs.json`; under `tasks/<scanner>/<task>/`, each
-//! task's `attrs.json` and, for a failed task, `error.txt`; and under
+//! task's `attrs.json` and, under `logs/`, the fixed blobs `out`,
+//! `err`, and `records`; and under
 //! `scanners/<name>/sourcecode.d/`, the scanner's source files as run,
 //! opaque to the store. The layout is the same in a scan's staging
 //! directory and in the store, so one decoder serves both through
@@ -31,7 +32,9 @@ const TASKS_DIR: &str = "tasks";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const ATTRS_FILE: &str = "attrs.json";
-const ERROR_FILE: &str = "error.txt";
+const LOGS_DIR: &str = "logs";
+/// The blobs `logs/` may hold
+pub const LOG_NAMES: [&str; 3] = ["out", "err", "records"];
 
 /// Scan operations over an opened store.
 pub struct ScanStore<'a> {
@@ -121,8 +124,9 @@ pub struct ScanTask {
     pub scanner: String,
     pub task: String,
     pub attrs: TaskAttrs,
-    /// The failure message from `error.txt`, when present
-    pub error: Option<String>,
+    /// The names present under `logs/`, sorted; each one of
+    /// [`LOG_NAMES`]. A failed task's message is `err`.
+    pub logs: Vec<String>,
 }
 
 /// A scan's content, decoded from either location.
@@ -166,7 +170,7 @@ impl ScanStore<'_> {
     /// Write a scan from its staging `scan/` directory under the given
     /// id. The directory is validated first: every task status must be
     /// terminal, and a task directory may hold only `attrs.json` and
-    /// `error.txt`. Returns the commit SHA.
+    /// `logs/`. Returns the commit SHA.
     pub fn create(&self, id: &str, scan_dir: &Path) -> Result<String, StoreError> {
         let content = ScanContent::from_files(&DirFiles::new(scan_dir))?;
         for task in &content.tasks {
@@ -226,6 +230,22 @@ impl ScanStore<'_> {
             store: self.store,
             query: ObjectQuery::new(OBJECT_TYPE),
         }
+    }
+
+    /// The bytes of one log of a task at `commit_sha`: `name` is one
+    /// of [`LOG_NAMES`]. `None` when the task did not produce it.
+    pub fn task_log(
+        &self,
+        commit_sha: &str,
+        scanner: &str,
+        task: &str,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        CommitFiles {
+            store: self.store,
+            commit: commit_sha,
+        }
+        .read(&format!("{TASKS_DIR}/{scanner}/{task}/{LOGS_DIR}/{name}"))
     }
 
     /// The bytes of one source file of a scanner at `commit_sha`, by
@@ -311,14 +331,12 @@ impl ScanContent {
             for task in files.list_dirs(&scanner_path)? {
                 let task_path = format!("{scanner_path}/{task}");
                 let attrs = read_json(files, &format!("{task_path}/{ATTRS_FILE}"))?;
-                let error = files
-                    .read(&format!("{task_path}/{ERROR_FILE}"))?
-                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                let logs = files.list_files(&format!("{task_path}/{LOGS_DIR}"))?;
                 tasks.push(ScanTask {
                     scanner: scanner.clone(),
                     task,
                     attrs,
-                    error,
+                    logs,
                 });
             }
         }
@@ -401,18 +419,63 @@ fn import_tasks_tree(store_path: &Path, tasks_dir: &Path) -> Result<Option<Strin
     Ok(Some(tree_of_trees(store_path, &scanner_trees)?))
 }
 
-/// Build one task's tree. Only `attrs.json` and `error.txt` are
-/// accepted; anything else in the directory is an error.
+/// Build one task's tree. Only `attrs.json` and a `logs/` directory
+/// holding [`LOG_NAMES`] are accepted; anything else is an error.
 fn import_task_tree(store_path: &Path, task_dir: &Path) -> Result<String, StoreError> {
     let mut blobs: BTreeMap<String, String> = BTreeMap::new();
+    let mut logs_sha: Option<String> = None;
     for entry in fs::read_dir(task_dir).map_err(|e| read_error(task_dir, e))? {
         let entry = entry.map_err(|e| read_error(task_dir, e))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        if !path.is_file() || !(name == ATTRS_FILE || name == ERROR_FILE) {
+        let unexpected = || StoreError::InvalidPath {
+            path: path.display().to_string(),
+            reason: "unexpected entry in a task directory".to_string(),
+        };
+        if path.is_dir() && name == LOGS_DIR {
+            logs_sha = Some(import_fixed_blobs(store_path, &path, &LOG_NAMES)?);
+            continue;
+        }
+        if !path.is_file() || name != ATTRS_FILE {
+            return Err(unexpected());
+        }
+        let bytes = fs::read(&path).map_err(|e| read_error(&path, e))?;
+        blobs.insert(name, write_blob(store_path, &bytes)?);
+    }
+    let mut entries: Vec<TreeInput<'_>> = blobs
+        .iter()
+        .map(|(name, sha)| TreeInput {
+            mode: "100644",
+            sha,
+            name,
+        })
+        .collect();
+    if let Some(sha) = &logs_sha {
+        entries.push(TreeInput {
+            mode: "040000",
+            sha,
+            name: LOGS_DIR,
+        });
+    }
+    mktree(store_path, &entries)
+}
+
+/// Build a tree of blobs from a directory whose files must each be
+/// one of `allowed`.
+fn import_fixed_blobs(
+    store_path: &Path,
+    dir: &Path,
+    allowed: &[&str],
+) -> Result<String, StoreError> {
+    let mut blobs: BTreeMap<String, String> = BTreeMap::new();
+    for entry in fs::read_dir(dir).map_err(|e| read_error(dir, e))? {
+        let entry = entry.map_err(|e| read_error(dir, e))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if !path.is_file() || !allowed.contains(&name.as_str()) {
             return Err(StoreError::InvalidPath {
                 path: path.display().to_string(),
-                reason: "unexpected entry in a task directory".to_string(),
+                reason: format!("expected one of {}", allowed.join(", ")),
             });
         }
         let bytes = fs::read(&path).map_err(|e| read_error(&path, e))?;
@@ -707,7 +770,12 @@ mod tests {
             &scan.join("tasks/hello/fail/attrs.json"),
             r#"{"status":"failed","started":1200,"stopped":1500}"#,
         );
-        write(&scan.join("tasks/hello/fail/error.txt"), "boom\nline 2\n");
+        write(&scan.join("tasks/hello/fail/logs/err"), "boom\nline 2\n");
+        write(&scan.join("tasks/hello/greet/logs/out"), "hello, world\n");
+        write(
+            &scan.join("tasks/hello/greet/logs/records"),
+            "2026-09-24T15:04:05.123Z INFO started\n",
+        );
         scan
     }
 
@@ -741,9 +809,13 @@ mod tests {
                 "tasks/hello",
                 "tasks/hello/fail",
                 "tasks/hello/fail/attrs.json",
-                "tasks/hello/fail/error.txt",
+                "tasks/hello/fail/logs",
+                "tasks/hello/fail/logs/err",
                 "tasks/hello/greet",
                 "tasks/hello/greet/attrs.json",
+                "tasks/hello/greet/logs",
+                "tasks/hello/greet/logs/out",
+                "tasks/hello/greet/logs/records",
                 "type",
             ]
         );
@@ -794,10 +866,22 @@ mod tests {
             ("hello", "fail")
         );
         assert_eq!(failed.attrs.status, TaskStatus::Failed);
-        assert_eq!(failed.error.as_deref(), Some("boom\nline 2\n"));
+        assert_eq!(failed.logs, ["err"]);
+        assert_eq!(
+            scans.task_log(&commit, "hello", "fail", "err").unwrap(),
+            Some(b"boom\nline 2\n".to_vec())
+        );
         let greet = &record.content.tasks[1];
         assert_eq!(greet.task, "greet");
-        assert_eq!(greet.error, None);
+        assert_eq!(greet.logs, ["out", "records"]);
+        assert_eq!(
+            scans.task_log(&commit, "hello", "greet", "out").unwrap(),
+            Some(b"hello, world\n".to_vec())
+        );
+        assert_eq!(
+            scans.task_log(&commit, "hello", "greet", "err").unwrap(),
+            None
+        );
         assert_eq!(scans.at_commit(&commit).unwrap(), record);
     }
 
@@ -882,6 +966,18 @@ mod tests {
         write(&scan_dir.join("scanners/hello/notes.txt"), "x");
         let err = ScanStore::from(&store)
             .create("SCAN5", &scan_dir)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InvalidPath { .. }), "{err}");
+    }
+
+    #[test]
+    fn create_rejects_an_unknown_log_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        write(&scan_dir.join("tasks/hello/greet/logs/trace"), "x");
+        let err = ScanStore::from(&store)
+            .create("SCAN6", &scan_dir)
             .unwrap_err();
         assert!(matches!(err, StoreError::InvalidPath { .. }), "{err}");
     }

@@ -247,6 +247,8 @@ async fn run_scan(args: Scan2RunArgs) {
     let result = gage_scan2::scan(&store, &config, &scanners, &cancel, |event| match event {
         Event::Output(Output::Print(s)) => print!("{s}"),
         Event::Output(Output::Println(s)) => println!("{s}"),
+        // Records go to the task's logs only, as with `gage scan`
+        Event::Output(Output::Log { .. }) => {}
         Event::TaskStarted { .. } => {}
         Event::TaskFinished {
             scanner,
@@ -255,7 +257,8 @@ async fn run_scan(args: Scan2RunArgs) {
             error,
         } => {
             let message = error.unwrap_or_default();
-            eprintln!("gage scan2: {scanner}:{task}: {message}");
+            eprintln!("gage scan2: {scanner}:{task} failed");
+            eprint!("{message}");
         }
         Event::TaskFinished { .. } => {}
     })
