@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use gage_core::uuid::derive_id;
 use gage_session::{ContentSink, ContentSource, Driver, NativeSession, SessionAttrs};
@@ -59,6 +60,15 @@ pub struct SessionAttrsRecord {
     pub native_source: String,
     /// The id the harness gave the session, as the driver reported it.
     pub native_id: String,
+    /// UNIX time millis: when the native artifact was last touched at
+    /// its source, as the driver reported it. Zero on objects written
+    /// before the field existed.
+    #[serde(default)]
+    pub native_mtime: i64,
+    /// The size in bytes of the native artifact, as the driver
+    /// reported it. Zero on objects written before the field existed.
+    #[serde(default)]
+    pub native_size: u64,
     /// Harness family, e.g. `"claude"`. A category with no version.
     pub session_type: String,
     /// The driver's byte-layout string, as returned by
@@ -69,9 +79,9 @@ pub struct SessionAttrsRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// The driver's projection of the session, written at add time.
-    /// Absent when the driver reported nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<SummaryAttrs>,
+    /// Default on objects written before every field existed.
+    #[serde(default)]
+    pub summary: SummaryAttrs,
 }
 
 /// `attrs.summary`: the driver's session-level attributes at write
@@ -85,18 +95,26 @@ pub struct SummaryAttrs {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
+    /// The session has no entry with content. False on objects
+    /// written before the field existed.
+    #[serde(default)]
+    pub is_empty: bool,
 }
 
-fn collect_summary(attrs: &dyn SessionAttrs) -> Option<SummaryAttrs> {
-    let summary = SummaryAttrs {
+fn collect_summary(attrs: &dyn SessionAttrs) -> SummaryAttrs {
+    SummaryAttrs {
         title: attrs.title().map(String::from),
         model: attrs.model().map(String::from),
         message_count: attrs.message_count(),
-        size: attrs.size(),
-    };
-    (summary != SummaryAttrs::default()).then_some(summary)
+        is_empty: attrs.is_empty(),
+    }
+}
+
+/// UNIX time millis of `t`; a time before the epoch is zero.
+fn system_time_ms(t: SystemTime) -> i64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Outcome of writing one session to the store.
@@ -143,9 +161,6 @@ pub struct SessionRecord {
     pub attrs: SessionAttrsRecord,
     pub driver_name: String,
     pub driver_version: String,
-    /// The driver's size of the session's own files, from
-    /// `attrs.summary`. `None` when the driver did not report one.
-    pub size: Option<u64>,
 }
 
 /// Derive the Gage object id of a session from its driver name and
@@ -189,8 +204,10 @@ impl<'a> SessionStore<'a> {
         session: &mut dyn NativeSession,
     ) -> Result<SessionAddOutcome, StoreError> {
         let path = self.store.path();
-        let native_id = session.native_id().to_string();
+        let native_id = session.id().to_string();
         let native_source = session.source().to_string();
+        let native_mtime = system_time_ms(session.attrs().native_mtime());
+        let native_size = session.attrs().native_size();
         let project = session.attrs().project_name().map(String::from);
         let id = session_object_id(driver.name(), &native_id);
         let session_type = session.session_type().to_string();
@@ -214,6 +231,8 @@ impl<'a> SessionStore<'a> {
             driver: format!("{} {}", driver.name(), driver.version()),
             native_source,
             native_id,
+            native_mtime,
+            native_size,
             session_type,
             content_format,
             project,
@@ -404,7 +423,6 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
         Some((n, v)) => (n.to_string(), v.to_string()),
         None => (attrs.driver.clone(), String::new()),
     };
-    let size = attrs.summary.as_ref().and_then(|s| s.size);
     Ok(SessionRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
@@ -413,7 +431,6 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
         attrs,
         driver_name,
         driver_version,
-        size,
     })
 }
 
@@ -646,14 +663,14 @@ pub(crate) mod tests {
     }
 
     impl SessionAttrs for FakeAttrs {
-        fn mtime(&self) -> Option<SystemTime> {
-            None
+        fn native_mtime(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
         }
-        fn size(&self) -> Option<u64> {
-            Some(self.size)
+        fn native_size(&self) -> u64 {
+            self.size
         }
-        fn is_empty(&self) -> Option<bool> {
-            None
+        fn is_empty(&self) -> bool {
+            false
         }
         fn project_name(&self) -> Option<&str> {
             Some("proj")
@@ -670,7 +687,7 @@ pub(crate) mod tests {
     }
 
     impl NativeSession for FakeSession {
-        fn native_id(&self) -> &str {
+        fn id(&self) -> &str {
             &self.id
         }
 
@@ -775,7 +792,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"native_source\":\"fake:s1\",\"project\":\"proj\",\"session_type\":\"fake\",\"summary\":{\"size\":4}}\n"
+            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"native_mtime\":0,\"native_size\":4,\"native_source\":\"fake:s1\",\"project\":\"proj\",\"session_type\":\"fake\",\"summary\":{\"is_empty\":false}}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
@@ -788,8 +805,9 @@ pub(crate) mod tests {
         assert_eq!(record.attrs.native_id, "s1");
         assert_eq!(record.attrs.native_source, "fake:s1");
         assert_eq!(record.attrs.project.as_deref(), Some("proj"));
-        assert_eq!(record.attrs.summary.as_ref().unwrap().size, Some(4));
-        assert_eq!(record.size, Some(4));
+        assert_eq!(record.attrs.native_size, 4);
+        assert_eq!(record.attrs.native_mtime, 0);
+        assert!(!record.attrs.summary.is_empty);
     }
 
     #[test]

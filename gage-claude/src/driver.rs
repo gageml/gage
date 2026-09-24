@@ -482,7 +482,7 @@ impl ClaudeNativeSession {
 }
 
 impl NativeSession for ClaudeNativeSession {
-    fn native_id(&self) -> &str {
+    fn id(&self) -> &str {
         &self.native_id
     }
 
@@ -511,16 +511,16 @@ struct ClaudeSessionAttrs {
 }
 
 impl SessionAttrs for ClaudeSessionAttrs {
-    fn mtime(&self) -> Option<SystemTime> {
-        Some(self.mtime)
+    fn native_mtime(&self) -> SystemTime {
+        self.mtime
     }
 
-    fn size(&self) -> Option<u64> {
-        Some(self.size)
+    fn native_size(&self) -> u64 {
+        self.size
     }
 
-    fn is_empty(&self) -> Option<bool> {
-        Some(self.summary.is_empty)
+    fn is_empty(&self) -> bool {
+        self.summary.is_empty
     }
 
     fn project_name(&self) -> Option<&str> {

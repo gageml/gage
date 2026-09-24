@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 use gage_claude::project::shorten_home_path;
-use gage_store::{EntryKind, InitOutcome, Store, StoreStatus, TreeEntry};
+use gage_store::{EntryKind, InitOutcome, Store, StoreError, StoreStatus, TreeEntry};
 use tabled::{
     Table,
     settings::{
@@ -135,6 +135,17 @@ fn init() {
 }
 
 fn view(store: Store, args: ViewArgs) {
+    // A prefix that names nothing is an error before the terminal is
+    // taken over; an ambiguous one opens the view on its first match
+    if let Some(prefix) = &args.object {
+        match store.resolve_id(prefix) {
+            Ok(_) | Err(StoreError::AmbiguousId(..)) => {}
+            Err(e) => {
+                eprintln!("gage store view: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Err(e) = gage_tui::store_view::run(store, args.object.as_deref()) {
         eprintln!("gage store view: {e}");
         std::process::exit(1);

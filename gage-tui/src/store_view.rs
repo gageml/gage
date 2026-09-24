@@ -1227,14 +1227,14 @@ mod tests {
     struct FakeAttrs;
 
     impl gage_session::SessionAttrs for FakeAttrs {
-        fn mtime(&self) -> Option<std::time::SystemTime> {
-            None
+        fn native_mtime(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
         }
-        fn size(&self) -> Option<u64> {
-            Some(3)
+        fn native_size(&self) -> u64 {
+            3
         }
-        fn is_empty(&self) -> Option<bool> {
-            None
+        fn is_empty(&self) -> bool {
+            false
         }
         fn project_name(&self) -> Option<&str> {
             None
@@ -1251,7 +1251,7 @@ mod tests {
     }
 
     impl gage_session::NativeSession for FakeSession {
-        fn native_id(&self) -> &str {
+        fn id(&self) -> &str {
             "s1"
         }
         fn session_type(&self) -> &str {

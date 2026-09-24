@@ -112,7 +112,8 @@ pub struct DriverTables {
 }
 
 pub trait NativeSession {
-    fn native_id(&self) -> &str;
+    /// The id the harness gave the session
+    fn id(&self) -> &str;
     fn session_type(&self) -> &str;
     /// The Gage URL this session was read from, under one of the
     /// driver's schemes. The driver spells it and reads it back; Gage
@@ -132,12 +133,16 @@ pub trait StoredSession {
 }
 
 /// The attributes of a native session. An implementation decides how
-/// and when it reads them; `None` means the harness has no such fact,
-/// never that the value was not computed.
+/// and when it reads them; for the optional ones, `None` means the
+/// harness has no such fact, never that the value was not computed.
 pub trait SessionAttrs {
-    fn mtime(&self) -> Option<SystemTime>;
-    fn size(&self) -> Option<u64>;
-    fn is_empty(&self) -> Option<bool>;
+    /// When the native artifact was last touched at its source: the
+    /// file mtime for a file, the closest equivalent otherwise
+    fn native_mtime(&self) -> SystemTime;
+    /// The size in bytes of the native artifact
+    fn native_size(&self) -> u64;
+    /// The session has no entry with content
+    fn is_empty(&self) -> bool;
     fn project_name(&self) -> Option<&str>;
     fn title(&self) -> Option<&str>;
     fn model(&self) -> Option<&str>;

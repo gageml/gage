@@ -135,14 +135,14 @@ struct SyntheticAttrs {
 }
 
 impl SessionAttrs for SyntheticAttrs {
-    fn mtime(&self) -> Option<SystemTime> {
-        None
+    fn native_mtime(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH
     }
-    fn size(&self) -> Option<u64> {
-        Some(self.size)
+    fn native_size(&self) -> u64 {
+        self.size
     }
-    fn is_empty(&self) -> Option<bool> {
-        None
+    fn is_empty(&self) -> bool {
+        false
     }
     fn project_name(&self) -> Option<&str> {
         None
@@ -176,7 +176,7 @@ impl SyntheticSession {
 }
 
 impl NativeSession for SyntheticSession {
-    fn native_id(&self) -> &str {
+    fn id(&self) -> &str {
         &self.id
     }
 

@@ -244,10 +244,6 @@ async fn list_stored(args: SessionListArgs) {
         eprintln!("gage session list: --project does not apply to stored sessions");
         std::process::exit(1);
     }
-    if args.empty {
-        eprintln!("gage session list: --empty does not apply to stored sessions");
-        std::process::exit(1);
-    }
     let store = match Store::open(&gage_store::store_path()) {
         Ok(store) => store,
         Err(e) => {
@@ -279,10 +275,6 @@ async fn list_stored(args: SessionListArgs) {
 fn list_dataset(args: SessionListArgs) {
     if args.project.is_some() {
         eprintln!("gage session list: --project does not apply to stored sessions");
-        std::process::exit(1);
-    }
-    if args.empty {
-        eprintln!("gage session list: --empty does not apply to stored sessions");
         std::process::exit(1);
     }
     let prefix = args
@@ -324,6 +316,7 @@ fn list_dataset(args: SessionListArgs) {
             Some(cutoff) => r.modified_ms.is_some_and(|ms| ms >= cutoff),
             None => true,
         })
+        .filter(|r| !args.empty || r.attrs.summary.is_empty)
         .collect();
     let total = records.len();
     if total == 0 {
@@ -348,16 +341,16 @@ fn list_dataset(args: SessionListArgs) {
         .take(show)
         .map(|r| {
             let prefix_len = highlighter.unique_prefix_len(&r.id);
-            let summary = r.attrs.summary.clone().unwrap_or_default();
+            let summary = &r.attrs.summary;
             Row {
                 id: r.id.clone(),
                 id_display: short_uuid(&r.id).to_string(),
                 id_prefix: r.id.chars().take(prefix_len).collect(),
                 project: r.attrs.project.clone().unwrap_or_default(),
-                title: summary.title.unwrap_or_default(),
+                title: summary.title.clone().unwrap_or_default(),
                 session_type: r.attrs.session_type.clone(),
-                model: summary.model.unwrap_or_default(),
-                size: summary.size.map(|n| n as i64),
+                model: summary.model.clone().unwrap_or_default(),
+                size: Some(r.attrs.native_size as i64),
                 message_count: summary.message_count.map(|n| n as i64),
                 time_ms: r.created_ms,
                 driver_name: r.driver_name.clone(),
@@ -404,12 +397,26 @@ enum Listing {
     Stored,
 }
 
+impl Listing {
+    /// The column rows order on, newest first, and `--since` filters
+    /// on: the native mtime for a source, the store's `modified`
+    /// marker for the store
+    fn order_col(self) -> &'static str {
+        match self {
+            Listing::Native => "mtime",
+            Listing::Stored => "modified",
+        }
+    }
+}
+
 /// Run one SQL query for the shown rows and a second for the total
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
 /// report a total. Both bindings select the same column list; the
-/// native binding has no type and fills it with an empty literal, and
-/// its time column is `mtime` where the store's is `created`.
+/// native binding has no type and fills it with an empty literal; its
+/// time column is `mtime` where the store's is `created`, its size is
+/// `size` where the store's is `native_size`, and rows order and
+/// `--since` filter on `mtime` where the store's do on `modified`.
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
@@ -417,20 +424,31 @@ async fn query_sessions(
     from: &str,
     project_pred: Option<&str>,
 ) -> (Vec<Row>, usize) {
-    let where_clause = build_where_clause(args, project_pred);
+    let where_clause = build_where_clause(args, listing, project_pred);
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let (type_col, time_col, driver_col) = match listing {
-        Listing::Native => ("'' AS session_type", "mtime AS time", "'' AS driver"),
-        Listing::Stored => ("session_type", "created AS time", "driver"),
+    let (type_col, size_col, time_col, driver_col) = match listing {
+        Listing::Native => (
+            "'' AS session_type",
+            "size",
+            "mtime AS time",
+            "'' AS driver",
+        ),
+        Listing::Stored => (
+            "session_type",
+            "native_size AS size",
+            "created AS time",
+            "driver",
+        ),
     };
+    let order_col = listing.order_col();
     let sql = format!(
-        "SELECT id, id_display, id_prefix, project, title, {type_col}, model, size, \
+        "SELECT id, id_display, id_prefix, project, title, {type_col}, model, {size_col}, \
          message_count, {time_col}, {driver_col} \
          FROM {from}{where_clause} \
-         ORDER BY mtime DESC{limit_clause}",
+         ORDER BY {order_col} DESC{limit_clause}",
     );
     let batches = run_query(ctx, &sql).await;
     let rows = rows_from_batches(&batches);
@@ -445,7 +463,11 @@ async fn query_sessions(
     (rows, total)
 }
 
-fn build_where_clause(args: &SessionListArgs, project_pred: Option<&str>) -> String {
+fn build_where_clause(
+    args: &SessionListArgs,
+    listing: Listing,
+    project_pred: Option<&str>,
+) -> String {
     let mut clauses: Vec<String> = Vec::new();
     if let Some(pred) = project_pred {
         clauses.push(pred.to_string());
@@ -456,7 +478,10 @@ fn build_where_clause(args: &SessionListArgs, project_pred: Option<&str>) -> Str
             .unwrap_or_default()
             .as_millis()
             .saturating_sub(d.as_millis()) as i64;
-        clauses.push(format!("mtime >= to_timestamp_millis({cutoff_ms})"));
+        clauses.push(format!(
+            "{} >= to_timestamp_millis({cutoff_ms})",
+            listing.order_col()
+        ));
     }
     if args.empty {
         clauses.push("is_empty".to_string());

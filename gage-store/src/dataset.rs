@@ -58,8 +58,9 @@ pub struct DatasetSessionSummary {
     pub native_id: String,
     /// Harness family (`attrs.session_type`, e.g. `"claude"`).
     pub session_type: String,
-    /// The driver's size of the session's own files, when reported.
-    pub size: Option<u64>,
+    /// The size in bytes of the native artifact, as the driver
+    /// reported it
+    pub native_size: u64,
 }
 
 /// Outcome of adding one session to a dataset.
@@ -199,7 +200,7 @@ impl DatasetStore<'_> {
                 session_num: (idx + 1) as u32,
                 native_id: record.attrs.native_id,
                 session_type: record.attrs.session_type,
-                size: record.size,
+                native_size: record.attrs.native_size,
             })
             .collect())
     }
@@ -545,14 +546,14 @@ mod tests {
     }
 
     impl SessionAttrs for FakeAttrs {
-        fn mtime(&self) -> Option<SystemTime> {
-            None
+        fn native_mtime(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
         }
-        fn size(&self) -> Option<u64> {
-            Some(self.size)
+        fn native_size(&self) -> u64 {
+            self.size
         }
-        fn is_empty(&self) -> Option<bool> {
-            None
+        fn is_empty(&self) -> bool {
+            false
         }
         fn project_name(&self) -> Option<&str> {
             None
@@ -569,7 +570,7 @@ mod tests {
     }
 
     impl NativeSession for FakeSession {
-        fn native_id(&self) -> &str {
+        fn id(&self) -> &str {
             &self.id
         }
 
@@ -858,7 +859,7 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].session_num, 1);
         assert_eq!(listed[0].native_id, "s1");
-        assert_eq!(listed[0].size, Some(7));
+        assert_eq!(listed[0].native_size, 7);
     }
 
     #[test]
@@ -912,7 +913,7 @@ mod tests {
         assert_ne!(rev_parse(&store, &dataset), tip);
         let listed = datasets.sessions_list(&dataset).unwrap();
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].size, Some(7));
+        assert_eq!(listed[0].native_size, 7);
     }
 
     #[test]
@@ -1074,7 +1075,7 @@ mod tests {
         let records = datasets.sessions(&dataset).unwrap();
         let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec![added[0].id.as_str(), added[1].id.as_str()]);
-        assert_eq!(records[0].size, Some(2));
+        assert_eq!(records[0].attrs.native_size, 2);
         assert!(records[0].created_ms.is_some());
         assert_eq!(records[1].attrs.native_id, "s2");
         assert!(

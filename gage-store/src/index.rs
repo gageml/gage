@@ -605,14 +605,14 @@ mod tests {
     struct FakeAttrs;
 
     impl SessionAttrs for FakeAttrs {
-        fn mtime(&self) -> Option<SystemTime> {
-            None
+        fn native_mtime(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
         }
-        fn size(&self) -> Option<u64> {
-            Some(2)
+        fn native_size(&self) -> u64 {
+            2
         }
-        fn is_empty(&self) -> Option<bool> {
-            None
+        fn is_empty(&self) -> bool {
+            false
         }
         fn project_name(&self) -> Option<&str> {
             None
@@ -629,7 +629,7 @@ mod tests {
     }
 
     impl NativeSession for FakeSession {
-        fn native_id(&self) -> &str {
+        fn id(&self) -> &str {
             &self.id
         }
 
