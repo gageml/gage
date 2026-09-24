@@ -1,9 +1,9 @@
 pub const SCANNER = #{
     name: "hello-session",
     description: "Greeting",
-    tasks: #{main: #{}}
+    tasks: #{ main: #{} },
 };
 
 pub async fn main() {
-    println!("Hello, scan {}!", gage::scan().id);
+    println!("Hello, {}", gage::scan().id);
 }

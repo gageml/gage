@@ -1,0 +1,25 @@
+pub const SCANNER = #{
+    name: "thinking",
+    description: "Checks sessions for thinking blocks",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    for s in gage::scan().sessions().await {
+        if let Some(msg) = s
+            .messages()
+            .type(#{ "assistant": "thinking" })
+            .await?
+            .get(0)
+        {
+            if msg.text.is_empty() {
+                println!("{} has EMPTY thinking block", s.id);
+            } else {
+                println!("{} has thinking block", s.id);
+            }
+        } else {
+            println!("{} does not have thinking block", s.id);
+        }
+    }
+    Ok(())
+}

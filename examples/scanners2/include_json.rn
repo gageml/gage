@@ -1,12 +1,12 @@
 pub const SCANNER = #{
     name: "include-json",
     description: "Include JSON val from file.",
-    tasks: #{main: #{}}
+    tasks: #{ main: #{} },
 };
 
 const MSG = include_json!("msg.json");
 
 pub async fn main() {
-    let #{greeting, name} = MSG;
-    println(`${greeting}, ${name}!`);
+    let #{ greeting, name } = MSG;
+    println(`${greeting}, ${name}`);
 }

@@ -1,10 +1,10 @@
 pub const SCANNER = #{
     name: "log",
     description: "Logging",
-    tasks: #{ task: #{} },
+    tasks: #{ main: #{} },
 };
 
-pub async fn task() {
+pub async fn main() {
     println("See logs for details");
     log::debug!("Debug message");
     log::info!("Informational message");

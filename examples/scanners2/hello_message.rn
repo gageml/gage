@@ -6,15 +6,11 @@ pub const SCANNER = #{
 
 pub async fn main() {
     for s in gage::scan().sessions().await {
-        for m in s.messages().await {
-            println!(
-                "Hello, msg {}:{} ({})!",
-                s.id,
-                m.line,
-                msg_type(m),
-            );
+        for m in s.messages().await? {
+            println!("Hello, {}:{} {}", s.id, m.line, msg_type(m), );
         }
     }
+    Ok(())
 }
 
 fn msg_type(m) {
