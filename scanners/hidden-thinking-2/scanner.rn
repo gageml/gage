@@ -1,7 +1,7 @@
 use gage::{Ignore, write_note, write_issue, user, scan};
 
 pub const SCANNER = #{
-    name: "hidden-thinking",
+    name: "hidden-thinking-2",
     description: "v2 of hidden-thinking",
     tasks: #{ note: #{} },
 };

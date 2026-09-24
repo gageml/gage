@@ -1,0 +1,15 @@
+pub const SCANNER = #{
+    name: "session-note",
+    description: "Write session notes",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    for s in gage::scan().sessions().await {
+        let attrs = s.attrs().await;
+        gage::write_note("native_size", attrs.native_size)
+            .for_session(s.id)
+            .await?;
+    }
+    Ok(())
+}

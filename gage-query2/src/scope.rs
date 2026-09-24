@@ -14,7 +14,9 @@ use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::filter::IdFilter;
-use gage_store::{DatasetStore, Order, SessionRecord, SessionStore, Store, StoreError};
+use gage_store::{
+    DatasetStore, Order, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
+};
 
 use crate::rows::{RowCache, derive_batch};
 
@@ -25,6 +27,9 @@ pub struct StoredSessionRef {
     pub id: String,
     /// Commit of the version read; the row cache key
     pub commit: String,
+    /// The version's `created` and `modified` markers, UNIX millis
+    pub created_ms: i64,
+    pub modified_ms: i64,
     pub native_id: String,
     pub content_format: String,
     pub driver_name: String,
@@ -32,13 +37,34 @@ pub struct StoredSessionRef {
 
 impl StoredSessionRef {
     /// The reference to a session record at the commit it was read.
-    pub fn from_record(record: SessionRecord) -> Self {
-        StoredSessionRef {
+    /// A record without its markers is a malformed object.
+    pub fn from_record(record: SessionRecord) -> Result<Self> {
+        let marker = |name: &str, value: Option<i64>| {
+            value.ok_or_else(|| {
+                external(StoreError::Parse(format!(
+                    "session {}: missing {name} marker",
+                    record.id
+                )))
+            })
+        };
+        Ok(StoredSessionRef {
+            created_ms: marker("created", record.created_ms)?,
+            modified_ms: marker("modified", record.modified_ms)?,
             id: record.id,
             commit: record.commit_sha,
             native_id: record.attrs.native_id,
             content_format: record.attrs.content_format,
             driver_name: record.driver_name,
+        })
+    }
+
+    /// The version as the `session` table takes it.
+    fn as_version(&self) -> SelectedTip {
+        SelectedTip {
+            id: self.id.clone(),
+            sha: self.commit.clone(),
+            created_ms: Some(self.created_ms),
+            modified_ms: Some(self.modified_ms),
         }
     }
 }
@@ -88,15 +114,15 @@ impl SessionScope {
             members
                 .into_iter()
                 .map(StoredSessionRef::from_record)
-                .collect(),
+                .collect::<Result<_>>()?,
         ))
     }
 
-    /// The commits of a fixed scope, in order; `None` store-wide.
-    pub fn fixed_commits(&self) -> Option<Vec<String>> {
+    /// The versions of a fixed scope, in order; `None` store-wide.
+    pub fn fixed_versions(&self) -> Option<Vec<SelectedTip>> {
         self.fixed
             .as_ref()
-            .map(|refs| refs.iter().map(|r| r.commit.clone()).collect())
+            .map(|refs| refs.iter().map(StoredSessionRef::as_version).collect())
     }
 
     /// The scope's sessions, narrowed by the `session_id` predicates
@@ -123,7 +149,7 @@ impl SessionScope {
         tips.into_iter()
             .map(|tip| {
                 let record = sessions.at_commit(&tip.sha).map_err(external)?;
-                Ok(StoredSessionRef::from_record(record))
+                StoredSessionRef::from_record(record)
             })
             .collect()
     }

@@ -98,8 +98,11 @@ impl ContextBuilder {
         let scope = self
             .scope
             .unwrap_or_else(|| Arc::new(SessionScope::new(Arc::clone(&store))));
-        let session: Arc<dyn TableProvider> = match scope.fixed_commits() {
-            Some(commits) => Arc::new(StoredSessionTable::at_commits(Arc::clone(&store), commits)),
+        let session: Arc<dyn TableProvider> = match scope.fixed_versions() {
+            Some(versions) => Arc::new(StoredSessionTable::at_versions(
+                Arc::clone(&store),
+                versions,
+            )),
             None => Arc::new(StoredSessionTable::new(Arc::clone(&store))),
         };
         let base: Vec<(&str, Arc<dyn TableProvider>)> = vec![

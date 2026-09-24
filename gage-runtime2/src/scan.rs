@@ -11,13 +11,16 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use datafusion::arrow::array::{Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::array::{
+    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
+};
 use datafusion::prelude::SessionContext;
 use gage_query2::ContextBuilder;
 use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
 use gage_store::Store;
-use rune::runtime::{Protocol, VmError};
+use rune::alloc::fmt::TryWrite;
+use rune::runtime::{Formatter, Protocol, VmError};
 use rune::{Any, ContextError, Module};
 use tokio::sync::OnceCell;
 
@@ -120,12 +123,22 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
     m.ty::<Scan>()?;
     m.function_meta(Scan::sessions)?;
+    m.function_meta(Scan::debug)?;
     m.ty::<ScanDataset>()?;
+    m.function_meta(ScanDataset::debug)?;
     m.ty::<SessionsQuery>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
         fetch_sessions(q).await
     })?;
     m.ty::<Session>()?;
+    m.function_meta(Session::attrs)?;
+    m.function_meta(Session::debug)?;
+    m.ty::<SessionAttrsQuery>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionAttrsQuery| async move {
+        fetch_attrs(q).await
+    })?;
+    m.ty::<SessionAttrs>()?;
+    m.function_meta(SessionAttrs::debug)?;
     m.ty::<Sessions>()?;
     m.function_meta(Sessions::next__meta)?;
     m.function_meta(Sessions::nth__meta)?;
@@ -174,6 +187,17 @@ impl Scan {
     fn sessions(&self) -> SessionsQuery {
         SessionsQuery
     }
+
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "Scan {{ id: {:?}, dataset: ", self.id)?;
+        match &self.dataset {
+            Some(dataset) => write!(f, "Some(ScanDataset {{ id: {:?} }})", dataset.id)?,
+            None => write!(f, "None")?,
+        }
+        write!(f, " }}")?;
+        Ok(())
+    }
 }
 
 /// The dataset a scan links.
@@ -182,6 +206,14 @@ impl Scan {
 pub struct ScanDataset {
     #[rune(get)]
     pub id: String,
+}
+
+impl ScanDataset {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "ScanDataset {{ id: {:?} }}", self.id)?;
+        Ok(())
+    }
 }
 
 impl rune::alloc::prelude::TryClone for ScanDataset {
@@ -196,70 +228,222 @@ impl rune::alloc::prelude::TryClone for ScanDataset {
 pub struct SessionsQuery;
 
 /// The scan's sessions, read from the scoped `session` table, whose
-/// rows are the members in member order.
+/// rows are the members in member order. Only the id and the version
+/// are held per session; `attrs()` reads the rest on request.
 async fn fetch_sessions(_query: SessionsQuery) -> Result<Sessions, VmError> {
-    const SQL: &str =
-        "SELECT id, native_id, session_type, project, title, native_mtime FROM session";
+    const SQL: &str = "SELECT id, locator FROM session";
     let ctx = current()?;
-    let df_ctx = ctx.query_context().await?;
-    let fail = |e: datafusion::error::DataFusionError| VmError::panic(format!("{SQL}: {e}"));
-    let batches = df_ctx
-        .sql(SQL)
-        .await
-        .map_err(fail)?
-        .collect()
-        .await
-        .map_err(fail)?;
+    let batches = run(ctx.query_context().await?, SQL).await?;
     let mut items = Vec::new();
     for batch in &batches {
-        let col = |i: usize| {
-            batch
-                .column(i)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("session table column types are fixed")
-        };
-        let (ids, native_ids, types, projects, titles) = (col(0), col(1), col(2), col(3), col(4));
-        let mtimes = batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("native_mtime is a timestamp column");
+        let ids = string_column(batch, 0);
+        let locators = string_column(batch, 1);
         for i in 0..batch.num_rows() {
-            let optional = |arr: &StringArray| arr.is_valid(i).then(|| arr.value(i).to_string());
+            let locator = locators.value(i);
+            let commit = locator
+                .strip_prefix("git:")
+                .unwrap_or_else(|| panic!("session locator is git:<sha>, got {locator:?}"));
             items.push(Session {
                 id: ids.value(i).to_string(),
-                native_id: native_ids.value(i).to_string(),
-                session_type: types.value(i).to_string(),
-                project: optional(projects),
-                title: optional(titles),
-                mtime: DateTime::from_millis(mtimes.value(i)),
+                commit: commit.to_string(),
             });
         }
     }
     Ok(Sessions::new(items))
 }
 
-/// A stored session, as a scanner sees it.
+/// Run `sql` on the scan's query context.
+async fn run(
+    df_ctx: &SessionContext,
+    sql: &str,
+) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>, VmError> {
+    let fail = |e: datafusion::error::DataFusionError| VmError::panic(format!("{sql}: {e}"));
+    df_ctx
+        .sql(sql)
+        .await
+        .map_err(fail)?
+        .collect()
+        .await
+        .map_err(fail)
+}
+
+fn string_column(batch: &datafusion::arrow::record_batch::RecordBatch, i: usize) -> &StringArray {
+    batch
+        .column(i)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("session table column types are fixed")
+}
+
+/// A stored session, as a scanner sees it: its id and, held for the
+/// runtime, the version the scan reads. Everything else is read on
+/// request through [`Session::attrs`].
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct Session {
     /// The Gage object id
     #[rune(get)]
     pub id: String,
-    /// The id the harness gave the session
+    #[rune(skip)]
+    pub commit: String,
+}
+
+impl Session {
+    /// The session's attributes, read when awaited.
+    #[rune::function(instance)]
+    fn attrs(&self) -> SessionAttrsQuery {
+        SessionAttrsQuery {
+            id: self.id.clone(),
+        }
+    }
+
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "Session {{ id: {:?} }}", self.id)?;
+        Ok(())
+    }
+}
+
+/// The value of `session.attrs()`. Awaiting it reads the session's
+/// row of the `session` table.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct SessionAttrsQuery {
+    #[rune(skip)]
+    id: String,
+}
+
+/// A session's attributes: the user-facing row of the `session`
+/// table, read for one session.
+#[derive(Any, Clone)]
+#[rune(item = ::gage)]
+pub struct SessionAttrs {
     #[rune(get)]
-    pub native_id: String,
-    #[rune(get)]
-    pub session_type: String,
+    pub id: String,
     /// The project, as the driver names it
     #[rune(get)]
     pub project: Option<String>,
+    /// When the store wrote this version
     #[rune(get)]
-    pub title: Option<String>,
+    pub modified: DateTime,
+    /// When the store first added the session
+    #[rune(get)]
+    pub created: DateTime,
     /// When the native artifact was last touched at its source
     #[rune(get)]
-    pub mtime: DateTime,
+    pub native_mtime: DateTime,
+    #[rune(get)]
+    pub native_size: i64,
+    /// The id the harness gave the session
+    #[rune(get)]
+    pub native_id: String,
+    /// The Gage URL the session was read from
+    #[rune(get)]
+    pub native_source: String,
+    #[rune(get)]
+    pub session_type: String,
+    #[rune(get)]
+    pub driver: String,
+    #[rune(get)]
+    pub title: Option<String>,
+    #[rune(get)]
+    pub model: Option<String>,
+    #[rune(get)]
+    pub message_count: Option<i64>,
+    #[rune(get)]
+    pub is_empty: bool,
+}
+
+impl SessionAttrs {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(
+            f,
+            "SessionAttrs {{ id: {:?}, project: {:?}, modified: {}, created: {}, \
+             native_mtime: {}, native_size: {}, native_id: {:?}, native_source: {:?}, \
+             session_type: {:?}, driver: {:?}, title: {:?}, model: {:?}, \
+             message_count: {:?}, is_empty: {} }}",
+            self.id,
+            self.project,
+            self.modified.to_rfc3339(),
+            self.created.to_rfc3339(),
+            self.native_mtime.to_rfc3339(),
+            self.native_size,
+            self.native_id,
+            self.native_source,
+            self.session_type,
+            self.driver,
+            self.title,
+            self.model,
+            self.message_count,
+            self.is_empty
+        )?;
+        Ok(())
+    }
+}
+
+/// One session's row. A session that is not a member of the scan is
+/// a VM error: the value came from `sessions()`, so its absence is a
+/// runtime fault.
+async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
+    let sql = format!(
+        "SELECT id, project, modified, created, native_mtime, native_size, native_id, \
+                native_source, session_type, driver, title, model, message_count, is_empty \
+         FROM session WHERE id = '{}'",
+        q.id.replace('\'', "''")
+    );
+    let ctx = current()?;
+    let batches = run(ctx.query_context().await?, &sql).await?;
+    let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+        return Err(VmError::panic(format!(
+            "session {} is not a member of the scan",
+            q.id
+        )));
+    };
+    let string = |i: usize| string_column(batch, i);
+    let optional = |i: usize| {
+        let arr = string_column(batch, i);
+        arr.is_valid(0).then(|| arr.value(0).to_string())
+    };
+    let timestamp = |i: usize| {
+        DateTime::from_millis(
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("session table timestamp columns are fixed")
+                .value(0),
+        )
+    };
+    let int = |i: usize| {
+        batch
+            .column(i)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("session table integer columns are fixed")
+    };
+    let counts = int(12);
+    Ok(SessionAttrs {
+        id: string(0).value(0).to_string(),
+        project: optional(1),
+        modified: timestamp(2),
+        created: timestamp(3),
+        native_mtime: timestamp(4),
+        native_size: int(5).value(0),
+        native_id: string(6).value(0).to_string(),
+        native_source: string(7).value(0).to_string(),
+        session_type: string(8).value(0).to_string(),
+        driver: string(9).value(0).to_string(),
+        title: optional(10),
+        model: optional(11),
+        message_count: counts.is_valid(0).then(|| counts.value(0)),
+        is_empty: batch
+            .column(13)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .expect("is_empty is a boolean column")
+            .value(0),
+    })
 }
 
 /// A double-ended, exact-size iterator over a scan's sessions, in
@@ -353,11 +537,7 @@ mod tests {
     fn session(id: &str) -> Session {
         Session {
             id: id.to_string(),
-            native_id: format!("native-{id}"),
-            session_type: "fake".into(),
-            project: None,
-            title: Some(format!("Title {id}")),
-            mtime: DateTime::from_millis(1_000),
+            commit: format!("commit-{id}"),
         }
     }
 
@@ -380,26 +560,12 @@ mod tests {
     }
 
     #[test]
-    fn session_getters_expose_the_record() {
-        let mut vm = vm(r#"
-            pub fn check(s) {
-                (s.id, s.native_id, s.session_type, s.project, s.title, s.mtime.millis())
-            }
-            "#);
+    fn session_exposes_its_id_and_debug_form() {
+        let mut vm = vm("pub fn check(s) { (s.id, format!(\"{s:?}\")) }");
         let output = vm.call(["check"], (session("a"),)).unwrap();
-        let fields: (String, String, String, Option<String>, Option<String>, i64) =
-            rune::from_value(output).unwrap();
-        assert_eq!(
-            fields,
-            (
-                "a".into(),
-                "native-a".into(),
-                "fake".into(),
-                None,
-                Some("Title a".into()),
-                1_000
-            )
-        );
+        let (id, text): (String, String) = rune::from_value(output).unwrap();
+        assert_eq!(id, "a");
+        assert_eq!(text, "Session { id: \"a\" }");
     }
 
     /// `scan()` outside a task is a VM error, not a panic.

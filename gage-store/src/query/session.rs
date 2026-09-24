@@ -116,14 +116,16 @@ fn stored_session_schema() -> SchemaRef {
 
 /// The store-bound `session` table. The store is shared under a mutex
 /// because its git reader is single-threaded. Store-wide, the rows
-/// are every live session at its tip, served by the index; at fixed
-/// commits, the rows are those versions in the order given, which is
-/// how a dataset or scan scope lists its members.
+/// are every live session at its tip, served by the index; over fixed
+/// versions, the rows are those versions in the order given, which is
+/// how a dataset or scan scope lists its members. A fixed version
+/// carries its markers, so a row costs no read until an attrs column
+/// is projected.
 #[derive(Debug, Clone)]
 pub struct StoredSessionTable {
     store: Arc<Mutex<Store>>,
     schema: SchemaRef,
-    commits: Option<Vec<String>>,
+    versions: Option<Vec<SelectedTip>>,
 }
 
 impl StoredSessionTable {
@@ -131,17 +133,17 @@ impl StoredSessionTable {
         Self {
             store,
             schema: stored_session_schema(),
-            commits: None,
+            versions: None,
         }
     }
 
-    /// The table over exactly the session versions at `commits`, in
-    /// that order.
-    pub fn at_commits(store: Arc<Mutex<Store>>, commits: Vec<String>) -> Self {
+    /// The table over exactly `versions`, in that order. Each carries
+    /// the id, commit, and markers of one session version.
+    pub fn at_versions(store: Arc<Mutex<Store>>, versions: Vec<SelectedTip>) -> Self {
         Self {
             store,
             schema: stored_session_schema(),
-            commits: Some(commits),
+            versions: Some(versions),
         }
     }
 }
@@ -191,7 +193,7 @@ impl TableProvider for StoredSessionTable {
         };
         Ok(Arc::new(StoredSessionExec::new(
             Arc::clone(&self.store),
-            self.commits.clone(),
+            self.versions.clone(),
             self.schema.clone(),
             projected_schema,
             projection.cloned(),
@@ -242,7 +244,7 @@ fn timestamp_literal_ms(expr: &Expr) -> Option<i64> {
 #[derive(Clone)]
 struct StoredSessionExec {
     store: Arc<Mutex<Store>>,
-    commits: Option<Vec<String>>,
+    versions: Option<Vec<SelectedTip>>,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -263,7 +265,7 @@ impl fmt::Debug for StoredSessionExec {
 impl StoredSessionExec {
     fn new(
         store: Arc<Mutex<Store>>,
-        commits: Option<Vec<String>>,
+        versions: Option<Vec<SelectedTip>>,
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
@@ -271,7 +273,7 @@ impl StoredSessionExec {
         limit: Option<usize>,
     ) -> Self {
         // Only the index-served rows come newest modified first
-        let equivalence = if commits.is_none() {
+        let equivalence = if versions.is_none() {
             modified_desc_eq_properties(&projected_schema)
         } else {
             EquivalenceProperties::new(projected_schema.clone())
@@ -284,7 +286,7 @@ impl StoredSessionExec {
         );
         Self {
             store,
-            commits,
+            versions,
             full_schema,
             projected_schema,
             projection,
@@ -313,32 +315,22 @@ impl StoredSessionExec {
         let sessions = SessionStore::from(&*store);
 
         // The rows to filter: every live session newest modified first,
-        // or the given versions in the given order
-        let all: Vec<SelectedTip> = match &self.commits {
+        // or the given versions in the given order. Neither reads an
+        // object.
+        let all: Vec<SelectedTip> = match &self.versions {
             None => sessions
                 .query()
                 .order(Order::ModifiedDesc)
                 .tips()
                 .map_err(external)?,
-            Some(commits) => commits
-                .iter()
-                .map(|sha| {
-                    let header = store.read_header(sha).map_err(external)?;
-                    Ok(SelectedTip {
-                        id: header.id,
-                        sha: sha.clone(),
-                        created_ms: header.created_ms,
-                        modified_ms: header.modified_ms,
-                    })
-                })
-                .collect::<Result<_>>()?,
+            Some(versions) => versions.clone(),
         };
         // id_prefix is unique within the short-prefix set of sessions,
         // where a session prefix resolves first, plus the fixed rows
         let mut peers = store
             .short_prefix_ids(Some(SESSION_TYPE))
             .map_err(external)?;
-        if self.commits.is_some() {
+        if self.versions.is_some() {
             for tip in &all {
                 if !peers.contains(&tip.id) {
                     peers.push(tip.id.clone());
@@ -534,7 +526,7 @@ impl ExecutionPlan for StoredSessionExec {
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         Some(Arc::new(StoredSessionExec::new(
             Arc::clone(&self.store),
-            self.commits.clone(),
+            self.versions.clone(),
             self.full_schema.clone(),
             self.projected_schema.clone(),
             self.projection.clone(),
