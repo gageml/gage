@@ -15,6 +15,17 @@
 //! - Reuse as needed by calling into `gage-runtime`, `gage-scan`, and
 //!   `gage-query`. Do not copy code from them; a copy loses its
 //!   revision history at promotion.
+//! - The scanner-facing surface is the exception: `scan()` and the
+//!   values it returns (`Scan`, `Session`, `Sessions`) are what the
+//!   rethink changes. A session is a store object read through its
+//!   driver, not a file path, and the task context is the store and
+//!   the dataset commit, not the sqlite db. Legacy `scan()` reads
+//!   state this runtime never populates, so that surface is written
+//!   here rather than called, and its Rune boilerplate (iterator
+//!   protocols, getters) is not history worth preserving. Everything
+//!   below that surface, such as content reading, query tables, agent
+//!   calls, templates, validation, and the datetime, json, and stats
+//!   modules, reaches this crate by calling into the first generation.
 //!
 //! This crate owns the Rune-facing half of the facility: the context
 //! every scanner compiles against, the native modules installed in
@@ -24,10 +35,13 @@
 
 mod io;
 mod log;
+mod scan;
 pub mod source;
 
 use rune::{Context, ContextError};
 use tokio::sync::mpsc;
+
+pub use scan::{SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions};
 
 /// One item of task output, in the order it happened. The runtime
 /// emits these; the consumer owns rendering.
@@ -112,13 +126,15 @@ pub(crate) fn send(output: Output) {
 
 /// The Rune context every scanner compiles against: the standard
 /// library without its stdio, this crate's `print`/`println` and
-/// `log` macros, and the include macros from `gage-runtime`. Every
-/// file-reading facility installed here is enumerated by
-/// [`source::source_files`].
+/// `log` macros, `gage::scan` and the values it returns, and the
+/// include macros from `gage-runtime`. Every file-reading facility
+/// installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
     let mut context = Context::with_config(false)?;
     context.install(io::module()?)?;
     context.install(log::module()?)?;
+    context.install(scan::module()?)?;
+    context.install(scan::types_module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

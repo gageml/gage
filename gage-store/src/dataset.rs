@@ -209,9 +209,24 @@ impl DatasetStore<'_> {
     /// the commit the dataset links, which is the version a scan of
     /// the dataset reads.
     pub fn sessions(&self, dataset_id: &str) -> Result<Vec<SessionRecord>, StoreError> {
-        let members = members(&self.current(dataset_id)?);
+        self.read_members(&self.current(dataset_id)?)
+    }
+
+    /// The member sessions of the dataset at the given commit, which
+    /// need not be the dataset's current commit, in member order. A
+    /// scan reads its dataset this way.
+    pub fn sessions_at(&self, commit_sha: &str) -> Result<Vec<SessionRecord>, StoreError> {
+        let object = self.store.read_object(commit_sha)?;
+        require_type(&object, OBJECT_TYPE)?;
+        self.read_members(&object)
+    }
+
+    fn read_members(&self, dataset: &Object) -> Result<Vec<SessionRecord>, StoreError> {
         let sessions = SessionStore::from(self.store);
-        members.iter().map(|sha| sessions.at_commit(sha)).collect()
+        members(dataset)
+            .iter()
+            .map(|sha| sessions.at_commit(sha))
+            .collect()
     }
 
     /// Add or update one or more sessions in the given dataset in a

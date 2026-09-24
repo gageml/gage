@@ -5,7 +5,7 @@ pub const SCANNER = #{
 };
 
 pub async fn main() {
-    for s in gage::scan().sessions() {
-        println!("Hello {}", s.id);
+    for s in gage::scan().sessions().await {
+        println!("Hello, session {}!", s.id);
     }
 }

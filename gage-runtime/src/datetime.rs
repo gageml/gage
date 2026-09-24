@@ -25,7 +25,7 @@ impl DateTime {
     }
 
     #[rune::function(keep, path = Self::from_millis)]
-    pub(crate) fn from_millis(ms: i64) -> Self {
+    pub fn from_millis(ms: i64) -> Self {
         let inner = ChronoDateTime::from_timestamp_millis(ms)
             .expect("epoch millis within chrono representable range");
         DateTime { inner }
@@ -298,7 +298,7 @@ impl Duration {
     }
 }
 
-pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
+pub fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<DateTime>()?;
     m.function_meta(DateTime::from_millis__meta)?;
     m.function_meta(DateTime::now__meta)?;

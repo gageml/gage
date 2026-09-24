@@ -8,5 +8,5 @@ const MSG = include_json!("msg.json");
 
 pub async fn main() {
     let #{greeting, name} = MSG;
-    println(`${greeting}, ${name}`);
+    println(`${greeting}, ${name}!`);
 }

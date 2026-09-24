@@ -5,5 +5,5 @@ pub const SCANNER = #{
 };
 
 pub async fn main() {
-    println("Hello scan!");
+    println!("Hello, scan {}!", gage::scan().id);
 }

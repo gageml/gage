@@ -40,9 +40,13 @@ use gage_core::datetime::now_ms;
 use gage_core::uuid::{new_uuid, short_uuid};
 use gage_registry::scanner::ScannerDef;
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
-use gage_runtime2::{OUTPUT_SINK, Output, OutputSink, TaskOutput};
+use gage_runtime2::{
+    OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext, ScanDatasetRef, TaskOutput,
+};
 use gage_scan::error::render_task_error;
-use gage_store::{ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts, TaskStatus};
+use gage_store::{
+    DatasetStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts, TaskStatus,
+};
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
 use rune::{Diagnostics, Source, Sources, Vm};
@@ -284,6 +288,20 @@ pub async fn scan(
 ) -> Result<ScanOutcome, ScanError> {
     let plan = plan_tasks(scanners)?;
     let id = new_uuid();
+    // Tasks read the dataset through their own handle: the store's git
+    // reader is single-threaded, and this one stays free for the apply
+    let dataset = match config.dataset {
+        Some(sha) => Some(ScanDatasetRef {
+            id: DatasetStore::from(store).at_commit(sha)?.id,
+            commit_sha: sha.to_string(),
+        }),
+        None => None,
+    };
+    let scan_ctx = ScanContext {
+        scan_id: id.clone(),
+        dataset,
+        store: Arc::new(Mutex::new(Store::open(store.path())?)),
+    };
     let scanner_plans: Vec<ScannerPlan<'_>> = scanners
         .iter()
         .map(|s| ScannerPlan {
@@ -311,6 +329,7 @@ pub async fn scan(
         staging,
         cancel,
         scope: scope.clone(),
+        scan_ctx,
         output_tx,
         output_rx,
         on_event,
@@ -327,6 +346,7 @@ struct Run<'a, F: FnMut(Event)> {
     staging: Staging,
     cancel: &'a CancellationToken,
     scope: LogScope,
+    scan_ctx: ScanContext,
     output_tx: mpsc::UnboundedSender<TaskOutput>,
     output_rx: mpsc::UnboundedReceiver<TaskOutput>,
     on_event: F,
@@ -382,18 +402,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
                 ..self.scope.clone()
             };
             let outcome = LOG_SCOPE
-                .scope(
-                    task_scope,
-                    run_task(
-                        compiled,
-                        task,
-                        self.cancel,
-                        &self.output_tx,
-                        &mut self.output_rx,
-                        &mut scan_logs,
-                        &mut self.on_event,
-                    ),
-                )
+                .scope(task_scope, self.run_task(compiled, task, &mut scan_logs))
                 .await?;
             let (status, error) = match outcome {
                 TaskOutcome::Completed => (TaskStatus::Completed, None),
@@ -456,6 +465,47 @@ impl<F: FnMut(Event)> Run<'_, F> {
             commit_sha,
             attrs,
         })
+    }
+
+    /// Run one task under the scan context and its output sink,
+    /// delivering what it sends through the scan's channel as it
+    /// arrives.
+    async fn run_task(
+        &mut self,
+        scanner: &CompiledScanner,
+        task: &str,
+        logs: &mut Logs,
+    ) -> Result<TaskOutcome, ScanError> {
+        let sink = OutputSink {
+            scanner: scanner.name.clone(),
+            task: task.to_string(),
+            tx: self.output_tx.clone(),
+        };
+        let outcome = {
+            let exec = SCAN_CTX.scope(
+                self.scan_ctx.clone(),
+                OUTPUT_SINK.scope(sink, execute(scanner, task)),
+            );
+            tokio::pin!(exec);
+            loop {
+                tokio::select! {
+                    result = &mut exec => break match result {
+                        Ok(()) => TaskOutcome::Completed,
+                        Err(message) => TaskOutcome::Failed(message),
+                    },
+                    Some(output) = self.output_rx.recv() => {
+                        deliver(output, logs, &mut self.on_event)?
+                    }
+                    _ = self.cancel.cancelled() => break TaskOutcome::Canceled,
+                }
+            }
+        };
+        // The block dropped the execution; drain what the task sent
+        // between the last poll and completion.
+        while let Ok(output) = self.output_rx.try_recv() {
+            deliver(output, logs, &mut self.on_event)?;
+        }
+        Ok(outcome)
     }
 
     /// Record a line of the scan's own output, then hand it to the
@@ -529,44 +579,6 @@ enum TaskOutcome {
 
 /// Run one task on a fresh VM, writing its output to `logs` and
 /// forwarding it to `on_event` as it happens.
-/// Run one task under its output sink, delivering what it sends
-/// through the scan's channel as it arrives.
-async fn run_task(
-    scanner: &CompiledScanner,
-    task: &str,
-    cancel: &CancellationToken,
-    output_tx: &mpsc::UnboundedSender<TaskOutput>,
-    output_rx: &mut mpsc::UnboundedReceiver<TaskOutput>,
-    logs: &mut Logs,
-    on_event: &mut impl FnMut(Event),
-) -> Result<TaskOutcome, ScanError> {
-    let sink = OutputSink {
-        scanner: scanner.name.clone(),
-        task: task.to_string(),
-        tx: output_tx.clone(),
-    };
-    let outcome = {
-        let exec = OUTPUT_SINK.scope(sink, execute(scanner, task));
-        tokio::pin!(exec);
-        loop {
-            tokio::select! {
-                result = &mut exec => break match result {
-                    Ok(()) => TaskOutcome::Completed,
-                    Err(message) => TaskOutcome::Failed(message),
-                },
-                Some(output) = output_rx.recv() => deliver(output, logs, on_event)?,
-                _ = cancel.cancelled() => break TaskOutcome::Canceled,
-            }
-        }
-    };
-    // The block dropped the execution; drain what the task sent
-    // between the last poll and completion.
-    while let Ok(output) = output_rx.try_recv() {
-        deliver(output, logs, on_event)?;
-    }
-    Ok(outcome)
-}
-
 /// Record one output in the scan's logs, then hand it to the sink.
 fn deliver(
     output: TaskOutput,
@@ -1300,5 +1312,77 @@ mod tests {
         );
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
         assert_eq!(record.content.dataset, Some(dataset_sha));
+    }
+
+    /// `scan()` gives a task the scan id and its dataset, and the
+    /// dataset's sessions; a scan without a dataset has none.
+    #[tokio::test]
+    async fn tasks_read_the_scan_and_its_dataset() {
+        const SCANNER: &str = r#"
+            use gage::scan;
+
+            pub const SCANNER = #{
+                name: "ctx",
+                description: "Scan context",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let s = scan();
+                println!("{}", s.id);
+                match s.dataset {
+                    Some(d) => println!("dataset {}", d.id),
+                    None => println!("no dataset"),
+                }
+                println!("{} sessions", scan().sessions().await.len());
+            }
+        "#;
+        let (tmp, store) = open_store();
+        let datasets = DatasetStore::from(&store);
+        let dataset_id = datasets.create().unwrap();
+        let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let compiled = compiled.unwrap();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            std::slice::from_ref(&compiled),
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(outcome.id.clone()),
+                &Output::Println(format!("dataset {dataset_id}")),
+                &Output::Println("0 sessions".into()),
+            ]
+        );
+
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled],
+            &CancellationToken::new(),
+        )
+        .await;
+        let outcome = outcome.unwrap();
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(outcome.id.clone()),
+                &Output::Println("no dataset".into()),
+                &Output::Println("0 sessions".into()),
+            ]
+        );
     }
 }

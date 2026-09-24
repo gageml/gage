@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gage-runtime = { path = "../gage-runtime" }
+gage-store = { path = "../gage-store" }
 percent-encoding = { workspace = true }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
