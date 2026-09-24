@@ -339,7 +339,7 @@ impl RowBuilders {
         self.types.append_option(e.entry_type.as_deref());
         self.subtypes.append_option(e.subtype.as_deref());
         self.timestamps.append_option(e.timestamp_ms);
-        self.raws.append_value(&e.raw);
+        self.raws.append_option(e.raw.as_deref());
         let m = e.message.as_ref();
         self.texts.append_option(m.map(|m| m.text.as_str()));
         self.attachments
@@ -526,6 +526,9 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
             _ => (joined, None),
         };
         Message {
+            message_type: entry_type
+                .expect("is_message_row admits only typed entries")
+                .to_string(),
             subtype: msg_subtype.map(String::from),
             text,
             attachments: (!attachments.is_empty())
@@ -540,7 +543,7 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
         entry_type: entry_type.map(String::from),
         subtype: entry_subtype(entry).map(String::from),
         timestamp_ms,
-        raw: entry.to_string(),
+        raw: Some(entry.to_string()),
         message,
     }
 }

@@ -159,15 +159,21 @@ pub struct Entry {
     pub subtype: Option<String>,
     /// Epoch milliseconds, UTC
     pub timestamp_ms: Option<i64>,
-    /// The native row as the harness wrote it
-    pub raw: String,
+    /// The native row as the harness wrote it, when the harness has
+    /// such a thing; a bail-out for readers, not a fact every harness
+    /// carries
+    pub raw: Option<String>,
     /// Present for exactly the rows the `message` table contains
     pub message: Option<Message>,
 }
 
-/// The message-derived columns of an entry.
+/// The message-derived columns of an entry. Every message has a type
+/// and a text, which may be empty; the rest is present when the
+/// harness provides it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
+    /// The message type, e.g. `user` or `assistant`
+    pub message_type: String,
     pub subtype: Option<String>,
     pub text: String,
     /// JSON array of attachment blocks, each carrying a `ref` of
