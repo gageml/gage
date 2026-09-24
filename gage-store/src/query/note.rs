@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use datafusion::arrow::array::{StringBuilder, TimestampMillisecondBuilder};
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
@@ -23,7 +24,8 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{BinaryExpr, Operator, TableProviderFilterPushDown};
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::expressions::col;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -44,6 +46,7 @@ const ATTRS_COLS: &[&str] = &[
 ];
 
 const NAME_COL: &str = "name";
+const CREATED_COL: &str = "created";
 
 fn stored_note_schema() -> SchemaRef {
     // Column order: identity, key, value, timestamps, provenance,
@@ -67,7 +70,7 @@ fn stored_note_schema() -> SchemaRef {
         Field::new("metadata", DataType::Utf8, true),
         // Timestamps
         Field::new(
-            "created",
+            CREATED_COL,
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             true,
         ),
@@ -217,7 +220,7 @@ impl StoredNoteExec {
         limit: Option<usize>,
     ) -> Self {
         let properties = PlanProperties::new(
-            EquivalenceProperties::new(projected_schema.clone()),
+            created_desc_eq_properties(&projected_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -355,6 +358,25 @@ fn unique_prefix_lens(ids: Vec<String>) -> HashMap<String, usize> {
 
 fn external(e: StoreError) -> DataFusionError {
     DataFusionError::External(Box::new(e))
+}
+
+/// Advertise `[created DESC]` when the projection keeps `created`:
+/// the index returns rows in that order, so DataFusion elides its
+/// sort and pushes `LIMIT` into the scan.
+fn created_desc_eq_properties(projected_schema: &SchemaRef) -> EquivalenceProperties {
+    match col(CREATED_COL, projected_schema) {
+        Ok(expr) => {
+            let sort = PhysicalSortExpr {
+                expr,
+                options: SortOptions {
+                    descending: true,
+                    nulls_first: true,
+                },
+            };
+            EquivalenceProperties::new_with_orderings(projected_schema.clone(), [[sort]])
+        }
+        Err(_) => EquivalenceProperties::new(projected_schema.clone()),
+    }
 }
 
 impl DisplayAs for StoredNoteExec {

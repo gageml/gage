@@ -261,9 +261,9 @@ async fn main() {
             Command::Init(args) => cmd_init::run(args),
             Command::Status(args) => cmd_status::run(args),
             Command::Note { command } => match command {
-                cmd_note::NoteCommand::List(args) => cmd_note::list(args),
+                cmd_note::NoteCommand::List(args) => cmd_note::list(args).await,
                 cmd_note::NoteCommand::Add(args) => cmd_note::add(args),
-                cmd_note::NoteCommand::Show(args) => cmd_note::show(args),
+                cmd_note::NoteCommand::Show(args) => cmd_note::show(args).await,
                 cmd_note::NoteCommand::Edit(args) => cmd_note::edit(args),
                 cmd_note::NoteCommand::Delete(args) => cmd_note::delete(args),
             },

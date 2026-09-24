@@ -29,7 +29,7 @@ use tabled::{
 
 use crate::dialog::{self, DialogError};
 use crate::source;
-use crate::style::{self, IdHighlighter, IdKind};
+use crate::style::{self, IdHighlighter, IdKind, styled_id};
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
@@ -545,18 +545,6 @@ fn string_or_empty(col: &StringArray, i: usize) -> String {
     }
 }
 
-/// Styled id: the kind's bright shade over the unique prefix, its dark
-/// shade for the rest of the shown form.
-fn styled_id(shown: &str, prefix: &str, kind: IdKind) -> String {
-    let split = shown
-        .char_indices()
-        .nth(prefix.chars().count())
-        .map(|(i, _)| i)
-        .unwrap_or(shown.len());
-    let (head, tail) = shown.split_at(split);
-    kind.style(head, tail)
-}
-
 /// Print the listing. `drivers` holds the driver of each row in
 /// `rows`, which formats the row's model and project names.
 ///
@@ -660,7 +648,9 @@ fn refit_project_cells(table: &mut Table, rows: &[Row], drivers: &[Arc<dyn Drive
     }
 }
 
-async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
+/// Run `sql` and collect its batches, exiting with the error on
+/// failure
+pub(crate) async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
     match ctx.sql(sql).await {
         Ok(df) => match df.collect().await {
             Ok(b) => b,

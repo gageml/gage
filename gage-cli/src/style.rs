@@ -84,3 +84,15 @@ impl Peaker for IdAwarePriority {
             .map(|(i, _)| i)
     }
 }
+
+/// Styled id: the kind's bright shade over the unique prefix, its dark
+/// shade for the rest of the shown form.
+pub fn styled_id(shown: &str, prefix: &str, kind: IdKind) -> String {
+    let split = shown
+        .char_indices()
+        .nth(prefix.chars().count())
+        .map(|(i, _)| i)
+        .unwrap_or(shown.len());
+    let (head, tail) = shown.split_at(split);
+    kind.style(head, tail)
+}

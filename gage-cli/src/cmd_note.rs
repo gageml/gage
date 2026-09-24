@@ -1,13 +1,17 @@
+use std::sync::{Arc, Mutex};
+
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use console::style;
+use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_db::note;
 use gage_db::target::NoteTarget;
+use gage_query2::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
-use gage_store::{
-    NOTE_TYPE, NoteEdit, NoteInput, NoteRecord, NoteStore, NoteValue, SESSION_TYPE, Store, url,
-};
+use gage_store::{NOTE_TYPE, NoteEdit, NoteInput, NoteStore, NoteValue, SESSION_TYPE, Store, url};
 use tabled::{
     Table,
     settings::{
@@ -17,8 +21,9 @@ use tabled::{
     },
 };
 
+use crate::cmd_session::run_query;
 use crate::dialog::{self, DialogError};
-use crate::style;
+use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
 pub enum NoteCommand {
@@ -40,6 +45,10 @@ pub enum NoteCommand {
 
 #[derive(Args)]
 pub struct NoteListArgs {
+    /// Show notes with this name
+    #[arg(long)]
+    name: Option<String>,
+
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 }
@@ -132,7 +141,7 @@ pub struct NoteDeleteArgs {
     yes: bool,
 }
 
-pub fn list(args: NoteListArgs) {
+pub async fn list(args: NoteListArgs) {
     let store = match Store::open(&gage_store::store_path()) {
         Ok(store) => store,
         Err(e) => {
@@ -140,55 +149,67 @@ pub fn list(args: NoteListArgs) {
             std::process::exit(1);
         }
     };
-    let notes = NoteStore::from(&store);
-    let total = match notes.query().count() {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("gage note list: {e}");
-            std::process::exit(1);
-        }
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
+    let where_clause = match &args.name {
+        Some(name) => format!(" WHERE name = '{}'", name.replace('\'', "''")),
+        None => String::new(),
     };
+    let limit_clause = match args.limit.fetch_limit() {
+        Some(n) => format!(" LIMIT {n}"),
+        None => String::new(),
+    };
+    let sql = format!(
+        "SELECT id, id_prefix, name, text, value, target, created \
+         FROM note{where_clause} ORDER BY created DESC{limit_clause}"
+    );
+    let batches = run_query(&ctx, &sql).await;
+    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM note{where_clause}")).await;
     if total == 0 {
         println!("No notes found");
         return;
     }
-    let show = args.limit.show_count(total);
-    let records: Vec<NoteRecord> =
-        match notes.query().limit(show).iter().and_then(|it| it.collect()) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("gage note list: {e}");
-                std::process::exit(1);
-            }
-        };
-
-    // The highlighted prefix is unique within the short-prefix set
-    // of notes, which is where `note show` and friends resolve first
-    let peers = match store.short_prefix_ids(Some(NOTE_TYPE)) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("gage note list: {e}");
-            std::process::exit(1);
-        }
-    };
-    let highlighter = style::IdHighlighter::new(peers);
 
     let header: Vec<String> = ["Id", "Name", "Value", "Target", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let rows: Vec<Vec<String>> = records
-        .iter()
-        .map(|n| {
-            vec![
-                highlighter.short(&n.id),
-                n.name.clone(),
-                stored_value_cell(&n.value),
-                n.target.as_deref().map(target_cell).unwrap_or_default(),
-                crate::human::format_elapsed_ms(n.created_ms),
-            ]
-        })
-        .collect();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in &batches {
+        let ids = column::<StringArray>(batch, 0);
+        let prefixes = column::<StringArray>(batch, 1);
+        let names = column::<StringArray>(batch, 2);
+        let texts = column::<StringArray>(batch, 3);
+        let values = column::<StringArray>(batch, 4);
+        let targets = column::<StringArray>(batch, 5);
+        let createds = column::<TimestampMillisecondArray>(batch, 6);
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            // A text note shows its text; a JSON note its compact JSON
+            let raw = if texts.is_valid(i) {
+                texts.value(i)
+            } else {
+                values.value(i)
+            };
+            let target = if targets.is_valid(i) {
+                target_cell(targets.value(i))
+            } else {
+                String::new()
+            };
+            let created = if createds.is_valid(i) {
+                crate::human::format_elapsed_ms(createds.value(i))
+            } else {
+                String::new()
+            };
+            rows.push(vec![
+                styled_id(short_uuid(id), prefixes.value(i), IdKind::Gage),
+                names.value(i).to_string(),
+                value_cell(raw),
+                target,
+                created,
+            ]);
+        }
+    }
+    let shown = rows.len();
 
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
@@ -207,7 +228,24 @@ pub fn list(args: NoteListArgs) {
         .to_string();
     println!("{table}");
 
-    args.limit.print_summary(records.len(), total, "note");
+    args.limit.print_summary(shown, total, "note");
+}
+
+/// The single count a `SELECT COUNT(*)` query returns
+async fn count_rows(ctx: &SessionContext, sql: &str) -> usize {
+    let batches = run_query(ctx, sql).await;
+    batches
+        .first()
+        .map(|b| column::<Int64Array>(b, 0).value(0) as usize)
+        .unwrap_or(0)
+}
+
+fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<T>()
+        .expect("column type matches note-table schema")
 }
 
 /// Target cell: the type name, a space, and the short id with any
@@ -224,13 +262,9 @@ fn target_cell(target: &str) -> String {
     }
 }
 
-/// One-line cell for a stored note value: text flattened to a single
-/// line and cut at 400 chars, JSON in its compact form
-fn stored_value_cell(value: &NoteValue) -> String {
-    let raw = match value {
-        NoteValue::Text(text) => text.clone(),
-        NoteValue::Json(json) => json.to_string(),
-    };
+/// One-line cell for a note value: flattened to a single line and
+/// cut at 400 chars
+fn value_cell(raw: &str) -> String {
     let flattened: String = raw
         .split(['\n', '\r'])
         .filter(|s| !s.is_empty())
@@ -407,7 +441,7 @@ fn type_name(object_type: &str) -> &str {
     object_type.strip_prefix("gage::").unwrap_or(object_type)
 }
 
-pub fn show(args: NoteShowArgs) {
+pub async fn show(args: NoteShowArgs) {
     let store = match Store::open(&gage_store::store_path()) {
         Ok(store) => store,
         Err(e) => {
@@ -415,34 +449,80 @@ pub fn show(args: NoteShowArgs) {
             std::process::exit(1);
         }
     };
-    let note = match NoteStore::from(&store).get(&args.id) {
-        Ok(n) => n,
+    // The prefix resolves through the store; the row comes from SQL
+    let id = match store.resolve_in(&args.id, Some(NOTE_TYPE)) {
+        Ok(found) if found.deleted => {
+            eprintln!("gage note show: note {} is deleted", found.id);
+            std::process::exit(1);
+        }
+        Ok(found) => found.id,
         Err(e) => {
             eprintln!("gage note show: {e}");
             std::process::exit(1);
         }
     };
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).build();
+    let sql = format!(
+        "SELECT name, value, text, metadata, target, author, created, modified \
+         FROM note WHERE id = '{id}'"
+    );
+    let batches = run_query(&ctx, &sql).await;
+    let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+        eprintln!("gage note show: note {id} not found");
+        std::process::exit(1);
+    };
+    let text_col = column::<StringArray>(batch, 2);
+    let value = if text_col.is_valid(0) {
+        NoteValue::Text(text_col.value(0).to_string())
+    } else {
+        match serde_json::from_str(column::<StringArray>(batch, 1).value(0)) {
+            Ok(json) => NoteValue::Json(json),
+            Err(e) => {
+                eprintln!("gage note show: note {id} value: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+    let metadata_col = column::<StringArray>(batch, 3);
+    let metadata: Option<serde_json::Value> = if metadata_col.is_valid(0) {
+        match serde_json::from_str(metadata_col.value(0)) {
+            Ok(json) => Some(json),
+            Err(e) => {
+                eprintln!("gage note show: note {id} metadata: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let opt_string = |idx: usize| {
+        let col = column::<StringArray>(batch, idx);
+        col.is_valid(0).then(|| col.value(0).to_string())
+    };
+    let iso = |idx: usize| {
+        let col = column::<TimestampMillisecondArray>(batch, idx);
+        if col.is_valid(0) {
+            gage_core::datetime::ms_to_iso8601(col.value(0))
+        } else {
+            String::new()
+        }
+    };
+    let name = column::<StringArray>(batch, 0).value(0).to_string();
 
     let mut attrs = vec![
-        ("id", note.id.clone()),
-        ("name", note.name.clone()),
+        ("id", id.clone()),
+        ("name", name.clone()),
         ("value", String::new()),
-        ("target", note.target.clone().unwrap_or_default()),
-        ("author", note.author.clone()),
+        ("target", opt_string(4).unwrap_or_default()),
+        ("author", opt_string(5).unwrap_or_default()),
         ("metadata", String::new()),
-        (
-            "created",
-            gage_core::datetime::ms_to_iso8601(note.created_ms),
-        ),
-        (
-            "modified",
-            gage_core::datetime::ms_to_iso8601(note.modified_ms),
-        ),
+        ("created", iso(6)),
+        ("modified", iso(7)),
     ];
     if args.doc {
         let registry = ScannerRegistry::load();
         let doc = registry
-            .note_doc(&note.name)
+            .note_doc(&name)
             .unwrap_or_else(|| "(no scanner declares this note)".to_string());
         attrs.push(("doc", doc));
     }
@@ -456,12 +536,11 @@ pub fn show(args: NoteShowArgs) {
 
     // A JSON value is pretty-printed and colored token by token; text
     // is wrapped and colored as one cell
-    let (value_cell, value_is_json) = match &note.value {
+    let (value_cell, value_is_json) = match &value {
         NoteValue::Text(text) => (textwrap::fill(text, value_width), false),
         NoteValue::Json(json) => (crate::json::render(json), true),
     };
-    let metadata_cell = note
-        .metadata
+    let metadata_cell = metadata
         .as_ref()
         .map(crate::json::render)
         .unwrap_or_default();
