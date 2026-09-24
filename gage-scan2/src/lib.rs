@@ -37,7 +37,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use gage_core::datetime::now_ms;
-use gage_core::uuid::new_uuid;
+use gage_core::uuid::{new_uuid, short_uuid};
 use gage_registry::scanner::ScannerDef;
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{OUTPUT_SINK, Output, OutputSink, TaskOutput};
@@ -470,7 +470,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
     }
 }
 
-/// The scan's closing line: `scan <id> completed: 3 tasks: 2
+/// The scan's closing line: `Scan <short id> completed: 3 tasks: 2
 /// completed, 1 failed`, with a canceled count when the run was cut
 /// short.
 pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
@@ -489,7 +489,8 @@ pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
         parts.push(format!("{canceled} canceled"));
     }
     format!(
-        "scan {id} {state}: {} tasks: {}",
+        "Scan {} {state}: {} tasks: {}",
+        short_uuid(id),
         counts.total,
         parts.join(", ")
     )
@@ -867,8 +868,8 @@ mod tests {
         assert_eq!(
             summary,
             format!(
-                "scan {} completed: 2 tasks: 1 completed, 1 failed\n",
-                outcome.id
+                "Scan {} completed: 2 tasks: 1 completed, 1 failed\n",
+                short_uuid(&outcome.id)
             )
         );
         assert!(
@@ -1151,8 +1152,8 @@ mod tests {
         assert_eq!(
             events.last(),
             Some(&Event::Scan(ScanOutput::Out(format!(
-                "scan {} canceled: 2 tasks: 0 completed, 0 failed, 2 canceled\n",
-                outcome.id
+                "Scan {} canceled: 2 tasks: 0 completed, 0 failed, 2 canceled\n",
+                short_uuid(&outcome.id)
             ))))
         );
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
