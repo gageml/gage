@@ -5,5 +5,5 @@ pub const SCANNER = #{
 };
 
 pub async fn main() {
-    gage::write_note("greeting", "Hello, Robert").await?
+    gage::write_note("greeting", "Hello, Robert").await?;
 }

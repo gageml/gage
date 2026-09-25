@@ -1,0 +1,22 @@
+use gage::{DateTime, scan, write_note};
+
+pub const SCANNER = #{
+    name: "note-deps",
+    description: "Note written for another note",
+    tasks: #{
+        a: #{ notes: #{ writes: ["a"] } },
+        b: #{ notes: #{ writes: ["b"], wants: ["a"] } },
+    },
+};
+
+pub async fn a() {
+    let now = DateTime::now();
+    for s in scan().sessions() {
+        write_note("a", now).for_session(s.id).await?;
+    }
+}
+
+pub async fn b() {
+    let notes = scan().notes().name("a").await?;
+    write_note("b", notes.len()).await?;
+}

@@ -15,9 +15,11 @@ mod links;
 mod note;
 mod scan;
 mod session;
+mod validation;
 
 pub use dataset::dataset_table;
 pub use links::{LinkKind, link_table};
 pub use note::StoredNoteTable;
 pub use scan::scan_table;
 pub use session::StoredSessionTable;
+pub use validation::scan_validation_table;

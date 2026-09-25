@@ -84,7 +84,9 @@ fn sessions_split_valid(sessions: Ref<Sessions>, key: Value) -> SessionsSplitVal
 /// Render a task validation key — a tuple/vec of strings and integers —
 /// as its colon-joined form, e.g. `("s", "findings", 1)` →
 /// `"s:findings:1"`.
-fn key_string(key: &Value) -> crate::Result<String> {
+/// Render a validation key, a tuple or list of strings and integers,
+/// as its colon-joined storage form.
+pub fn key_string(key: &Value) -> Result<String, Error> {
     let json = crate::value::value_to_json(key)
         .map_err(|e| Error::Args(format!("validation key could not be serialized: {e}")))?;
     let parts = match json {

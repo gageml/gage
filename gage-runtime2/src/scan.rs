@@ -40,10 +40,21 @@ pub struct ScanContext {
     /// `None` when the scan has no dataset; `sessions()` is then empty
     pub dataset: Option<ScanDatasetRef>,
     pub store: Arc<Mutex<Store>>,
-    /// The staging directory the scan's notes are written under,
-    /// `staging/<scan_id>/notes/`
-    pub notes_dir: PathBuf,
+    /// Where the runtime writes during the run
+    pub paths: StagingPaths,
     query: Arc<OnceCell<(Arc<SessionScope>, SessionContext)>>,
+}
+
+/// The staging paths the runtime writes under. The orchestrator owns
+/// the layout and supplies them.
+#[derive(Debug, Clone)]
+pub struct StagingPaths {
+    /// `write_note` stages note trees here, one directory per id
+    pub notes_dir: PathBuf,
+    /// `mark_valid` writes `<input_type>/<key>/<input_id>` here
+    pub validation_dir: PathBuf,
+    /// Carry-forward appends carried note commits here, one per line
+    pub carried_notes: PathBuf,
 }
 
 impl ScanContext {
@@ -51,13 +62,13 @@ impl ScanContext {
         scan_id: String,
         dataset: Option<ScanDatasetRef>,
         store: Arc<Mutex<Store>>,
-        notes_dir: PathBuf,
+        paths: StagingPaths,
     ) -> Self {
         ScanContext {
             scan_id,
             dataset,
             store,
-            notes_dir,
+            paths,
             query: Arc::new(OnceCell::new()),
         }
     }
@@ -130,6 +141,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
         fetch_sessions(q).await
     })?;
+    m.function_meta(crate::validate::partition)?;
     m.ty::<Session>()?;
     m.function_meta(Session::attrs)?;
     m.function_meta(Session::debug)?;
@@ -239,21 +251,14 @@ async fn fetch_sessions(_query: SessionsQuery) -> Result<Sessions, VmError> {
         let ids = string_column(batch, 0);
         let locators = string_column(batch, 1);
         for i in 0..batch.num_rows() {
-            let locator = locators.value(i);
-            let commit = locator
-                .strip_prefix("git:")
-                .unwrap_or_else(|| panic!("session locator is git:<sha>, got {locator:?}"));
-            items.push(Session {
-                id: ids.value(i).to_string(),
-                commit: commit.to_string(),
-            });
+            items.push(Session::from_row(ids.value(i), locators.value(i)));
         }
     }
     Ok(Sessions::new(items))
 }
 
 /// Run `sql` on the scan's query context.
-async fn run(
+pub(crate) async fn run(
     df_ctx: &SessionContext,
     sql: &str,
 ) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>, VmError> {
@@ -267,7 +272,10 @@ async fn run(
         .map_err(fail)
 }
 
-fn string_column(batch: &datafusion::arrow::record_batch::RecordBatch, i: usize) -> &StringArray {
+pub(crate) fn string_column(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    i: usize,
+) -> &StringArray {
     batch
         .column(i)
         .as_any()
@@ -289,6 +297,17 @@ pub struct Session {
 }
 
 impl Session {
+    /// A session from its `id` and `locator` columns.
+    pub(crate) fn from_row(id: &str, locator: &str) -> Session {
+        let commit = locator
+            .strip_prefix("git:")
+            .unwrap_or_else(|| panic!("session locator is git:<sha>, got {locator:?}"));
+        Session {
+            id: id.to_string(),
+            commit: commit.to_string(),
+        }
+    }
+
     /// The session's attributes, read when awaited.
     #[rune::function(instance)]
     fn attrs(&self) -> SessionAttrsQuery {

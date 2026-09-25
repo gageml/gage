@@ -37,6 +37,8 @@ const SOURCE_DIR: &str = "sourcecode.d";
 const ATTRS_FILE: &str = "attrs.json";
 const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
+const NOTES_CARRIED_LINK: &str = "notes_carried.link";
+const VALIDATION_DIR: &str = "validation";
 const LOGS_DIR: &str = "logs";
 /// The blobs `logs/` may hold
 pub const LOG_NAMES: [&str; 3] = ["out", "err", "records"];
@@ -131,6 +133,18 @@ pub struct ScanTask {
     pub attrs: TaskAttrs,
 }
 
+/// One `validation/<input_type>/<key>/<input_id>` record: the
+/// validator a task observed for an input it finished under a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Validation {
+    /// `session`, `note`, or `attachment`
+    pub input_type: String,
+    pub key: String,
+    pub input_id: String,
+    /// The file's content, trimmed: a size or a commit SHA
+    pub validator: String,
+}
+
 /// A scan's content, decoded from either location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanContent {
@@ -141,6 +155,11 @@ pub struct ScanContent {
     /// The commit SHAs of the notes the scan wrote, from `notes.link`,
     /// in file order. Empty when it wrote none.
     pub notes: Vec<String>,
+    /// The commit SHAs of the notes the scan carried from prior scans,
+    /// from `notes_carried.link`, in file order.
+    pub notes_carried: Vec<String>,
+    /// The validation records under `validation/`, in path order.
+    pub validation: Vec<Validation>,
     /// The names present under the scan's `logs/`, sorted; each one
     /// of [`LOG_NAMES`]
     pub logs: Vec<String>,
@@ -207,12 +226,20 @@ impl ScanStore<'_> {
             tree.links
                 .insert(DATASET_LINK.to_string(), vec![sha.clone()]);
         }
-        if !content.notes.is_empty() {
-            for sha in &content.notes {
+        for (file, shas) in [
+            (NOTES_LINK, &content.notes),
+            (NOTES_CARRIED_LINK, &content.notes_carried),
+        ] {
+            if shas.is_empty() {
+                continue;
+            }
+            for sha in shas {
                 self.require_live(sha, NOTE_TYPE)?;
             }
-            tree.links
-                .insert(NOTES_LINK.to_string(), content.notes.clone());
+            tree.links.insert(file.to_string(), shas.clone());
+        }
+        if let Some(sha) = import_opaque_tree(self.store.path(), &scan_dir.join(VALIDATION_DIR))? {
+            tree.subtrees.insert(VALIDATION_DIR.to_string(), sha);
         }
         let logs_dir = scan_dir.join(LOGS_DIR);
         if logs_dir.is_dir() {
@@ -377,6 +404,8 @@ impl ScanContent {
             },
         };
         let notes = read_link(files, NOTES_LINK)?.unwrap_or_default();
+        let notes_carried = read_link(files, NOTES_CARRIED_LINK)?.unwrap_or_default();
+        let validation = read_validation(files)?;
         let logs = files.list_files(LOGS_DIR)?;
         let mut tasks = Vec::new();
         for scanner in files.list_dirs(TASKS_DIR)? {
@@ -402,11 +431,41 @@ impl ScanContent {
             attrs,
             dataset,
             notes,
+            notes_carried,
+            validation,
             logs,
             tasks,
             scanners,
         })
     }
+}
+
+/// Every record under `validation/`, in path order. A path that is
+/// not `<input_type>/<key>/<input_id>` is an error.
+fn read_validation(files: &dyn ScanFiles) -> Result<Vec<Validation>, StoreError> {
+    let mut paths = Vec::new();
+    walk_files(files, VALIDATION_DIR, "", &mut paths)?;
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let parts: Vec<&str> = path.split('/').collect();
+        let [input_type, key, input_id] = parts.as_slice() else {
+            return Err(StoreError::Parse(format!(
+                "scan file {VALIDATION_DIR}/{path}: expected <input_type>/<key>/<input_id>"
+            )));
+        };
+        let bytes = files
+            .read(&format!("{VALIDATION_DIR}/{path}"))?
+            .ok_or_else(|| {
+                StoreError::Parse(format!("scan file {VALIDATION_DIR}/{path} is missing"))
+            })?;
+        out.push(Validation {
+            input_type: input_type.to_string(),
+            key: key.to_string(),
+            input_id: input_id.to_string(),
+            validator: String::from_utf8_lossy(&bytes).trim().to_string(),
+        });
+    }
+    Ok(out)
 }
 
 /// The SHAs in the link file `name`, one per line, or `None` when
@@ -1192,6 +1251,49 @@ mod tests {
         assert!(
             matches!(&err, StoreError::WrongType { expected, .. } if expected == NOTE_TYPE),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn create_imports_validation_records_and_decodes_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        write(
+            &scan_dir.join("validation/session/s:t:1/SESSION1"),
+            "1234\n",
+        );
+        write(&scan_dir.join("validation/note/s:t:1/NOTE1"), "abc\n");
+        let scans = ScanStore::from(&store);
+        let commit = scans.create("SCAN15", &scan_dir).unwrap();
+        let record = scans.get("SCAN15").unwrap();
+        assert_eq!(
+            record.content.validation,
+            [
+                Validation {
+                    input_type: "note".into(),
+                    key: "s:t:1".into(),
+                    input_id: "NOTE1".into(),
+                    validator: "abc".into(),
+                },
+                Validation {
+                    input_type: "session".into(),
+                    key: "s:t:1".into(),
+                    input_id: "SESSION1".into(),
+                    validator: "1234".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            record.content,
+            ScanContent::from_files(&DirFiles::new(&scan_dir)).unwrap()
+        );
+        assert!(
+            store
+                .ls(&commit)
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "validation/session/s:t:1/SESSION1")
         );
     }
 }

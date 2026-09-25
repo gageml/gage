@@ -10,7 +10,6 @@ pub async fn main() {
             println!("Hello, {}:{} {}", s.id, e.line, entry_type(e), );
         }
     }
-    Ok(())
 }
 
 fn entry_type(e) {

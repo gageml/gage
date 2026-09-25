@@ -13,7 +13,10 @@
 //! scan/attrs.json                        # written at the terminal state
 //! scan/dataset.link                      # the scanned dataset's commit, written at create
 //! scan/notes.link                        # the notes' commits, written at apply
+//! scan/notes_carried.link                # carried notes' commits, written at apply
+//! scan/validation/<type>/<key>/<id>      # validation records, written by mark_valid
 //! notes/<id>/**                          # note trees, written by write_note
+//! carried_notes                          # carried note commits, appended by carry-forward
 //! scan/logs/out                          # output lines, the scan's own and every task's
 //! scan/logs/err                          # error lines: task failures, the cancel notice, panics
 //! scan/logs/records                      # log records, runtime and scanner
@@ -32,8 +35,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use gage_core::datetime::{ms_to_iso8601, now_ms};
-use gage_runtime2::Level;
 use gage_runtime2::source::SourceFile;
+use gage_runtime2::{Level, StagingPaths};
 use gage_store::{ScanAttrs, TaskAttrs, TaskStatus};
 use serde::Serialize;
 
@@ -43,6 +46,9 @@ const APPLIED_FILE: &str = "applied";
 const SCAN_DIR: &str = "scan";
 const NOTES_DIR: &str = "notes";
 const NOTES_LINK: &str = "notes.link";
+const NOTES_CARRIED_LINK: &str = "notes_carried.link";
+const VALIDATION_DIR: &str = "validation";
+const CARRIED_NOTES_FILE: &str = "carried_notes";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
@@ -182,11 +188,40 @@ impl Staging {
 
     /// Write `scan/notes.link` listing `shas`; nothing when empty.
     pub fn write_notes_link(&self, shas: &[String]) -> io::Result<()> {
+        self.write_link(NOTES_LINK, shas)
+    }
+
+    /// Write `scan/notes_carried.link` listing `shas`; nothing when
+    /// empty.
+    pub fn write_notes_carried_link(&self, shas: &[String]) -> io::Result<()> {
+        self.write_link(NOTES_CARRIED_LINK, shas)
+    }
+
+    fn write_link(&self, name: &str, shas: &[String]) -> io::Result<()> {
         if shas.is_empty() {
             return Ok(());
         }
         let content: String = shas.iter().map(|s| format!("{s}\n")).collect();
-        write_atomic(&self.scan_dir().join(NOTES_LINK), content.as_bytes())
+        write_atomic(&self.scan_dir().join(name), content.as_bytes())
+    }
+
+    /// The paths the runtime writes under during the run.
+    pub fn runtime_paths(&self) -> StagingPaths {
+        StagingPaths {
+            notes_dir: self.notes_dir(),
+            validation_dir: self.scan_dir().join(VALIDATION_DIR),
+            carried_notes: self.dir.join(CARRIED_NOTES_FILE),
+        }
+    }
+
+    /// The note commits carry-forward appended, one per line; empty
+    /// when none.
+    pub fn staged_carried_notes(&self) -> io::Result<Vec<String>> {
+        match fs::read_to_string(self.dir.join(CARRIED_NOTES_FILE)) {
+            Ok(text) => Ok(text.lines().map(String::from).collect()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn set_state(&self, state: State) -> io::Result<()> {

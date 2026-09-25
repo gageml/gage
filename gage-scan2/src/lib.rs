@@ -311,7 +311,7 @@ pub async fn scan(
         id.clone(),
         dataset,
         Arc::new(Mutex::new(Store::open(store.path())?)),
-        staging.notes_dir(),
+        staging.runtime_paths(),
     );
     trace::install_panic_hook();
     let scope = LogScope {
@@ -468,6 +468,8 @@ impl<F: FnMut(Event)> Run<'_, F> {
             note_shas.push(sha);
         }
         self.staging.write_notes_link(&note_shas)?;
+        self.staging
+            .write_notes_carried_link(&self.staging.staged_carried_notes()?)?;
         let commit_sha = ScanStore::from(store).create(&self.id, &self.staging.scan_dir())?;
         self.staging.mark_applied()?;
         self.staging.remove()?;
@@ -1672,5 +1674,141 @@ mod tests {
             .await,
             1
         );
+    }
+
+    /// A second scan of the same dataset finds the session valid under
+    /// the key the first scan marked, and the record is queryable.
+    #[tokio::test]
+    async fn partition_marks_sessions_valid_across_scans() {
+        const SCANNER: &str = r#"
+            use gage::{scan, write_note};
+
+            pub const SCANNER = #{
+                name: "part",
+                description: "Partition",
+                tasks: #{ main: #{} },
+            };
+
+            const KEY = ("part", "main", 1);
+
+            pub async fn main() {
+                let p = scan().sessions().partition(KEY).carry_forward_notes().await?;
+                println!("{p:?}");
+                for s in p.invalid {
+                    write_note("size", s.attrs().await.native_size).for_session(s.id).await?;
+                    p.mark_valid(s).await?;
+                }
+                match p.mark_valid("not-a-member").await {
+                    Err(gage::Error::Args(m)) => println!("args: {m}"),
+                    other => println!("unexpected: {other:?}"),
+                }
+                Ok(())
+            }
+        "#;
+        const SESSION: &str = concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+        );
+        let (tmp, store) = open_store();
+        let (_, dataset_sha, session_id) = seeded_dataset(tmp.path(), &store, SESSION);
+        let (_dir, compiled) = compile_source(SCANNER);
+        let compiled = compiled.unwrap();
+
+        let mut first_events = Vec::new();
+        let mut second_events = Vec::new();
+        let mut outcomes = Vec::new();
+        for events in [&mut first_events, &mut second_events] {
+            let config = ScanConfig {
+                staging_root: &tmp.path().join("staging"),
+                gage_version: "test-version",
+                dataset: Some(&dataset_sha),
+            };
+            let outcome = scan(
+                &store,
+                &config,
+                std::slice::from_ref(&compiled),
+                &CancellationToken::new(),
+                |e| events.push(e),
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+            outcomes.push(outcome);
+        }
+        assert_eq!(
+            outputs(&first_events),
+            [
+                &Output::Println(
+                    "SessionPartition { key: \"part:main:1\", valid: 0, invalid: 1 }".into()
+                ),
+                &Output::Println(
+                    "args: session not-a-member was not partitioned as invalid".into()
+                ),
+            ]
+        );
+        assert_eq!(
+            outputs(&second_events),
+            [
+                &Output::Println(
+                    "SessionPartition { key: \"part:main:1\", valid: 1, invalid: 0 }".into()
+                ),
+                &Output::Println(
+                    "args: session not-a-member was not partitioned as invalid".into()
+                ),
+            ]
+        );
+
+        let first = ScanStore::from(&store).get(&outcomes[0].id).unwrap();
+        assert_eq!(first.content.notes.len(), 1);
+        assert!(first.content.notes_carried.is_empty());
+        assert_eq!(first.content.validation.len(), 1);
+        let v = &first.content.validation[0];
+        assert_eq!(
+            (v.input_type.as_str(), v.key.as_str()),
+            ("session", "part:main:1")
+        );
+        assert_eq!(v.input_id, session_id);
+        assert!(v.validator.parse::<u64>().unwrap() > 0);
+        let second = ScanStore::from(&store).get(&outcomes[1].id).unwrap();
+        assert!(second.content.notes.is_empty());
+        assert!(second.content.validation.is_empty());
+        assert_eq!(
+            second.content.notes_carried, first.content.notes,
+            "the second scan carries the first scan's note"
+        );
+        assert!(
+            store
+                .read_commit(&outcomes[1].commit_sha)
+                .unwrap()
+                .parents
+                .contains(&first.content.notes[0]),
+            "a carried note is a commit parent"
+        );
+
+        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+            Store::open(store.path()).unwrap(),
+        ))))
+        .build()
+        .await;
+        let batches = ctx
+            .sql("SELECT scan_id, validator FROM scan_validation WHERE input_type = 'session'")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 1);
+        let carried = ctx
+            .sql(&format!(
+                "SELECT note_id FROM scan_note WHERE scan_id = '{}' AND carried",
+                outcomes[1].id
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(carried.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 }

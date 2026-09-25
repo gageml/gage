@@ -213,7 +213,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
     let staged = {
         let store = ctx.store.lock().unwrap();
         NoteStore::from(&*store).stage(
-            &ctx.notes_dir.join(&id),
+            &ctx.paths.notes_dir.join(&id),
             &id,
             &input,
             &ctx.scan_id,

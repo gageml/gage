@@ -39,11 +39,14 @@ mod note;
 mod query;
 mod scan;
 pub mod source;
+mod validate;
 
 use rune::{Context, ContextError};
 use tokio::sync::mpsc;
 
-pub use scan::{SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions};
+pub use scan::{
+    SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions, StagingPaths,
+};
 
 /// One item of task output, in the order it happened. The runtime
 /// emits these; the consumer owns rendering.
@@ -141,6 +144,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(query::types_module()?)?;
     context.install(note::module()?)?;
     context.install(note::types_module()?)?;
+    context.install(validate::types_module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

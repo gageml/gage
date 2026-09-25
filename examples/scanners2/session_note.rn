@@ -11,5 +11,4 @@ pub async fn main() {
             .for_session(s.id)
             .await?;
     }
-    Ok(())
 }

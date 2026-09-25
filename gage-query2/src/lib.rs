@@ -43,6 +43,7 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
 use gage_store::{
     LinkKind, Store, StoredNoteTable, StoredSessionTable, dataset_table, link_table, scan_table,
+    scan_validation_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -127,6 +128,8 @@ impl ContextBuilder {
             ctx.register_table(kind.table_name(), link_table(Arc::clone(&store), kind))
                 .expect("register link tables on a fresh context");
         }
+        ctx.register_table(SCAN_VALIDATION, scan_validation_table(Arc::clone(&store)))
+            .expect("register the validation table on a fresh context");
         // Views are planned over the raw providers, so they survive the
         // user-facing context hiding what they read
         for (name, sql) in VIEWS {
@@ -145,14 +148,22 @@ impl ContextBuilder {
                 ctx.register_table(name, Arc::new(SkipSystemCols::new(table)))
                     .expect("register store tables on a fresh context");
             }
-            for kind in LinkKind::ALL {
-                ctx.deregister_table(kind.table_name())
+            for name in LinkKind::ALL
+                .iter()
+                .map(|k| k.table_name())
+                .chain([SCAN_VALIDATION])
+            {
+                ctx.deregister_table(name)
                     .expect("deregister a table this build registered");
             }
         }
         ctx
     }
 }
+
+/// The system-tier table of validation records; see
+/// validation-and-splitting.md
+const SCAN_VALIDATION: &str = "scan_validation";
 
 /// The user-facing relation tables: views over the `_link` tables
 /// with the version already chosen, so a join is on ids.
