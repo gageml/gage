@@ -57,8 +57,8 @@ impl<'a> From<&'a Store> for ScanStore<'a> {
 /// The scan's `attrs.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanAttrs {
-    /// The runtime that ran the scan, `gage <version>`; the runtime
-    /// is the binary
+    /// The runtime that ran the scan, `<scheme> <version>`, where
+    /// the scheme term names the runtime scheme, not the application
     pub runtime: String,
     /// UNIX time millis, run start
     pub started: i64,

@@ -48,6 +48,12 @@ pub use scan::{
     SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions, StagingPaths,
 };
 
+/// The scheme term a scan records in its `runtime` attr, followed by
+/// the version: `gage <version>`. The term names the runtime scheme
+/// the scan ran under, not the application; a scan run by another
+/// implementation of the same scheme records the same term.
+pub const CURRENT_RUNTIME_SCHEME: &str = "gage";
+
 /// One item of task output, in the order it happened. The runtime
 /// emits these; the consumer owns rendering.
 #[derive(Debug, PartialEq, Eq)]

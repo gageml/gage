@@ -41,7 +41,8 @@ use gage_core::uuid::{new_uuid, short_uuid};
 use gage_registry::scanner::ScannerDef;
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{
-    OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext, ScanDatasetRef, TaskOutput,
+    CURRENT_RUNTIME_SCHEME, OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext, ScanDatasetRef,
+    TaskOutput,
 };
 use gage_scan::error::render_task_error;
 use gage_store::{
@@ -254,8 +255,8 @@ impl From<StoreError> for ScanError {
 pub struct ScanConfig<'a> {
     /// The staging root, `staging/` under Gage home in production
     pub staging_root: &'a std::path::Path,
-    /// The Gage build version; the scan records `gage <version>` as
-    /// its `runtime`
+    /// The Gage build version; the scan records
+    /// `<CURRENT_RUNTIME_SCHEME> <version>` as its `runtime`
     pub gage_version: &'a str,
     /// The commit SHA of the dataset to scan, linked from the scan as
     /// `dataset.link`. `None` runs the scanners with no dataset.
@@ -439,7 +440,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         }
 
         let attrs = ScanAttrs {
-            runtime: format!("gage {}", self.config.gage_version),
+            runtime: format!("{CURRENT_RUNTIME_SCHEME} {}", self.config.gage_version),
             started,
             stopped: now_ms(),
             canceled,
