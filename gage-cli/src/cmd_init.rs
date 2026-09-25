@@ -7,66 +7,25 @@ use gage_claude::plugin;
 use gage_claude::proc::find_claude;
 use gage_core::config::plugin_marketplace_dir;
 use gage_db::db::{db_path, open_db};
-use gage_db::import::{ImportReport, import};
 
 use crate::dialog::{self, DialogError, DialogResult};
 
 #[derive(Args)]
 pub struct InitArgs {
     /// Uninstall Gage from Claude Code
-    #[arg(short, long, conflicts_with_all = ["import_data", "import_data_preview"])]
+    #[arg(short, long)]
     pub remove: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
     pub yes: bool,
-
-    /// Import data from PATH
-    ///
-    /// Rows with same IDs are never overwritten. Rejected rows are written to a
-    /// JSON file next to the modified database file (~/.gage/data/gage.db)
-    #[arg(long, value_name = "PATH", conflicts_with = "import_data_preview")]
-    pub import_data: Option<PathBuf>,
-
-    /// Preview import without modifying the database
-    #[arg(long, value_name = "PATH")]
-    pub import_data_preview: Option<PathBuf>,
 }
 
 pub fn run(args: InitArgs) {
-    if let Some(p) = args
-        .import_data
-        .as_ref()
-        .or(args.import_data_preview.as_ref())
-    {
-        let preview = args.import_data_preview.is_some();
-        match import(p, preview) {
-            Ok(report) => print_import_report(&report),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
     if args.remove {
         dialog::run("Remove Gage setup", || remove_dialog(&args));
     } else {
         dialog::run("Setup Gage", || install_dialog(&args));
-    }
-}
-
-fn print_import_report(r: &ImportReport) {
-    let mode = if r.preview { " (preview)" } else { "" };
-    println!("Import from {}{mode}", r.source.display());
-    println!("  {:<18}  {:>10}  {:>10}", "table", "accepted", "rejected");
-    for t in &r.tables {
-        println!("  {:<18}  {:>10}  {:>10}", t.name, t.accepted, t.rejected);
-    }
-    if let Some(p) = &r.rejected_path {
-        println!("Rejected rows written to {}", p.display());
-    } else if !r.preview && r.tables.iter().all(|t| t.rejected == 0) {
-        println!("No rejected rows");
     }
 }
 
@@ -90,6 +49,17 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         DialogError::Other(anyhow::anyhow!(
             "failed to initialize database at {}: {e}",
             db_path().display()
+        ))
+    })?;
+
+    let store_spinner = crate::style::spinner("Initializing store");
+    let store_path = gage_store::store_path();
+    let store_result = gage_store::init(&store_path);
+    store_spinner.finish_and_clear();
+    store_result.map_err(|e| {
+        DialogError::Other(anyhow::anyhow!(
+            "failed to initialize store at {}: {e}",
+            store_path.display()
         ))
     })?;
 

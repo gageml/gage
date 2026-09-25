@@ -1,7 +1,6 @@
 pub use rusqlite;
 
 pub mod db;
-pub mod import;
 pub mod issue;
 pub mod note;
 pub mod related;
