@@ -1174,6 +1174,7 @@ mod tests {
                 author: "user:test",
                 target,
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap()
     }

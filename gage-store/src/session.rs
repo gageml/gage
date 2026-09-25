@@ -92,6 +92,10 @@ pub struct SummaryAttrs {
     pub message_count: Option<u64>,
     /// The session has no entry with content
     pub is_empty: bool,
+    /// The number of lines in the native content, when the driver
+    /// reports it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<u64>,
 }
 
 fn collect_summary(attrs: &dyn SessionAttrs) -> SummaryAttrs {
@@ -100,6 +104,7 @@ fn collect_summary(attrs: &dyn SessionAttrs) -> SummaryAttrs {
         model: attrs.model().map(String::from),
         message_count: attrs.message_count(),
         is_empty: attrs.is_empty(),
+        line_count: attrs.line_count(),
     }
 }
 
@@ -675,6 +680,9 @@ pub(crate) mod tests {
             None
         }
         fn message_count(&self) -> Option<u64> {
+            None
+        }
+        fn line_count(&self) -> Option<u64> {
             None
         }
     }

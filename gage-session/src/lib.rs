@@ -147,6 +147,10 @@ pub trait SessionAttrs {
     fn title(&self) -> Option<&str>;
     fn model(&self) -> Option<&str>;
     fn message_count(&self) -> Option<u64>;
+    /// The number of lines in the native content, when the driver's
+    /// content is line-structured. This is the last line number the
+    /// `entry` table can report for the session.
+    fn line_count(&self) -> Option<u64>;
 }
 
 /// One normalized row of a stored session, in `entry` table shape.

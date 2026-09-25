@@ -68,11 +68,11 @@ pub use note::{
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{
     LinkKind, StoredNoteTable, StoredSessionTable, dataset_table, link_table, scan_table,
-    scan_validation_table,
+    scan_watermark_table,
 };
 pub use scan::{
     DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanQuery,
-    ScanRecord, ScanStore, ScanTask, TaskAttrs, TaskCounts, TaskStatus, Validation,
+    ScanRecord, ScanStore, ScanTask, TaskAttrs, TaskCounts, TaskStatus, Watermark,
 };
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,

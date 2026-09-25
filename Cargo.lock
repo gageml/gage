@@ -2584,6 +2584,7 @@ version = "0.2.0-dev"
 dependencies = [
  "anyhow",
  "gage-log",
+ "gage-runtime2",
  "gage-scan",
  "rune",
  "tokio",

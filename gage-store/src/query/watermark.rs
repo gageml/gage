@@ -1,7 +1,7 @@
-//! The `scan_validation` table: one row per `validation/<type>/<key>/<id>`
-//! record across every live scan. System tier: `partition` reads the
-//! largest validator per input under a key, and carry-forward finds
-//! the scan that recorded it.
+//! The `scan_watermark` table: one row per `watermarks/<kind>/<oid>/<key>`
+//! record across every live scan. System tier: `unseen` reads the
+//! watermarks a key holds for the scan's sessions and picks, per
+//! session, the closest one in the session's commit chain.
 
 use std::sync::{Arc, Mutex};
 
@@ -19,10 +19,13 @@ fn schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         utf8("scan_id"),
         utf8("scan_commit"),
-        utf8("input_type"),
+        // `sessions`, `notes`, or `attachments`
+        utf8("kind"),
+        // The Gage object id of the watermarked object
+        utf8("oid"),
         utf8("key"),
-        utf8("input_id"),
-        utf8("validator"),
+        // The object's commit the task finished processing
+        utf8("commit"),
     ]))
 }
 
@@ -38,19 +41,19 @@ impl BatchSource for Source {
         let scans = ScanStore::from(store);
         let mut scan_ids = StringBuilder::new();
         let mut scan_commits = StringBuilder::new();
-        let mut input_types = StringBuilder::new();
+        let mut kinds = StringBuilder::new();
+        let mut oids = StringBuilder::new();
         let mut keys = StringBuilder::new();
-        let mut input_ids = StringBuilder::new();
-        let mut validators = StringBuilder::new();
+        let mut commits = StringBuilder::new();
         for tip in scans.query().tips().map_err(external)? {
             let record = scans.at_commit(&tip.sha).map_err(external)?;
-            for v in &record.content.validation {
+            for w in &record.content.watermarks {
                 scan_ids.append_value(&tip.id);
                 scan_commits.append_value(&tip.sha);
-                input_types.append_value(&v.input_type);
-                keys.append_value(&v.key);
-                input_ids.append_value(&v.input_id);
-                validators.append_value(&v.validator);
+                kinds.append_value(&w.kind);
+                oids.append_value(&w.oid);
+                keys.append_value(&w.key);
+                commits.append_value(&w.commit);
             }
         }
         Ok(RecordBatch::try_new(
@@ -58,16 +61,16 @@ impl BatchSource for Source {
             vec![
                 Arc::new(scan_ids.finish()),
                 Arc::new(scan_commits.finish()),
-                Arc::new(input_types.finish()),
+                Arc::new(kinds.finish()),
+                Arc::new(oids.finish()),
                 Arc::new(keys.finish()),
-                Arc::new(input_ids.finish()),
-                Arc::new(validators.finish()),
+                Arc::new(commits.finish()),
             ],
         )?)
     }
 }
 
-/// The store-bound `scan_validation` table.
-pub fn scan_validation_table(store: Arc<Mutex<Store>>) -> Arc<dyn TableProvider> {
+/// The store-bound `scan_watermark` table.
+pub fn scan_watermark_table(store: Arc<Mutex<Store>>) -> Arc<dyn TableProvider> {
     Arc::new(BatchTable::new(store, Arc::new(Source)))
 }

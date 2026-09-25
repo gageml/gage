@@ -138,8 +138,9 @@ pub(crate) fn send(output: Output) {
 /// The Rune context every scanner compiles against: the standard
 /// library without its stdio, this crate's `print`/`println` and
 /// `log` macros, `gage::scan` and the values it returns, the message
-/// and entry queries on a session, `gage::write_note`, and the
-/// include macros from `gage-runtime`. Every file-reading facility
+/// and entry queries on a session, `gage::write_note`,
+/// `gage::carry_forward`, `gage::watermark`, and the include macros
+/// from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
     let mut context = Context::with_config(false)?;
@@ -150,6 +151,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(query::types_module()?)?;
     context.install(note::module()?)?;
     context.install(note::types_module()?)?;
+    context.install(validate::module()?)?;
     context.install(validate::types_module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)

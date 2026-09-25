@@ -99,6 +99,10 @@ pub struct SessionSummary {
     pub cache_read_input_tokens: i64,
     pub cache_creation_input_tokens: i64,
     pub is_empty: bool,
+    /// The line number of the last parsed entry; a trailing line the
+    /// reader could not parse is not counted
+    #[serde(default)]
+    pub line_count: u64,
 }
 
 pub struct DerivedSession {
@@ -410,6 +414,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         };
 
         let entry_type = entry.get("type").and_then(|v| v.as_str());
+        summary.line_count = u64::from(line_num);
 
         if summary.is_empty && entry_has_content(&entry) {
             summary.is_empty = false;

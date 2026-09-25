@@ -156,6 +156,9 @@ impl SessionAttrs for SyntheticAttrs {
     fn message_count(&self) -> Option<u64> {
         None
     }
+    fn line_count(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl SyntheticSession {

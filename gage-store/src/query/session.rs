@@ -59,6 +59,7 @@ const ATTRS_COLS: &[&str] = &[
     "model",
     "message_count",
     "is_empty",
+    "line_count",
 ];
 
 /// The commit's `modified` marker: when the store wrote the version
@@ -104,6 +105,9 @@ fn stored_session_schema() -> SchemaRef {
         Field::new("model", DataType::Utf8, true),
         Field::new("message_count", DataType::Int64, true),
         Field::new("is_empty", DataType::Boolean, false),
+        // The number of lines in the native content, when the driver
+        // reports it
+        Field::new("line_count", DataType::Int64, true),
         // System
         // Short display form of the Gage id
         Field::new("id_display", DataType::Utf8, false),
@@ -369,6 +373,7 @@ impl StoredSessionExec {
         let mut models = StringBuilder::new();
         let mut message_counts = Int64Builder::with_capacity(len);
         let mut is_empties = BooleanBuilder::with_capacity(len);
+        let mut line_counts = Int64Builder::with_capacity(len);
         let mut projects = StringBuilder::new();
 
         for tip in &tips {
@@ -396,6 +401,7 @@ impl StoredSessionExec {
                 models.append_null();
                 message_counts.append_null();
                 is_empties.append_value(false);
+                line_counts.append_null();
                 projects.append_null();
                 continue;
             }
@@ -412,6 +418,7 @@ impl StoredSessionExec {
             models.append_option(summary.model.as_deref());
             message_counts.append_option(summary.message_count.map(|v| v as i64));
             is_empties.append_value(summary.is_empty);
+            line_counts.append_option(summary.line_count.map(|v| v as i64));
             projects.append_option(attrs.project.as_deref());
         }
 
@@ -432,6 +439,7 @@ impl StoredSessionExec {
                 Arc::new(models.finish()),
                 Arc::new(message_counts.finish()),
                 Arc::new(is_empties.finish()),
+                Arc::new(line_counts.finish()),
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),

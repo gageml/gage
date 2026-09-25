@@ -14,7 +14,7 @@
 //! scan/dataset.link                      # the scanned dataset's commit, written at create
 //! scan/notes.link                        # the notes' commits, written at apply
 //! scan/notes_carried.link                # carried notes' commits, written at apply
-//! scan/validation/<type>/<key>/<id>      # validation records, written by mark_valid
+//! scan/watermarks/<kind>/<oid>/<key>     # watermarks, written by watermark
 //! notes/<id>/**                          # note trees, written by write_note
 //! carried_notes                          # carried note commits, appended by carry-forward
 //! scan/logs/out                          # output lines, the scan's own and every task's
@@ -47,7 +47,7 @@ const SCAN_DIR: &str = "scan";
 const NOTES_DIR: &str = "notes";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
-const VALIDATION_DIR: &str = "validation";
+const WATERMARKS_DIR: &str = "watermarks";
 const CARRIED_NOTES_FILE: &str = "carried_notes";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
@@ -209,7 +209,7 @@ impl Staging {
     pub fn runtime_paths(&self) -> StagingPaths {
         StagingPaths {
             notes_dir: self.notes_dir(),
-            validation_dir: self.scan_dir().join(VALIDATION_DIR),
+            watermarks_dir: self.scan_dir().join(WATERMARKS_DIR),
             carried_notes: self.dir.join(CARRIED_NOTES_FILE),
         }
     }

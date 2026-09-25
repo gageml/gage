@@ -24,7 +24,7 @@ use super::derive::SessionSummary;
 /// `SessionSummary` (new field, changed title heuristic, fixed token
 /// accounting, ...). Stale `v{N}` directories are cleaned up by
 /// reconcile.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 fn versioned_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("session").join(format!("v{VERSION}"))

@@ -1677,113 +1677,251 @@ mod tests {
         );
     }
 
-    /// A second scan of the same dataset finds the session valid under
-    /// the key the first scan marked, and the record is queryable.
-    #[tokio::test]
-    async fn partition_marks_sessions_valid_across_scans() {
-        const SCANNER: &str = r#"
-            use gage::{scan, write_note};
+    /// Re-add the seeded session with `jsonl` as its grown content,
+    /// advancing its slot in the dataset. Returns the dataset's new
+    /// commit.
+    fn grow_dataset(
+        root: &std::path::Path,
+        store: &Store,
+        dataset_id: &str,
+        jsonl: &str,
+    ) -> String {
+        use gage_session::Driver;
+        use gage_store::SessionSpec;
 
-            pub const SCANNER = #{
-                name: "part",
-                description: "Partition",
-                tasks: #{ main: #{} },
-            };
-
-            const KEY = ("part", "main", 1);
-
-            pub async fn main() {
-                let p = scan().sessions().partition(KEY).carry_forward_notes().await?;
-                println!("{p:?}");
-                for s in p.invalid {
-                    write_note("size", s.attrs().await.native_size).for_session(s.id).await?;
-                    p.mark_valid(s).await?;
-                }
-                match p.mark_valid("not-a-member").await {
-                    Err(gage::Error::Args(m)) => println!("args: {m}"),
-                    other => println!("unexpected: {other:?}"),
-                }
-                Ok(())
-            }
-        "#;
-        const SESSION: &str = concat!(
-            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
-            "\n",
-        );
-        let (tmp, store) = open_store();
-        let (_, dataset_sha, session_id) = seeded_dataset(tmp.path(), &store, SESSION);
-        let (_dir, compiled) = compile_source(SCANNER);
-        let compiled = compiled.unwrap();
-
-        let mut first_events = Vec::new();
-        let mut second_events = Vec::new();
-        let mut outcomes = Vec::new();
-        for events in [&mut first_events, &mut second_events] {
-            let config = ScanConfig {
-                staging_root: &tmp.path().join("staging"),
-                gage_version: "test-version",
-                dataset: Some(&dataset_sha),
-            };
-            let outcome = scan(
-                &store,
-                &config,
-                std::slice::from_ref(&compiled),
-                &CancellationToken::new(),
-                |e| events.push(e),
-            )
-            .await
+        let claude = root.join("claude");
+        let native_id = "11111111-2222-3333-4444-555555555555";
+        let dir = claude.join("projects").join("-home-alice-proj");
+        std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
+        let driver = gage_claude::driver::ClaudeDriver::new();
+        let source = driver
+            .open_source(&format!("claude:{}", claude.display()))
             .unwrap();
-            assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
-            outcomes.push(outcome);
+        let mut native = source.open_native(native_id).unwrap();
+        let datasets = DatasetStore::from(store);
+        let outcomes = datasets
+            .sessions_add(
+                dataset_id,
+                vec![SessionSpec {
+                    driver: &driver,
+                    session: &mut *native,
+                }],
+            )
+            .unwrap();
+        assert_eq!(outcomes[0].outcome, gage_store::SessionOutcome::Updated);
+        datasets.get(dataset_id).unwrap().commit_sha
+    }
+
+    const WATERMARK_SCANNER: &str = r#"
+        use gage::{carry_forward, scan, watermark, write_note};
+
+        pub const SCANNER = #{
+            name: "wm",
+            description: "Watermarks",
+            tasks: #{ main: #{} },
+        };
+
+        const KEY = ("wm", "main", 1);
+
+        pub async fn main() {
+            let carried = carry_forward(KEY).await?;
+            println!("carried {carried}");
+            for (s, unseen) in scan().sessions().with_unseen(KEY).await? {
+                println!("unseen {unseen:?}");
+                if let Some((start, end)) = unseen {
+                    write_note("seen", format!("{start}-{end}"))
+                        .for_session_range(s.id, start, end)
+                        .carry_forward(KEY)
+                        .await?;
+                    write_note("untagged", "x").for_session(s.id).await?;
+                    watermark(KEY, s).await?;
+                }
+            }
+            match watermark(KEY, "not-a-member").await {
+                Err(gage::Error::Args(m)) => println!("args: {m}"),
+                other => println!("unexpected: {other:?}"),
+            }
+            match carry_forward("a/b").await {
+                Err(gage::Error::Args(m)) => println!("args: {m}"),
+                other => println!("unexpected: {other:?}"),
+            }
+            Ok(())
         }
+    "#;
+
+    const ONE_LINE: &str = concat!(
+        r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+        "\n",
+    );
+
+    const THREE_LINES: &str = concat!(
+        r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"hi"}]}}"#,
+        "\n",
+        r#"{"type":"user","uuid":"u2","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"more"}}"#,
+        "\n",
+    );
+
+    /// Run the watermark scanner on `dataset_sha` and return the
+    /// outcome with the task's printed lines.
+    async fn run_watermark_scan(
+        tmp: &TempDir,
+        store: &Store,
+        compiled: &CompiledScanner,
+        dataset_sha: &str,
+    ) -> (ScanOutcome, Vec<String>) {
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(dataset_sha),
+        };
+        let outcome = scan(
+            store,
+            &config,
+            std::slice::from_ref(compiled),
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        let printed = outputs(&events)
+            .into_iter()
+            .map(|o| match o {
+                Output::Println(s) => s.clone(),
+                other => panic!("unexpected output {other:?}"),
+            })
+            .collect();
+        (outcome, printed)
+    }
+
+    /// The first scan finds the whole session unseen and watermarks
+    /// it; a second scan of the same dataset commit finds nothing
+    /// unseen and carries the tagged note; a scan of the grown
+    /// session finds the appended lines unseen and still carries the
+    /// note written against the earlier commit; a scan of the
+    /// earlier dataset commit again ignores the later scan's
+    /// watermark and note, which sit on a descendant commit.
+    #[tokio::test]
+    async fn watermarks_resume_grown_sessions_and_carry_tagged_notes() {
+        let (tmp, store) = open_store();
+        let (dataset_id, dataset_sha_1, session_id) = seeded_dataset(tmp.path(), &store, ONE_LINE);
+        let (_dir, compiled) = compile_source(WATERMARK_SCANNER);
+        let compiled = compiled.unwrap();
+        let args_lines = [
+            "args: session not-a-member is not a member of the scan".to_string(),
+            "args: key must be non-empty and must not contain '/': \"a/b\"".to_string(),
+        ];
+
+        let (first, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
         assert_eq!(
-            outputs(&first_events),
+            printed,
             [
-                &Output::Println(
-                    "SessionPartition { key: \"part:main:1\", valid: 0, invalid: 1 }".into()
-                ),
-                &Output::Println(
-                    "args: session not-a-member was not partitioned as invalid".into()
-                ),
+                "carried 0".to_string(),
+                "unseen Some((1, 1))".to_string(),
+                args_lines[0].clone(),
+                args_lines[1].clone(),
             ]
         );
+        let scans = ScanStore::from(&store);
+        let first_record = scans.get(&first.id).unwrap();
+        assert_eq!(first_record.content.notes.len(), 2);
+        assert!(first_record.content.notes_carried.is_empty());
+        let member_sha_1 = DatasetStore::from(&store)
+            .sessions_at(&dataset_sha_1)
+            .unwrap()[0]
+            .commit_sha
+            .clone();
         assert_eq!(
-            outputs(&second_events),
-            [
-                &Output::Println(
-                    "SessionPartition { key: \"part:main:1\", valid: 1, invalid: 0 }".into()
-                ),
-                &Output::Println(
-                    "args: session not-a-member was not partitioned as invalid".into()
-                ),
-            ]
+            first_record.content.watermarks,
+            [gage_store::Watermark {
+                kind: "sessions".into(),
+                oid: session_id.clone(),
+                key: "wm:main:1".into(),
+                commit: member_sha_1.clone(),
+            }]
+        );
+        let notes = NoteStore::from(&store);
+        let tagged_1 = first_record
+            .content
+            .notes
+            .iter()
+            .map(|sha| (sha.clone(), notes.at_commit(sha).unwrap()))
+            .find(|(_, n)| n.name == "seen")
+            .expect("the scanner wrote the tagged note");
+        assert_eq!(tagged_1.1.carry_forward.as_deref(), Some("wm:main:1"));
+        assert_eq!(
+            tagged_1.1.target.as_deref(),
+            Some(format!("session:{session_id}#1-1").as_str())
         );
 
-        let first = ScanStore::from(&store).get(&outcomes[0].id).unwrap();
-        assert_eq!(first.content.notes.len(), 1);
-        assert!(first.content.notes_carried.is_empty());
-        assert_eq!(first.content.validation.len(), 1);
-        let v = &first.content.validation[0];
+        let (second, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
         assert_eq!(
-            (v.input_type.as_str(), v.key.as_str()),
-            ("session", "part:main:1")
+            printed,
+            [
+                "carried 1".to_string(),
+                "unseen None".to_string(),
+                args_lines[0].clone(),
+                args_lines[1].clone(),
+            ]
         );
-        assert_eq!(v.input_id, session_id);
-        assert!(v.validator.parse::<u64>().unwrap() > 0);
-        let second = ScanStore::from(&store).get(&outcomes[1].id).unwrap();
-        assert!(second.content.notes.is_empty());
-        assert!(second.content.validation.is_empty());
+        let second_record = scans.get(&second.id).unwrap();
+        assert!(second_record.content.notes.is_empty());
+        assert!(second_record.content.watermarks.is_empty());
         assert_eq!(
-            second.content.notes_carried, first.content.notes,
-            "the second scan carries the first scan's note"
+            second_record.content.notes_carried,
+            [tagged_1.0.clone()],
+            "only the tagged note is carried"
         );
         assert!(
             store
-                .read_commit(&outcomes[1].commit_sha)
+                .read_commit(&second.commit_sha)
                 .unwrap()
                 .parents
-                .contains(&first.content.notes[0]),
+                .contains(&tagged_1.0),
             "a carried note is a commit parent"
+        );
+
+        let dataset_sha_2 = grow_dataset(tmp.path(), &store, &dataset_id, THREE_LINES);
+        assert_ne!(dataset_sha_2, dataset_sha_1);
+        let (third, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_2).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 1".to_string(),
+                "unseen Some((2, 3))".to_string(),
+                args_lines[0].clone(),
+                args_lines[1].clone(),
+            ]
+        );
+        let third_record = scans.get(&third.id).unwrap();
+        assert_eq!(third_record.content.notes.len(), 2);
+        assert_eq!(third_record.content.notes_carried, [tagged_1.0.clone()]);
+        let member_sha_2 = DatasetStore::from(&store)
+            .sessions_at(&dataset_sha_2)
+            .unwrap()[0]
+            .commit_sha
+            .clone();
+        assert_ne!(member_sha_2, member_sha_1);
+        assert_eq!(third_record.content.watermarks[0].commit, member_sha_2);
+
+        let (fourth, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 1".to_string(),
+                "unseen None".to_string(),
+                args_lines[0].clone(),
+                args_lines[1].clone(),
+            ]
+        );
+        let fourth_record = scans.get(&fourth.id).unwrap();
+        assert_eq!(
+            fourth_record.content.notes_carried,
+            [tagged_1.0.clone()],
+            "the third scan's note targets a descendant commit and is not carried"
         );
 
         let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
@@ -1792,18 +1930,18 @@ mod tests {
         .build()
         .await;
         let batches = ctx
-            .sql("SELECT scan_id, validator FROM scan_validation WHERE input_type = 'session'")
+            .sql("SELECT scan_id, commit FROM scan_watermark WHERE kind = 'sessions'")
             .await
             .unwrap()
             .collect()
             .await
             .unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(rows, 1);
+        assert_eq!(rows, 2, "the first and third scans hold watermarks");
         let carried = ctx
             .sql(&format!(
                 "SELECT note_id FROM scan_note WHERE scan_id = '{}' AND carried",
-                outcomes[1].id
+                third.id
             ))
             .await
             .unwrap()

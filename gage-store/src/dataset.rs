@@ -587,6 +587,9 @@ mod tests {
         fn message_count(&self) -> Option<u64> {
             None
         }
+        fn line_count(&self) -> Option<u64> {
+            None
+        }
     }
 
     impl NativeSession for FakeSession {
@@ -706,6 +709,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap()
     }

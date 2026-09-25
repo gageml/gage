@@ -9,8 +9,9 @@
 //! directory and in the store, so one decoder serves both through
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
 //! view over a commit. [`ScanStore::create`] imports a staging `scan/`
-//! directory as the object's content. The note and issue links, agent
-//! records, and validation records are not written yet.
+//! directory as the object's content. Under `watermarks/`, the
+//! commits each task finished processing; see watermarks.md. The
+//! issue links and agent records are not written yet.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,7 +39,7 @@ const ATTRS_FILE: &str = "attrs.json";
 const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
-const VALIDATION_DIR: &str = "validation";
+const WATERMARKS_DIR: &str = "watermarks";
 const LOGS_DIR: &str = "logs";
 /// The blobs `logs/` may hold
 pub const LOG_NAMES: [&str; 3] = ["out", "err", "records"];
@@ -133,16 +134,17 @@ pub struct ScanTask {
     pub attrs: TaskAttrs,
 }
 
-/// One `validation/<input_type>/<key>/<input_id>` record: the
-/// validator a task observed for an input it finished under a key.
+/// One `watermarks/<kind>/<oid>/<key>` record: the commit of the
+/// object `oid` that a task under `key` finished processing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Validation {
-    /// `session`, `note`, or `attachment`
-    pub input_type: String,
+pub struct Watermark {
+    /// `sessions`, `notes`, or `attachments`
+    pub kind: String,
+    /// The Gage object id
+    pub oid: String,
     pub key: String,
-    pub input_id: String,
-    /// The file's content, trimmed: a size or a commit SHA
-    pub validator: String,
+    /// The file's content, trimmed: the object's commit SHA
+    pub commit: String,
 }
 
 /// A scan's content, decoded from either location.
@@ -158,8 +160,8 @@ pub struct ScanContent {
     /// The commit SHAs of the notes the scan carried from prior scans,
     /// from `notes_carried.link`, in file order.
     pub notes_carried: Vec<String>,
-    /// The validation records under `validation/`, in path order.
-    pub validation: Vec<Validation>,
+    /// The records under `watermarks/`, in path order.
+    pub watermarks: Vec<Watermark>,
     /// The names present under the scan's `logs/`, sorted; each one
     /// of [`LOG_NAMES`]
     pub logs: Vec<String>,
@@ -238,8 +240,8 @@ impl ScanStore<'_> {
             }
             tree.links.insert(file.to_string(), shas.clone());
         }
-        if let Some(sha) = import_opaque_tree(self.store.path(), &scan_dir.join(VALIDATION_DIR))? {
-            tree.subtrees.insert(VALIDATION_DIR.to_string(), sha);
+        if let Some(sha) = import_opaque_tree(self.store.path(), &scan_dir.join(WATERMARKS_DIR))? {
+            tree.subtrees.insert(WATERMARKS_DIR.to_string(), sha);
         }
         let logs_dir = scan_dir.join(LOGS_DIR);
         if logs_dir.is_dir() {
@@ -405,7 +407,7 @@ impl ScanContent {
         };
         let notes = read_link(files, NOTES_LINK)?.unwrap_or_default();
         let notes_carried = read_link(files, NOTES_CARRIED_LINK)?.unwrap_or_default();
-        let validation = read_validation(files)?;
+        let watermarks = read_watermarks(files)?;
         let logs = files.list_files(LOGS_DIR)?;
         let mut tasks = Vec::new();
         for scanner in files.list_dirs(TASKS_DIR)? {
@@ -432,7 +434,7 @@ impl ScanContent {
             dataset,
             notes,
             notes_carried,
-            validation,
+            watermarks,
             logs,
             tasks,
             scanners,
@@ -440,29 +442,36 @@ impl ScanContent {
     }
 }
 
-/// Every record under `validation/`, in path order. A path that is
-/// not `<input_type>/<key>/<input_id>` is an error.
-fn read_validation(files: &dyn ScanFiles) -> Result<Vec<Validation>, StoreError> {
+/// Every record under `watermarks/`, in path order. A path that is
+/// not `<kind>/<oid>/<key>`, or a content that is not a commit SHA,
+/// is an error.
+fn read_watermarks(files: &dyn ScanFiles) -> Result<Vec<Watermark>, StoreError> {
     let mut paths = Vec::new();
-    walk_files(files, VALIDATION_DIR, "", &mut paths)?;
+    walk_files(files, WATERMARKS_DIR, "", &mut paths)?;
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
         let parts: Vec<&str> = path.split('/').collect();
-        let [input_type, key, input_id] = parts.as_slice() else {
+        let [kind, oid, key] = parts.as_slice() else {
             return Err(StoreError::Parse(format!(
-                "scan file {VALIDATION_DIR}/{path}: expected <input_type>/<key>/<input_id>"
+                "scan file {WATERMARKS_DIR}/{path}: expected <kind>/<oid>/<key>"
             )));
         };
         let bytes = files
-            .read(&format!("{VALIDATION_DIR}/{path}"))?
+            .read(&format!("{WATERMARKS_DIR}/{path}"))?
             .ok_or_else(|| {
-                StoreError::Parse(format!("scan file {VALIDATION_DIR}/{path} is missing"))
+                StoreError::Parse(format!("scan file {WATERMARKS_DIR}/{path} is missing"))
             })?;
-        out.push(Validation {
-            input_type: input_type.to_string(),
+        let commit = String::from_utf8_lossy(&bytes).trim().to_string();
+        if !is_sha(&commit) {
+            return Err(StoreError::Parse(format!(
+                "scan file {WATERMARKS_DIR}/{path}: {commit:?} is not a commit SHA"
+            )));
+        }
+        out.push(Watermark {
+            kind: kind.to_string(),
+            oid: oid.to_string(),
             key: key.to_string(),
-            input_id: input_id.to_string(),
-            validator: String::from_utf8_lossy(&bytes).trim().to_string(),
+            commit,
         });
     }
     Ok(out)
@@ -1218,6 +1227,7 @@ mod tests {
                     author: "task:s:t",
                     target: None,
                     metadata: None,
+                    carry_forward: None,
                 })
                 .unwrap();
             shas.push(
@@ -1255,32 +1265,37 @@ mod tests {
     }
 
     #[test]
-    fn create_imports_validation_records_and_decodes_them() {
+    fn create_imports_watermarks_and_decodes_them() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let scan_dir = staged_scan(tmp.path());
+        let session_sha = "0123456789abcdef0123456789abcdef01234567";
+        let note_sha = "89abcdef0123456789abcdef0123456789abcdef";
         write(
-            &scan_dir.join("validation/session/s:t:1/SESSION1"),
-            "1234\n",
+            &scan_dir.join("watermarks/sessions/SESSION1/s:t:1"),
+            &format!("{session_sha}\n"),
         );
-        write(&scan_dir.join("validation/note/s:t:1/NOTE1"), "abc\n");
+        write(
+            &scan_dir.join("watermarks/notes/NOTE1/s:t:1"),
+            &format!("{note_sha}\n"),
+        );
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN15", &scan_dir).unwrap();
         let record = scans.get("SCAN15").unwrap();
         assert_eq!(
-            record.content.validation,
+            record.content.watermarks,
             [
-                Validation {
-                    input_type: "note".into(),
+                Watermark {
+                    kind: "notes".into(),
+                    oid: "NOTE1".into(),
                     key: "s:t:1".into(),
-                    input_id: "NOTE1".into(),
-                    validator: "abc".into(),
+                    commit: note_sha.into(),
                 },
-                Validation {
-                    input_type: "session".into(),
+                Watermark {
+                    kind: "sessions".into(),
+                    oid: "SESSION1".into(),
                     key: "s:t:1".into(),
-                    input_id: "SESSION1".into(),
-                    validator: "1234".into(),
+                    commit: session_sha.into(),
                 },
             ]
         );
@@ -1293,7 +1308,25 @@ mod tests {
                 .ls(&commit)
                 .unwrap()
                 .iter()
-                .any(|e| e.name == "validation/session/s:t:1/SESSION1")
+                .any(|e| e.name == "watermarks/sessions/SESSION1/s:t:1")
+        );
+    }
+
+    #[test]
+    fn create_rejects_a_watermark_that_is_not_a_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let scan_dir = staged_scan(tmp.path());
+        write(
+            &scan_dir.join("watermarks/sessions/SESSION1/s:t:1"),
+            "1234\n",
+        );
+        let err = ScanStore::from(&store)
+            .create("SCAN16", &scan_dir)
+            .unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Parse(m) if m.contains("is not a commit SHA")),
+            "{err}"
         );
     }
 }

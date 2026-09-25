@@ -1088,6 +1088,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap();
 
@@ -1179,6 +1180,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap();
         let gone = notes
@@ -1188,6 +1190,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap();
         notes.delete(&gone).unwrap();
@@ -1252,6 +1255,9 @@ mod tests {
             None
         }
         fn message_count(&self) -> Option<u64> {
+            None
+        }
+        fn line_count(&self) -> Option<u64> {
             None
         }
     }
@@ -1424,6 +1430,7 @@ mod tests {
                         author: "user:test",
                         target: None,
                         metadata: None,
+                        carry_forward: None,
                     })
                     .unwrap()
             })

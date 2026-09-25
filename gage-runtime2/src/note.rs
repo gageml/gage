@@ -21,6 +21,7 @@ use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
 use crate::scan::current;
+use crate::validate::watermark_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
@@ -36,6 +37,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(NoteWrite::for_session_range)?;
     m.function_meta(NoteWrite::for_session_lines)?;
     m.function_meta(NoteWrite::metadata)?;
+    m.function_meta(NoteWrite::carry_forward)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: NoteWrite| async move {
         do_write_note(w).await
     })?;
@@ -57,6 +59,8 @@ pub struct NoteWrite {
     target: Option<SessionTarget>,
     #[rune(skip)]
     metadata: Option<Value>,
+    #[rune(skip)]
+    carry_forward: Option<Value>,
 }
 
 /// A session target before rendering: the id and the lines as the
@@ -79,6 +83,7 @@ fn write_note(name: &str, value: Value) -> NoteWrite {
         value,
         target: None,
         metadata: None,
+        carry_forward: None,
     }
 }
 
@@ -129,6 +134,16 @@ impl NoteWrite {
     #[rune::function(instance)]
     fn metadata(mut self, metadata: Value) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    /// Tag the note with a carry-forward key: a later scan's
+    /// `carry_forward(key)` links it when its target session is in
+    /// that scan. A string, or a tuple of strings and integers
+    /// rendered colon-joined.
+    #[rune::function(instance)]
+    fn carry_forward(mut self, key: Value) -> Self {
+        self.carry_forward = Some(key);
         self
     }
 }
@@ -197,6 +212,10 @@ async fn do_write_note(w: NoteWrite) -> Written {
         Ok(m) => m,
         Err(e) => return Ok(Err(e)),
     };
+    let carry_forward = match w.carry_forward.as_ref().map(watermark_key).transpose() {
+        Ok(k) => k,
+        Err(e) => return Ok(Err(e)),
+    };
     let pinned = match &session {
         Some(id) => ctx.member_commit(id).await?,
         None => None,
@@ -209,6 +228,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
         author: &author,
         target: target.as_deref(),
         metadata: metadata.clone(),
+        carry_forward: carry_forward.as_deref(),
     };
     let staged = {
         let store = ctx.store.lock().unwrap();

@@ -538,6 +538,10 @@ impl SessionAttrs for ClaudeSessionAttrs {
     fn message_count(&self) -> Option<u64> {
         Some(self.summary.message_count.max(0) as u64)
     }
+
+    fn line_count(&self) -> Option<u64> {
+        Some(self.summary.line_count)
+    }
 }
 
 /// The `ClaudeHome` for a resolved root. The env-resolved home carries

@@ -330,6 +330,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap()
     }
@@ -626,6 +627,9 @@ mod tests {
         fn message_count(&self) -> Option<u64> {
             None
         }
+        fn line_count(&self) -> Option<u64> {
+            None
+        }
     }
 
     impl NativeSession for FakeSession {
@@ -727,6 +731,7 @@ mod tests {
                 author: "user:test",
                 target: Some(&format!("note:{a}")),
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap();
         notes
@@ -750,6 +755,7 @@ mod tests {
                 author: "user:test",
                 target: Some(&format!("note:{c1}")),
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap();
         let c2 = note(&store, "c2");
@@ -915,6 +921,7 @@ mod tests {
                 author: "user:test",
                 target: Some(&format!("note:{root}")),
                 metadata: None,
+                carry_forward: None,
             })
             .unwrap();
         notes

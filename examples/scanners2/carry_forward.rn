@@ -1,0 +1,26 @@
+use gage::{carry_forward, scan, watermark, write_note};
+
+pub const SCANNER = #{
+    name: "carry-forward",
+    description: "Carry forward example",
+    tasks: #{ main: #{} },
+};
+
+const KEY = ("code-review", "findings", 1);
+
+pub async fn main() {
+    // Carries forward previously written notes scan sessions
+    carry_forward(KEY).await?;
+
+    //
+    for (s, unseen) in scan().sessions().with_unseen(KEY).await? {
+        if unseen.is_some() {
+            let attrs = s.attrs().await;
+            write_note("native_size", attrs.native_size)
+                .for_session(s.id)
+                .carry_forward(KEY)
+                .await?;
+        }
+        watermark(KEY, s).await?;
+    }
+}

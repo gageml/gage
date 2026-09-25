@@ -51,8 +51,8 @@ pub struct ScanContext {
 pub struct StagingPaths {
     /// `write_note` stages note trees here, one directory per id
     pub notes_dir: PathBuf,
-    /// `mark_valid` writes `<input_type>/<key>/<input_id>` here
-    pub validation_dir: PathBuf,
+    /// `watermark` writes `<kind>/<oid>/<key>` here
+    pub watermarks_dir: PathBuf,
     /// Carry-forward appends carried note commits here, one per line
     pub carried_notes: PathBuf,
 }
@@ -141,7 +141,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
         fetch_sessions(q).await
     })?;
-    m.function_meta(crate::validate::partition)?;
+    m.function_meta(crate::validate::with_unseen)?;
     m.ty::<Session>()?;
     m.function_meta(Session::attrs)?;
     m.function_meta(Session::debug)?;
@@ -371,6 +371,10 @@ pub struct SessionAttrs {
     pub message_count: Option<i64>,
     #[rune(get)]
     pub is_empty: bool,
+    /// The number of lines in the native content, when the driver
+    /// reports it
+    #[rune(get)]
+    pub line_count: Option<i64>,
 }
 
 impl SessionAttrs {
@@ -381,7 +385,7 @@ impl SessionAttrs {
             "SessionAttrs {{ id: {:?}, project: {:?}, modified: {}, created: {}, \
              native_mtime: {}, native_size: {}, native_id: {:?}, native_source: {:?}, \
              session_type: {:?}, driver: {:?}, title: {:?}, model: {:?}, \
-             message_count: {:?}, is_empty: {} }}",
+             message_count: {:?}, is_empty: {}, line_count: {:?} }}",
             self.id,
             self.project,
             self.modified.to_rfc3339(),
@@ -395,7 +399,8 @@ impl SessionAttrs {
             self.title,
             self.model,
             self.message_count,
-            self.is_empty
+            self.is_empty,
+            self.line_count
         )?;
         Ok(())
     }
@@ -407,7 +412,8 @@ impl SessionAttrs {
 async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
     let sql = format!(
         "SELECT id, project, modified, created, native_mtime, native_size, native_id, \
-                native_source, session_type, driver, title, model, message_count, is_empty \
+                native_source, session_type, driver, title, model, message_count, is_empty, \
+                line_count \
          FROM session WHERE id = '{}'",
         q.id.replace('\'', "''")
     );
@@ -442,6 +448,7 @@ async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
             .expect("session table integer columns are fixed")
     };
     let counts = int(12);
+    let lines = int(14);
     Ok(SessionAttrs {
         id: string(0).value(0).to_string(),
         project: optional(1),
@@ -462,6 +469,7 @@ async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
             .downcast_ref::<BooleanArray>()
             .expect("is_empty is a boolean column")
             .value(0),
+        line_count: lines.is_valid(0).then(|| lines.value(0)),
     })
 }
 
