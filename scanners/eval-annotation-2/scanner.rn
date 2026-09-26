@@ -1,0 +1,154 @@
+// Model of the `eval-annotation` scanner for the rethink runtime
+// (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
+// the task names the action.
+//
+// Untagged code runs on the rethink runtime today. Code tagged
+// `// FUTURE` needs a facility the rethink runtime does not have yet.
+// Where the rethink design specifies the interface, FUTURE code is
+// written against it; otherwise it follows the legacy interface as a
+// placeholder. This file is a target, not a runnable scanner.
+
+use gage::{scan, write_note};
+// FUTURE: agents, templates, progress, and SQL query are not in the
+// rethink runtime
+use gage::tools::Query;
+use gage::{AgentRunner, Progress, Template, call_agent, query};
+
+pub const SCANNER = #{
+    name: "eval-annotation-2",
+    description: "Annotate sessions with open codes for error analysis",
+    hidden: true,
+    // FUTURE: groups: ["eval"] when this scanner replaces
+    // `eval-annotation`. Left out so a legacy `-g eval` scan does not
+    // select it.
+    tasks: #{
+        annotate: #{
+            notes: #{ writes: #{ open: include_str!("open-doc.md") } },
+        },
+    },
+};
+
+/// Submit each session to an agent that writes open code notes.
+///
+/// Every session is annotated on every run: repeat runs are
+/// independent annotation passes, distinguished by the scan that
+/// wrote them.
+pub async fn annotate() {
+    let sessions = scan().sessions().await;
+
+    // FUTURE: Template
+    let t = Template::new(include_str!("annotate-prompt.md.j2")).await?;
+
+    // One tick per session: skipped sessions tick during queueing,
+    // annotated sessions tick as their agents complete
+    // FUTURE: Progress
+    let progress = Progress::new(sessions.len());
+
+    // FUTURE: AgentRunner
+    let runner = AgentRunner::new();
+    for s in sessions {
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            progress.tick();
+            continue;
+        }
+        let prompt = t.render(#{ session_id: s.id }).await?;
+        runner.add(
+            // FUTURE: call_agent. The agent sees this session only
+            call_agent(prompt)
+                .name("eval-annotation")
+                .gage_tools([Query::new().sessions([s])])
+                .tools(#{ open_code: open_code_tooldef() })
+                .model("medium"),
+            #{ session: s.id },
+        );
+    }
+
+    // FUTURE: AgentRunner results
+    let results = runner.start();
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        // Debug, not info: the agent's reply restates its written
+        // notes
+        log::debug!(
+            "eval-annotation: {:?}",
+            #{
+                session,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        progress.tick();
+    }
+    Ok(())
+}
+
+/// Min total text length to annotate a session
+const SESSION_MIN_TEXT_LEN = 200;
+
+async fn skip_session(s) {
+    // FUTURE: query(). The rethink `message` table is scoped to the
+    // scan's dataset, so the SQL is unchanged. The query keeps
+    // scanner memory down; the sum is limited to 50 messages for the
+    // same reason.
+    let result = query(
+        format!(
+            "SELECT sum(length(text)) AS text_len FROM \
+            (SELECT text FROM message WHERE session_id = '{}' LIMIT 50)",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ text_len } = result.get(0).expect("should return one row");
+    match text_len {
+        () => Ok(Some("empty session")),
+        text_len if text_len < SESSION_MIN_TEXT_LEN => {
+            let reason = format!(
+                "text len {text_len} < min {SESSION_MIN_TEXT_LEN}"
+            );
+            Ok(Some(reason))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn open_code_tooldef() {
+    #{
+        name: "OpenCode",
+        description: "Write an open code note for the session",
+        inputs: #{
+            text: #{
+                type: "string",
+                description: "The open code: a brief note on what is wrong or surprising",
+            },
+            session: #{ type: "string", description: "Session ID" },
+            line: #{
+                type: "integer",
+                description: "Session line the observation anchors to",
+                required: false,
+            },
+        },
+    }
+}
+
+// FUTURE: tool callback. The rethink runtime has no agent tool
+// dispatch. When it does, the callback runs inside the task's scan
+// context, and the note's author is the agent session that made the
+// call (`session+task:<scan>/<scanner>:<task>/<native id>`), recorded
+// by the runtime. That replaces the legacy scan-qualified `agent:`
+// author, and `.replace_prev()` goes with it.
+pub async fn open_code(inputs, meta) {
+    let write = write_note("open", inputs.text);
+    let write = match inputs.get("line") {
+        Some(line) => write.for_session_line(inputs.session, line),
+        None => write.for_session(inputs.session),
+    };
+    // Record the calling tool-use id; the author carries the run, not
+    // the call
+    let metadata = #{};
+    if let Some(call) = meta.get("claudecode/toolUseId") {
+        metadata.insert("call", call);
+    }
+    let note = write.metadata(metadata).await?;
+    Ok(format!("Wrote open code note {}", note.id))
+}

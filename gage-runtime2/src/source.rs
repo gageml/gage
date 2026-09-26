@@ -246,6 +246,9 @@ pub fn decode_name(name: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// A file marking a scanner directory whose tests are skipped
+    const SKIP_TESTS_SENTINEL: &str = "SKIP-TESTS";
+
     fn write_scanner(dir: &Path, name: &str, source: &str) -> PathBuf {
         let path = dir.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -368,7 +371,8 @@ mod tests {
     /// The guard on the closed-runtime contract: every builtin scanner
     /// compiles in a directory holding only its enumerated files, with
     /// the full first-generation context. A file the compiler reads
-    /// that the enumerator missed fails this compile.
+    /// that the enumerator missed fails this compile. A scanner
+    /// directory holding a `SKIP-TESTS` file is left out.
     #[test]
     fn enumerated_files_are_all_the_compiler_reads() {
         let scanners_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "..", "scanners"]
@@ -376,8 +380,9 @@ mod tests {
             .collect();
         let mut checked = 0;
         for entry in fs::read_dir(&scanners_dir).unwrap() {
-            let scanner = entry.unwrap().path().join("scanner.rn");
-            if !scanner.is_file() {
+            let dir = entry.unwrap().path();
+            let scanner = dir.join("scanner.rn");
+            if !scanner.is_file() || dir.join(SKIP_TESTS_SENTINEL).is_file() {
                 continue;
             }
             let files = source_files(&scanner).unwrap();

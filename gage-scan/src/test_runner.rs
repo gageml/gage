@@ -60,7 +60,8 @@ struct FileSource {
 /// Extract the scanner bundle and compile every `.rn` file, returning
 /// a case per `#[test]` function. A file that fails to compile yields
 /// a single `<module>::build` case carrying its diagnostics; warnings
-/// on a successful build go to stderr.
+/// on a successful build go to stderr. A directory holding a
+/// `SKIP-TESTS` file is left out, with everything under it.
 pub fn collect_tests() -> io::Result<Vec<TestCase>> {
     extract_scanners().unwrap();
     let dir = scanners_dir();
@@ -279,6 +280,9 @@ fn walk_rn_files(dir: &std::path::Path) -> Vec<PathBuf> {
     result
 }
 
+/// A file marking a scanner directory whose tests are skipped
+const SKIP_TESTS_SENTINEL: &str = "SKIP-TESTS";
+
 fn walk_rn_files_rec(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -287,6 +291,9 @@ fn walk_rn_files_rec(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            if path.join(SKIP_TESTS_SENTINEL).is_file() {
+                continue;
+            }
             walk_rn_files_rec(&path, result);
         } else if path.extension().is_some_and(|ext| ext == "rn") {
             result.push(path);

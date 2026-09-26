@@ -1,0 +1,40 @@
+Write project summary notes for project {{ project }}
+
+The file contents below describe the project. Use them to write one summary
+note per section using the `mcp__gage__ProjectSummary` tool. Pass the note
+name given for the section, the project path `{{ project }}`, and the summary
+as content.
+
+The summaries are consumed by downstream agents that review coding sessions
+for this project. Write for that reader: compact, factual, and focused on what
+helps judge whether session activity fits the project.
+
+{% for section in sections %}
+{% if section.kind == "rules" %}
+## Rules (note name `project-summary.rules`)
+
+Summarize the project's rules in a way that is useful for judging rule
+compliance in a session. Preserve concrete requirements (naming, error
+handling, forbidden patterns, workflow steps). Note any rules that are
+inconsistent with each other or unclear --- this is your judgement and is
+valuable to the downstream reader.
+{% endif %}
+{% if section.kind == "stack" %}
+## Stack (note name `project-summary.stack`)
+
+Describe the project's stack and architecture from its manifest files.
+Evaluate the stack for standardness and highlight bespoke or idiosyncratic
+features a reviewer should know about.
+{% endif %}
+
+{% for file in section.files %}
+### {{ file.path }}
+
+```
+{{ file.text }}
+```
+{% endfor %}
+{% endfor %}
+
+In your reply, simply state which notes you wrote. Do not re-state the
+summaries in your reply.
