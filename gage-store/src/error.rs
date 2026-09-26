@@ -67,11 +67,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StoreError::NotFound(path) => {
-                write!(
-                    f,
-                    "no Gage store at {} (run `gage store init`)",
-                    path.display()
-                )
+                write!(f, "no Gage store at {} (run `gage init`)", path.display())
             }
             StoreError::VersionMissing(path) => {
                 write!(f, "store at {} has no gage.version", path.display())

@@ -7,6 +7,7 @@ use gage_claude::plugin;
 use gage_claude::proc::find_claude;
 use gage_core::config::plugin_marketplace_dir;
 use gage_db::db::{db_path, open_db};
+use gage_store::{Store, StoreError};
 
 use crate::dialog::{self, DialogError, DialogResult};
 
@@ -33,6 +34,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     let claude_bin = find_claude_or_err()?;
     let marketplace = plugin_marketplace_dir();
 
+    cli::log::step("Gage store")?;
     cli::log::step("Plugin\ngage (MCP server + skills)")?;
 
     if !args.yes {
@@ -53,15 +55,9 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     })?;
 
     let store_spinner = crate::style::spinner("Initializing store");
-    let store_path = gage_store::store_path();
-    let store_result = gage_store::init(&store_path);
+    let store_result = init_store();
     store_spinner.finish_and_clear();
-    store_result.map_err(|e| {
-        DialogError::Other(anyhow::anyhow!(
-            "failed to initialize store at {}: {e}",
-            store_path.display()
-        ))
-    })?;
+    store_result?;
 
     let gage_bin = std::env::current_exe()?;
     plugin::write_plugin_files_to(&marketplace, &gage_bin)?;
@@ -98,7 +94,26 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         )));
     }
 
-    Ok(DialogResult::from("Gage installed as Claude Code plugin"))
+    Ok(DialogResult::from("Gage is initialized"))
+}
+
+/// Creates the store only when none exists. An existing store is
+/// opened, which validates its version and object format without
+/// running any git command that modifies it; `gage_store::init` on an
+/// existing store would rewrite `gage.version` and the update hook.
+fn init_store() -> Result<(), DialogError> {
+    let path = gage_store::store_path();
+    let init_err = |e: StoreError| {
+        DialogError::Other(anyhow::anyhow!(
+            "failed to initialize store at {}: {e}",
+            path.display()
+        ))
+    };
+    match Store::open(&path) {
+        Ok(_) => Ok(()),
+        Err(StoreError::NotFound(_)) => gage_store::init(&path).map(|_| ()).map_err(init_err),
+        Err(e) => Err(init_err(e)),
+    }
 }
 
 fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
