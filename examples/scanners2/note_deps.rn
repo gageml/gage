@@ -11,7 +11,7 @@ pub const SCANNER = #{
 
 pub async fn a() {
     let now = DateTime::now();
-    for s in scan().sessions() {
+    for s in scan().sessions().await {
         write_note("a", now).for_session(s.id).await?;
     }
 }

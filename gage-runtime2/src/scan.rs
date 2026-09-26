@@ -8,7 +8,7 @@
 //! runs under a [`ScanContext`], scoped by the orchestrator through
 //! [`SCAN_CTX`]; `scan()` outside one is a VM error.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::array::{
@@ -18,7 +18,7 @@ use datafusion::prelude::SessionContext;
 use gage_query2::ContextBuilder;
 use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
-use gage_store::Store;
+use gage_store::{Store, StoreError};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, VmError};
 use rune::{Any, ContextError, Module};
@@ -30,18 +30,23 @@ tokio::task_local! {
 }
 
 /// The scan a task runs under: its id, its dataset, and the store
-/// the dataset is read from. The store is shared under a mutex
-/// because its git reader is single-threaded. The query context over
-/// the dataset's members is built on first use and shared by every
-/// task, so a session's rows are derived once per scan.
+/// the dataset is read from. The store's git reader is
+/// single-threaded, so each handle is shared under a lock. The
+/// runtime's own reads and staging writes go through `store`, an
+/// async lock, so a task waiting for it parks instead of holding a
+/// runtime thread. The query context over the dataset's members has
+/// its own handle, since its table providers read synchronously; it
+/// is built on first use and shared by every task, so a session's
+/// rows are derived once per scan.
 #[derive(Clone)]
 pub struct ScanContext {
     pub scan_id: String,
     /// `None` when the scan has no dataset; `sessions()` is then empty
     pub dataset: Option<ScanDatasetRef>,
-    pub store: Arc<Mutex<Store>>,
+    pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Where the runtime writes during the run
     pub paths: StagingPaths,
+    query_store: Arc<Mutex<Store>>,
     query: Arc<OnceCell<(Arc<SessionScope>, SessionContext)>>,
 }
 
@@ -58,19 +63,22 @@ pub struct StagingPaths {
 }
 
 impl ScanContext {
+    /// Open the context over the store at `store_path`: one handle for
+    /// the runtime and one for the query context.
     pub fn new(
         scan_id: String,
         dataset: Option<ScanDatasetRef>,
-        store: Arc<Mutex<Store>>,
+        store_path: &Path,
         paths: StagingPaths,
-    ) -> Self {
-        ScanContext {
+    ) -> Result<Self, StoreError> {
+        Ok(ScanContext {
             scan_id,
             dataset,
-            store,
+            store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             paths,
+            query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
             query: Arc::new(OnceCell::new()),
-        }
+        })
     }
 
     /// The scope and query context over the dataset's members at the
@@ -80,16 +88,15 @@ impl ScanContext {
         self.query
             .get_or_try_init(|| async {
                 let scope = match &self.dataset {
-                    Some(dataset) => {
-                        SessionScope::for_dataset(Arc::clone(&self.store), &dataset.commit_sha)
-                            .map_err(|e| {
-                                VmError::panic(format!("read dataset {}: {e}", dataset.id))
-                            })?
-                    }
-                    None => SessionScope::with_sessions(Arc::clone(&self.store), Vec::new()),
+                    Some(dataset) => SessionScope::for_dataset(
+                        Arc::clone(&self.query_store),
+                        &dataset.commit_sha,
+                    )
+                    .map_err(|e| VmError::panic(format!("read dataset {}: {e}", dataset.id)))?,
+                    None => SessionScope::with_sessions(Arc::clone(&self.query_store), Vec::new()),
                 };
                 let scope = Arc::new(scope);
-                let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
+                let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
                     .scope(Arc::clone(&scope))
                     .build()
                     .await;

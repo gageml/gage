@@ -12,6 +12,7 @@
 //! applied                                # present once written to the store
 //! scan/attrs.json                        # written at the terminal state
 //! scan/dataset.link                      # the scanned dataset's commit, written at create
+//! scan/plan.json                         # the resolved plan, written at create; see `plan`
 //! scan/notes.link                        # the notes' commits, written at apply
 //! scan/notes_carried.link                # carried notes' commits, written at apply
 //! scan/watermarks/<kind>/<oid>/<key>     # watermarks, written by watermark
@@ -54,6 +55,7 @@ const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
 const ATTRS_FILE: &str = "attrs.json";
 const DATASET_LINK: &str = "dataset.link";
+const PLAN_FILE: &str = "plan.json";
 const LOGS_DIR: &str = "logs";
 pub(crate) const OUT_LOG: &str = "out";
 pub(crate) const ERR_LOG: &str = "err";
@@ -129,6 +131,7 @@ impl Staging {
                         started: None,
                         stopped: None,
                         worked_ms: None,
+                        skipped: None,
                     },
                 )?;
             }
@@ -243,6 +246,11 @@ impl Staging {
     /// entry.
     pub fn scan_logs(&self) -> Logs {
         Logs::new(scan_logs_dir(&self.scan_dir()))
+    }
+
+    /// Write `scan/plan.json`, the resolved plan (see `crate::plan`).
+    pub fn write_plan(&self, plan: &serde_json::Value) -> io::Result<()> {
+        write_json(&self.scan_dir().join(PLAN_FILE), plan)
     }
 
     /// Write the scan's `attrs.json`.
@@ -410,6 +418,7 @@ mod tests {
                     started: Some(1),
                     stopped: Some(2),
                     worked_ms: None,
+                    skipped: None,
                 },
             )
             .unwrap();

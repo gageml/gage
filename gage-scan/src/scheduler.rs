@@ -772,6 +772,7 @@ mod tests {
     fn deps(wants: &[&str], writes: &[&str]) -> TaskDepsDef {
         TaskDepsDef {
             wants: wants.iter().map(|s| (*s).to_string()).collect(),
+            needs: Vec::new(),
             writes: writes
                 .iter()
                 .map(|s| ((*s).to_string(), String::new()))

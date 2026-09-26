@@ -36,6 +36,7 @@ const TASKS_DIR: &str = "tasks";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const ATTRS_FILE: &str = "attrs.json";
+const PLAN_FILE: &str = "plan.json";
 const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
@@ -124,6 +125,18 @@ pub struct TaskAttrs {
     /// by no writer today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worked_ms: Option<u64>,
+    /// Why the task was skipped; present only for `skipped`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<SkipReason>,
+}
+
+/// Why a task was skipped: a `needs` pattern that no completed upstream
+/// task satisfied, and the upstream tasks that were to write it, as
+/// `<scanner>:<task>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkipReason {
+    pub needs: String,
+    pub upstream: Vec<String>,
 }
 
 /// One task of a scan, decoded from `tasks/<scanner>/<task>/`.
@@ -162,6 +175,10 @@ pub struct ScanContent {
     pub notes_carried: Vec<String>,
     /// The records under `watermarks/`, in path order.
     pub watermarks: Vec<Watermark>,
+    /// The resolved task plan, from `plan.json`, carried verbatim. The
+    /// runtime that wrote it defines its shape. `None` for a scan
+    /// written without one.
+    pub plan: Option<serde_json::Value>,
     /// The names present under the scan's `logs/`, sorted; each one
     /// of [`LOG_NAMES`]
     pub logs: Vec<String>,
@@ -240,6 +257,12 @@ impl ScanStore<'_> {
             }
             tree.links.insert(file.to_string(), shas.clone());
         }
+        if let Some(plan) = &content.plan {
+            let mut json = serde_json::to_vec(plan)
+                .map_err(|e| StoreError::Parse(format!("scan plan encode: {e}")))?;
+            json.push(b'\n');
+            tree.blobs.insert(PLAN_FILE.to_string(), json);
+        }
         if let Some(sha) = import_opaque_tree(self.store.path(), &scan_dir.join(WATERMARKS_DIR))? {
             tree.subtrees.insert(WATERMARKS_DIR.to_string(), sha);
         }
@@ -298,6 +321,16 @@ impl ScanStore<'_> {
             commit: commit_sha,
         }
         .read(&format!("{LOGS_DIR}/{name}"))
+    }
+
+    /// The bytes of `plan.json`, the resolved task plan of the scan at
+    /// `commit_sha`. `None` for a scan written without one.
+    pub fn plan_file(&self, commit_sha: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        CommitFiles {
+            store: self.store,
+            commit: commit_sha,
+        }
+        .read(PLAN_FILE)
     }
 
     /// The bytes of one source file of a scanner at `commit_sha`, by
@@ -408,6 +441,13 @@ impl ScanContent {
         let notes = read_link(files, NOTES_LINK)?.unwrap_or_default();
         let notes_carried = read_link(files, NOTES_CARRIED_LINK)?.unwrap_or_default();
         let watermarks = read_watermarks(files)?;
+        let plan = match files.read(PLAN_FILE)? {
+            Some(bytes) => Some(
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| StoreError::Parse(format!("scan file {PLAN_FILE}: {e}")))?,
+            ),
+            None => None,
+        };
         let logs = files.list_files(LOGS_DIR)?;
         let mut tasks = Vec::new();
         for scanner in files.list_dirs(TASKS_DIR)? {
@@ -435,6 +475,7 @@ impl ScanContent {
             notes,
             notes_carried,
             watermarks,
+            plan,
             logs,
             tasks,
             scanners,

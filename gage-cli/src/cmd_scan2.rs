@@ -82,6 +82,14 @@ pub struct Scan2RunArgs {
     #[arg(short, long, value_name = "DATASET")]
     dataset: Option<String>,
 
+    /// Tasks to run at once
+    #[arg(short, long, value_name = "N", default_value_t = 10)]
+    jobs: usize,
+
+    /// Run only the scanners named, without pulling in required_by dependents
+    #[arg(long)]
+    no_deps: bool,
+
     /// Show available scanners and exit
     #[arg(long)]
     list_scanners: bool,
@@ -260,11 +268,39 @@ async fn run_scan(args: Scan2RunArgs) {
     }
     defs.extend(file_defs.iter());
 
+    // Pull in tasks that declare themselves `required_by` what the
+    // selection writes. `--no-deps` skips the pull-in so only the
+    // named scanners run.
+    let required = if args.no_deps {
+        Vec::new()
+    } else {
+        let cwd = match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(e) => {
+                eprintln!("gage scan2: reading cwd: {e}");
+                std::process::exit(1);
+            }
+        };
+        let config = match gage_core::config::load_merged(&cwd) {
+            Ok((config, _)) => config,
+            Err(e) => {
+                eprintln!("gage scan2: reading config: {e}");
+                std::process::exit(1);
+            }
+        };
+        registry.required_tasks(&defs, &config)
+    };
+
     // Every scanner compiles before any task runs, so a broken
     // scanner is a full stop.
     let mut scanners: Vec<CompiledScanner> = Vec::new();
-    for def in defs {
-        match gage_scan2::compile(def) {
+    let compiled = defs.iter().map(|def| gage_scan2::compile(def)).chain(
+        required
+            .iter()
+            .map(|(def, tasks)| gage_scan2::compile_required(def, tasks)),
+    );
+    for result in compiled {
+        match result {
             Ok(s) => scanners.push(s),
             Err(e) => {
                 eprintln!("gage scan2: {e}");
@@ -294,6 +330,7 @@ async fn run_scan(args: Scan2RunArgs) {
         staging_root: &staging_root(),
         gage_version: crate::VERSION,
         dataset: dataset_sha.as_deref(),
+        jobs: args.jobs,
     };
     // Headless: task output and the scan's own lines go to the
     // terminal as they happen, unprefixed; records go to the scan
@@ -306,6 +343,11 @@ async fn run_scan(args: Scan2RunArgs) {
         },
         Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
         Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
+        Event::Warning {
+            scanner,
+            task,
+            message,
+        } => eprintln!("warning: task {scanner}:{task} {message}"),
         Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
     })
     .await;

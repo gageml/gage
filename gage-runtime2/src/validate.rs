@@ -120,7 +120,7 @@ async fn do_carry_forward(q: CarryForward) -> Result<Result<i64, Error>, VmError
         id_list(&members)
     );
     let batches = run(ctx.query_context().await?, &sql).await?;
-    let chains = chains(&ctx, &members)?;
+    let chains = chains(&ctx, &members).await?;
     let mut commits: BTreeSet<String> = BTreeSet::new();
     for batch in &batches {
         let note_commits = string_column(batch, 0);
@@ -199,7 +199,7 @@ async fn do_with_unseen(q: WithUnseenQuery) -> Result<Result<Vec<Value>, Error>,
                 .insert(commits.value(i).to_string());
         }
     }
-    let store = ctx.store.lock().unwrap();
+    let store = ctx.store.lock().await;
     let mut out = Vec::with_capacity(members.len());
     for m in members {
         let closest = match marks.get(&m.session.id) {
@@ -327,11 +327,11 @@ async fn members(ctx: &ScanContext) -> Result<Vec<Member>, VmError> {
 }
 
 /// The commit chain of each member, as a set, keyed by session id.
-fn chains(
+async fn chains(
     ctx: &ScanContext,
     members: &[Member],
 ) -> Result<HashMap<String, HashSet<String>>, VmError> {
-    let store = ctx.store.lock().unwrap();
+    let store = ctx.store.lock().await;
     let mut out = HashMap::with_capacity(members.len());
     for m in members {
         let chain: HashSet<String> = chain(&store, &m.session.commit)?.into_iter().collect();

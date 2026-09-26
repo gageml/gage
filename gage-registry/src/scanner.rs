@@ -160,13 +160,19 @@ fn embedded_digest() -> String {
 
 /// A task's declared dependencies for one item kind (notes or issues):
 /// `wants` lists `*`-glob patterns over item names the task consumes;
-/// `writes` maps each item name the task produces to its docstring;
-/// `required_by` lists `*`-glob patterns over item names whose writers
-/// require this task — a planned task writing a matching name schedules
-/// this task even when its scanner is not selected.
+/// `needs` lists `*`-glob patterns over item names the task cannot do
+/// without — the task runs only after at least one task writing each
+/// has completed; `writes` maps each item name the task produces to its
+/// docstring; `required_by` lists `*`-glob patterns over item names
+/// whose writers require this task — a planned task writing a matching
+/// name schedules this task even when its scanner is not selected.
+/// `writes` is declared as a map of name to docstring, or as a list of
+/// names when the items have no docs; a listed name has an empty
+/// docstring.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TaskDepsDef {
     pub wants: Vec<String>,
+    pub needs: Vec<String>,
     pub writes: BTreeMap<String, String>,
     pub required_by: Vec<String>,
 }
@@ -778,12 +784,13 @@ impl ScannerRegistry {
     /// Docstring for `note_name` from any scanner's `notes.writes`.
     /// Resolution order is by scanner name then task name (both ascending);
     /// last write wins for deterministic behaviour on duplicates. Returns
-    /// `None` if no scanner declares the note.
+    /// `None` if no scanner declares the note, or declares it without
+    /// a doc.
     pub fn note_doc(&self, note_name: &str) -> Option<String> {
         let mut found: Option<String> = None;
         for def in self.list() {
             for task in def.tasks.values() {
-                if let Some(doc) = task.notes.writes.get(note_name) {
+                if let Some(doc) = task.notes.writes.get(note_name).filter(|d| !d.is_empty()) {
                     found = Some(doc.clone());
                 }
             }
@@ -1031,6 +1038,13 @@ impl DepsKind {
         }
     }
 
+    fn needs_field(self) -> &'static str {
+        match self {
+            DepsKind::Notes => "notes.needs",
+            DepsKind::Issues => "issues.needs",
+        }
+    }
+
     fn required_by_field(self) -> &'static str {
         match self {
             DepsKind::Notes => "notes.required_by",
@@ -1065,17 +1079,29 @@ fn parse_task_deps(
             "wants" => {
                 deps.wants = parse_patterns(source, expr, task, kind.wants_field())?;
             }
+            "needs" => {
+                deps.needs = parse_patterns(source, expr, task, kind.needs_field())?;
+            }
             "required_by" => {
                 deps.required_by = parse_patterns(source, expr, task, kind.required_by_field())?;
             }
             "writes" => {
-                let ast::Expr::Object(writes_obj) = expr else {
-                    return Err(ParseError::TaskFieldType {
-                        task: task.to_string(),
-                        field: kind.writes_field(),
-                    });
+                deps.writes = match expr {
+                    ast::Expr::Object(writes_obj) => {
+                        parse_notes(source, writes_obj, task, embed_key)?
+                    }
+                    // The list form names the items with no docs
+                    ast::Expr::Vec(_) => parse_patterns(source, expr, task, kind.writes_field())?
+                        .into_iter()
+                        .map(|name| (name, String::new()))
+                        .collect(),
+                    _ => {
+                        return Err(ParseError::TaskFieldType {
+                            task: task.to_string(),
+                            field: kind.writes_field(),
+                        });
+                    }
                 };
-                deps.writes = parse_notes(source, writes_obj, task, embed_key)?;
             }
             _ => {}
         }
@@ -1083,7 +1109,7 @@ fn parse_task_deps(
     Ok(deps)
 }
 
-/// Parse a `*`-glob pattern list field (`wants`, `required_by`).
+/// Parse a `*`-glob pattern list field (`wants`, `needs`, `required_by`).
 fn parse_patterns(
     source: &str,
     expr: &ast::Expr,
@@ -1346,6 +1372,36 @@ pub const SCANNER = #{
 "#;
         let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
         assert_eq!(def.agents.get("agent").unwrap(), "Says hello");
+    }
+
+    #[test]
+    fn parse_task_writes_as_a_list_of_names() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    tasks: #{
+        a: #{ notes: #{ writes: ["a", "a.more"] } },
+        b: #{
+            notes: #{ writes: ["b"], wants: ["a"], needs: ["a.*"] },
+            issues: #{ writes: ["found"] },
+        },
+    },
+};
+"#;
+        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let a = def.tasks.get("a").unwrap();
+        assert_eq!(
+            a.notes.writes,
+            BTreeMap::from([
+                ("a".to_string(), String::new()),
+                ("a.more".to_string(), String::new()),
+            ])
+        );
+        let b = def.tasks.get("b").unwrap();
+        assert_eq!(b.notes.writes.keys().collect::<Vec<_>>(), ["b"]);
+        assert_eq!(b.notes.wants, ["a"]);
+        assert_eq!(b.notes.needs, ["a.*"]);
+        assert_eq!(b.issues.writes.keys().collect::<Vec<_>>(), ["found"]);
     }
 
     #[test]

@@ -161,7 +161,7 @@ pub async fn list(args: NoteListArgs) {
         None => String::new(),
     };
     let sql = format!(
-        "SELECT id, id_prefix, name, text, value, target, created \
+        "SELECT id, id_prefix, name, text, value, target, scan, created \
          FROM note{where_clause} ORDER BY created DESC{limit_clause}"
     );
     let batches = run_query(&ctx, &sql).await;
@@ -171,7 +171,7 @@ pub async fn list(args: NoteListArgs) {
         return;
     }
 
-    let header: Vec<String> = ["Id", "Name", "Value", "Target", "Created"]
+    let header: Vec<String> = ["Id", "Name", "Value", "Target", "Scan", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -183,7 +183,8 @@ pub async fn list(args: NoteListArgs) {
         let texts = column::<StringArray>(batch, 3);
         let values = column::<StringArray>(batch, 4);
         let targets = column::<StringArray>(batch, 5);
-        let createds = column::<TimestampMillisecondArray>(batch, 6);
+        let scans = column::<StringArray>(batch, 6);
+        let createds = column::<TimestampMillisecondArray>(batch, 7);
         for i in 0..batch.num_rows() {
             let id = ids.value(i);
             // A text note shows its text; a JSON note its compact JSON
@@ -197,6 +198,11 @@ pub async fn list(args: NoteListArgs) {
             } else {
                 String::new()
             };
+            let scan = if scans.is_valid(i) {
+                short_uuid(scans.value(i)).to_string()
+            } else {
+                String::new()
+            };
             let created = if createds.is_valid(i) {
                 crate::human::format_elapsed_ms(createds.value(i))
             } else {
@@ -207,6 +213,7 @@ pub async fn list(args: NoteListArgs) {
                 names.value(i).to_string(),
                 value_cell(raw),
                 target,
+                scan,
                 created,
             ]);
         }
@@ -226,7 +233,7 @@ pub async fn list(args: NoteListArgs) {
             Columns::one(2).not(Rows::first()),
             style::tty(Color::FG_BRIGHT_CYAN),
         )
-        .modify(Columns::new(3..5).not(Rows::first()), style::dim())
+        .modify(Columns::new(3..6).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
 

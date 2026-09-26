@@ -1,4 +1,5 @@
-//! `write_note(name, value)`: a note written to the scan's staging.
+//! `write_note(name, value)`: a note written to the scan's staging,
+//! and `scan().notes()`: the scan's own notes read back.
 //!
 //! The builder carries the name, the value, the target set by one of
 //! the `for_session*` methods, and the metadata. Awaiting it validates
@@ -9,18 +10,32 @@
 //! input is `Error::Args`; a failure to reach staging or the store is
 //! a VM error. See implementation-notes.md, "`write_note` runtime
 //! function".
+//!
+//! `scan().notes()` is a [`NotesQuery`]; awaiting it reads the notes
+//! staged by this scan's tasks and the notes carried into it, and
+//! nothing else, as the rethink design says a running scan sees.
+//! `.name(name)` and `.names([...])` match names exactly. A task sees
+//! every note its upstream tasks wrote because the runner releases it
+//! only after they returned.
+//!
+//! A `DateTime` value, as a note value or inside metadata, is stored
+//! as its RFC 3339 string.
+
+use std::fs;
+use std::io;
 
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
+use gage_runtime::datetime::DateTime;
 use gage_runtime::error::Error;
 use gage_runtime::value::{json_to_value, value_to_json};
-use gage_store::{NoteInput, NoteStore, NoteValue, StoreError};
+use gage_store::{NoteFull, NoteInput, NoteStore, NoteValue, StoreError};
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Object, Protocol, Value, VmError};
+use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
-use crate::scan::current;
+use crate::scan::{Scan, ScanContext, current};
 use crate::validate::watermark_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
@@ -43,6 +58,13 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     })?;
     m.ty::<Note>()?;
     m.function_meta(Note::debug)?;
+    m.ty::<NotesQuery>()?;
+    m.function_meta(notes)?;
+    m.function_meta(NotesQuery::name)?;
+    m.function_meta(NotesQuery::names)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
+        fetch_notes(q).await
+    })?;
     Ok(m)
 }
 
@@ -231,7 +253,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
         carry_forward: carry_forward.as_deref(),
     };
     let staged = {
-        let store = ctx.store.lock().unwrap();
+        let store = ctx.store.lock().await;
         NoteStore::from(&*store).stage(
             &ctx.paths.notes_dir.join(&id),
             &id,
@@ -323,21 +345,225 @@ fn lines_spec(v: &Value) -> Result<String, Error> {
     ))
 }
 
-/// A string is stored as text; anything else as JSON.
+/// A string is stored as text, a `DateTime` as its RFC 3339 string,
+/// anything else as JSON.
 fn note_value(v: &Value) -> Result<NoteValue, Error> {
     if let Ok(s) = v.borrow_string_ref() {
         return Ok(NoteValue::Text(s.to_string()));
     }
+    if let Ok(dt) = v.borrow_ref::<DateTime>() {
+        return Ok(NoteValue::Text(dt.to_rfc3339()));
+    }
     let json =
-        value_to_json(v).map_err(|e| Error::Args(format!("value could not be serialized: {e}")))?;
+        json_value(v).map_err(|e| Error::Args(format!("value could not be serialized: {e}")))?;
     Ok(NoteValue::Json(json))
 }
 
 fn metadata_json(v: &Value) -> Result<serde_json::Value, Error> {
-    let json = value_to_json(v)
-        .map_err(|e| Error::Args(format!("metadata could not be serialized: {e}")))?;
+    let json =
+        json_value(v).map_err(|e| Error::Args(format!("metadata could not be serialized: {e}")))?;
     if !json.is_object() {
         return Err(Error::Args("metadata must be an object".into()));
     }
     Ok(json)
+}
+
+/// Encode a value as JSON with a `DateTime` as its RFC 3339 string,
+/// at the top or anywhere inside an object or list. Everything else
+/// is the first generation's encoding.
+fn json_value(v: &Value) -> Result<serde_json::Value, String> {
+    if let Ok(dt) = v.borrow_ref::<DateTime>() {
+        return Ok(serde_json::Value::String(dt.to_rfc3339()));
+    }
+    if let Ok(obj) = v.borrow_ref::<Object>() {
+        let mut map = serde_json::Map::with_capacity(obj.len());
+        for (k, val) in obj.iter() {
+            map.insert(k.as_str().to_owned(), json_value(val)?);
+        }
+        return Ok(serde_json::Value::Object(map));
+    }
+    if let Ok(list) = v.borrow_ref::<RuneVec>() {
+        let mut out = Vec::with_capacity(list.len());
+        for val in list.iter() {
+            out.push(json_value(val)?);
+        }
+        return Ok(serde_json::Value::Array(out));
+    }
+    value_to_json(v)
+}
+
+/// The value of `scan().notes()`: the scan's own notes, read when
+/// awaited.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct NotesQuery {
+    /// Exact names to keep; `None` keeps every note
+    #[rune(skip)]
+    names: Option<Vec<String>>,
+}
+
+/// The notes this scan wrote or carried, read when awaited.
+#[rune::function(instance)]
+fn notes(_scan: Ref<Scan>) -> NotesQuery {
+    NotesQuery { names: None }
+}
+
+impl NotesQuery {
+    /// Keep the notes named `name`.
+    #[rune::function(instance)]
+    fn name(mut self, name: &str) -> Self {
+        self.names = Some(vec![name.to_string()]);
+        self
+    }
+
+    /// Keep the notes with any of `names`.
+    #[rune::function(instance)]
+    fn names(mut self, names: Ref<RuneVec>) -> Result<Self, VmError> {
+        let mut out = Vec::with_capacity(names.len());
+        for v in names.iter() {
+            let s = v
+                .borrow_string_ref()
+                .map_err(|e| VmError::panic(format!("names: expected strings: {e}")))?;
+            out.push(s.to_string());
+        }
+        self.names = Some(out);
+        Ok(self)
+    }
+}
+
+/// Read the staged and carried notes, filtered by name, oldest first
+/// and by id among equals.
+async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error>, VmError> {
+    let ctx = current()?;
+    let mut full = staged_notes(&ctx).await?;
+    full.extend(carried_notes(&ctx).await?);
+    full.retain(|n| q.names.as_ref().is_none_or(|names| names.contains(&n.name)));
+    full.sort_by(|a, b| {
+        a.created_ms
+            .cmp(&b.created_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut out = Vec::with_capacity(full.len());
+    for n in full {
+        out.push(note_from_full(n)?);
+    }
+    Ok(Ok(out))
+}
+
+/// The notes staged under the scan's notes directory, in id order.
+async fn staged_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
+    let entries = match fs::read_dir(&ctx.paths.notes_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(VmError::panic(format!("staged notes: {e}"))),
+    };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|e| VmError::panic(format!("staged notes: {e}")))?
+            .path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    let store = ctx.store.lock().await;
+    let notes = NoteStore::from(&*store);
+    let mut out = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        out.push(
+            notes
+                .read_staged(&dir)
+                .map_err(|e| VmError::panic(format!("staged note {}: {e}", dir.display())))?,
+        );
+    }
+    Ok(out)
+}
+
+/// The notes carried into the scan so far, in the order they were
+/// carried.
+async fn carried_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
+    let text = match fs::read_to_string(&ctx.paths.carried_notes) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(VmError::panic(format!("carried notes: {e}"))),
+    };
+    let store = ctx.store.lock().await;
+    let notes = NoteStore::from(&*store);
+    let mut out = Vec::new();
+    for sha in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        out.push(
+            notes
+                .at_commit(sha)
+                .map_err(|e| VmError::panic(format!("carried note {sha}: {e}")))?,
+        );
+    }
+    Ok(out)
+}
+
+fn note_from_full(n: NoteFull) -> Result<Note, VmError> {
+    let value = match n.value {
+        NoteValue::Text(s) => rune::to_value(s).map_err(VmError::from)?,
+        NoteValue::Json(json) => json_to_value(&json),
+    };
+    let metadata = match n.metadata {
+        Some(json) => json_to_value(&json),
+        None => rune::to_value(Object::new()).map_err(VmError::from)?,
+    };
+    Ok(Note {
+        id: n.id,
+        name: n.name,
+        value,
+        author: n.author,
+        target: n.target,
+        metadata,
+        created: n.created_ms,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use rune::Vm;
+    use rune::sync::Arc as RuneArc;
+    use rune::{Diagnostics, Source, Sources};
+
+    use super::*;
+
+    fn vm(script: &str) -> Vm {
+        let context = crate::context().unwrap();
+        let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
+        let mut sources = Sources::new();
+        sources.insert(Source::memory(script).unwrap()).unwrap();
+        let mut diagnostics = Diagnostics::new();
+        let unit = rune::prepare(&mut sources)
+            .with_context(&context)
+            .with_diagnostics(&mut diagnostics)
+            .build()
+            .unwrap();
+        Vm::new(rt, RuneArc::try_new(unit).unwrap())
+    }
+
+    /// `names` borrows its list, so the caller's list is still
+    /// readable afterwards.
+    #[test]
+    fn notes_names_leaves_the_caller_list_readable() {
+        let mut vm = vm(r#"
+            pub fn check(scan) {
+                let names = ["a", "b"];
+                let query = scan.notes().names(names);
+                (names.len(), names[1])
+            }
+            "#);
+        let scan = Scan {
+            id: "scan".into(),
+            dataset: None,
+        };
+        let output = vm.call(["check"], (scan,)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "takes the VM execution's return value; the test holds the only live handle"
+        )]
+        let (len, second): (i64, String) = rune::from_value(output).unwrap();
+        assert_eq!((len, second.as_str()), (2, "b"));
+    }
 }

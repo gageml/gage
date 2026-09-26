@@ -72,7 +72,7 @@ pub use query::{
 };
 pub use scan::{
     DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanQuery,
-    ScanRecord, ScanStore, ScanTask, TaskAttrs, TaskCounts, TaskStatus, Watermark,
+    ScanRecord, ScanStore, ScanTask, SkipReason, TaskAttrs, TaskCounts, TaskStatus, Watermark,
 };
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,

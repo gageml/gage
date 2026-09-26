@@ -230,58 +230,46 @@ impl NoteStore<'_> {
     /// directory name is the note's id. Idempotent: a note whose ref
     /// already exists is not rewritten. Returns `(id, commit SHA)`.
     pub fn create_staged(&self, dir: &Path) -> Result<(String, String), StoreError> {
-        let id = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| StoreError::InvalidPath {
-                path: dir.display().to_string(),
-                reason: "a staged note directory is named by its id".to_string(),
-            })?;
-        if let Some(sha) = self.store.rev_parse(&object_ref(&id))? {
-            return Ok((id, sha));
+        let staged = read_staged_tree(dir)?;
+        if let Some(sha) = self.store.rev_parse(&object_ref(&staged.id))? {
+            return Ok((staged.id, sha));
         }
-        let read = |name: &str| -> Result<Option<Vec<u8>>, StoreError> {
-            match fs::read(dir.join(name)) {
-                Ok(bytes) => Ok(Some(bytes)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(StoreError::Write {
-                    path: dir.join(name),
-                    source: e,
-                }),
-            }
-        };
-        let attrs_bytes = read(ATTRS_FILE)?
-            .ok_or_else(|| StoreError::Parse(format!("staged note {id}: missing {ATTRS_FILE}")))?;
-        let attrs: NoteAttrs = serde_json::from_slice(&attrs_bytes)
-            .map_err(|e| StoreError::Parse(format!("staged note {id} {ATTRS_FILE}: {e}")))?;
-        let value = if let Some(bytes) = read(TEXT_VALUE_FILE)? {
-            NoteValue::Text(String::from_utf8(bytes).map_err(|e| {
-                StoreError::Parse(format!("staged note {id} {TEXT_VALUE_FILE}: {e}"))
-            })?)
-        } else if let Some(bytes) = read(JSON_VALUE_FILE)? {
-            NoteValue::Json(serde_json::from_slice(&bytes).map_err(|e| {
-                StoreError::Parse(format!("staged note {id} {JSON_VALUE_FILE}: {e}"))
-            })?)
-        } else {
-            return Err(StoreError::Parse(format!(
-                "staged note {id}: missing {TEXT_VALUE_FILE} or {JSON_VALUE_FILE}"
-            )));
-        };
-        let targets: Vec<String> = match read(TARGET_LINK)? {
-            Some(bytes) => String::from_utf8_lossy(&bytes)
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(String::from)
-                .collect(),
-            None => Vec::new(),
-        };
-        let tree = build_tree(&attrs, &value, targets)?;
-        let message = format!("note: {}", attrs.name);
+        let tree = build_tree(&staged.attrs, &staged.value, staged.targets)?;
+        let message = format!("note: {}", staged.attrs.name);
         let sha = self
             .store
-            .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
-        Ok((id, sha))
+            .create(OBJECT_TYPE, OBJECT_VERSION, &staged.id, &tree, &message)?;
+        Ok((staged.id, sha))
+    }
+
+    /// Read the note staged under `dir` by [`NoteStore::stage`], as a
+    /// running scan reads its own notes before apply. The note has no
+    /// commit yet, so `created_ms` and `modified_ms` are the time it
+    /// was staged.
+    pub fn read_staged(&self, dir: &Path) -> Result<NoteFull, StoreError> {
+        let staged = read_staged_tree(dir)?;
+        let staged_ms = fs::metadata(dir.join(ATTRS_FILE))
+            .and_then(|m| m.modified())
+            .map_err(|e| StoreError::Write {
+                path: dir.join(ATTRS_FILE),
+                source: e,
+            })?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        Ok(NoteFull {
+            id: staged.id,
+            name: staged.attrs.name,
+            value: staged.value,
+            author: staged.attrs.author,
+            target: staged.attrs.target,
+            metadata: staged.attrs.metadata,
+            scan: staged.attrs.scan,
+            carry_forward: staged.attrs.carry_forward,
+            targets: staged.targets,
+            created_ms: staged_ms,
+            modified_ms: staged_ms,
+        })
     }
 
     /// Validate a target URL and return the tip SHA of the object it
@@ -479,6 +467,69 @@ fn build_tree(
         tree.links.insert(TARGET_LINK.to_string(), target_shas);
     }
     Ok(tree)
+}
+
+/// A note's staged files, decoded.
+struct StagedNote {
+    id: String,
+    attrs: NoteAttrs,
+    value: NoteValue,
+    targets: Vec<String>,
+}
+
+/// Decode the files [`NoteStore::stage`] wrote under `dir`. The
+/// directory name is the note's id.
+fn read_staged_tree(dir: &Path) -> Result<StagedNote, StoreError> {
+    let id = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| StoreError::InvalidPath {
+            path: dir.display().to_string(),
+            reason: "a staged note directory is named by its id".to_string(),
+        })?;
+    let read = |name: &str| -> Result<Option<Vec<u8>>, StoreError> {
+        match fs::read(dir.join(name)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StoreError::Write {
+                path: dir.join(name),
+                source: e,
+            }),
+        }
+    };
+    let attrs_bytes = read(ATTRS_FILE)?
+        .ok_or_else(|| StoreError::Parse(format!("staged note {id}: missing {ATTRS_FILE}")))?;
+    let attrs: NoteAttrs = serde_json::from_slice(&attrs_bytes)
+        .map_err(|e| StoreError::Parse(format!("staged note {id} {ATTRS_FILE}: {e}")))?;
+    let value =
+        if let Some(bytes) = read(TEXT_VALUE_FILE)? {
+            NoteValue::Text(String::from_utf8(bytes).map_err(|e| {
+                StoreError::Parse(format!("staged note {id} {TEXT_VALUE_FILE}: {e}"))
+            })?)
+        } else if let Some(bytes) = read(JSON_VALUE_FILE)? {
+            NoteValue::Json(serde_json::from_slice(&bytes).map_err(|e| {
+                StoreError::Parse(format!("staged note {id} {JSON_VALUE_FILE}: {e}"))
+            })?)
+        } else {
+            return Err(StoreError::Parse(format!(
+                "staged note {id}: missing {TEXT_VALUE_FILE} or {JSON_VALUE_FILE}"
+            )));
+        };
+    let targets: Vec<String> = match read(TARGET_LINK)? {
+        Some(bytes) => String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(StagedNote {
+        id,
+        attrs,
+        value,
+        targets,
+    })
 }
 
 fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {

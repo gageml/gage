@@ -17,10 +17,11 @@
 //!   revision history at promotion.
 //!
 //! This crate owns task orchestration: it compiles scanners against
-//! the `gage-runtime2` context, runs their tasks, and records the run
-//! in [`staging`] and then the store. The runtime is a pure event
-//! emitter: [`scan`] hands each [`Event`] to the caller's sink, which
-//! owns rendering.
+//! the `gage-runtime2` context, plans their tasks as one DAG (see
+//! [`plan`]), runs the tasks through a worker pool as their upstream
+//! tasks finish, and records the run in [`staging`] and then the
+//! store. The runtime is a pure event emitter: [`scan`] hands each
+//! [`Event`] to the caller's sink, which owns rendering.
 //!
 //! Rule: code in this crate and in `gage-runtime2` never calls
 //! `println!` or `eprintln!`. Every line meant for a person is emitted
@@ -29,32 +30,36 @@
 //! the terminal hold the same text. Runtime diagnostics go through
 //! `tracing` and reach the record through [`trace`].
 
+pub mod plan;
 pub mod staging;
 pub mod trace;
 
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io;
 use std::sync::{Arc, Mutex};
 
 use gage_core::datetime::now_ms;
 use gage_core::uuid::{new_uuid, short_uuid};
-use gage_registry::scanner::ScannerDef;
+use gage_registry::scanner::{ScannerDef, TaskDef};
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{
-    CURRENT_RUNTIME_SCHEME, OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext, ScanDatasetRef,
-    TaskOutput,
+    CURRENT_RUNTIME_SCHEME, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext,
+    ScanDatasetRef, TaskOutput,
 };
 use gage_scan::error::render_task_error;
 use gage_store::{
-    DatasetStore, NoteStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs, TaskCounts,
-    TaskStatus,
+    DatasetStore, NoteStore, ScanAttrs, ScanStore, SkipReason, Store, StoreError, TaskAttrs,
+    TaskCounts, TaskStatus,
 };
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
 use rune::{Diagnostics, Source, Sources, Vm};
 use tokio::sync::mpsc;
+use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 
+use crate::plan::{Plan, PlanError, PlannedScanner, Selection};
 use crate::staging::{Logs, ScannerPlan, Staging, State};
 use crate::trace::{LOG_SCOPE, LogScope};
 
@@ -66,17 +71,26 @@ pub enum Event {
     /// The scan's own output for a person, already recorded in the
     /// scan's `logs/`
     Scan(ScanOutput),
+    /// A plan warning, given before any task runs and already
+    /// recorded in the scan's `logs/records`: the task wants a note
+    /// no planned task writes
+    Warning {
+        scanner: String,
+        task: String,
+        message: String,
+    },
     TaskStarted {
         scanner: String,
         task: String,
     },
     /// A task reached a terminal status. `error` is the rendered
-    /// failure for `Failed`.
+    /// failure for `Failed`; `skipped` is the reason for `Skipped`.
     TaskFinished {
         scanner: String,
         task: String,
         status: TaskStatus,
         error: Option<String>,
+        skipped: Option<SkipReason>,
     },
 }
 
@@ -128,8 +142,10 @@ impl std::error::Error for Error {}
 /// fresh one is built per task.
 pub struct CompiledScanner {
     name: String,
-    /// Declared task names, sorted by name
-    tasks: Vec<String>,
+    /// The planned tasks by name: every declared task for a selected
+    /// scanner, the pulled tasks for one pulled in by `required_by`
+    tasks: BTreeMap<String, TaskDef>,
+    selection: Selection,
     /// The files the scanner is built from, recorded with the scan
     source_files: Vec<SourceFile>,
     rt: RuneArc<RuntimeContext>,
@@ -141,12 +157,39 @@ impl CompiledScanner {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// The compiled artifacts a worker needs to run one of the
+    /// scanner's tasks.
+    fn task_unit(&self) -> TaskUnit {
+        TaskUnit {
+            rt: self.rt.clone(),
+            unit: self.unit.clone(),
+            sources: Arc::clone(&self.sources),
+        }
+    }
+}
+
+/// Compile a scanner named on the command line or given as a file,
+/// planning every declared task.
+pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
+    compile_selected(def, Selection::Explicit, None)
+}
+
+/// Compile a scanner pulled in by `required_by`, planning only
+/// `tasks`.
+pub fn compile_required(def: &ScannerDef, tasks: &[String]) -> Result<CompiledScanner, Error> {
+    compile_selected(def, Selection::RequiredBy, Some(tasks))
 }
 
 /// Compile a scanner and verify that every declared task maps to a
 /// function of the same name. A scanner that fails here is a full
-/// stop for the caller: nothing has run yet.
-pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
+/// stop for the caller: nothing has run yet. `only` restricts the
+/// planned tasks; every declared task is verified regardless.
+pub fn compile_selected(
+    def: &ScannerDef,
+    selection: Selection,
+    only: Option<&[String]>,
+) -> Result<CompiledScanner, Error> {
     let context = gage_runtime2::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
 
@@ -203,9 +246,17 @@ pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
         }
     }
 
+    let tasks = def
+        .tasks
+        .iter()
+        .filter(|(name, _)| only.is_none_or(|only| only.contains(name)))
+        .map(|(name, task)| (name.clone(), task.clone()))
+        .collect();
+
     Ok(CompiledScanner {
         name: def.name.clone(),
-        tasks: def.tasks.keys().cloned().collect(),
+        tasks,
+        selection,
         source_files: files,
         rt,
         unit,
@@ -219,6 +270,8 @@ pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
 pub enum ScanError {
     /// Two scanners share a name; `tasks/<scanner>/` cannot hold both
     DuplicateScanner(String),
+    /// The tasks cannot be planned
+    Plan(PlanError),
     /// Staging could not be written
     Staging(io::Error),
     /// The scan could not be applied to the store
@@ -231,6 +284,7 @@ impl fmt::Display for ScanError {
             ScanError::DuplicateScanner(name) => {
                 write!(f, "scanner {name} is given more than once")
             }
+            ScanError::Plan(e) => write!(f, "planning the scan: {e}"),
             ScanError::Staging(e) => write!(f, "writing scan staging: {e}"),
             ScanError::Store(e) => write!(f, "writing scan to the store: {e}"),
         }
@@ -251,7 +305,8 @@ impl From<StoreError> for ScanError {
     }
 }
 
-/// Where a scan stages and what it records about its runtime.
+/// Where a scan stages, how many tasks it runs at once, and what it
+/// records about its runtime.
 pub struct ScanConfig<'a> {
     /// The staging root, `staging/` under Gage home in production
     pub staging_root: &'a std::path::Path,
@@ -261,6 +316,8 @@ pub struct ScanConfig<'a> {
     /// The commit SHA of the dataset to scan, linked from the scan as
     /// `dataset.link`. `None` runs the scanners with no dataset.
     pub dataset: Option<&'a str>,
+    /// Tasks run at once. Treated as at least 1.
+    pub jobs: usize,
 }
 
 /// What a finished scan wrote.
@@ -271,16 +328,18 @@ pub struct ScanOutcome {
     pub attrs: ScanAttrs,
 }
 
-/// Run every task of every scanner, in order, one at a time, and
-/// record the scan in `store`.
+/// Plan every task of every scanner, run them through a pool of
+/// `config.jobs` workers as their upstream tasks finish, and record
+/// the scan in `store`.
 ///
 /// The scan is staged under `config.staging_root/<id>/` while it runs
 /// (see [`staging`]) and applied to the store at its terminal state,
 /// after which the staging directory is removed. Output and task
 /// status reach `on_event` as they happen. A failed task is recorded
-/// and the run continues with the next task. Cancelling `cancel`
-/// abandons the running task at its next await point, marks it and
-/// every task not yet started `canceled`, and applies what ran.
+/// and the run continues; tasks that `need` its notes are skipped.
+/// Cancelling `cancel` abandons the running tasks at their next await
+/// point, marks them and every task not yet started `canceled`, and
+/// applies what ran.
 pub async fn scan(
     store: &Store,
     config: &ScanConfig<'_>,
@@ -288,7 +347,16 @@ pub async fn scan(
     cancel: &CancellationToken,
     on_event: impl FnMut(Event),
 ) -> Result<ScanOutcome, ScanError> {
-    let plan = plan_tasks(scanners)?;
+    check_unique_names(scanners)?;
+    let planned: Vec<PlannedScanner<'_>> = scanners
+        .iter()
+        .map(|s| PlannedScanner {
+            name: &s.name,
+            tasks: &s.tasks,
+            selection: s.selection.clone(),
+        })
+        .collect();
+    let plan = plan::plan(&planned).map_err(ScanError::Plan)?;
     let id = new_uuid();
     // Tasks read the dataset through their own handle: the store's git
     // reader is single-threaded, and this one stays free for the apply
@@ -299,21 +367,22 @@ pub async fn scan(
         }),
         None => None,
     };
+    let task_names: Vec<Vec<String>> = scanners
+        .iter()
+        .map(|s| s.tasks.keys().cloned().collect())
+        .collect();
     let scanner_plans: Vec<ScannerPlan<'_>> = scanners
         .iter()
-        .map(|s| ScannerPlan {
+        .zip(&task_names)
+        .map(|(s, tasks)| ScannerPlan {
             name: &s.name,
-            tasks: &s.tasks,
+            tasks,
             sources: &s.source_files,
         })
         .collect();
     let staging = Staging::create(config.staging_root, &id, config.dataset, &scanner_plans)?;
-    let scan_ctx = ScanContext::new(
-        id.clone(),
-        dataset,
-        Arc::new(Mutex::new(Store::open(store.path())?)),
-        staging.runtime_paths(),
-    );
+    staging.write_plan(&plan.to_json())?;
+    let scan_ctx = ScanContext::new(id.clone(), dataset, store.path(), staging.runtime_paths())?;
     trace::install_panic_hook();
     let scope = LogScope {
         scan_dir: staging.scan_dir(),
@@ -327,8 +396,11 @@ pub async fn scan(
     let run = Run {
         id,
         config,
-        scanners,
-        plan,
+        units: scanners
+            .iter()
+            .map(|s| (s.name.clone(), s.task_unit()))
+            .collect(),
+        plan: Arc::new(plan),
         staging,
         cancel,
         scope: scope.clone(),
@@ -340,12 +412,22 @@ pub async fn scan(
     LOG_SCOPE.scope(scope, run.execute(store)).await
 }
 
+fn check_unique_names(scanners: &[CompiledScanner]) -> Result<(), ScanError> {
+    for (i, scanner) in scanners.iter().enumerate() {
+        if scanners.iter().take(i).any(|s| s.name == scanner.name) {
+            return Err(ScanError::DuplicateScanner(scanner.name.clone()));
+        }
+    }
+    Ok(())
+}
+
 /// One scan in progress.
 struct Run<'a, F: FnMut(Event)> {
     id: String,
     config: &'a ScanConfig<'a>,
-    scanners: &'a [CompiledScanner],
-    plan: Vec<(String, String)>,
+    /// Compiled artifacts by scanner name
+    units: HashMap<String, TaskUnit>,
+    plan: Arc<Plan>,
     staging: Staging,
     cancel: &'a CancellationToken,
     scope: LogScope,
@@ -355,96 +437,64 @@ struct Run<'a, F: FnMut(Event)> {
     on_event: F,
 }
 
+/// The live state of dispatch: what each task has reached and what
+/// is ready to start.
+struct Dispatch {
+    /// Remaining in-degree per task
+    deps: Vec<u32>,
+    /// Terminal status per task, `None` until it has one
+    status: Vec<Option<TaskStatus>>,
+    /// Start time per task, `None` until it starts
+    started: Vec<Option<i64>>,
+    /// Tasks with no remaining upstream task, in release order
+    ready: VecDeque<usize>,
+    /// Running tasks by tokio task id
+    running: HashMap<Id, usize>,
+    counts: TaskCounts,
+}
+
 impl<F: FnMut(Event)> Run<'_, F> {
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "task indices are plan-internal and bounded by construction"
+    )]
     async fn execute(mut self, store: &Store) -> Result<ScanOutcome, ScanError> {
-        tracing::info!("scan {} started with {} tasks", self.id, self.plan.len());
+        let plan = Arc::clone(&self.plan);
+        tracing::info!("scan {} started with {} tasks", self.id, plan.tasks.len());
         let mut scan_logs = self.staging.scan_logs();
         let started = now_ms();
-        let mut counts = TaskCounts {
-            total: self.plan.len(),
-            ..TaskCounts::default()
-        };
-        let mut canceled = false;
-        let plan = std::mem::take(&mut self.plan);
-        for (scanner, task) in &plan {
-            if self.cancel.is_cancelled() {
-                if !canceled {
-                    self.say(&mut scan_logs, ScanOutput::Err("scan canceled\n".into()))?;
-                }
-                canceled = true;
-                self.staging.write_task(
-                    scanner,
-                    task,
-                    &task_attrs(TaskStatus::Canceled, None, None),
-                )?;
-                (self.on_event)(Event::TaskFinished {
-                    scanner: scanner.clone(),
-                    task: task.clone(),
-                    status: TaskStatus::Canceled,
-                    error: None,
+        for t in &plan.tasks {
+            for pattern in &t.unmatched {
+                let message = format!("wants note '{pattern}' but no task writes it");
+                scan_logs.record(Level::Warn, &t.label(), &message)?;
+                (self.on_event)(Event::Warning {
+                    scanner: t.scanner.clone(),
+                    task: t.task.clone(),
+                    message,
                 });
-                continue;
             }
-            let compiled = self
-                .scanners
-                .iter()
-                .find(|s| &s.name == scanner)
-                .expect("plan names a compiled scanner");
-            let task_started = now_ms();
-            self.staging.write_task(
-                scanner,
-                task,
-                &task_attrs(TaskStatus::Started, Some(task_started), None),
-            )?;
-            (self.on_event)(Event::TaskStarted {
-                scanner: scanner.clone(),
-                task: task.clone(),
-            });
-            let task_scope = LogScope {
-                task: Some((scanner.clone(), task.clone())),
-                ..self.scope.clone()
-            };
-            let outcome = LOG_SCOPE
-                .scope(task_scope, self.run_task(compiled, task, &mut scan_logs))
-                .await?;
-            let (status, error) = match outcome {
-                TaskOutcome::Completed => (TaskStatus::Completed, None),
-                TaskOutcome::Failed(message) => (TaskStatus::Failed, Some(message)),
-                TaskOutcome::Canceled => (TaskStatus::Canceled, None),
-            };
-            match status {
-                TaskStatus::Completed => counts.completed += 1,
-                TaskStatus::Failed => counts.failed += 1,
-                _ => canceled = true,
-            }
-            self.staging.write_task(
-                scanner,
-                task,
-                &task_attrs(status, Some(task_started), Some(now_ms())),
-            )?;
-            if let Some(message) = &error {
-                self.say(
-                    &mut scan_logs,
-                    ScanOutput::Err(format!("task {scanner}:{task} failed\n{message}")),
-                )?;
-            }
-            if status == TaskStatus::Canceled {
-                self.say(&mut scan_logs, ScanOutput::Err("scan canceled\n".into()))?;
-            }
-            (self.on_event)(Event::TaskFinished {
-                scanner: scanner.clone(),
-                task: task.clone(),
-                status,
-                error,
-            });
         }
+        let mut dispatch = Dispatch {
+            deps: plan.deps.clone(),
+            status: vec![None; plan.tasks.len()],
+            started: vec![None; plan.tasks.len()],
+            ready: (0..plan.tasks.len())
+                .filter(|i| plan.deps[*i] == 0)
+                .collect(),
+            running: HashMap::new(),
+            counts: TaskCounts {
+                total: plan.tasks.len(),
+                ..TaskCounts::default()
+            },
+        };
+        let canceled = self.run_tasks(&plan, &mut dispatch, &mut scan_logs).await?;
 
         let attrs = ScanAttrs {
             runtime: format!("{CURRENT_RUNTIME_SCHEME} {}", self.config.gage_version),
             started,
             stopped: now_ms(),
             canceled,
-            tasks: counts,
+            tasks: dispatch.counts,
         };
         self.say(
             &mut scan_logs,
@@ -481,45 +531,204 @@ impl<F: FnMut(Event)> Run<'_, F> {
         })
     }
 
-    /// Run one task under the scan context and its output sink,
-    /// delivering what it sends through the scan's channel as it
-    /// arrives.
-    async fn run_task(
+    /// Dispatch the plan's tasks through the worker pool until every
+    /// task is terminal or the scan is canceled, delivering task
+    /// output as it arrives. Returns whether the scan was canceled; on
+    /// cancellation every task without a terminal status is recorded
+    /// `canceled` before returning.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "task indices are plan-internal and bounded by construction"
+    )]
+    async fn run_tasks(
         &mut self,
-        scanner: &CompiledScanner,
-        task: &str,
+        plan: &Plan,
+        d: &mut Dispatch,
         logs: &mut Logs,
-    ) -> Result<TaskOutcome, ScanError> {
-        let sink = OutputSink {
-            scanner: scanner.name.clone(),
-            task: task.to_string(),
-            tx: self.output_tx.clone(),
-        };
-        let outcome = {
-            let exec = SCAN_CTX.scope(
-                self.scan_ctx.clone(),
-                OUTPUT_SINK.scope(sink, execute(scanner, task)),
-            );
-            tokio::pin!(exec);
-            loop {
-                tokio::select! {
-                    result = &mut exec => break match result {
-                        Ok(()) => TaskOutcome::Completed,
-                        Err(message) => TaskOutcome::Failed(message),
-                    },
-                    Some(output) = self.output_rx.recv() => {
-                        deliver(output, logs, &mut self.on_event)?
-                    }
-                    _ = self.cancel.cancelled() => break TaskOutcome::Canceled,
+    ) -> Result<bool, ScanError> {
+        let total = plan.tasks.len();
+        let jobs = self.config.jobs.max(1);
+        let mut running: JoinSet<(usize, Result<(), String>)> = JoinSet::new();
+        loop {
+            if self.cancel.is_cancelled() {
+                break;
+            }
+            // Release ready tasks up to the pool size. A task whose
+            // needs are not met finishes here as skipped, which may
+            // release its downstream tasks in turn.
+            while running.len() < jobs {
+                let Some(i) = d.ready.pop_front() else { break };
+                if let Some(reason) = unmet_need(plan, i, &d.status) {
+                    self.finish(plan, i, TaskStatus::Skipped, None, Some(reason), d, logs)?;
+                    continue;
+                }
+                self.start(plan, i, d, &mut running)?;
+            }
+            if d.status.iter().all(Option::is_some) {
+                break;
+            }
+            let cancel = self.cancel;
+            let output_rx = &mut self.output_rx;
+            let joined = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                Some(joined) = running.join_next_with_id(), if !running.is_empty() => joined,
+                Some(output) = output_rx.recv() => {
+                    deliver(output, logs, &mut self.on_event)?;
+                    continue;
+                }
+            };
+            let (i, result) = match joined {
+                Ok((id, (i, result))) => {
+                    d.running.remove(&id);
+                    (i, result)
+                }
+                Err(e) if e.is_cancelled() => continue,
+                Err(e) => {
+                    let i = d
+                        .running
+                        .remove(&e.id())
+                        .expect("every spawned task is registered");
+                    (i, Err(format!("task panicked: {e}")))
+                }
+            };
+            // The task has returned; deliver what it sent before its
+            // record closes
+            self.drain_output(logs)?;
+            let (status, error) = match result {
+                Ok(()) => (TaskStatus::Completed, None),
+                Err(message) => (TaskStatus::Failed, Some(message)),
+            };
+            self.finish(plan, i, status, error, None, d, logs)?;
+        }
+        let canceled = d.counts.completed + d.counts.failed + d.counts.skipped < total;
+        if canceled {
+            running.abort_all();
+            while running.join_next().await.is_some() {}
+            self.drain_output(logs)?;
+            self.say(logs, ScanOutput::Err("scan canceled\n".into()))?;
+            for i in 0..total {
+                if d.status[i].is_none() {
+                    self.finish(plan, i, TaskStatus::Canceled, None, None, d, logs)?;
                 }
             }
+        }
+        Ok(canceled)
+    }
+
+    /// Record a task as started and hand it to a worker.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "task indices are plan-internal and bounded by construction"
+    )]
+    fn start(
+        &mut self,
+        plan: &Plan,
+        i: usize,
+        d: &mut Dispatch,
+        running: &mut JoinSet<(usize, Result<(), String>)>,
+    ) -> Result<(), ScanError> {
+        let t = &plan.tasks[i];
+        let now = now_ms();
+        d.started[i] = Some(now);
+        self.staging.write_task(
+            &t.scanner,
+            &t.task,
+            &task_attrs(TaskStatus::Started, Some(now), None),
+        )?;
+        (self.on_event)(Event::TaskStarted {
+            scanner: t.scanner.clone(),
+            task: t.task.clone(),
+        });
+        let exec = TaskExec {
+            unit: self.units[&t.scanner].clone(),
+            task: t.task.clone(),
+            ctx: self.scan_ctx.clone(),
+            sink: OutputSink {
+                scanner: t.scanner.clone(),
+                task: t.task.clone(),
+                tx: self.output_tx.clone(),
+            },
+            scope: LogScope {
+                task: Some((t.scanner.clone(), t.task.clone())),
+                ..self.scope.clone()
+            },
         };
-        // The block dropped the execution; drain what the task sent
-        // between the last poll and completion.
+        let handle = running.spawn(async move { (i, exec.run().await) });
+        d.running.insert(handle.id(), i);
+        Ok(())
+    }
+
+    /// Record a task's terminal status, tell the sink, and release
+    /// the downstream tasks it was holding.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "task indices are plan-internal and bounded by construction"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &mut self,
+        plan: &Plan,
+        i: usize,
+        status: TaskStatus,
+        error: Option<String>,
+        skipped: Option<SkipReason>,
+        d: &mut Dispatch,
+        logs: &mut Logs,
+    ) -> Result<(), ScanError> {
+        let t = &plan.tasks[i];
+        let stopped = d.started[i].map(|_| now_ms());
+        let mut attrs = task_attrs(status, d.started[i], stopped);
+        attrs.skipped = skipped.clone();
+        self.staging.write_task(&t.scanner, &t.task, &attrs)?;
+        match status {
+            TaskStatus::Completed => d.counts.completed += 1,
+            TaskStatus::Failed => d.counts.failed += 1,
+            TaskStatus::Skipped => d.counts.skipped += 1,
+            _ => {}
+        }
+        if let Some(message) = &error {
+            self.say(
+                logs,
+                ScanOutput::Err(format!("task {} failed\n{message}", t.label())),
+            )?;
+        }
+        if let Some(reason) = &skipped {
+            self.say(
+                logs,
+                ScanOutput::Err(format!(
+                    "task {} skipped: needs '{}' and no task writing it completed ({})\n",
+                    t.label(),
+                    reason.needs,
+                    reason.upstream.join(", ")
+                )),
+            )?;
+        }
+        (self.on_event)(Event::TaskFinished {
+            scanner: t.scanner.clone(),
+            task: t.task.clone(),
+            status,
+            error,
+            skipped,
+        });
+        d.status[i] = Some(status);
+        if status != TaskStatus::Canceled {
+            for &down in &plan.downstream[i] {
+                d.deps[down] -= 1;
+                if d.deps[down] == 0 {
+                    d.ready.push_back(down);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Deliver every output the tasks have sent so far.
+    fn drain_output(&mut self, logs: &mut Logs) -> Result<(), ScanError> {
         while let Ok(output) = self.output_rx.try_recv() {
             deliver(output, logs, &mut self.on_event)?;
         }
-        Ok(outcome)
+        Ok(())
     }
 
     /// Record a line of the scan's own output, then hand it to the
@@ -534,9 +743,37 @@ impl<F: FnMut(Event)> Run<'_, F> {
     }
 }
 
+/// The reason task `i` must not start, or `None` when every `needs`
+/// pattern has a completed upstream writer. A need whose only writer
+/// is the task itself has no upstream task and holds nothing back.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "task indices are plan-internal and bounded by construction"
+)]
+fn unmet_need(plan: &Plan, i: usize, status: &[Option<TaskStatus>]) -> Option<SkipReason> {
+    plan.tasks[i]
+        .needs
+        .iter()
+        .filter(|need| !need.upstream.is_empty())
+        .find(|need| {
+            !need
+                .upstream
+                .iter()
+                .any(|u| status[*u] == Some(TaskStatus::Completed))
+        })
+        .map(|need| SkipReason {
+            needs: need.pattern.clone(),
+            upstream: need
+                .upstream
+                .iter()
+                .map(|u| plan.tasks[*u].label())
+                .collect(),
+        })
+}
+
 /// The scan's closing line: `Scan <short id> completed: 3 tasks: 2
-/// completed, 1 failed`, with a canceled count when the run was cut
-/// short.
+/// completed, 1 failed`, with skipped and canceled counts when
+/// nonzero.
 pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
     let state = if attrs.canceled {
         "canceled"
@@ -548,6 +785,9 @@ pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
         format!("{} completed", counts.completed),
         format!("{} failed", counts.failed),
     ];
+    if counts.skipped > 0 {
+        parts.push(format!("{} skipped", counts.skipped));
+    }
     let canceled = counts.total - counts.completed - counts.failed - counts.skipped;
     if canceled > 0 {
         parts.push(format!("{canceled} canceled"));
@@ -560,39 +800,16 @@ pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
     )
 }
 
-/// The `(scanner, task)` pairs to run, in scanner order then task
-/// order. Scanner names must be unique.
-fn plan_tasks(scanners: &[CompiledScanner]) -> Result<Vec<(String, String)>, ScanError> {
-    let mut plan = Vec::new();
-    for (i, scanner) in scanners.iter().enumerate() {
-        if scanners.iter().take(i).any(|s| s.name == scanner.name) {
-            return Err(ScanError::DuplicateScanner(scanner.name.clone()));
-        }
-        for task in &scanner.tasks {
-            plan.push((scanner.name.clone(), task.clone()));
-        }
-    }
-    Ok(plan)
-}
-
 fn task_attrs(status: TaskStatus, started: Option<i64>, stopped: Option<i64>) -> TaskAttrs {
     TaskAttrs {
         status,
         started,
         stopped,
         worked_ms: None,
+        skipped: None,
     }
 }
 
-enum TaskOutcome {
-    Completed,
-    /// The rendered failure message
-    Failed(String),
-    Canceled,
-}
-
-/// Run one task on a fresh VM, writing its output to `logs` and
-/// forwarding it to `on_event` as it happens.
 /// Record one output in the scan's logs, then hand it to the sink.
 fn deliver(
     output: TaskOutput,
@@ -614,7 +831,47 @@ fn deliver(
     Ok(())
 }
 
-async fn execute(scanner: &CompiledScanner, task: &str) -> Result<(), String> {
+/// A scanner's compiled artifacts, shared by every worker running one
+/// of its tasks.
+#[derive(Clone)]
+struct TaskUnit {
+    rt: RuneArc<RuntimeContext>,
+    unit: RuneArc<Unit>,
+    sources: Arc<Sources>,
+}
+
+/// Everything a worker needs to run one task: the scanner's
+/// artifacts and the task-local scopes the task runs under.
+struct TaskExec {
+    unit: TaskUnit,
+    task: String,
+    ctx: ScanContext,
+    sink: OutputSink,
+    scope: LogScope,
+}
+
+impl TaskExec {
+    /// Run the task under its scan context, output sink, and log
+    /// scope.
+    async fn run(self) -> Result<(), String> {
+        let TaskExec {
+            unit,
+            task,
+            ctx,
+            sink,
+            scope,
+        } = self;
+        LOG_SCOPE
+            .scope(
+                scope,
+                SCAN_CTX.scope(ctx, OUTPUT_SINK.scope(sink, execute(&unit, &task))),
+            )
+            .await
+    }
+}
+
+/// Run one task on a fresh VM.
+async fn execute(scanner: &TaskUnit, task: &str) -> Result<(), String> {
     let vm = Vm::new(scanner.rt.clone(), scanner.unit.clone());
     let execution = vm
         .send_execute([task], ())
@@ -641,7 +898,7 @@ fn vm_error(e: &VmError, sources: &Sources) -> String {
     clippy::disallowed_methods,
     reason = "takes the VM execution's return value; the runtime holds the only live handle"
 )]
-fn task_result(value: Value, scanner: &CompiledScanner, task: &str) -> Result<(), String> {
+fn task_result(value: Value, scanner: &TaskUnit, task: &str) -> Result<(), String> {
     match rune::from_value::<Result<Value, Value>>(value) {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(err)) => Err(returned_error(&render_task_error(err), scanner, task)),
@@ -653,7 +910,7 @@ fn task_result(value: Value, scanner: &CompiledScanner, task: &str) -> Result<()
 /// The diagnostic for a task that returned `Err`: an `error:` line
 /// with the value, labelled at the task function's first instruction
 /// when the unit's debug info locates it.
-fn returned_error(value: &str, scanner: &CompiledScanner, task: &str) -> String {
+fn returned_error(value: &str, scanner: &TaskUnit, task: &str) -> String {
     use codespan_reporting::diagnostic::{Diagnostic, Label};
     use codespan_reporting::term;
 
@@ -729,6 +986,7 @@ mod tests {
             staging_root: root,
             gage_version: "test-version",
             dataset: None,
+            jobs: 1,
         };
         let outcome = scan(store, &config, scanners, cancel, |e| events.push(e)).await;
         (outcome, events)
@@ -872,6 +1130,7 @@ mod tests {
                     task: "a".into(),
                     status: TaskStatus::Failed,
                     error: Some(failure.clone()),
+                    skipped: None,
                 },
                 Event::TaskStarted {
                     scanner: "fail".into(),
@@ -887,6 +1146,7 @@ mod tests {
                     task: "b".into(),
                     status: TaskStatus::Completed,
                     error: None,
+                    skipped: None,
                 },
                 Event::Scan(ScanOutput::Out(summary.clone())),
             ]
@@ -1212,27 +1472,37 @@ mod tests {
             .unwrap();
         });
 
-        let (_dir, compiled) = compile_source(HELLO);
+        // The runtime's `write_note` raises a debug record from inside
+        // the task; the sink runs on the scan loop, outside any task
+        let (_dir, compiled) = compile_source(
+            r#"
+            pub const SCANNER = #{
+                name: "notes",
+                description: "Writes a note",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                gage::write_note("greeting", "hello").await?;
+            }
+            "#,
+        );
         let (tmp, store) = open_store();
         let config = ScanConfig {
             staging_root: &tmp.path().join("staging"),
             gage_version: "test-version",
             dataset: None,
+            jobs: 1,
         };
         let outcome = scan(
             &store,
             &config,
             &[compiled.unwrap()],
             &CancellationToken::new(),
-            |event| match event {
-                // Emitted from the scan loop, outside any task
-                Event::TaskStarted { .. } => tracing::warn!("outside the task"),
-                // Delivered from inside the running task's scope
-                Event::Output(TaskOutput {
-                    output: Output::Print(_),
-                    ..
-                }) => tracing::warn!("inside the task"),
-                _ => {}
+            |event| {
+                if let Event::TaskStarted { .. } = event {
+                    tracing::warn!("outside the task")
+                }
             },
         )
         .await
@@ -1256,7 +1526,10 @@ mod tests {
             "{records}"
         );
         assert!(
-            records.contains(" WARN gage_scan2::tests: inside the task task=hello:hello\n"),
+            records
+                .lines()
+                .any(|l| l.contains(" DEBUG gage_runtime2::note: write_note")
+                    && l.ends_with(" task=notes:main")),
             "{records}"
         );
     }
@@ -1309,6 +1582,7 @@ mod tests {
             staging_root: &tmp.path().join("staging"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
+            jobs: 1,
         };
         let outcome = scan(
             &store,
@@ -1363,6 +1637,7 @@ mod tests {
             staging_root: &tmp.path().join("staging"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
+            jobs: 1,
         };
         let outcome = scan(
             &store,
@@ -1490,6 +1765,7 @@ mod tests {
             staging_root: &tmp.path().join("staging"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
+            jobs: 1,
         };
         let outcome = scan(
             &store,
@@ -1581,6 +1857,7 @@ mod tests {
             staging_root: &tmp.path().join("staging"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
+            jobs: 1,
         };
         let outcome = scan(
             &store,
@@ -1776,6 +2053,7 @@ mod tests {
             staging_root: &tmp.path().join("staging"),
             gage_version: "test-version",
             dataset: Some(dataset_sha),
+            jobs: 1,
         };
         let outcome = scan(
             store,
@@ -1949,5 +2227,428 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(carried.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    }
+
+    /// Tasks with `needs`, `wants`, and an unmatched `wants` behind one
+    /// failing writer. Task order is by name: chained, needy, wanty,
+    /// write.
+    const DEPENDENT: &str = r#"
+        pub const SCANNER = #{
+            name: "deps",
+            description: "Dependent tasks",
+            tasks: #{
+                write: #{ notes: #{ writes: #{ "x": "the x note" } } },
+                needy: #{ notes: #{ needs: ["x"], writes: #{ "y": "the y note" } } },
+                wanty: #{ notes: #{ wants: ["x", "nobody"] } },
+                chained: #{ notes: #{ needs: ["y"] } },
+            },
+        };
+
+        pub fn write() {
+            Err("boom")
+        }
+
+        pub fn needy() {
+            println!("needy ran");
+        }
+
+        pub fn wanty() {
+            println!("wanty ran");
+        }
+
+        pub fn chained() {
+            println!("chained ran");
+        }
+    "#;
+
+    #[tokio::test]
+    async fn needs_skips_downstream_of_a_failed_writer_and_wants_runs_regardless() {
+        let (_dir, compiled) = compile_source(DEPENDENT);
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        let outcome = outcome.unwrap();
+        assert_eq!(
+            outcome.attrs.tasks,
+            TaskCounts {
+                total: 4,
+                completed: 1,
+                failed: 1,
+                skipped: 2,
+            }
+        );
+        assert_eq!(
+            events[0],
+            Event::Warning {
+                scanner: "deps".into(),
+                task: "wanty".into(),
+                message: "wants note 'nobody' but no task writes it".into(),
+            },
+            "the plan warning comes before any task"
+        );
+        let finished: Vec<(&str, TaskStatus, Option<&SkipReason>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::TaskFinished {
+                    task,
+                    status,
+                    skipped,
+                    ..
+                } => Some((task.as_str(), *status, skipped.as_ref())),
+                _ => None,
+            })
+            .collect();
+        let needy_reason = SkipReason {
+            needs: "x".into(),
+            upstream: vec!["deps:write".into()],
+        };
+        let chained_reason = SkipReason {
+            needs: "y".into(),
+            upstream: vec!["deps:needy".into()],
+        };
+        assert_eq!(
+            finished,
+            [
+                ("write", TaskStatus::Failed, None),
+                ("needy", TaskStatus::Skipped, Some(&needy_reason)),
+                ("wanty", TaskStatus::Completed, None),
+                ("chained", TaskStatus::Skipped, Some(&chained_reason)),
+            ],
+            "release is in order: the failure releases needy and wanty, and the \
+             skip of needy releases chained behind them"
+        );
+        assert!(events.contains(&Event::Output(TaskOutput {
+            scanner: "deps".into(),
+            task: "wanty".into(),
+            output: Output::Println("wanty ran".into()),
+        })));
+        assert!(events.contains(&Event::Scan(ScanOutput::Err(
+            "task deps:needy skipped: needs 'x' and no task writing it completed (deps:write)\n"
+                .into()
+        ))));
+        assert!(
+            events.last().unwrap()
+                == &Event::Scan(ScanOutput::Out(format!(
+                    "Scan {} completed: 4 tasks: 1 completed, 1 failed, 2 skipped\n",
+                    short_uuid(&outcome.id)
+                )))
+        );
+
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        let task = |name: &str| {
+            record
+                .content
+                .tasks
+                .iter()
+                .find(|t| t.task == name)
+                .unwrap()
+                .attrs
+                .clone()
+        };
+        assert_eq!(task("needy").skipped, Some(needy_reason));
+        assert!(task("needy").started.is_none() && task("needy").stopped.is_none());
+        assert_eq!(task("chained").skipped, Some(chained_reason));
+        assert_eq!(task("wanty").skipped, None);
+        let scans = ScanStore::from(&store);
+        let records = String::from_utf8(
+            scans
+                .scan_log(&outcome.commit_sha, "records")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            records.contains(" WARN deps:wanty: wants note 'nobody' but no task writes it\n"),
+            "{records}"
+        );
+        let plan: serde_json::Value =
+            serde_json::from_slice(&scans.plan_file(&outcome.commit_sha).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(
+            plan["tasks"][1],
+            serde_json::json!({
+                "task": "deps:needy",
+                "selected": "explicit",
+                "after": [{ "task": "deps:write", "pattern": "x", "kind": "needs" }],
+                "unmatched": []
+            })
+        );
+        assert_eq!(plan["tasks"][2]["unmatched"], serde_json::json!(["nobody"]));
+    }
+
+    const PARALLEL: &str = r#"
+        pub const SCANNER = #{
+            name: "par",
+            description: "Independent tasks and one downstream task",
+            tasks: #{
+                a: #{ notes: #{ writes: #{ "n": "the n note" } } },
+                b: #{},
+                c: #{ notes: #{ wants: ["n"] } },
+            },
+        };
+
+        pub fn a() {}
+        pub fn b() {}
+        pub fn c() {}
+    "#;
+
+    #[tokio::test]
+    async fn the_pool_starts_ready_tasks_together_and_holds_downstream_tasks() {
+        let (_dir, compiled) = compile_source(PARALLEL);
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 2,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.completed, 3);
+        let started = |task: &str| {
+            events
+                .iter()
+                .position(|e| matches!(e, Event::TaskStarted { task: t, .. } if t == task))
+                .unwrap()
+        };
+        let finished = |task: &str| {
+            events
+                .iter()
+                .position(|e| matches!(e, Event::TaskFinished { task: t, .. } if t == task))
+                .unwrap()
+        };
+        assert_eq!(
+            (started("a"), started("b")),
+            (0, 1),
+            "both ready tasks start before either finishes: {events:?}"
+        );
+        assert!(
+            started("c") > finished("a"),
+            "c waits for a, which writes what it wants: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_need_is_a_plan_error_before_staging() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            pub const SCANNER = #{
+                name: "needy",
+                description: "Needs what nobody writes",
+                tasks: #{ main: #{ notes: #{ needs: ["nothing"] } } },
+            };
+
+            pub fn main() {}
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("staging");
+        let (outcome, events) = run_all(
+            &store,
+            &root,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        let err = outcome.err().unwrap();
+        assert!(
+            matches!(
+                &err,
+                ScanError::Plan(plan::PlanError::UnmatchedNeeds { task, pattern })
+                    if task == "needy:main" && pattern == "nothing"
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "planning the scan: task needy:main needs note 'nothing' but no task writes it"
+        );
+        assert!(events.is_empty());
+        assert!(
+            !root.exists(),
+            "nothing is staged for a scan that cannot be planned"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pulled_in_scanner_plans_only_its_pulled_tasks() {
+        let (_w, writer) = compile_source(
+            r#"
+            pub const SCANNER = #{
+                name: "main",
+                description: "Writes x",
+                tasks: #{ w: #{ notes: #{ writes: #{ "x": "the x note" } } } },
+            };
+
+            pub fn w() {}
+            "#,
+        );
+        let lib_dir = tempfile::tempdir().unwrap();
+        let lib_path = lib_dir.path().join("scanner.rn");
+        std::fs::write(
+            &lib_path,
+            r#"
+            pub const SCANNER = #{
+                name: "lib",
+                description: "Pulled in by x",
+                library: true,
+                tasks: #{
+                    a: #{},
+                    b: #{ notes: #{ required_by: ["x"] } },
+                },
+            };
+
+            pub fn a() {
+                println!("a must not run");
+            }
+
+            pub fn b() {}
+            "#,
+        )
+        .unwrap();
+        let lib_def = parse_scanner_file(&lib_path).unwrap();
+        let lib = compile_required(&lib_def, &["b".to_string()]).unwrap();
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[writer.unwrap(), lib],
+            &CancellationToken::new(),
+        )
+        .await;
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.attrs.tasks.total, 2);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::TaskStarted { task, .. } if task == "a"))
+        );
+        let scans = ScanStore::from(&store);
+        let plan: serde_json::Value =
+            serde_json::from_slice(&scans.plan_file(&outcome.commit_sha).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(
+            plan["tasks"][0],
+            serde_json::json!({
+                "task": "lib:b",
+                "selected": "required_by:x",
+                "after": [{ "task": "main:w", "pattern": "x", "kind": "wants" }],
+                "unmatched": []
+            })
+        );
+        assert_eq!(plan["tasks"][1]["selected"], "explicit");
+    }
+
+    /// The `examples/scanners2/note_deps.rn` shape: `a` writes a dated
+    /// note per session, `b` wants `a` and counts them.
+    #[tokio::test]
+    async fn a_downstream_task_reads_the_notes_its_upstream_task_wrote() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::{DateTime, scan, write_note};
+
+            pub const SCANNER = #{
+                name: "note-deps",
+                description: "Note written for another note",
+                tasks: #{
+                    a: #{ notes: #{ writes: ["a"] } },
+                    b: #{ notes: #{ writes: ["b"], wants: ["a"] } },
+                },
+            };
+
+            pub async fn a() {
+                let now = DateTime::from_millis(1_700_000_000_000);
+                for s in scan().sessions().await {
+                    write_note("a", now).for_session(s.id).await?;
+                }
+            }
+
+            pub async fn b() {
+                let notes = scan().notes().name("a").await?;
+                let none = scan().notes().names(["nobody"]).await?;
+                write_note("b", notes.len())
+                    .metadata(#{ at: DateTime::from_millis(0), none: none.len(), first: notes[0].name })
+                    .await?;
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (_, dataset_sha, session_id) = seeded_dataset(
+            tmp.path(),
+            &store,
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+        );
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 2,
+        };
+        let mut events = Vec::new();
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.attrs.tasks,
+            TaskCounts {
+                total: 2,
+                completed: 2,
+                failed: 0,
+                skipped: 0,
+            },
+            "{events:?}"
+        );
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        let notes = gage_store::NoteStore::from(&store);
+        let mut written: Vec<gage_store::NoteFull> = record
+            .content
+            .notes
+            .iter()
+            .map(|sha| notes.at_commit(sha).unwrap())
+            .collect();
+        written.sort_by(|x, y| x.name.cmp(&y.name));
+        let [a, b] = written.as_slice() else {
+            panic!("two notes: {written:?}");
+        };
+        assert_eq!(a.name, "a");
+        assert_eq!(
+            a.value,
+            gage_store::NoteValue::Text("2023-11-14T22:13:20+00:00".into()),
+            "a DateTime value is stored as its RFC 3339 string"
+        );
+        assert_eq!(
+            a.target.as_deref(),
+            Some(format!("session:{session_id}").as_str())
+        );
+        assert_eq!(b.name, "b");
+        assert_eq!(b.value, gage_store::NoteValue::Json(serde_json::json!(1)));
+        assert_eq!(
+            b.metadata,
+            Some(serde_json::json!({
+                "at": "1970-01-01T00:00:00+00:00",
+                "none": 0,
+                "first": "a"
+            })),
+            "a DateTime inside metadata is stored as its RFC 3339 string"
+        );
     }
 }
