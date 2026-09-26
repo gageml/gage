@@ -1,26 +1,80 @@
-use gage::{Ignore, write_note, write_issue, user, scan};
+// Model of the `hidden-thinking` scanner for the rethink runtime
+// (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
+// the task names the action.
+//
+// Untagged code runs on the rethink runtime today. Code tagged
+// `// FUTURE` needs a facility the rethink runtime does not have yet.
+// Where the rethink design specifies the interface, FUTURE code is
+// written against it; otherwise it follows the legacy interface as a
+// placeholder. This file is a target, not a runnable scanner.
+
+use gage::{scan, write_note};
+// FUTURE: issues are not in the rethink runtime
+use gage::write_issue;
 
 pub const SCANNER = #{
     name: "hidden-thinking-2",
-    description: "v2 of hidden-thinking",
-    tasks: #{ note: #{} },
+    // FUTURE: groups: ["default"] when this scanner replaces
+    // `hidden-thinking`. Left out so a legacy default scan does not
+    // select it.
+    description: "
+Detect sessions where model thinking is hidden
+
+Thinking blocks provide important evidence of model thinking and
+should be visible. Unfortunately, the default settings for Claude
+Code cause thinking blocks to be hidden. This scanner looks for this
+condition and recommends fixes for issues it finds.
+",
+    tasks: #{
+        detect: #{
+            notes: #{
+                writes: #{
+                    "thinking.empty": include_str!(
+                        "thinking-empty-note.md"
+                    ),
+                },
+            },
+            // FUTURE: the user config attachment, for the
+            // showThinkingSummaries setting
+            attachments: #{ wants: ["config:"] },
+        },
+        report: #{
+            notes: #{
+                // FUTURE: `needs` skips the report unless `detect` ran
+                // to completion. A note it did not write is still no
+                // issue: the report reads what exists.
+                needs: ["thinking.empty"],
+            },
+            issues: #{
+                writes: #{ "hidden-thinking": "Thinking blocks are hidden" },
+            },
+        },
+    },
 };
 
-pub async fn note() {
-    // let config = format!(
-    //     "{{\"showThinkingSummaries\": {}}}",
-    //     user().config().await.get("showThinkingSummaries").unwrap_or("null")
-    // );
-    let config = "TODO - user config to help assessment";
+/// Write a `thinking.empty` note on the latest thinking block across
+/// the scan's sessions.
+pub async fn detect() {
+    // FUTURE: the user config comes from the dataset's `config:`
+    // attachment (`scan().attachments("config")`); legacy read it
+    // through `user().config()`, which the rethink removes
+    let config = "TODO: showThinkingSummaries from the config attachment";
 
-    // Find the latest thinking block across all sessions. Sessions are
-    // ordered newest-modified first and a session's thinking blocks are
-    // no newer than its modified time, so stop once a session's modified
-    // time can't beat the latest msg.
+    // The store's read order is not the modified order, so sort the
+    // sessions newest-modified first, then stop once a session's
+    // modified time cannot beat the latest block found: a session's
+    // thinking blocks are no newer than its modified time
+    let sessions = [];
+    for s in scan().sessions().await {
+        let attrs = s.attrs().await;
+        sessions.push((attrs.modified.millis(), s));
+    }
+    sessions.sort_by(|a, b| b.0.cmp(a.0));
+
     let latest = None;
-    for s in scan().sessions() {
+    for (modified, s) in sessions {
         if let Some((latest_msg, _)) = latest {
-            if s.modified.millis() <= latest_msg.timestamp.millis() {
+            if modified <= latest_msg.timestamp.millis() {
                 break;
             }
         }
@@ -41,20 +95,47 @@ pub async fn note() {
             break;
         }
     }
-    if let Some((latest_msg, session_id)) = latest {
-        write_note(
-            #{
-                name: "thinking.empty",
-                value: latest_msg.text == "",
-                target: #{ session: session_id, line: latest_msg.line },
-                metadata: #{
-                    msg_timestamp: latest_msg.timestamp.millis(),
-                    model: latest_msg.model(),
-                    config,
-                },
-            },
-        )
-        .await?;
+    if let Some((msg, session_id)) = latest {
+        // FUTURE: legacy `.keep_prev()` kept the prior note alongside
+        // this one; the rethink note object model decides how a new
+        // note relates to the prior one
+        write_note("thinking.empty", msg.text == "")
+            .for_session_line(session_id, msg.line)
+            .metadata(#{
+                msg_timestamp: msg.timestamp.millis(),
+                model: msg.model(),
+                config,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+/// Report an issue when the latest `thinking.empty` note says the
+/// block was empty.
+pub async fn report() {
+    // FUTURE: a notes query over the scan's notes
+    let notes = scan().notes().name("thinking.empty").await?;
+    if notes.is_empty() {
+        return Ok(());
+    }
+    // Use the most recent block for evidence
+    notes.sort_by(|a, b| {
+        let a_ts = a.metadata.get("msg_timestamp").unwrap();
+        let b_ts = b.metadata.get("msg_timestamp").unwrap();
+        b_ts.cmp(a_ts)
+    });
+    let note = notes[0];
+    // Only report issues for empty text (value is true)
+    if note.value {
+        // FUTURE: write_issue. Legacy `.open_on_new_evidence()`
+        // reopened an existing issue on newer evidence; the rethink
+        // issue is an object whose status the writer sets, and how a
+        // re-report relates to the existing issue is undecided.
+        write_issue("hidden-thinking", "Thinking blocks hidden in recent session")
+            .description(include_str!("issue-description.md"))
+            .evidence([#{ note, timestamp: note.metadata.get("msg_timestamp").unwrap() }])
+            .await?;
     }
     Ok(())
 }

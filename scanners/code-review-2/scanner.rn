@@ -1,0 +1,461 @@
+// Model of the `code-review` scanner for the rethink runtime
+// (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
+// the task names the action.
+//
+// Untagged code runs on the rethink runtime today. Code tagged
+// `// FUTURE` needs a facility the rethink runtime does not have yet.
+// Where the rethink design specifies the interface, FUTURE code is
+// written against it; otherwise it follows the legacy interface as a
+// placeholder. This file is a target, not a runnable scanner.
+
+use gage::{carry_forward, scan, watermark, write_note};
+// FUTURE: agents, templates, progress, params, SQL query, and model
+// context are not in the rethink runtime
+use gage::tools::Query;
+use gage::{AgentRunner, Progress, Template, call_agent, model_context, params, query};
+
+pub const SCANNER = #{
+    name: "code-review-2",
+    description: "Review sessions for code quality",
+    // FUTURE: groups: ["default"] when this scanner replaces
+    // `code-review`. Left out so a legacy default scan does not
+    // select it.
+    // FUTURE: params() is not in the rethink runtime
+    params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
+    tasks: #{
+        summarize_projects: #{
+            notes: #{
+                writes: #{
+                    "project-summary.rules": "Summary of a project's rules",
+                    "project-summary.stack": "Summary of a project's stack and architecture",
+                },
+            },
+            // FUTURE: the attachments a task wants, per the rethink
+            // design. `gage scan` attaches them to each session while
+            // building the dataset.
+            attachments: #{ wants: ["config:", "stack-files:"] },
+        },
+        review: #{
+            notes: #{
+                // Ordering only: the review runs after the summaries
+                // and proceeds without them when none were written
+                wants: ["project-summary.*"],
+                writes: #{
+                    "finding.code": include_str!("finding-code-doc.md"),
+                },
+            },
+            // FUTURE: attachments, as above
+            attachments: #{ wants: ["config:"] },
+        },
+    },
+};
+
+// Validation keys, named for the promoted scanner
+const SUMMARY_KEY = ("code-review", "summarize_projects", 1);
+const REVIEW_KEY = ("code-review", "review", 1);
+const REVIEW_ROADMAP_KEY = ("code-review", "review[roadmap]", 1);
+
+// Summary note names by the attachment scheme whose files support them
+const SUMMARY_NOTES = #{
+    "config": "project-summary.rules",
+    "stack-files": "project-summary.stack",
+};
+
+/// Write summary notes for the project configuration and stack files
+/// attached to the scan's sessions.
+///
+/// One agent call per attachment writes the summary note its files
+/// support. An attachment at a commit the key already covers carries
+/// its existing note forward instead of being summarized again.
+pub async fn summarize_projects() {
+    // FUTURE: attachments. Designed interface: `session.attachments(scheme)`
+    // lists a session's attachments under a scheme; an attachment has
+    // `id`, `source`, `files()`, and `file(key)`; a file has `text()`.
+    // Attachments are collected across sessions by id, since sessions
+    // of one project share their attachment.
+    let attachments = #{};
+    for s in scan().sessions().await {
+        for (scheme, _) in SUMMARY_NOTES {
+            for a in s.attachments(scheme).await? {
+                attachments.insert(a.id, (scheme, a));
+            }
+        }
+    }
+
+    // FUTURE: validation over attachments. Designed: the scan records
+    // `validation/attachment/<key>/<id>` holding the attachment commit,
+    // and carry-forward keys on an attachment commit like any other
+    // object. The runtime has watermarks and carry-forward for
+    // sessions only; the partition form below is the design's.
+    let p = attachments.values().partition(SUMMARY_KEY).carry_forward_notes().await?;
+
+    // FUTURE: Template
+    let t = Template::new(include_str!(
+        "project-summary-prompt.md.j2"
+    )).await?;
+
+    // One tick per attachment: valid attachments tick during
+    // queueing, summarized attachments tick as their agents complete
+    // FUTURE: Progress
+    let progress = Progress::new(attachments.len());
+    for _ in p.valid {
+        progress.tick();
+    }
+
+    // FUTURE: AgentRunner
+    let runner = AgentRunner::new();
+    for (scheme, a) in p.invalid {
+        let contents = [];
+        for f in a.files().await? {
+            contents.push(#{ path: f.key, text: f.text()? });
+        }
+        if contents.is_empty() {
+            p.mark_valid(a).await?;
+            progress.tick();
+            continue;
+        }
+        let kind = SUMMARY_NOTES[scheme];
+        let prompt = t
+            .render(#{ project: a.source, sections: [#{ kind, files: contents }] })
+            .await?;
+        runner.add(
+            // FUTURE: call_agent
+            call_agent(prompt)
+                .name("project-summary")
+                .tools(#{ write_summary: write_summary_tooldef() })
+                .model("medium"),
+            #{ attachment: a },
+        );
+    }
+
+    // FUTURE: AgentRunner results
+    let results = runner.start();
+    while let Some(item) = results.next().await {
+        let (result, #{ attachment }) = item?;
+        log::info!(
+            "project-summary: {:?}",
+            #{
+                attachment: attachment.id,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        p.mark_valid(attachment).await?;
+        progress.tick();
+    }
+    Ok(())
+}
+
+fn write_summary_tooldef() {
+    #{
+        name: "ProjectSummary",
+        description: "Write a project summary note",
+        inputs: #{
+            name: #{
+                type: "string",
+                description: "Note name as directed by the prompt",
+            },
+            attachment: #{ type: "string", description: "Attachment ID" },
+            summary: #{ type: "string", description: "Summary content" },
+        },
+    }
+}
+
+// FUTURE: tool callback; see `write_finding` below
+pub async fn write_summary(inputs, meta) {
+    if inputs.name != "project-summary.rules" && inputs.name != "project-summary.stack" {
+        return Ok(format!("error: unknown note name `{}`", inputs.name));
+    }
+    // FUTURE: an attachment target (`attachment:<id>`); the runtime
+    // targets sessions only. Legacy `.replace_prev()` replaced the
+    // prior summary across runs; the rethink note object model
+    // decides how a new note relates to the prior one.
+    let note = write_note(inputs.name, inputs.summary)
+        .for_attachment(inputs.attachment)
+        .carry_forward(SUMMARY_KEY)
+        .await?;
+    Ok(format!("Wrote summary note {}", note.id))
+}
+
+/// Submit each session that edits files to a code review agent that
+/// writes finding notes, informed by the session project's summary
+/// notes.
+///
+/// The `mode` param selects the variant. Each mode watermarks sessions
+/// under its own key. Both modes write `finding.code` notes; the note's
+/// `mode` metadata records the variant.
+pub async fn review() {
+    // FUTURE: params()
+    match params().mode {
+        "query" => review_query().await,
+        "roadmap" => review_roadmap().await,
+        other => Err(
+            format!(
+                "unsupported mode `{other}`: expected `query` or `roadmap`"
+            ),
+        ),
+    }
+}
+
+/// Query mode: the agent reads the session's unseen lines through its
+/// Query view.
+async fn review_query() {
+    let sessions = unseen_sessions(REVIEW_KEY).await?;
+
+    // FUTURE: Template
+    let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
+
+    // One tick per session: skipped sessions tick during queueing,
+    // reviewed sessions tick as their agents complete
+    // FUTURE: Progress
+    let progress = Progress::new(sessions.len());
+
+    // FUTURE: AgentRunner
+    let runner = AgentRunner::new();
+    for (s, start, end) in sessions {
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            watermark(REVIEW_KEY, s).await?;
+            progress.tick();
+            continue;
+        }
+        let prompt = t.render(#{ session_id: s.id }).await?;
+        runner.add(
+            // FUTURE: call_agent. The Query view is clipped to the
+            // session's unseen lines
+            call_agent(prompt)
+                .name("code-review")
+                .gage_tools([Query::new().sessions([s]).lines(start, end)])
+                .tools(#{ write_finding: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s },
+        );
+    }
+    collect_results(runner, REVIEW_KEY, progress).await
+}
+
+// Rules for the code-review roadmap. The roadmap is an index, not a
+// transcript: each entry carries enough to identify the message and
+// decide whether to fetch it, and the agent queries full text by line
+// for anything it needs to judge. A tool call's first ~120 chars are
+// its name and file path; past that it starts dumping source, which
+// belongs in a targeted query rather than the prompt.
+//
+// The floors follow what review agents ask for when they have no
+// roadmap: a complete, line-ordered, uniformly truncated view with no
+// type filter, every time. Message kinds not listed here are excluded
+// from the rendered roadmap entirely (system:*, user:meta).
+//
+// `max` is what holds the index open. Without it the budget is the
+// only ceiling, and slack expansion spends all of it: on a 477-message
+// session the same floors rendered 659 chars per message, a
+// transcript. `max` near `min` pins each entry to index size; `min`
+// still sets the floor that survives budget pressure on a session
+// large enough to exhaust the budget.
+const ROADMAP_RULES = #{
+    "user.text": #{ min: 200, max: 400, weight: 5 },
+    "assistant.tool_use": #{ min: 120, max: 160, weight: 5 },
+    "assistant.text": #{ min: 120, max: 200, weight: 3 },
+    "assistant.thinking": #{ min: 100, max: 160, weight: 2 },
+    "user.tool_result": #{ min: 100, max: 140, weight: 2 },
+
+    // A failed command is index-worthy on its own; give it room to
+    // show what failed. `[error]` outranks the tool-scoped rules
+    // below, so a failed Read reports its error rather than
+    // collapsing to a header.
+    "user.tool_result[error]": #{ min: 300, max: 400, weight: 6 },
+
+    // File and search dumps. The header names the tool and back-links
+    // the call, which already carries the path.
+    "user.tool_result[tool=Read]": #{ header: true },
+    "user.tool_result[tool=Grep]": #{ header: true },
+    "user.tool_result[tool=Glob]": #{ header: true },
+};
+
+const BUDGET_CAP = 100_000;
+
+/// Roadmap mode: the session's unseen lines go into the agent prompt
+/// as a compressed session; the agent retrieves full message text
+/// selectively through its Query view over the same lines.
+async fn review_roadmap() {
+    let sessions = unseen_sessions(REVIEW_ROADMAP_KEY).await?;
+
+    // Size the compression budget to the agent's free context
+    // FUTURE: model_context, params
+    let context = model_context("medium").await?;
+    let budget = match params().budget {
+        b if b > 0 => b,
+        _ => (((context.free_tokens as f64) * 0.8) as i64).min(BUDGET_CAP),
+    };
+    log::info!("model context: {:?}", context);
+    log::info!("budget: {:?}", budget);
+
+    // FUTURE: Template
+    let t = Template::new(include_str!(
+        "findings-roadmap-prompt.md.j2"
+    ))
+        .await?;
+
+    // FUTURE: Progress
+    let progress = Progress::new(sessions.len());
+
+    // FUTURE: AgentRunner
+    let runner = AgentRunner::new();
+    for (s, start, end) in sessions {
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            watermark(REVIEW_ROADMAP_KEY, s).await?;
+            progress.tick();
+            continue;
+        }
+        let summaries = project_summaries(s).await?;
+        // FUTURE: compress, constrained to the unseen lines
+        let roadmap = s.compress(budget, ROADMAP_RULES).lines(start, end).await?;
+        let prompt = t
+            .render(#{ session_id: s.id, summaries, roadmap })
+            .await?;
+        runner.add(
+            // FUTURE: call_agent
+            call_agent(prompt)
+                .name("code-review-roadmap")
+                .gage_tools([Query::new().sessions([s]).lines(start, end)])
+                .tools(#{ write_finding_roadmap: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s },
+        );
+    }
+    collect_results(runner, REVIEW_ROADMAP_KEY, progress).await
+}
+
+/// The summary notes for the session's project, for inlining into the
+/// prompt. The `wants` on this task makes them visible.
+///
+/// Roadmap mode reads these itself rather than directing the agent to
+/// query them: the rules are needed for every finding, so one read
+/// here replaces one query per agent.
+async fn project_summaries(s) {
+    // FUTURE: attachments and a notes query by target. The summaries
+    // target the session's attachments, one note per scheme.
+    let out = [];
+    for (scheme, name) in SUMMARY_NOTES {
+        for a in s.attachments(scheme).await? {
+            for n in scan().notes().name(name).target(a).await? {
+                out.push(#{ name: n.name, value: n.value });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The scan's sessions with unseen lines under `key`, as
+/// `(session, start, end)`. Notes prior scans wrote under `key` are
+/// carried into this scan first, so a session the key already covers
+/// contributes its findings without being reviewed again.
+async fn unseen_sessions(key) {
+    let carried = carry_forward(key).await?;
+    log::info!("carried {} notes forward under {:?}", carried, key);
+    let out = [];
+    for (s, unseen) in scan().sessions().with_unseen(key).await? {
+        if let Some((start, end)) = unseen {
+            out.push((s, start, end));
+        }
+    }
+    Ok(out)
+}
+
+/// Wait for the agents, then watermark each reviewed session.
+async fn collect_results(runner, key, progress) {
+    // FUTURE: AgentRunner results
+    let results = runner.start();
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        log::info!(
+            "code-review findings: {:?}",
+            #{
+                session: session.id,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        watermark(key, session).await?;
+        progress.tick();
+    }
+    Ok(())
+}
+
+async fn skip_session(s) {
+    // FUTURE: query(). The rethink `message` table is scoped to the
+    // scan's dataset, so the SQL is unchanged. File edits show up as
+    // Edit/Write tool calls.
+    let result = query(
+        format!(
+            "SELECT count(*) AS n FROM message \
+            WHERE session_id = '{}' \
+            AND type = 'assistant' AND subtype = 'tool_use' \
+            AND regexp_like(raw, '\"name\"\\s*:\\s*\"(Edit|Write|MultiEdit)\"')",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ n } = result.get(0).expect("should return one row");
+    if n == 0 {
+        Ok(Some("no file edits"))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_finding_tooldef() {
+    #{
+        name: "Finding",
+        description: "Write a code quality finding about the session",
+        inputs: #{
+            description: #{
+                type: "string",
+                description: "Finding description",
+            },
+            session: #{ type: "string", description: "Session ID" },
+            lines: #{
+                type: "string",
+                description: "Session line numbers associated with the finding: \
+                              a line (`112`), a range (`61-72`), or a \
+                              comma-separated list (`28,31`)",
+                required: false,
+            },
+        },
+    }
+}
+
+// FUTURE: tool callbacks. The rethink runtime has no agent tool
+// dispatch. When it does, a callback runs inside the task's scan
+// context, and the note's author is the agent session that made the
+// call (`session+task:<scan>/<scanner>:<task>/<native id>`), recorded
+// by the runtime rather than passed by the scanner. Tool callbacks run
+// without task params, so each mode registers its own callback.
+
+pub async fn write_finding(inputs, meta) {
+    write_finding_note(REVIEW_KEY, "query", inputs).await
+}
+
+pub async fn write_finding_roadmap(inputs, meta) {
+    write_finding_note(REVIEW_ROADMAP_KEY, "roadmap", inputs).await
+}
+
+/// Write one `finding.code` note, tagged for carry-forward under the
+/// mode's key so a later scan carries it when the session is
+/// unchanged.
+async fn write_finding_note(key, mode, inputs) {
+    let metadata = #{ mode };
+    let write = write_note("finding.code", inputs.description);
+    // The session line selection grammar accepts a line, a range, or
+    // a list as the tool describes them, so no parsing happens here
+    let write = match inputs.get("lines") {
+        Some(lines) => {
+            metadata.insert("lines", lines);
+            write.for_session_lines(inputs.session, lines)
+        }
+        None => write.for_session(inputs.session),
+    };
+    let note = write.metadata(metadata).carry_forward(key).await?;
+    Ok(format!("Wrote finding note {}", note.id))
+}

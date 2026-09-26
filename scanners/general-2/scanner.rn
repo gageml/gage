@@ -1,0 +1,281 @@
+// Model of the `general` scanner for the rethink runtime (`gage-scan2`
+// and `gage-runtime2`). The scanner names the subject; the task names
+// the action.
+//
+// Untagged code runs on the rethink runtime today. Code tagged
+// `// FUTURE` needs a facility the rethink runtime does not have yet.
+// Where the rethink design specifies the interface, FUTURE code is
+// written against it; otherwise it follows the legacy interface as a
+// placeholder. This file is a target, not a runnable scanner.
+
+use gage::{carry_forward, scan, watermark, write_note};
+// FUTURE: agents, templates, progress, params, SQL query, and model
+// context are not in the rethink runtime
+use gage::tools::Query;
+use gage::{AgentRunner, Progress, Template, call_agent, model_context, params, query};
+
+pub const SCANNER = #{
+    name: "general-2",
+    description: "Scan sessions for general findings",
+    // FUTURE: groups: ["default"] when this scanner replaces `general`.
+    // Left out so a legacy default scan does not select it.
+    // FUTURE: params() is not in the rethink runtime
+    params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
+    tasks: #{
+        review: #{
+            notes: #{
+                writes: #{
+                    "finding.general": include_str!("finding-general-doc.md"),
+                },
+            },
+        },
+    },
+};
+
+// Watermark keys, named for the promoted scanner. One key per mode so
+// the modes never mask each other's work.
+const REVIEW_KEY = ("general", "review", 1);
+const REVIEW_ROADMAP_KEY = ("general", "review[roadmap]", 1);
+
+/// Submit each session's unseen lines to an agent that writes finding
+/// notes.
+///
+/// The `mode` param selects the variant. Each mode watermarks sessions
+/// under its own key. Both modes write `finding.general` notes; the
+/// note's `mode` metadata records the variant.
+pub async fn review() {
+    // FUTURE: params()
+    match params().mode {
+        "query" => review_query().await,
+        "roadmap" => review_roadmap().await,
+        other => Err(
+            format!(
+                "unsupported mode `{other}`: expected `query` or `roadmap`"
+            ),
+        ),
+    }
+}
+
+/// Query mode: the agent reads the session's unseen lines through its
+/// Query view.
+async fn review_query() {
+    let sessions = unseen_sessions(REVIEW_KEY).await?;
+
+    // FUTURE: Template
+    let t = Template::new(include_str!("findings-prompt.md.j2")).await?;
+
+    // One tick per session: skipped sessions tick during queueing,
+    // reviewed sessions tick as their agents complete
+    // FUTURE: Progress
+    let progress = Progress::new(sessions.len());
+
+    // FUTURE: AgentRunner
+    let runner = AgentRunner::new();
+    for (s, start, end) in sessions {
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            watermark(REVIEW_KEY, s).await?;
+            progress.tick();
+            continue;
+        }
+        let prompt = t.render(#{ session_id: s.id }).await?;
+        runner.add(
+            // FUTURE: call_agent. The Query view is clipped to the
+            // session's unseen lines
+            call_agent(prompt)
+                .name("general-finding")
+                .gage_tools([Query::new().sessions([s]).lines(start, end)])
+                .tools(#{ write_finding: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s },
+        );
+    }
+    collect_results(runner, REVIEW_KEY, progress).await
+}
+
+// Rules for the general (session-quality) roadmap. Ordering by
+// weight: human intent (user.text) and the assistant's reasoning
+// (thinking, text) carry the review's primary signal for session
+// quality; tool activity is context. No `max`: the budget is the
+// ceiling. `min` sets a floor that survives budget pressure
+// (demotion drops lowest-weight rules first). Message kinds not
+// listed here are excluded from the rendered roadmap entirely.
+const ROADMAP_RULES = #{
+    "user.text": #{ min: 300, weight: 5 },
+    "assistant.thinking": #{ min: 300, weight: 4, priority: ["start", "end"] },
+    "assistant.text": #{ min: 300, weight: 4 },
+    "user.tool_result": #{ min: 200, weight: 2 },
+    "assistant.tool_use": #{ min: 200, weight: 2 },
+};
+
+const BUDGET_CAP = 800_000;
+
+/// Roadmap mode: the session's unseen lines go into the agent prompt
+/// as a compressed session; the agent retrieves full message text
+/// selectively through its Query view over the same lines.
+async fn review_roadmap() {
+    let sessions = unseen_sessions(REVIEW_ROADMAP_KEY).await?;
+
+    // Size the compression budget to the agent's free context
+    // FUTURE: model_context, params
+    let context = model_context("medium").await?;
+    let budget = match params().budget {
+        b if b > 0 => b,
+        _ => (((context.free_tokens as f64) * 0.8) as i64).min(BUDGET_CAP),
+    };
+    log::info!("model context: {:?}", context);
+    log::info!("budget: {:?}", budget);
+
+    // FUTURE: Template
+    let t = Template::new(include_str!(
+        "findings-roadmap-prompt.md.j2"
+    ))
+        .await?;
+
+    // FUTURE: Progress
+    let progress = Progress::new(sessions.len());
+
+    // FUTURE: AgentRunner
+    let runner = AgentRunner::new();
+    for (s, start, end) in sessions {
+        if let Some(reason) = skip_session(s).await? {
+            log::info!("Skipping session {}: {}", s.id, reason);
+            watermark(REVIEW_ROADMAP_KEY, s).await?;
+            progress.tick();
+            continue;
+        }
+        // FUTURE: compress, constrained to the unseen lines
+        let roadmap = s.compress(budget, ROADMAP_RULES).lines(start, end).await?;
+        let prompt = t.render(#{ session_id: s.id, roadmap }).await?;
+        runner.add(
+            // FUTURE: call_agent
+            call_agent(prompt)
+                .name("general-finding")
+                .gage_tools([Query::new().sessions([s]).lines(start, end)])
+                .tools(#{ write_finding_roadmap: write_finding_tooldef() })
+                .model("medium"),
+            #{ session: s },
+        );
+    }
+    collect_results(runner, REVIEW_ROADMAP_KEY, progress).await
+}
+
+/// The scan's sessions with unseen lines under `key`, as
+/// `(session, start, end)`. Notes prior scans wrote under `key` are
+/// carried into this scan first, so a session the key already covers
+/// contributes its findings without being reviewed again.
+async fn unseen_sessions(key) {
+    let carried = carry_forward(key).await?;
+    log::info!("carried {} notes forward under {:?}", carried, key);
+    let out = [];
+    for (s, unseen) in scan().sessions().with_unseen(key).await? {
+        if let Some((start, end)) = unseen {
+            out.push((s, start, end));
+        }
+    }
+    Ok(out)
+}
+
+/// Wait for the agents, then watermark each reviewed session.
+async fn collect_results(runner, key, progress) {
+    // FUTURE: AgentRunner results
+    let results = runner.start();
+    while let Some(item) = results.next().await {
+        let (result, #{ session }) = item?;
+        log::info!(
+            "findings: {:?}",
+            #{
+                session: session.id,
+                result: result.text,
+                metadata: result.as_metadata(),
+            },
+        );
+        watermark(key, session).await?;
+        progress.tick();
+    }
+    Ok(())
+}
+
+/// Min total text length to review a session
+const SESSION_MIN_TEXT_LEN = 200;
+
+async fn skip_session(s) {
+    // FUTURE: query(). The rethink `message` table is scoped to the
+    // scan's dataset, so the SQL is unchanged. The query keeps
+    // scanner memory down; the sum is limited to 50 messages for the
+    // same reason.
+    let result = query(
+        format!(
+            "SELECT sum(length(text)) AS text_len FROM \
+            (SELECT text FROM message WHERE session_id = '{}' LIMIT 50)",
+            s.id
+        ),
+    )
+    .await?;
+    let #{ text_len } = result.get(0).expect("should return one row");
+    match text_len {
+        () => Ok(Some("empty session")),
+        text_len if text_len < SESSION_MIN_TEXT_LEN => {
+            let reason = format!(
+                "text len {text_len} < min {SESSION_MIN_TEXT_LEN}"
+            );
+            Ok(Some(reason))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn write_finding_tooldef() {
+    #{
+        name: "Finding",
+        description: "Write a finding about the session",
+        inputs: #{
+            description: #{
+                type: "string",
+                description: "Finding description",
+            },
+            session: #{ type: "string", description: "Session ID" },
+            lines: #{
+                type: "string",
+                description: "Session line numbers associated with the finding: \
+                              a line (`112`), a range (`61-72`), or a \
+                              comma-separated list (`28,31`)",
+                required: false,
+            },
+        },
+    }
+}
+
+// FUTURE: tool callbacks. The rethink runtime has no agent tool
+// dispatch. When it does, a callback runs inside the task's scan
+// context, and the note's author is the agent session that made the
+// call (`session+task:<scan>/<scanner>:<task>/<native id>`), recorded
+// by the runtime rather than passed by the scanner. Tool callbacks run
+// without task params, so each mode registers its own callback.
+
+pub async fn write_finding(inputs, meta) {
+    write_finding_note(REVIEW_KEY, "query", inputs).await
+}
+
+pub async fn write_finding_roadmap(inputs, meta) {
+    write_finding_note(REVIEW_ROADMAP_KEY, "roadmap", inputs).await
+}
+
+/// Write one `finding.general` note, tagged for carry-forward under
+/// the mode's key so a later scan carries it when the session is
+/// unchanged.
+async fn write_finding_note(key, mode, inputs) {
+    let metadata = #{ mode };
+    let write = write_note("finding.general", inputs.description);
+    // The session line selection grammar accepts a line, a range, or
+    // a list as the tool describes them, so no parsing happens here
+    let write = match inputs.get("lines") {
+        Some(lines) => {
+            metadata.insert("lines", lines);
+            write.for_session_lines(inputs.session, lines)
+        }
+        None => write.for_session(inputs.session),
+    };
+    let note = write.metadata(metadata).carry_forward(key).await?;
+    Ok(format!("Wrote finding note {}", note.id))
+}

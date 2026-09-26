@@ -1,0 +1,77 @@
+// Model of the `session-retention` scanner for the rethink runtime
+// (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
+// the task names the action.
+//
+// Untagged code runs on the rethink runtime today. Code tagged
+// `// FUTURE` needs a facility the rethink runtime does not have yet.
+// Where the rethink design specifies the interface, FUTURE code is
+// written against it; otherwise it follows the legacy interface as a
+// placeholder. This file is a target, not a runnable scanner.
+
+use gage::write_note;
+// FUTURE: attachments and issues are not in the rethink runtime
+use gage::{scan, write_issue};
+
+pub const SCANNER = #{
+    name: "session-retention-2",
+    description: "Highlight unset session retention policy",
+    // FUTURE: groups: ["default"] when this scanner replaces
+    // `session-retention`. Left out so a legacy default scan does not
+    // select it.
+    tasks: #{
+        check: #{
+            notes: #{
+                writes: #{
+                    "session-retention-policy.unset": include_str!(
+                        "unset-policy-note.md"
+                    ),
+                },
+            },
+            issues: #{
+                writes: #{
+                    "session-retention": "Session retention policy is unset",
+                },
+            },
+            // FUTURE: the user config attachment, for the
+            // cleanupPeriodDays setting
+            attachments: #{ wants: ["config:"] },
+        },
+    },
+};
+
+/// Note and report an unset retention policy in the user config.
+pub async fn check() {
+    // FUTURE: the user config comes from the dataset's `config:`
+    // attachment. Designed: `scan().attachments("config")` lists the
+    // dataset-level attachments under the scheme; `file(key)` returns
+    // `Option`; `json()` is fallible. File keys are
+    // `<origin>/<relative path>`; the user config's key is assumed to
+    // be `user/.claude.json`.
+    let setting = None;
+    for a in scan().attachments("config").await? {
+        if let Some(f) = a.file("user/.claude.json") {
+            setting = f.json()?.get("cleanupPeriodDays");
+        }
+    }
+    if setting.is_some() {
+        return Ok(());
+    }
+    // FUTURE: a scan target (`scan:<id>`); the runtime targets sessions
+    // only. Legacy `.keep_prev()` kept the prior note alongside this
+    // one; the rethink note object model decides.
+    let note = write_note("session-retention-policy.unset", true)
+        .for_scan()
+        .await?;
+    // FUTURE: write_issue. Legacy `.keep_status()` left an existing
+    // issue's status alone; the rethink issue is an object whose
+    // status the writer sets, and how a re-report relates to the
+    // existing issue is undecided.
+    write_issue(
+        "session-retention",
+        "Unset session retention policy - sessions may be unexpectedly deleted",
+    )
+    .description(include_str!("issue.md"))
+    .evidence([#{ note, timestamp: note.created }])
+    .await?;
+    Ok(())
+}
