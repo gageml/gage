@@ -25,6 +25,38 @@ pub fn short_uuid(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
+/// Generate a ULID: 26 chars of Crockford base32 whose first 10 chars
+/// encode the current time in milliseconds and whose last 16 are
+/// random. Sorting ULIDs as strings sorts them by creation time, so a
+/// tree listing of ULID-named entries is chronological.
+pub fn new_ulid() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let random = uuid::Uuid::new_v4().into_bytes();
+    let mut bytes = [0u8; 16];
+    // 48-bit timestamp, then 80 random bits
+    bytes[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
+    bytes[6..].copy_from_slice(&random[6..]);
+    encode_crockford(&bytes)
+}
+
+/// The millisecond timestamp encoded in a ULID's first 10 chars, or
+/// `None` when the value is not 26 chars of the Crockford alphabet.
+pub fn ulid_timestamp_ms(ulid: &str) -> Option<i64> {
+    if ulid.len() != 26 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for b in ulid.bytes() {
+        let digit = CROCKFORD.iter().position(|c| *c == b)? as u128;
+        n = (n << 5) | digit;
+    }
+    // The top 2 of the 130 bits are padding; the next 48 are the time
+    Some((n >> 80) as i64)
+}
+
 fn encode_crockford(bytes: &[u8; 16]) -> String {
     let n = u128::from_be_bytes(*bytes);
     let mut out = [0u8; 26];
@@ -45,6 +77,24 @@ mod tests {
         let id = new_uuid();
         assert_eq!(id.len(), 26);
         assert!(id.bytes().all(|b| CROCKFORD.contains(&b)));
+    }
+
+    #[test]
+    fn ulid_sorts_by_time_and_decodes_its_timestamp() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let a = new_ulid();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = new_ulid();
+        assert_eq!(a.len(), 26);
+        assert!(a.bytes().all(|b| CROCKFORD.contains(&b)));
+        assert!(a < b, "{a} {b}");
+        let ts = ulid_timestamp_ms(&a).unwrap();
+        assert!(ts >= before && ts <= before + 10_000, "{ts} vs {before}");
+        assert_eq!(ulid_timestamp_ms("short"), None);
+        assert_eq!(ulid_timestamp_ms(&"i".repeat(26)), None);
     }
 
     #[test]

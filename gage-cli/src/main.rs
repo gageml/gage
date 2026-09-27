@@ -31,6 +31,7 @@ mod cmd_dataset;
 mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
+mod cmd_issue2;
 mod cmd_note;
 mod cmd_query;
 mod cmd_query2;
@@ -139,6 +140,12 @@ enum Command {
     Issue {
         #[command(subcommand)]
         command: cmd_issue::IssueCommand,
+    },
+
+    /// Manage issues (new store)
+    Issue2 {
+        #[command(subcommand)]
+        command: cmd_issue2::Issue2Command,
     },
 
     /// Manage notes
@@ -298,6 +305,15 @@ async fn main() {
             Command::Dataset { command } => match command {
                 cmd_dataset::DatasetCommand::Add => cmd_dataset::add(),
                 cmd_dataset::DatasetCommand::List(args) => cmd_dataset::list(args).await,
+            },
+            Command::Issue2 { command } => match command {
+                cmd_issue2::Issue2Command::List(args) => cmd_issue2::list(args).await,
+                cmd_issue2::Issue2Command::Show(args) => cmd_issue2::show(args).await,
+                cmd_issue2::Issue2Command::Add(args) => cmd_issue2::add(args),
+                cmd_issue2::Issue2Command::Delete(args) => cmd_issue2::delete(args),
+                cmd_issue2::Issue2Command::Close(args) => cmd_issue2::close(args),
+                cmd_issue2::Issue2Command::Open(args) => cmd_issue2::open(args),
+                cmd_issue2::Issue2Command::Comment(args) => cmd_issue2::comment(args),
             },
             Command::Issue { command } => match command {
                 cmd_issue::IssueCommand::List(args) => cmd_issue::list(args),

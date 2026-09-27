@@ -27,13 +27,14 @@ use serde_json::Value as JsonValue;
 
 use crate::git::{git_in, run};
 use crate::object::{LinkFile, Object, object_ref};
-use crate::{Store, StoreError, dataset, note, scan, session};
+use crate::{Store, StoreError, dataset, issue, note, scan, session};
 
 /// Indexed attribute paths for an object type, or empty when the type
 /// declares none.
 pub(crate) fn indexed_attrs(object_type: &str) -> &'static [&'static str] {
     match object_type {
         note::OBJECT_TYPE => note::INDEXED_ATTRS,
+        issue::OBJECT_TYPE => issue::INDEXED_ATTRS,
         dataset::OBJECT_TYPE => dataset::INDEXED_ATTRS,
         session::OBJECT_TYPE => session::INDEXED_ATTRS,
         scan::OBJECT_TYPE => scan::INDEXED_ATTRS,

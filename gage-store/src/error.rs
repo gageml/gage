@@ -61,6 +61,11 @@ pub enum StoreError {
     Index(String),
     /// A session's content exceeds the configured maximum storage size
     SessionTooLarge { size: u64, max: u64 },
+    /// Issue input the store cannot record: an empty title, a closing
+    /// reason on a non-closing change, an empty comment
+    IssueInput(String),
+    /// A status change to the status the issue already has
+    IssueStatusUnchanged { id: String, status: String },
 }
 
 impl fmt::Display for StoreError {
@@ -138,6 +143,10 @@ impl fmt::Display for StoreError {
                 "session content reached {size} bytes, over the {max}-byte limit \
                  (raise it with --max-session-size or override with --force)"
             ),
+            StoreError::IssueInput(what) => write!(f, "invalid issue input: {what}"),
+            StoreError::IssueStatusUnchanged { id, status } => {
+                write!(f, "issue {id} is already {status}")
+            }
         }
     }
 }
@@ -167,7 +176,9 @@ impl std::error::Error for StoreError {
             | StoreError::WrongType { .. }
             | StoreError::SessionNotFound(_)
             | StoreError::Index(_)
-            | StoreError::SessionTooLarge { .. } => None,
+            | StoreError::SessionTooLarge { .. }
+            | StoreError::IssueInput(_)
+            | StoreError::IssueStatusUnchanged { .. } => None,
         }
     }
 }

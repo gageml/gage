@@ -260,7 +260,7 @@ fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
 /// Target cell: the type name, a space, and the short id with any
 /// line selection, e.g. `session 6tyx7fs2#12-20`. A value that is not
 /// a Gage URL is shown as stored.
-fn target_cell(target: &str) -> String {
+pub(crate) fn target_cell(target: &str) -> String {
     let Ok(parsed) = url::parse(target) else {
         return target.to_string();
     };
@@ -273,7 +273,7 @@ fn target_cell(target: &str) -> String {
 
 /// One-line cell for a note value: flattened to a single line and
 /// cut at 400 chars
-fn value_cell(raw: &str) -> String {
+pub(crate) fn value_cell(raw: &str) -> String {
     let flattened: String = raw
         .split(['\n', '\r'])
         .filter(|s| !s.is_empty())

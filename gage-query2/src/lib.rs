@@ -13,8 +13,8 @@
 //! that wrote each session deserializes its bytes into normalized
 //! entries the core turns into batches ([`rows`], [`stored_rows`]).
 //! `note` is one row per live note object, from
-//! [`gage_store::StoredNoteTable`]. `dataset`, `scan`, and `issue`
-//! join as the crate grows.
+//! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
+//! object and `issue_event` one row per change entry across them.
 //!
 //! Native session data is reached through driver-provided functions,
 //! present on every context: `native_session`, `native_message`, and
@@ -42,8 +42,8 @@ use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
 use gage_store::{
-    LinkKind, Store, StoredNoteTable, StoredSessionTable, dataset_table, link_table, scan_table,
-    scan_watermark_table,
+    LinkKind, Store, StoredNoteTable, StoredSessionTable, dataset_table, issue_event_table,
+    issue_table, link_table, scan_table, scan_watermark_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -119,6 +119,8 @@ impl ContextBuilder {
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
             ("scan", scan_table(Arc::clone(&store))),
+            ("issue", issue_table(Arc::clone(&store))),
+            ("issue_event", issue_event_table(Arc::clone(&store))),
         ];
         for (name, table) in &base {
             ctx.register_table(*name, Arc::clone(table))
@@ -187,6 +189,19 @@ const VIEWS: &[(&str, &str)] = &[
         "SELECT target_id AS session_id, note_id, lines \
          FROM note_target_link WHERE target_type = 'session'",
     ),
+    (
+        "issue_evidence",
+        "SELECT issue_id, note_id FROM issue_evidence_link",
+    ),
+    // An issue reaches a session through the notes it cites; the
+    // note's current target is used, so an edited note follows
+    (
+        "session_issue",
+        "SELECT DISTINCT t.target_id AS session_id, e.issue_id \
+         FROM issue_evidence_link e \
+         JOIN note_target_link t ON t.note_id = e.note_id \
+         WHERE t.target_type = 'session'",
+    ),
 ];
 
 /// The table functions this crate's contexts expose, for the repl's
@@ -247,7 +262,8 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use gage_registry::driver::DriverRegistry;
     use gage_store::{
-        DatasetStore, NoteInput, NoteStore, NoteValue, SessionSpec, SessionStore, Store,
+        DatasetStore, IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue,
+        SessionSpec, SessionStore, StatusReason, Store,
     };
     use tempfile::TempDir;
 
@@ -396,7 +412,7 @@ mod tests {
         let driver = registry.driver_for(&spec).unwrap();
         let source = driver.open_source(&spec).unwrap();
         let mut native = source.open_native(native_id).unwrap();
-        let (dataset_id, dataset_commit, session_id, note_id) = {
+        let (dataset_id, dataset_commit, session_id, note_id, issue_id) = {
             let store = store.lock().unwrap();
             let datasets = DatasetStore::from(&*store);
             let dataset_id = datasets.create().unwrap();
@@ -421,8 +437,28 @@ mod tests {
                     carry_forward: None,
                 })
                 .unwrap();
+            let issues = IssueStore::from(&*store);
+            let issue_id = issues
+                .create(IssueInput {
+                    name: "user-issue",
+                    title: "Something",
+                    description: Some("Details"),
+                    author: "user:t",
+                    status: IssueStatus::Pending,
+                    evidence: &[note_id.clone()],
+                })
+                .unwrap();
+            issues
+                .set_status(
+                    &issue_id,
+                    IssueStatus::Closed,
+                    Some(StatusReason::WontFix),
+                    "user:t",
+                    Some("not now"),
+                )
+                .unwrap();
             let dataset_commit = datasets.get(&dataset_id).unwrap().commit_sha;
-            (dataset_id, dataset_commit, session_id, note_id)
+            (dataset_id, dataset_commit, session_id, note_id, issue_id)
         };
 
         let ctx = ContextBuilder::new(Arc::clone(&store).into()).build().await;
@@ -457,6 +493,42 @@ mod tests {
             ["1"]
         );
 
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT status || ' ' || status_reason || ' ' || evidence_count FROM issue"
+            )
+            .await,
+            ["closed wontfix 1"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT event || ' ' || coalesce(to_status, '-') || ' ' || coalesce(message, '-') \
+                     FROM issue_event WHERE issue_id = '{issue_id}' ORDER BY event_id"
+                )
+            )
+            .await,
+            ["create pending -", "status closed not now"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT note_id FROM issue_evidence WHERE issue_id = '{issue_id}'")
+            )
+            .await,
+            [note_id.clone()]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT session_id FROM session_issue WHERE issue_id = '{issue_id}'")
+            )
+            .await,
+            [session_id.clone()]
+        );
+
         let user = ContextBuilder::new(Some(store))
             .skip_system_cols()
             .build()
@@ -467,6 +539,14 @@ mod tests {
                 &format!(
                     "SELECT session_id FROM dataset_session WHERE dataset_id = '{dataset_id}'"
                 )
+            )
+            .await,
+            [session_id.clone()]
+        );
+        assert_eq!(
+            strings(
+                &user,
+                &format!("SELECT session_id FROM session_issue WHERE issue_id = '{issue_id}'")
             )
             .await,
             [session_id]

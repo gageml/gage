@@ -31,7 +31,7 @@
 //!   reconcile that keeps it current, and the query core. Type modules
 //!   opt attributes in through `INDEXED_ATTRS`.
 //! - [`sqlite_index`] --- the SQLite implementation of the index.
-//! - `note`, `dataset`, `session`, `scan` --- object types: each supplies its
+//! - `note`, `issue`, `dataset`, `session`, `scan` --- object types: each supplies its
 //!   `attrs.json` shape, its content files, its decoder, and its typed
 //!   store.
 
@@ -41,6 +41,7 @@ mod dataset;
 mod error;
 pub mod git;
 pub mod index;
+mod issue;
 mod note;
 pub mod object;
 pub mod query;
@@ -61,14 +62,18 @@ pub use dataset::{
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{IdMatch, Order, SelectedTip};
+pub use issue::{
+    ChangeEvent, IssueChange, IssueFull, IssueInput, IssueQuery, IssueStatus, IssueStore,
+    OBJECT_TYPE as ISSUE_TYPE, StatusReason,
+};
 pub use note::{
     NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue,
     OBJECT_TYPE as NOTE_TYPE,
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{
-    LinkKind, StoredNoteTable, StoredSessionTable, dataset_table, link_table, scan_table,
-    scan_watermark_table,
+    LinkKind, StoredNoteTable, StoredSessionTable, dataset_table, issue_event_table, issue_table,
+    link_table, scan_table, scan_watermark_table,
 };
 pub use scan::{
     DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanQuery,

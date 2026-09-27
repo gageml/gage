@@ -9,6 +9,7 @@
 //! | `scan_dataset_link`    | `scan/dataset.link`                        |
 //! | `scan_note_link`       | `scan/notes.link`, `scan/notes_carried.link` |
 //! | `note_target_link`     | `note/target.link`                         |
+//! | `issue_evidence_link`  | `issue/evidence.link`                      |
 //!
 //! `dataset_session_link` lists every dataset at its tip and at every
 //! commit a scan links, so a scan's members are found by joining on
@@ -25,13 +26,14 @@ use datafusion::error::Result;
 
 use super::batch::{BatchSource, BatchTable, external};
 use crate::object::Object;
-use crate::{DatasetStore, NoteStore, ScanStore, Store, url};
+use crate::{DatasetStore, IssueStore, NoteStore, ScanStore, Store, url};
 
 const SESSIONS_LINK: &str = "sessions.link";
 const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
 const TARGET_LINK: &str = "target.link";
+const EVIDENCE_LINK: &str = "evidence.link";
 
 /// Which link file a [`LinkTable`] serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,14 +42,16 @@ pub enum LinkKind {
     ScanDataset,
     ScanNote,
     NoteTarget,
+    IssueEvidence,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 4] = [
+    pub const ALL: [LinkKind; 5] = [
         LinkKind::DatasetSession,
         LinkKind::ScanDataset,
         LinkKind::ScanNote,
         LinkKind::NoteTarget,
+        LinkKind::IssueEvidence,
     ];
 
     /// The table name.
@@ -57,6 +61,7 @@ impl LinkKind {
             LinkKind::ScanDataset => "scan_dataset_link",
             LinkKind::ScanNote => "scan_note_link",
             LinkKind::NoteTarget => "note_target_link",
+            LinkKind::IssueEvidence => "issue_evidence_link",
         }
     }
 
@@ -93,6 +98,12 @@ impl LinkKind {
                 // The line selection from the target URL, for sessions
                 utf8("lines", true),
             ],
+            LinkKind::IssueEvidence => vec![
+                utf8("issue_id", false),
+                utf8("issue_commit", false),
+                utf8("note_id", false),
+                utf8("note_commit", false),
+            ],
         }))
     }
 }
@@ -118,6 +129,7 @@ impl BatchSource for Source {
             LinkKind::ScanDataset => scan_dataset(store),
             LinkKind::ScanNote => scan_note(store),
             LinkKind::NoteTarget => note_target(store),
+            LinkKind::IssueEvidence => issue_evidence(store),
         }
     }
 }
@@ -280,6 +292,32 @@ fn note_target(store: &Store) -> Result<RecordBatch> {
             Arc::new(target_types.finish()),
             Arc::new(target_commits.finish()),
             Arc::new(lines.finish()),
+        ],
+    )?)
+}
+
+fn issue_evidence(store: &Store) -> Result<RecordBatch> {
+    let mut issue_ids = StringBuilder::new();
+    let mut issue_commits = StringBuilder::new();
+    let mut note_ids = StringBuilder::new();
+    let mut note_commits = StringBuilder::new();
+    for tip in IssueStore::from(store).query().tips().map_err(external)? {
+        let issue = store.read_object(&tip.sha).map_err(external)?;
+        for sha in linked(&issue, EVIDENCE_LINK) {
+            let note = store.read_header(&sha).map_err(external)?;
+            issue_ids.append_value(&issue.header.id);
+            issue_commits.append_value(&issue.commit_sha);
+            note_ids.append_value(note.id);
+            note_commits.append_value(&sha);
+        }
+    }
+    Ok(RecordBatch::try_new(
+        LinkKind::IssueEvidence.schema(),
+        vec![
+            Arc::new(issue_ids.finish()),
+            Arc::new(issue_commits.finish()),
+            Arc::new(note_ids.finish()),
+            Arc::new(note_commits.finish()),
         ],
     )?)
 }
