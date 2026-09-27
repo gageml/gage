@@ -282,7 +282,7 @@ pub async fn list(args: IssueListArgs) {
         return;
     }
 
-    let header: Vec<String> = ["Id", "Title", "Status", "Name", "Scan", "Created"]
+    let header: Vec<String> = ["Id", "Name", "Title", "Scan", "Status", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -314,10 +314,10 @@ pub async fn list(args: IssueListArgs) {
             };
             rows.push(vec![
                 styled_id(short_uuid(ids.value(i)), prefixes.value(i), IdKind::Gage),
-                titles.value(i).to_string(),
-                status,
                 names.value(i).to_string(),
+                titles.value(i).to_string(),
                 scan,
+                status,
                 created,
             ]);
         }
@@ -334,7 +334,7 @@ pub async fn list(args: IssueListArgs) {
         )
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(
-            Columns::one(1).not(Rows::first()),
+            Columns::one(2).not(Rows::first()),
             style::tty(Color::FG_BRIGHT_CYAN),
         )
         .modify(Columns::new(3..6).not(Rows::first()), style::dim())

@@ -10,8 +10,10 @@
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
 //! view over a commit. [`ScanStore::create`] imports a staging `scan/`
 //! directory as the object's content. Under `watermarks/`, the
-//! commits each task finished processing; see watermarks.md. The
-//! issue links and agent records are not written yet.
+//! commits each task finished processing; see watermarks.md.
+//! `notes.link`, `notes_carried.link`, and `issues.link` name the
+//! commits of the notes and issues the scan wrote or carried. The
+//! agent records are not written yet.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::dataset::OBJECT_TYPE as DATASET_TYPE;
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order, SelectedTip};
+use crate::issue::OBJECT_TYPE as ISSUE_TYPE;
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
 use crate::object::{ObjectTree, require_type};
 use crate::session::build_files_tree_inner;
@@ -40,6 +43,7 @@ const PLAN_FILE: &str = "plan.json";
 const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
+const ISSUES_LINK: &str = "issues.link";
 const WATERMARKS_DIR: &str = "watermarks";
 const LOGS_DIR: &str = "logs";
 /// The blobs `logs/` may hold
@@ -173,6 +177,9 @@ pub struct ScanContent {
     /// The commit SHAs of the notes the scan carried from prior scans,
     /// from `notes_carried.link`, in file order.
     pub notes_carried: Vec<String>,
+    /// The commit SHAs of the issues the scan wrote, from
+    /// `issues.link`, in file order. Empty when it wrote none.
+    pub issues: Vec<String>,
     /// The records under `watermarks/`, in path order.
     pub watermarks: Vec<Watermark>,
     /// The resolved task plan, from `plan.json`, carried verbatim. The
@@ -256,6 +263,13 @@ impl ScanStore<'_> {
                 self.require_live(sha, NOTE_TYPE)?;
             }
             tree.links.insert(file.to_string(), shas.clone());
+        }
+        if !content.issues.is_empty() {
+            for sha in &content.issues {
+                self.require_live(sha, ISSUE_TYPE)?;
+            }
+            tree.links
+                .insert(ISSUES_LINK.to_string(), content.issues.clone());
         }
         if let Some(plan) = &content.plan {
             let mut json = serde_json::to_vec(plan)
@@ -440,6 +454,7 @@ impl ScanContent {
         };
         let notes = read_link(files, NOTES_LINK)?.unwrap_or_default();
         let notes_carried = read_link(files, NOTES_CARRIED_LINK)?.unwrap_or_default();
+        let issues = read_link(files, ISSUES_LINK)?.unwrap_or_default();
         let watermarks = read_watermarks(files)?;
         let plan = match files.read(PLAN_FILE)? {
             Some(bytes) => Some(
@@ -474,6 +489,7 @@ impl ScanContent {
             dataset,
             notes,
             notes_carried,
+            issues,
             watermarks,
             plan,
             logs,
@@ -1287,6 +1303,41 @@ mod tests {
         let commit = scans.create("SCAN12", &scan_dir).unwrap();
         assert_eq!(store.read_commit(&commit).unwrap().parents, shas);
         assert_eq!(scans.get("SCAN12").unwrap().content.notes, shas);
+    }
+
+    #[test]
+    fn create_links_every_issue_in_issues_link_and_rejects_a_non_issue() {
+        use crate::{IssueInput, IssueStatus, IssueStore};
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = IssueStore::from(&store)
+            .create(IssueInput {
+                name: "n",
+                title: "t",
+                description: None,
+                author: "task:s:t",
+                status: IssueStatus::Pending,
+                evidence: &[],
+            })
+            .unwrap();
+        let sha = store
+            .rev_parse(&crate::object::object_ref(&id))
+            .unwrap()
+            .unwrap();
+        let scan_dir = staged_scan(tmp.path());
+        write(&scan_dir.join("issues.link"), &format!("{sha}\n"));
+        let scans = ScanStore::from(&store);
+        let commit = scans.create("SCAN12I", &scan_dir).unwrap();
+        assert_eq!(store.read_commit(&commit).unwrap().parents, [sha.clone()]);
+        assert_eq!(scans.get("SCAN12I").unwrap().content.issues, [sha]);
+
+        let other_dir = staged_scan(tmp.path());
+        write(&other_dir.join("issues.link"), &format!("{commit}\n"));
+        let err = scans.create("SCAN13I", &other_dir).unwrap_err();
+        assert!(
+            matches!(&err, StoreError::WrongType { expected, .. } if expected == "gage::issue"),
+            "{err}"
+        );
     }
 
     #[test]

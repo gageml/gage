@@ -190,6 +190,10 @@ const VIEWS: &[(&str, &str)] = &[
          FROM note_target_link WHERE target_type = 'session'",
     ),
     (
+        "scan_issue",
+        "SELECT scan_id, issue_id FROM scan_issue_link",
+    ),
+    (
         "issue_evidence",
         "SELECT issue_id, note_id FROM issue_evidence_link",
     ),

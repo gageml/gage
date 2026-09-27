@@ -15,8 +15,10 @@
 //! scan/plan.json                         # the resolved plan, written at create; see `plan`
 //! scan/notes.link                        # the notes' commits, written at apply
 //! scan/notes_carried.link                # carried notes' commits, written at apply
+//! scan/issues.link                       # the issues' commits, written at apply
 //! scan/watermarks/<kind>/<oid>/<key>     # watermarks, written by watermark
 //! notes/<id>/**                          # note trees, written by write_note
+//! issues/<id>/**                         # issue trees, written by write_issue
 //! carried_notes                          # carried note commits, appended by carry-forward
 //! scan/logs/out                          # output lines, the scan's own and every task's
 //! scan/logs/err                          # error lines: task failures, the cancel notice, panics
@@ -48,6 +50,8 @@ const SCAN_DIR: &str = "scan";
 const NOTES_DIR: &str = "notes";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
+const ISSUES_DIR: &str = "issues";
+const ISSUES_LINK: &str = "issues.link";
 const WATERMARKS_DIR: &str = "watermarks";
 const CARRIED_NOTES_FILE: &str = "carried_notes";
 const SCANNERS_DIR: &str = "scanners";
@@ -173,20 +177,23 @@ impl Staging {
     /// The staged note directories, in id order. Empty when no note
     /// was written.
     pub fn staged_notes(&self) -> io::Result<Vec<PathBuf>> {
-        let entries = match fs::read_dir(self.notes_dir()) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
-        let mut dirs = Vec::new();
-        for entry in entries {
-            let path = entry?.path();
-            if path.is_dir() {
-                dirs.push(path);
-            }
-        }
-        dirs.sort();
-        Ok(dirs)
+        staged_dirs(&self.notes_dir())
+    }
+
+    /// The `issues/` directory `write_issue` stages issue trees under.
+    pub fn issues_dir(&self) -> PathBuf {
+        self.dir.join(ISSUES_DIR)
+    }
+
+    /// The staged issue directories, in id order. Empty when no issue
+    /// was written.
+    pub fn staged_issues(&self) -> io::Result<Vec<PathBuf>> {
+        staged_dirs(&self.issues_dir())
+    }
+
+    /// Write `scan/issues.link` listing `shas`; nothing when empty.
+    pub fn write_issues_link(&self, shas: &[String]) -> io::Result<()> {
+        self.write_link(ISSUES_LINK, shas)
     }
 
     /// Write `scan/notes.link` listing `shas`; nothing when empty.
@@ -212,6 +219,7 @@ impl Staging {
     pub fn runtime_paths(&self) -> StagingPaths {
         StagingPaths {
             notes_dir: self.notes_dir(),
+            issues_dir: self.issues_dir(),
             watermarks_dir: self.scan_dir().join(WATERMARKS_DIR),
             carried_notes: self.dir.join(CARRIED_NOTES_FILE),
         }
@@ -271,6 +279,25 @@ impl Staging {
     fn task_dir(&self, scanner: &str, task: &str) -> PathBuf {
         self.scan_dir().join(TASKS_DIR).join(scanner).join(task)
     }
+}
+
+/// The subdirectories of `dir`, sorted by name. Empty when `dir` does
+/// not exist.
+fn staged_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
 }
 
 /// The `logs/` directory of the scan under a staging `scan/` directory

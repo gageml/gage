@@ -49,8 +49,8 @@ use gage_runtime2::{
 };
 use gage_scan::error::render_task_error;
 use gage_store::{
-    DatasetStore, NoteStore, ScanAttrs, ScanStore, SkipReason, Store, StoreError, TaskAttrs,
-    TaskCounts, TaskStatus,
+    DatasetStore, IssueStore, NoteStore, ScanAttrs, ScanStore, SkipReason, Store, StoreError,
+    TaskAttrs, TaskCounts, TaskStatus,
 };
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
@@ -521,6 +521,14 @@ impl<F: FnMut(Event)> Run<'_, F> {
         self.staging.write_notes_link(&note_shas)?;
         self.staging
             .write_notes_carried_link(&self.staging.staged_carried_notes()?)?;
+        // Issues follow the notes they cite, so their evidence resolves
+        let issues = IssueStore::from(store);
+        let mut issue_shas = Vec::new();
+        for dir in self.staging.staged_issues()? {
+            let (_, sha) = issues.create_staged(&dir)?;
+            issue_shas.push(sha);
+        }
+        self.staging.write_issues_link(&issue_shas)?;
         let commit_sha = ScanStore::from(store).create(&self.id, &self.staging.scan_dir())?;
         self.staging.mark_applied()?;
         self.staging.remove()?;
@@ -1948,6 +1956,209 @@ mod tests {
             count(format!(
                 "SELECT COUNT(*) FROM scan WHERE id = '{}' AND dataset = '{}'",
                 outcome.id, dataset_id
+            ))
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_write_issues_that_cite_staged_notes_and_the_scan_links() {
+        use gage_store::{IssueInput, IssueStatus, IssueStore, NoteStore};
+
+        const SCANNER: &str = r###"
+            use gage::{issues, scan, write_issue, write_note};
+
+            pub const SCANNER = #{
+                name: "issues",
+                description: "Issues",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let before = issues().await?;
+                println!("before {} {}", before.len(), before[0].status);
+                let note = None;
+                for s in scan().sessions().await {
+                    note = Some(write_note("finding.code", "retry loop")
+                        .for_session_line(s.id, 2)
+                        .await?);
+                }
+                let note = note.unwrap();
+                let i = write_issue("findings", "Retry loop", "## Summary\n\nRetries.")
+                    .evidence(note)
+                    .pending()
+                    .await?;
+                println!("{} {} {} {:?} {:?}", i.name, i.status, i.author, i.evidence, i.description);
+                let j = write_issue("session-retention", "Retention unset", "")
+                    .evidence([note.id, note.id])
+                    .await?;
+                println!("{} {} {:?} {:?}", j.name, j.status, j.evidence.len(), j.description);
+                match write_issue("bad", "t", "d").evidence("nosuchnote").await {
+                    Err(gage::Error::Args(m)) => println!("args: {m}"),
+                    other => println!("unexpected: {other:?}"),
+                }
+                match write_issue("bad", "t", "d").evidence(1).await {
+                    Err(gage::Error::Args(m)) => println!("args: {m}"),
+                    other => println!("unexpected: {other:?}"),
+                }
+                let all = issues().await?;
+                let pending = issues().status("pending").await?;
+                let named = issues().name(["findings", "prior"]).status(["open", "pending"]).await?;
+                println!("after {} {} {}", all.len(), pending.len(), named.len());
+                match issues().status("bogus").await {
+                    Err(gage::Error::Args(m)) => println!("args: {m}"),
+                    other => println!("unexpected: {other:?}"),
+                }
+                Ok(())
+            }
+        "###;
+        const SESSION: &str = concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        );
+
+        let (tmp, store) = open_store();
+        let (_dataset_id, dataset_sha, session_id) = seeded_dataset(tmp.path(), &store, SESSION);
+        // An issue already in the store is visible to the task
+        let prior = IssueStore::from(&store)
+            .create(IssueInput {
+                name: "prior",
+                title: "Prior",
+                description: None,
+                author: "user:t",
+                status: IssueStatus::Open,
+                evidence: &[],
+            })
+            .unwrap();
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 1,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        assert_eq!(record.content.notes.len(), 1);
+        assert_eq!(record.content.issues.len(), 2);
+        let parents = store.read_commit(&outcome.commit_sha).unwrap().parents;
+        for sha in &record.content.issues {
+            assert!(parents.contains(sha), "issue {sha} is a scan parent");
+        }
+        let note_sha = record.content.notes[0].clone();
+        let note_id = NoteStore::from(&store).at_commit(&note_sha).unwrap().id;
+        let issues = IssueStore::from(&store);
+        let mut written: Vec<_> = record
+            .content
+            .issues
+            .iter()
+            .map(|sha| issues.at_commit(sha).unwrap())
+            .collect();
+        written.sort_by(|a, b| a.name.cmp(&b.name));
+        let findings = &written[0];
+        assert_eq!(findings.name, "findings");
+        assert_eq!(findings.status, IssueStatus::Pending);
+        assert_eq!(findings.author, "task:issues:main");
+        assert_eq!(findings.scan.as_deref(), Some(outcome.id.as_str()));
+        assert_eq!(
+            findings.evidence,
+            [note_sha.clone()],
+            "the issue links the staged note's commit"
+        );
+        assert_eq!(
+            findings.description.as_deref(),
+            Some("## Summary\n\nRetries.")
+        );
+        assert_eq!(findings.changes.len(), 1);
+        let retention = &written[1];
+        assert_eq!(retention.status, IssueStatus::Open);
+        assert_eq!(
+            retention.evidence,
+            [note_sha.clone()],
+            "a repeated citation links once"
+        );
+        assert_eq!(
+            retention.description, None,
+            "an empty description writes no file"
+        );
+
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println("before 1 open".into()),
+                &Output::Println(format!(
+                    "findings pending task:issues:main [\"{note_id}\"] Some(\"## Summary\\n\\nRetries.\")"
+                )),
+                &Output::Println(format!("session-retention open 1 None")),
+                &Output::Println("args: write_issue evidence: object not found: nosuchnote".into()),
+                &Output::Println(
+                    "args: evidence must be a note id, a Note, or a list of either".into()
+                ),
+                &Output::Println("after 3 1 2".into()),
+                &Output::Println(
+                    "args: issues status: invalid issue input: unknown issue status \"bogus\""
+                        .into()
+                ),
+            ]
+        );
+        assert_eq!(
+            issues.get(&prior).unwrap().status,
+            IssueStatus::Open,
+            "the prior issue is untouched"
+        );
+
+        // The scan's issues and their evidence are queryable
+        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+            Store::open(store.path()).unwrap(),
+        ))))
+        .build()
+        .await;
+        let count = |sql: String| {
+            let ctx = ctx.clone();
+            async move {
+                let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                    .unwrap()
+                    .value(0)
+            }
+        };
+        assert_eq!(
+            count(format!(
+                "SELECT COUNT(*) FROM scan_issue WHERE scan_id = '{}'",
+                outcome.id
+            ))
+            .await,
+            2
+        );
+        assert_eq!(
+            count(format!(
+                "SELECT COUNT(*) FROM session_issue WHERE session_id = '{session_id}'"
+            ))
+            .await,
+            2
+        );
+        assert_eq!(
+            count(format!(
+                "SELECT COUNT(*) FROM issue WHERE scan = '{}' AND status = 'pending'",
+                outcome.id
             ))
             .await,
             1

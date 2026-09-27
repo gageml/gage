@@ -8,6 +8,7 @@
 //! | `dataset_session_link` | `dataset/sessions.link`                    |
 //! | `scan_dataset_link`    | `scan/dataset.link`                        |
 //! | `scan_note_link`       | `scan/notes.link`, `scan/notes_carried.link` |
+//! | `scan_issue_link`      | `scan/issues.link`                         |
 //! | `note_target_link`     | `note/target.link`                         |
 //! | `issue_evidence_link`  | `issue/evidence.link`                      |
 //!
@@ -32,6 +33,7 @@ const SESSIONS_LINK: &str = "sessions.link";
 const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
+const ISSUES_LINK: &str = "issues.link";
 const TARGET_LINK: &str = "target.link";
 const EVIDENCE_LINK: &str = "evidence.link";
 
@@ -41,15 +43,17 @@ pub enum LinkKind {
     DatasetSession,
     ScanDataset,
     ScanNote,
+    ScanIssue,
     NoteTarget,
     IssueEvidence,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 5] = [
+    pub const ALL: [LinkKind; 6] = [
         LinkKind::DatasetSession,
         LinkKind::ScanDataset,
         LinkKind::ScanNote,
+        LinkKind::ScanIssue,
         LinkKind::NoteTarget,
         LinkKind::IssueEvidence,
     ];
@@ -60,6 +64,7 @@ impl LinkKind {
             LinkKind::DatasetSession => "dataset_session_link",
             LinkKind::ScanDataset => "scan_dataset_link",
             LinkKind::ScanNote => "scan_note_link",
+            LinkKind::ScanIssue => "scan_issue_link",
             LinkKind::NoteTarget => "note_target_link",
             LinkKind::IssueEvidence => "issue_evidence_link",
         }
@@ -87,6 +92,12 @@ impl LinkKind {
                 utf8("note_id", false),
                 utf8("note_commit", false),
                 Field::new("carried", DataType::Boolean, false),
+            ],
+            LinkKind::ScanIssue => vec![
+                utf8("scan_id", false),
+                utf8("scan_commit", false),
+                utf8("issue_id", false),
+                utf8("issue_commit", false),
             ],
             LinkKind::NoteTarget => vec![
                 utf8("note_id", false),
@@ -128,6 +139,7 @@ impl BatchSource for Source {
             LinkKind::DatasetSession => dataset_session(store),
             LinkKind::ScanDataset => scan_dataset(store),
             LinkKind::ScanNote => scan_note(store),
+            LinkKind::ScanIssue => scan_issue(store),
             LinkKind::NoteTarget => note_target(store),
             LinkKind::IssueEvidence => issue_evidence(store),
         }
@@ -246,6 +258,31 @@ fn scan_note(store: &Store) -> Result<RecordBatch> {
             Arc::new(note_ids.finish()),
             Arc::new(note_commits.finish()),
             Arc::new(carrieds.finish()),
+        ],
+    )?)
+}
+
+fn scan_issue(store: &Store) -> Result<RecordBatch> {
+    let mut scan_ids = StringBuilder::new();
+    let mut scan_commits = StringBuilder::new();
+    let mut issue_ids = StringBuilder::new();
+    let mut issue_commits = StringBuilder::new();
+    for scan in scan_objects(store)? {
+        for sha in linked(&scan, ISSUES_LINK) {
+            let issue = store.read_header(&sha).map_err(external)?;
+            scan_ids.append_value(&scan.header.id);
+            scan_commits.append_value(&scan.commit_sha);
+            issue_ids.append_value(issue.id);
+            issue_commits.append_value(&sha);
+        }
+    }
+    Ok(RecordBatch::try_new(
+        LinkKind::ScanIssue.schema(),
+        vec![
+            Arc::new(scan_ids.finish()),
+            Arc::new(scan_commits.finish()),
+            Arc::new(issue_ids.finish()),
+            Arc::new(issue_commits.finish()),
         ],
     )?)
 }

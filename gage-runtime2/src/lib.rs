@@ -34,6 +34,7 @@
 //! in `gage-scan2`.
 
 mod io;
+mod issue;
 mod log;
 mod note;
 mod query;
@@ -139,7 +140,8 @@ pub(crate) fn send(output: Output) {
 /// library without its stdio, this crate's `print`/`println` and
 /// `log` macros, `gage::scan` and the values it returns, the message
 /// and entry queries on a session, `gage::write_note`,
-/// `gage::carry_forward`, `gage::watermark`, and the include macros
+/// `gage::write_issue`, `gage::issues`, `gage::carry_forward`,
+/// `gage::watermark`, and the include macros
 /// from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
@@ -151,6 +153,8 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(query::types_module()?)?;
     context.install(note::module()?)?;
     context.install(note::types_module()?)?;
+    context.install(issue::module()?)?;
+    context.install(issue::types_module()?)?;
     context.install(validate::module()?)?;
     context.install(validate::types_module()?)?;
     context.install(gage_runtime::macros_module()?)?;

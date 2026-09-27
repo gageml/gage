@@ -56,6 +56,8 @@ pub struct ScanContext {
 pub struct StagingPaths {
     /// `write_note` stages note trees here, one directory per id
     pub notes_dir: PathBuf,
+    /// `write_issue` stages issue trees here, one directory per id
+    pub issues_dir: PathBuf,
     /// `watermark` writes `<kind>/<oid>/<key>` here
     pub watermarks_dir: PathBuf,
     /// Carry-forward appends carried note commits here, one per line

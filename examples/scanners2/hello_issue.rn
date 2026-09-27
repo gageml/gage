@@ -1,0 +1,14 @@
+pub const SCANNER = #{
+    name: "hello-issue",
+    description: "Write an issue",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    gage::write_issue(
+        "question",
+        "Erlang author",
+        "Who created the Erlang programming language?",
+    )
+    .await?;
+}

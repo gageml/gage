@@ -14,6 +14,9 @@
 //! [`crate::object`].
 
 use std::fmt;
+use std::fs;
+use std::io;
+use std::path::Path;
 use std::str::FromStr;
 
 use gage_core::uuid::{new_ulid, new_uuid, ulid_timestamp_ms};
@@ -22,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::{EntryKind, TreeEntry};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
-use crate::object::{EditOutcome, Object, ObjectTree};
+use crate::object::{EditOutcome, Object, ObjectTree, object_ref};
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
@@ -35,6 +38,10 @@ const DESCRIPTION_FILE: &str = "description.txt";
 const EVIDENCE_LINK: &str = "evidence.link";
 const CHANGES_DIR: &str = "changes";
 const MESSAGE_FILE: &str = "message.txt";
+/// Staging only: the cited note ids, one per line. Apply resolves them
+/// to commits and writes `evidence.link`; the ids may name notes the
+/// same scan staged, which have no commit until apply.
+const STAGED_EVIDENCE_FILE: &str = "evidence";
 
 /// Issue operations over an opened store.
 pub struct IssueStore<'a> {
@@ -213,6 +220,25 @@ pub struct IssueFull {
     pub modified_ms: i64,
 }
 
+/// An issue staged by a scan and not yet created, as the running scan
+/// reads its own issues. Evidence is the cited note ids, since a
+/// staged note has no commit yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueStaged {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub author: String,
+    pub status: IssueStatus,
+    /// The staging scan's id, from `attrs.scan`
+    pub scan: Option<String>,
+    /// The cited note ids, in citation order
+    pub evidence: Vec<String>,
+    /// The time the issue was staged, from the create change's ULID
+    pub created_ms: i64,
+}
+
 /// The `attrs.json` shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IssueAttrs {
@@ -243,41 +269,131 @@ impl IssueStore<'_> {
     /// Create an issue with a `create` change entry recording its
     /// initial status. Returns the new issue's id.
     pub fn create(&self, input: IssueInput) -> Result<String, StoreError> {
-        if input.status == IssueStatus::Closed {
-            return Err(StoreError::IssueInput(
-                "an issue is created pending or open, not closed".to_string(),
-            ));
-        }
-        if input.name.trim().is_empty() {
-            return Err(StoreError::IssueInput("name is empty".to_string()));
-        }
-        if input.title.trim().is_empty() {
-            return Err(StoreError::IssueInput("title is empty".to_string()));
-        }
+        validate_input(&input)?;
         let evidence = self.resolve_evidence(input.evidence)?;
-        let attrs = IssueAttrs {
-            name: input.name.to_string(),
-            title: input.title.to_string(),
-            author: input.author.to_string(),
-            status: input.status,
-            status_reason: None,
-            scan: None,
-        };
-        let change = ChangeAttrs {
-            author: input.author.to_string(),
-            event: ChangeEvent::Create,
-            from_status: None,
-            to_status: Some(input.status),
-            reason: None,
-        };
+        let attrs = create_attrs(&input, None);
         let path = self.store.path();
-        let changes_sha = changes_tree(path, &[], &change, None)?;
+        let json = json_line(&create_change(&input), "issue change")?;
+        let entry_sha = change_entry(path, &json, None)?;
+        let changes_sha = changes_tree(path, &[], &new_ulid(), &entry_sha)?;
         let tree = build_tree(&attrs, input.description, evidence, changes_sha)?;
         let id = new_uuid();
         let message = format!("issue: {}", attrs.name);
         self.store
             .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
         Ok(id)
+    }
+
+    /// Write an issue as a staged tree under `dir`, for a scan to
+    /// create at apply. `id` is the issue's id and `scan` the staging
+    /// scan's id. The cited note ids are written as given and resolved
+    /// at apply, so a note the same scan staged may be cited; the
+    /// caller checks that each id names a staged or stored note.
+    pub fn stage(
+        &self,
+        dir: &Path,
+        id: &str,
+        input: &IssueInput,
+        scan: &str,
+    ) -> Result<(), StoreError> {
+        validate_input(input)?;
+        let attrs = create_attrs(input, Some(scan));
+        let write = |path: &Path, bytes: &[u8]| -> Result<(), StoreError> {
+            fs::write(path, bytes).map_err(|e| StoreError::Write {
+                path: path.to_path_buf(),
+                source: e,
+            })
+        };
+        let change_dir = dir.join(CHANGES_DIR).join(new_ulid());
+        fs::create_dir_all(&change_dir).map_err(|e| StoreError::Write {
+            path: change_dir.clone(),
+            source: e,
+        })?;
+        write(&dir.join(ATTRS_FILE), &json_line(&attrs, "issue attrs")?)?;
+        if let Some(text) = input.description {
+            write(&dir.join(DESCRIPTION_FILE), text.as_bytes())?;
+        }
+        let mut ids: Vec<&str> = Vec::new();
+        for id in input.evidence {
+            if !ids.contains(&id.as_str()) {
+                ids.push(id);
+            }
+        }
+        if !ids.is_empty() {
+            let content: String = ids.iter().map(|id| format!("{id}\n")).collect();
+            write(&dir.join(STAGED_EVIDENCE_FILE), content.as_bytes())?;
+        }
+        write(
+            &change_dir.join(ATTRS_FILE),
+            &json_line(&create_change(input), "issue change")?,
+        )?;
+        let _ = id;
+        Ok(())
+    }
+
+    /// Create the issue staged under `dir` by [`IssueStore::stage`].
+    /// The directory name is the issue's id. Each cited note id is
+    /// resolved to its current commit; a note that does not exist or
+    /// is deleted is an error. Idempotent: an issue whose ref already
+    /// exists is not rewritten. Returns `(id, commit SHA)`.
+    pub fn create_staged(&self, dir: &Path) -> Result<(String, String), StoreError> {
+        let staged = read_staged_dir(dir)?;
+        if let Some(sha) = self.store.rev_parse(&object_ref(&staged.id))? {
+            return Ok((staged.id, sha));
+        }
+        let evidence = self.resolve_evidence(&staged.evidence)?;
+        let path = self.store.path();
+        let mut entries: Vec<(String, String)> = Vec::with_capacity(staged.changes.len());
+        for (ulid, change_json, message) in &staged.changes {
+            entries.push((
+                ulid.clone(),
+                change_entry(path, change_json, message.as_deref())?,
+            ));
+        }
+        let inputs: Vec<TreeInput<'_>> = entries
+            .iter()
+            .map(|(ulid, sha)| TreeInput {
+                mode: "040000",
+                sha,
+                name: ulid,
+            })
+            .collect();
+        let changes_sha = mktree(path, &inputs)?;
+        let tree = build_tree(
+            &staged.attrs,
+            staged.description.as_deref(),
+            evidence,
+            changes_sha,
+        )?;
+        let message = format!("issue: {}", staged.attrs.name);
+        let sha = self
+            .store
+            .create(OBJECT_TYPE, OBJECT_VERSION, &staged.id, &tree, &message)?;
+        Ok((staged.id, sha))
+    }
+
+    /// Read the issue staged under `dir` by [`IssueStore::stage`], as
+    /// a running scan reads its own issues before apply.
+    pub fn read_staged(&self, dir: &Path) -> Result<IssueStaged, StoreError> {
+        let staged = read_staged_dir(dir)?;
+        let created_ms = staged
+            .changes
+            .first()
+            .and_then(|(ulid, _, _)| ulid_timestamp_ms(ulid))
+            .ok_or_else(|| {
+                StoreError::Parse(format!("staged issue {}: missing create change", staged.id))
+            })?;
+        Ok(IssueStaged {
+            id: staged.id,
+            name: staged.attrs.name,
+            title: staged.attrs.title,
+            description: staged.description,
+            author: staged.attrs.author,
+            status: staged.attrs.status,
+            scan: staged.attrs.scan,
+            evidence: staged.evidence,
+            created_ms,
+        })
     }
 
     /// The current commit of each cited note, in citation order with
@@ -408,7 +524,9 @@ impl IssueStore<'_> {
             Some(sha) => self.store.read_tree(sha)?,
             None => Vec::new(),
         };
-        let changes_sha = changes_tree(path, &existing, change, message)?;
+        let json = json_line(change, "issue change")?;
+        let entry_sha = change_entry(path, &json, message.map(str::as_bytes))?;
+        let changes_sha = changes_tree(path, &existing, &new_ulid(), &entry_sha)?;
         let description = object
             .tree
             .blobs
@@ -619,25 +737,68 @@ fn build_tree(
     Ok(tree)
 }
 
-/// The `changes/` tree: the `existing` entries plus one new entry for
-/// `change`, named by a fresh ULID.
-fn changes_tree(
-    store_path: &std::path::Path,
-    existing: &[TreeEntry],
-    change: &ChangeAttrs,
-    message: Option<&str>,
+/// Reject input the store cannot record as a new issue.
+fn validate_input(input: &IssueInput) -> Result<(), StoreError> {
+    if input.status == IssueStatus::Closed {
+        return Err(StoreError::IssueInput(
+            "an issue is created pending or open, not closed".to_string(),
+        ));
+    }
+    if input.name.trim().is_empty() {
+        return Err(StoreError::IssueInput("name is empty".to_string()));
+    }
+    if input.title.trim().is_empty() {
+        return Err(StoreError::IssueInput("title is empty".to_string()));
+    }
+    Ok(())
+}
+
+fn create_attrs(input: &IssueInput, scan: Option<&str>) -> IssueAttrs {
+    IssueAttrs {
+        name: input.name.to_string(),
+        title: input.title.to_string(),
+        author: input.author.to_string(),
+        status: input.status,
+        status_reason: None,
+        scan: scan.map(String::from),
+    }
+}
+
+fn create_change(input: &IssueInput) -> ChangeAttrs {
+    ChangeAttrs {
+        author: input.author.to_string(),
+        event: ChangeEvent::Create,
+        from_status: None,
+        to_status: Some(input.status),
+        reason: None,
+    }
+}
+
+/// One-line JSON with a trailing newline, the encoding the store uses
+/// for `attrs.json`.
+fn json_line<T: Serialize>(value: &T, what: &str) -> Result<Vec<u8>, StoreError> {
+    let mut bytes =
+        serde_json::to_vec(value).map_err(|e| StoreError::Parse(format!("{what} encode: {e}")))?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// One `changes/<ulid>/` entry tree: `attrs.json` from `change_json`
+/// and `message.txt` when `message` is given and not blank.
+fn change_entry(
+    store_path: &Path,
+    change_json: &[u8],
+    message: Option<&[u8]>,
 ) -> Result<String, StoreError> {
-    let mut json = serde_json::to_string(change)
-        .map_err(|e| StoreError::Parse(format!("issue change encode: {e}")))?;
-    json.push('\n');
-    let attrs_sha = write_blob(store_path, json.as_bytes())?;
+    let attrs_sha = write_blob(store_path, change_json)?;
     let mut files = vec![TreeInput {
         mode: "100644",
         sha: &attrs_sha,
         name: ATTRS_FILE,
     }];
-    let message_sha = match message.map(str::trim).filter(|m| !m.is_empty()) {
-        Some(text) => Some(write_blob(store_path, text.as_bytes())?),
+    let message = message.filter(|m| !m.iter().all(u8::is_ascii_whitespace));
+    let message_sha = match message {
+        Some(text) => Some(write_blob(store_path, text)?),
         None => None,
     };
     if let Some(sha) = &message_sha {
@@ -647,8 +808,17 @@ fn changes_tree(
             name: MESSAGE_FILE,
         });
     }
-    let entry_sha = mktree(store_path, &files)?;
-    let ulid = new_ulid();
+    mktree(store_path, &files)
+}
+
+/// The `changes/` tree: the `existing` entries plus `entry_sha` under
+/// `ulid`.
+fn changes_tree(
+    store_path: &Path,
+    existing: &[TreeEntry],
+    ulid: &str,
+    entry_sha: &str,
+) -> Result<String, StoreError> {
     let mut entries: Vec<TreeInput<'_>> = existing
         .iter()
         .map(|e| TreeInput {
@@ -659,10 +829,102 @@ fn changes_tree(
         .collect();
     entries.push(TreeInput {
         mode: "040000",
-        sha: &entry_sha,
-        name: &ulid,
+        sha: entry_sha,
+        name: ulid,
     });
     mktree(store_path, &entries)
+}
+
+/// An issue's staged files, decoded.
+struct StagedIssue {
+    id: String,
+    attrs: IssueAttrs,
+    description: Option<String>,
+    /// Cited note ids
+    evidence: Vec<String>,
+    /// `(ulid, attrs.json bytes, message.txt bytes)`, in ULID order
+    changes: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
+}
+
+/// Decode the files [`IssueStore::stage`] wrote under `dir`. The
+/// directory name is the issue's id.
+fn read_staged_dir(dir: &Path) -> Result<StagedIssue, StoreError> {
+    let id = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| StoreError::InvalidPath {
+            path: dir.display().to_string(),
+            reason: "a staged issue directory is named by its id".to_string(),
+        })?;
+    let attrs_bytes = read_optional(&dir.join(ATTRS_FILE))?
+        .ok_or_else(|| StoreError::Parse(format!("staged issue {id}: missing {ATTRS_FILE}")))?;
+    let attrs: IssueAttrs = serde_json::from_slice(&attrs_bytes)
+        .map_err(|e| StoreError::Parse(format!("staged issue {id} {ATTRS_FILE}: {e}")))?;
+    let description = match read_optional(&dir.join(DESCRIPTION_FILE))? {
+        Some(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
+            StoreError::Parse(format!("staged issue {id} {DESCRIPTION_FILE}: {e}"))
+        })?),
+        None => None,
+    };
+    let evidence: Vec<String> = match read_optional(&dir.join(STAGED_EVIDENCE_FILE))? {
+        Some(bytes) => String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+        None => Vec::new(),
+    };
+    let changes_dir = dir.join(CHANGES_DIR);
+    let mut ulids: Vec<String> = match fs::read_dir(&changes_dir) {
+        Ok(entries) => entries
+            .map(|entry| {
+                entry
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .map_err(|e| StoreError::Write {
+                        path: changes_dir.clone(),
+                        source: e,
+                    })
+            })
+            .collect::<Result<_, _>>()?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(StoreError::Write {
+                path: changes_dir,
+                source: e,
+            });
+        }
+    };
+    ulids.sort();
+    let mut changes = Vec::with_capacity(ulids.len());
+    for ulid in ulids {
+        let entry_dir = changes_dir.join(&ulid);
+        let json = read_optional(&entry_dir.join(ATTRS_FILE))?.ok_or_else(|| {
+            StoreError::Parse(format!(
+                "staged issue {id} {CHANGES_DIR}/{ulid}: missing {ATTRS_FILE}"
+            ))
+        })?;
+        let message = read_optional(&entry_dir.join(MESSAGE_FILE))?;
+        changes.push((ulid, json, message));
+    }
+    Ok(StagedIssue {
+        id,
+        attrs,
+        description,
+        evidence,
+        changes,
+    })
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(StoreError::Write {
+            path: path.to_path_buf(),
+            source: e,
+        }),
+    }
 }
 
 fn decode_attrs(object: &Object) -> Result<IssueAttrs, StoreError> {
@@ -964,6 +1226,67 @@ mod tests {
         ));
         // Nothing above wrote a commit
         assert_eq!(issues.get(&id).unwrap().changes.len(), 1);
+    }
+
+    #[test]
+    fn stage_and_create_staged_resolve_evidence_at_apply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let issues = IssueStore::from(&store);
+        let input = IssueInput {
+            name: "findings",
+            title: "Staged",
+            description: Some("body"),
+            author: "task:s:t",
+            status: IssueStatus::Pending,
+            evidence: &["NOTELATER".to_string(), "NOTELATER".to_string()],
+        };
+        let dir = tmp.path().join("issues").join("ISSUE1");
+        issues.stage(&dir, "ISSUE1", &input, "SCAN1").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("evidence")).unwrap(),
+            "NOTELATER\n",
+            "cited ids are written once each, unresolved"
+        );
+        assert!(!dir.join("evidence.link").exists());
+
+        let staged = issues.read_staged(&dir).unwrap();
+        assert_eq!(staged.id, "ISSUE1");
+        assert_eq!(staged.status, IssueStatus::Pending);
+        assert_eq!(staged.scan.as_deref(), Some("SCAN1"));
+        assert_eq!(staged.evidence, ["NOTELATER"]);
+        assert_eq!(staged.description.as_deref(), Some("body"));
+        assert!(staged.created_ms > 0);
+
+        // The cited note does not exist yet: apply fails and writes
+        // nothing
+        assert!(matches!(
+            issues.create_staged(&dir),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        assert!(store.rev_parse(&object_ref("ISSUE1")).unwrap().is_none());
+
+        // Once the note exists, apply links its commit
+        let note_id = note(&store, "finding.code");
+        let note_commit = rev_parse(&store, &note_id);
+        fs::write(dir.join("evidence"), format!("{note_id}\n")).unwrap();
+        let (id, sha) = issues.create_staged(&dir).unwrap();
+        assert_eq!(id, "ISSUE1");
+        let full = issues.at_commit(&sha).unwrap();
+        assert_eq!(full.evidence, [note_commit.clone()]);
+        assert_eq!(full.scan.as_deref(), Some("SCAN1"));
+        assert_eq!(full.changes.len(), 1);
+        assert_eq!(full.changes[0].event, ChangeEvent::Create);
+        assert_eq!(full.changes[0].timestamp_ms, staged.created_ms);
+        assert!(
+            store
+                .read_commit(&sha)
+                .unwrap()
+                .parents
+                .contains(&note_commit)
+        );
+        // Idempotent
+        assert_eq!(issues.create_staged(&dir).unwrap(), (id, sha));
     }
 
     #[test]
