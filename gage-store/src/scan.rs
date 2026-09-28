@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 use crate::dataset::OBJECT_TYPE as DATASET_TYPE;
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::issue::OBJECT_TYPE as ISSUE_TYPE;
-use crate::note::OBJECT_TYPE as NOTE_TYPE;
+use crate::issue::{IssueStore, OBJECT_TYPE as ISSUE_TYPE};
+use crate::note::{NoteStore, OBJECT_TYPE as NOTE_TYPE};
 use crate::object::{ObjectTree, require_type};
 use crate::session::build_files_tree_inner;
 use crate::writer::{TreeInput, mktree, write_blob};
@@ -209,6 +209,16 @@ pub struct ScanRecord {
     pub modified_ms: i64,
 }
 
+/// The ids [`ScanStore::delete_cascade`] tombstoned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanDeleted {
+    pub scan: String,
+    /// The notes the scan wrote that were live at the delete
+    pub notes: Vec<String>,
+    /// The issues the scan wrote that were live at the delete
+    pub issues: Vec<String>,
+}
+
 /// A read-only view of a scan's files. Paths are `/`-separated and
 /// relative to the scan root; the root itself is `""`.
 pub trait ScanFiles {
@@ -361,6 +371,55 @@ impl ScanStore<'_> {
             commit: commit_sha,
         }
         .read(&format!("{SCANNERS_DIR}/{scanner}/{SOURCE_DIR}/{path}"))
+    }
+
+    /// Delete a scan by writing a parentless tombstone commit. The
+    /// notes and issues the scan wrote stay. Returns the resolved id.
+    pub fn delete(&self, id_or_prefix: &str) -> Result<String, StoreError> {
+        let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
+        self.store.delete(&object, "scan delete")?;
+        Ok(object.header.id)
+    }
+
+    /// Delete a scan and the notes and issues it wrote, named by
+    /// `notes.link` and `issues.link`. Carried notes stay, since the
+    /// scan did not write them. A note or issue deleted since the scan
+    /// wrote it is skipped. The notes and issues go first, so a
+    /// failure among them leaves the scan in place. Returns the ids
+    /// tombstoned.
+    pub fn delete_cascade(&self, id_or_prefix: &str) -> Result<ScanDeleted, StoreError> {
+        let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
+        let content = ScanContent::from_files(&CommitFiles {
+            store: self.store,
+            commit: &object.commit_sha,
+        })?;
+        let mut deleted = ScanDeleted {
+            scan: object.header.id.clone(),
+            notes: Vec::new(),
+            issues: Vec::new(),
+        };
+        let notes = NoteStore::from(self.store);
+        for sha in &content.notes {
+            let id = self.store.read_header(sha)?.id;
+            match notes.delete(&id) {
+                Ok(id) => deleted.notes.push(id),
+                // Already deleted since the scan wrote it
+                Err(StoreError::ObjectDeleted(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let issues = IssueStore::from(self.store);
+        for sha in &content.issues {
+            let id = self.store.read_header(sha)?.id;
+            match issues.delete(&id) {
+                Ok(id) => deleted.issues.push(id),
+                // Already deleted since the scan wrote it
+                Err(StoreError::ObjectDeleted(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.store.delete(&object, "scan delete")?;
+        Ok(deleted)
     }
 
     /// The commit at `sha` must be a live object of `object_type`.
@@ -1420,5 +1479,124 @@ mod tests {
             matches!(&err, StoreError::Parse(m) if m.contains("is not a commit SHA")),
             "{err}"
         );
+    }
+
+    /// A staged scan under `id` linking two written notes, one carried
+    /// note, and one issue. Returns the scan commit and the ids of the
+    /// written notes, the carried note, and the issue.
+    fn scan_with_links(
+        tmp: &Path,
+        store: &Store,
+        id: &str,
+    ) -> (String, [String; 2], String, String) {
+        use crate::{IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue};
+        let notes = NoteStore::from(store);
+        let note = |name: &str| {
+            notes
+                .create(NoteInput {
+                    name,
+                    value: NoteValue::Text(name.into()),
+                    author: "task:s:t",
+                    target: None,
+                    metadata: None,
+                    carry_forward: None,
+                })
+                .unwrap()
+        };
+        let sha = |id: &str| {
+            store
+                .rev_parse(&crate::object::object_ref(id))
+                .unwrap()
+                .unwrap()
+        };
+        let written = [note("a"), note("b")];
+        let carried = note("c");
+        let issue = IssueStore::from(store)
+            .create(IssueInput {
+                name: "n",
+                title: "t",
+                description: None,
+                author: "task:s:t",
+                status: IssueStatus::Pending,
+                evidence: &[],
+            })
+            .unwrap();
+        let scan_dir = staged_scan(tmp);
+        write(
+            &scan_dir.join("notes.link"),
+            &format!("{}\n{}\n", sha(&written[0]), sha(&written[1])),
+        );
+        write(
+            &scan_dir.join("notes_carried.link"),
+            &format!("{}\n", sha(&carried)),
+        );
+        write(&scan_dir.join("issues.link"), &format!("{}\n", sha(&issue)));
+        let commit = ScanStore::from(store).create(id, &scan_dir).unwrap();
+        (commit, written, carried, issue)
+    }
+
+    #[test]
+    fn delete_tombstones_the_scan_and_leaves_its_notes_and_issues() {
+        use crate::{IssueStore, NoteStore};
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let (_, written, carried, issue) = scan_with_links(tmp.path(), &store, "SCAN17");
+        let scans = ScanStore::from(&store);
+
+        assert_eq!(scans.delete("SCAN17").unwrap(), "SCAN17");
+
+        assert!(matches!(
+            scans.get("SCAN17").unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == "SCAN17"
+        ));
+        assert_eq!(scans.query().count().unwrap(), 0);
+        let notes = NoteStore::from(&store);
+        for id in written.iter().chain([&carried]) {
+            notes.get(id).unwrap();
+        }
+        IssueStore::from(&store).get(&issue).unwrap();
+        assert!(matches!(
+            scans.delete("SCAN17").unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == "SCAN17"
+        ));
+    }
+
+    #[test]
+    fn delete_cascade_tombstones_written_notes_and_issues_and_keeps_carried() {
+        use crate::{IssueStore, NoteStore};
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let (_, written, carried, issue) = scan_with_links(tmp.path(), &store, "SCAN18");
+        let scans = ScanStore::from(&store);
+        let notes = NoteStore::from(&store);
+        let issues = IssueStore::from(&store);
+        // A note deleted after the scan wrote it is skipped, not an error
+        notes.delete(&written[1]).unwrap();
+
+        let deleted = scans.delete_cascade("SCAN18").unwrap();
+
+        assert_eq!(
+            deleted,
+            ScanDeleted {
+                scan: "SCAN18".into(),
+                notes: vec![written[0].clone()],
+                issues: vec![issue.clone()],
+            }
+        );
+        assert!(matches!(
+            scans.get("SCAN18").unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == "SCAN18"
+        ));
+        for id in &written {
+            assert!(matches!(
+                notes.get(id).unwrap_err(),
+                StoreError::ObjectDeleted(x) if &x == id
+            ));
+        }
+        notes.get(&carried).unwrap();
+        assert!(matches!(
+            issues.get(&issue).unwrap_err(),
+            StoreError::ObjectDeleted(x) if x == issue
+        ));
     }
 }

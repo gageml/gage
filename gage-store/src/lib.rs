@@ -76,8 +76,9 @@ pub use query::{
     link_table, scan_table, scan_watermark_table,
 };
 pub use scan::{
-    DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanFiles, ScanQuery,
-    ScanRecord, ScanStore, ScanTask, SkipReason, TaskAttrs, TaskCounts, TaskStatus, Watermark,
+    DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted, ScanFiles,
+    ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAttrs, TaskCounts, TaskStatus,
+    Watermark,
 };
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,

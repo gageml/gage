@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
+use cliclack as cli;
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
@@ -13,7 +14,7 @@ use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
 use gage_runtime2::{Output, TaskOutput};
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
-use gage_store::{DatasetStore, Store};
+use gage_store::{DatasetStore, ScanStore, Store};
 use tabled::{
     Table,
     settings::{
@@ -24,6 +25,7 @@ use tabled::{
 
 use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, run_query};
+use crate::dialog::{self, DialogError};
 use crate::human::{format_duration, format_elapsed_ms};
 use crate::style as s;
 
@@ -66,6 +68,11 @@ pub struct Scan2Args {
 enum Scan2Command {
     /// List scan runs
     List(Scan2ListArgs),
+    /// Delete scan runs
+    ///
+    /// Deletes each scan run and the notes and issues it wrote. Notes
+    /// carried from earlier scan runs are kept.
+    Delete(Scan2DeleteArgs),
 }
 
 #[derive(Args)]
@@ -101,9 +108,21 @@ pub struct Scan2ListArgs {
     limit: crate::limit::LimitArgs,
 }
 
+#[derive(Args)]
+pub struct Scan2DeleteArgs {
+    /// Scan run IDs (or prefixes)
+    #[arg(required = true)]
+    ids: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
 pub async fn main(args: Scan2Args) {
     match args.command {
         Some(Scan2Command::List(a)) => list(a).await,
+        Some(Scan2Command::Delete(a)) => delete(a),
         None => run_scan(args.run_args).await,
     }
 }
@@ -191,6 +210,75 @@ async fn list(args: Scan2ListArgs) {
     println!("{table}");
 
     args.limit.print_summary(shown, total, "scan run");
+}
+
+fn delete(args: Scan2DeleteArgs) {
+    let store = open_store("gage scan2 delete");
+    let scans = ScanStore::from(&store);
+
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut ids: Vec<String> = Vec::with_capacity(args.ids.len());
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match scans.get(prefix) {
+            Ok(record) => ids.push(record.id),
+            Err(e) => {
+                eprintln!("gage scan2 delete: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let count = ids.len();
+    dialog::run("Delete scan runs", || {
+        cli::log::remark(format!("{count} {}", plural(count, "scan run")))?;
+
+        if !args.yes {
+            let prompt = format!(
+                "Permanently delete {count} {} and associated notes/issues? \
+                 This cannot be undone.",
+                plural(count, "scan run")
+            );
+            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        let mut deleted = 0;
+        let mut notes = 0;
+        let mut issues = 0;
+        for id in &ids {
+            match scans.delete_cascade(id) {
+                Ok(d) => {
+                    deleted += 1;
+                    notes += d.notes.len();
+                    issues += d.issues.len();
+                }
+                Err(e) => eprintln!("warning: failed to delete {}: {e}", short_uuid(id)),
+            }
+        }
+
+        Ok(format!(
+            "Deleted {deleted} {}, {notes} {}, {issues} {}",
+            plural(deleted, "scan run"),
+            plural(notes, "note"),
+            plural(issues, "issue")
+        )
+        .into())
+    });
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
+    }
 }
 
 async fn run_scan(args: Scan2RunArgs) {
