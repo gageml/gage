@@ -7,9 +7,8 @@
 //! is the raw object, so a read costs a pipe round-trip rather than a
 //! process launch. Measured against one launch per read, a single
 //! object read is ten times faster and anything that reads many
-//! objects, a query or a full iteration, about fifty times; see
-//! footnote 1 of `gage-bench/results/store/README.md`. Writes and
-//! administration launch `git` per call. Gage-object concepts live in
+//! objects, a query or a full iteration, about fifty times. Writes
+//! and administration launch `git` per call. Gage-object concepts live in
 //! [`crate::object`].
 
 use std::cell::RefCell;
@@ -602,7 +601,7 @@ pub(crate) fn git_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
 /// deliberately keeps (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`).
 /// Anything else `GIT_*` is cleared, so an exported `GIT_DIR`, a
 /// `GIT_NAMESPACE`, or a `GIT_CONFIG_KEY_<n>` injection cannot redirect
-/// or reconfigure the store. See `store-init.md`.
+/// or reconfigure the store.
 pub(crate) fn git_cmd() -> Command {
     let mut cmd = Command::new("git");
     for (name, _) in std::env::vars_os() {
@@ -642,7 +641,7 @@ const GIT_ENV_KEEP: &[EnvKeep] = &[
     // Credential prompt.
     EnvKeep::Exact("GIT_ASKPASS"),
     EnvKeep::Exact("GIT_TERMINAL_PROMPT"),
-    // Config-file location the store deliberately keeps; see store-init.md.
+    // Config-file location the store deliberately keeps.
     EnvKeep::Exact("GIT_CONFIG_GLOBAL"),
     EnvKeep::Exact("GIT_CONFIG_SYSTEM"),
     // HTTP transport for remote operations (proxy, timeouts, user-agent).
@@ -713,7 +712,7 @@ mod tests {
     #[test]
     fn git_env_keep_covers_transport_and_diagnostics_but_not_redirects() {
         // Allowlisted: transport, credentials, tracing, and the two
-        // config-locating vars store-init.md keeps.
+        // config-locating vars.
         for name in [
             "GIT_SSH",
             "GIT_SSH_COMMAND",

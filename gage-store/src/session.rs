@@ -32,7 +32,7 @@ const OBJECT_VERSION: &str = "1";
 pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];
 /// Top-level subtree name for the session's opaque file content. The
 /// `.d` suffix marks the subtree as producer-owned; Gage schema
-/// walkers do not descend into it. See object-trees.md.
+/// walkers do not descend into it.
 const FILES_TREE: &str = "files.d";
 
 /// Session operations over an opened store.

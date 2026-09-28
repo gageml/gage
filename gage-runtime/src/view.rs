@@ -25,8 +25,7 @@
 //! `[tool=<name>]`, since an error describes the individual message
 //! where a tool name describes a category. Rules naming different
 //! tools cannot match the same message, so the ranking is total: no
-//! two rules that match a message ever tie. See
-//! `.local.design/roadmap-scan.md` for the algorithm.
+//! two rules that match a message ever tie.
 
 use std::collections::BTreeMap;
 

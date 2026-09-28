@@ -92,8 +92,7 @@ impl TextResolverScheme for ScannerScheme {
 }
 
 /// If `name` matches `{bare}[{path-spec}]`, recover the directory
-/// containing the scanner file by inverting the display-path elision
-/// (see "Scanner file refs" in `.local.design/run-scanner-file.md`):
+/// containing the scanner file by inverting the display-path elision:
 /// a path spec ending in `.rn` is the literal file, so the root is its
 /// parent; otherwise the file is `{path-spec}/{bare}/scanner.rn`, so
 /// the root is `{path-spec}/{bare}`.

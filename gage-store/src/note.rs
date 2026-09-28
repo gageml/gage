@@ -65,8 +65,7 @@ pub struct NoteInput<'a> {
     /// Gage schema.
     pub metadata: Option<JsonValue>,
     /// The work key under which a scan's `carry_forward_notes(key)`
-    /// links this note; see watermarks.md. `None` means no scan
-    /// carries it by key.
+    /// links this note. `None` means no scan carries it by key.
     pub work_key: Option<&'a str>,
 }
 

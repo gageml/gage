@@ -1,5 +1,4 @@
-//! Work reuse: `carry_forward_notes`, `unseen`, and `watermark`. See
-//! watermarks.md.
+//! Work reuse: `carry_forward_notes`, `unseen`, and `watermark`.
 //!
 //! A watermark is the record `watermarks/sessions/<oid>/<key>` in a
 //! scan's tree, holding the session commit a task under `key`

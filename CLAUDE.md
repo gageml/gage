@@ -130,6 +130,30 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   ordering, naming, or splitting the file - not a banner. The reader infers
   structure from the code itself.
 
+- **Comments do not cite documents.** Source code is the only current
+  documentation. Design notes, plans, READMEs, footnotes, and files under
+  `.local.*` are not kept in sync with the code and are stale on arrival. A
+  comment never directs the reader to a markdown file, a design document, a
+  section title, or a footnote. A comment that has something to say states it
+  in place.
+  - WRONG: `// see watermarks.md`
+  - WRONG: `/// See footnote 2 of gage-bench/results/store/README.md.`
+  - WRONG: `// (see PLAN.md "After implementation")`
+  - RIGHT: `/// The whole diff is one index transaction. One commit per
+    object took 11.6 s on the bench population; one transaction takes 251 ms.`
+
+  Functional references are not comments and are unaffected: `include_str!`
+  paths, config-file discovery (`CLAUDE.md`, `SKILL.md`), and test fixtures.
+
+- **Comment only what the code cannot say.** A comment is warranted when the
+  code is non-obvious and cannot be simplified without a cost to performance
+  or correctness: a performance optimization and its measured effect, a
+  non-trivial algorithm, an invariant the type system does not enforce, a
+  workaround for an external behavior. Clear, well-named, conceptually sound
+  code needs no comment. A comment that restates what readable code already
+  says is removed. The remedy for unclear code is clearer code, not a
+  description of the unclear code.
+
 - Comment punctuation rules:
   - Sentences that provide background or details not obvious in the code should
     end with periods

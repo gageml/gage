@@ -1,8 +1,8 @@
 #!/bin/sh
 # Gage store update hook. Enforces the ref rules for refs/gage/object/*.
-# See store-init.md. Written verbatim by gage-store at init; edits are
-# clobbered on the next `gage store init`. Uses shell builtins and git
-# only, so the receiving host needs nothing beyond git itself.
+# Written verbatim by gage-store at init; edits are clobbered on the
+# next `gage store init`. Uses shell builtins and git only, so the
+# receiving host needs nothing beyond git itself.
 
 refname="$1"
 old="$2"

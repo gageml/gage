@@ -10,12 +10,11 @@
 //! The runtime sets `author` to `task:<scanner>:<task>` and
 //! `attrs.scan` to the running scan. Apply creates the object. Bad
 //! input is `Error::Args`; a failure to reach staging or the store is
-//! a VM error. See implementation-notes.md, "`write_note` runtime
-//! function".
+//! a VM error.
 //!
 //! `scan().notes()` is a [`NotesQuery`]; awaiting it reads the notes
 //! staged by this scan's tasks and the notes carried into it, and
-//! nothing else, as the rethink design says a running scan sees.
+//! nothing else.
 //! `.name(name)` and `.names([...])` match names exactly. A task sees
 //! every note its upstream tasks wrote because the runner releases it
 //! only after they returned.

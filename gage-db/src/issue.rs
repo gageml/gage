@@ -231,7 +231,7 @@ pub struct Issue {
     pub modified: Option<i64>,
     /// Writer identity: `scanner:{name}` for scanner-written issues,
     /// `user:{name}` for issues added by a person, `agent:...` for
-    /// model writers (see docs/issues.md). Used to resolve
+    /// model writers. Used to resolve
     /// `scanner:{path}` URIs in issue fields. With `name`, forms the
     /// duplication key.
     pub author: String,

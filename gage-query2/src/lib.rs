@@ -163,7 +163,7 @@ impl ContextBuilder {
     }
 }
 
-/// The system-tier table of watermarks; see watermarks.md
+/// The system-tier table of watermarks
 const SCAN_WATERMARK: &str = "scan_watermark";
 
 /// The user-facing relation tables: views over the `_link` tables

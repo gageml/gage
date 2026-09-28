@@ -4,8 +4,7 @@
 //! Partitions a scan's sessions or notes by validation state recorded
 //! in `task_validate` so scanners can skip work already done under the
 //! same key, adopt the notes a prior scan produced, and record
-//! validation state when the work completes. See
-//! `.local.design/session-caching.md`.
+//! validation state when the work completes.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

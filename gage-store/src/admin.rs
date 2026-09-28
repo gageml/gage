@@ -27,8 +27,7 @@ const STORE_CONFIG: [(&str, &str); 3] = [
 ];
 
 /// Update hook script installed at `hooks/update` on init. The script
-/// enforces the ref rules for `refs/gage/object/*`; see store-init.md
-/// for the contract.
+/// enforces the ref rules for `refs/gage/object/*`.
 pub(crate) const UPDATE_HOOK: &str = include_str!("hooks/update");
 
 /// Relative path of the update hook inside the store.

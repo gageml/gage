@@ -218,7 +218,7 @@ fn parse_duration(s: &str) -> Result<Duration, DurationError> {
 }
 
 // TODO: re-enable MultiProgress tracing writer with AtomicBool flag
-// for commands that use progress bars (see PLAN.md "After implementation")
+// for commands that use progress bars
 //
 // static MP: OnceLock<MultiProgress> = OnceLock::new();
 //

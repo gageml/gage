@@ -10,7 +10,7 @@
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
 //! view over a commit. [`ScanStore::create`] imports a staging `scan/`
 //! directory as the object's content. Under `watermarks/`, the
-//! commits each task finished processing; see watermarks.md.
+//! commits each task finished processing.
 //! `notes.link`, `notes_carried.link`, and `issues.link` name the
 //! commits of the notes and issues the scan wrote or carried. The
 //! agent records are not written yet.

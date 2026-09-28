@@ -1,8 +1,7 @@
 //! Object writing: blobs, trees, and commits are written as loose
 //! objects directly into `objects/`, without a `git` process. A create
 //! that took eight `git` launches takes one, `update-ref`, and a note
-//! create went from 5.6 ms to 1.3 ms; see footnote 3 of
-//! `gage-bench/results/store/README.md`.
+//! create went from 5.6 ms to 1.3 ms.
 //!
 //! Nothing here calls fsync. Git's own default is
 //! `core.fsync=committed,-loose-object`, so git does not sync loose

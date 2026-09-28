@@ -92,9 +92,6 @@ impl SqliteIndex {
         // The index is rebuilt from the refs whenever it is missing or
         // damaged, so a commit does not need to reach disk before the
         // call returns; NORMAL under WAL skips the per-commit sync.
-        // Together with one transaction per reconcile this is the
-        // change measured in footnote 2 of
-        // gage-bench/results/store/README.md.
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(sql_err)?;
         // A concurrent writer holds the reserved lock for the duration

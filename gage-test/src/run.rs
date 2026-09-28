@@ -334,8 +334,7 @@ fn run_one(
         .arg("--max-turns")
         .arg(max_turns.to_string())
         // Counters Opus 4.7's server-side `display: "omitted"` default
-        // so thinking content survives in the recorded session. See
-        // scanners/hidden-thinking/enable-thinking.md.
+        // so thinking content survives in the recorded session.
         .arg("--thinking-display")
         .arg("summarized");
     if let Some(settings) = &test.claude {

@@ -846,8 +846,7 @@ fn running(this: &Agent) -> bool {
 /// Claude Code reports background sub-agent lifecycle on the `system`
 /// channel: `subtype: task_started` opens a task and `task_notification`
 /// closes one (any terminal `status`). `task_updated` is informational
-/// and ignored here. See `.local.notes/claude/sub-agents.md` for the
-/// captured wire shape.
+/// and ignored here.
 fn track_task_event(v: &JsonValue, pending: &mut HashSet<String>) {
     let Some(subtype) = v.get("subtype").and_then(|s| s.as_str()) else {
         return;
@@ -1513,7 +1512,6 @@ fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
         .collect();
     // Base author for built-in tool writes; each request appends its
     // own `?call={toolUseId}` so the author is the authoring call.
-    // See the author scheme in docs/notes.md.
     ToolSpec {
         tools,
         custom_tools,

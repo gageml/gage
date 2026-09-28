@@ -180,8 +180,7 @@ impl Store {
     ///
     /// The whole diff is one index transaction. With one commit per
     /// object, each a WAL sync, a rebuild of the bench population took
-    /// 11.6 s; as one transaction it takes 251 ms, a factor of 46. See
-    /// footnote 2 of `gage-bench/results/store/README.md`.
+    /// 11.6 s; as one transaction it takes 251 ms, a factor of 46.
     pub(crate) fn reconcile(&self) -> Result<(), StoreError> {
         // Both reads happen inside the transaction so the diff and the
         // writes see one state.
