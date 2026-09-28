@@ -20,7 +20,7 @@ use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
 use gage_store::{Store, StoreError};
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Protocol, VmError};
+use rune::runtime::{Formatter, Protocol, Value, VmError};
 use rune::{Any, ContextError, Module};
 use tokio::sync::OnceCell;
 
@@ -330,6 +330,21 @@ impl Session {
         write!(f, "Session {{ id: {:?} }}", self.id)?;
         Ok(())
     }
+}
+
+/// The session id in a scanner's argument: a [`Session`] or an id
+/// string. The value is borrowed, not taken.
+pub(crate) fn session_id(v: &Value) -> Result<String, VmError> {
+    if let Ok(s) = v.borrow_ref::<Session>() {
+        return Ok(s.id.clone());
+    }
+    if let Ok(s) = v.borrow_string_ref() {
+        return Ok(s.to_string());
+    }
+    Err(VmError::panic(format!(
+        "expected a Session or session id string, got {}",
+        v.type_info()
+    )))
 }
 
 /// The value of `session.attrs()`. Awaiting it reads the session's

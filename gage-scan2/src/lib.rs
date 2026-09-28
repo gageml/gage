@@ -1832,6 +1832,8 @@ mod tests {
                         .for_session_range(s.id, 1, 3)
                         .await?;
                     println!("{:?}", n.target);
+                    let n = write_note("comment", "by-session").for_session(s).await?;
+                    println!("{:?} {}", n.target, s.id);
                     match write_note("bad", 1).for_session_line(s.id, 0).await {
                         Err(gage::Error::Args(m)) => println!("args: {m}"),
                         other => println!("unexpected: {other:?}"),
@@ -1885,13 +1887,14 @@ mod tests {
                 )),
                 &Output::Println(format!("Some(\"session:{session_id}\")")),
                 &Output::Println(format!("Some(\"session:{session_id}#1-3\")")),
+                &Output::Println(format!("Some(\"session:{session_id}\") {session_id}")),
                 &Output::Println("args: line must be 1 or greater, got 0".into()),
                 &Output::Println("None 0".into()),
             ]
         );
 
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
-        assert_eq!(record.content.notes.len(), 4);
+        assert_eq!(record.content.notes.len(), 5);
         let parents = store.read_commit(&outcome.commit_sha).unwrap().parents;
         for sha in &record.content.notes {
             assert!(parents.contains(sha), "note {sha} is a scan parent");
@@ -1942,7 +1945,7 @@ mod tests {
                 outcome.id
             ))
             .await,
-            4
+            5
         );
         assert_eq!(
             count(format!(

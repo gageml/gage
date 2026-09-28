@@ -2,7 +2,9 @@
 //! and `scan().notes()`: the scan's own notes read back.
 //!
 //! The builder carries the name, the value, the target set by one of
-//! the `for_session*` methods, and the metadata. Awaiting it validates
+//! the `for_session*` methods, and the metadata. Each `for_session*`
+//! method takes the session as a `Session` or an id string and keeps
+//! the id. Awaiting the builder validates
 //! the target through the store, writes the note tree under the scan's
 //! staging (`gage_store::NoteStore::stage`), and returns the [`Note`].
 //! The runtime sets `author` to `task:<scanner>:<task>` and
@@ -35,7 +37,7 @@ use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmE
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
-use crate::scan::{Scan, ScanContext, current};
+use crate::scan::{Scan, ScanContext, current, session_id};
 use crate::validate::watermark_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
@@ -110,46 +112,51 @@ fn write_note(name: &str, value: Value) -> NoteWrite {
 }
 
 impl NoteWrite {
-    /// Target a whole session.
+    /// Target a whole session. `session` is a `Session` or an id string.
     #[rune::function(instance)]
-    fn for_session(mut self, session: &str) -> Self {
+    fn for_session(mut self, session: Value) -> Result<Self, VmError> {
         self.target = Some(SessionTarget {
-            session: session.to_string(),
+            session: session_id(&session)?,
             lines: Lines::None,
         });
-        self
+        Ok(self)
     }
 
     /// Target one line of a session.
     #[rune::function(instance)]
-    fn for_session_line(mut self, session: &str, line: Value) -> Self {
+    fn for_session_line(mut self, session: Value, line: Value) -> Result<Self, VmError> {
         self.target = Some(SessionTarget {
-            session: session.to_string(),
+            session: session_id(&session)?,
             lines: Lines::One(line),
         });
-        self
+        Ok(self)
     }
 
     /// Target an inclusive line range of a session.
     #[rune::function(instance)]
-    fn for_session_range(mut self, session: &str, start: Value, end: Value) -> Self {
+    fn for_session_range(
+        mut self,
+        session: Value,
+        start: Value,
+        end: Value,
+    ) -> Result<Self, VmError> {
         self.target = Some(SessionTarget {
-            session: session.to_string(),
+            session: session_id(&session)?,
             lines: Lines::Range(start, end),
         });
-        self
+        Ok(self)
     }
 
     /// Target lines of a session: a list of lines, or one string in the
     /// selection grammar. An empty list or string targets the whole
     /// session.
     #[rune::function(instance)]
-    fn for_session_lines(mut self, session: &str, lines: Value) -> Self {
+    fn for_session_lines(mut self, session: Value, lines: Value) -> Result<Self, VmError> {
         self.target = Some(SessionTarget {
-            session: session.to_string(),
+            session: session_id(&session)?,
             lines: Lines::Spec(lines),
         });
-        self
+        Ok(self)
     }
 
     /// The writer's payload, an object stored and returned verbatim.

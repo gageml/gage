@@ -26,7 +26,7 @@ use gage_store::{SessionStore, Store};
 use rune::runtime::{Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::scan::{ScanContext, Session, SessionsQuery, current, run, string_column};
+use crate::scan::{ScanContext, Session, SessionsQuery, current, run, session_id, string_column};
 
 const SESSIONS_KIND: &str = "sessions";
 
@@ -89,11 +89,15 @@ pub struct WatermarkWrite {
     #[rune(skip)]
     key: Value,
     #[rune(skip)]
-    session: Value,
+    session: String,
 }
 
-fn watermark(key: Value, session: Value) -> WatermarkWrite {
-    WatermarkWrite { key, session }
+/// `session` is a `Session` or an id string.
+fn watermark(key: Value, session: Value) -> Result<WatermarkWrite, VmError> {
+    Ok(WatermarkWrite {
+        key,
+        session: session_id(&session)?,
+    })
 }
 
 /// Link into this scan every note tagged `key` whose target is one
@@ -243,26 +247,11 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
         Err(e) => return Ok(Err(e)),
     };
     let ctx = current()?;
-    let (id, commit) = if let Ok(s) = w.session.borrow_ref::<Session>() {
-        (s.id.clone(), s.commit.clone())
-    } else {
-        let id = match w.session.borrow_string_ref() {
-            Ok(s) => s.to_string(),
-            Err(e) => {
-                return Ok(Err(Error::Args(format!(
-                    "expected a Session or session id string, got {}: {e}",
-                    w.session.type_info()
-                ))));
-            }
-        };
-        match ctx.member_commit(&id).await? {
-            Some(commit) => (id, commit),
-            None => {
-                return Ok(Err(Error::Args(format!(
-                    "session {id} is not a member of the scan"
-                ))));
-            }
-        }
+    let id = w.session;
+    let Some(commit) = ctx.member_commit(&id).await? else {
+        return Ok(Err(Error::Args(format!(
+            "session {id} is not a member of the scan"
+        ))));
     };
     let dir = ctx.paths.watermarks_dir.join(SESSIONS_KIND).join(&id);
     let written = fs::create_dir_all(&dir)
