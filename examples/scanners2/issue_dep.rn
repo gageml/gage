@@ -1,0 +1,37 @@
+use gage::{carry_forward, scan, write_issue, write_note};
+
+pub const SCANNER = #{
+    name: "note-deps",
+    description: "Note written for another note",
+    tasks: #{
+        find: #{ notes: #{ writes: ["long-session"] } },
+        report: #{ notes: #{ wants: ["long-session"] } },
+    },
+};
+
+const KEY = ("long-session", "find", 1);
+
+pub async fn find() {
+    carry_forward(KEY).await?;
+    for s in scan().sessions().await {
+        let attrs = s.attrs().await;
+        println!("{attrs:?}");
+        if attrs.summary.line_count > 200 {
+            write_note("long-session").for_session(s).carry_forward(KEY).await?;
+        }
+    }
+}
+
+pub async fn report() {
+    let notes = scan().notes().name("long-session").await?;
+    log::info!("Found {} long-session notes", notes.len());
+    if notes.len() > 3 {
+        write_issue(
+            "long-sessions",
+            "Long sessions",
+            "Sessions are consistently long.",
+        )
+        .evidence(notes)
+        .await?;
+    }
+}
