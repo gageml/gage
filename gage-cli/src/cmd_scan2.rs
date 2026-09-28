@@ -119,11 +119,10 @@ async fn list(args: Scan2ListArgs) {
         return;
     }
     let show = args.limit.show_count(total);
-    // Sessions and Notes are counts over the relation views; a scan
-    // without a dataset has no session count to show
+    // Sessions and Notes are counts over the relation views
     let sql = format!(
         "SELECT s.id, s.id_prefix, s.tasks, s.failed, s.canceled, s.started, s.stopped, \
-                s.dataset, ss.n, sn.n \
+                ss.n, sn.n \
          FROM scan s \
          LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_session GROUP BY scan_id) ss \
               ON ss.scan_id = s.id \
@@ -149,20 +148,15 @@ async fn list(args: Scan2ListArgs) {
         let canceled = column::<BooleanArray>(batch, 4);
         let started = column::<TimestampMillisecondArray>(batch, 5);
         let stopped = column::<TimestampMillisecondArray>(batch, 6);
-        let datasets = column::<StringArray>(batch, 7);
-        let sessions = column::<Int64Array>(batch, 8);
-        let notes = column::<Int64Array>(batch, 9);
+        let sessions = column::<Int64Array>(batch, 7);
+        let notes = column::<Int64Array>(batch, 8);
         for i in 0..batch.num_rows() {
             let count = |arr: &Int64Array| if arr.is_valid(i) { arr.value(i) } else { 0 };
             let elapsed = stopped.value(i).saturating_sub(started.value(i)).max(0) as u64;
             rows.push(vec![
                 s::styled_id(short_uuid(ids.value(i)), prefixes.value(i), s::IdKind::Gage),
                 tasks.value(i).to_string(),
-                if datasets.is_valid(i) {
-                    count(sessions).to_string()
-                } else {
-                    String::new()
-                },
+                count(sessions).to_string(),
                 String::new(),
                 count(notes).to_string(),
                 failed.value(i).to_string(),
