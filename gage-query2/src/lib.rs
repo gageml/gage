@@ -389,7 +389,7 @@ mod tests {
         );
         let note_cols = strings(&ctx, &sql.replace("'session'", "'note'")).await;
         assert_eq!(note_cols.first().map(String::as_str), Some("id"));
-        assert_eq!(note_cols.last().map(String::as_str), Some("carry_forward"));
+        assert_eq!(note_cols.last().map(String::as_str), Some("work_key"));
     }
 
     /// The `_link` tables list the store's link files with both
@@ -438,7 +438,7 @@ mod tests {
                     author: "user:t",
                     target: Some(&url),
                     metadata: None,
-                    carry_forward: None,
+                    work_key: None,
                 })
                 .unwrap();
             let issues = IssueStore::from(&*store);

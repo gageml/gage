@@ -1088,7 +1088,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
 
@@ -1180,7 +1180,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         let gone = notes
@@ -1190,7 +1190,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         notes.delete(&gone).unwrap();
@@ -1430,7 +1430,7 @@ mod tests {
                         author: "user:test",
                         target: None,
                         metadata: None,
-                        carry_forward: None,
+                        work_key: None,
                     })
                     .unwrap()
             })

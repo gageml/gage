@@ -2204,7 +2204,7 @@ mod tests {
     }
 
     const WATERMARK_SCANNER: &str = r#"
-        use gage::{carry_forward, scan, watermark, write_note};
+        use gage::{carry_forward_notes, scan, watermark, write_note};
 
         pub const SCANNER = #{
             name: "wm",
@@ -2215,24 +2215,24 @@ mod tests {
         const KEY = ("wm", "main", 1);
 
         pub async fn main() {
-            let carried = carry_forward(KEY).await?;
+            let carried = carry_forward_notes(KEY).await?;
             println!("carried {carried}");
             for (s, unseen) in scan().sessions().with_unseen(KEY).await? {
                 println!("unseen {unseen:?}");
                 if let Some((start, end)) = unseen {
                     write_note("seen", format!("{start}-{end}"))
                         .for_session_range(s.id, start, end)
-                        .carry_forward(KEY)
+                        .work_key(KEY)
                         .await?;
                     write_note("untagged", "x").for_session(s.id).await?;
-                    watermark(KEY, s).await?;
+                    watermark(s, KEY).await?;
                 }
             }
-            match watermark(KEY, "not-a-member").await {
+            match watermark("not-a-member", KEY).await {
                 Err(gage::Error::Args(m)) => println!("args: {m}"),
                 other => println!("unexpected: {other:?}"),
             }
-            match carry_forward("a/b").await {
+            match carry_forward_notes("a/b").await {
                 Err(gage::Error::Args(m)) => println!("args: {m}"),
                 other => println!("unexpected: {other:?}"),
             }
@@ -2343,7 +2343,7 @@ mod tests {
             .map(|sha| (sha.clone(), notes.at_commit(sha).unwrap()))
             .find(|(_, n)| n.name == "seen")
             .expect("the scanner wrote the tagged note");
-        assert_eq!(tagged_1.1.carry_forward.as_deref(), Some("wm:main:1"));
+        assert_eq!(tagged_1.1.work_key.as_deref(), Some("wm:main:1"));
         assert_eq!(
             tagged_1.1.target.as_deref(),
             Some(format!("session:{session_id}#1-1").as_str())

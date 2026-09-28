@@ -709,7 +709,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap()
     }

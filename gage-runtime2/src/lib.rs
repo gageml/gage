@@ -140,7 +140,7 @@ pub(crate) fn send(output: Output) {
 /// library without its stdio, this crate's `print`/`println` and
 /// `log` macros, `gage::scan` and the values it returns, the message
 /// and entry queries on a session, `gage::write_note`,
-/// `gage::write_issue`, `gage::issues`, `gage::carry_forward`,
+/// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,
 /// `gage::watermark`, and the include macros
 /// from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].

@@ -1343,7 +1343,7 @@ mod tests {
                     author: "task:s:t",
                     target: None,
                     metadata: None,
-                    carry_forward: None,
+                    work_key: None,
                 })
                 .unwrap();
             shas.push(
@@ -1499,7 +1499,7 @@ mod tests {
                     author: "task:s:t",
                     target: None,
                     metadata: None,
-                    carry_forward: None,
+                    work_key: None,
                 })
                 .unwrap()
         };

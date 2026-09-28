@@ -331,7 +331,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap()
     }
@@ -732,7 +732,7 @@ mod tests {
                 author: "user:test",
                 target: Some(&format!("note:{a}")),
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         notes
@@ -756,7 +756,7 @@ mod tests {
                 author: "user:test",
                 target: Some(&format!("note:{c1}")),
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         let c2 = note(&store, "c2");
@@ -922,7 +922,7 @@ mod tests {
                 author: "user:test",
                 target: Some(&format!("note:{root}")),
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         notes

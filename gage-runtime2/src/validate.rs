@@ -1,4 +1,4 @@
-//! Session watermarks: `carry_forward`, `unseen`, and `watermark`. See
+//! Work reuse: `carry_forward_notes`, `unseen`, and `watermark`. See
 //! watermarks.md.
 //!
 //! A watermark is the record `watermarks/sessions/<oid>/<key>` in a
@@ -9,8 +9,8 @@
 //! finds the closest one in the session's commit chain: none means
 //! the whole session is unseen, the scan's own commit means nothing
 //! is, and an ancestor means the lines after its `line_count`.
-//! `carry_forward(key)` links into this scan every note tagged with
-//! `key` whose target commit is in a session's chain. A commit that is
+//! `carry_forward_notes(key)` links into this scan every note whose
+//! work key is `key` and whose target commit is in a session's chain. A commit that is
 //! not in the chain, such as a later commit of the same session, is
 //! never consulted.
 
@@ -32,16 +32,17 @@ const SESSIONS_KIND: &str = "sessions";
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
-    m.function("carry_forward", carry_forward).build()?;
+    m.function("carry_forward_notes", carry_forward_notes)
+        .build()?;
     m.function("watermark", watermark).build()?;
     Ok(m)
 }
 
 pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
-    m.ty::<CarryForward>()?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForward| async move {
-        do_carry_forward(q).await
+    m.ty::<CarryForwardNotes>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForwardNotes| async move {
+        do_carry_forward_notes(q).await
     })?;
     m.ty::<WithUnseenQuery>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: WithUnseenQuery| async move {
@@ -54,16 +55,17 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     Ok(m)
 }
 
-/// The value of `carry_forward(key)`. Awaiting it links the notes.
+/// The value of `carry_forward_notes(key)`. Awaiting it links the
+/// notes.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub struct CarryForward {
+pub struct CarryForwardNotes {
     #[rune(skip)]
     key: Value,
 }
 
-fn carry_forward(key: Value) -> CarryForward {
-    CarryForward { key }
+fn carry_forward_notes(key: Value) -> CarryForwardNotes {
+    CarryForwardNotes { key }
 }
 
 /// The value of `scan().sessions().with_unseen(key)`. Awaiting it
@@ -81,7 +83,7 @@ pub(crate) fn with_unseen(_sessions: Ref<SessionsQuery>, key: Value) -> WithUnse
     WithUnseenQuery { key }
 }
 
-/// The value of `watermark(key, session)`. Awaiting it writes the
+/// The value of `watermark(session, key)`. Awaiting it writes the
 /// record.
 #[derive(Any)]
 #[rune(item = ::gage)]
@@ -93,20 +95,21 @@ pub struct WatermarkWrite {
 }
 
 /// `session` is a `Session` or an id string.
-fn watermark(key: Value, session: Value) -> Result<WatermarkWrite, VmError> {
+fn watermark(session: Value, key: Value) -> Result<WatermarkWrite, VmError> {
     Ok(WatermarkWrite {
         key,
         session: session_id(&session)?,
     })
 }
 
-/// Link into this scan every note tagged `key` whose target is one
-/// of the scan's sessions at a commit in that session's chain. The
+/// Link into this scan every note whose work key is `key` and whose
+/// target is one of the scan's sessions at a commit in that session's
+/// chain. The
 /// note commits are appended to the staged carried list, which apply
 /// writes as `notes_carried.link`. Returns the number of notes newly
 /// linked; a note already carried by this scan counts zero.
-async fn do_carry_forward(q: CarryForward) -> Result<Result<i64, Error>, VmError> {
-    let key = match watermark_key(&q.key) {
+async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Error>, VmError> {
+    let key = match work_key(&q.key) {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
@@ -118,7 +121,7 @@ async fn do_carry_forward(q: CarryForward) -> Result<Result<i64, Error>, VmError
     let sql = format!(
         "SELECT t.note_commit, t.target_id, t.target_commit \
          FROM note n JOIN note_target_link t ON t.note_id = n.id \
-         WHERE n.carry_forward = '{}' AND t.target_type = 'session' \
+         WHERE n.work_key = '{}' AND t.target_type = 'session' \
            AND t.target_id IN ({})",
         sql_str(&key),
         id_list(&members)
@@ -140,7 +143,7 @@ async fn do_carry_forward(q: CarryForward) -> Result<Result<i64, Error>, VmError
         }
     }
     let added = append_carried(&ctx.paths.carried_notes, &commits)?;
-    tracing::info!(key, notes = added, "carry_forward");
+    tracing::info!(key, notes = added, "carry_forward_notes");
     Ok(Ok(i64::try_from(added).unwrap()))
 }
 
@@ -176,7 +179,7 @@ fn append_carried(path: &Path, commits: &BTreeSet<String>) -> Result<usize, VmEr
 /// the closest watermarked ancestor's `line_count`, or 1 with no
 /// such ancestor, and `end` is the session's `line_count`.
 async fn do_with_unseen(q: WithUnseenQuery) -> Result<Result<Vec<Value>, Error>, VmError> {
-    let key = match watermark_key(&q.key) {
+    let key = match work_key(&q.key) {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
@@ -242,7 +245,7 @@ async fn do_with_unseen(q: WithUnseenQuery) -> Result<Result<Vec<Value>, Error>,
 /// the commit this scan reads. A session that is not a member of the
 /// scan is an `Args` error.
 async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
-    let key = match watermark_key(&w.key) {
+    let key = match work_key(&w.key) {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
@@ -360,10 +363,10 @@ fn sql_str(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// A key in storage form: a string as given, or a tuple of strings
-/// and integers colon-joined. The result is a path component and a
+/// A work key in storage form: a string as given, or a tuple of
+/// strings and integers colon-joined. The result is a path component and a
 /// table value, so it must be non-empty and hold no `/`.
-pub(crate) fn watermark_key(key: &Value) -> Result<String, Error> {
+pub(crate) fn work_key(key: &Value) -> Result<String, Error> {
     let key = match key.borrow_string_ref() {
         Ok(s) => s.to_string(),
         Err(_not_a_string) => key_string(key)?,

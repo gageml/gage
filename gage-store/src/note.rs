@@ -22,7 +22,7 @@ use crate::{Store, StoreError};
 pub const OBJECT_TYPE: &str = "gage::note";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from a note's `attrs.json`.
-pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "carry_forward"];
+pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "work_key"];
 const TEXT_VALUE_FILE: &str = "value.txt";
 const JSON_VALUE_FILE: &str = "value.json";
 const TARGET_LINK: &str = "target.link";
@@ -64,10 +64,10 @@ pub struct NoteInput<'a> {
     /// Writer-defined payload, stored and returned verbatim. Has no
     /// Gage schema.
     pub metadata: Option<JsonValue>,
-    /// The key under which a scan's `carry_forward(key)` links this
-    /// note; see watermarks.md. `None` means no scan
+    /// The work key under which a scan's `carry_forward_notes(key)`
+    /// links this note; see watermarks.md. `None` means no scan
     /// carries it by key.
-    pub carry_forward: Option<&'a str>,
+    pub work_key: Option<&'a str>,
 }
 
 /// Input to [`NoteStore::edit`]. Every field is optional; `None`
@@ -94,8 +94,8 @@ pub struct NoteRecord {
     pub metadata: Option<JsonValue>,
     /// The scan the note was written during, from `attrs.scan`
     pub scan: Option<String>,
-    /// The carry-forward key, from `attrs.carry_forward`
-    pub carry_forward: Option<String>,
+    /// The work key, from `attrs.work_key`
+    pub work_key: Option<String>,
     /// From the `created` blob: milliseconds since the Unix epoch.
     pub created_ms: i64,
     /// From the `modified` blob: milliseconds since the Unix epoch.
@@ -114,8 +114,8 @@ pub struct NoteFull {
     pub metadata: Option<JsonValue>,
     /// The scan the note was written during, from `attrs.scan`
     pub scan: Option<String>,
-    /// The carry-forward key, from `attrs.carry_forward`
-    pub carry_forward: Option<String>,
+    /// The work key, from `attrs.work_key`
+    pub work_key: Option<String>,
     /// Commit SHAs from the `target.link` file, in file order. Empty
     /// when the note has no `target.link` file.
     pub targets: Vec<String>,
@@ -141,7 +141,7 @@ struct NoteAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    carry_forward: Option<String>,
+    work_key: Option<String>,
 }
 
 impl NoteStore<'_> {
@@ -159,7 +159,7 @@ impl NoteStore<'_> {
             line_end: None,
             metadata: input.metadata,
             scan: None,
-            carry_forward: input.carry_forward.map(String::from),
+            work_key: input.work_key.map(String::from),
         };
         let tree = build_tree(&attrs, &input.value, target_sha.into_iter().collect())?;
         let id = new_uuid();
@@ -198,7 +198,7 @@ impl NoteStore<'_> {
             line_end: None,
             metadata: input.metadata.clone(),
             scan: Some(scan.to_string()),
-            carry_forward: input.carry_forward.map(String::from),
+            work_key: input.work_key.map(String::from),
         };
         let tree = build_tree(&attrs, &input.value, link.into_iter().collect())?;
         let write = |name: &str, bytes: &[u8]| -> Result<(), StoreError> {
@@ -265,7 +265,7 @@ impl NoteStore<'_> {
             target: staged.attrs.target,
             metadata: staged.attrs.metadata,
             scan: staged.attrs.scan,
-            carry_forward: staged.attrs.carry_forward,
+            work_key: staged.attrs.work_key,
             targets: staged.targets,
             created_ms: staged_ms,
             modified_ms: staged_ms,
@@ -383,9 +383,9 @@ impl<'a> NoteQuery<'a> {
         self
     }
 
-    /// Select notes whose `carry_forward` key equals `key`.
-    pub fn carry_forward(mut self, key: &str) -> Self {
-        self.query.attrs.push(("carry_forward", key.to_string()));
+    /// Select notes whose work key equals `key`.
+    pub fn work_key(mut self, key: &str) -> Self {
+        self.query.attrs.push(("work_key", key.to_string()));
         self
     }
 
@@ -433,7 +433,7 @@ impl<'a> NoteQuery<'a> {
                 target: full.target,
                 metadata: full.metadata,
                 scan: full.scan,
-                carry_forward: full.carry_forward,
+                work_key: full.work_key,
                 created_ms: full.created_ms,
                 modified_ms: full.modified_ms,
             })
@@ -542,7 +542,7 @@ fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
         target: attrs.target,
         metadata: attrs.metadata,
         scan: attrs.scan,
-        carry_forward: attrs.carry_forward,
+        work_key: attrs.work_key,
         targets: object
             .tree
             .links
@@ -608,7 +608,7 @@ mod tests {
                 author: "user:test",
                 target,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap()
     }
@@ -703,7 +703,7 @@ mod tests {
             author: "user:test",
             target: Some(target),
             metadata: None,
-            carry_forward: None,
+            work_key: None,
         })
     }
 
@@ -863,7 +863,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: Some(metadata.clone()),
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         let without = notes
@@ -873,7 +873,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
 
@@ -898,7 +898,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         let listing = run(git_in(
@@ -1298,7 +1298,7 @@ mod tests {
                 author: "user:a",
                 target: None,
                 metadata: None,
-                carry_forward: None,
+                work_key: None,
             })
             .unwrap();
         let target_sha = store.rev_parse(&object_ref(&target_id)).unwrap().unwrap();
@@ -1325,7 +1325,7 @@ mod tests {
                     author: "task:s:t",
                     target: Some(&url),
                     metadata: Some(serde_json::json!({"k": "v"})),
-                    carry_forward: None,
+                    work_key: None,
                 },
                 "SCAN1",
                 Some(&pinned),
@@ -1371,7 +1371,7 @@ mod tests {
                     author: "task:s:t",
                     target: Some("session:nope#1"),
                     metadata: None,
-                    carry_forward: None,
+                    work_key: None,
                 },
                 "SCAN1",
                 None,

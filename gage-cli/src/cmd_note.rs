@@ -389,7 +389,7 @@ pub fn add(args: NoteAddArgs) {
                 author: &author,
                 target: target.as_deref(),
                 metadata: metadata.clone(),
-                carry_forward: None,
+                work_key: None,
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Note {} added", short_uuid(&id)).into())
