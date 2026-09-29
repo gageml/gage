@@ -525,7 +525,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let issues = IssueStore::from(store);
         let mut issue_shas = Vec::new();
         for dir in self.staging.staged_issues()? {
-            let (_, sha) = issues.create_staged(&dir)?;
+            let (_, sha) = issues.apply_staged(&dir)?;
             issue_shas.push(sha);
         }
         self.staging.write_issues_link(&issue_shas)?;
@@ -1988,6 +1988,7 @@ mod tests {
                 author: "user:t",
                 status: IssueStatus::Open,
                 evidence: &[],
+                replace_key: None,
             })
             .unwrap();
 
@@ -2119,6 +2120,179 @@ mod tests {
             ))
             .await,
             1
+        );
+    }
+
+    /// `replace_named()` and `replace_keyed(key)` store a replace key.
+    /// A later scan's write under the same key is a new commit of the
+    /// live issue, with the write's whole state, and the scan links
+    /// that commit. A second write in one scan replaces the staged one.
+    #[tokio::test]
+    async fn issues_written_under_a_replace_key_replace_the_live_issue() {
+        use gage_store::{ChangeEvent, IssueStatus, IssueStore};
+
+        const SCANNER: &str = r###"
+            use gage::{scan, write_issue, write_note};
+
+            pub const SCANNER = #{
+                name: "replace",
+                description: "Replace",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let note = None;
+                for s in scan().sessions().await {
+                    note = Some(write_note("empty-thinking", true)
+                        .for_session_line(s.id, 1)
+                        .await?);
+                }
+                let note = note.unwrap();
+                let first = write_issue("hidden-thinking", "Hidden", "first")
+                    .replace_named()
+                    .evidence(note)
+                    .await?;
+                let i = write_issue("hidden-thinking", "Hidden", "second")
+                    .replace_named()
+                    .evidence(note)
+                    .await?;
+                println!("{} {} {:?} {}", i.id == first.id, i.status, i.replace_key, i.evidence.len());
+                let k = write_issue("per-session", "Per session", "")
+                    .replace_keyed(("per-session", 7))
+                    .await?;
+                println!("{:?}", k.replace_key);
+                Ok(())
+            }
+        "###;
+        const SESSION: &str = concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+        );
+
+        let (tmp, store) = open_store();
+        let (_, dataset_sha, _) = seeded_dataset(tmp.path(), &store, SESSION);
+        let (_dir, compiled) = compile_source(SCANNER);
+        let compiled = compiled.unwrap();
+        let run = |n: u32| {
+            let store = &store;
+            let compiled = &compiled;
+            let root = tmp.path().join(format!("staging{n}"));
+            let dataset_sha = dataset_sha.clone();
+            async move {
+                let mut events = Vec::new();
+                let config = ScanConfig {
+                    staging_root: &root,
+                    gage_version: "test-version",
+                    dataset: Some(&dataset_sha),
+                    jobs: 1,
+                };
+                let outcome = scan(
+                    store,
+                    &config,
+                    std::slice::from_ref(compiled),
+                    &CancellationToken::new(),
+                    |e| events.push(e),
+                )
+                .await
+                .unwrap();
+                assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+                assert_eq!(
+                    outputs(&events),
+                    [
+                        &Output::Println("true open Some(\"hidden-thinking\") 1".into()),
+                        &Output::Println("Some(\"per-session:7\")".into()),
+                    ]
+                );
+                outcome
+            }
+        };
+
+        let first = run(1).await;
+        let issues = IssueStore::from(&store);
+        let record = ScanStore::from(&store).get(&first.id).unwrap();
+        assert_eq!(record.content.issues.len(), 2);
+        let mut written: Vec<_> = record
+            .content
+            .issues
+            .iter()
+            .map(|sha| issues.at_commit(sha).unwrap())
+            .collect();
+        written.sort_by(|a, b| a.name.cmp(&b.name));
+        let hidden = written[0].clone();
+        assert_eq!(hidden.name, "hidden-thinking");
+        assert_eq!(hidden.replace_key.as_deref(), Some("hidden-thinking"));
+        assert_eq!(
+            hidden.description.as_deref(),
+            Some("second"),
+            "the second write in the scan replaced the first staged one"
+        );
+        assert_eq!(hidden.changes.len(), 1);
+        assert_eq!(hidden.evidence, [record.content.notes[0].clone()]);
+        let per_session = written[1].clone();
+        assert_eq!(per_session.replace_key.as_deref(), Some("per-session:7"));
+
+        issues
+            .set_status(&hidden.id, IssueStatus::Closed, None, "user:t", None)
+            .unwrap();
+
+        let second = run(2).await;
+        let record = ScanStore::from(&store).get(&second.id).unwrap();
+        assert_eq!(record.content.issues.len(), 2);
+        let parents = store.read_commit(&second.commit_sha).unwrap().parents;
+        for sha in &record.content.issues {
+            assert!(parents.contains(sha), "issue {sha} is a scan parent");
+        }
+        let mut written: Vec<_> = record
+            .content
+            .issues
+            .iter()
+            .map(|sha| issues.at_commit(sha).unwrap())
+            .collect();
+        written.sort_by(|a, b| a.name.cmp(&b.name));
+        let replaced = &written[0];
+        assert_eq!(replaced.id, hidden.id, "the same issue");
+        assert_ne!(replaced.commit_sha, hidden.commit_sha, "a new commit of it");
+        assert_eq!(replaced.status, IssueStatus::Open);
+        assert_eq!(replaced.scan.as_deref(), Some(second.id.as_str()));
+        assert_eq!(
+            replaced.evidence,
+            [record.content.notes[0].clone()],
+            "the evidence is the second scan's note alone"
+        );
+        assert_eq!(
+            replaced
+                .changes
+                .iter()
+                .map(|c| (c.event, c.from_status, c.to_status))
+                .collect::<Vec<_>>(),
+            [
+                (ChangeEvent::Create, None, Some(IssueStatus::Open)),
+                (
+                    ChangeEvent::Status,
+                    Some(IssueStatus::Open),
+                    Some(IssueStatus::Closed)
+                ),
+                (
+                    ChangeEvent::Status,
+                    Some(IssueStatus::Closed),
+                    Some(IssueStatus::Open)
+                ),
+            ]
+        );
+        assert_eq!(
+            issues.get(&hidden.id).unwrap().commit_sha,
+            replaced.commit_sha
+        );
+        let per_session_again = &written[1];
+        assert_eq!(per_session_again.id, per_session.id);
+        assert_eq!(
+            per_session_again.changes.last().unwrap().event,
+            ChangeEvent::Edit
+        );
+        assert_eq!(
+            issues.query().name("hidden-thinking").count().unwrap(),
+            1,
+            "no second issue under the name"
         );
     }
 

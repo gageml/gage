@@ -1,17 +1,23 @@
 //! Issue objects: `gage::issue 1`, reached through [`IssueStore`].
 //!
 //! Content is `attrs.json` (name, title, author, status, and the
-//! optional `status_reason` and `scan`), the description as
-//! `description.txt`, `evidence.link` naming the commits of the notes
-//! the issue cites, and `changes/<ulid>/` holding one entry per
-//! event: `attrs.json` with the event fields and an optional
-//! `message.txt`. `attrs.json` is the state; `changes/` is the
-//! history. A status change or a comment is an edit commit that
+//! optional `status_reason`, `scan`, and `replace_key`), the
+//! description as `description.txt`, `evidence.link` naming the
+//! commits of the notes the issue cites, and `changes/<ulid>/` holding
+//! one entry per event: `attrs.json` with the event fields and an
+//! optional `message.txt`. `attrs.json` is the state; `changes/` is
+//! the history. A status change or a comment is an edit commit that
 //! rewrites `attrs.json` as needed and appends one change entry. An
 //! issue has no target: a session it concerns is reached through the
 //! notes it cites. Tree construction, commit parents, edits, and
 //! tombstones are the generic object model's job; see
 //! [`crate::object`].
+//!
+//! `replace_key` is the writer's own identity for the issue. A later
+//! write under the same key replaces the live issue's state with a
+//! new commit instead of creating a second issue: title, description,
+//! evidence, and status are the new write's, and the prior state
+//! stays in the commit chain and `changes/`.
 
 use std::fmt;
 use std::fs;
@@ -32,7 +38,7 @@ use crate::{Store, StoreError};
 pub const OBJECT_TYPE: &str = "gage::issue";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from an issue's `attrs.json`.
-pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "status"];
+pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "status", "replace_key"];
 const ATTRS_FILE: &str = "attrs.json";
 const DESCRIPTION_FILE: &str = "description.txt";
 const EVIDENCE_LINK: &str = "evidence.link";
@@ -42,6 +48,10 @@ const MESSAGE_FILE: &str = "message.txt";
 /// to commits and writes `evidence.link`; the ids may name notes the
 /// same scan staged, which have no commit until apply.
 const STAGED_EVIDENCE_FILE: &str = "evidence";
+/// Staging only: present when the staged tree replaces a live issue,
+/// holding the commit the writer replaced. Apply writes the tree as a
+/// new commit of that issue.
+const STAGED_PARENT_FILE: &str = "parent";
 
 /// Issue operations over an opened store.
 pub struct IssueStore<'a> {
@@ -178,6 +188,9 @@ pub struct IssueInput<'a> {
     /// must be a live note; its current commit is linked. Repeats are
     /// linked once.
     pub evidence: &'a [String],
+    /// The writer's identity for the issue, stored as `replace_key`.
+    /// `None` means no later write replaces this issue.
+    pub replace_key: Option<&'a str>,
 }
 
 /// One entry under `changes/`, decoded.
@@ -212,6 +225,7 @@ pub struct IssueFull {
     pub status_reason: Option<StatusReason>,
     /// The scan the issue was written during, from `attrs.scan`
     pub scan: Option<String>,
+    pub replace_key: Option<String>,
     /// Commit SHAs from `evidence.link`, in file order
     pub evidence: Vec<String>,
     /// The change entries, oldest first
@@ -233,9 +247,13 @@ pub struct IssueStaged {
     pub status: IssueStatus,
     /// The staging scan's id, from `attrs.scan`
     pub scan: Option<String>,
+    pub replace_key: Option<String>,
     /// The cited note ids, in citation order
     pub evidence: Vec<String>,
-    /// The time the issue was staged, from the create change's ULID
+    /// The commit this write replaces, when it replaces a live issue
+    pub replaces: Option<String>,
+    /// The time the issue was staged, from the first staged change's
+    /// ULID
     pub created_ms: i64,
 }
 
@@ -250,6 +268,8 @@ struct IssueAttrs {
     status_reason: Option<StatusReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replace_key: Option<String>,
 }
 
 /// The `changes/<ulid>/attrs.json` shape.
@@ -298,37 +318,37 @@ impl IssueStore<'_> {
     ) -> Result<(), StoreError> {
         validate_input(input)?;
         let attrs = create_attrs(input, Some(scan));
-        let write = |path: &Path, bytes: &[u8]| -> Result<(), StoreError> {
-            fs::write(path, bytes).map_err(|e| StoreError::Write {
-                path: path.to_path_buf(),
-                source: e,
-            })
-        };
-        let change_dir = dir.join(CHANGES_DIR).join(new_ulid());
-        fs::create_dir_all(&change_dir).map_err(|e| StoreError::Write {
-            path: change_dir.clone(),
-            source: e,
-        })?;
-        write(&dir.join(ATTRS_FILE), &json_line(&attrs, "issue attrs")?)?;
-        if let Some(text) = input.description {
-            write(&dir.join(DESCRIPTION_FILE), text.as_bytes())?;
-        }
-        let mut ids: Vec<&str> = Vec::new();
-        for id in input.evidence {
-            if !ids.contains(&id.as_str()) {
-                ids.push(id);
-            }
-        }
-        if !ids.is_empty() {
-            let content: String = ids.iter().map(|id| format!("{id}\n")).collect();
-            write(&dir.join(STAGED_EVIDENCE_FILE), content.as_bytes())?;
-        }
-        write(
-            &change_dir.join(ATTRS_FILE),
-            &json_line(&create_change(input), "issue change")?,
-        )?;
         let _ = id;
-        Ok(())
+        write_staged(dir, &attrs, input, &create_change(input), None)
+    }
+
+    /// Write a replacement of the live issue `prev` as a staged tree
+    /// under `dir`, for a scan to apply as a new commit of that issue.
+    /// The tree carries the new write's whole state; the change entry
+    /// is a `status` event when the status differs from `prev`'s and
+    /// an `edit` event otherwise. `dir` is named by `prev`'s id.
+    pub fn stage_replace(
+        &self,
+        dir: &Path,
+        input: &IssueInput,
+        scan: &str,
+        prev: &IssueFull,
+    ) -> Result<(), StoreError> {
+        validate_input(input)?;
+        let attrs = create_attrs(input, Some(scan));
+        let change = replace_change(input, prev.status);
+        write_staged(dir, &attrs, input, &change, Some(&prev.commit_sha))
+    }
+
+    /// Apply the issue staged under `dir`: create it, or when the
+    /// tree replaces a live issue, write it as that issue's new
+    /// commit. Returns `(id, commit SHA)`.
+    pub fn apply_staged(&self, dir: &Path) -> Result<(String, String), StoreError> {
+        let staged = read_staged_dir(dir)?;
+        match staged.replaces {
+            Some(_) => self.replace_staged(staged),
+            None => self.create_staged(staged),
+        }
     }
 
     /// Create the issue staged under `dir` by [`IssueStore::stage`].
@@ -336,29 +356,12 @@ impl IssueStore<'_> {
     /// resolved to its current commit; a note that does not exist or
     /// is deleted is an error. Idempotent: an issue whose ref already
     /// exists is not rewritten. Returns `(id, commit SHA)`.
-    pub fn create_staged(&self, dir: &Path) -> Result<(String, String), StoreError> {
-        let staged = read_staged_dir(dir)?;
+    fn create_staged(&self, staged: StagedIssue) -> Result<(String, String), StoreError> {
         if let Some(sha) = self.store.rev_parse(&object_ref(&staged.id))? {
             return Ok((staged.id, sha));
         }
         let evidence = self.resolve_evidence(&staged.evidence)?;
-        let path = self.store.path();
-        let mut entries: Vec<(String, String)> = Vec::with_capacity(staged.changes.len());
-        for (ulid, change_json, message) in &staged.changes {
-            entries.push((
-                ulid.clone(),
-                change_entry(path, change_json, message.as_deref())?,
-            ));
-        }
-        let inputs: Vec<TreeInput<'_>> = entries
-            .iter()
-            .map(|(ulid, sha)| TreeInput {
-                mode: "040000",
-                sha,
-                name: ulid,
-            })
-            .collect();
-        let changes_sha = mktree(path, &inputs)?;
+        let changes_sha = self.staged_changes_tree(&[], &staged.changes)?;
         let tree = build_tree(
             &staged.attrs,
             staged.description.as_deref(),
@@ -372,6 +375,71 @@ impl IssueStore<'_> {
         Ok((staged.id, sha))
     }
 
+    /// Write the tree staged by [`IssueStore::stage_replace`] as a new
+    /// commit of the live issue, from its current commit, with the
+    /// staged change entries appended to its history. Idempotent: an
+    /// issue whose history already holds the staged entries is not
+    /// rewritten. Returns `(id, commit SHA)`.
+    fn replace_staged(&self, staged: StagedIssue) -> Result<(String, String), StoreError> {
+        let object = self.store.resolve_typed(&staged.id, OBJECT_TYPE)?;
+        let existing = match object.tree.subtrees.get(CHANGES_DIR) {
+            Some(sha) => self.store.read_tree(sha)?,
+            None => Vec::new(),
+        };
+        let applied = staged
+            .changes
+            .iter()
+            .all(|(ulid, _, _)| existing.iter().any(|e| &e.name == ulid));
+        if applied {
+            return Ok((staged.id, object.commit_sha));
+        }
+        let evidence = self.resolve_evidence(&staged.evidence)?;
+        let changes_sha = self.staged_changes_tree(&existing, &staged.changes)?;
+        let tree = build_tree(
+            &staged.attrs,
+            staged.description.as_deref(),
+            evidence,
+            changes_sha,
+        )?;
+        let message = format!("issue replace: {}", staged.attrs.name);
+        match self.store.edit(&object, &tree, &message)? {
+            EditOutcome::Written(sha) => Ok((staged.id, sha)),
+            // A change entry is new content, so an edit always writes
+            EditOutcome::Unchanged => Ok((staged.id, object.commit_sha)),
+        }
+    }
+
+    /// The `changes/` tree: `existing` entries plus the staged ones,
+    /// each written as an entry tree.
+    fn staged_changes_tree(
+        &self,
+        existing: &[TreeEntry],
+        staged: &[StagedChange],
+    ) -> Result<String, StoreError> {
+        let path = self.store.path();
+        let mut entries: Vec<(String, String)> = Vec::with_capacity(staged.len());
+        for (ulid, change_json, message) in staged {
+            entries.push((
+                ulid.clone(),
+                change_entry(path, change_json, message.as_deref())?,
+            ));
+        }
+        let mut inputs: Vec<TreeInput<'_>> = existing
+            .iter()
+            .map(|e| TreeInput {
+                mode: &e.mode,
+                sha: &e.sha,
+                name: &e.name,
+            })
+            .collect();
+        inputs.extend(entries.iter().map(|(ulid, sha)| TreeInput {
+            mode: "040000",
+            sha,
+            name: ulid,
+        }));
+        mktree(path, &inputs)
+    }
+
     /// Read the issue staged under `dir` by [`IssueStore::stage`], as
     /// a running scan reads its own issues before apply.
     pub fn read_staged(&self, dir: &Path) -> Result<IssueStaged, StoreError> {
@@ -381,7 +449,7 @@ impl IssueStore<'_> {
             .first()
             .and_then(|(ulid, _, _)| ulid_timestamp_ms(ulid))
             .ok_or_else(|| {
-                StoreError::Parse(format!("staged issue {}: missing create change", staged.id))
+                StoreError::Parse(format!("staged issue {}: missing change entry", staged.id))
             })?;
         Ok(IssueStaged {
             id: staged.id,
@@ -391,7 +459,9 @@ impl IssueStore<'_> {
             author: staged.attrs.author,
             status: staged.attrs.status,
             scan: staged.attrs.scan,
+            replace_key: staged.attrs.replace_key,
             evidence: staged.evidence,
+            replaces: staged.replaces,
             created_ms,
         })
     }
@@ -579,6 +649,7 @@ impl IssueStore<'_> {
             status: attrs.status,
             status_reason: attrs.status_reason,
             scan: attrs.scan,
+            replace_key: attrs.replace_key,
             evidence: object
                 .tree
                 .links
@@ -674,6 +745,12 @@ impl<'a> IssueQuery<'a> {
         self
     }
 
+    /// Select issues whose `replace_key` equals `key`.
+    pub fn replace_key(mut self, key: &str) -> Self {
+        self.query.attrs.push(("replace_key", key.to_string()));
+        self
+    }
+
     pub fn order(mut self, order: Order) -> Self {
         self.query.order = order;
         self
@@ -761,6 +838,7 @@ fn create_attrs(input: &IssueInput, scan: Option<&str>) -> IssueAttrs {
         status: input.status,
         status_reason: None,
         scan: scan.map(String::from),
+        replace_key: input.replace_key.map(String::from),
     }
 }
 
@@ -772,6 +850,72 @@ fn create_change(input: &IssueInput) -> ChangeAttrs {
         to_status: Some(input.status),
         reason: None,
     }
+}
+
+/// The change entry a replacement records: a `status` event when the
+/// write's status differs from `prev_status`, an `edit` otherwise.
+fn replace_change(input: &IssueInput, prev_status: IssueStatus) -> ChangeAttrs {
+    if input.status == prev_status {
+        return ChangeAttrs {
+            author: input.author.to_string(),
+            event: ChangeEvent::Edit,
+            from_status: None,
+            to_status: None,
+            reason: None,
+        };
+    }
+    ChangeAttrs {
+        author: input.author.to_string(),
+        event: ChangeEvent::Status,
+        from_status: Some(prev_status),
+        to_status: Some(input.status),
+        reason: None,
+    }
+}
+
+/// Write a staged issue tree under `dir`: the attrs, the description,
+/// the cited note ids once each, one change entry, and, for a
+/// replacement, the replaced commit.
+fn write_staged(
+    dir: &Path,
+    attrs: &IssueAttrs,
+    input: &IssueInput,
+    change: &ChangeAttrs,
+    replaces: Option<&str>,
+) -> Result<(), StoreError> {
+    let write = |path: &Path, bytes: &[u8]| -> Result<(), StoreError> {
+        fs::write(path, bytes).map_err(|e| StoreError::Write {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    };
+    let change_dir = dir.join(CHANGES_DIR).join(new_ulid());
+    fs::create_dir_all(&change_dir).map_err(|e| StoreError::Write {
+        path: change_dir.clone(),
+        source: e,
+    })?;
+    write(&dir.join(ATTRS_FILE), &json_line(attrs, "issue attrs")?)?;
+    if let Some(text) = input.description {
+        write(&dir.join(DESCRIPTION_FILE), text.as_bytes())?;
+    }
+    let mut ids: Vec<&str> = Vec::new();
+    for id in input.evidence {
+        if !ids.contains(&id.as_str()) {
+            ids.push(id);
+        }
+    }
+    if !ids.is_empty() {
+        let content: String = ids.iter().map(|id| format!("{id}\n")).collect();
+        write(&dir.join(STAGED_EVIDENCE_FILE), content.as_bytes())?;
+    }
+    if let Some(sha) = replaces {
+        write(&dir.join(STAGED_PARENT_FILE), format!("{sha}\n").as_bytes())?;
+    }
+    write(
+        &change_dir.join(ATTRS_FILE),
+        &json_line(change, "issue change")?,
+    )?;
+    Ok(())
 }
 
 /// One-line JSON with a trailing newline, the encoding the store uses
@@ -835,6 +979,10 @@ fn changes_tree(
     mktree(store_path, &entries)
 }
 
+/// A staged change entry: `(ulid, attrs.json bytes, message.txt
+/// bytes)`.
+type StagedChange = (String, Vec<u8>, Option<Vec<u8>>);
+
 /// An issue's staged files, decoded.
 struct StagedIssue {
     id: String,
@@ -842,8 +990,10 @@ struct StagedIssue {
     description: Option<String>,
     /// Cited note ids
     evidence: Vec<String>,
-    /// `(ulid, attrs.json bytes, message.txt bytes)`, in ULID order
-    changes: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
+    /// The replaced commit, when the tree replaces a live issue
+    replaces: Option<String>,
+    /// In ULID order
+    changes: Vec<StagedChange>,
 }
 
 /// Decode the files [`IssueStore::stage`] wrote under `dir`. The
@@ -875,6 +1025,8 @@ fn read_staged_dir(dir: &Path) -> Result<StagedIssue, StoreError> {
             .collect(),
         None => Vec::new(),
     };
+    let replaces = read_optional(&dir.join(STAGED_PARENT_FILE))?
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string());
     let changes_dir = dir.join(CHANGES_DIR);
     let mut ulids: Vec<String> = match fs::read_dir(&changes_dir) {
         Ok(entries) => entries
@@ -912,6 +1064,7 @@ fn read_staged_dir(dir: &Path) -> Result<StagedIssue, StoreError> {
         attrs,
         description,
         evidence,
+        replaces,
         changes,
     })
 }
@@ -980,6 +1133,7 @@ mod tests {
                 author: "user:test",
                 status,
                 evidence,
+                replace_key: None,
             })
             .unwrap()
     }
@@ -1070,6 +1224,7 @@ mod tests {
             author: "user:test",
             status: IssueStatus::Closed,
             evidence: &[],
+            replace_key: None,
         });
         assert!(matches!(closed, Err(StoreError::IssueInput(_))));
 
@@ -1080,6 +1235,7 @@ mod tests {
             author: "user:test",
             status: IssueStatus::Open,
             evidence: &["doesnotexist".to_string()],
+            replace_key: None,
         });
         assert!(matches!(missing, Err(StoreError::ObjectNotFound(_))));
 
@@ -1092,6 +1248,7 @@ mod tests {
             author: "user:test",
             status: IssueStatus::Open,
             evidence: &[gone.clone()],
+            replace_key: None,
         });
         assert!(matches!(deleted, Err(StoreError::ObjectDeleted(id)) if id == gone));
     }
@@ -1240,6 +1397,7 @@ mod tests {
             author: "task:s:t",
             status: IssueStatus::Pending,
             evidence: &["NOTELATER".to_string(), "NOTELATER".to_string()],
+            replace_key: None,
         };
         let dir = tmp.path().join("issues").join("ISSUE1");
         issues.stage(&dir, "ISSUE1", &input, "SCAN1").unwrap();
@@ -1261,7 +1419,7 @@ mod tests {
         // The cited note does not exist yet: apply fails and writes
         // nothing
         assert!(matches!(
-            issues.create_staged(&dir),
+            issues.apply_staged(&dir),
             Err(StoreError::ObjectNotFound(_))
         ));
         assert!(store.rev_parse(&object_ref("ISSUE1")).unwrap().is_none());
@@ -1270,7 +1428,7 @@ mod tests {
         let note_id = note(&store, "finding.code");
         let note_commit = rev_parse(&store, &note_id);
         fs::write(dir.join("evidence"), format!("{note_id}\n")).unwrap();
-        let (id, sha) = issues.create_staged(&dir).unwrap();
+        let (id, sha) = issues.apply_staged(&dir).unwrap();
         assert_eq!(id, "ISSUE1");
         let full = issues.at_commit(&sha).unwrap();
         assert_eq!(full.evidence, [note_commit.clone()]);
@@ -1286,7 +1444,116 @@ mod tests {
                 .contains(&note_commit)
         );
         // Idempotent
-        assert_eq!(issues.create_staged(&dir).unwrap(), (id, sha));
+        assert_eq!(issues.apply_staged(&dir).unwrap(), (id, sha));
+    }
+
+    #[test]
+    fn stage_replace_and_apply_write_a_new_commit_of_the_prior_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let issues = IssueStore::from(&store);
+        let first_note = note(&store, "empty-thinking");
+        let prior_id = issues
+            .create(IssueInput {
+                name: "hidden-thinking",
+                title: "Thinking hidden",
+                description: Some("first"),
+                author: "task:s:report",
+                status: IssueStatus::Open,
+                evidence: &[first_note.clone()],
+                replace_key: Some("hidden-thinking"),
+            })
+            .unwrap();
+        issues
+            .set_status(&prior_id, IssueStatus::Closed, None, "user:test", None)
+            .unwrap();
+        let prior = issues.get(&prior_id).unwrap();
+        assert_eq!(prior.replace_key.as_deref(), Some("hidden-thinking"));
+        assert_eq!(
+            issues
+                .query()
+                .replace_key("hidden-thinking")
+                .tips()
+                .unwrap()
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            [prior_id.as_str()],
+            "the key is indexed"
+        );
+
+        let second_note = note(&store, "empty-thinking");
+        let input = IssueInput {
+            name: "hidden-thinking",
+            title: "Thinking hidden again",
+            description: Some("second"),
+            author: "task:s:report",
+            status: IssueStatus::Open,
+            evidence: &[second_note.clone()],
+            replace_key: Some("hidden-thinking"),
+        };
+        let dir = tmp.path().join("issues").join(&prior_id);
+        issues.stage_replace(&dir, &input, "SCAN2", &prior).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("parent")).unwrap().trim(),
+            prior.commit_sha
+        );
+        let staged = issues.read_staged(&dir).unwrap();
+        assert_eq!(staged.id, prior_id);
+        assert_eq!(staged.replaces.as_deref(), Some(prior.commit_sha.as_str()));
+        assert_eq!(staged.replace_key.as_deref(), Some("hidden-thinking"));
+
+        let (id, sha) = issues.apply_staged(&dir).unwrap();
+        assert_eq!(id, prior_id);
+        assert_ne!(sha, prior.commit_sha);
+        let full = issues.at_commit(&sha).unwrap();
+        assert_eq!(full.status, IssueStatus::Open);
+        assert_eq!(full.status_reason, None);
+        assert_eq!(full.title, "Thinking hidden again");
+        assert_eq!(full.description.as_deref(), Some("second"));
+        assert_eq!(full.scan.as_deref(), Some("SCAN2"));
+        assert_eq!(
+            full.evidence,
+            [rev_parse(&store, &second_note)],
+            "evidence is the new write's, not appended"
+        );
+        assert_eq!(
+            full.changes
+                .iter()
+                .map(|c| (c.event, c.from_status, c.to_status))
+                .collect::<Vec<_>>(),
+            [
+                (ChangeEvent::Create, None, Some(IssueStatus::Open)),
+                (
+                    ChangeEvent::Status,
+                    Some(IssueStatus::Open),
+                    Some(IssueStatus::Closed)
+                ),
+                (
+                    ChangeEvent::Status,
+                    Some(IssueStatus::Closed),
+                    Some(IssueStatus::Open)
+                ),
+            ],
+            "the prior history is kept and the replacement appends its entry"
+        );
+        assert_eq!(
+            store.read_commit(&sha).unwrap().parents[0],
+            prior.commit_sha,
+            "the new commit is a version of the prior issue"
+        );
+        assert_eq!(issues.get(&prior_id).unwrap().commit_sha, sha);
+        // Idempotent
+        assert_eq!(issues.apply_staged(&dir).unwrap(), (id, sha));
+
+        // A replacement with the same status records an edit
+        let same = issues.get(&prior_id).unwrap();
+        let dir2 = tmp.path().join("issues2").join(&prior_id);
+        issues.stage_replace(&dir2, &input, "SCAN3", &same).unwrap();
+        let (_, sha3) = issues.apply_staged(&dir2).unwrap();
+        let full = issues.at_commit(&sha3).unwrap();
+        assert_eq!(full.changes.last().unwrap().event, ChangeEvent::Edit);
+        assert_eq!(full.scan.as_deref(), Some("SCAN3"));
     }
 
     #[test]
@@ -1304,6 +1571,7 @@ mod tests {
                 author: "task:hidden-thinking:report",
                 status: IssueStatus::Open,
                 evidence: &[],
+                replace_key: None,
             })
             .unwrap();
 

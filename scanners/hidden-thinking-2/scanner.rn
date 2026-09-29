@@ -119,14 +119,15 @@ pub async fn report() {
     // of an issue
     if let Some(note) = latest_msg_note(notes) {
         if note.value {
-            // `hidden-thinking` is a singleton. The notes are this
-            // scan's, so each is new evidence: an existing issue, open
-            // or closed, is reopened with it
+            // The notes are this scan's, so each is new evidence. The
+            // write replaces the live `hidden-thinking` issue, reopening
+            // a closed one, rather than adding a second
             write_issue(
                 "hidden-thinking",
                 "Thinking blocks hidden in recent session",
                 include_str!("issue-description.md"),
             )
+            .replace_named()
             .evidence(note)
             .await?;
         }

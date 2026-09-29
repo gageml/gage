@@ -41,6 +41,9 @@ fn issue_schema() -> SchemaRef {
         // Provenance
         // The scan the issue was written during
         Field::new("scan", DataType::Utf8, true),
+        // The writer's identity for the issue; a later write under the
+        // same key replaces it
+        Field::new("replace_key", DataType::Utf8, true),
         // System
         // Shortest prefix of `id` unique among every live issue
         Field::new("id_prefix", DataType::Utf8, false),
@@ -105,6 +108,7 @@ impl BatchSource for IssueSource {
         let mut createds = TimestampMillisecondBuilder::with_capacity(len);
         let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
         let mut scans = StringBuilder::new();
+        let mut replace_keys = StringBuilder::new();
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
         let mut locators = StringBuilder::with_capacity(len, len * 44);
         let mut commits = StringBuilder::with_capacity(len, len * 40);
@@ -120,6 +124,7 @@ impl BatchSource for IssueSource {
             createds.append_value(issue.created_ms);
             modifieds.append_value(issue.modified_ms);
             scans.append_option(issue.scan.as_deref());
+            replace_keys.append_option(issue.replace_key.as_deref());
             let n = prefix_len.get(&issue.id).copied().unwrap_or(issue.id.len());
             id_prefixes.append_value(issue.id.chars().take(n).collect::<String>());
             locators.append_value(format!("git:{}", issue.commit_sha));
@@ -139,6 +144,7 @@ impl BatchSource for IssueSource {
                 Arc::new(createds.finish().with_timezone("UTC")),
                 Arc::new(modifieds.finish().with_timezone("UTC")),
                 Arc::new(scans.finish()),
+                Arc::new(replace_keys.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),
                 Arc::new(commits.finish()),
