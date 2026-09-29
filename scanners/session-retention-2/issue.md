@@ -7,8 +7,8 @@ applies its default and deletes transcripts after **30 days**.
 
 Gage analyzes your session history. Once a transcript is deleted, the sessions
 it contained can no longer be scanned, queried, or reviewed --- the underlying
-data is gone. The evidence below shows that `cleanupPeriodDays` is not set, so
-the 30-day default is in effect.
+data is gone. The scan read your user `settings.json` and found no
+`cleanupPeriodDays`, so the 30-day default is in effect.
 
 This is an awareness finding: if 30 days is acceptable to you, you can close
 this issue. Otherwise, set an explicit retention period below.
@@ -46,8 +46,8 @@ definition. There's no need to verify beyond perhaps double checking the file.
 
 ## LLM notes
 
-The evidence note's metadata has `configured: false`, confirming
-`cleanupPeriodDays` is unset and the 30-day default applies.
+This issue is opened when `cleanupPeriodDays` is absent from the user
+`settings.json` at scan time; it cites no evidence notes.
 
 Do not pick a retention period unilaterally. Present the user with the
 reasonable choices from the Fix section above --- 90, 365, or 3650 days, or a
@@ -59,6 +59,5 @@ To keep history effectively forever, use a large day count. Do not assume a
 value like `0` or `-1` disables cleanup unless you have verified it; treat that
 as unknown.
 
-After applying the change, re-run `gage scan -s session-retention -y` to confirm
-the issue does not reopen, and confirm with the user before closing it as
-completed.
+After applying the change, confirm with the user before closing the issue as
+completed. A later scan does not reopen a closed issue.

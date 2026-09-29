@@ -33,6 +33,7 @@
 //! files are a scanner's source ([`source`]). Task orchestration lives
 //! in `gage-scan2`.
 
+mod attachment;
 mod io;
 mod issue;
 mod log;
@@ -45,6 +46,7 @@ mod validate;
 use rune::{Context, ContextError};
 use tokio::sync::mpsc;
 
+pub use attachment::{Attachment, AttachmentFile, Attachments};
 pub use scan::{
     SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions, StagingPaths,
 };
@@ -139,7 +141,8 @@ pub(crate) fn send(output: Output) {
 /// The Rune context every scanner compiles against: the standard
 /// library without its stdio, this crate's `print`/`println` and
 /// `log` macros, `gage::scan` and the values it returns, the message
-/// and entry queries on a session, `gage::write_note`,
+/// and entry queries on a session, `scan().attachments()` and the
+/// values it returns, `gage::write_note`,
 /// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,
 /// `gage::watermark`, and the include macros
 /// from `gage-runtime`. Every file-reading facility
@@ -150,6 +153,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(log::module()?)?;
     context.install(scan::module()?)?;
     context.install(scan::types_module()?)?;
+    context.install(attachment::types_module()?)?;
     context.install(query::types_module()?)?;
     context.install(note::module()?)?;
     context.install(note::types_module()?)?;

@@ -19,6 +19,11 @@
 //! as a replacement of it: apply writes the new state as that issue's
 //! next commit, and the scan links that commit. A second write under
 //! the same key in one scan replaces the first staged one.
+//! `.keep_named()` and `.keep_keyed(key)` give the issue the same key
+//! with the opposite policy: when an issue under the key exists,
+//! staged by this scan or live in the store in any status, nothing is
+//! written and the existing issue is returned. A closed issue counts,
+//! so a condition reported once and closed is not reported again.
 //!
 //! `issues()` is an [`IssuesQuery`]; awaiting it reads every live
 //! issue in the store plus the issues this scan has staged, since a
@@ -33,7 +38,9 @@ use std::path::PathBuf;
 
 use gage_core::uuid::new_uuid;
 use gage_runtime::error::Error;
-use gage_store::{IssueFull, IssueInput, IssueStatus, IssueStore, NOTE_TYPE, StoreError};
+use gage_store::{
+    IssueFull, IssueInput, IssueStaged, IssueStatus, IssueStore, NOTE_TYPE, Store, StoreError,
+};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
@@ -57,6 +64,8 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(IssueWrite::pending)?;
     m.function_meta(IssueWrite::replace_named)?;
     m.function_meta(IssueWrite::replace_keyed)?;
+    m.function_meta(IssueWrite::keep_named)?;
+    m.function_meta(IssueWrite::keep_keyed)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: IssueWrite| async move {
         do_write_issue(w).await
     })?;
@@ -93,6 +102,18 @@ pub struct IssueWrite {
     /// The replace key as given; encoded at the await
     #[rune(skip)]
     replace_key: Option<Value>,
+    /// What a write does when an issue under the key exists
+    #[rune(skip)]
+    policy: KeyPolicy,
+}
+
+/// The action when the key names an existing issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyPolicy {
+    /// Stage this write as the existing issue's next state
+    Replace,
+    /// Write nothing and return the existing issue
+    Keep,
 }
 
 fn write_issue(name: &str, title: &str, description: &str) -> IssueWrite {
@@ -104,6 +125,7 @@ fn write_issue(name: &str, title: &str, description: &str) -> IssueWrite {
         evidence_error: None,
         status: IssueStatus::Open,
         replace_key: None,
+        policy: KeyPolicy::Replace,
     }
 }
 
@@ -147,6 +169,28 @@ impl IssueWrite {
     #[rune::function(instance)]
     fn replace_keyed(mut self, key: Value) -> Self {
         self.replace_key = Some(key);
+        self.policy = KeyPolicy::Replace;
+        self
+    }
+
+    /// Write nothing when an issue keyed by this issue's name exists,
+    /// in any status, and return it instead. The same as
+    /// `keep_keyed(name)`.
+    #[rune::function(instance)]
+    fn keep_named(mut self) -> Result<Self, VmError> {
+        self.replace_key = Some(rune::to_value(self.name.clone())?);
+        self.policy = KeyPolicy::Keep;
+        Ok(self)
+    }
+
+    /// Write nothing when an issue keyed by `key` exists, in any
+    /// status, and return it instead. `key` is a string, or a tuple
+    /// of strings and integers rendered colon-joined, and is stored
+    /// on the issue as `replace_key`.
+    #[rune::function(instance)]
+    fn keep_keyed(mut self, key: Value) -> Self {
+        self.replace_key = Some(key);
+        self.policy = KeyPolicy::Keep;
         self
     }
 }
@@ -213,6 +257,48 @@ pub struct Issue {
 }
 
 impl Issue {
+    /// A live issue read from the store, its evidence resolved to
+    /// note ids.
+    fn from_full(store: &Store, full: IssueFull) -> Result<Issue, VmError> {
+        let mut evidence = Vec::with_capacity(full.evidence.len());
+        for sha in &full.evidence {
+            let note = store
+                .read_header(sha)
+                .map_err(|e| VmError::panic(format!("issue {} evidence {sha}: {e}", full.id)))?;
+            evidence.push(note.id);
+        }
+        Ok(Issue {
+            id: full.id,
+            name: full.name,
+            title: full.title,
+            description: full.description,
+            author: full.author,
+            status: full.status.as_str().to_string(),
+            status_reason: full.status_reason.map(|r| r.as_str().to_string()),
+            scan: full.scan,
+            replace_key: full.replace_key,
+            evidence: rune::to_value(evidence).map_err(VmError::from)?,
+            created: full.created_ms,
+        })
+    }
+
+    /// An issue staged by this scan.
+    fn from_staged(staged: IssueStaged) -> Result<Issue, VmError> {
+        Ok(Issue {
+            id: staged.id,
+            name: staged.name,
+            title: staged.title,
+            description: staged.description,
+            author: staged.author,
+            status: staged.status.as_str().to_string(),
+            status_reason: None,
+            scan: staged.scan,
+            replace_key: staged.replace_key,
+            evidence: rune::to_value(staged.evidence).map_err(VmError::from)?,
+            created: staged.created_ms,
+        })
+    }
+
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
@@ -259,12 +345,34 @@ async fn do_write_issue(w: IssueWrite) -> Written {
     };
     let store = ctx.store.lock().await;
     let issues = IssueStore::from(&*store);
-    // A key names the issue to replace: the one this scan already
-    // staged under the key, else the live one in the store
+    // A key names the issue to replace or keep: the one this scan
+    // already staged under the key, else the live one in the store
     let prev = match &replace_key {
         Some(key) => prior_issue(&ctx, &issues, key)?,
         None => None,
     };
+    if w.policy == KeyPolicy::Keep {
+        match prev {
+            Some(Prior::Staged(id)) => {
+                let dir = ctx.paths.issues_dir.join(&id);
+                let staged = issues
+                    .read_staged(&dir)
+                    .map_err(|e| VmError::panic(format!("staged issue {id}: {e}")))?;
+                tracing::debug!(id, name = w.name, replace_key, "write_issue: kept staged");
+                return Ok(Ok(Issue::from_staged(staged)?));
+            }
+            Some(Prior::Stored(live)) => {
+                tracing::debug!(
+                    id = live.id,
+                    name = w.name,
+                    replace_key,
+                    "write_issue: kept"
+                );
+                return Ok(Ok(Issue::from_full(&store, *live)?));
+            }
+            None => {}
+        }
+    }
     let (id, staged) = match prev {
         Some(Prior::Staged(id)) => {
             let dir = ctx.paths.issues_dir.join(&id);
@@ -517,26 +625,7 @@ async fn stored_issues(ctx: &ScanContext) -> Result<Vec<Issue>, VmError> {
     let mut out = Vec::new();
     for record in records {
         let full = record.map_err(|e| VmError::panic(format!("issues: {e}")))?;
-        let mut evidence = Vec::with_capacity(full.evidence.len());
-        for sha in &full.evidence {
-            let note = store
-                .read_header(sha)
-                .map_err(|e| VmError::panic(format!("issue {} evidence {sha}: {e}", full.id)))?;
-            evidence.push(note.id);
-        }
-        out.push(Issue {
-            id: full.id,
-            name: full.name,
-            title: full.title,
-            description: full.description,
-            author: full.author,
-            status: full.status.as_str().to_string(),
-            status_reason: full.status_reason.map(|r| r.as_str().to_string()),
-            scan: full.scan,
-            replace_key: full.replace_key,
-            evidence: rune::to_value(evidence).map_err(VmError::from)?,
-            created: full.created_ms,
-        });
+        out.push(Issue::from_full(&store, full)?);
     }
     Ok(out)
 }
@@ -551,19 +640,7 @@ async fn staged_issues(ctx: &ScanContext) -> Result<Vec<Issue>, VmError> {
         let staged = issues
             .read_staged(&dir)
             .map_err(|e| VmError::panic(format!("staged issue {}: {e}", dir.display())))?;
-        out.push(Issue {
-            id: staged.id,
-            name: staged.name,
-            title: staged.title,
-            description: staged.description,
-            author: staged.author,
-            status: staged.status.as_str().to_string(),
-            status_reason: None,
-            scan: staged.scan,
-            replace_key: staged.replace_key,
-            evidence: rune::to_value(staged.evidence).map_err(VmError::from)?,
-            created: staged.created_ms,
-        });
+        out.push(Issue::from_staged(staged)?);
     }
     Ok(out)
 }

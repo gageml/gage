@@ -2,14 +2,11 @@
 // (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
 // the task names the action.
 //
-// Untagged code runs on the rethink runtime today. Code tagged
-// `// FUTURE` needs a facility the rethink runtime does not have yet.
-// Where the rethink design specifies the interface, FUTURE code is
-// written against it; otherwise it follows the legacy interface as a
-// placeholder. This file is a target, not a runnable scanner.
+// The user config reaches the scan as a dataset attachment named
+// `claude-config`, added with `gage attachment add claude-config
+// --root ~/.claude 'settings*.json' --dataset <DATASET>`. The scan
+// reads the attachment at the commit its dataset links.
 
-use gage::write_note;
-// FUTURE: attachments and issues are not in the rethink runtime
 use gage::{scan, write_issue};
 
 pub const SCANNER = #{
@@ -20,58 +17,40 @@ pub const SCANNER = #{
     // select it.
     tasks: #{
         check: #{
-            notes: #{
-                writes: #{
-                    "session-retention-policy.unset": include_str!(
-                        "unset-policy-note.md"
-                    ),
-                },
-            },
             issues: #{
                 writes: #{
                     "session-retention": "Session retention policy is unset",
                 },
             },
-            // FUTURE: the user config attachment, for the
-            // cleanupPeriodDays setting
-            attachments: #{ wants: ["config:"] },
         },
     },
 };
 
-/// Note and report an unset retention policy in the user config.
+/// Report an unset retention policy in the user config.
+///
+/// Reads `settings.json` from the `claude-config` attachment. Without
+/// the attachment or the file there is nothing to check. The issue is
+/// written once: a later scan that finds it in any status, closed
+/// included, writes nothing.
 pub async fn check() {
-    // FUTURE: the user config comes from the dataset's `config:`
-    // attachment. Designed: `scan().attachments("config")` lists the
-    // dataset-level attachments under the scheme; `file(key)` returns
-    // `Option`; `json()` is fallible. File keys are
-    // `<origin>/<relative path>`; the user config's key is assumed to
-    // be `user/.claude.json`.
-    let setting = None;
-    for a in scan().attachments("config").await? {
-        if let Some(f) = a.file("user/.claude.json") {
-            setting = f.json()?.get("cleanupPeriodDays");
+    for a in scan().attachments().name("claude-config").await {
+        let settings = match a.file("settings.json").await {
+            Some(f) => f.json()?,
+            None => {
+                log::info!("claude-config has no settings.json; skipping");
+                continue;
+            }
+        };
+        if settings.get("cleanupPeriodDays").is_some() {
+            continue;
         }
-    }
-    if setting.is_some() {
-        return Ok(());
-    }
-    // FUTURE: a scan target (`scan:<id>`); the runtime targets sessions
-    // only. Legacy `.keep_prev()` kept the prior note alongside this
-    // one; the rethink note object model decides.
-    let note = write_note("session-retention-policy.unset", true)
-        .for_scan()
+        write_issue(
+            "session-retention",
+            "Unset session retention policy - sessions may be unexpectedly deleted",
+            include_str!("issue.md"),
+        )
+        .keep_named()
         .await?;
-    // FUTURE: write_issue. Legacy `.keep_status()` left an existing
-    // issue's status alone; the rethink issue is an object whose
-    // status the writer sets, and how a re-report relates to the
-    // existing issue is undecided.
-    write_issue(
-        "session-retention",
-        "Unset session retention policy - sessions may be unexpectedly deleted",
-    )
-    .description(include_str!("issue.md"))
-    .evidence([#{ note, timestamp: note.created }])
-    .await?;
+    }
     Ok(())
 }

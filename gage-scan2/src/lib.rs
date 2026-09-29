@@ -2296,6 +2296,177 @@ mod tests {
         );
     }
 
+    /// `scan().attachments()` reads the dataset's linked attachments
+    /// at the commit the scan links; `.name()` filters; `file(key)`
+    /// reads content and `None` for an absent key.
+    #[tokio::test]
+    async fn attachments_are_read_from_the_scanned_dataset_commit() {
+        use gage_store::{AttachmentSpec, AttachmentStore};
+
+        const SCANNER: &str = r###"
+            use gage::scan;
+
+            pub const SCANNER = #{
+                name: "attach",
+                description: "Reads attachments",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let all = scan().attachments().await;
+                println!("{}", all.len());
+                for a in scan().attachments().name("cfg").await {
+                    println!("{} {:?}", a.name, a.files().await);
+                    let f = a.file("settings.json").await.unwrap();
+                    println!("{:?}", f.json()?.get("cleanupPeriodDays"));
+                    println!("{}", a.file("missing.json").await.is_none());
+                }
+                println!("{}", scan().attachments().name("nope").await.len());
+                Ok(())
+            }
+        "###;
+
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("claude");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), "{\"cleanupPeriodDays\": 365}").unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "rules").unwrap();
+        let attachments = AttachmentStore::from(&store);
+        let datasets = DatasetStore::from(&store);
+        let pats = ["settings.json".to_string()];
+        for name in ["cfg", "other"] {
+            let added = attachments
+                .add(&AttachmentSpec {
+                    name,
+                    root: &root,
+                    patterns: &pats,
+                })
+                .unwrap();
+            let dataset = datasets.create().unwrap();
+            datasets.attachments_link(&dataset, &[added.id]).unwrap();
+        }
+        // One dataset holds both; scan that one
+        let dataset = datasets.create().unwrap();
+        let ids: Vec<String> = ["cfg", "other"]
+            .iter()
+            .map(|n| attachments.get_by_name(n).unwrap().id)
+            .collect();
+        datasets.attachments_link(&dataset, &ids).unwrap();
+        let dataset_sha = datasets.get(&dataset).unwrap().commit_sha;
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 1,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println("2".into()),
+                &Output::Println("cfg [\"settings.json\"]".into()),
+                &Output::Println("Some(365)".into()),
+                &Output::Println("true".into()),
+                &Output::Println("0".into()),
+            ]
+        );
+    }
+
+    /// `keep_named()` writes once: a second scan finds the issue live
+    /// in the store, in any status, and returns it without a write;
+    /// a second write in one scan returns the staged one.
+    #[tokio::test]
+    async fn issues_written_under_a_keep_key_are_not_rewritten() {
+        use gage_store::{IssueStatus, IssueStore};
+
+        const SCANNER: &str = r###"
+            use gage::write_issue;
+
+            pub const SCANNER = #{
+                name: "keep",
+                description: "Keep",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let first = write_issue("retention", "Retention", "first")
+                    .keep_named()
+                    .await?;
+                let again = write_issue("retention", "Retention", "second")
+                    .keep_named()
+                    .await?;
+                println!("{} {} {:?} {:?}", again.id == first.id, again.status, again.description, again.replace_key);
+                Ok(())
+            }
+        "###;
+
+        let (tmp, store) = open_store();
+        let (_dir, compiled) = compile_source(SCANNER);
+        let compiled = compiled.unwrap();
+        let run = |n: u32, expected: &'static str| {
+            let store = &store;
+            let compiled = &compiled;
+            let root = tmp.path().join(format!("staging{n}"));
+            async move {
+                let mut events = Vec::new();
+                let config = ScanConfig {
+                    staging_root: &root,
+                    gage_version: "test-version",
+                    dataset: None,
+                    jobs: 1,
+                };
+                let outcome = scan(
+                    store,
+                    &config,
+                    std::slice::from_ref(compiled),
+                    &CancellationToken::new(),
+                    |e| events.push(e),
+                )
+                .await
+                .unwrap();
+                assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+                assert_eq!(outputs(&events), [&Output::Println(expected.into())]);
+                outcome
+            }
+        };
+
+        let first = run(1, "true open Some(\"first\") Some(\"retention\")").await;
+        let issues = IssueStore::from(&store);
+        let record = ScanStore::from(&store).get(&first.id).unwrap();
+        assert_eq!(record.content.issues.len(), 1);
+        let issue = issues.at_commit(&record.content.issues[0]).unwrap();
+        assert_eq!(issue.description.as_deref(), Some("first"));
+        issues
+            .set_status(&issue.id, IssueStatus::Closed, None, "user:t", None)
+            .unwrap();
+
+        let second = run(2, "true closed Some(\"first\") Some(\"retention\")").await;
+        let record = ScanStore::from(&store).get(&second.id).unwrap();
+        assert!(
+            record.content.issues.is_empty(),
+            "the second scan wrote no issue"
+        );
+        let live = issues.get(&issue.id).unwrap();
+        assert_eq!(
+            live.commit_sha,
+            issues.at_commit(&live.commit_sha).unwrap().commit_sha
+        );
+        assert_eq!(live.status, IssueStatus::Closed, "the close stands");
+        assert_eq!(issues.query().name("retention").count().unwrap(), 1);
+    }
+
     /// Add a second `claude` session with `native_id` and `jsonl` to
     /// the seeded dataset. Returns the dataset's new commit and the
     /// session's Gage id.

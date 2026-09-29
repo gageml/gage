@@ -31,11 +31,12 @@
 //!   reconcile that keeps it current, and the query core. Type modules
 //!   opt attributes in through `INDEXED_ATTRS`.
 //! - [`sqlite_index`] --- the SQLite implementation of the index.
-//! - `note`, `issue`, `dataset`, `session`, `scan` --- object types: each supplies its
+//! - `note`, `issue`, `dataset`, `session`, `attachment`, `scan` --- object types: each supplies its
 //!   `attrs.json` shape, its content files, its decoder, and its typed
 //!   store.
 
 mod admin;
+mod attachment;
 mod content;
 mod dataset;
 mod error;
@@ -55,17 +56,23 @@ pub mod url;
 mod writer;
 
 pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init, store_path};
+pub use attachment::{
+    AttachmentAddOutcome, AttachmentAttrs, AttachmentFile, AttachmentOutcome, AttachmentQuery,
+    AttachmentRecord, AttachmentRemoveOutcome, AttachmentSpec, AttachmentStore,
+    OBJECT_TYPE as ATTACHMENT_TYPE, attachment_object_id,
+};
 pub use dataset::{
-    DatasetDeleted, DatasetMembers, DatasetQuery, DatasetRecord, DatasetSessionAddOutcome,
-    DatasetSessionSummary, DatasetSessionUnlinkOutcome, DatasetStore, OBJECT_TYPE as DATASET_TYPE,
-    SessionSpec,
+    AttachmentLinkOutcome, DatasetAttachmentLinkOutcome, DatasetAttachmentUnlinkOutcome,
+    DatasetAttachments, DatasetDeleted, DatasetMembers, DatasetQuery, DatasetRecord,
+    DatasetSessionAddOutcome, DatasetSessionSummary, DatasetSessionUnlinkOutcome, DatasetStore,
+    OBJECT_TYPE as DATASET_TYPE, SessionSpec,
 };
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{IdMatch, IndexCounts, IndexStatus, Order, SelectedTip};
 pub use issue::{
-    ChangeEvent, IssueChange, IssueFull, IssueInput, IssueQuery, IssueStatus, IssueStore,
-    OBJECT_TYPE as ISSUE_TYPE, StatusReason,
+    ChangeEvent, IssueChange, IssueFull, IssueInput, IssueQuery, IssueStaged, IssueStatus,
+    IssueStore, OBJECT_TYPE as ISSUE_TYPE, StatusReason,
 };
 pub use note::{
     NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue,

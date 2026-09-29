@@ -26,6 +26,7 @@ fn install_panic_hook() {
 
 mod author;
 mod cmd_agent;
+mod cmd_attachment;
 mod cmd_config;
 mod cmd_dataset;
 mod cmd_index;
@@ -147,6 +148,16 @@ enum Command {
     Dataset {
         #[command(subcommand)]
         command: cmd_dataset::DatasetCommand,
+    },
+
+    /// Manage attachments
+    ///
+    /// An attachment is a named set of files added from a directory
+    /// for scanners to read, such as a Claude Code config directory.
+    /// Datasets link attachments the way they link sessions.
+    Attachment {
+        #[command(subcommand)]
+        command: cmd_attachment::AttachmentCommand,
     },
 
     /// Manage issues
@@ -322,6 +333,12 @@ async fn main() {
                 cmd_dataset::DatasetCommand::Refresh(args) => cmd_dataset::refresh(args).await,
                 cmd_dataset::DatasetCommand::List(args) => cmd_dataset::list(args).await,
                 cmd_dataset::DatasetCommand::Delete(args) => cmd_dataset::delete(args),
+            },
+            Command::Attachment { command } => match command {
+                cmd_attachment::AttachmentCommand::Add(args) => cmd_attachment::add(args),
+                cmd_attachment::AttachmentCommand::List(args) => cmd_attachment::list(args),
+                cmd_attachment::AttachmentCommand::Show(args) => cmd_attachment::show(args),
+                cmd_attachment::AttachmentCommand::Remove(args) => cmd_attachment::remove(args),
             },
             Command::Issue2 { command } => match command {
                 cmd_issue2::Issue2Command::List(args) => cmd_issue2::list(args).await,

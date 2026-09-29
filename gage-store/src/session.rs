@@ -539,7 +539,10 @@ impl Drop for GitBlobWriter<'_> {
 
 /// Build the `files.d/` tree from `(relative_path, blob_sha)` pairs.
 /// Validates the full path set once, then recurses on subdirectories.
-fn build_files_tree(path: &Path, entries: Vec<(String, String)>) -> Result<String, StoreError> {
+pub(crate) fn build_files_tree(
+    path: &Path,
+    entries: Vec<(String, String)>,
+) -> Result<String, StoreError> {
     validate_session_paths(&entries)?;
     build_files_tree_inner(path, entries)
 }

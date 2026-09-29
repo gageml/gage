@@ -66,6 +66,11 @@ pub enum StoreError {
     IssueInput(String),
     /// A status change to the status the issue already has
     IssueStatusUnchanged { id: String, status: String },
+    /// Attachment input the store cannot record: an empty or malformed
+    /// name, a root that is not a directory, a malformed glob
+    AttachmentInput(String),
+    /// A file under an attachment root could not be read or listed
+    Read { path: PathBuf, source: io::Error },
 }
 
 impl fmt::Display for StoreError {
@@ -147,6 +152,10 @@ impl fmt::Display for StoreError {
             StoreError::IssueStatusUnchanged { id, status } => {
                 write!(f, "issue {id} is already {status}")
             }
+            StoreError::AttachmentInput(what) => write!(f, "invalid attachment input: {what}"),
+            StoreError::Read { path, source } => {
+                write!(f, "failed to read {}: {source}", path.display())
+            }
         }
     }
 }
@@ -156,6 +165,7 @@ impl std::error::Error for StoreError {
         match self {
             StoreError::Spawn(e) => Some(e),
             StoreError::Write { source, .. } => Some(source),
+            StoreError::Read { source, .. } => Some(source),
             StoreError::ReadContent(e) => Some(e),
             StoreError::NotFound(_)
             | StoreError::VersionMissing(_)
@@ -178,7 +188,8 @@ impl std::error::Error for StoreError {
             | StoreError::Index(_)
             | StoreError::SessionTooLarge { .. }
             | StoreError::IssueInput(_)
-            | StoreError::IssueStatusUnchanged { .. } => None,
+            | StoreError::IssueStatusUnchanged { .. }
+            | StoreError::AttachmentInput(_) => None,
         }
     }
 }

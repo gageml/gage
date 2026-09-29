@@ -2,16 +2,19 @@
 //!
 //! Content is a `sessions.link` file listing the commit SHA of each
 //! member session in insertion order; the position in that file is the
-//! session number used by dataset session commands. Every listed SHA
-//! is a commit parent, so pushing a dataset carries its sessions along.
-//! Session content lives in [`gage::session`](crate::session) objects;
-//! the dataset does not copy it. Tree construction, commit parents,
-//! and edits are the generic object model's job; see
-//! [`crate::object`].
+//! session number used by dataset session commands. An optional
+//! `attachments.link` lists the commit SHA of each linked attachment
+//! the same way. Every listed SHA is a commit parent, so pushing a
+//! dataset carries its members along. Session and attachment content
+//! lives in [`gage::session`](crate::session) and
+//! [`gage::attachment`](crate::attachment) objects; the dataset does
+//! not copy it. Tree construction, commit parents, and edits are the
+//! generic object model's job; see [`crate::object`].
 
 use gage_core::uuid::new_uuid;
 use gage_session::{ContentSource, Driver, NativeSession};
 
+use crate::attachment::{AttachmentRecord, AttachmentStore};
 use crate::content::GitContentSource;
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, require_type};
@@ -23,6 +26,7 @@ const OBJECT_VERSION: &str = "1";
 /// Datasets declare no indexed attributes.
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 const SESSIONS_LINK: &str = "sessions.link";
+const ATTACHMENTS_LINK: &str = "attachments.link";
 
 /// Dataset operations over an opened store.
 pub struct DatasetStore<'a> {
@@ -48,6 +52,8 @@ pub struct DatasetRecord {
     pub created_ms: i64,
     /// Member sessions listed in `sessions.link`
     pub session_count: usize,
+    /// Attachments listed in `attachments.link`
+    pub attachment_count: usize,
 }
 
 /// Summary of one member session in a dataset, for list views.
@@ -90,6 +96,39 @@ pub struct DatasetSessionUnlinkOutcome {
 pub struct DatasetMembers {
     pub dataset_id: String,
     pub session_ids: Vec<String>,
+}
+
+/// Outcome of linking one attachment to a dataset.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetAttachmentLinkOutcome {
+    pub id: String,
+    pub name: String,
+    pub outcome: AttachmentLinkOutcome,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AttachmentLinkOutcome {
+    /// The attachment was not linked before
+    Linked,
+    /// The link advanced to a newer commit of the attachment
+    Updated,
+    /// The link already named the attachment's current commit
+    Unchanged,
+}
+
+/// Outcome of unlinking one attachment from a dataset.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetAttachmentUnlinkOutcome {
+    pub id: String,
+    pub name: String,
+}
+
+/// The current attachments of one dataset that belong to a queried
+/// set, in link order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetAttachments {
+    pub dataset_id: String,
+    pub attachment_ids: Vec<String>,
 }
 
 /// Outcome of deleting a dataset together with its member sessions.
@@ -290,6 +329,187 @@ impl DatasetStore<'_> {
             .collect()
     }
 
+    /// The attachments a dataset links, in link order, each read at
+    /// the commit the dataset links.
+    pub fn attachments(&self, dataset_id: &str) -> Result<Vec<AttachmentRecord>, StoreError> {
+        self.read_attachments(&self.current(dataset_id)?)
+    }
+
+    /// The attachments of the dataset at the given commit, which need
+    /// not be the dataset's current commit, in link order. A scan
+    /// reads its dataset this way.
+    pub fn attachments_at(&self, commit_sha: &str) -> Result<Vec<AttachmentRecord>, StoreError> {
+        let object = self.store.read_object(commit_sha)?;
+        require_type(&object, OBJECT_TYPE)?;
+        self.read_attachments(&object)
+    }
+
+    fn read_attachments(&self, dataset: &Object) -> Result<Vec<AttachmentRecord>, StoreError> {
+        let attachments = AttachmentStore::from(self.store);
+        linked_attachments(dataset)
+            .iter()
+            .map(|sha| attachments.at_commit(sha))
+            .collect()
+    }
+
+    /// Link stored attachments to the given dataset in a single
+    /// commit. Each id or prefix resolves to a live attachment whose
+    /// current commit takes its slot: a new slot is
+    /// [`AttachmentLinkOutcome::Linked`], an existing slot advanced to
+    /// a newer commit is [`AttachmentLinkOutcome::Updated`], and a
+    /// slot already at the current commit is
+    /// [`AttachmentLinkOutcome::Unchanged`]. When no SHA changes, no
+    /// dataset commit is written.
+    pub fn attachments_link(
+        &self,
+        dataset_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<DatasetAttachmentLinkOutcome>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dataset = self.current(dataset_id)?;
+        let mut linked = linked_attachments(&dataset);
+        let mut linked_ids: Vec<String> = Vec::with_capacity(linked.len());
+        for sha in &linked {
+            linked_ids.push(self.store.read_header(sha)?.id);
+        }
+
+        let attachments = AttachmentStore::from(self.store);
+        let mut outcomes: Vec<DatasetAttachmentLinkOutcome> = Vec::with_capacity(ids.len());
+        for id_or_prefix in ids {
+            let record = attachments.get(id_or_prefix)?;
+            let outcome = match linked_ids
+                .iter()
+                .position(|m| m == &record.id)
+                .and_then(|idx| linked.get(idx))
+            {
+                Some(sha) if *sha == record.commit_sha => AttachmentLinkOutcome::Unchanged,
+                Some(_) => AttachmentLinkOutcome::Updated,
+                None => AttachmentLinkOutcome::Linked,
+            };
+            place_member(&mut linked, &mut linked_ids, &record.id, record.commit_sha);
+            outcomes.push(DatasetAttachmentLinkOutcome {
+                id: record.id,
+                name: record.attrs.name,
+                outcome,
+            });
+        }
+        let names: Vec<&str> = outcomes
+            .iter()
+            .filter(|o| o.outcome != AttachmentLinkOutcome::Unchanged)
+            .map(|o| o.name.as_str())
+            .collect();
+        let message = format!("attachments: link {}", names.join(", "));
+        self.write_attachments(&dataset, linked, &message)?;
+        Ok(outcomes)
+    }
+
+    /// Unlink attachments from the given dataset in a single commit.
+    /// Each id or prefix resolves to an attachment object, live or
+    /// removed, that the dataset currently links; one that is not
+    /// linked is [`StoreError::ObjectNotFound`] and nothing is
+    /// written. The attachment objects are not touched.
+    pub fn attachments_unlink(
+        &self,
+        dataset_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<DatasetAttachmentUnlinkOutcome>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dataset = self.current(dataset_id)?;
+        let linked = linked_attachments(&dataset);
+        let mut linked_ids: Vec<String> = Vec::with_capacity(linked.len());
+        for sha in &linked {
+            linked_ids.push(self.store.read_header(sha)?.id);
+        }
+
+        let attachments = AttachmentStore::from(self.store);
+        let mut drop: Vec<usize> = Vec::with_capacity(ids.len());
+        let mut outcomes: Vec<DatasetAttachmentUnlinkOutcome> = Vec::with_capacity(ids.len());
+        for id_or_prefix in ids {
+            let (id, _) = self.store.resolve_id(id_or_prefix)?;
+            let idx = linked_ids
+                .iter()
+                .position(|m| *m == id)
+                .ok_or_else(|| StoreError::ObjectNotFound(id_or_prefix.clone()))?;
+            if drop.contains(&idx) {
+                continue;
+            }
+            let sha = linked
+                .get(idx)
+                .expect("idx came from linked_ids, which parallels linked");
+            let record = attachments.at_commit(sha)?;
+            drop.push(idx);
+            outcomes.push(DatasetAttachmentUnlinkOutcome {
+                id,
+                name: record.attrs.name,
+            });
+        }
+
+        let kept: Vec<String> = linked
+            .into_iter()
+            .enumerate()
+            .filter(|(idx, _)| !drop.contains(idx))
+            .map(|(_, sha)| sha)
+            .collect();
+        let names: Vec<&str> = outcomes.iter().map(|o| o.name.as_str()).collect();
+        let message = format!("attachments: unlink {}", names.join(", "));
+        self.write_attachments(&dataset, kept, &message)?;
+        Ok(outcomes)
+    }
+
+    /// The datasets whose current attachments include any of
+    /// `attachment_ids`, each with the subset it links in link order.
+    /// Datasets linking none are omitted.
+    pub fn containing_attachments(
+        &self,
+        attachment_ids: &[String],
+    ) -> Result<Vec<DatasetAttachments>, StoreError> {
+        let mut out = Vec::new();
+        for tip in self.store.select(&ObjectQuery::new(OBJECT_TYPE))? {
+            let dataset = self.store.read_object(&tip.sha)?;
+            let mut held = Vec::new();
+            for sha in linked_attachments(&dataset) {
+                let id = self.store.read_header(&sha)?.id;
+                if attachment_ids.contains(&id) && !held.contains(&id) {
+                    held.push(id);
+                }
+            }
+            if !held.is_empty() {
+                out.push(DatasetAttachments {
+                    dataset_id: dataset.header.id,
+                    attachment_ids: held,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Write `linked` as the dataset's `attachments.link` in one edit
+    /// commit, keeping every other link file. Unchanged content writes
+    /// nothing; an empty list drops the file.
+    fn write_attachments(
+        &self,
+        dataset: &Object,
+        linked: Vec<String>,
+        message: &str,
+    ) -> Result<(), StoreError> {
+        let mut tree = ObjectTree {
+            links: dataset.tree.links.clone(),
+            ..ObjectTree::default()
+        };
+        if linked.is_empty() {
+            tree.links.remove(ATTACHMENTS_LINK);
+        } else {
+            tree.links.insert(ATTACHMENTS_LINK.to_string(), linked);
+        }
+        match self.store.edit(dataset, &tree, message)? {
+            EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(()),
+        }
+    }
+
     /// Add or update one or more sessions in the given dataset in a
     /// single commit. Each spec is written as a session object
     /// (created, updated, or unchanged); the dataset's `sessions.link`
@@ -469,14 +689,18 @@ impl DatasetStore<'_> {
     }
 
     /// Write `members` as the dataset's `sessions.link` in one edit
-    /// commit. Unchanged content writes nothing.
+    /// commit, keeping every other link file. Unchanged content writes
+    /// nothing.
     fn write_members(
         &self,
         dataset: &Object,
         members: Vec<String>,
         message: &str,
     ) -> Result<(), StoreError> {
-        let mut tree = ObjectTree::default();
+        let mut tree = ObjectTree {
+            links: dataset.tree.links.clone(),
+            ..ObjectTree::default()
+        };
         tree.links.insert(SESSIONS_LINK.to_string(), members);
         match self.store.edit(dataset, &tree, message)? {
             EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(()),
@@ -562,6 +786,7 @@ fn record(object: &Object) -> Result<DatasetRecord, StoreError> {
         commit_sha: object.commit_sha.clone(),
         created_ms,
         session_count: members(object).len(),
+        attachment_count: linked_attachments(object).len(),
     })
 }
 
@@ -570,6 +795,15 @@ fn members(object: &Object) -> Vec<String> {
         .tree
         .links
         .get(SESSIONS_LINK)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn linked_attachments(object: &Object) -> Vec<String> {
+    object
+        .tree
+        .links
+        .get(ATTACHMENTS_LINK)
         .cloned()
         .unwrap_or_default()
 }
