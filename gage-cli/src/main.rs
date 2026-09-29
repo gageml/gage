@@ -49,6 +49,7 @@ mod json;
 mod limit;
 mod markdown;
 mod model_prompt;
+mod session_select;
 mod source;
 mod style;
 
@@ -119,11 +120,23 @@ enum Command {
         /// A driver scheme selects the driver (`claude:<path>`); a value
         /// with no scheme goes to the default driver (`<path>`). Defaults
         /// to the default driver's default location.
-        #[arg(short = 's', long, value_name = "SOURCE", global = true)]
+        #[arg(
+            short = 's',
+            long,
+            value_name = "SOURCE",
+            global = true,
+            display_order = 1
+        )]
         source: Option<String>,
 
         /// Operate on sessions in the Gage store
-        #[arg(short = 'S', long, global = true, conflicts_with = "source")]
+        #[arg(
+            short = 'S',
+            long,
+            global = true,
+            conflicts_with = "source",
+            display_order = 2
+        )]
         stored: bool,
 
         #[command(subcommand)]
@@ -292,7 +305,9 @@ async fn main() {
                 cmd_session::SessionCommand::List(args) => {
                     cmd_session::list(source, stored, args).await
                 }
-                cmd_session::SessionCommand::Add(args) => cmd_session::add(source, stored, args),
+                cmd_session::SessionCommand::Add(args) => {
+                    cmd_session::add(source, stored, args).await
+                }
                 cmd_session::SessionCommand::Remove(args) => {
                     cmd_session::remove(source, stored, args)
                 }

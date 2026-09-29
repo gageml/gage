@@ -29,6 +29,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
+use crate::session_select::SessionSelectArgs;
 use crate::source;
 use crate::style::{self, IdKind, styled_id};
 
@@ -97,19 +98,12 @@ pub struct SessionListArgs {
 
 #[derive(Args)]
 pub struct SessionAddArgs {
-    /// Session IDs (or prefixes)
-    ///
-    /// Native session IDs from the selected source, or stored session
-    /// IDs with --stored --dataset
-    #[arg(required = true)]
-    pub sessions: Vec<String>,
-
     /// Add the sessions to a dataset
     ///
     /// Dataset ID (or prefix). Native sessions are added to the store
     /// and linked in one step; with --stored, sessions already in the
     /// store are linked
-    #[arg(short, long, value_name = "DATASET")]
+    #[arg(short, long, value_name = "DATASET", display_order = 3)]
     pub dataset: Option<String>,
 
     /// Maximum stored size per session
@@ -117,14 +111,17 @@ pub struct SessionAddArgs {
     /// Overrides the configured default. Accepts a byte count or a
     /// unit suffix, such as 256MB or 1GB. A session whose stored files
     /// exceed this is refused.
-    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
-    pub max_session_size: Option<ByteSize>,
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size, display_order = 4)]
+    pub max_size: Option<ByteSize>,
 
     /// Add regardless of size
     ///
     /// Stores the session even when it exceeds the size limit.
-    #[arg(long)]
+    #[arg(long, display_order = 5)]
     pub force: bool,
+
+    #[command(flatten)]
+    pub select: SessionSelectArgs,
 }
 
 fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
@@ -656,10 +653,19 @@ pub(crate) async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatc
     }
 }
 
-pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
+pub async fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
     if stored && args.dataset.is_none() {
         eprintln!(
             "gage session add: --stored applies only with --dataset; sessions are added from a source"
+        );
+        std::process::exit(1);
+    }
+    // --stored --dataset resolves stored session IDs, not the native
+    // filter axes. Reject anything but positional session IDs here so
+    // a filter given with --stored fails up front.
+    if stored && !only_positional_selected(&args.select) {
+        eprintln!(
+            "gage session add: --stored --dataset takes stored session IDs; the selection flags apply to native sessions"
         );
         std::process::exit(1);
     }
@@ -688,18 +694,40 @@ pub fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
         let configured = Config::load_user()
             .map(|c| c.storage.max_session_size)
             .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
-        Some(args.max_session_size.unwrap_or(configured).bytes())
+        Some(args.max_size.unwrap_or(configured).bytes())
     };
     match dataset_id {
-        Some(dataset_id) if stored => add_stored_to_dataset(&store, &dataset_id, &args.sessions),
-        _ => add_native(
-            &store,
-            source,
-            dataset_id.as_deref(),
-            &args.sessions,
-            max_bytes,
-        ),
+        Some(dataset_id) if stored => {
+            add_stored_to_dataset(&store, &dataset_id, &args.select.sessions);
+        }
+        _ => {
+            let selected = match args.select.resolve("gage session add").await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("gage session add: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if selected.is_empty() {
+                eprintln!("gage session add: no sessions matched the selection");
+                std::process::exit(1);
+            }
+            add_native(&store, source, dataset_id.as_deref(), &selected, max_bytes);
+        }
     }
+}
+
+/// True when the shared selection was given only as a positional
+/// session list — the form `--stored --dataset` needs. Any filter
+/// axis being set means the caller asked for a native walk.
+fn only_positional_selected(select: &SessionSelectArgs) -> bool {
+    !select.sessions.is_empty()
+        && select.project.is_none()
+        && select.limit.is_none()
+        && select.sample.is_none()
+        && select.days.is_none()
+        && !select.today
+        && !select.all
 }
 
 /// Link sessions already in the store, given by Gage id or prefix, as
@@ -744,11 +772,15 @@ fn add_stored_to_dataset(store: &Store, dataset_id: &str, prefixes: &[String]) {
 
 /// Add native sessions from `source` to the store and, when
 /// `dataset_id` is given, link them as members in the same operation.
+/// `selected` holds records resolved by the shared session picker;
+/// their ids are re-checked against the opened source so a caller
+/// that walked disk directly still meets the source's own id
+/// contract.
 fn add_native(
     store: &Store,
     source: Option<String>,
     dataset_id: Option<&str>,
-    prefixes: &[String],
+    selected: &[gage_claude::session::SessionInfo],
     max_bytes: Option<u64>,
 ) {
     let registry = source::driver_registry();
@@ -767,12 +799,13 @@ fn add_native(
         }
     };
 
-    // Resolve every argument before writing anything, so one bad
-    // argument leaves the store untouched
-    let mut ids: Vec<String> = Vec::with_capacity(prefixes.len());
+    // Confirm every selected session is present in the opened source
+    // before writing anything, so one missing session leaves the
+    // store untouched.
+    let mut ids: Vec<String> = Vec::with_capacity(selected.len());
     let mut errors = 0;
-    for prefix in prefixes {
-        match source.find_native(prefix) {
+    for info in selected {
+        match source.find_native(&info.id) {
             Ok(id) => ids.push(id),
             Err(e) => {
                 eprintln!("gage session add: {e}");

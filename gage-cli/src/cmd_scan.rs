@@ -35,6 +35,7 @@ use rand::seq::SliceRandom;
 
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::model_prompt;
+use crate::session_select;
 use crate::style as s;
 
 const DEFAULT_AGENT_JOBS: usize = 8;
@@ -1518,17 +1519,17 @@ async fn run_dialog(
         };
         let since = match window {
             Window::All => None,
-            Window::Today => Some(since_local_midnight()),
+            Window::Today => Some(session_select::since_local_midnight()),
             Window::Days(d) => Some(Duration::from_secs(u64::from(d) * 86_400)),
         };
 
         let project = match &args.project {
             Some(p) => {
-                let projects = known_projects()
+                let projects = session_select::known_projects("gage scan")
                     .await
                     .context("querying session projects")?;
                 let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-                match resolve_project(p, &home, &cwd, &projects) {
+                match session_select::resolve_project(p, &home, &cwd, &projects) {
                     Some(slug) => Some(slug),
                     None => {
                         cli::log::error(format!("No sessions for project '{p}'"))?;
@@ -1540,7 +1541,7 @@ async fn run_dialog(
         };
 
         if let Some(slug) = &project {
-            selection_step("Project", project_slug_display(slug))?;
+            selection_step("Project", session_select::project_slug_display(slug))?;
         }
 
         let mut builder = SessionListBuilder::new();
@@ -1807,98 +1808,6 @@ fn prompt_limit(initial: Option<usize>) -> io::Result<Option<usize>> {
         .item(None, "All available", "")
         .initial_value(initial)
         .interact()
-}
-
-async fn known_projects() -> anyhow::Result<std::collections::HashSet<String>> {
-    use datafusion::arrow::array::{Array, StringArray};
-
-    let source = crate::source::open_source_or_exit("gage scan", "");
-    let ctx = gage_query::create_context(source.as_ref()).await?;
-    let batches = ctx
-        .sql("SELECT DISTINCT project FROM session")
-        .await?
-        .collect()
-        .await?;
-    let mut out = std::collections::HashSet::new();
-    for batch in &batches {
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("session.project should be a Utf8 column");
-        for i in 0..batch.num_rows() {
-            if !col.is_null(i) {
-                out.insert(col.value(i).to_string());
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Resolve a `-p` value to an encoded project slug recorded in the
-/// session corpus. A leading `-` names a slug exactly. A value with no
-/// path separator is tried as a slug first: as the home-relative
-/// abbreviation `gage session list` shows, then with a leading `-`
-/// prepended. Anything else — or a slug miss — resolves as a path
-/// (`~` against `home`, relative against `cwd`), canonicalized and
-/// encoded. None when no candidate matches a recorded project.
-fn resolve_project(
-    value: &str,
-    home: &Path,
-    cwd: &Path,
-    projects: &std::collections::HashSet<String>,
-) -> Option<String> {
-    if value.starts_with('-') {
-        return projects.contains(value).then(|| value.to_string());
-    }
-    if !value.contains('/') && !value.starts_with('~') {
-        let abbreviated = format!("{}-{value}", session::encode_project_dir(home));
-        if projects.contains(&abbreviated) {
-            return Some(abbreviated);
-        }
-        let full = format!("-{value}");
-        if projects.contains(&full) {
-            return Some(full);
-        }
-    }
-    let expanded = if value == "~" {
-        home.to_path_buf()
-    } else if let Some(rest) = value.strip_prefix("~/") {
-        home.join(rest)
-    } else {
-        PathBuf::from(value)
-    };
-    let resolved = if expanded.is_absolute() {
-        expanded
-    } else {
-        cwd.join(expanded)
-    };
-    let canonical = resolved.canonicalize().unwrap_or(resolved);
-    let slug = session::encode_project_dir(&canonical);
-    projects.contains(&slug).then_some(slug)
-}
-
-/// Slug with the home prefix stripped — the form `gage session list`
-/// shows.
-fn project_slug_display(slug: &str) -> String {
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    let prefix = format!("{}-", session::encode_project_dir(Path::new(&home)));
-    slug.strip_prefix(&prefix).unwrap_or(slug).to_string()
-}
-
-/// Elapsed time since midnight local time, for the --today window.
-/// `SessionListBuilder::since` takes a duration back from now, so the
-/// local-midnight cutoff is expressed as that offset.
-fn since_local_midnight() -> Duration {
-    use chrono::{Local, NaiveTime};
-    let now = Local::now();
-    let midnight = now
-        .with_time(NaiveTime::MIN)
-        .earliest()
-        .expect("midnight should map to a local time");
-    (now - midnight)
-        .to_std()
-        .expect("now should not precede midnight")
 }
 
 /// Run the scan under the full-screen scan view. The runner and the
@@ -2321,84 +2230,5 @@ pub(crate) fn list_scanners(registry: &ScannerRegistry) {
             eprintln!("{}", style(path.display()).yellow());
             eprintln!("{rendered}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-    use std::path::Path;
-
-    use super::resolve_project;
-
-    const HOME: &str = "/home/tester";
-    const CWD: &str = "/work";
-
-    fn resolve(value: &str, known: &[&str]) -> Option<String> {
-        let projects: HashSet<String> = known.iter().map(|s| s.to_string()).collect();
-        resolve_project(value, Path::new(HOME), Path::new(CWD), &projects)
-    }
-
-    #[test]
-    fn full_slug_matches_exactly() {
-        assert_eq!(
-            resolve("-home-tester-Code-gage", &["-home-tester-Code-gage"]).as_deref(),
-            Some("-home-tester-Code-gage")
-        );
-    }
-
-    #[test]
-    fn unknown_full_slug_is_none() {
-        assert_eq!(
-            resolve("-home-tester-nope", &["-home-tester-Code-gage"]),
-            None
-        );
-    }
-
-    #[test]
-    fn abbreviation_prepends_home_slug() {
-        assert_eq!(
-            resolve("Code-gage", &["-home-tester-Code-gage"]).as_deref(),
-            Some("-home-tester-Code-gage")
-        );
-    }
-
-    #[test]
-    fn slug_missing_leading_dash_matches() {
-        assert_eq!(
-            resolve("home-tester-Code-gage", &["-home-tester-Code-gage"]).as_deref(),
-            Some("-home-tester-Code-gage")
-        );
-    }
-
-    #[test]
-    fn tilde_path_resolves_against_home() {
-        assert_eq!(
-            resolve("~/proj", &["-home-tester-proj"]).as_deref(),
-            Some("-home-tester-proj")
-        );
-    }
-
-    #[test]
-    fn relative_path_resolves_against_cwd() {
-        assert_eq!(
-            resolve("proj", &["-work-proj"]).as_deref(),
-            Some("-work-proj")
-        );
-    }
-
-    #[test]
-    fn abbreviation_wins_over_path() {
-        // "proj" matches both the abbreviation and a cwd-relative path;
-        // the slug interpretation is checked first
-        assert_eq!(
-            resolve("proj", &["-home-tester-proj", "-work-proj"]).as_deref(),
-            Some("-home-tester-proj")
-        );
-    }
-
-    #[test]
-    fn no_match_is_none() {
-        assert_eq!(resolve("nonexistent", &["-home-tester-Code-gage"]), None);
     }
 }
