@@ -29,6 +29,15 @@ pub enum DatasetCommand {
     /// sessions in a single step.
     Add(DatasetAddArgs),
 
+    /// Re-add each dataset session from its source
+    ///
+    /// Every member is re-read from the source and re-added: a
+    /// session whose native content is unchanged is a no-op, and a
+    /// session whose native content grew is updated in place.
+    /// Equivalent to running 'gage session add -d DATASET' against
+    /// every member's native id.
+    Refresh(DatasetRefreshArgs),
+
     /// List datasets
     List(DatasetListArgs),
 }
@@ -59,6 +68,34 @@ pub struct DatasetAddArgs {
 
     #[command(flatten)]
     pub select: SessionSelectArgs,
+}
+
+#[derive(Args)]
+pub struct DatasetRefreshArgs {
+    /// Dataset ID (or prefix)
+    pub dataset: String,
+
+    /// Session source
+    ///
+    /// A driver scheme selects the driver (`claude:<path>`); a value
+    /// with no scheme goes to the default driver (`<path>`). Defaults
+    /// to the default driver's default location.
+    #[arg(short, long, value_name = "SOURCE", display_order = 1)]
+    pub source: Option<String>,
+
+    /// Maximum stored size per session
+    ///
+    /// Overrides the configured default. Accepts a byte count or a
+    /// unit suffix, such as 256MB or 1GB. A session whose stored files
+    /// exceed this is refused.
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size, display_order = 4)]
+    pub max_size: Option<ByteSize>,
+
+    /// Add regardless of size
+    ///
+    /// Stores the session even when it exceeds the size limit.
+    #[arg(long, display_order = 5)]
+    pub force: bool,
 }
 
 #[derive(Args)]
@@ -98,6 +135,70 @@ pub async fn add(args: DatasetAddArgs) {
     .await;
 }
 
+pub async fn refresh(args: DatasetRefreshArgs) {
+    let store = open_store("gage dataset refresh");
+    let datasets = DatasetStore::from(&store);
+    let record = match datasets.get(&args.dataset) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("gage dataset refresh: {}: {e}", args.dataset);
+            std::process::exit(1);
+        }
+    };
+    let members = match datasets.sessions_list(&record.id) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("gage dataset refresh: {e}");
+            std::process::exit(1);
+        }
+    };
+    if members.is_empty() {
+        println!(
+            "Dataset {} has no sessions to refresh",
+            short_uuid(&record.id)
+        );
+        return;
+    }
+
+    // Look each member's native id back up on disk. A member whose
+    // native session is gone is a hard error; the dataset stays
+    // untouched in that case.
+    let mut selected = Vec::with_capacity(members.len());
+    let mut errors = Vec::new();
+    for member in &members {
+        match gage_claude::session::one_session(&member.native_id) {
+            Ok(info) => selected.push(info),
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("gage dataset refresh: {e}");
+        }
+        std::process::exit(1);
+    }
+
+    // --force lifts the cap; otherwise the flag overrides the
+    // configured default.
+    let max_bytes = if args.force {
+        None
+    } else {
+        let configured = Config::load_user()
+            .map(|c| c.storage.max_session_size)
+            .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
+        Some(args.max_size.unwrap_or(configured).bytes())
+    };
+
+    add_native_to_dataset(
+        "gage dataset refresh",
+        &store,
+        &record.id,
+        args.source.as_deref(),
+        &selected,
+        max_bytes,
+    );
+}
+
 /// Create an empty dataset in `store`. Prints `command: <error>`
 /// and exits on failure.
 pub(crate) fn create_dataset(command: &str, store: &Store) -> String {
@@ -135,7 +236,23 @@ pub(crate) async fn populate_dataset(
         println!("No sessions matched the selection; dataset is empty");
         return;
     }
+    add_native_to_dataset(command, store, dataset_id, source, &selected, max_bytes);
+}
 
+/// Add each already-resolved native session record to `dataset_id`
+/// through the opened source in a single commit. Prints outcome
+/// lines and exits on any failure. `sessions_add` is idempotent per
+/// session — a member whose native content is unchanged is a no-op,
+/// a member whose content grew is updated in its slot, and a
+/// non-member is appended.
+pub(crate) fn add_native_to_dataset(
+    command: &str,
+    store: &Store,
+    dataset_id: &str,
+    source: Option<&str>,
+    selected: &[gage_claude::session::SessionInfo],
+    max_bytes: Option<u64>,
+) {
     let registry = crate::source::driver_registry();
     let (driver, spec) = match crate::source::resolve_source(&registry, source) {
         Ok(v) => v,
@@ -154,10 +271,10 @@ pub(crate) async fn populate_dataset(
 
     // Confirm every selected session is present in the opened
     // source before writing anything, so one missing session leaves
-    // the dataset empty rather than partially filled.
+    // the dataset unchanged rather than partially updated.
     let mut ids: Vec<String> = Vec::with_capacity(selected.len());
     let mut errors = 0;
-    for info in &selected {
+    for info in selected {
         match source_handle.find_native(&info.id) {
             Ok(id) => ids.push(id),
             Err(e) => {
