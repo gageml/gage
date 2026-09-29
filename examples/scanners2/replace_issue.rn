@@ -1,0 +1,23 @@
+use gage::{scan, write_issue};
+
+pub const SCANNER = #{
+    name: "replace-issue",
+    description: "Replace named and keyed issue",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    write_issue("named-example", "Example issue re-opened by name", "")
+        .replace_named()
+        .await?;
+
+    for s in scan().sessions().await {
+        write_issue(
+            "keyed-example",
+            format!("Example issue re-opened by key for {}", s.id),
+            "",
+        )
+        .replace_keyed(("keyed", s.id))
+        .await?;
+    }
+}
