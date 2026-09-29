@@ -25,7 +25,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StoreError;
-use crate::index::{IdMatch, ObjectIndex, ObjectQuery, Order, SelectedTip};
+use crate::index::{IdMatch, IndexCounts, ObjectIndex, ObjectQuery, Order, SelectedTip};
 use crate::object::{LinkFile, Object};
 
 /// Bumped when the schema changes. A mismatch discards the file and
@@ -144,6 +144,18 @@ impl ObjectIndex for SqliteIndex {
             tips.insert(id, sha);
         }
         Ok(tips)
+    }
+
+    fn counts(&self) -> Result<IndexCounts, StoreError> {
+        let count = |sql: &str| -> Result<u64, StoreError> {
+            self.conn
+                .query_row(sql, [], |row| row.get(0))
+                .map_err(sql_err)
+        };
+        Ok(IndexCounts {
+            refs: count("SELECT COUNT(*) FROM ref")?,
+            objects: count("SELECT COUNT(*) FROM object")?,
+        })
     }
 
     fn has_commit(&self, sha: &str) -> Result<bool, StoreError> {

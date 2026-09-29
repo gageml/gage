@@ -22,11 +22,15 @@
 //! `schema_version` mismatch rebuilds it from an empty ref table.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
 
 use serde_json::Value as JsonValue;
 
 use crate::git::{git_in, run};
 use crate::object::{LinkFile, Object, object_ref};
+use crate::sqlite_index::INDEX_SCHEMA_VERSION;
+use crate::store::index_path;
 use crate::{Store, StoreError, dataset, issue, note, scan, session};
 
 /// Indexed attribute paths for an object type, or empty when the type
@@ -120,6 +124,23 @@ pub struct IdMatch {
     pub deleted: bool,
 }
 
+/// Row counts of an index: refs with a recorded tip, and commits held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexCounts {
+    pub refs: u64,
+    pub objects: u64,
+}
+
+/// What `gage store index` reports: where the index file is, the
+/// schema it carries, its row counts, and its size on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexStatus {
+    pub path: PathBuf,
+    pub schema_version: u32,
+    pub counts: IndexCounts,
+    pub bytes: u64,
+}
+
 /// What the store needs from an index. The write side is fed by the
 /// reconcile and by the store's own writes; the read side serves
 /// queries. One implementation exists, [`SqliteIndex`](crate::sqlite_index::SqliteIndex).
@@ -127,6 +148,9 @@ pub trait ObjectIndex: Send {
     /// Ref id to tip SHA as last indexed. The reconcile diff runs
     /// against this.
     fn tips(&self) -> Result<BTreeMap<String, String>, StoreError>;
+
+    /// Row counts for status reporting.
+    fn counts(&self) -> Result<IndexCounts, StoreError>;
 
     /// True when this commit is already indexed; bounds the
     /// incremental walk.
@@ -176,7 +200,9 @@ impl Store {
     /// Bring the index up to date with the repository: diff the live
     /// ref map against the index's tips, index every commit reachable
     /// from a changed tip that the index does not hold, and drop refs
-    /// that no longer exist.
+    /// that no longer exist. A dropped ref leaves commit rows nothing
+    /// reaches, so it marks the store for the prune at close, as a
+    /// delete does.
     ///
     /// The whole diff is one index transaction. With one commit per
     /// object, each a WAL sync, a rebuild of the bench population took
@@ -200,9 +226,24 @@ impl Store {
             for id in known.keys() {
                 if !live.contains_key(id) {
                     self.index.set_tip(id, None)?;
+                    self.deleted.set(true);
                 }
             }
             Ok(())
+        })
+    }
+
+    /// The index file's location, schema, row counts, and size.
+    pub fn index_status(&self) -> Result<IndexStatus, StoreError> {
+        let path = index_path(self.path());
+        let bytes = fs::metadata(&path)
+            .map_err(|e| StoreError::Index(format!("stat {}: {e}", path.display())))?
+            .len();
+        Ok(IndexStatus {
+            path,
+            schema_version: INDEX_SCHEMA_VERSION,
+            counts: self.index.counts()?,
+            bytes,
         })
     }
 
@@ -366,6 +407,48 @@ mod tests {
         assert_eq!(note_ids(&store), vec![a]);
     }
 
+    #[test]
+    fn reconcile_of_a_dropped_ref_prunes_its_commits_at_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _fsck) = init_repo(tmp.path());
+        let a = note(&Store::open(&path).unwrap(), "a");
+        let sha = run(git_in(&path, ["rev-parse", &object_ref(&a)]))
+            .unwrap()
+            .trim()
+            .to_string();
+        // The ref goes away behind the index's back, as a store
+        // replacement or a pruning fetch would make it
+        run(git_in(&path, ["update-ref", "-d", &object_ref(&a)])).unwrap();
+        {
+            let store = Store::open(&path).unwrap();
+            assert!(note_ids(&store).is_empty());
+            assert!(store.index.has_commit(&sha).unwrap());
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(!store.index.has_commit(&sha).unwrap());
+    }
+
+    #[test]
+    fn rebuild_index_starts_from_an_empty_file_and_reaches_every_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _fsck) = init_repo(tmp.path());
+        let a = note(&Store::open(&path).unwrap(), "a");
+        let before = std::fs::metadata(index_path(&path)).unwrap().len();
+        let store = Store::rebuild_index(&path).unwrap();
+        assert_eq!(note_ids(&store), vec![a]);
+        let status = store.index_status().unwrap();
+        assert_eq!(status.path, index_path(&path));
+        assert_eq!(status.schema_version, INDEX_SCHEMA_VERSION);
+        assert_eq!(
+            status.counts,
+            IndexCounts {
+                refs: 1,
+                objects: 1
+            }
+        );
+        assert!(status.bytes > 0 && status.bytes <= before, "{status:?}");
+    }
+
     /// Delegates to the real index but refuses every `put`, to stand in
     /// for an index failure after the git objects are written.
     struct FailingPut {
@@ -383,6 +466,9 @@ mod tests {
     impl ObjectIndex for FailingPut {
         fn tips(&self) -> Result<BTreeMap<String, String>, StoreError> {
             self.inner().tips()
+        }
+        fn counts(&self) -> Result<IndexCounts, StoreError> {
+            self.inner().counts()
         }
         fn has_commit(&self, sha: &str) -> Result<bool, StoreError> {
             self.inner().has_commit(sha)
@@ -443,6 +529,9 @@ mod tests {
     impl ObjectIndex for CapturingPut {
         fn tips(&self) -> Result<BTreeMap<String, String>, StoreError> {
             self.inner().tips()
+        }
+        fn counts(&self) -> Result<IndexCounts, StoreError> {
+            self.inner().counts()
         }
         fn has_commit(&self, sha: &str) -> Result<bool, StoreError> {
             self.inner().has_commit(sha)

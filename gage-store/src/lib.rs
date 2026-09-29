@@ -61,7 +61,7 @@ pub use dataset::{
 };
 pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
-pub use index::{IdMatch, Order, SelectedTip};
+pub use index::{IdMatch, IndexCounts, IndexStatus, Order, SelectedTip};
 pub use issue::{
     ChangeEvent, IssueChange, IssueFull, IssueInput, IssueQuery, IssueStatus, IssueStore,
     OBJECT_TYPE as ISSUE_TYPE, StatusReason,

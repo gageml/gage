@@ -23,6 +23,13 @@ pub enum StoreCommand {
     /// Show store status
     Status(StatusArgs),
 
+    /// Show object index status
+    ///
+    /// The object index is a cache over the store's refs, kept current
+    /// on every open and safe to delete at any time. `--rebuild`
+    /// deletes it and builds it again from every ref.
+    Index(IndexArgs),
+
     /// Garbage collect the store
     ///
     /// Runs `git gc` in the store. Use `--prune <EXPIRE>` to control the
@@ -78,6 +85,13 @@ pub struct CatArgs {
 }
 
 #[derive(Args)]
+pub struct IndexArgs {
+    /// Delete the index and rebuild it from the store's refs
+    #[arg(long)]
+    rebuild: bool,
+}
+
+#[derive(Args)]
 pub struct StatusArgs {
     /// Run `git fsck --strict` after showing status
     #[arg(long)]
@@ -92,13 +106,21 @@ pub struct GcArgs {
 }
 
 pub fn run(command: StoreCommand) {
-    if let StoreCommand::Init = command {
-        init();
-        return;
+    match command {
+        StoreCommand::Init => {
+            init();
+            return;
+        }
+        StoreCommand::Index(args) if args.rebuild => {
+            rebuild_index();
+            return;
+        }
+        _ => {}
     }
     let store = open_store();
     match command {
         StoreCommand::Init => unreachable!("handled above"),
+        StoreCommand::Index(_) => index_status(&store),
         StoreCommand::Status(args) => status(&store, args),
         StoreCommand::Gc(args) => gc(&store, args),
         StoreCommand::Ls(args) => ls(&store, args),
@@ -132,6 +154,39 @@ fn init() {
         InitOutcome::Reinitialized => "Reinitialized existing",
     };
     println!("{verb} Gage store in {}/", path.display());
+}
+
+/// The rebuild replaces the index file, so it opens the store itself
+/// rather than taking the handle `open_store` would have built.
+fn rebuild_index() {
+    match Store::rebuild_index(&gage_store::store_path()) {
+        Ok(store) => index_status(&store),
+        Err(e) => {
+            eprintln!("gage store index: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn index_status(store: &Store) {
+    let status = match store.index_status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("gage store index: {e}");
+            std::process::exit(1);
+        }
+    };
+    let rows = [
+        ["path".to_string(), shorten_home_path(&status.path)],
+        ["refs".to_string(), status.counts.refs.to_string()],
+        ["objects".to_string(), status.counts.objects.to_string()],
+        ["size".to_string(), format_size(status.bytes as i64)],
+    ];
+    let table = Table::from_iter(rows)
+        .with(Style::rounded().horizontals([]))
+        .modify(Columns::first(), style::dim())
+        .to_string();
+    println!("{table}");
 }
 
 fn view(store: Store, args: ViewArgs) {

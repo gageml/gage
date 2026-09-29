@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use gage_core::config::gage_home;
 
 use crate::git::{git_cmd, git_in, run};
+use crate::store::remove_index_file;
 use crate::{Store, StoreError};
 
 /// Schema version stamped into `gage.version` at init. Bumped when the
@@ -51,6 +52,9 @@ pub enum InitOutcome {
 
 /// Creates a bare repository at `path`, or reinitializes it if present.
 ///
+/// A newly created store has no objects, so any object index already
+/// under its parent belongs to a store that was removed or replaced,
+/// and is deleted. A reinitialized store keeps its index.
 /// Leading directories are created as needed. The empty template keeps
 /// sample hooks and `description` out of the store and ignores any
 /// `init.templateDir` in the user's Git config; the store's own
@@ -77,11 +81,11 @@ pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
         ["config", "gage.version", &STORE_VERSION.to_string()],
     ))?;
     write_update_hook(path)?;
-    Ok(if existing {
-        InitOutcome::Reinitialized
-    } else {
-        InitOutcome::Created
-    })
+    if existing {
+        return Ok(InitOutcome::Reinitialized);
+    }
+    remove_index_file(path)?;
+    Ok(InitOutcome::Created)
 }
 
 /// Writes [`UPDATE_HOOK`] to `<path>/<UPDATE_HOOK_PATH>` and marks it
@@ -338,6 +342,23 @@ mod tests {
         }
 
         assert_eq!(init(&store).unwrap(), InitOutcome::Reinitialized);
+    }
+
+    #[test]
+    fn init_of_a_new_store_removes_a_leftover_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let store = home.join("store.git");
+        let index = home.join(crate::INDEX_FILE);
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        std::fs::write(&index, b"stale").unwrap();
+
+        assert_eq!(init(&store).unwrap(), InitOutcome::Created);
+        assert!(!index.exists());
+
+        std::fs::write(&index, b"current").unwrap();
+        assert_eq!(init(&store).unwrap(), InitOutcome::Reinitialized);
+        assert!(index.exists());
     }
 
     #[test]

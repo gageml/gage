@@ -8,6 +8,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,9 +19,30 @@ use crate::git::{CatFile, CatFileCell, git_cmd, git_in, run};
 use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
 
-/// Index file, relative to the store's parent directory (Gage home).
 /// The object index file, relative to the store's parent directory
 pub const INDEX_FILE: &str = "cache/object-index.sqlite";
+
+/// The object index file for the store at `store`.
+pub(crate) fn index_path(store: &Path) -> PathBuf {
+    store
+        .parent()
+        .map(|p| p.join(INDEX_FILE))
+        .unwrap_or_else(|| PathBuf::from(INDEX_FILE))
+}
+
+/// Remove the object index file for the store at `store`. An absent
+/// file is the outcome the caller wants, so it is not an error.
+pub(crate) fn remove_index_file(store: &Path) -> Result<(), StoreError> {
+    let index = index_path(store);
+    match fs::remove_file(&index) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StoreError::Index(format!(
+            "remove {}: {e}",
+            index.display()
+        ))),
+    }
+}
 
 /// An opened Gage store: a bare Git repository whose `gage.version`
 /// this build supports.
@@ -31,7 +54,8 @@ pub struct Store {
     pub(crate) cat_file: CatFileCell,
     /// Set by any write; decides whether `git gc --auto` runs at drop.
     pub(crate) wrote: Cell<bool>,
-    /// Set by a delete; decides whether the index is pruned at drop.
+    /// Set by a delete or by a reconcile that dropped a ref; decides
+    /// whether the index is pruned at drop.
     pub(crate) deleted: Cell<bool>,
 }
 
@@ -91,20 +115,24 @@ impl Store {
                 supported: STORE_VERSION,
             });
         }
-        let index_path = path
-            .parent()
-            .map(|p| p.join(INDEX_FILE))
-            .unwrap_or_else(|| PathBuf::from(INDEX_FILE));
         let store = Store {
             path: path.to_path_buf(),
             version,
-            index: Box::new(SqliteIndex::open(&index_path)?),
+            index: Box::new(SqliteIndex::open(&index_path(path))?),
             cat_file: RefCell::new(CatFile::spawn(path)?),
             wrote: Cell::new(false),
             deleted: Cell::new(false),
         };
         store.reconcile()?;
         Ok(store)
+    }
+
+    /// Open the store at `path` with a new object index: the index
+    /// file is removed first, so the open's reconcile is a full walk
+    /// of every ref.
+    pub fn rebuild_index(path: &Path) -> Result<Store, StoreError> {
+        remove_index_file(path)?;
+        Store::open(path)
     }
 
     pub fn path(&self) -> &Path {
