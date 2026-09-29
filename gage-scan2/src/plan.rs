@@ -1,21 +1,19 @@
 //! The plan: one DAG over every task of the scan.
 //!
 //! Tasks are the nodes. An edge runs from an upstream task to a
-//! downstream task when a `wants` or `needs` pattern of the downstream
-//! task matches a name under the upstream task's `writes`. Patterns
-//! are `*`-globs matched across every planned scanner, so a task in
-//! one scanner is ordered after a task in another without naming it.
-//! `wants` is ordering only. `needs` is ordering plus a start
-//! condition the runner checks when the task is released: for each
-//! pattern, at least one upstream task that writes a matching note
-//! must have completed. Dependencies resolve over notes only.
+//! downstream task when a `wants` or `required_by` pattern of the
+//! downstream task matches a name under the upstream task's `writes`.
+//! Patterns are `*`-globs matched across every planned scanner, so a
+//! task in one scanner is ordered after a task in another without
+//! naming it. An edge is ordering only: the downstream task runs
+//! after its upstream tasks finish, whatever their status, and reads
+//! what exists. Dependencies resolve over notes only.
 //!
 //! A cycle is a plan error, since the edges are inferred and the
-//! person cannot see them. A `needs` pattern no planned task writes is
-//! a plan error, since the scan cannot satisfy it. A `wants` pattern no
-//! planned task writes is recorded on the task as unmatched and
-//! reported as a warning. Task order is scanner name then task name,
-//! which is the dispatch tie-break order.
+//! person cannot see them. A `wants` pattern no planned task writes
+//! is recorded on the task as unmatched and reported as a warning.
+//! Task order is scanner name then task name, which is the dispatch
+//! tie-break order.
 //!
 //! The plan is recorded as `scan/plan.json` (see [`Plan::to_json`]),
 //! written at create so it exists for a scan canceled before its
@@ -66,36 +64,12 @@ impl fmt::Display for Selected {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeKind {
-    Wants,
-    Needs,
-}
-
-impl EdgeKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EdgeKind::Wants => "wants",
-            EdgeKind::Needs => "needs",
-        }
-    }
-}
-
 /// An ordering edge into a task from one upstream task, with the
-/// pattern and kind that produced it.
+/// pattern that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub upstream: usize,
     pub pattern: String,
-    pub kind: EdgeKind,
-}
-
-/// One `needs` pattern of a task and the upstream tasks that write a
-/// matching note.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Need {
-    pub pattern: String,
-    pub upstream: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,8 +81,6 @@ pub struct PlanTask {
     pub after: Vec<Edge>,
     /// `wants` patterns no planned task writes
     pub unmatched: Vec<String>,
-    /// The start conditions, one per `needs` pattern
-    pub needs: Vec<Need>,
 }
 
 impl PlanTask {
@@ -131,8 +103,6 @@ pub struct Plan {
 pub enum PlanError {
     /// The tasks on a dependency cycle, as `<scanner>:<task>`
     Cycle(Vec<String>),
-    /// A task needs a note no planned task writes
-    UnmatchedNeeds { task: String, pattern: String },
 }
 
 impl fmt::Display for PlanError {
@@ -140,12 +110,6 @@ impl fmt::Display for PlanError {
         match self {
             PlanError::Cycle(tasks) => {
                 write!(f, "cycle in task dependencies: {}", tasks.join(" -> "))
-            }
-            PlanError::UnmatchedNeeds { task, pattern } => {
-                write!(
-                    f,
-                    "task {task} needs note '{pattern}' but no task writes it"
-                )
             }
         }
     }
@@ -199,10 +163,8 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
     let mut tasks: Vec<PlanTask> = Vec::with_capacity(defs.len());
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     for (i, (scanner, def)) in defs.iter().enumerate() {
-        let label = format!("{}:{}", scanner.name, def.name);
         let mut after = Vec::new();
         let mut unmatched = Vec::new();
-        let mut needs = Vec::new();
         for pattern in &def.notes.wants {
             let (matched, upstream) = matching(pattern, i);
             if !matched {
@@ -212,31 +174,9 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
                 after.push(Edge {
                     upstream: up,
                     pattern: pattern.clone(),
-                    kind: EdgeKind::Wants,
                 });
                 edges.insert((up, i));
             }
-        }
-        for pattern in &def.notes.needs {
-            let (matched, upstream) = matching(pattern, i);
-            if !matched {
-                return Err(PlanError::UnmatchedNeeds {
-                    task: label,
-                    pattern: pattern.clone(),
-                });
-            }
-            for up in &upstream {
-                after.push(Edge {
-                    upstream: *up,
-                    pattern: pattern.clone(),
-                    kind: EdgeKind::Needs,
-                });
-                edges.insert((*up, i));
-            }
-            needs.push(Need {
-                pattern: pattern.clone(),
-                upstream,
-            });
         }
         // A pulled-in task is ordered after what pulled it in, as
         // `wants` would order it, without the unmatched warning
@@ -246,7 +186,6 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
                 after.push(Edge {
                     upstream: up,
                     pattern: pattern.clone(),
-                    kind: EdgeKind::Wants,
                 });
                 edges.insert((up, i));
             }
@@ -256,6 +195,7 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
                 .cmp(&b.upstream)
                 .then_with(|| a.pattern.cmp(&b.pattern))
         });
+        after.dedup();
         let selected = match &scanner.selection {
             Selection::Explicit => Selected::Explicit,
             Selection::Group(name) => Selected::Group(name.clone()),
@@ -276,7 +216,6 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
             selected,
             after,
             unmatched,
-            needs,
         });
     }
 
@@ -374,7 +313,6 @@ impl Plan {
                     .map(|e| EdgeJson {
                         task: self.tasks[e.upstream].label(),
                         pattern: e.pattern.clone(),
-                        kind: e.kind.as_str(),
                     })
                     .collect(),
                 unmatched: t.unmatched.clone(),
@@ -401,7 +339,6 @@ struct TaskJson {
 struct EdgeJson {
     task: String,
     pattern: String,
-    kind: &'static str,
 }
 
 #[cfg(test)]
@@ -410,19 +347,13 @@ mod tests {
 
     use super::*;
 
-    /// `(task, wants, needs, writes, required_by)`
-    type Entry<'a> = (
-        &'a str,
-        &'a [&'a str],
-        &'a [&'a str],
-        &'a [&'a str],
-        &'a [&'a str],
-    );
+    /// `(task, wants, writes, required_by)`
+    type Entry<'a> = (&'a str, &'a [&'a str], &'a [&'a str], &'a [&'a str]);
 
     fn tasks(entries: &[Entry<'_>]) -> BTreeMap<String, TaskDef> {
         entries
             .iter()
-            .map(|(name, wants, needs, writes, required_by)| {
+            .map(|(name, wants, writes, required_by)| {
                 let strings = |list: &[&str]| list.iter().map(|s| s.to_string()).collect();
                 (
                     name.to_string(),
@@ -430,7 +361,6 @@ mod tests {
                         name: name.to_string(),
                         notes: TaskDepsDef {
                             wants: strings(wants),
-                            needs: strings(needs),
                             writes: writes
                                 .iter()
                                 .map(|w| (w.to_string(), String::new()))
@@ -463,8 +393,8 @@ mod tests {
 
     #[test]
     fn wants_orders_the_downstream_task_across_scanners() {
-        let a = tasks(&[("write", &[], &[], &["finding"], &[])]);
-        let b = tasks(&[("read", &["finding"], &[], &[], &[])]);
+        let a = tasks(&[("write", &[], &["finding"], &[])]);
+        let b = tasks(&[("read", &["finding"], &[], &[])]);
         let plan = plan(&[
             PlannedScanner {
                 name: "b",
@@ -485,17 +415,16 @@ mod tests {
             [Edge {
                 upstream: idx(&plan, "a:write"),
                 pattern: "finding".into(),
-                kind: EdgeKind::Wants,
             }]
         );
-        assert!(read.unmatched.is_empty() && read.needs.is_empty());
+        assert!(read.unmatched.is_empty());
         // Scanner order, not argument order
         assert_eq!(plan.tasks[0].label(), "a:write");
     }
 
     #[test]
     fn unmatched_wants_is_recorded_and_the_task_is_ready() {
-        let a = tasks(&[("read", &["nobody-writes-this"], &[], &[], &[])]);
+        let a = tasks(&[("read", &["nobody-writes-this"], &[], &[])]);
         let plan = plan(&[PlannedScanner {
             name: "a",
             tasks: &a,
@@ -507,10 +436,10 @@ mod tests {
     }
 
     #[test]
-    fn needs_orders_and_records_the_condition_per_pattern() {
-        let a = tasks(&[("review", &[], &[], &["finding.code"], &[])]);
-        let b = tasks(&[("review", &[], &[], &["finding.general"], &[])]);
-        let c = tasks(&[("report", &[], &["finding.*"], &[], &["finding.*"])]);
+    fn required_by_orders_the_pulled_in_task_after_each_writer() {
+        let a = tasks(&[("review", &[], &["finding.code"], &[])]);
+        let b = tasks(&[("review", &[], &["finding.general"], &[])]);
+        let c = tasks(&[("report", &["finding.*"], &[], &["finding.*"])]);
         let plan = plan(&[
             PlannedScanner {
                 name: "a",
@@ -537,66 +466,35 @@ mod tests {
             2,
             "one edge per upstream task"
         );
-        assert_eq!(
-            report.needs,
-            [Need {
-                pattern: "finding.*".into(),
-                upstream: vec![idx(&plan, "a:review"), idx(&plan, "b:review")],
-            }]
-        );
         assert_eq!(report.selected, Selected::RequiredBy("finding.*".into()));
         assert_eq!(
             report.after.len(),
-            4,
-            "needs and required_by each record their edges"
-        );
-    }
-
-    #[test]
-    fn unmatched_needs_is_a_plan_error() {
-        let a = tasks(&[("report", &[], &["finding.*"], &[], &[])]);
-        let err = plan(&[PlannedScanner {
-            name: "a",
-            tasks: &a,
-            selection: Selection::Explicit,
-        }])
-        .err()
-        .unwrap();
-        assert_eq!(
-            err,
-            PlanError::UnmatchedNeeds {
-                task: "a:report".into(),
-                pattern: "finding.*".into(),
-            }
-        );
-        assert_eq!(
-            err.to_string(),
-            "task a:report needs note 'finding.*' but no task writes it"
+            2,
+            "wants and required_by on the same pattern record one edge per writer"
         );
     }
 
     #[test]
     fn a_task_writing_what_it_wants_has_no_self_edge() {
-        let a = tasks(&[("both", &["finding"], &["finding"], &["finding"], &[])]);
+        let a = tasks(&[("both", &["finding"], &["finding"], &[])]);
         let err = plan(&[PlannedScanner {
             name: "a",
             tasks: &a,
             selection: Selection::Explicit,
         }]);
-        // The need is matched by its own write, so it is not unmatched,
+        // The want is matched by its own write, so it is not unmatched,
         // and the self edge is dropped
         let plan = err.unwrap();
         assert_eq!(plan.deps, [0]);
         assert!(plan.downstream[0].is_empty());
         assert!(plan.tasks[0].unmatched.is_empty());
-        assert_eq!(plan.tasks[0].needs[0].upstream, Vec::<usize>::new());
     }
 
     #[test]
     fn a_cycle_is_a_plan_error_naming_the_tasks_on_it() {
-        let a = tasks(&[("one", &["y"], &[], &["x"], &[])]);
-        let b = tasks(&[("two", &["x"], &[], &["y"], &[])]);
-        let c = tasks(&[("three", &["y"], &[], &[], &[])]);
+        let a = tasks(&[("one", &["y"], &["x"], &[])]);
+        let b = tasks(&[("two", &["x"], &["y"], &[])]);
+        let c = tasks(&[("three", &["y"], &[], &[])]);
         let err = plan(&[
             PlannedScanner {
                 name: "a",
@@ -626,16 +524,15 @@ mod tests {
     #[test]
     fn plan_json_records_selection_edges_and_unmatched_patterns() {
         let a = tasks(&[
-            ("summarize", &[], &[], &["project-summary.rules"], &[]),
+            ("summarize", &[], &["project-summary.rules"], &[]),
             (
                 "review",
                 &["project-summary.*", "missing"],
-                &[],
                 &["finding.code"],
                 &[],
             ),
         ]);
-        let c = tasks(&[("report", &[], &["finding.*"], &[], &["finding.*"])]);
+        let c = tasks(&[("report", &[], &[], &["finding.*"])]);
         let plan = plan(&[
             PlannedScanner {
                 name: "a",
@@ -657,7 +554,7 @@ mod tests {
                         "task": "a:review",
                         "selected": "group:default",
                         "after": [
-                            { "task": "a:summarize", "pattern": "project-summary.*", "kind": "wants" }
+                            { "task": "a:summarize", "pattern": "project-summary.*" }
                         ],
                         "unmatched": ["missing"]
                     },
@@ -671,8 +568,7 @@ mod tests {
                         "task": "c:report",
                         "selected": "required_by:finding.*",
                         "after": [
-                            { "task": "a:review", "pattern": "finding.*", "kind": "needs" },
-                            { "task": "a:review", "pattern": "finding.*", "kind": "wants" }
+                            { "task": "a:review", "pattern": "finding.*" }
                         ],
                         "unmatched": []
                     }

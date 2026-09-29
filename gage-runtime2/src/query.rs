@@ -32,6 +32,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<MessageQuery>()?;
     m.function_meta(messages)?;
     m.associated_function("type", MessageQuery::type_)?;
+    m.function_meta(MessageQuery::lines)?;
     m.function_meta(MessageQuery::latest_first)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: MessageQuery| async move {
         fetch_messages(q).await
@@ -53,6 +54,8 @@ pub struct MessageQuery {
     #[rune(skip)]
     session_id: String,
     #[rune(skip)]
+    lines: Option<(u64, u64)>,
+    #[rune(skip)]
     type_: Option<Value>,
     #[rune(skip)]
     reverse: bool,
@@ -63,6 +66,7 @@ pub struct MessageQuery {
 fn messages(session: Ref<Session>) -> MessageQuery {
     MessageQuery {
         session_id: session.id.clone(),
+        lines: None,
         type_: None,
         reverse: false,
     }
@@ -71,6 +75,13 @@ fn messages(session: Ref<Session>) -> MessageQuery {
 impl MessageQuery {
     fn type_(mut self, t: Value) -> Self {
         self.type_ = Some(t);
+        self
+    }
+
+    /// Restrict to messages on lines `start` through `end`, inclusive.
+    #[rune::function(instance)]
+    fn lines(mut self, start: u64, end: u64) -> Self {
+        self.lines = Some((start, end));
         self
     }
 
@@ -114,7 +125,7 @@ impl EntryQuery {
 type Fetched<T> = Result<Result<T, Error>, VmError>;
 
 async fn fetch_messages(q: MessageQuery) -> Fetched<Vec<Message>> {
-    let (where_clause, params) = match where_clause(&q.session_id, q.type_.as_ref()) {
+    let (where_clause, params) = match where_clause(&q.session_id, q.lines, q.type_.as_ref()) {
         Ok(built) => built,
         Err(e) => return Ok(Err(e)),
     };
@@ -124,7 +135,7 @@ async fn fetch_messages(q: MessageQuery) -> Fetched<Vec<Message>> {
 }
 
 async fn fetch_entries(q: EntryQuery) -> Fetched<Vec<Entry>> {
-    let (where_clause, params) = match where_clause(&q.session_id, q.type_.as_ref()) {
+    let (where_clause, params) = match where_clause(&q.session_id, None, q.type_.as_ref()) {
         Ok(built) => built,
         Err(e) => return Ok(Err(e)),
     };
@@ -132,17 +143,19 @@ async fn fetch_entries(q: EntryQuery) -> Fetched<Vec<Entry>> {
     Ok(run(&sql, params).await?.map(entries_from_batches))
 }
 
-/// The `WHERE` clause and its parameters for one session and an
-/// optional `.type(spec)`. A malformed spec is `Error::Args`.
+/// The `WHERE` clause and its parameters for one session, an optional
+/// line range, and an optional `.type(spec)`. A malformed spec is
+/// `Error::Args`.
 fn where_clause(
     session_id: &str,
+    lines: Option<(u64, u64)>,
     type_: Option<&Value>,
 ) -> Result<(String, Vec<ScalarValue>), Error> {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<ScalarValue> = Vec::new();
     params.push(ScalarValue::Utf8(Some(session_id.to_string())));
     clauses.push(format!("session_id = ${}", params.len()));
-    push_lines_clause(None, &mut clauses, &mut params);
+    push_lines_clause(lines, &mut clauses, &mut params);
     if let Some(t) = type_ {
         let spec = serde_json::to_value(t)
             .map_err(|e| Error::Args(format!("`.type()` value could not be read: {e}")))?;

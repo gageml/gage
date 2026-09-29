@@ -160,9 +160,7 @@ fn embedded_digest() -> String {
 
 /// A task's declared dependencies for one item kind (notes or issues):
 /// `wants` lists `*`-glob patterns over item names the task consumes;
-/// `needs` lists `*`-glob patterns over item names the task cannot do
-/// without — the task runs only after at least one task writing each
-/// has completed; `writes` maps each item name the task produces to its
+/// `writes` maps each item name the task produces to its
 /// docstring; `required_by` lists `*`-glob patterns over item names
 /// whose writers require this task — a planned task writing a matching
 /// name schedules this task even when its scanner is not selected.
@@ -172,7 +170,6 @@ fn embedded_digest() -> String {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TaskDepsDef {
     pub wants: Vec<String>,
-    pub needs: Vec<String>,
     pub writes: BTreeMap<String, String>,
     pub required_by: Vec<String>,
 }
@@ -1038,13 +1035,6 @@ impl DepsKind {
         }
     }
 
-    fn needs_field(self) -> &'static str {
-        match self {
-            DepsKind::Notes => "notes.needs",
-            DepsKind::Issues => "issues.needs",
-        }
-    }
-
     fn required_by_field(self) -> &'static str {
         match self {
             DepsKind::Notes => "notes.required_by",
@@ -1079,9 +1069,6 @@ fn parse_task_deps(
             "wants" => {
                 deps.wants = parse_patterns(source, expr, task, kind.wants_field())?;
             }
-            "needs" => {
-                deps.needs = parse_patterns(source, expr, task, kind.needs_field())?;
-            }
             "required_by" => {
                 deps.required_by = parse_patterns(source, expr, task, kind.required_by_field())?;
             }
@@ -1109,7 +1096,7 @@ fn parse_task_deps(
     Ok(deps)
 }
 
-/// Parse a `*`-glob pattern list field (`wants`, `needs`, `required_by`).
+/// Parse a `*`-glob pattern list field (`wants`, `required_by`).
 fn parse_patterns(
     source: &str,
     expr: &ast::Expr,
@@ -1382,7 +1369,7 @@ pub const SCANNER = #{
     tasks: #{
         a: #{ notes: #{ writes: ["a", "a.more"] } },
         b: #{
-            notes: #{ writes: ["b"], wants: ["a"], needs: ["a.*"] },
+            notes: #{ writes: ["b"], wants: ["a"] },
             issues: #{ writes: ["found"] },
         },
     },
@@ -1400,7 +1387,6 @@ pub const SCANNER = #{
         let b = def.tasks.get("b").unwrap();
         assert_eq!(b.notes.writes.keys().collect::<Vec<_>>(), ["b"]);
         assert_eq!(b.notes.wants, ["a"]);
-        assert_eq!(b.notes.needs, ["a.*"]);
         assert_eq!(b.issues.writes.keys().collect::<Vec<_>>(), ["found"]);
     }
 

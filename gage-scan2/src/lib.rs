@@ -49,8 +49,8 @@ use gage_runtime2::{
 };
 use gage_scan::error::render_task_error;
 use gage_store::{
-    DatasetStore, IssueStore, NoteStore, ScanAttrs, ScanStore, SkipReason, Store, StoreError,
-    TaskAttrs, TaskCounts, TaskStatus,
+    DatasetStore, IssueStore, NoteStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs,
+    TaskCounts, TaskStatus,
 };
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
@@ -84,13 +84,12 @@ pub enum Event {
         task: String,
     },
     /// A task reached a terminal status. `error` is the rendered
-    /// failure for `Failed`; `skipped` is the reason for `Skipped`.
+    /// failure for `Failed`.
     TaskFinished {
         scanner: String,
         task: String,
         status: TaskStatus,
         error: Option<String>,
-        skipped: Option<SkipReason>,
     },
 }
 
@@ -336,7 +335,8 @@ pub struct ScanOutcome {
 /// (see [`staging`]) and applied to the store at its terminal state,
 /// after which the staging directory is removed. Output and task
 /// status reach `on_event` as they happen. A failed task is recorded
-/// and the run continues; tasks that `need` its notes are skipped.
+/// and the run continues; the tasks ordered after it run and read
+/// what exists.
 /// Cancelling `cancel` abandons the running tasks at their next await
 /// point, marks them and every task not yet started `canceled`, and
 /// applies what ran.
@@ -561,15 +561,9 @@ impl<F: FnMut(Event)> Run<'_, F> {
             if self.cancel.is_cancelled() {
                 break;
             }
-            // Release ready tasks up to the pool size. A task whose
-            // needs are not met finishes here as skipped, which may
-            // release its downstream tasks in turn.
+            // Release ready tasks up to the pool size
             while running.len() < jobs {
                 let Some(i) = d.ready.pop_front() else { break };
-                if let Some(reason) = unmet_need(plan, i, &d.status) {
-                    self.finish(plan, i, TaskStatus::Skipped, None, Some(reason), d, logs)?;
-                    continue;
-                }
                 self.start(plan, i, d, &mut running)?;
             }
             if d.status.iter().all(Option::is_some) {
@@ -607,7 +601,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
                 Ok(()) => (TaskStatus::Completed, None),
                 Err(message) => (TaskStatus::Failed, Some(message)),
             };
-            self.finish(plan, i, status, error, None, d, logs)?;
+            self.finish(plan, i, status, error, d, logs)?;
         }
         let canceled = d.counts.completed + d.counts.failed + d.counts.skipped < total;
         if canceled {
@@ -617,7 +611,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
             self.say(logs, ScanOutput::Err("scan canceled\n".into()))?;
             for i in 0..total {
                 if d.status[i].is_none() {
-                    self.finish(plan, i, TaskStatus::Canceled, None, None, d, logs)?;
+                    self.finish(plan, i, TaskStatus::Canceled, None, d, logs)?;
                 }
             }
         }
@@ -673,26 +667,22 @@ impl<F: FnMut(Event)> Run<'_, F> {
         clippy::indexing_slicing,
         reason = "task indices are plan-internal and bounded by construction"
     )]
-    #[allow(clippy::too_many_arguments)]
     fn finish(
         &mut self,
         plan: &Plan,
         i: usize,
         status: TaskStatus,
         error: Option<String>,
-        skipped: Option<SkipReason>,
         d: &mut Dispatch,
         logs: &mut Logs,
     ) -> Result<(), ScanError> {
         let t = &plan.tasks[i];
         let stopped = d.started[i].map(|_| now_ms());
-        let mut attrs = task_attrs(status, d.started[i], stopped);
-        attrs.skipped = skipped.clone();
+        let attrs = task_attrs(status, d.started[i], stopped);
         self.staging.write_task(&t.scanner, &t.task, &attrs)?;
         match status {
             TaskStatus::Completed => d.counts.completed += 1,
             TaskStatus::Failed => d.counts.failed += 1,
-            TaskStatus::Skipped => d.counts.skipped += 1,
             _ => {}
         }
         if let Some(message) = &error {
@@ -701,23 +691,11 @@ impl<F: FnMut(Event)> Run<'_, F> {
                 ScanOutput::Err(format!("task {} failed\n{message}", t.label())),
             )?;
         }
-        if let Some(reason) = &skipped {
-            self.say(
-                logs,
-                ScanOutput::Err(format!(
-                    "task {} skipped: needs '{}' and no task writing it completed ({})\n",
-                    t.label(),
-                    reason.needs,
-                    reason.upstream.join(", ")
-                )),
-            )?;
-        }
         (self.on_event)(Event::TaskFinished {
             scanner: t.scanner.clone(),
             task: t.task.clone(),
             status,
             error,
-            skipped,
         });
         d.status[i] = Some(status);
         if status != TaskStatus::Canceled {
@@ -749,34 +727,6 @@ impl<F: FnMut(Event)> Run<'_, F> {
         (self.on_event)(Event::Scan(output));
         Ok(())
     }
-}
-
-/// The reason task `i` must not start, or `None` when every `needs`
-/// pattern has a completed upstream writer. A need whose only writer
-/// is the task itself has no upstream task and holds nothing back.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "task indices are plan-internal and bounded by construction"
-)]
-fn unmet_need(plan: &Plan, i: usize, status: &[Option<TaskStatus>]) -> Option<SkipReason> {
-    plan.tasks[i]
-        .needs
-        .iter()
-        .filter(|need| !need.upstream.is_empty())
-        .find(|need| {
-            !need
-                .upstream
-                .iter()
-                .any(|u| status[*u] == Some(TaskStatus::Completed))
-        })
-        .map(|need| SkipReason {
-            needs: need.pattern.clone(),
-            upstream: need
-                .upstream
-                .iter()
-                .map(|u| plan.tasks[*u].label())
-                .collect(),
-        })
 }
 
 /// The scan's closing line: `Scan <short id> completed: 3 tasks: 2
@@ -1138,7 +1088,6 @@ mod tests {
                     task: "a".into(),
                     status: TaskStatus::Failed,
                     error: Some(failure.clone()),
-                    skipped: None,
                 },
                 Event::TaskStarted {
                     scanner: "fail".into(),
@@ -1154,7 +1103,6 @@ mod tests {
                     task: "b".into(),
                     status: TaskStatus::Completed,
                     error: None,
-                    skipped: None,
                 },
                 Event::Scan(ScanOutput::Out(summary.clone())),
             ]
@@ -1721,7 +1669,8 @@ mod tests {
 
     /// `messages()` and `entries()` read a member session through
     /// its driver at the commit the dataset links, scoped to that
-    /// session, with `.type(spec)` and `.latest_first()` applied.
+    /// session, with `.type(spec)`, `.latest_first()`, and `.lines()`
+    /// applied.
     #[tokio::test]
     async fn tasks_read_session_messages_and_entries() {
         const SCANNER: &str = r#"
@@ -1740,6 +1689,9 @@ mod tests {
                     }
                     for m in s.messages().type("assistant").latest_first().await? {
                         println!("latest assistant: {}", m.text);
+                    }
+                    for m in s.messages().lines(2, 3).await? {
+                        println!("lines 2-3: {}", m.text);
                     }
                     println!("{} entries", s.entries().await?.len());
                     for e in s.entries().type("summary").await? {
@@ -1793,6 +1745,8 @@ mod tests {
                 &Output::Println("assistant/text: anything else?".into()),
                 &Output::Println("latest assistant: anything else?".into()),
                 &Output::Println("latest assistant: hi there".into()),
+                &Output::Println("lines 2-3: hello".into()),
+                &Output::Println("lines 2-3: hi there".into()),
                 &Output::Println("4 entries".into()),
                 &Output::Println("entry 1: summary".into()),
                 &Output::Println("args error: `.type()` object must name at least one type".into()),
@@ -2168,6 +2122,118 @@ mod tests {
         );
     }
 
+    /// Add a second `claude` session with `native_id` and `jsonl` to
+    /// the seeded dataset. Returns the dataset's new commit and the
+    /// session's Gage id.
+    fn add_session(
+        root: &std::path::Path,
+        store: &Store,
+        dataset_id: &str,
+        native_id: &str,
+        jsonl: &str,
+    ) -> (String, String) {
+        use gage_session::Driver;
+        use gage_store::SessionSpec;
+
+        let claude = root.join("claude");
+        let dir = claude.join("projects").join("-home-alice-proj");
+        std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
+        let driver = gage_claude::driver::ClaudeDriver::new();
+        let source = driver
+            .open_source(&format!("claude:{}", claude.display()))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        let datasets = DatasetStore::from(store);
+        let outcomes = datasets
+            .sessions_add(
+                dataset_id,
+                vec![SessionSpec {
+                    driver: &driver,
+                    session: &mut *native,
+                }],
+            )
+            .unwrap();
+        (
+            datasets.get(dataset_id).unwrap().commit_sha,
+            outcomes[0].id.clone(),
+        )
+    }
+
+    /// `newest_first()` reads the sessions newest-modified first, on
+    /// its own and through `with_unseen`; the default is member order.
+    #[tokio::test]
+    async fn sessions_read_newest_first_on_request() {
+        const SCANNER: &str = r#"
+            use gage::scan;
+
+            pub const SCANNER = #{
+                name: "order",
+                description: "Session order",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                for s in scan().sessions().await {
+                    println!("member {}", s.id);
+                }
+                for s in scan().sessions().newest_first().await {
+                    println!("newest {}", s.id);
+                }
+                for (s, _) in scan().sessions().newest_first().with_unseen("k").await? {
+                    println!("unseen {}", s.id);
+                }
+                Ok(())
+            }
+        "#;
+        const SESSION: &str = concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+        );
+
+        let (tmp, store) = open_store();
+        let (dataset_id, _, first) = seeded_dataset(tmp.path(), &store, SESSION);
+        // `modified` is the store's write time in millis, so the
+        // second add must land in a later millisecond
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let (dataset_sha, second) = add_session(
+            tmp.path(),
+            &store,
+            &dataset_id,
+            "22222222-2222-3333-4444-555555555555",
+            SESSION,
+        );
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            staging_root: &tmp.path().join("staging"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 1,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(format!("member {first}")),
+                &Output::Println(format!("member {second}")),
+                &Output::Println(format!("newest {second}")),
+                &Output::Println(format!("newest {first}")),
+                &Output::Println(format!("unseen {second}")),
+                &Output::Println(format!("unseen {first}")),
+            ]
+        );
+    }
+
     /// Re-add the seeded session with `jsonl` as its grown content,
     /// advancing its slot in the dataset. Returns the dataset's new
     /// commit.
@@ -2443,27 +2509,21 @@ mod tests {
         assert_eq!(carried.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 
-    /// Tasks with `needs`, `wants`, and an unmatched `wants` behind one
-    /// failing writer. Task order is by name: chained, needy, wanty,
-    /// write.
+    /// Tasks with `wants`, one of them unmatched, behind one failing
+    /// writer. Task order is by name: chained, wanty, write.
     const DEPENDENT: &str = r#"
         pub const SCANNER = #{
             name: "deps",
             description: "Dependent tasks",
             tasks: #{
                 write: #{ notes: #{ writes: #{ "x": "the x note" } } },
-                needy: #{ notes: #{ needs: ["x"], writes: #{ "y": "the y note" } } },
-                wanty: #{ notes: #{ wants: ["x", "nobody"] } },
-                chained: #{ notes: #{ needs: ["y"] } },
+                wanty: #{ notes: #{ wants: ["x", "nobody"], writes: #{ "y": "the y note" } } },
+                chained: #{ notes: #{ wants: ["y"] } },
             },
         };
 
         pub fn write() {
             Err("boom")
-        }
-
-        pub fn needy() {
-            println!("needy ran");
         }
 
         pub fn wanty() {
@@ -2476,7 +2536,7 @@ mod tests {
     "#;
 
     #[tokio::test]
-    async fn needs_skips_downstream_of_a_failed_writer_and_wants_runs_regardless() {
+    async fn a_failed_writer_does_not_hold_back_the_tasks_ordered_after_it() {
         let (_dir, compiled) = compile_source(DEPENDENT);
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
@@ -2490,10 +2550,10 @@ mod tests {
         assert_eq!(
             outcome.attrs.tasks,
             TaskCounts {
-                total: 4,
-                completed: 1,
+                total: 3,
+                completed: 2,
                 failed: 1,
-                skipped: 2,
+                skipped: 0,
             }
         );
         assert_eq!(
@@ -2505,50 +2565,36 @@ mod tests {
             },
             "the plan warning comes before any task"
         );
-        let finished: Vec<(&str, TaskStatus, Option<&SkipReason>)> = events
+        let finished: Vec<(&str, TaskStatus)> = events
             .iter()
             .filter_map(|e| match e {
-                Event::TaskFinished {
-                    task,
-                    status,
-                    skipped,
-                    ..
-                } => Some((task.as_str(), *status, skipped.as_ref())),
+                Event::TaskFinished { task, status, .. } => Some((task.as_str(), *status)),
                 _ => None,
             })
             .collect();
-        let needy_reason = SkipReason {
-            needs: "x".into(),
-            upstream: vec!["deps:write".into()],
-        };
-        let chained_reason = SkipReason {
-            needs: "y".into(),
-            upstream: vec!["deps:needy".into()],
-        };
         assert_eq!(
             finished,
             [
-                ("write", TaskStatus::Failed, None),
-                ("needy", TaskStatus::Skipped, Some(&needy_reason)),
-                ("wanty", TaskStatus::Completed, None),
-                ("chained", TaskStatus::Skipped, Some(&chained_reason)),
+                ("write", TaskStatus::Failed),
+                ("wanty", TaskStatus::Completed),
+                ("chained", TaskStatus::Completed),
             ],
-            "release is in order: the failure releases needy and wanty, and the \
-             skip of needy releases chained behind them"
+            "release is in order: the failure releases wanty, and wanty releases chained"
         );
         assert!(events.contains(&Event::Output(TaskOutput {
             scanner: "deps".into(),
             task: "wanty".into(),
             output: Output::Println("wanty ran".into()),
         })));
-        assert!(events.contains(&Event::Scan(ScanOutput::Err(
-            "task deps:needy skipped: needs 'x' and no task writing it completed (deps:write)\n"
-                .into()
-        ))));
+        assert!(events.contains(&Event::Output(TaskOutput {
+            scanner: "deps".into(),
+            task: "chained".into(),
+            output: Output::Println("chained ran".into()),
+        })));
         assert!(
             events.last().unwrap()
                 == &Event::Scan(ScanOutput::Out(format!(
-                    "Scan {} completed: 4 tasks: 1 completed, 1 failed, 2 skipped\n",
+                    "Scan {} completed: 3 tasks: 2 completed, 1 failed\n",
                     short_uuid(&outcome.id)
                 )))
         );
@@ -2564,10 +2610,7 @@ mod tests {
                 .attrs
                 .clone()
         };
-        assert_eq!(task("needy").skipped, Some(needy_reason));
-        assert!(task("needy").started.is_none() && task("needy").stopped.is_none());
-        assert_eq!(task("chained").skipped, Some(chained_reason));
-        assert_eq!(task("wanty").skipped, None);
+        assert!(task("wanty").started.is_some() && task("wanty").stopped.is_some());
         let scans = ScanStore::from(&store);
         let records = String::from_utf8(
             scans
@@ -2586,13 +2629,16 @@ mod tests {
         assert_eq!(
             plan["tasks"][1],
             serde_json::json!({
-                "task": "deps:needy",
+                "task": "deps:wanty",
                 "selected": "explicit",
-                "after": [{ "task": "deps:write", "pattern": "x", "kind": "needs" }],
-                "unmatched": []
+                "after": [{ "task": "deps:write", "pattern": "x" }],
+                "unmatched": ["nobody"]
             })
         );
-        assert_eq!(plan["tasks"][2]["unmatched"], serde_json::json!(["nobody"]));
+        assert_eq!(
+            plan["tasks"][0]["after"],
+            serde_json::json!([{ "task": "deps:wanty", "pattern": "y" }])
+        );
     }
 
     const PARALLEL: &str = r#"
@@ -2652,48 +2698,6 @@ mod tests {
         assert!(
             started("c") > finished("a"),
             "c waits for a, which writes what it wants: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unmatched_need_is_a_plan_error_before_staging() {
-        let (_dir, compiled) = compile_source(
-            r#"
-            pub const SCANNER = #{
-                name: "needy",
-                description: "Needs what nobody writes",
-                tasks: #{ main: #{ notes: #{ needs: ["nothing"] } } },
-            };
-
-            pub fn main() {}
-            "#,
-        );
-        let (tmp, store) = open_store();
-        let root = tmp.path().join("staging");
-        let (outcome, events) = run_all(
-            &store,
-            &root,
-            &[compiled.unwrap()],
-            &CancellationToken::new(),
-        )
-        .await;
-        let err = outcome.err().unwrap();
-        assert!(
-            matches!(
-                &err,
-                ScanError::Plan(plan::PlanError::UnmatchedNeeds { task, pattern })
-                    if task == "needy:main" && pattern == "nothing"
-            ),
-            "{err}"
-        );
-        assert_eq!(
-            err.to_string(),
-            "planning the scan: task needy:main needs note 'nothing' but no task writes it"
-        );
-        assert!(events.is_empty());
-        assert!(
-            !root.exists(),
-            "nothing is staged for a scan that cannot be planned"
         );
     }
 
@@ -2759,7 +2763,7 @@ mod tests {
             serde_json::json!({
                 "task": "lib:b",
                 "selected": "required_by:x",
-                "after": [{ "task": "main:w", "pattern": "x", "kind": "wants" }],
+                "after": [{ "task": "main:w", "pattern": "x" }],
                 "unmatched": []
             })
         );

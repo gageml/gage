@@ -25,7 +25,9 @@ use gage_store::{SessionStore, Store};
 use rune::runtime::{Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::scan::{ScanContext, Session, SessionsQuery, current, run, session_id, string_column};
+use crate::scan::{
+    ScanContext, Session, SessionsQuery, current, run, session_id, session_order, string_column,
+};
 
 const SESSIONS_KIND: &str = "sessions";
 
@@ -74,12 +76,18 @@ fn carry_forward_notes(key: Value) -> CarryForwardNotes {
 pub struct WithUnseenQuery {
     #[rune(skip)]
     key: Value,
+    #[rune(skip)]
+    newest_first: bool,
 }
 
-/// Pair each of the scan's sessions with its unseen lines under `key`.
+/// Pair each of the scan's sessions with its unseen lines under `key`,
+/// in the order the sessions query would read them.
 #[rune::function(instance)]
-pub(crate) fn with_unseen(_sessions: Ref<SessionsQuery>, key: Value) -> WithUnseenQuery {
-    WithUnseenQuery { key }
+pub(crate) fn with_unseen(sessions: Ref<SessionsQuery>, key: Value) -> WithUnseenQuery {
+    WithUnseenQuery {
+        key,
+        newest_first: sessions.newest_first,
+    }
 }
 
 /// The value of `watermark(session, key)`. Awaiting it writes the
@@ -113,7 +121,7 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
         Err(e) => return Ok(Err(e)),
     };
     let ctx = current()?;
-    let members = members(&ctx).await?;
+    let members = members(&ctx, false).await?;
     if members.is_empty() {
         return Ok(Ok(0));
     }
@@ -172,7 +180,8 @@ fn append_carried(path: &Path, commits: &BTreeSet<String>) -> Result<usize, VmEr
     Ok(new.len())
 }
 
-/// For each of the scan's sessions, `(session, unseen)`: `None` when
+/// For each of the scan's sessions, in query order, `(session,
+/// unseen)`: `None` when
 /// a watermark under `key` names the commit the scan reads,
 /// `Some((start, end))` otherwise, where `start` is the line after
 /// the closest watermarked ancestor's `line_count`, or 1 with no
@@ -183,7 +192,7 @@ async fn do_with_unseen(q: WithUnseenQuery) -> Result<Result<Vec<Value>, Error>,
         Err(e) => return Ok(Err(e)),
     };
     let ctx = current()?;
-    let members = members(&ctx).await?;
+    let members = members(&ctx, q.newest_first).await?;
     if members.is_empty() {
         return Ok(Ok(Vec::new()));
     }
@@ -294,10 +303,13 @@ impl Member {
     }
 }
 
-/// The scan's sessions, in member order.
-async fn members(ctx: &ScanContext) -> Result<Vec<Member>, VmError> {
-    const SQL: &str = "SELECT id, locator, line_count FROM session";
-    let batches = run(ctx.query_context().await?, SQL).await?;
+/// The scan's sessions, in member order unless `newest_first` is set.
+async fn members(ctx: &ScanContext, newest_first: bool) -> Result<Vec<Member>, VmError> {
+    let sql = format!(
+        "SELECT id, locator, line_count FROM session{}",
+        session_order(newest_first)
+    );
+    let batches = run(ctx.query_context().await?, &sql).await?;
     let mut out = Vec::new();
     for batch in &batches {
         let ids = string_column(batch, 0);

@@ -20,12 +20,9 @@ pub const SCANNER = #{
     tasks: #{
         report: #{
             notes: #{
-                // FUTURE: `needs` orders this task after every task
-                // that writes a matching note and skips it, with the
-                // reason recorded, unless at least one of them ran to
-                // completion. `required_by` pulls this task into any
-                // scan whose selected tasks write a matching note.
-                needs: ["finding.*"],
+                // `required_by` pulls this task into any scan whose
+                // selected tasks write a matching note
+                wants: ["finding.*"],
                 required_by: ["finding.*"],
             },
             issues: #{

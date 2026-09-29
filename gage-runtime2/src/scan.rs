@@ -147,6 +147,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<ScanDataset>()?;
     m.function_meta(ScanDataset::debug)?;
     m.ty::<SessionsQuery>()?;
+    m.function_meta(SessionsQuery::newest_first)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
         fetch_sessions(q).await
     })?;
@@ -206,7 +207,9 @@ impl Scan {
     /// awaited.
     #[rune::function(instance)]
     fn sessions(&self) -> SessionsQuery {
-        SessionsQuery
+        SessionsQuery {
+            newest_first: false,
+        }
     }
 
     #[rune::function(protocol = DEBUG_FMT)]
@@ -246,15 +249,41 @@ impl rune::alloc::prelude::TryClone for ScanDataset {
 /// The value of `scan().sessions()`. Awaiting it runs the read.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub struct SessionsQuery;
+pub struct SessionsQuery {
+    #[rune(skip)]
+    pub(crate) newest_first: bool,
+}
+
+impl SessionsQuery {
+    /// Order the sessions newest-modified first instead of member
+    /// order.
+    #[rune::function(instance)]
+    fn newest_first(mut self) -> Self {
+        self.newest_first = true;
+        self
+    }
+}
+
+/// The `ORDER BY` clause for a session read: none for member order.
+pub(crate) fn session_order(newest_first: bool) -> &'static str {
+    if newest_first {
+        " ORDER BY modified DESC"
+    } else {
+        ""
+    }
+}
 
 /// The scan's sessions, read from the scoped `session` table, whose
-/// rows are the members in member order. Only the id and the version
-/// are held per session; `attrs()` reads the rest on request.
-async fn fetch_sessions(_query: SessionsQuery) -> Result<Sessions, VmError> {
-    const SQL: &str = "SELECT id, locator FROM session";
+/// rows are the members in member order unless `newest_first` is set.
+/// Only the id and the version are held per session; `attrs()` reads
+/// the rest on request.
+async fn fetch_sessions(query: SessionsQuery) -> Result<Sessions, VmError> {
+    let sql = format!(
+        "SELECT id, locator FROM session{}",
+        session_order(query.newest_first)
+    );
     let ctx = current()?;
-    let batches = run(ctx.query_context().await?, SQL).await?;
+    let batches = run(ctx.query_context().await?, &sql).await?;
     let mut items = Vec::new();
     for batch in &batches {
         let ids = string_column(batch, 0);
@@ -498,7 +527,7 @@ async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
 }
 
 /// A double-ended, exact-size iterator over a scan's sessions, in
-/// dataset order.
+/// the order the query read them.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct Sessions {

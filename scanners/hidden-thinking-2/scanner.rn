@@ -8,9 +8,9 @@
 // written against it; otherwise it follows the legacy interface as a
 // placeholder. This file is a target, not a runnable scanner.
 
-use gage::{scan, write_note};
-// FUTURE: issues are not in the rethink runtime
-use gage::write_issue;
+use gage::{scan, watermark, write_issue, write_note};
+
+const KEY = ("hidden-thinking", "detect", 1);
 
 pub const SCANNER = #{
     name: "hidden-thinking-2",
@@ -29,7 +29,7 @@ condition and recommends fixes for issues it finds.
         detect: #{
             notes: #{
                 writes: #{
-                    "thinking.empty": include_str!(
+                    "empty-thinking": include_str!(
                         "thinking-empty-note.md"
                     ),
                 },
@@ -39,12 +39,7 @@ condition and recommends fixes for issues it finds.
             attachments: #{ wants: ["config:"] },
         },
         report: #{
-            notes: #{
-                // FUTURE: `needs` skips the report unless `detect` ran
-                // to completion. A note it did not write is still no
-                // issue: the report reads what exists.
-                needs: ["thinking.empty"],
-            },
+            notes: #{ wants: ["empty-thinking"] },
             issues: #{
                 writes: #{ "hidden-thinking": "Thinking blocks are hidden" },
             },
@@ -52,7 +47,7 @@ condition and recommends fixes for issues it finds.
     },
 };
 
-/// Write a `thinking.empty` note on the latest thinking block across
+/// Write a `empty-thinking` note on the latest thinking block across
 /// the scan's sessions.
 pub async fn detect() {
     // FUTURE: the user config comes from the dataset's `config:`
@@ -60,82 +55,96 @@ pub async fn detect() {
     // through `user().config()`, which the rethink removes
     let config = "TODO: showThinkingSummaries from the config attachment";
 
-    // The store's read order is not the modified order, so sort the
-    // sessions newest-modified first, then stop once a session's
-    // modified time cannot beat the latest block found: a session's
-    // thinking blocks are no newer than its modified time
-    let sessions = [];
-    for s in scan().sessions().await {
-        let attrs = s.attrs().await;
-        sessions.push((attrs.modified.millis(), s));
-    }
-    sessions.sort_by(|a, b| b.0.cmp(a.0));
-
+    // Look at the latest sessions first for empty thinking blocks.
     let latest = None;
-    for (modified, s) in sessions {
+    for (s, unseen) in scan().sessions().newest_first().with_unseen(KEY).await? {
+        // Skip session messages we've seen
+        let (start, end) = match unseen {
+            Some(range) => range,
+            None => continue,
+        };
+
+        // If current session is older than our working latest, we have
+        // our latest
         if let Some((latest_msg, _)) = latest {
-            if modified <= latest_msg.timestamp.millis() {
+            let modified = s.attrs().await.modified;
+            if modified <= latest_msg.timestamp {
                 break;
             }
         }
+
+        // Get the latest thinking msg for session - if it's older than
+        // working latest we have latest, otherwise it becomes working latest
         for msg in s
             .messages()
+            .lines(start, end)
             .type(#{ "assistant": "thinking" })
-            .latest_first() // only check latest thinking block
+            .latest_first()
             .await?
         {
-            let newer = match latest {
-                Some((latest_msg, _)) => msg.timestamp.millis() > latest_msg.timestamp.millis(),
-                None => true,
+            let is_msg_older = match latest {
+                Some((latest_msg, _)) => msg.timestamp > latest_msg.timestamp,
+                None => false,
             };
-            if newer {
-                latest = Some((msg, s.id));
+            if is_msg_older {
+                break;
             }
-            // Stop after the session's latest block
-            break;
+            latest = Some((msg, s.id));
         }
     }
+
+    // If we have a latest thinking block, record its empty status
     if let Some((msg, session_id)) = latest {
-        // FUTURE: legacy `.keep_prev()` kept the prior note alongside
-        // this one; the rethink note object model decides how a new
-        // note relates to the prior one
-        write_note("thinking.empty", msg.text == "")
+        write_note("empty-thinking", msg.text == "")
             .for_session_line(session_id, msg.line)
-            .metadata(#{
-                msg_timestamp: msg.timestamp.millis(),
-                model: msg.model(),
-                config,
-            })
+            .metadata(
+                #{ msg_timestamp: msg.timestamp, model: msg.model(), config },
+            )
             .await?;
     }
-    Ok(())
+
+    // Mark sessions as seen
+    for s in scan().sessions().await {
+        watermark(s, KEY).await?;
+    }
 }
 
-/// Report an issue when the latest `thinking.empty` note says the
+/// Report an issue when the latest `empty-thinking` note says the
 /// block was empty.
 pub async fn report() {
-    // FUTURE: a notes query over the scan's notes
-    let notes = scan().notes().name("thinking.empty").await?;
-    if notes.is_empty() {
-        return Ok(());
-    }
-    // Use the most recent block for evidence
-    notes.sort_by(|a, b| {
-        let a_ts = a.metadata.get("msg_timestamp").unwrap();
-        let b_ts = b.metadata.get("msg_timestamp").unwrap();
-        b_ts.cmp(a_ts)
-    });
-    let note = notes[0];
-    // Only report issues for empty text (value is true)
-    if note.value {
-        // FUTURE: write_issue. Legacy `.open_on_new_evidence()`
-        // reopened an existing issue on newer evidence; the rethink
-        // issue is an object whose status the writer sets, and how a
-        // re-report relates to the existing issue is undecided.
-        write_issue("hidden-thinking", "Thinking blocks hidden in recent session")
-            .description(include_str!("issue-description.md"))
-            .evidence([#{ note, timestamp: note.metadata.get("msg_timestamp").unwrap() }])
+    // Get empty-thinking notes written for this scan
+    let notes = scan().notes().name("empty-thinking").await?;
+
+    // Use the note for the latest msg --- this is our best evidence
+    // of an issue
+    if let Some(note) = latest_msg_note(notes) {
+        if note.value {
+            // `hidden-thinking` is a singleton. The notes are this
+            // scan's, so each is new evidence: an existing issue, open
+            // or closed, is reopened with it
+            write_issue(
+                "hidden-thinking",
+                "Thinking blocks hidden in recent session",
+                include_str!("issue-description.md"),
+            )
+            .evidence(note)
             .await?;
+        }
     }
-    Ok(())
+}
+
+fn latest_msg_note(notes) {
+    notes
+        .iter()
+        .reduce(
+            |a, b| {
+                let a_ts = a.metadata.get("msg_timestamp").unwrap();
+                let b_ts = b.metadata.get("msg_timestamp").unwrap();
+                if b_ts > a_ts {
+                    b
+                } else {
+                    a
+                }
+            },
+        )
 }
