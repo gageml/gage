@@ -6,25 +6,24 @@ pub const SCANNER = #{
     tasks: #{ main: #{} },
 };
 
-const KEY = ("code-review", "findings", 1);
+const KEY = ("carry-forward-example", "main", 1);
 
 pub async fn main() {
-    // Carries forward previously written notes scan sessions
     carry_forward(KEY).await?;
-
-    // Iterate sessions with associated unseen line ranges
-    for (s, unseen) in scan().sessions().with_unseen(KEY).await? {
-        // Only write a note if we haven't seen this session or
-        // if its changed since its last watermark
-        if unseen.is_some() {
+    let carried = scan().notes().name("native-size").await?;
+    log::info!("Carried forward {} native-size notes", carried.len());
+    for s in scan().sessions().await? {
+        if !carried_for_session(s, carried) {
             let attrs = s.attrs().await;
-            write_note("native_size", attrs.native_size)
+            write_note("native-size", attrs.native_size)
                 .for_session(s.id)
-                .carry_forward(KEY)
+                .work_key(KEY)
                 .await?;
         }
-
-        // Refresh the watermark
-        watermark(KEY, s).await?;
     }
+}
+
+fn carried_for_session(s, carried) {
+    println!("{carried:?}");
+    return false;
 }
