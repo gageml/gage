@@ -81,7 +81,7 @@ enum Scan2Command {
 #[command(group = ArgGroup::new("scan2_dataset")
     .required(true)
     .multiple(true)
-    .args(SELECT_ARG_NAMES.iter().copied().chain(std::iter::once("dataset"))))]
+    .args(SELECT_ARG_NAMES.iter().copied().chain(["dataset", "list_scanners"])))]
 pub struct Scan2RunArgs {
     /// Scanner to run (repeatable)
     #[arg(short, long = "scanner", value_name = "NAME", display_order = 2)]
@@ -116,7 +116,7 @@ pub struct Scan2RunArgs {
     no_deps: bool,
 
     /// Show available scanners and exit
-    #[arg(long, display_order = 13)]
+    #[arg(long, exclusive = true, display_order = 13)]
     list_scanners: bool,
 }
 
