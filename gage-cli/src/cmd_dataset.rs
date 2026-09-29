@@ -18,7 +18,6 @@ use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, parse_byte_size, print_add_outcome, run_query};
 use crate::human::format_elapsed_ms;
 use crate::session_select::SessionSelectArgs;
-use crate::source;
 use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
@@ -70,28 +69,10 @@ pub struct DatasetListArgs {
 
 pub async fn add(args: DatasetAddArgs) {
     let store = open_store("gage dataset add");
-    let dataset_id = match DatasetStore::from(&store).create() {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage dataset add: {e}");
-            std::process::exit(1);
-        }
-    };
+    let dataset_id = create_dataset("gage dataset add", &store);
     println!("Created dataset {}", short_uuid(&dataset_id));
 
     if args.select.is_empty() {
-        return;
-    }
-
-    let selected = match args.select.resolve("gage dataset add").await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("gage dataset add: {e}");
-            std::process::exit(1);
-        }
-    };
-    if selected.is_empty() {
-        eprintln!("gage dataset add: no sessions matched the selection");
         return;
     }
 
@@ -106,32 +87,81 @@ pub async fn add(args: DatasetAddArgs) {
         Some(args.max_size.unwrap_or(configured).bytes())
     };
 
-    let registry = source::driver_registry();
-    let (driver, spec) = match source::resolve_source(&registry, args.source.as_deref()) {
+    populate_dataset(
+        "gage dataset add",
+        &store,
+        &dataset_id,
+        args.source.as_deref(),
+        &args.select,
+        max_bytes,
+    )
+    .await;
+}
+
+/// Create an empty dataset in `store`. Prints `command: <error>`
+/// and exits on failure.
+pub(crate) fn create_dataset(command: &str, store: &Store) -> String {
+    match DatasetStore::from(store).create() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Resolve `select` to native sessions and add them to
+/// `dataset_id` through the opened source. Prints one
+/// `Added session … (native …) to dataset …` line per added
+/// session. On any failure it prints `command: <error>` and exits.
+/// A selection that resolves to no sessions is announced and
+/// otherwise is not an error.
+pub(crate) async fn populate_dataset(
+    command: &str,
+    store: &Store,
+    dataset_id: &str,
+    source: Option<&str>,
+    select: &SessionSelectArgs,
+    max_bytes: Option<u64>,
+) {
+    let selected = match select.resolve(command).await {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("gage dataset add: {e}");
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
+    };
+    if selected.is_empty() {
+        println!("No sessions matched the selection; dataset is empty");
+        return;
+    }
+
+    let registry = crate::source::driver_registry();
+    let (driver, spec) = match crate::source::resolve_source(&registry, source) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{command}: {e}");
             std::process::exit(1);
         }
     };
     let source_handle = match driver.open_source(&spec) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("gage dataset add: {spec}: {e}");
+            eprintln!("{command}: {spec}: {e}");
             std::process::exit(1);
         }
     };
 
-    // Confirm every selected session is present in the opened source
-    // before writing anything, so one missing session leaves the
-    // dataset empty rather than partially filled.
+    // Confirm every selected session is present in the opened
+    // source before writing anything, so one missing session leaves
+    // the dataset empty rather than partially filled.
     let mut ids: Vec<String> = Vec::with_capacity(selected.len());
     let mut errors = 0;
     for info in &selected {
         match source_handle.find_native(&info.id) {
             Ok(id) => ids.push(id),
             Err(e) => {
-                eprintln!("gage dataset add: {e}");
+                eprintln!("{command}: {e}");
                 errors += 1;
             }
         }
@@ -145,7 +175,7 @@ pub async fn add(args: DatasetAddArgs) {
         match source_handle.open_native(id) {
             Ok(s) => natives.push(s),
             Err(e) => {
-                eprintln!("gage dataset add: {id}: {e}");
+                eprintln!("{command}: {id}: {e}");
                 std::process::exit(1);
             }
         }
@@ -159,22 +189,22 @@ pub async fn add(args: DatasetAddArgs) {
         })
         .collect();
     let datasets = match max_bytes {
-        Some(max) => DatasetStore::from(&store).with_max_session_size(max),
-        None => DatasetStore::from(&store),
+        Some(max) => DatasetStore::from(store).with_max_session_size(max),
+        None => DatasetStore::from(store),
     };
-    let outcomes = match datasets.sessions_add(&dataset_id, specs) {
+    let outcomes = match datasets.sessions_add(dataset_id, specs) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("gage dataset add: {e}");
+            eprintln!("{command}: {e}");
             std::process::exit(1);
         }
     };
     for (outcome, id) in outcomes.iter().zip(&ids) {
-        print_add_outcome(&outcome.outcome, &outcome.id, id, Some(&dataset_id));
+        print_add_outcome(&outcome.outcome, &outcome.id, id, Some(dataset_id));
     }
 
     if let Err(e) = source_handle.close() {
-        eprintln!("gage dataset add: {spec}: {e}");
+        eprintln!("{command}: {spec}: {e}");
         std::process::exit(1);
     }
 }

@@ -6,19 +6,14 @@ pub const SCANNER = #{
     tasks: #{ main: #{} },
 };
 
-const KEY = ("watermark", "findings", 1);
+const KEY = ("watermark-example", 1);
 
 pub async fn main() {
     for (s, unseen) in scan().sessions().with_unseen(KEY).await? {
         if let Some((line, line_end)) = unseen {
-            println!(
-                "Session {} seen, lines {}-{} unseen",
-                s.id,
-                line,
-                line_end
-            )
+            println!("{} unseen {}-{}", s.id, line, line_end)
         } else {
-            println!("Session {} not seen", s.id);
+            println!("{} nothing unseen", s.id);
         }
         watermark(s, KEY).await?;
     }

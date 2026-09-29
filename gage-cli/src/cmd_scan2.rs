@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
@@ -23,10 +23,12 @@ use tabled::{
     },
 };
 
+use crate::cmd_dataset;
 use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
 use crate::human::{format_duration, format_elapsed_ms};
+use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::style as s;
 
 /// Install the `tracing` subscriber for a scan: warnings and above to
@@ -76,29 +78,45 @@ enum Scan2Command {
 }
 
 #[derive(Args)]
+#[command(group = ArgGroup::new("scan2_dataset")
+    .required(true)
+    .multiple(true)
+    .args(SELECT_ARG_NAMES.iter().copied().chain(std::iter::once("dataset"))))]
 pub struct Scan2RunArgs {
     /// Scanner to run (repeatable)
-    #[arg(short, long = "scanner", value_name = "NAME")]
+    #[arg(short, long = "scanner", value_name = "NAME", display_order = 2)]
     scanners: Vec<String>,
 
-    /// Scanner file to run (repeatable)
-    #[arg(short, long = "file", value_name = "PATH")]
-    files: Vec<PathBuf>,
-
     /// Dataset to scan (ID or prefix)
-    #[arg(short, long, value_name = "DATASET")]
+    ///
+    /// Runs the scan against an existing dataset instead of creating
+    /// one from the session-selection options.
+    #[arg(
+        short,
+        long,
+        value_name = "DATASET",
+        display_order = 3,
+        conflicts_with_all = SELECT_ARG_NAMES,
+    )]
     dataset: Option<String>,
 
+    /// Scanner file to run (repeatable)
+    #[arg(short, long = "file", value_name = "PATH", display_order = 4)]
+    files: Vec<PathBuf>,
+
     /// Tasks to run at once
-    #[arg(short, long, value_name = "N", default_value_t = 10)]
+    #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 5)]
     jobs: usize,
 
+    #[command(flatten)]
+    select: SessionSelectArgs,
+
     /// Run only the scanners named, without pulling in required_by dependents
-    #[arg(long)]
+    #[arg(long, display_order = 12)]
     no_deps: bool,
 
     /// Show available scanners and exit
-    #[arg(long)]
+    #[arg(long, display_order = 13)]
     list_scanners: bool,
 }
 
@@ -295,17 +313,45 @@ async fn run_scan(args: Scan2RunArgs) {
     // full stop before any work.
     let store = open_store("gage scan2");
 
-    // The dataset commit the scan links
-    let dataset_sha =
-        args.dataset
-            .as_deref()
-            .map(|prefix| match DatasetStore::from(&store).get(prefix) {
-                Ok(record) => record.commit_sha,
-                Err(e) => {
-                    eprintln!("gage scan2: --dataset {prefix}: {e}");
-                    std::process::exit(1);
-                }
-            });
+    // Either --dataset names an existing dataset, or the
+    // session-selection options mint one populated with the
+    // matching native sessions. The clap group guarantees one of
+    // the two is present.
+    let dataset_record = if let Some(prefix) = args.dataset.as_deref() {
+        let record = match DatasetStore::from(&store).get(prefix) {
+            Ok(record) => record,
+            Err(e) => {
+                eprintln!("gage scan2: --dataset {prefix}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let members = match DatasetStore::from(&store).sessions_list(&record.id) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("gage scan2: --dataset {prefix}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if members.is_empty() {
+            println!(
+                "Note: dataset {} contains no sessions; the scan will run against an empty set",
+                short_uuid(&record.id)
+            );
+        }
+        record
+    } else {
+        let id = cmd_dataset::create_dataset("gage scan2", &store);
+        println!("Created dataset {}", short_uuid(&id));
+        cmd_dataset::populate_dataset("gage scan2", &store, &id, None, &args.select, None).await;
+        match DatasetStore::from(&store).get(&id) {
+            Ok(record) => record,
+            Err(e) => {
+                eprintln!("gage scan2: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+    let dataset_sha = Some(dataset_record.commit_sha.clone());
 
     // Named scanners come from the registry; `-f` files are parsed on
     // this invocation. Named scanners run first, then files.
