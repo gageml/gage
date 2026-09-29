@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
+use cliclack as cli;
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
 use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
@@ -16,6 +17,7 @@ use tabled::{
 
 use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, parse_byte_size, print_add_outcome, run_query};
+use crate::dialog::{self, DialogError};
 use crate::human::format_elapsed_ms;
 use crate::session_select::SessionSelectArgs;
 use crate::style::{self, IdKind, styled_id};
@@ -40,6 +42,12 @@ pub enum DatasetCommand {
 
     /// List datasets
     List(DatasetListArgs),
+
+    /// Delete datasets
+    ///
+    /// Member sessions and scan runs that used a dataset are kept
+    /// unless --sessions is given.
+    Delete(DatasetDeleteArgs),
 }
 
 #[derive(Args)]
@@ -102,6 +110,24 @@ pub struct DatasetRefreshArgs {
 pub struct DatasetListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
+}
+
+#[derive(Args)]
+pub struct DatasetDeleteArgs {
+    /// Dataset IDs (or prefixes)
+    #[arg(required = true)]
+    ids: Vec<String>,
+
+    /// Also remove member sessions from the store
+    ///
+    /// A session that another dataset holds is kept. Scan runs that
+    /// used the dataset are not affected.
+    #[arg(long)]
+    sessions: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 pub async fn add(args: DatasetAddArgs) {
@@ -372,6 +398,93 @@ pub async fn list(args: DatasetListArgs) {
         .to_string();
     println!("{table}");
     args.limit.print_summary(shown, total, "dataset");
+}
+
+pub fn delete(args: DatasetDeleteArgs) {
+    let store = open_store("gage dataset delete");
+    let datasets = DatasetStore::from(&store);
+
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut records = Vec::with_capacity(args.ids.len());
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match datasets.get(prefix) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                eprintln!("gage dataset delete: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let count = records.len();
+    let members: usize = records.iter().map(|r| r.session_count).sum();
+    dialog::run("Delete datasets", || {
+        let mut remark = format!("{count} {}", plural(count, "dataset"));
+        if args.sessions {
+            remark.push_str(&format!(", {members} {}", plural(members, "session")));
+        }
+        cli::log::remark(remark)?;
+
+        if !args.yes {
+            let action = if args.sessions {
+                format!(
+                    "Permanently delete {count} {} and remove their sessions?",
+                    plural(count, "dataset")
+                )
+            } else {
+                format!("Permanently delete {count} {}?", plural(count, "dataset"))
+            };
+            let confirmed = cli::confirm(format!("{action} This cannot be undone."))
+                .initial_value(false)
+                .interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        let mut deleted = 0;
+        let mut removed = 0;
+        let mut kept = 0;
+        for record in &records {
+            let result = if args.sessions {
+                datasets.delete_cascade(&record.id).map(|d| {
+                    removed += d.removed.len();
+                    kept += d.kept.len();
+                })
+            } else {
+                datasets.delete(&record.id).map(|_| ())
+            };
+            match result {
+                Ok(()) => deleted += 1,
+                Err(e) => eprintln!("warning: failed to delete {}: {e}", short_uuid(&record.id)),
+            }
+        }
+
+        let mut outro = format!("Deleted {deleted} {}", plural(deleted, "dataset"));
+        if args.sessions {
+            outro.push_str(&format!(
+                ", removed {removed} {}",
+                plural(removed, "session")
+            ));
+            if kept > 0 {
+                outro.push_str(&format!(", kept {kept} held by other datasets"));
+            }
+        }
+        Ok(outro.into())
+    });
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
+    }
 }
 
 /// Open the default store, or print `command: <error>` and exit

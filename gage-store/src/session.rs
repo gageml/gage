@@ -315,17 +315,24 @@ impl<'a> SessionStore<'a> {
         }
 
         for record in &sessions {
-            let object = self.store.read_object(&record.commit_sha)?;
-            let message = format!(
-                "session remove: {}:{}",
-                record.driver_name, record.attrs.native_id
-            );
-            self.store.delete(&object, &message)?;
+            self.tombstone(record)?;
         }
         Ok(SessionRemoveOutcome {
             sessions,
             datasets: held,
         })
+    }
+
+    /// Write a parentless tombstone over `record`'s current commit.
+    /// Datasets holding the session are not edited.
+    pub(crate) fn tombstone(&self, record: &SessionRecord) -> Result<(), StoreError> {
+        let object = self.store.read_object(&record.commit_sha)?;
+        let message = format!(
+            "session remove: {}:{}",
+            record.driver_name, record.attrs.native_id
+        );
+        self.store.delete(&object, &message)?;
+        Ok(())
     }
 
     /// Read the live session for `id_or_prefix`.

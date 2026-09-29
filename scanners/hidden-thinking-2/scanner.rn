@@ -1,13 +1,3 @@
-// Model of the `hidden-thinking` scanner for the rethink runtime
-// (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
-// the task names the action.
-//
-// Untagged code runs on the rethink runtime today. Code tagged
-// `// FUTURE` needs a facility the rethink runtime does not have yet.
-// Where the rethink design specifies the interface, FUTURE code is
-// written against it; otherwise it follows the legacy interface as a
-// placeholder. This file is a target, not a runnable scanner.
-
 use gage::{scan, watermark, write_issue, write_note};
 
 const KEY = ("hidden-thinking", "detect", 1);

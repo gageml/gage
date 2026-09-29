@@ -57,15 +57,6 @@ pub enum Issue2Command {
     Comment(IssueCommentArgs),
 }
 
-/// A `--status` value: one status, or every status
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum StatusFilter {
-    Pending,
-    Open,
-    Closed,
-    All,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CloseReason {
     Completed,
@@ -85,16 +76,16 @@ impl From<CloseReason> for StatusReason {
 
 #[derive(Args)]
 pub struct IssueListArgs {
-    /// Show issues with this status (default: pending and open)
-    #[arg(short, long, value_enum)]
-    status: Option<StatusFilter>,
+    #[command(flatten)]
+    limit: crate::limit::LimitArgs,
 
-    /// Show issues with this name
+    /// Filter by issue name
     #[arg(long)]
     name: Option<String>,
 
-    #[command(flatten)]
-    limit: crate::limit::LimitArgs,
+    /// Show closed issues
+    #[arg(short, long)]
+    closed: bool,
 }
 
 #[derive(Args)]
@@ -252,21 +243,15 @@ pub async fn list(args: IssueListArgs) {
         .build()
         .await;
     let mut clauses: Vec<String> = Vec::new();
-    match args.status {
-        None => clauses.push("status IN ('pending', 'open')".to_string()),
-        Some(StatusFilter::All) => {}
-        Some(StatusFilter::Pending) => clauses.push("status = 'pending'".to_string()),
-        Some(StatusFilter::Open) => clauses.push("status = 'open'".to_string()),
-        Some(StatusFilter::Closed) => clauses.push("status = 'closed'".to_string()),
+    if args.closed {
+        clauses.push("status = 'closed'".to_string());
+    } else {
+        clauses.push("status IN ('pending', 'open')".to_string());
     }
     if let Some(name) = &args.name {
         clauses.push(format!("name = '{}'", sql_str(name)));
     }
-    let where_clause = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", clauses.join(" AND "))
-    };
+    let where_clause = format!(" WHERE {}", clauses.join(" AND "));
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),

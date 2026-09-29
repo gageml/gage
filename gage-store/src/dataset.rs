@@ -92,6 +92,16 @@ pub struct DatasetMembers {
     pub session_ids: Vec<String>,
 }
 
+/// Outcome of deleting a dataset together with its member sessions.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetDeleted {
+    pub dataset: String,
+    /// Member sessions tombstoned, in member order
+    pub removed: Vec<String>,
+    /// Member sessions kept because another live dataset holds them
+    pub kept: Vec<String>,
+}
+
 /// One session to add to a dataset. The driver drives the serialization
 /// via [`Driver::write_native`]; `session` supplies the native id,
 /// type, and attributes.
@@ -157,6 +167,57 @@ impl DatasetStore<'_> {
         let object = self.store.read_object(commit_sha)?;
         require_type(&object, OBJECT_TYPE)?;
         record(&object)
+    }
+
+    /// Delete a dataset by writing a parentless tombstone commit. The
+    /// member sessions and the scans that reference the dataset stay.
+    /// Returns the resolved id.
+    pub fn delete(&self, id_or_prefix: &str) -> Result<String, StoreError> {
+        let object = self.current(id_or_prefix)?;
+        self.store.delete(&object, "dataset delete")?;
+        Ok(object.header.id)
+    }
+
+    /// Delete a dataset and the member sessions no other live dataset
+    /// holds. A member held elsewhere is kept and reported. A member
+    /// removed since the dataset linked it is skipped. The sessions go
+    /// first, so a failure among them leaves the dataset in place.
+    pub fn delete_cascade(&self, id_or_prefix: &str) -> Result<DatasetDeleted, StoreError> {
+        let object = self.current(id_or_prefix)?;
+        let mut member_ids: Vec<String> = Vec::new();
+        for sha in members(&object) {
+            member_ids.push(self.store.read_header(&sha)?.id);
+        }
+        let held_elsewhere: Vec<String> = self
+            .containing(&member_ids)?
+            .into_iter()
+            .filter(|m| m.dataset_id != object.header.id)
+            .flat_map(|m| m.session_ids)
+            .collect();
+
+        let mut deleted = DatasetDeleted {
+            dataset: object.header.id.clone(),
+            removed: Vec::new(),
+            kept: Vec::new(),
+        };
+        let sessions = SessionStore::from(self.store);
+        for id in member_ids {
+            if held_elsewhere.contains(&id) {
+                deleted.kept.push(id);
+                continue;
+            }
+            match sessions.get(&id) {
+                Ok(record) => {
+                    sessions.tombstone(&record)?;
+                    deleted.removed.push(id);
+                }
+                // Already removed since the dataset linked it
+                Err(StoreError::ObjectDeleted(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.store.delete(&object, "dataset delete")?;
+        Ok(deleted)
     }
 
     fn current(&self, id_or_prefix: &str) -> Result<Object, StoreError> {
@@ -1038,6 +1099,99 @@ mod tests {
             .unwrap();
         assert_eq!(outcomes[0].native_id, "s1");
         assert!(datasets.sessions_list(&dataset).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_tombstones_dataset_and_keeps_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        let added = add(&store, &dataset, &mut [fake("s1", "a\n")]);
+        let before = datasets.get(&dataset).unwrap();
+
+        assert_eq!(datasets.delete(&dataset).unwrap(), dataset);
+
+        assert!(matches!(
+            datasets.get(&dataset).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == dataset
+        ));
+        assert_eq!(datasets.query().count().unwrap(), 0);
+        SessionStore::from(&store).get(&added[0].id).unwrap();
+        // The pre-delete commit still reads, as a scan linking it does
+        let at = datasets.sessions_at(&before.commit_sha).unwrap();
+        assert_eq!(at[0].id, added[0].id);
+        assert!(matches!(
+            datasets.delete(&dataset).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == dataset
+        ));
+    }
+
+    #[test]
+    fn delete_cascade_removes_unshared_sessions_and_keeps_shared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let a = datasets.create().unwrap();
+        let b = datasets.create().unwrap();
+        let in_a = add(&store, &a, &mut [fake("s1", "a\n"), fake("s2", "b\n")]);
+        add(&store, &b, &mut [fake("s2", "b\n")]);
+        let (s1, s2) = (in_a[0].id.clone(), in_a[1].id.clone());
+        let b_tip = rev_parse(&store, &b);
+
+        let deleted = datasets.delete_cascade(&a).unwrap();
+
+        assert_eq!(
+            deleted,
+            DatasetDeleted {
+                dataset: a.clone(),
+                removed: vec![s1.clone()],
+                kept: vec![s2.clone()],
+            }
+        );
+        let sessions = SessionStore::from(&store);
+        assert!(matches!(
+            sessions.get(&s1).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == s1
+        ));
+        sessions.get(&s2).unwrap();
+        assert!(matches!(
+            datasets.get(&a).unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == a
+        ));
+        // The other dataset is not edited
+        assert_eq!(rev_parse(&store, &b), b_tip);
+        assert_eq!(datasets.sessions_list(&b).unwrap()[0].native_id, "s2");
+    }
+
+    #[test]
+    fn delete_cascade_skips_already_removed_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        let added = add(
+            &store,
+            &dataset,
+            &mut [fake("s1", "a\n"), fake("s2", "b\n")],
+        );
+        let (s1, s2) = (added[0].id.clone(), added[1].id.clone());
+        // Tombstone s1 directly so it stays linked as a member
+        store
+            .delete(&store.read_object(&rev_parse(&store, &s1)).unwrap(), "x")
+            .unwrap();
+
+        let deleted = datasets.delete_cascade(&dataset).unwrap();
+
+        assert_eq!(
+            deleted,
+            DatasetDeleted {
+                dataset: dataset.clone(),
+                removed: vec![s2],
+                kept: Vec::new(),
+            }
+        );
+        assert_eq!(datasets.query().count().unwrap(), 0);
     }
 
     #[test]
