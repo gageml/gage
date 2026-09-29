@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
@@ -29,7 +29,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
-use crate::session_select::SessionSelectArgs;
+use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::source;
 use crate::style::{self, IdKind, styled_id};
 
@@ -97,6 +97,10 @@ pub struct SessionListArgs {
 }
 
 #[derive(Args)]
+#[command(group = ArgGroup::new("session_add_select")
+    .required(true)
+    .multiple(true)
+    .args(SELECT_ARG_NAMES))]
 pub struct SessionAddArgs {
     /// Add the sessions to a dataset
     ///
@@ -124,7 +128,7 @@ pub struct SessionAddArgs {
     pub select: SessionSelectArgs,
 }
 
-fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
+pub(crate) fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
     s.parse()
 }
 
@@ -875,7 +879,12 @@ fn add_native(
     }
 }
 
-fn print_add_outcome(outcome: &SessionOutcome, id: &str, native_id: &str, dataset: Option<&str>) {
+pub(crate) fn print_add_outcome(
+    outcome: &SessionOutcome,
+    id: &str,
+    native_id: &str,
+    dataset: Option<&str>,
+) {
     let verb = match outcome {
         SessionOutcome::Added => "Added",
         SessionOutcome::Updated => "Updated",

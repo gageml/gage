@@ -13,17 +13,21 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{ArgGroup, Args};
+use clap::Args;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use rand::seq::SliceRandom;
 
 use crate::source;
 
+/// Names of the arg fields on this struct, in the order the shared
+/// help layout shows them. Callers that need to enforce "at least
+/// one selection" pass this list into an `ArgGroup` on the wrapping
+/// args struct.
+pub const SELECT_ARG_NAMES: &[&str] = &[
+    "sessions", "limit", "sample", "days", "today", "all", "project",
+];
+
 #[derive(Args)]
-#[command(group = ArgGroup::new("session_select")
-    .required(true)
-    .multiple(true)
-    .args(["sessions", "project", "limit", "sample", "days", "today", "all"]))]
 pub struct SessionSelectArgs {
     /// Session IDs (or prefixes)
     #[arg(
@@ -119,6 +123,18 @@ impl fmt::Display for SessionSelectError {
 impl std::error::Error for SessionSelectError {}
 
 impl SessionSelectArgs {
+    /// True when the caller supplied no positional session and no
+    /// filter axis — every field holds its clap default.
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+            && self.project.is_none()
+            && self.limit.is_none()
+            && self.sample.is_none()
+            && self.days.is_none()
+            && !self.today
+            && !self.all
+    }
+
     /// Resolve the parsed options to native session records.
     ///
     /// A non-empty positional `sessions` list is resolved through
