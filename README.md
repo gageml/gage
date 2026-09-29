@@ -127,13 +127,6 @@ Gage ships these scanners in the `default` group. Their source is under
     </td>
   </tr>
   <tr>
-    <td><a href="/scanners/hidden-thinking"><code>hidden-thinking</code></a></td>
-    <td>
-      Sessions where Claude Code settings hid the model's thinking blocks, with
-      a recommended fix
-    </td>
-  </tr>
-  <tr>
     <td>
       <a href="/scanners/session-retention"><code>session-retention</code></a>
     </td>

@@ -4,9 +4,9 @@
 
 A task name says what the task does. The scanner name says what the task works
 on. The two names appear together wherever Gage records a task, so neither one
-has to carry the whole meaning. A note written by the `report` task of the
-`hidden-thinking` scanner has the author `task:hidden-thinking:report`. The scan
-record, the logs, and the task list show the same pair.
+has to carry the whole meaning. A note written by the `review` task of the
+`code-review` scanner has the author `task:code-review:review`. The scan record,
+the logs, and the task list show the same pair.
 
 A scanner with one task names it `main`. There is nothing to tell apart, and the
 scanner name already says what the task is for.
@@ -23,18 +23,22 @@ pub async fn main() {
 ```
 
 A scanner with more than one task names each task for its action. Use a verb.
-The `hidden-thinking` scanner has a `detect` task that writes notes and a
-`report` task that writes issues. The `code-review` scanner has a
-`summarize_projects` task and a `review` task.
+The `code-review` scanner has a `summarize_projects` task that writes project
+summary notes and a `review` task that reads those summaries and writes
+findings.
 
 ```rune
 pub const SCANNER = #{
-    name: "hidden-thinking",
+    name: "code-review",
     tasks: #{
-        detect: #{ notes: #{ writes: #{ "thinking.empty": "..." } } },
-        report: #{
-            notes: #{ wants: ["thinking.empty"] },
-            issues: #{ writes: #{ "hidden-thinking": "..." } },
+        summarize_projects: #{
+            notes: #{ writes: #{ "project-summary.rules": "..." } },
+        },
+        review: #{
+            notes: #{
+                wants: ["project-summary.*"],
+                writes: #{ "finding.code": "..." },
+            },
         },
     },
 };
