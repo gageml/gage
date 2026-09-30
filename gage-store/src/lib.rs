@@ -80,8 +80,8 @@ pub use note::{
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{
-    LinkKind, StoredNoteTable, StoredSessionTable, dataset_table, issue_event_table, issue_table,
-    link_table, scan_table, scan_watermark_table,
+    LinkKind, StoredNoteTable, StoredSessionTable, attachment_table, dataset_table,
+    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table,
 };
 pub use scan::{
     DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted, ScanFiles,

@@ -7,11 +7,14 @@
 //! `add --dataset` stores and links in one step, `remove --dataset`
 //! unlinks without touching the object.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
+use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
+use gage_query2::ContextBuilder;
 use gage_store::{
     AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec, AttachmentStore,
     DatasetStore, Store, StoreError,
@@ -24,8 +27,10 @@ use tabled::{
     },
 };
 
+use crate::cmd_note::count_rows;
+use crate::cmd_session::{column, run_query};
 use crate::human::{format_elapsed_ms, format_size};
-use crate::style;
+use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
 pub enum AttachmentCommand {
@@ -210,69 +215,71 @@ fn link_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: &str) {
     }
 }
 
-pub fn list(args: AttachmentListArgs) {
+pub async fn list(args: AttachmentListArgs) {
     let store = open_store("gage attachment list");
-    let records: Vec<AttachmentRecord> = match args.dataset.as_deref() {
+    // With --dataset the rows are the dataset's links in link order;
+    // otherwise every live attachment, newest modified first
+    let (from, order) = match args.dataset.as_deref() {
         Some(prefix) => {
-            let datasets = DatasetStore::from(&store);
-            let dataset = match datasets.get(prefix) {
+            let dataset = match DatasetStore::from(&store).get(prefix) {
                 Ok(record) => record,
                 Err(e) => {
                     eprintln!("gage attachment list: --dataset {prefix}: {e}");
                     std::process::exit(1);
                 }
             };
-            match datasets.attachments(&dataset.id) {
-                Ok(records) => records,
-                Err(e) => {
-                    eprintln!("gage attachment list: {e}");
-                    std::process::exit(1);
-                }
-            }
+            (
+                format!(
+                    "attachment a JOIN dataset_attachment m ON m.attachment_id = a.id \
+                     AND m.dataset_id = '{}'",
+                    dataset.id
+                ),
+                "m.attachment_num",
+            )
         }
-        None => match AttachmentStore::from(&store)
-            .query()
-            .order(gage_store::Order::ModifiedDesc)
-            .iter()
-            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>())
-        {
-            Ok(records) => records,
-            Err(e) => {
-                eprintln!("gage attachment list: {e}");
-                std::process::exit(1);
-            }
-        },
+        None => ("attachment a".to_string(), "a.modified DESC"),
     };
-    let total = records.len();
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
+    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM {from}")).await;
     if total == 0 {
         println!("No attachments found");
         return;
     }
     let show = args.limit.show_count(total);
+    let sql = format!(
+        "SELECT a.id, a.id_prefix, a.name, a.file_count, a.size, a.root, a.modified \
+         FROM {from} ORDER BY {order} LIMIT {show}"
+    );
+    let batches = run_query(&ctx, &sql).await;
 
     let header: Vec<String> = ["Id", "Name", "Files", "Size", "Root", "Modified"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let rows: Vec<Vec<String>> = records
-        .iter()
-        .take(show)
-        .map(|r| {
-            let id = if args.full_id {
-                r.id.clone()
-            } else {
-                short_uuid(&r.id).to_string()
-            };
-            vec![
-                id,
-                r.attrs.name.clone(),
-                r.attrs.file_count.to_string(),
-                format_size(r.attrs.size as i64),
-                shorten_home(&r.attrs.root),
-                r.modified_ms.map(format_elapsed_ms).unwrap_or_default(),
-            ]
-        })
-        .collect();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in &batches {
+        let ids = column::<StringArray>(batch, 0);
+        let prefixes = column::<StringArray>(batch, 1);
+        let names = column::<StringArray>(batch, 2);
+        let files = column::<Int64Array>(batch, 3);
+        let sizes = column::<Int64Array>(batch, 4);
+        let roots = column::<StringArray>(batch, 5);
+        let modifieds = column::<TimestampMillisecondArray>(batch, 6);
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let shown = if args.full_id { id } else { short_uuid(id) };
+            rows.push(vec![
+                styled_id(shown, prefixes.value(i), IdKind::Gage),
+                names.value(i).to_string(),
+                files.value(i).to_string(),
+                format_size(sizes.value(i)),
+                shorten_home(Path::new(roots.value(i))),
+                format_elapsed_ms(modifieds.value(i)),
+            ]);
+        }
+    }
     let shown = rows.len();
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())

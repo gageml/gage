@@ -42,8 +42,8 @@ use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
 use gage_store::{
-    LinkKind, Store, StoredNoteTable, StoredSessionTable, dataset_table, issue_event_table,
-    issue_table, link_table, scan_table, scan_watermark_table,
+    LinkKind, Store, StoredNoteTable, StoredSessionTable, attachment_table, dataset_table,
+    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -118,6 +118,7 @@ impl ContextBuilder {
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
+            ("attachment", attachment_table(Arc::clone(&store))),
             ("scan", scan_table(Arc::clone(&store))),
             ("issue", issue_table(Arc::clone(&store))),
             ("issue_event", issue_event_table(Arc::clone(&store))),

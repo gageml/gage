@@ -336,7 +336,7 @@ async fn main() {
             },
             Command::Attachment { command } => match command {
                 cmd_attachment::AttachmentCommand::Add(args) => cmd_attachment::add(args),
-                cmd_attachment::AttachmentCommand::List(args) => cmd_attachment::list(args),
+                cmd_attachment::AttachmentCommand::List(args) => cmd_attachment::list(args).await,
                 cmd_attachment::AttachmentCommand::Show(args) => cmd_attachment::show(args),
                 cmd_attachment::AttachmentCommand::Remove(args) => cmd_attachment::remove(args),
             },
