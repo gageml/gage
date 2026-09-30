@@ -8,18 +8,17 @@
 // written against it; otherwise it follows the legacy interface as a
 // placeholder. This file is a target, not a runnable scanner.
 
-use gage::{carry_forward, scan, watermark, write_note};
-// FUTURE: agents, templates, progress, params, SQL query, and model
-// context are not in the rethink runtime
+use gage::{carry_forward_notes, params, scan, watermark, write_note};
+// FUTURE: agents, templates, progress, and model context are not in
+// the rethink runtime
 use gage::tools::Query;
-use gage::{AgentRunner, Progress, Template, call_agent, model_context, params, query};
+use gage::{AgentRunner, Progress, Template, call_agent, model_context};
 
 pub const SCANNER = #{
     name: "general-2",
     description: "Scan sessions for general findings",
     // FUTURE: groups: ["default"] when this scanner replaces `general`.
     // Left out so a legacy default scan does not select it.
-    // FUTURE: params() is not in the rethink runtime
     params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
     tasks: #{
         review: #{
@@ -44,7 +43,6 @@ const REVIEW_ROADMAP_KEY = ("general", "review[roadmap]", 1);
 /// under its own key. Both modes write `finding.general` notes; the
 /// note's `mode` metadata records the variant.
 pub async fn review() {
-    // FUTURE: params()
     match params().mode {
         "query" => review_query().await,
         "roadmap" => review_roadmap().await,
@@ -74,7 +72,7 @@ async fn review_query() {
     for (s, start, end) in sessions {
         if let Some(reason) = skip_session(s).await? {
             log::info!("Skipping session {}: {}", s.id, reason);
-            watermark(REVIEW_KEY, s).await?;
+            watermark(s, REVIEW_KEY).await?;
             progress.tick();
             continue;
         }
@@ -117,7 +115,7 @@ async fn review_roadmap() {
     let sessions = unseen_sessions(REVIEW_ROADMAP_KEY).await?;
 
     // Size the compression budget to the agent's free context
-    // FUTURE: model_context, params
+    // FUTURE: model_context
     let context = model_context("medium").await?;
     let budget = match params().budget {
         b if b > 0 => b,
@@ -140,7 +138,7 @@ async fn review_roadmap() {
     for (s, start, end) in sessions {
         if let Some(reason) = skip_session(s).await? {
             log::info!("Skipping session {}: {}", s.id, reason);
-            watermark(REVIEW_ROADMAP_KEY, s).await?;
+            watermark(s, REVIEW_ROADMAP_KEY).await?;
             progress.tick();
             continue;
         }
@@ -165,7 +163,7 @@ async fn review_roadmap() {
 /// carried into this scan first, so a session the key already covers
 /// contributes its findings without being reviewed again.
 async fn unseen_sessions(key) {
-    let carried = carry_forward(key).await?;
+    let carried = carry_forward_notes(key).await?;
     log::info!("carried {} notes forward under {:?}", carried, key);
     let out = [];
     for (s, unseen) in scan().sessions().with_unseen(key).await? {
@@ -190,7 +188,7 @@ async fn collect_results(runner, key, progress) {
                 metadata: result.as_metadata(),
             },
         );
-        watermark(key, session).await?;
+        watermark(session, key).await?;
         progress.tick();
     }
     Ok(())
@@ -200,29 +198,18 @@ async fn collect_results(runner, key, progress) {
 const SESSION_MIN_TEXT_LEN = 200;
 
 async fn skip_session(s) {
-    // FUTURE: query(). The rethink `message` table is scoped to the
-    // scan's dataset, so the SQL is unchanged. The query keeps
-    // scanner memory down; the sum is limited to 50 messages for the
-    // same reason.
-    let result = query(
-        format!(
-            "SELECT sum(length(text)) AS text_len FROM \
-            (SELECT text FROM message WHERE session_id = '{}' LIMIT 50)",
-            s.id
-        ),
-    )
-    .await?;
-    let #{ text_len } = result.get(0).expect("should return one row");
-    match text_len {
-        () => Ok(Some("empty session")),
-        text_len if text_len < SESSION_MIN_TEXT_LEN => {
-            let reason = format!(
-                "text len {text_len} < min {SESSION_MIN_TEXT_LEN}"
-            );
-            Ok(Some(reason))
-        }
-        _ => Ok(None),
+    let messages = s.messages().await?;
+    if messages.is_empty() {
+        return Ok(Some("empty session"));
     }
+    let text_len = 0;
+    for m in messages {
+        text_len += m.text.len();
+        if text_len >= SESSION_MIN_TEXT_LEN {
+            return Ok(None);
+        }
+    }
+    Ok(Some(format!("text len {text_len} < min {SESSION_MIN_TEXT_LEN}")))
 }
 
 fn write_finding_tooldef() {
@@ -276,6 +263,6 @@ async fn write_finding_note(key, mode, inputs) {
         }
         None => write.for_session(inputs.session),
     };
-    let note = write.metadata(metadata).carry_forward(key).await?;
+    let note = write.metadata(metadata).work_key(key).await?;
     Ok(format!("Wrote finding note {}", note.id))
 }

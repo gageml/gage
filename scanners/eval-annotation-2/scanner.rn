@@ -9,10 +9,10 @@
 // placeholder. This file is a target, not a runnable scanner.
 
 use gage::{scan, write_note};
-// FUTURE: agents, templates, progress, and SQL query are not in the
-// rethink runtime
+// FUTURE: agents, templates, and progress are not in the rethink
+// runtime
 use gage::tools::Query;
-use gage::{AgentRunner, Progress, Template, call_agent, query};
+use gage::{AgentRunner, Progress, Template, call_agent};
 
 pub const SCANNER = #{
     name: "eval-annotation-2",
@@ -87,29 +87,18 @@ pub async fn annotate() {
 const SESSION_MIN_TEXT_LEN = 200;
 
 async fn skip_session(s) {
-    // FUTURE: query(). The rethink `message` table is scoped to the
-    // scan's dataset, so the SQL is unchanged. The query keeps
-    // scanner memory down; the sum is limited to 50 messages for the
-    // same reason.
-    let result = query(
-        format!(
-            "SELECT sum(length(text)) AS text_len FROM \
-            (SELECT text FROM message WHERE session_id = '{}' LIMIT 50)",
-            s.id
-        ),
-    )
-    .await?;
-    let #{ text_len } = result.get(0).expect("should return one row");
-    match text_len {
-        () => Ok(Some("empty session")),
-        text_len if text_len < SESSION_MIN_TEXT_LEN => {
-            let reason = format!(
-                "text len {text_len} < min {SESSION_MIN_TEXT_LEN}"
-            );
-            Ok(Some(reason))
-        }
-        _ => Ok(None),
+    let messages = s.messages().await?;
+    if messages.is_empty() {
+        return Ok(Some("empty session"));
     }
+    let text_len = 0;
+    for m in messages {
+        text_len += m.text.len();
+        if text_len >= SESSION_MIN_TEXT_LEN {
+            return Ok(None);
+        }
+    }
+    Ok(Some(format!("text len {text_len} < min {SESSION_MIN_TEXT_LEN}")))
 }
 
 fn open_code_tooldef() {

@@ -9,10 +9,10 @@
 // placeholder. This file is a target, not a runnable scanner.
 
 use gage::{carry_forward, scan, watermark, write_note};
-// FUTURE: agents, templates, progress, params, SQL query, and model
-// context are not in the rethink runtime
+// FUTURE: agents, templates, progress, params, and model context are
+// not in the rethink runtime
 use gage::tools::Query;
-use gage::{AgentRunner, Progress, Template, call_agent, model_context, params, query};
+use gage::{AgentRunner, Progress, Template, call_agent, model_context, params};
 
 pub const SCANNER = #{
     name: "code-review-2",
@@ -383,26 +383,19 @@ async fn collect_results(runner, key, progress) {
     Ok(())
 }
 
+/// Tools whose calls edit files
+const FILE_EDIT_TOOLS = ["Edit", "Write", "MultiEdit"];
+
+/// A session with no file edits has nothing to review
 async fn skip_session(s) {
-    // FUTURE: query(). The rethink `message` table is scoped to the
-    // scan's dataset, so the SQL is unchanged. File edits show up as
-    // Edit/Write tool calls.
-    let result = query(
-        format!(
-            "SELECT count(*) AS n FROM message \
-            WHERE session_id = '{}' \
-            AND type = 'assistant' AND subtype = 'tool_use' \
-            AND regexp_like(raw, '\"name\"\\s*:\\s*\"(Edit|Write|MultiEdit)\"')",
-            s.id
-        ),
-    )
-    .await?;
-    let #{ n } = result.get(0).expect("should return one row");
-    if n == 0 {
-        Ok(Some("no file edits"))
-    } else {
-        Ok(None)
+    for m in s.messages().type(#{ assistant: "tool_use" }).await? {
+        for block in m.as_object().message.content {
+            if block.type == "tool_use" && FILE_EDIT_TOOLS.iter().any(|t| t == block.name) {
+                return Ok(None);
+            }
+        }
     }
+    Ok(Some("no file edits"))
 }
 
 fn write_finding_tooldef() {
