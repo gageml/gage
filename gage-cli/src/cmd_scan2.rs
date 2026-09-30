@@ -496,7 +496,7 @@ async fn run_scan(args: Scan2RunArgs) {
         Event::Output(TaskOutput { output, .. }) => match output {
             Output::Print(s) => print!("{s}"),
             Output::Println(s) => println!("{s}"),
-            Output::Log { .. } => {}
+            Output::Log { .. } | Output::Progress { .. } => {}
         },
         Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
         Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),

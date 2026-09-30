@@ -38,6 +38,7 @@ mod io;
 mod issue;
 mod log;
 mod note;
+mod progress;
 mod query;
 mod scan;
 pub mod source;
@@ -68,6 +69,8 @@ pub enum Output {
     Println(String),
     /// A scanner `log::<level>!(...)` record
     Log { level: Level, message: String },
+    /// A `Progress` snapshot: absolute position and total
+    Progress { pos: u64, total: u64 },
 }
 
 /// A log record's level, the set the Rust `log` crate defines.
@@ -145,8 +148,8 @@ pub(crate) fn send(output: Output) {
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::write_note`,
 /// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,
-/// `gage::watermark`, `gage::Template`, and the include macros
-/// from `gage-runtime`. Every file-reading facility
+/// `gage::watermark`, `gage::Template`, `gage::Progress`, and the
+/// include macros from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
     let mut context = Context::with_config(false)?;
@@ -163,6 +166,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(validate::module()?)?;
     context.install(validate::types_module()?)?;
     context.install(template::module()?)?;
+    context.install(progress::types_module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

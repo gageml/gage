@@ -1,7 +1,7 @@
-use gage::{Template, carry_forward_notes, scan, watermark, write_note};
-// FUTURE: agents and progress are not in the rethink runtime
+use gage::{Progress, Template, carry_forward_notes, scan, watermark, write_note};
+// FUTURE: agents are not in the rethink runtime
 use gage::tools::Query;
-use gage::{AgentRunner, Progress, call_agent};
+use gage::{AgentRunner, call_agent};
 
 pub const SCANNER = #{
     name: "general-2",
@@ -29,7 +29,6 @@ pub async fn review() {
     carry_forward_notes(REVIEW_KEY).await?;
     let sessions = unseen_sessions().await?;
 
-    // FUTURE: Progress
     let progress = Progress::new(sessions.len());
 
     // FUTURE: AgentRunner

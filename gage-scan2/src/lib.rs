@@ -783,6 +783,8 @@ fn deliver(
             let origin = format!("{}:{}", output.scanner, output.task);
             logs.record(*level, &origin, message)?;
         }
+        // A snapshot for a live view, not a record of the scan
+        Output::Progress { .. } => {}
     }
     on_event(Event::Output(output));
     Ok(())
@@ -1043,6 +1045,52 @@ mod tests {
                 &Output::Println("Review S1".into()),
                 &Output::Println("Review S2 (more)".into()),
                 &Output::Println("template error".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tasks_report_progress() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::Progress;
+
+            pub const SCANNER = #{
+                name: "prog",
+                description: "Reports progress",
+                tasks: #{ main: #{} },
+            };
+
+            pub fn main() {
+                let p = Progress::new(3);
+                p.tick();
+                p.inc(2);
+                for x in Progress::iter([10, 20].iter()) {
+                    println!("{x}");
+                }
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outcome.unwrap().attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Progress { pos: 0, total: 3 },
+                &Output::Progress { pos: 1, total: 3 },
+                &Output::Progress { pos: 3, total: 3 },
+                &Output::Progress { pos: 0, total: 2 },
+                &Output::Progress { pos: 1, total: 2 },
+                &Output::Println("10".into()),
+                &Output::Progress { pos: 2, total: 2 },
+                &Output::Println("20".into()),
             ]
         );
     }
