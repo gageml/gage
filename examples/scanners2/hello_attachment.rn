@@ -1,0 +1,15 @@
+pub const SCANNER = #{
+    name: "hello-attachment",
+    description: "Attachment greeting",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    for a in gage::scan().attachments().await {
+        println!("{}", a.name);
+        for name in a.files().await {
+            let f = a.file(name).await.unwrap();
+            println!("  {} {} bytes", name, f.bytes().len());
+        }
+    }
+}
