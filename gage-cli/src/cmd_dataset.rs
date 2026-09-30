@@ -4,6 +4,7 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
 use gage_core::config::{ByteSize, Config};
+use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
 use gage_store::{DatasetStore, SessionSpec, Store};
@@ -42,6 +43,9 @@ pub enum DatasetCommand {
 
     /// List datasets
     List(DatasetListArgs),
+
+    /// Show a dataset
+    Show(DatasetShowArgs),
 
     /// Delete datasets
     ///
@@ -110,6 +114,12 @@ pub struct DatasetRefreshArgs {
 pub struct DatasetListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
+}
+
+#[derive(Args)]
+pub struct DatasetShowArgs {
+    /// Dataset ID (or prefix)
+    dataset: String,
 }
 
 #[derive(Args)]
@@ -404,6 +414,51 @@ pub async fn list(args: DatasetListArgs) {
         .to_string();
     println!("{table}");
     args.limit.print_summary(shown, total, "dataset");
+}
+
+pub fn show(args: DatasetShowArgs) {
+    let store = open_store("gage dataset show");
+    let datasets = DatasetStore::from(&store);
+    let record = match datasets.get(&args.dataset) {
+        Ok(record) => record,
+        Err(e) => {
+            eprintln!("gage dataset show: {}: {e}", args.dataset);
+            std::process::exit(1);
+        }
+    };
+    fn or_exit<T>(result: Result<T, gage_store::StoreError>) -> T {
+        result.unwrap_or_else(|e| {
+            eprintln!("gage dataset show: {e}");
+            std::process::exit(1)
+        })
+    }
+    let sessions = or_exit(datasets.sessions(&record.id));
+    let attachments = or_exit(datasets.attachments(&record.id));
+    let header = or_exit(store.read_header(&record.commit_sha));
+    let iso = |ms: Option<i64>| ms.map(ms_to_iso8601).unwrap_or_default();
+
+    let sessions_cell = sessions
+        .iter()
+        .map(|s| short_uuid(&s.id).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let attachments_cell = attachments
+        .iter()
+        .map(|a| format!("{} {}", short_uuid(&a.id), a.attrs.name))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rows = [
+        ("id", record.id.clone()),
+        ("sessions", sessions_cell),
+        ("attachments", attachments_cell),
+        ("created", iso(Some(record.created_ms))),
+        ("modified", iso(header.modified_ms)),
+    ];
+    let table = Table::from_iter(rows.iter().map(|(k, v)| [k.to_string(), v.clone()]))
+        .with(Style::rounded())
+        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .to_string();
+    println!("{table}");
 }
 
 pub fn delete(args: DatasetDeleteArgs) {

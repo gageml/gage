@@ -332,6 +332,7 @@ async fn main() {
                 cmd_dataset::DatasetCommand::Add(args) => cmd_dataset::add(args).await,
                 cmd_dataset::DatasetCommand::Refresh(args) => cmd_dataset::refresh(args).await,
                 cmd_dataset::DatasetCommand::List(args) => cmd_dataset::list(args).await,
+                cmd_dataset::DatasetCommand::Show(args) => cmd_dataset::show(args),
                 cmd_dataset::DatasetCommand::Delete(args) => cmd_dataset::delete(args),
             },
             Command::Attachment { command } => match command {
