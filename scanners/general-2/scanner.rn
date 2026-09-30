@@ -1,8 +1,7 @@
-use gage::{carry_forward_notes, scan, watermark, write_note};
-// FUTURE: agents, templates, and progress are not in the rethink
-// runtime
+use gage::{Template, carry_forward_notes, scan, watermark, write_note};
+// FUTURE: agents and progress are not in the rethink runtime
 use gage::tools::Query;
-use gage::{AgentRunner, Progress, Template, call_agent};
+use gage::{AgentRunner, Progress, call_agent};
 
 pub const SCANNER = #{
     name: "general-2",
@@ -25,8 +24,7 @@ pub const SCANNER = #{
 const REVIEW_KEY = ("general", "review", 1);
 
 pub async fn review() {
-    // FUTURE: Template
-    let t = Template::new(include_str!("prompt.md.j2")).await?;
+    let t = Template::new(include_str!("prompt.md.j2"))?;
 
     carry_forward_notes(REVIEW_KEY).await?;
     let sessions = unseen_sessions().await?;
@@ -43,7 +41,7 @@ pub async fn review() {
             progress.tick();
             continue;
         }
-        let prompt = t.render(#{ session_id: s.id }).await?;
+        let prompt = t.render(#{ session_id: s.id })?;
         runner.add(
             // FUTURE: call_agent. The Query view is clipped to the
             // session's unseen lines

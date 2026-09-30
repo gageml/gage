@@ -41,6 +41,7 @@ mod note;
 mod query;
 mod scan;
 pub mod source;
+mod template;
 mod validate;
 
 use rune::{Context, ContextError};
@@ -144,7 +145,7 @@ pub(crate) fn send(output: Output) {
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::write_note`,
 /// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,
-/// `gage::watermark`, and the include macros
+/// `gage::watermark`, `gage::Template`, and the include macros
 /// from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
@@ -161,6 +162,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(issue::types_module()?)?;
     context.install(validate::module()?)?;
     context.install(validate::types_module()?)?;
+    context.install(template::module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

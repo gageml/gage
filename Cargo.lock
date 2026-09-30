@@ -2734,6 +2734,7 @@ dependencies = [
  "gage-query2",
  "gage-runtime",
  "gage-store",
+ "minijinja",
  "percent-encoding",
  "rune",
  "serde_json",

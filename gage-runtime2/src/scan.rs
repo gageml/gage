@@ -165,7 +165,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
         fetch_sessions(q).await
     })?;
-    m.function_meta(crate::validate::with_unseen)?;
+    m.function_meta(crate::validate::unseen)?;
     m.ty::<Session>()?;
     m.function_meta(Session::attrs)?;
     m.function_meta(Session::debug)?;

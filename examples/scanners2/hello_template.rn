@@ -1,0 +1,13 @@
+use gage::Template;
+
+pub const SCANNER = #{
+    name: "hello-template",
+    description: "Template greeting",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let t = Template::new("Hello, {{ name }}")?;
+    let out = t.render(#{ name: "Joe" })?;
+    println(out);
+}

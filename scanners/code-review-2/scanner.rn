@@ -355,7 +355,7 @@ async fn unseen_sessions(key) {
     let carried = carry_forward(key).await?;
     log::info!("carried {} notes forward under {:?}", carried, key);
     let out = [];
-    for (s, unseen) in scan().sessions().with_unseen(key).await? {
+    for (s, unseen) in scan().sessions().unseen(key).await? {
         if let Some((start, end)) = unseen {
             out.push((s, start, end));
         }

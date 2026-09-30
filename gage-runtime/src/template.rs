@@ -54,7 +54,8 @@ impl From<minijinja::Error> for Error {
     }
 }
 
-struct SerObject<'a>(&'a Object);
+/// A Rune object as a serde map, for template contexts.
+pub struct SerObject<'a>(pub &'a Object);
 
 impl Serialize for SerObject<'_> {
     fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {

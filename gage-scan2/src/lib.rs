@@ -1005,6 +1005,48 @@ mod tests {
         }
     "#;
 
+    #[tokio::test]
+    async fn tasks_render_templates() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::Template;
+
+            pub const SCANNER = #{
+                name: "tpl",
+                description: "Renders a template",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let t = Template::new("Review {{ session_id }}{% if extra %} ({{ extra }}){% endif %}")?;
+                println!("{}", t.render(#{ session_id: "S1" })?);
+                println!("{}", t.render(#{ session_id: "S2", extra: "more" })?);
+                match Template::new("{% if") {
+                    Err(gage::Error::Template(_)) => println!("template error"),
+                    other => println!("unexpected: {other:?}"),
+                }
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outcome.unwrap().attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println("Review S1".into()),
+                &Output::Println("Review S2 (more)".into()),
+                &Output::Println("template error".into()),
+            ]
+        );
+    }
+
     const PARAMS: &str = r#"
         use gage::params;
 
@@ -2602,7 +2644,7 @@ mod tests {
     }
 
     /// `newest_first()` reads the sessions newest-modified first, on
-    /// its own and through `with_unseen`; the default is member order.
+    /// its own and through `unseen`; the default is member order.
     #[tokio::test]
     async fn sessions_read_newest_first_on_request() {
         const SCANNER: &str = r#"
@@ -2621,7 +2663,7 @@ mod tests {
                 for s in scan().sessions().newest_first().await {
                     println!("newest {}", s.id);
                 }
-                for (s, _) in scan().sessions().newest_first().with_unseen("k").await? {
+                for (s, _) in scan().sessions().newest_first().unseen("k").await? {
                     println!("unseen {}", s.id);
                 }
                 Ok(())
@@ -2725,7 +2767,7 @@ mod tests {
         pub async fn main() {
             let carried = carry_forward_notes(KEY).await?;
             println!("carried {carried}");
-            for (s, unseen) in scan().sessions().with_unseen(KEY).await? {
+            for (s, unseen) in scan().sessions().unseen(KEY).await? {
                 println!("unseen {unseen:?}");
                 if let Some((start, end)) = unseen {
                     write_note("seen", format!("{start}-{end}"))

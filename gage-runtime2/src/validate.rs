@@ -3,7 +3,7 @@
 //! A watermark is the record `watermarks/sessions/<oid>/<key>` in a
 //! scan's tree, holding the session commit a task under `key`
 //! finished processing. `watermark(key, s)` writes one into staging.
-//! `scan().sessions().with_unseen(key)` reads every prior scan's
+//! `scan().sessions().unseen(key)` reads every prior scan's
 //! watermarks through the `scan_watermark` table and, per session,
 //! finds the closest one in the session's commit chain: none means
 //! the whole session is unseen, the scan's own commit means nothing
@@ -45,9 +45,9 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForwardNotes| async move {
         do_carry_forward_notes(q).await
     })?;
-    m.ty::<WithUnseenQuery>()?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: WithUnseenQuery| async move {
-        do_with_unseen(q).await
+    m.ty::<UnseenQuery>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: UnseenQuery| async move {
+        do_unseen(q).await
     })?;
     m.ty::<WatermarkWrite>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: WatermarkWrite| async move {
@@ -69,11 +69,11 @@ fn carry_forward_notes(key: Value) -> CarryForwardNotes {
     CarryForwardNotes { key }
 }
 
-/// The value of `scan().sessions().with_unseen(key)`. Awaiting it
+/// The value of `scan().sessions().unseen(key)`. Awaiting it
 /// reads the watermarks.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub struct WithUnseenQuery {
+pub struct UnseenQuery {
     #[rune(skip)]
     key: Value,
     #[rune(skip)]
@@ -83,8 +83,8 @@ pub struct WithUnseenQuery {
 /// Pair each of the scan's sessions with its unseen lines under `key`,
 /// in the order the sessions query would read them.
 #[rune::function(instance)]
-pub(crate) fn with_unseen(sessions: Ref<SessionsQuery>, key: Value) -> WithUnseenQuery {
-    WithUnseenQuery {
+pub(crate) fn unseen(sessions: Ref<SessionsQuery>, key: Value) -> UnseenQuery {
+    UnseenQuery {
         key,
         newest_first: sessions.newest_first,
     }
@@ -186,7 +186,7 @@ fn append_carried(path: &Path, commits: &BTreeSet<String>) -> Result<usize, VmEr
 /// `Some((start, end))` otherwise, where `start` is the line after
 /// the closest watermarked ancestor's `line_count`, or 1 with no
 /// such ancestor, and `end` is the session's `line_count`.
-async fn do_with_unseen(q: WithUnseenQuery) -> Result<Result<Vec<Value>, Error>, VmError> {
+async fn do_unseen(q: UnseenQuery) -> Result<Result<Vec<Value>, Error>, VmError> {
     let key = match work_key(&q.key) {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),

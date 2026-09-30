@@ -9,7 +9,7 @@ pub const SCANNER = #{
 const KEY = ("watermark-example", 1);
 
 pub async fn main() {
-    for (s, unseen) in scan().sessions().with_unseen(KEY).await? {
+    for (s, unseen) in scan().sessions().unseen(KEY).await? {
         if let Some((line, line_end)) = unseen {
             println!("{} unseen {}-{}", s.id, line, line_end)
         } else {
