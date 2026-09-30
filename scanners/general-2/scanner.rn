@@ -24,9 +24,9 @@ pub const SCANNER = #{
     tasks: #{
         review: #{
             notes: #{
-                writes: #{
-                    "finding.general": include_str!("finding-general-doc.md"),
-                },
+                writes: #{ "general[finding]": include_str!(
+                    "finding.md"
+                ) },
             },
         },
     },

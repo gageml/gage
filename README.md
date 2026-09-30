@@ -128,7 +128,7 @@ Gage ships these scanners in the `default` group. Their source is under
   </tr>
   <tr>
     <td>
-      <a href="/scanners/session-retention"><code>session-retention</code></a>
+      <a href="/scanners/session-retention-2"><code>session-retention-2</code></a>
     </td>
     <td>
       An unset session retention policy, which risks silent loss of session
