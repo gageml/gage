@@ -51,7 +51,7 @@ const ESCAPED: &AsciiSet = &CONTROLS
     .add(b'>')
     .add(b'|');
 
-/// The longest name the staging directory can hold: `NAME_MAX` on the
+/// The longest name the scan directory can hold: `NAME_MAX` on the
 /// filesystems Gage home lives on.
 const MAX_NAME_BYTES: usize = 255;
 

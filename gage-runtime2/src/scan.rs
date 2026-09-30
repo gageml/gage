@@ -57,15 +57,15 @@ pub struct ScanContext {
     pub params: Option<json::Value>,
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Where the runtime writes during the run
-    pub paths: StagingPaths,
+    pub paths: ScanDirPaths,
     query_store: Arc<Mutex<Store>>,
     query: Arc<OnceCell<(Arc<SessionScope>, SessionContext)>>,
 }
 
-/// The staging paths the runtime writes under. The orchestrator owns
+/// The scan directory paths the runtime writes under. The orchestrator owns
 /// the layout and supplies them.
 #[derive(Debug, Clone)]
-pub struct StagingPaths {
+pub struct ScanDirPaths {
     /// `write_note` stages note trees here, one directory per id
     pub notes_dir: PathBuf,
     /// `write_issue` stages issue trees here, one directory per id
@@ -83,7 +83,7 @@ impl ScanContext {
         scan_id: String,
         dataset: Option<ScanDatasetRef>,
         store_path: &Path,
-        paths: StagingPaths,
+        paths: ScanDirPaths,
     ) -> Result<Self, StoreError> {
         Ok(ScanContext {
             scan_id,

@@ -2,7 +2,7 @@
 //!
 //! [`layer`] is a `tracing` layer the CLI installs. Every event it
 //! admits is appended as one record to the running scan's
-//! `logs/records` in staging. A runtime record carries the Rust
+//! `logs/records` in scan_dir. A runtime record carries the Rust
 //! target as its origin, `… INFO gage_store: …`, where a scanner's
 //! own record carries `<scanner>:<task>`; a runtime record raised
 //! while a task runs ends with `task=<scanner>:<task>`. Outside a
@@ -25,18 +25,18 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
-use crate::staging;
+use crate::scan_dir;
 
 tokio::task_local! {
     /// Where runtime records of the current code go
     pub(crate) static LOG_SCOPE: LogScope;
 }
 
-/// The running scan's staging `scan/` directory and, while a task
+/// The running scan's `scan/` subtree in its scan directory and, while a task
 /// runs, the task, which runtime records name.
 #[derive(Clone)]
 pub(crate) struct LogScope {
-    pub scan_dir: PathBuf,
+    pub object_dir: PathBuf,
     /// `(scanner, task)` while a task runs
     pub task: Option<(String, String)>,
     /// The first failed append, surfaced by the scan at its end since
@@ -46,7 +46,7 @@ pub(crate) struct LogScope {
 
 impl LogScope {
     fn append(&self, name: &str, bytes: &[u8]) {
-        if let Err(e) = staging::append(&staging::scan_logs_dir(&self.scan_dir), name, bytes) {
+        if let Err(e) = scan_dir::append(&scan_dir::scan_logs_dir(&self.object_dir), name, bytes) {
             let mut failure = self.failure.lock().unwrap();
             if failure.is_none() {
                 *failure = Some(e);
@@ -82,7 +82,7 @@ impl<S: Subscriber> Layer<S> for RecordsLayer {
             write!(line, " task={scanner}:{task}").unwrap();
         }
         line.push('\n');
-        scope.append(staging::RECORDS_LOG, line.as_bytes());
+        scope.append(scan_dir::RECORDS_LOG, line.as_bytes());
     }
 }
 
@@ -122,7 +122,7 @@ pub fn install_panic_hook() {
             if let Ok(scope) = LOG_SCOPE.try_with(|s| s.clone()) {
                 let backtrace = std::backtrace::Backtrace::force_capture();
                 let text = format!("{} PANIC {info}\n{backtrace}\n", ms_to_iso8601(now_ms()));
-                scope.append(staging::ERR_LOG, text.as_bytes());
+                scope.append(scan_dir::ERR_LOG, text.as_bytes());
             }
             previous(info);
         }));

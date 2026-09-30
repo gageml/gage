@@ -1,7 +1,7 @@
-//! The staging directory of a running scan.
+//! The scan directory of a running scan.
 //!
 //! A scan is a transaction: while it runs, everything it records goes
-//! to `staging/<scan_id>/` under Gage home, and nothing is written to
+//! to `scans/<scan_id>/` under Gage home, and nothing is written to
 //! the store. At the terminal state the `scan/` subtree is applied to
 //! the store as the scan object's content, so `scan/` mirrors the
 //! object tree exactly (see `gage_store::ScanStore`). Layout:
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 use gage_core::datetime::{ms_to_iso8601, now_ms};
 use gage_runtime2::source::SourceFile;
-use gage_runtime2::{Level, StagingPaths};
+use gage_runtime2::{Level, ScanDirPaths};
 use gage_store::{ScanAttrs, TaskAttrs, TaskStatus};
 use serde::Serialize;
 
@@ -65,9 +65,9 @@ pub(crate) const OUT_LOG: &str = "out";
 pub(crate) const ERR_LOG: &str = "err";
 pub(crate) const RECORDS_LOG: &str = "records";
 
-/// The staging root under Gage home.
-pub fn staging_root() -> PathBuf {
-    gage_core::config::gage_home().join("staging")
+/// The parent of every scan directory under Gage home
+pub fn scans_dir() -> PathBuf {
+    gage_core::config::gage_home().join("scans")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,12 +94,12 @@ pub struct ScannerPlan<'a> {
     pub sources: &'a [SourceFile],
 }
 
-/// One scan's staging directory.
-pub struct Staging {
+/// One running scan's directory
+pub struct ScanDir {
     dir: PathBuf,
 }
 
-impl Staging {
+impl ScanDir {
     /// Create `root/<scan_id>/` in the `running` state with this
     /// process's pid, `scan/dataset.link` naming `dataset` when the
     /// scan has one, every scanner's source copied under
@@ -110,24 +110,24 @@ impl Staging {
         scan_id: &str,
         dataset: Option<&str>,
         scanners: &[ScannerPlan],
-    ) -> io::Result<Staging> {
+    ) -> io::Result<ScanDir> {
         let dir = root.join(scan_id);
         fs::create_dir_all(dir.join(SCAN_DIR))?;
-        let staging = Staging { dir };
+        let scan_dir = ScanDir { dir };
         write_atomic(
-            &staging.dir.join(PID_FILE),
+            &scan_dir.dir.join(PID_FILE),
             format!("{}\n", std::process::id()).as_bytes(),
         )?;
         if let Some(sha) = dataset {
             write_atomic(
-                &staging.scan_dir().join(DATASET_LINK),
+                &scan_dir.object_dir().join(DATASET_LINK),
                 format!("{sha}\n").as_bytes(),
             )?;
         }
         for scanner in scanners {
-            staging.copy_sources(scanner.name, scanner.sources)?;
+            scan_dir.copy_sources(scanner.name, scanner.sources)?;
             for task in scanner.tasks {
-                staging.write_task(
+                scan_dir.write_task(
                     scanner.name,
                     task,
                     &TaskAttrs {
@@ -140,15 +140,15 @@ impl Staging {
                 )?;
             }
         }
-        staging.set_state(State::Running)?;
-        Ok(staging)
+        scan_dir.set_state(State::Running)?;
+        Ok(scan_dir)
     }
 
     /// Copy a scanner's source files to `scan/scanners/<name>/
     /// sourcecode.d/`, each under its stored name, bytes preserved.
     fn copy_sources(&self, scanner: &str, sources: &[SourceFile]) -> io::Result<()> {
         let dir = self
-            .scan_dir()
+            .object_dir()
             .join(SCANNERS_DIR)
             .join(scanner)
             .join(SOURCE_DIR);
@@ -165,7 +165,7 @@ impl Staging {
     }
 
     /// The `scan/` subtree, the content applied to the store.
-    pub fn scan_dir(&self) -> PathBuf {
+    pub fn object_dir(&self) -> PathBuf {
         self.dir.join(SCAN_DIR)
     }
 
@@ -212,15 +212,15 @@ impl Staging {
             return Ok(());
         }
         let content: String = shas.iter().map(|s| format!("{s}\n")).collect();
-        write_atomic(&self.scan_dir().join(name), content.as_bytes())
+        write_atomic(&self.object_dir().join(name), content.as_bytes())
     }
 
     /// The paths the runtime writes under during the run.
-    pub fn runtime_paths(&self) -> StagingPaths {
-        StagingPaths {
+    pub fn runtime_paths(&self) -> ScanDirPaths {
+        ScanDirPaths {
             notes_dir: self.notes_dir(),
             issues_dir: self.issues_dir(),
-            watermarks_dir: self.scan_dir().join(WATERMARKS_DIR),
+            watermarks_dir: self.object_dir().join(WATERMARKS_DIR),
             carried_notes: self.dir.join(CARRIED_NOTES_FILE),
         }
     }
@@ -253,17 +253,17 @@ impl Staging {
     /// first write, so a scan that produced nothing has no `logs/`
     /// entry.
     pub fn scan_logs(&self) -> Logs {
-        Logs::new(scan_logs_dir(&self.scan_dir()))
+        Logs::new(scan_logs_dir(&self.object_dir()))
     }
 
     /// Write `scan/plan.json`, the resolved plan (see `crate::plan`).
     pub fn write_plan(&self, plan: &serde_json::Value) -> io::Result<()> {
-        write_json(&self.scan_dir().join(PLAN_FILE), plan)
+        write_json(&self.object_dir().join(PLAN_FILE), plan)
     }
 
     /// Write the scan's `attrs.json`.
     pub fn write_scan(&self, attrs: &ScanAttrs) -> io::Result<()> {
-        write_json(&self.scan_dir().join(ATTRS_FILE), attrs)
+        write_json(&self.object_dir().join(ATTRS_FILE), attrs)
     }
 
     /// Record that the scan has been written to the store.
@@ -277,7 +277,7 @@ impl Staging {
     }
 
     fn task_dir(&self, scanner: &str, task: &str) -> PathBuf {
-        self.scan_dir().join(TASKS_DIR).join(scanner).join(task)
+        self.object_dir().join(TASKS_DIR).join(scanner).join(task)
     }
 }
 
@@ -300,7 +300,7 @@ fn staged_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-/// The `logs/` directory of the scan under a staging `scan/` directory
+/// The `logs/` directory of the scan under a scan directory's `scan/` subtree
 pub(crate) fn scan_logs_dir(scan_dir: &Path) -> PathBuf {
     scan_dir.join(LOGS_DIR)
 }
@@ -415,28 +415,28 @@ mod tests {
             tasks: &tasks,
             sources: &sources,
         }];
-        let staging = Staging::create(tmp.path(), "SCAN1", None, &plan).unwrap();
-        assert_eq!(staging.dir(), tmp.path().join("SCAN1"));
-        assert!(!staging.scan_dir().join("dataset.link").exists());
+        let scan_dir = ScanDir::create(tmp.path(), "SCAN1", None, &plan).unwrap();
+        assert_eq!(scan_dir.dir(), tmp.path().join("SCAN1"));
+        assert!(!scan_dir.object_dir().join("dataset.link").exists());
         assert_eq!(
             fs::read_to_string(
-                staging
-                    .scan_dir()
+                scan_dir
+                    .object_dir()
                     .join("scanners/hello/sourcecode.d/hello.rn")
             )
             .unwrap(),
             "pub fn greet() {}\n"
         );
         assert_eq!(
-            fs::read_to_string(staging.dir().join("state")).unwrap(),
+            fs::read_to_string(scan_dir.dir().join("state")).unwrap(),
             "running\n"
         );
         assert_eq!(
-            fs::read_to_string(staging.dir().join("pid")).unwrap(),
+            fs::read_to_string(scan_dir.dir().join("pid")).unwrap(),
             format!("{}\n", std::process::id())
         );
 
-        staging
+        scan_dir
             .write_task(
                 "hello",
                 "fail",
@@ -449,23 +449,23 @@ mod tests {
                 },
             )
             .unwrap();
-        let mut logs = staging.scan_logs();
+        let mut logs = scan_dir.scan_logs();
         logs.err("boom").unwrap();
         logs.out("hello, ").unwrap();
         logs.out("world\n").unwrap();
         logs.record(Level::Info, "hello:greet", "started").unwrap();
         drop(logs);
         assert_eq!(
-            fs::read_to_string(staging.scan_dir().join("logs/out")).unwrap(),
+            fs::read_to_string(scan_dir.object_dir().join("logs/out")).unwrap(),
             "hello, world\n"
         );
-        let records = fs::read_to_string(staging.scan_dir().join("logs/records")).unwrap();
+        let records = fs::read_to_string(scan_dir.object_dir().join("logs/records")).unwrap();
         assert!(
             records.ends_with("Z INFO hello:greet: started\n"),
             "{records}"
         );
         assert_eq!(
-            fs::read_to_string(staging.scan_dir().join("logs/err")).unwrap(),
+            fs::read_to_string(scan_dir.object_dir().join("logs/err")).unwrap(),
             "boom\n",
             "err is newline-terminated"
         );
@@ -481,10 +481,10 @@ mod tests {
                 skipped: 0,
             },
         };
-        staging.write_scan(&attrs).unwrap();
-        staging.set_state(State::Completed).unwrap();
+        scan_dir.write_scan(&attrs).unwrap();
+        scan_dir.set_state(State::Completed).unwrap();
 
-        let content = ScanContent::from_files(&DirFiles::new(&staging.scan_dir())).unwrap();
+        let content = ScanContent::from_files(&DirFiles::new(&scan_dir.object_dir())).unwrap();
         assert_eq!(content.attrs, attrs);
         assert_eq!(content.tasks.len(), 2);
         assert_eq!(content.tasks[0].task, "fail");
@@ -497,14 +497,14 @@ mod tests {
             BTreeMap::from([("hello".to_string(), vec!["hello.rn".to_string()])])
         );
         assert!(
-            !staging.scan_dir().join("attrs.json.tmp").exists(),
+            !scan_dir.object_dir().join("attrs.json.tmp").exists(),
             "temp file is renamed away"
         );
 
-        staging.mark_applied().unwrap();
-        let dir = staging.dir().to_path_buf();
+        scan_dir.mark_applied().unwrap();
+        let dir = scan_dir.dir().to_path_buf();
         assert!(dir.join("applied").exists());
-        staging.remove().unwrap();
+        scan_dir.remove().unwrap();
         assert!(!dir.exists());
     }
 
@@ -512,12 +512,12 @@ mod tests {
     fn create_writes_the_dataset_link() {
         let tmp = tempfile::tempdir().unwrap();
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let staging = Staging::create(tmp.path(), "SCAN2", Some(sha), &[]).unwrap();
+        let scan_dir = ScanDir::create(tmp.path(), "SCAN2", Some(sha), &[]).unwrap();
         assert_eq!(
-            fs::read_to_string(staging.scan_dir().join("dataset.link")).unwrap(),
+            fs::read_to_string(scan_dir.object_dir().join("dataset.link")).unwrap(),
             format!("{sha}\n")
         );
-        let content = ScanContent::from_files(&DirFiles::new(&staging.scan_dir()));
+        let content = ScanContent::from_files(&DirFiles::new(&scan_dir.object_dir()));
         // attrs.json is absent until the terminal state, so the decoder
         // stops there; the link itself is what this test checks
         assert!(content.is_err());

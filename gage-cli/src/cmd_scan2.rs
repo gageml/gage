@@ -14,7 +14,7 @@ use gage_registry::scanner::{
     Scanner, ScannerDef, ScannerRegistry, parse_scanner_file, split_scanner_spec,
 };
 use gage_runtime2::{Output, TaskOutput};
-use gage_scan2::staging::staging_root;
+use gage_scan2::scan_dir::scans_dir;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
 use gage_store::{DatasetStore, ScanStore, Store};
 use tabled::{
@@ -484,7 +484,7 @@ async fn run_scan(args: Scan2RunArgs) {
     };
 
     let config = ScanConfig {
-        staging_root: &staging_root(),
+        scans_dir: &scans_dir(),
         gage_version: crate::VERSION,
         dataset: dataset_sha.as_deref(),
         jobs: args.jobs,

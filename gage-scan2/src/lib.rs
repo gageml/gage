@@ -19,7 +19,7 @@
 //! This crate owns task orchestration: it compiles scanners against
 //! the `gage-runtime2` context, plans their tasks as one DAG (see
 //! [`plan`]), runs the tasks through a worker pool as their upstream
-//! tasks finish, and records the run in [`staging`] and then the
+//! tasks finish, and records the run in [`scan_dir`] and then the
 //! store. The runtime is a pure event emitter: [`scan`] hands each
 //! [`Event`] to the caller's sink, which owns rendering.
 //!
@@ -31,7 +31,7 @@
 //! `tracing` and reach the record through [`trace`].
 
 pub mod plan;
-pub mod staging;
+pub mod scan_dir;
 pub mod trace;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -61,7 +61,7 @@ use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::plan::{Plan, PlanError, PlannedScanner, Selection};
-use crate::staging::{Logs, ScannerPlan, Staging, State};
+use crate::scan_dir::{Logs, ScanDir, ScannerPlan, State};
 use crate::trace::{LOG_SCOPE, LogScope};
 
 /// One item of run output, in the order it happened.
@@ -267,8 +267,8 @@ pub enum ScanError {
     DuplicateScanner(String),
     /// The tasks cannot be planned
     Plan(PlanError),
-    /// Staging could not be written
-    Staging(io::Error),
+    /// The scan directory could not be written
+    ScanDir(io::Error),
     /// The scan could not be applied to the store
     Store(StoreError),
 }
@@ -280,7 +280,7 @@ impl fmt::Display for ScanError {
                 write!(f, "scanner {name} is given more than once")
             }
             ScanError::Plan(e) => write!(f, "planning the scan: {e}"),
-            ScanError::Staging(e) => write!(f, "writing scan staging: {e}"),
+            ScanError::ScanDir(e) => write!(f, "writing scan directory: {e}"),
             ScanError::Store(e) => write!(f, "writing scan to the store: {e}"),
         }
     }
@@ -290,7 +290,7 @@ impl std::error::Error for ScanError {}
 
 impl From<io::Error> for ScanError {
     fn from(e: io::Error) -> Self {
-        ScanError::Staging(e)
+        ScanError::ScanDir(e)
     }
 }
 
@@ -303,8 +303,8 @@ impl From<StoreError> for ScanError {
 /// Where a scan stages, how many tasks it runs at once, and what it
 /// records about its runtime.
 pub struct ScanConfig<'a> {
-    /// The staging root, `staging/` under Gage home in production
-    pub staging_root: &'a std::path::Path,
+    /// The parent of scan directories, `scans/` under Gage home in production
+    pub scans_dir: &'a std::path::Path,
     /// The Gage build version; the scan records
     /// `<CURRENT_RUNTIME_SCHEME> <version>` as its `runtime`
     pub gage_version: &'a str,
@@ -327,9 +327,9 @@ pub struct ScanOutcome {
 /// `config.jobs` workers as their upstream tasks finish, and record
 /// the scan in `store`.
 ///
-/// The scan is staged under `config.staging_root/<id>/` while it runs
-/// (see [`staging`]) and applied to the store at its terminal state,
-/// after which the staging directory is removed. Output and task
+/// The scan is staged under `config.scans_dir/<id>/` while it runs
+/// (see [`scan_dir`]) and applied to the store at its terminal state,
+/// after which the scan directory is removed. Output and task
 /// status reach `on_event` as they happen. A failed task is recorded
 /// and the run continues; the tasks ordered after it run and read
 /// what exists.
@@ -376,12 +376,12 @@ pub async fn scan(
             sources: &s.source_files,
         })
         .collect();
-    let staging = Staging::create(config.staging_root, &id, config.dataset, &scanner_plans)?;
-    staging.write_plan(&plan.to_json())?;
-    let scan_ctx = ScanContext::new(id.clone(), dataset, store.path(), staging.runtime_paths())?;
+    let scan_dir = ScanDir::create(config.scans_dir, &id, config.dataset, &scanner_plans)?;
+    scan_dir.write_plan(&plan.to_json())?;
+    let scan_ctx = ScanContext::new(id.clone(), dataset, store.path(), scan_dir.runtime_paths())?;
     trace::install_panic_hook();
     let scope = LogScope {
-        scan_dir: staging.scan_dir(),
+        object_dir: scan_dir.object_dir(),
         task: None,
         failure: Arc::new(Mutex::new(None)),
     };
@@ -397,7 +397,7 @@ pub async fn scan(
             .map(|s| (s.name.clone(), s.task_unit()))
             .collect(),
         plan: Arc::new(plan),
-        staging,
+        scan_dir,
         cancel,
         scope: scope.clone(),
         scan_ctx,
@@ -424,7 +424,7 @@ struct Run<'a, F: FnMut(Event)> {
     /// Compiled artifacts by scanner name
     units: HashMap<String, TaskUnit>,
     plan: Arc<Plan>,
-    staging: Staging,
+    scan_dir: ScanDir,
     cancel: &'a CancellationToken,
     scope: LogScope,
     scan_ctx: ScanContext,
@@ -457,7 +457,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
     async fn execute(mut self, store: &Store) -> Result<ScanOutcome, ScanError> {
         let plan = Arc::clone(&self.plan);
         tracing::info!("scan {} started with {} tasks", self.id, plan.tasks.len());
-        let mut scan_logs = self.staging.scan_logs();
+        let mut scan_logs = self.scan_dir.scan_logs();
         let started = now_ms();
         for t in &plan.tasks {
             for pattern in &t.unmatched {
@@ -498,10 +498,10 @@ impl<F: FnMut(Event)> Run<'_, F> {
         )?;
         drop(scan_logs);
         if let Some(e) = self.scope.failure.lock().unwrap().take() {
-            return Err(ScanError::Staging(e));
+            return Err(ScanError::ScanDir(e));
         }
-        self.staging.write_scan(&attrs)?;
-        self.staging.set_state(if canceled {
+        self.scan_dir.write_scan(&attrs)?;
+        self.scan_dir.set_state(if canceled {
             State::Canceled
         } else {
             State::Completed
@@ -510,24 +510,24 @@ impl<F: FnMut(Event)> Run<'_, F> {
         // can link them
         let notes = NoteStore::from(store);
         let mut note_shas = Vec::new();
-        for dir in self.staging.staged_notes()? {
+        for dir in self.scan_dir.staged_notes()? {
             let (_, sha) = notes.create_staged(&dir)?;
             note_shas.push(sha);
         }
-        self.staging.write_notes_link(&note_shas)?;
-        self.staging
-            .write_notes_carried_link(&self.staging.staged_carried_notes()?)?;
+        self.scan_dir.write_notes_link(&note_shas)?;
+        self.scan_dir
+            .write_notes_carried_link(&self.scan_dir.staged_carried_notes()?)?;
         // Issues follow the notes they cite, so their evidence resolves
         let issues = IssueStore::from(store);
         let mut issue_shas = Vec::new();
-        for dir in self.staging.staged_issues()? {
+        for dir in self.scan_dir.staged_issues()? {
             let (_, sha) = issues.apply_staged(&dir)?;
             issue_shas.push(sha);
         }
-        self.staging.write_issues_link(&issue_shas)?;
-        let commit_sha = ScanStore::from(store).create(&self.id, &self.staging.scan_dir())?;
-        self.staging.mark_applied()?;
-        self.staging.remove()?;
+        self.scan_dir.write_issues_link(&issue_shas)?;
+        let commit_sha = ScanStore::from(store).create(&self.id, &self.scan_dir.object_dir())?;
+        self.scan_dir.mark_applied()?;
+        self.scan_dir.remove()?;
         Ok(ScanOutcome {
             id: self.id,
             commit_sha,
@@ -629,7 +629,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let t = &plan.tasks[i];
         let now = now_ms();
         d.started[i] = Some(now);
-        self.staging.write_task(
+        self.scan_dir.write_task(
             &t.scanner,
             &t.task,
             &task_attrs(TaskStatus::Started, Some(now), None),
@@ -678,7 +678,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let t = &plan.tasks[i];
         let stopped = d.started[i].map(|_| now_ms());
         let attrs = task_attrs(status, d.started[i], stopped);
-        self.staging.write_task(&t.scanner, &t.task, &attrs)?;
+        self.scan_dir.write_task(&t.scanner, &t.task, &attrs)?;
         match status {
             TaskStatus::Completed => d.counts.completed += 1,
             TaskStatus::Failed => d.counts.failed += 1,
@@ -940,7 +940,7 @@ mod tests {
         compile(&Scanner::from_spec(def, None, &def.name).unwrap())
     }
 
-    /// A fresh store and staging root under one directory.
+    /// A fresh store and scans directory under one directory.
     fn open_store() -> (TempDir, Store) {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
@@ -958,7 +958,7 @@ mod tests {
     ) -> (Result<ScanOutcome, ScanError>, Vec<Event>) {
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: root,
+            scans_dir: root,
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
@@ -1033,7 +1033,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1074,7 +1074,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1117,7 +1117,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1132,7 +1132,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1161,7 +1161,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1176,7 +1176,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1221,7 +1221,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1231,13 +1231,13 @@ mod tests {
     }
 
     /// The scan record lands in the store with one task record per
-    /// task, the failed task's message in `logs/err`, and staging
+    /// task, the failed task's message in `logs/err`, and the scan directory
     /// removed once applied.
     #[tokio::test]
-    async fn scan_records_every_task_and_removes_staging() {
+    async fn scan_records_every_task_and_removes_the_scan_dir() {
         let (_dir, compiled) = compile_source(FAIL_THEN_RUN);
         let (tmp, store) = open_store();
-        let root = tmp.path().join("staging");
+        let root = tmp.path().join("scans");
         let (outcome, events) = run_all(
             &store,
             &root,
@@ -1363,7 +1363,7 @@ mod tests {
 
         assert!(
             !root.join(&outcome.id).exists(),
-            "staging is removed after apply"
+            "the scan directory is removed after apply"
         );
     }
 
@@ -1392,7 +1392,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1462,7 +1462,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled],
             &CancellationToken::new(),
         )
@@ -1509,7 +1509,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -1543,7 +1543,7 @@ mod tests {
         cancel.cancel();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &cancel,
         )
@@ -1625,7 +1625,7 @@ mod tests {
         );
         let (tmp, store) = open_store();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
@@ -1671,11 +1671,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_scanner_names_are_rejected_before_staging() {
+    async fn duplicate_scanner_names_are_rejected_before_the_scan_dir() {
         let (_a, first) = compile_source(HELLO);
         let (_b, second) = compile_source(HELLO);
         let (tmp, store) = open_store();
-        let root = tmp.path().join("staging");
+        let root = tmp.path().join("scans");
         let (outcome, _) = run_all(
             &store,
             &root,
@@ -1715,7 +1715,7 @@ mod tests {
             .unwrap()
             .commit_sha;
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
@@ -1770,7 +1770,7 @@ mod tests {
         let compiled = compiled.unwrap();
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
@@ -1795,7 +1795,7 @@ mod tests {
 
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled],
             &CancellationToken::new(),
         )
@@ -1906,7 +1906,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
@@ -2004,7 +2004,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
@@ -2057,8 +2057,8 @@ mod tests {
         );
         assert_eq!(first.metadata, Some(serde_json::json!({"model": "m"})));
         assert!(
-            !tmp.path().join("staging").join(&outcome.id).exists(),
-            "staging is removed after apply"
+            !tmp.path().join("scans").join(&outcome.id).exists(),
+            "the scan directory is removed after apply"
         );
 
         // The scan and its relations are queryable through the tables
@@ -2181,7 +2181,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
@@ -2362,12 +2362,12 @@ mod tests {
         let run = |n: u32| {
             let store = &store;
             let compiled = &compiled;
-            let root = tmp.path().join(format!("staging{n}"));
+            let root = tmp.path().join(format!("scans{n}"));
             let dataset_sha = dataset_sha.clone();
             async move {
                 let mut events = Vec::new();
                 let config = ScanConfig {
-                    staging_root: &root,
+                    scans_dir: &root,
                     gage_version: "test-version",
                     dataset: Some(&dataset_sha),
                     jobs: 1,
@@ -2544,7 +2544,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
@@ -2605,11 +2605,11 @@ mod tests {
         let run = |n: u32, expected: &'static str| {
             let store = &store;
             let compiled = &compiled;
-            let root = tmp.path().join(format!("staging{n}"));
+            let root = tmp.path().join(format!("scans{n}"));
             async move {
                 let mut events = Vec::new();
                 let config = ScanConfig {
-                    staging_root: &root,
+                    scans_dir: &root,
                     gage_version: "test-version",
                     dataset: None,
                     jobs: 1,
@@ -2738,7 +2738,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
@@ -2862,7 +2862,7 @@ mod tests {
     ) -> (ScanOutcome, Vec<String>) {
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(dataset_sha),
             jobs: 1,
@@ -3073,7 +3073,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[compiled.unwrap()],
             &CancellationToken::new(),
         )
@@ -3195,7 +3195,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
             jobs: 2,
@@ -3274,7 +3274,7 @@ mod tests {
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
-            &tmp.path().join("staging"),
+            &tmp.path().join("scans"),
             &[writer.unwrap(), lib],
             &CancellationToken::new(),
         )
@@ -3342,7 +3342,7 @@ mod tests {
             r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
         );
         let config = ScanConfig {
-            staging_root: &tmp.path().join("staging"),
+            scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 2,
