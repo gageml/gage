@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
+use cliclack as cli;
 use gage_claude::project::shorten_home_path;
+use gage_core::uuid::short_uuid;
 use gage_store::{EntryKind, InitOutcome, Store, StoreError, StoreStatus, TreeEntry};
 use tabled::{
     Table,
@@ -9,6 +11,7 @@ use tabled::{
     },
 };
 
+use crate::dialog::{self, DialogError};
 use crate::human::format_size;
 use crate::style;
 
@@ -51,6 +54,15 @@ pub enum StoreCommand {
     /// object sha.
     Cat(CatArgs),
 
+    /// Delete objects of any type
+    ///
+    /// Writes a tombstone over each object, as the typed remove and
+    /// delete commands do, without their cleanup: a dataset that
+    /// links a deleted object keeps its link, and a dataset's members
+    /// are left in place. Use this on an object its own command
+    /// cannot read.
+    Delete(DeleteArgs),
+
     /// Browse the store's object graph
     ///
     /// Opens an interactive view of `refs/gage/object/*`: refs listing
@@ -66,6 +78,17 @@ pub struct ViewArgs {
     /// Object id prefix to select when the view opens
     #[arg(value_name = "OBJECT")]
     object: Option<String>,
+}
+
+#[derive(Args)]
+pub struct DeleteArgs {
+    /// Object IDs (or prefixes)
+    #[arg(required = true)]
+    ids: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -125,8 +148,74 @@ pub fn run(command: StoreCommand) {
         StoreCommand::Gc(args) => gc(&store, args),
         StoreCommand::Ls(args) => ls(&store, args),
         StoreCommand::Cat(args) => cat(&store, args),
+        StoreCommand::Delete(args) => delete(&store, args),
         StoreCommand::View(args) => view(store, args),
     }
+}
+
+fn delete(store: &Store, args: DeleteArgs) {
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut targets: Vec<(String, String)> = Vec::with_capacity(args.ids.len());
+    let mut errors = 0;
+    for prefix in &args.ids {
+        match store
+            .resolve_id(prefix)
+            .and_then(|(id, sha)| Ok((id, store.read_header(&sha)?)))
+        {
+            Ok((id, header)) if header.is_tombstone() => {
+                eprintln!("gage store delete: {} is already deleted", short_uuid(&id));
+                errors += 1;
+            }
+            Ok((id, header)) => {
+                let type_name = header
+                    .object_type
+                    .strip_prefix("gage::")
+                    .unwrap_or(&header.object_type)
+                    .to_string();
+                if !targets.iter().any(|(t, _)| *t == id) {
+                    targets.push((id, type_name));
+                }
+            }
+            Err(e) => {
+                eprintln!("gage store delete: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let count = targets.len();
+    dialog::run("Delete objects", || {
+        for (id, type_name) in &targets {
+            cli::log::remark(format!("{type_name} {}", short_uuid(id)))?;
+        }
+        if !args.yes {
+            let confirmed = cli::confirm(format!(
+                "Permanently delete {count} {}? This cannot be undone.",
+                if count == 1 { "object" } else { "objects" }
+            ))
+            .initial_value(false)
+            .interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let mut deleted = 0;
+        for (id, _) in &targets {
+            match store.delete_object(id) {
+                Ok(_) => deleted += 1,
+                Err(e) => eprintln!("warning: failed to delete {}: {e}", short_uuid(id)),
+            }
+        }
+        Ok(format!(
+            "Deleted {deleted} {}",
+            if deleted == 1 { "object" } else { "objects" }
+        )
+        .into())
+    });
 }
 
 /// Open the default store, or exit with the open error.

@@ -364,6 +364,27 @@ impl Store {
         Ok(EditOutcome::Written(commit_sha))
     }
 
+    /// Delete the object `id_or_prefix` names, whatever its type, by
+    /// writing a tombstone as [`Store::delete`] does. The object's
+    /// content is read as the object model alone, so a type whose
+    /// decoder rejects the content is still deletable. Nothing that
+    /// links the object is edited: a dataset keeps naming the
+    /// pre-tombstone commit, which stays readable. Returns the
+    /// header as it was before the tombstone and the tombstone's SHA.
+    pub fn delete_object(&self, id_or_prefix: &str) -> Result<(ObjectHeader, String), StoreError> {
+        let (_, tip_sha) = self.resolve_id(id_or_prefix)?;
+        let current = self.read_object(&tip_sha)?;
+        let type_name = current
+            .header
+            .object_type
+            .strip_prefix("gage::")
+            .unwrap_or(&current.header.object_type)
+            .to_string();
+        let message = format!("{type_name} delete: {}", current.header.id);
+        let sha = self.delete(&current, &message)?;
+        Ok((current.header, sha))
+    }
+
     /// Delete `current` by writing a parentless tombstone: `type`,
     /// `id`, `created`, and `modified` = `deleted` = now. Content,
     /// `parent`, and link files are dropped, so prior commits become
@@ -1503,6 +1524,37 @@ mod tests {
             store.short_prefix_ids(None).unwrap(),
             vec!["abc1".to_string()]
         );
+    }
+
+    #[test]
+    fn delete_object_tombstones_any_type_by_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let tree = ObjectTree {
+            attrs: Some(serde_json::json!({ "shape": "unknown to any decoder" })),
+            ..ObjectTree::default()
+        };
+        let created = store
+            .create("gage::widget", "1", "widget-1", &tree, "widget")
+            .unwrap();
+        let (header, sha) = store.delete_object("widget-").unwrap();
+        assert_eq!(header.id, "widget-1");
+        assert_eq!(header.object_type, "gage::widget");
+        assert!(
+            !header.is_tombstone(),
+            "the header is the pre-tombstone one"
+        );
+        let tombstone = store.read_header(&sha).unwrap();
+        assert!(tombstone.is_tombstone());
+        assert_eq!(store.rev_parse(&object_ref("widget-1")).unwrap(), Some(sha));
+        assert!(
+            !store.read_object(&created).unwrap().header.is_tombstone(),
+            "the prior commit stays readable"
+        );
+        assert!(matches!(
+            store.delete_object("widget-1").unwrap_err(),
+            StoreError::ObjectDeleted(_)
+        ));
     }
 
     #[test]
