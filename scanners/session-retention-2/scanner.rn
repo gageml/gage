@@ -32,25 +32,46 @@ pub const SCANNER = #{
 /// the attachment or the file there is nothing to check. The issue is
 /// written once: a later scan that finds it in any status, closed
 /// included, writes nothing.
+// pub async fn check() {
+//     let settings = match scan().attachment("claude-config").await {
+//         Some(a) => match a.file("settings.json").await {
+//             Some(f) => f.json()?,
+//             None => {
+//                 log::info!(
+//                     "claude-config has no settings.json; skipping"
+//                 );
+//                 return Ok(());
+//             }
+//         },
+//         None => {
+//             log::info!("no claude-config attachment; skipping");
+//             return Ok(());
+//         }
+//     };
+//     if settings.get("cleanupPeriodDays").is_some() {
+//         return Ok(());
+//     }
+//     write_issue(
+//         "session-retention",
+//         "Unset session retention policy - sessions may be unexpectedly deleted",
+//         include_str!("issue.md"),
+//     )
+//     .keep_named()
+//     .await?;
+// }
+
 pub async fn check() {
-    for a in scan().attachments().name("claude-config").await {
-        let settings = match a.file("settings.json").await {
-            Some(f) => f.json()?,
-            None => {
-                log::info!("claude-config has no settings.json; skipping");
-                continue;
+    if let Some(a) = scan().attachment("claude-config").await {
+        if let Some(f) = a.file("settings.json").await {
+            if f.json()?.get("cleanupPeriodDays").is_none() {
+                write_issue(
+                    "session-retention",
+                    "Unset session retention policy",
+                    include_str!("issue.md"),
+                )
+                .keep_named()
+                .await?;
             }
-        };
-        if settings.get("cleanupPeriodDays").is_some() {
-            continue;
         }
-        write_issue(
-            "session-retention",
-            "Unset session retention policy - sessions may be unexpectedly deleted",
-            include_str!("issue.md"),
-        )
-        .keep_named()
-        .await?;
     }
-    Ok(())
 }

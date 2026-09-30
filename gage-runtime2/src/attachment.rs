@@ -1,15 +1,18 @@
-//! `scan().attachments()`: the attachments the scan's dataset links,
-//! for scanners.
+//! `scan().attachments()` and `scan().attachment(name)`: the
+//! attachments the scan's dataset holds, for scanners.
 //!
 //! `scan().attachments()` is an [`AttachmentsQuery`]; awaiting it
 //! reads the dataset's `attachments.link` at the commit the scan
 //! links and yields an [`Attachments`] iterator of [`Attachment`]
-//! values in link order. `.name(name)` keeps the attachment with
-//! that name. An attachment offers `files()`, awaited to the list of
-//! file keys, and `file(key)`, awaited to `Some(AttachmentFile)` or
-//! `None`. A file holds its bytes; `bytes()` and `text()` return
-//! them, and `text()` and `json()` are fallible, returning
-//! `Error::Decode` for content that is not UTF-8 or not JSON.
+//! values in dataset order. `scan().attachment(name)` is an
+//! [`AttachmentQuery`]; awaiting it yields `Some(Attachment)` or
+//! `None`. A name names at most one attachment, since the object id
+//! derives from it. An attachment offers `files()`, awaited to the
+//! list of file keys, and `file(key)`, awaited to
+//! `Some(AttachmentFile)` or `None`. A file holds its bytes;
+//! `bytes()` and `text()` return them, and `text()` and `json()` are
+//! fallible, returning `Error::Decode` for content that is not UTF-8
+//! or not JSON.
 
 use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
@@ -23,10 +26,14 @@ use crate::scan::{Scan, current};
 pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
     m.function_meta(Scan::attachments)?;
+    m.function_meta(Scan::attachment)?;
     m.ty::<AttachmentsQuery>()?;
-    m.function_meta(AttachmentsQuery::name)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentsQuery| async move {
-        fetch_attachments(q).await
+    m.associated_function(&Protocol::INTO_FUTURE, |_q: AttachmentsQuery| async move {
+        Ok::<_, VmError>(Attachments::new(fetch_attachments().await?))
+    })?;
+    m.ty::<AttachmentQuery>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentQuery| async move {
+        fetch_attachment(q).await
     })?;
     m.ty::<Attachment>()?;
     m.function_meta(Attachment::files)?;
@@ -60,51 +67,61 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
 }
 
 impl Scan {
-    /// The attachments the scan's dataset links, read when awaited.
+    /// The attachments the scan's dataset holds, read when awaited.
     #[rune::function(instance)]
     fn attachments(&self) -> AttachmentsQuery {
-        AttachmentsQuery { name: None }
+        AttachmentsQuery {}
+    }
+
+    /// The attachment named `name` in the scan's dataset, read when
+    /// awaited: `Some(Attachment)` or `None`.
+    #[rune::function(instance)]
+    fn attachment(&self, name: &str) -> AttachmentQuery {
+        AttachmentQuery {
+            name: name.to_string(),
+        }
     }
 }
 
 /// The value of `scan().attachments()`. Awaiting it runs the read.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub struct AttachmentsQuery {
+pub struct AttachmentsQuery {}
+
+/// The value of `scan().attachment(name)`. Awaiting it runs the read.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct AttachmentQuery {
     #[rune(skip)]
-    name: Option<String>,
+    name: String,
 }
 
-impl AttachmentsQuery {
-    /// Keep the attachment named `name`.
-    #[rune::function(instance)]
-    fn name(mut self, name: &str) -> Self {
-        self.name = Some(name.to_string());
-        self
-    }
+async fn fetch_attachment(q: AttachmentQuery) -> Result<Option<Attachment>, VmError> {
+    Ok(fetch_attachments()
+        .await?
+        .into_iter()
+        .find(|a| a.name == q.name))
 }
 
-/// The dataset's attachments at the commit the scan links, in link
-/// order. Without a dataset there are none.
-async fn fetch_attachments(query: AttachmentsQuery) -> Result<Attachments, VmError> {
+/// The dataset's attachments at the commit the scan links, in
+/// dataset order. Without a dataset there are none.
+async fn fetch_attachments() -> Result<Vec<Attachment>, VmError> {
     let ctx = current()?;
     let Some(dataset) = &ctx.dataset else {
-        return Ok(Attachments::new(Vec::new()));
+        return Ok(Vec::new());
     };
     let store = ctx.store.lock().await;
     let records = DatasetStore::from(&*store)
         .attachments_at(&dataset.commit_sha)
         .map_err(|e| VmError::panic(format!("attachments of dataset {}: {e}", dataset.id)))?;
-    let items = records
+    Ok(records
         .into_iter()
-        .filter(|r| query.name.as_ref().is_none_or(|name| *name == r.attrs.name))
         .map(|r| Attachment {
             id: r.id,
             name: r.attrs.name,
             commit: r.commit_sha,
         })
-        .collect();
-    Ok(Attachments::new(items))
+        .collect())
 }
 
 /// An attachment, as a scanner sees it: its id and name and, held for
@@ -232,7 +249,7 @@ impl AttachmentFile {
 }
 
 /// A double-ended, exact-size iterator over a scan's attachments, in
-/// link order.
+/// dataset order.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct Attachments {

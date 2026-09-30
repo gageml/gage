@@ -2296,9 +2296,10 @@ mod tests {
         );
     }
 
-    /// `scan().attachments()` reads the dataset's linked attachments
-    /// at the commit the scan links; `.name()` filters; `file(key)`
-    /// reads content and `None` for an absent key.
+    /// `scan().attachments()` reads the dataset's attachments at the
+    /// commit the scan links; `scan().attachment(name)` yields one or
+    /// `None`; `file(key)` reads content and `None` for an absent
+    /// key.
     #[tokio::test]
     async fn attachments_are_read_from_the_scanned_dataset_commit() {
         use gage_store::{AttachmentSpec, AttachmentStore};
@@ -2315,13 +2316,12 @@ mod tests {
             pub async fn main() {
                 let all = scan().attachments().await;
                 println!("{}", all.len());
-                for a in scan().attachments().name("cfg").await {
-                    println!("{} {:?}", a.name, a.files().await);
-                    let f = a.file("settings.json").await.unwrap();
-                    println!("{:?}", f.json()?.get("cleanupPeriodDays"));
-                    println!("{}", a.file("missing.json").await.is_none());
-                }
-                println!("{}", scan().attachments().name("nope").await.len());
+                let a = scan().attachment("cfg").await.unwrap();
+                println!("{} {:?}", a.name, a.files().await);
+                let f = a.file("settings.json").await.unwrap();
+                println!("{:?}", f.json()?.get("cleanupPeriodDays"));
+                println!("{}", a.file("missing.json").await.is_none());
+                println!("{}", scan().attachment("nope").await.is_none());
                 Ok(())
             }
         "###;
@@ -2380,7 +2380,7 @@ mod tests {
                 &Output::Println("cfg [\"settings.json\"]".into()),
                 &Output::Println("Some(365)".into()),
                 &Output::Println("true".into()),
-                &Output::Println("0".into()),
+                &Output::Println("true".into()),
             ]
         );
     }
