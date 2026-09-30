@@ -13,9 +13,9 @@ use tabled::{
 use toml::Value;
 
 use gage_core::config::{
-    Config, discover_config_paths, display_user_config_path, find_project_gage_dir,
-    find_project_root, user_config_path,
+    Config, discover_config_paths, find_project_gage_dir, find_project_root, user_config_path,
 };
+use gage_core::path::shorten_home;
 
 use crate::style;
 
@@ -146,16 +146,7 @@ fn render_value(v: &Value) -> String {
 }
 
 fn display_source(path: &Path) -> String {
-    let user = user_config_path();
-    if path == user {
-        return display_user_config_path();
-    }
-    if let Ok(home) = env::var("HOME")
-        && let Ok(rel) = path.strip_prefix(&home)
-    {
-        return format!("~/{}", rel.display());
-    }
-    path.display().to_string()
+    shorten_home(path)
 }
 
 fn edit(args: EditArgs) {

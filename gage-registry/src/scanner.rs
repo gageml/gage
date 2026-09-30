@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use gage_core::glob::glob_match;
+use gage_core::path::shorten_home_in;
 use rune::SourceId;
 use rune::alloc;
 use rune::alloc::prelude::TryClone;
@@ -503,20 +504,10 @@ fn display_path_impl(abs: &Path, manifest_name: &str, home: Option<&str>) -> Str
         _ => s,
     };
 
-    if let Some(home) = home {
-        let home = home.trim_end_matches('/');
-        if !home.is_empty() {
-            if s == home {
-                return "~".to_string();
-            }
-            if let Some(rest) = s.strip_prefix(home)
-                && rest.starts_with('/')
-            {
-                return format!("~{rest}");
-            }
-        }
+    match home {
+        Some(home) => shorten_home_in(Path::new(&s), Path::new(home)),
+        None => s,
     }
-    s
 }
 
 pub struct ScannerRegistry {

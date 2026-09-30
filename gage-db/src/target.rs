@@ -1,3 +1,4 @@
+use gage_core::path::shorten_home;
 use serde::{Deserialize, Serialize};
 
 /// What a note is attached to. Always exactly one variant when set;
@@ -62,20 +63,7 @@ impl ProjectTarget {
     /// display. Falls back to the full path when `HOME` is unset or
     /// is not a prefix.
     pub fn to_shortened_path(&self) -> String {
-        match std::env::var_os("HOME") {
-            Some(home) => shorten_home(&self.project_path, &home.to_string_lossy()),
-            None => self.project_path.clone(),
-        }
-    }
-}
-
-fn shorten_home(path: &str, home: &str) -> String {
-    if path == home {
-        "~".to_string()
-    } else if let Some(rest) = path.strip_prefix(home).and_then(|r| r.strip_prefix('/')) {
-        format!("~/{rest}")
-    } else {
-        path.to_string()
+        shorten_home(std::path::Path::new(&self.project_path))
     }
 }
 
@@ -268,17 +256,6 @@ mod tests {
         for t in cases {
             assert_eq!(NoteTarget::from_uri(&t.to_uri()).unwrap(), t);
         }
-    }
-
-    #[test]
-    fn shorten_home_substitutes_tilde() {
-        assert_eq!(shorten_home("/home/me/proj", "/home/me"), "~/proj");
-        assert_eq!(shorten_home("/home/me", "/home/me"), "~");
-        assert_eq!(shorten_home("/opt/proj", "/home/me"), "/opt/proj");
-        assert_eq!(
-            shorten_home("/home/melon/proj", "/home/me"),
-            "/home/melon/proj"
-        );
     }
 
     #[test]

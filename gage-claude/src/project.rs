@@ -5,7 +5,9 @@
 //! see [`crate::session::encode_project_dir`] for the encoding and why.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use gage_core::path::shorten_home;
 
 use crate::config::{self, ConfigFiles, ProjectWants};
 use crate::home::ClaudeHome;
@@ -112,25 +114,6 @@ pub fn project_for_session_name(home: &ClaudeHome, name: &str) -> io::Result<Opt
 /// directory.
 pub fn project_display(home: Option<&ClaudeHome>, encoded: &str) -> String {
     home.and_then(|h| project_for_session_name(h, encoded).ok().flatten())
-        .map(|p| shorten_home_path(&p.path))
+        .map(|p| shorten_home(&p.path))
         .unwrap_or_else(|| encoded.to_string())
-}
-
-/// The path with a leading `$HOME` replaced by `~`, for display
-pub fn shorten_home_path(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    let Some(home) = std::env::var_os("HOME") else {
-        return s.into_owned();
-    };
-    let home = home.to_string_lossy();
-    if s == home {
-        "~".to_string()
-    } else if let Some(rest) = s
-        .strip_prefix(home.as_ref())
-        .and_then(|r| r.strip_prefix('/'))
-    {
-        format!("~/{rest}")
-    } else {
-        s.into_owned()
-    }
 }

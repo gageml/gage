@@ -130,15 +130,10 @@ pub fn plugin_marketplace_dir() -> PathBuf {
     gage_home().join(".plugin-marketplace")
 }
 
-/// Display-friendly path for the user config file.
-///
-/// Uses `~` in place of `$HOME` when `GAGE_HOME` is not set.
+/// Display-friendly path for the user config file, with `~` in place
+/// of `$HOME`.
 pub fn display_user_config_path() -> String {
-    if env::var("GAGE_HOME").is_ok() {
-        user_config_path().to_string_lossy().into_owned()
-    } else {
-        "~/.gage/config.toml".to_string()
-    }
+    crate::path::shorten_home(&user_config_path())
 }
 
 /// Contents of a single `.gage/config.toml`.

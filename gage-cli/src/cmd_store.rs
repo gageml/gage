@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 use cliclack as cli;
-use gage_claude::project::shorten_home_path;
+use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_store::{EntryKind, InitOutcome, Store, StoreError, StoreStatus, TreeEntry};
 use tabled::{
@@ -266,7 +266,7 @@ fn index_status(store: &Store) {
         }
     };
     let rows = [
-        ["path".to_string(), shorten_home_path(&status.path)],
+        ["path".to_string(), shorten_home(&status.path)],
         ["refs".to_string(), status.counts.refs.to_string()],
         ["objects".to_string(), status.counts.objects.to_string()],
         ["size".to_string(), format_size(status.bytes as i64)],
@@ -335,7 +335,7 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
         .collect::<Vec<_>>()
         .join("\n");
     let mut rows: Vec<Vec<String>> = vec![
-        vec!["path".to_string(), shorten_home_path(&status.path)],
+        vec!["path".to_string(), shorten_home(&status.path)],
         vec![
             "objects".to_string(),
             (status.loose_objects + status.packed_objects).to_string(),

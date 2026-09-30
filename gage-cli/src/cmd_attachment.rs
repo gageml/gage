@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
+use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_store::{
     AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec, AttachmentStore,
@@ -267,7 +268,7 @@ pub fn list(args: AttachmentListArgs) {
                 r.attrs.name.clone(),
                 r.attrs.file_count.to_string(),
                 format_size(r.attrs.size as i64),
-                r.attrs.root.display().to_string(),
+                shorten_home(&r.attrs.root),
                 r.modified_ms.map(format_elapsed_ms).unwrap_or_default(),
             ]
         })
@@ -301,7 +302,7 @@ pub fn show(args: AttachmentShowArgs) {
     let attrs = [
         ("id", record.id.clone()),
         ("name", record.attrs.name.clone()),
-        ("root", record.attrs.root.display().to_string()),
+        ("root", shorten_home(&record.attrs.root)),
         ("includes", record.attrs.includes.join(" ")),
         ("excludes", record.attrs.excludes.join(" ")),
         ("files", record.attrs.file_count.to_string()),
