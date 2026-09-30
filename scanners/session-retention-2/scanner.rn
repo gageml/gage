@@ -4,8 +4,8 @@
 //
 // The user config reaches the scan as a dataset attachment named
 // `claude-config`, added with `gage attachment add claude-config
-// --root ~/.claude 'settings*.json' --dataset <DATASET>`. The scan
-// reads the attachment at the commit its dataset links.
+// settings.json --root ~/.claude --dataset <DATASET>`. The scan reads
+// the attachment at the commit its dataset links.
 
 use gage::{scan, write_issue};
 

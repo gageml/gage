@@ -2339,7 +2339,8 @@ mod tests {
                 .add(&AttachmentSpec {
                     name,
                     root: &root,
-                    patterns: &pats,
+                    includes: &pats,
+                    excludes: &[],
                 })
                 .unwrap();
             let dataset = datasets.create().unwrap();

@@ -30,12 +30,13 @@ use crate::style;
 pub enum AttachmentCommand {
     /// Add an attachment from a directory
     ///
-    /// Files under the root are selected by the patterns, using
-    /// gitignore syntax in ripgrep's --glob sense: patterns are
-    /// ordered, the last match wins, a leading `!` excludes, and a
-    /// list of only positive patterns selects those files alone.
-    /// Adding under an existing name updates the attachment when its
-    /// files changed and is otherwise a no-op.
+    /// Files are selected by path globs relative to the root, as in
+    /// a shell: `settings.json` is the one file at the root,
+    /// `**/settings.json` is every file by that name, `*` and `?` do
+    /// not cross `/`, and `{a,b}` and `[a-z]` are supported. Excludes
+    /// use the same form, and a directory an exclude matches is not
+    /// entered. Adding under an existing name updates the attachment
+    /// when its files changed and is otherwise a no-op.
     Add(AttachmentAddArgs),
 
     /// List attachments
@@ -61,13 +62,15 @@ pub struct AttachmentAddArgs {
     /// every other command and in scanners
     pub name: String,
 
-    /// File selection patterns
+    /// Files to include (path globs relative to the root)
     ///
-    /// Use ripgrep syntax to add and exclude paths relative to root
-    /// (cwd or else specified with -r/--root). At least one is
-    /// required; `**` selects every file
-    #[arg(required = true)]
-    pub patterns: Vec<String>,
+    /// At least one is required; `**/*` selects every file
+    #[arg(required = true, value_name = "INCLUDE")]
+    pub includes: Vec<String>,
+
+    /// Files to exclude (path glob relative to the root, repeatable)
+    #[arg(short, long, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
 
     /// Directory to select files under (default: current directory)
     ///
@@ -133,7 +136,8 @@ pub fn add(args: AttachmentAddArgs) {
     let spec = AttachmentSpec {
         name: &args.name,
         root: &root,
-        patterns: &args.patterns,
+        includes: &args.includes,
+        excludes: &args.exclude,
     };
     let added = match attachments.add(&spec) {
         Ok(outcome) => outcome,
@@ -298,7 +302,8 @@ pub fn show(args: AttachmentShowArgs) {
         ("id", record.id.clone()),
         ("name", record.attrs.name.clone()),
         ("root", record.attrs.root.display().to_string()),
-        ("patterns", record.attrs.patterns.join(" ")),
+        ("includes", record.attrs.includes.join(" ")),
+        ("excludes", record.attrs.excludes.join(" ")),
         ("files", record.attrs.file_count.to_string()),
         ("size", format_size(record.attrs.size as i64)),
         ("created", iso(record.created_ms)),

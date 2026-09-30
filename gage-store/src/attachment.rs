@@ -3,31 +3,34 @@
 //!
 //! An attachment is a named file tree a user puts in the store so
 //! scanners can read it: a harness config directory, a project's
-//! manifests. Content is `attrs.json` (name, root, patterns, file
-//! count, size) and the opaque `files.d/**` subtree holding the
-//! selected files at their paths relative to the root. The object id
-//! is derived from the name, so re-adding under a name updates the
-//! same object: unchanged content writes nothing, changed content
-//! writes an edit commit. A dataset links attachments through
+//! manifests. Content is `attrs.json` (name, root, includes,
+//! excludes, file count, size) and the opaque `files.d/**` subtree
+//! holding the selected files at their paths relative to the root.
+//! The object id is derived from the name, so re-adding under a name
+//! updates the same object: unchanged content writes nothing, changed
+//! content writes an edit commit. A dataset links attachments through
 //! `attachments.link` the way it links sessions. Tree construction,
 //! commit parents, and edits are the generic object model's job; see
 //! [`crate::object`].
 //!
-//! File selection follows ripgrep's `--glob`: gitignore syntax, an
-//! ordered list where the last matching pattern wins, a leading `!`
-//! excludes, and a set with only positive patterns selects those
-//! files alone. An empty pattern list selects every file under the
-//! root. Hidden files are included; `.gitignore` files are not
-//! consulted.
+//! File selection uses shell path globs, as Nushell's `glob` does:
+//! an include is a path relative to the root, `*` and `?` do not
+//! cross `/`, `**` does, and `{a,b}` and `[a-z]` are supported. A
+//! bare `settings.json` names the one file at the root; any depth
+//! needs `**/settings.json`. Excludes are path globs of the same
+//! form; a directory an exclude matches is not descended. A pattern
+//! that is absolute or contains `..` is refused. Symbolic links are
+//! read through; a dangling link selects nothing.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use gage_core::uuid::derive_id;
-use ignore::WalkBuilder;
-use ignore::overrides::OverrideBuilder;
 use serde::{Deserialize, Serialize};
+use wax::walk::{Entry, FileIterator, GlobEntry, LinkBehavior, WalkError};
+use wax::{Glob, Program};
 
 use crate::dataset::{DatasetAttachments, DatasetStore};
 use crate::git::EntryKind;
@@ -61,8 +64,10 @@ pub struct AttachmentAttrs {
     /// The directory the files were selected under, on the machine
     /// that added them. File keys are paths relative to it.
     pub root: PathBuf,
-    /// The selection patterns, in order. Empty selects every file.
-    pub patterns: Vec<String>,
+    /// The include patterns, path globs relative to the root
+    pub includes: Vec<String>,
+    /// The exclude patterns, path globs relative to the root
+    pub excludes: Vec<String>,
     pub file_count: u64,
     /// Total bytes across the selected files
     pub size: u64,
@@ -73,7 +78,9 @@ pub struct AttachmentAttrs {
 pub struct AttachmentSpec<'a> {
     pub name: &'a str,
     pub root: &'a Path,
-    pub patterns: &'a [String],
+    /// At least one is required
+    pub includes: &'a [String],
+    pub excludes: &'a [String],
 }
 
 /// Outcome of writing one attachment to the store.
@@ -149,7 +156,7 @@ impl AttachmentStore<'_> {
 
         let mut entries: Vec<(String, String)> = Vec::new();
         let mut size = 0;
-        for (key, file) in select_files(spec.root, spec.patterns)? {
+        for (key, file) in select_files(spec.root, spec.includes, spec.excludes)? {
             let bytes = fs::read(&file).map_err(|e| read_error(&file, e))?;
             size += bytes.len() as u64;
             entries.push((key, write_blob(path, &bytes)?));
@@ -160,7 +167,8 @@ impl AttachmentStore<'_> {
         let attrs = AttachmentAttrs {
             name: spec.name.to_string(),
             root: spec.root.to_path_buf(),
-            patterns: spec.patterns.to_vec(),
+            includes: spec.includes.to_vec(),
+            excludes: spec.excludes.to_vec(),
             file_count,
             size,
         };
@@ -313,43 +321,90 @@ impl AttachmentStore<'_> {
     }
 }
 
-/// The files `patterns` select under `root`, as `(key, path)` pairs
-/// in path order.
-fn select_files(root: &Path, patterns: &[String]) -> Result<Vec<(String, PathBuf)>, StoreError> {
-    let mut overrides = OverrideBuilder::new(root);
-    for pattern in patterns {
-        overrides
-            .add(pattern)
-            .map_err(|e| StoreError::AttachmentInput(format!("pattern {pattern:?}: {e}")))?;
+/// The files the includes select under `root`, less the excludes, as
+/// `(key, path)` pairs in key order. Each include is walked on its
+/// own and the results are merged, so a file two includes match is
+/// listed once.
+fn select_files(
+    root: &Path,
+    includes: &[String],
+    excludes: &[String],
+) -> Result<Vec<(String, PathBuf)>, StoreError> {
+    if includes.is_empty() {
+        return Err(StoreError::AttachmentInput(
+            "at least one include pattern is required".to_string(),
+        ));
     }
-    let overrides = overrides
-        .build()
-        .map_err(|e| StoreError::AttachmentInput(format!("patterns: {e}")))?;
-    let walk = WalkBuilder::new(root)
-        .standard_filters(false)
-        .follow_links(true)
-        .overrides(overrides)
-        .sort_by_file_path(Path::cmp)
-        .build();
-    let mut out = Vec::new();
+    // An exclude that matches a directory prunes it. Wax prunes only
+    // on a pattern ending in `/**`, so each exclude is paired with
+    // that form
+    let excludes = excludes
+        .iter()
+        .flat_map(|p| {
+            let subtree = (!p.ends_with("**")).then(|| format!("{}/**", p.trim_end_matches('/')));
+            std::iter::once(p.clone()).chain(subtree)
+        })
+        .map(|p| parse_pattern(&p, "exclude"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for include in includes {
+        let glob = parse_pattern(include, "include")?;
+        let walk = glob.walk_with_behavior(root, LinkBehavior::ReadTarget);
+        if excludes.is_empty() {
+            collect_files(root, walk, &mut out)?;
+        } else {
+            let not = wax::any(excludes.iter().cloned())
+                .map_err(|e| StoreError::AttachmentInput(format!("excludes: {e}")))?;
+            let walk = walk
+                .not(not)
+                .map_err(|e| StoreError::AttachmentInput(format!("excludes: {e}")))?;
+            collect_files(root, walk, &mut out)?;
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// A path glob relative to the root: not absolute and without `..`.
+fn parse_pattern(pattern: &str, what: &str) -> Result<Glob<'static>, StoreError> {
+    let input =
+        |reason: String| StoreError::AttachmentInput(format!("{what} {pattern:?}: {reason}"));
+    if pattern.split('/').any(|c| c == "..") {
+        return Err(input("`..` is not allowed".to_string()));
+    }
+    let glob = Glob::new(pattern).map_err(|e| input(e.to_string()))?;
+    if !glob.has_root().is_never() {
+        return Err(input(
+            "an absolute pattern is not allowed; patterns are relative to the root".to_string(),
+        ));
+    }
+    Ok(glob.into_owned())
+}
+
+/// Add every regular file the walk yields to `out`, keyed by its
+/// `/`-separated path under `root`.
+fn collect_files(
+    root: &Path,
+    walk: impl Iterator<Item = Result<GlobEntry, WalkError>>,
+    out: &mut BTreeMap<String, PathBuf>,
+) -> Result<(), StoreError> {
     for entry in walk {
         let entry = match entry {
             Ok(entry) => entry,
-            // A dangling symlink is not a file to select
-            Err(e)
-                if e.io_error()
-                    .is_some_and(|io| io.kind() == io::ErrorKind::NotFound) =>
-            {
-                continue;
+            Err(e) => {
+                let e = io::Error::from(e);
+                // A dangling symlink is not a file to select
+                if e.kind() == io::ErrorKind::NotFound {
+                    continue;
+                }
+                return Err(StoreError::AttachmentInput(format!("walk: {e}")));
             }
-            Err(e) => return Err(StoreError::AttachmentInput(format!("walk: {e}"))),
         };
-        let path = entry.path();
-        // Directories select nothing themselves; a symlink is read
+        // Directories select nothing themselves; a link is read
         // through, so a link to a file is its target's file
-        if !path.is_file() {
+        if !entry.file_type().is_file() {
             continue;
         }
+        let path = entry.path();
         let rel = path
             .strip_prefix(root)
             .expect("the walk yields paths under its root");
@@ -367,9 +422,9 @@ fn select_files(root: &Path, patterns: &[String]) -> Result<Vec<(String, PathBuf
             }
             key.push_str(text);
         }
-        out.push((key, path.to_path_buf()));
+        out.entry(key).or_insert_with(|| path.to_path_buf());
     }
-    Ok(out)
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), StoreError> {
@@ -487,14 +542,30 @@ mod tests {
         files.iter().map(|f| f.key.as_str()).collect()
     }
 
+    fn selected_keys(root: &Path, includes: &[&str], excludes: &[&str]) -> Vec<String> {
+        select_files(root, &patterns(includes), &patterns(excludes))
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+    }
+
     #[test]
-    fn empty_patterns_select_every_file_including_hidden() {
+    fn a_bare_name_selects_only_the_root_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = fixture_root(dir.path());
-        let selected = select_files(&root, &[]).unwrap();
-        let keys: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
-            keys,
+            selected_keys(&root, &["settings*.json", "*.md"], &[]),
+            ["CLAUDE.md", "settings.json", "settings.local.json"]
+        );
+    }
+
+    #[test]
+    fn a_tree_wildcard_selects_at_any_depth_including_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fixture_root(dir.path());
+        assert_eq!(
+            selected_keys(&root, &["**/*"], &[]),
             [
                 ".hidden",
                 "CLAUDE.md",
@@ -505,55 +576,73 @@ mod tests {
                 "skills/rust/node_modules/x.js",
             ]
         );
+        assert_eq!(
+            selected_keys(&root, &["**/*.md", "settings.json"], &[]),
+            ["CLAUDE.md", "settings.json", "skills/rust/SKILL.md"]
+        );
     }
 
     #[test]
-    fn positive_patterns_select_only_matches_at_any_depth() {
+    fn excludes_prune_directories() {
         let dir = tempfile::tempdir().unwrap();
         let root = fixture_root(dir.path());
-        let selected = select_files(&root, &patterns(&["settings*.json", "*.md"])).unwrap();
-        let keys: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
-            keys,
+            selected_keys(&root, &["**/*"], &["**/node_modules/**", "projects/**"]),
             [
+                ".hidden",
                 "CLAUDE.md",
                 "settings.json",
                 "settings.local.json",
                 "skills/rust/SKILL.md",
             ]
         );
+        // A bare directory name or glob prunes the directory too
+        assert_eq!(
+            selected_keys(&root, &["**/*"], &["proj*", "skills", "**/*.json"]),
+            [".hidden", "CLAUDE.md"]
+        );
     }
 
     #[test]
-    fn a_negated_pattern_prunes_a_directory() {
+    fn a_file_matched_by_two_includes_is_listed_once() {
         let dir = tempfile::tempdir().unwrap();
         let root = fixture_root(dir.path());
-        let selected = select_files(
-            &root,
-            &patterns(&["skills/**", "!node_modules", "!projects"]),
-        )
-        .unwrap();
-        let keys: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["skills/rust/SKILL.md"]);
+        assert_eq!(
+            selected_keys(&root, &["*.md", "CLAUDE.md"], &[]),
+            ["CLAUDE.md"]
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_dangling_symlink_is_skipped() {
+    fn a_dangling_symlink_is_skipped_and_a_file_link_is_read_through() {
         let dir = tempfile::tempdir().unwrap();
         let root = fixture_root(dir.path());
         std::os::unix::fs::symlink(root.join("missing"), root.join("dangling")).unwrap();
-        let selected = select_files(&root, &patterns(&["CLAUDE.md", "dangling"])).unwrap();
-        let keys: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["CLAUDE.md"]);
+        std::os::unix::fs::symlink(root.join("CLAUDE.md"), root.join("linked.md")).unwrap();
+        assert_eq!(
+            selected_keys(&root, &["CLAUDE.md", "dangling", "linked.md"], &[]),
+            ["CLAUDE.md", "linked.md"]
+        );
     }
 
     #[test]
-    fn a_malformed_pattern_is_input_error() {
+    fn bad_patterns_are_input_errors() {
         let dir = tempfile::tempdir().unwrap();
         let root = fixture_root(dir.path());
-        let err = select_files(&root, &patterns(&["a[b"])).unwrap_err();
-        assert!(matches!(err, StoreError::AttachmentInput(_)), "{err}");
+        for (includes, excludes) in [
+            (vec![], vec![]),
+            (vec!["a[b"], vec![]),
+            (vec!["/settings.json"], vec![]),
+            (vec!["../x"], vec![]),
+            (vec!["*"], vec!["/tmp/**"]),
+        ] {
+            let err = select_files(&root, &patterns(&includes), &patterns(&excludes)).unwrap_err();
+            assert!(
+                matches!(err, StoreError::AttachmentInput(_)),
+                "{includes:?} {excludes:?}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -565,7 +654,8 @@ mod tests {
         let spec = AttachmentSpec {
             name: "claude-config",
             root: &root,
-            patterns: &patterns(&["settings*.json"]),
+            includes: &patterns(&["settings*.json"]),
+            excludes: &[],
         };
         let added = attachments.add(&spec).unwrap();
         assert_eq!(added.outcome, AttachmentOutcome::Added);
@@ -576,7 +666,8 @@ mod tests {
         assert_eq!(record.commit_sha, added.commit_sha);
         assert_eq!(record.attrs.name, "claude-config");
         assert_eq!(record.attrs.root, root);
-        assert_eq!(record.attrs.patterns, ["settings*.json"]);
+        assert_eq!(record.attrs.includes, ["settings*.json"]);
+        assert!(record.attrs.excludes.is_empty());
         assert_eq!(record.attrs.file_count, 2);
         assert_eq!(record.attrs.size, 9);
 
@@ -605,7 +696,8 @@ mod tests {
         let spec = AttachmentSpec {
             name: "cfg",
             root: &root,
-            patterns: &pats,
+            includes: &pats,
+            excludes: &[],
         };
         let first = attachments.add(&spec).unwrap();
         let again = attachments.add(&spec).unwrap();
@@ -639,7 +731,8 @@ mod tests {
                 .add(&AttachmentSpec {
                     name,
                     root: &root,
-                    patterns: &pats,
+                    includes: &pats,
+                    excludes: &[],
                 })
                 .unwrap();
         }
@@ -672,7 +765,8 @@ mod tests {
             .add(&AttachmentSpec {
                 name: "b",
                 root: &root,
-                patterns: &pats,
+                includes: &pats,
+                excludes: &[],
             })
             .unwrap();
         assert_eq!(back.outcome, AttachmentOutcome::Added);
@@ -693,7 +787,8 @@ mod tests {
         let spec = AttachmentSpec {
             name: "cfg",
             root: &root,
-            patterns: &pats,
+            includes: &pats,
+            excludes: &[],
         };
         let first = attachments.add(&spec).unwrap();
         let dataset = datasets.create().unwrap();
@@ -784,7 +879,8 @@ mod tests {
             .add(&AttachmentSpec {
                 name: "cfg",
                 root: &root,
-                patterns: &pats,
+                includes: &pats,
+                excludes: &[],
             })
             .unwrap();
         let a = datasets.create().unwrap();
@@ -821,7 +917,8 @@ mod tests {
                 .add(&AttachmentSpec {
                     name,
                     root: &root,
-                    patterns: &[],
+                    includes: &patterns(&["CLAUDE.md"]),
+                    excludes: &[],
                 })
                 .unwrap_err();
             assert!(
@@ -833,7 +930,8 @@ mod tests {
             .add(&AttachmentSpec {
                 name: "ok",
                 root: &root.join("settings.json"),
-                patterns: &[],
+                includes: &patterns(&["CLAUDE.md"]),
+                excludes: &[],
             })
             .unwrap_err();
         assert!(matches!(err, StoreError::AttachmentInput(_)), "{err}");
