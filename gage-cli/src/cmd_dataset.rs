@@ -364,14 +364,18 @@ pub async fn list(args: DatasetListArgs) {
     }
     let show = args.limit.show_count(total);
     let sql = format!(
-        "SELECT d.id, d.id_prefix, d.created, COUNT(m.session_id) \
-         FROM dataset d LEFT JOIN dataset_session m ON m.dataset_id = d.id \
-         GROUP BY d.id, d.id_prefix, d.created, d.modified \
+        "SELECT d.id, d.id_prefix, d.created, \
+         COALESCE(a.n, 0) AS attachments, COALESCE(m.n, 0) AS sessions \
+         FROM dataset d \
+         LEFT JOIN (SELECT dataset_id, COUNT(*) AS n FROM dataset_attachment \
+                    GROUP BY dataset_id) a ON a.dataset_id = d.id \
+         LEFT JOIN (SELECT dataset_id, COUNT(*) AS n FROM dataset_session \
+                    GROUP BY dataset_id) m ON m.dataset_id = d.id \
          ORDER BY d.modified DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 
-    let header: Vec<String> = ["Id", "Sessions", "Created"]
+    let header: Vec<String> = ["Id", "Sessions", "Attachments", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -380,11 +384,13 @@ pub async fn list(args: DatasetListArgs) {
         let ids = column::<StringArray>(batch, 0);
         let prefixes = column::<StringArray>(batch, 1);
         let createds = column::<TimestampMillisecondArray>(batch, 2);
-        let counts = column::<Int64Array>(batch, 3);
+        let attachments = column::<Int64Array>(batch, 3);
+        let sessions = column::<Int64Array>(batch, 4);
         for i in 0..batch.num_rows() {
             rows.push(vec![
                 styled_id(short_uuid(ids.value(i)), prefixes.value(i), IdKind::Gage),
-                counts.value(i).to_string(),
+                sessions.value(i).to_string(),
+                attachments.value(i).to_string(),
                 format_elapsed_ms(createds.value(i)),
             ]);
         }
@@ -393,7 +399,7 @@ pub async fn list(args: DatasetListArgs) {
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::one(1), Alignment::right())
+        .modify(Columns::new(1..3), Alignment::right())
         .modify(Columns::new(1..).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");

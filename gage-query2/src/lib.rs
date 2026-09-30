@@ -175,6 +175,11 @@ const VIEWS: &[(&str, &str)] = &[
          FROM dataset_session_link l JOIN dataset d ON l.dataset_commit = d.commit",
     ),
     (
+        "dataset_attachment",
+        "SELECT l.dataset_id, l.attachment_num, l.attachment_id \
+         FROM dataset_attachment_link l JOIN dataset d ON l.dataset_commit = d.commit",
+    ),
+    (
         "scan_session",
         "SELECT s.scan_id, m.session_num, m.session_id \
          FROM scan_dataset_link s \

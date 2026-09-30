@@ -6,6 +6,7 @@
 //! | Table                  | Link file                                  |
 //! | ---------------------- | ------------------------------------------ |
 //! | `dataset_session_link` | `dataset/sessions.link`                    |
+//! | `dataset_attachment_link` | `dataset/attachments.link`              |
 //! | `scan_dataset_link`    | `scan/dataset.link`                        |
 //! | `scan_note_link`       | `scan/notes.link`, `scan/notes_carried.link` |
 //! | `scan_issue_link`      | `scan/issues.link`                         |
@@ -30,6 +31,7 @@ use crate::object::Object;
 use crate::{DatasetStore, IssueStore, NoteStore, ScanStore, Store, url};
 
 const SESSIONS_LINK: &str = "sessions.link";
+const ATTACHMENTS_LINK: &str = "attachments.link";
 const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
@@ -41,6 +43,7 @@ const EVIDENCE_LINK: &str = "evidence.link";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {
     DatasetSession,
+    DatasetAttachment,
     ScanDataset,
     ScanNote,
     ScanIssue,
@@ -49,8 +52,9 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 6] = [
+    pub const ALL: [LinkKind; 7] = [
         LinkKind::DatasetSession,
+        LinkKind::DatasetAttachment,
         LinkKind::ScanDataset,
         LinkKind::ScanNote,
         LinkKind::ScanIssue,
@@ -62,6 +66,7 @@ impl LinkKind {
     pub fn table_name(self) -> &'static str {
         match self {
             LinkKind::DatasetSession => "dataset_session_link",
+            LinkKind::DatasetAttachment => "dataset_attachment_link",
             LinkKind::ScanDataset => "scan_dataset_link",
             LinkKind::ScanNote => "scan_note_link",
             LinkKind::ScanIssue => "scan_issue_link",
@@ -79,6 +84,13 @@ impl LinkKind {
                 Field::new("session_num", DataType::Int64, false),
                 utf8("session_id", false),
                 utf8("session_commit", false),
+            ],
+            LinkKind::DatasetAttachment => vec![
+                utf8("dataset_id", false),
+                utf8("dataset_commit", false),
+                Field::new("attachment_num", DataType::Int64, false),
+                utf8("attachment_id", false),
+                utf8("attachment_commit", false),
             ],
             LinkKind::ScanDataset => vec![
                 utf8("scan_id", false),
@@ -137,6 +149,7 @@ impl BatchSource for Source {
     fn build(&self, store: &Store) -> Result<RecordBatch> {
         match self.kind {
             LinkKind::DatasetSession => dataset_session(store),
+            LinkKind::DatasetAttachment => dataset_attachment(store),
             LinkKind::ScanDataset => scan_dataset(store),
             LinkKind::ScanNote => scan_note(store),
             LinkKind::ScanIssue => scan_issue(store),
@@ -161,9 +174,9 @@ fn linked(object: &Object, file: &str) -> Vec<String> {
     object.tree.links.get(file).cloned().unwrap_or_default()
 }
 
-fn dataset_session(store: &Store) -> Result<RecordBatch> {
-    // The dataset commits with members to list: every tip, and every
-    // commit a scan links
+/// The dataset commits with members to list: every tip, and every
+/// commit a scan links.
+fn dataset_commits_list(store: &Store) -> Result<Vec<String>> {
     let mut commits: Vec<String> = DatasetStore::from(store)
         .query()
         .tips()
@@ -179,12 +192,16 @@ fn dataset_session(store: &Store) -> Result<RecordBatch> {
             }
         }
     }
+    Ok(commits)
+}
+
+fn dataset_session(store: &Store) -> Result<RecordBatch> {
     let mut dataset_ids = StringBuilder::new();
     let mut dataset_commits = StringBuilder::new();
     let mut session_nums = Int64Builder::new();
     let mut session_ids = StringBuilder::new();
     let mut session_commits = StringBuilder::new();
-    for commit in &commits {
+    for commit in &dataset_commits_list(store)? {
         let dataset = store.read_object(commit).map_err(external)?;
         for (idx, sha) in linked(&dataset, SESSIONS_LINK).iter().enumerate() {
             let session = store.read_header(sha).map_err(external)?;
@@ -203,6 +220,35 @@ fn dataset_session(store: &Store) -> Result<RecordBatch> {
             Arc::new(session_nums.finish()),
             Arc::new(session_ids.finish()),
             Arc::new(session_commits.finish()),
+        ],
+    )?)
+}
+
+fn dataset_attachment(store: &Store) -> Result<RecordBatch> {
+    let mut dataset_ids = StringBuilder::new();
+    let mut dataset_commits = StringBuilder::new();
+    let mut attachment_nums = Int64Builder::new();
+    let mut attachment_ids = StringBuilder::new();
+    let mut attachment_commits = StringBuilder::new();
+    for commit in &dataset_commits_list(store)? {
+        let dataset = store.read_object(commit).map_err(external)?;
+        for (idx, sha) in linked(&dataset, ATTACHMENTS_LINK).iter().enumerate() {
+            let attachment = store.read_header(sha).map_err(external)?;
+            dataset_ids.append_value(&dataset.header.id);
+            dataset_commits.append_value(commit);
+            attachment_nums.append_value(idx as i64 + 1);
+            attachment_ids.append_value(attachment.id);
+            attachment_commits.append_value(sha);
+        }
+    }
+    Ok(RecordBatch::try_new(
+        LinkKind::DatasetAttachment.schema(),
+        vec![
+            Arc::new(dataset_ids.finish()),
+            Arc::new(dataset_commits.finish()),
+            Arc::new(attachment_nums.finish()),
+            Arc::new(attachment_ids.finish()),
+            Arc::new(attachment_commits.finish()),
         ],
     )?)
 }
