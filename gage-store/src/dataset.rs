@@ -827,6 +827,9 @@ fn format_session_commit_message(outcomes: &[DatasetSessionAddOutcome]) -> Strin
     if !updated.is_empty() {
         parts.push(format!("update {}", join_nums(&updated)));
     }
+    if parts.is_empty() {
+        return "sessions: <none>".to_string();
+    }
     format!("sessions: {}", parts.join("; "))
 }
 

@@ -439,12 +439,12 @@ pub fn show(args: DatasetShowArgs) {
 
     let sessions_cell = sessions
         .iter()
-        .map(|s| short_uuid(&s.id).to_string())
+        .map(|s| s.id.clone())
         .collect::<Vec<_>>()
         .join("\n");
     let attachments_cell = attachments
         .iter()
-        .map(|a| format!("{} {}", short_uuid(&a.id), a.attrs.name))
+        .map(|a| format!("{} {}", a.id, a.attrs.name))
         .collect::<Vec<_>>()
         .join("\n");
     let rows = [
