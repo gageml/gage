@@ -83,7 +83,7 @@ enum Scan2Command {
 #[command(group = ArgGroup::new("scan2_dataset")
     .required(true)
     .multiple(true)
-    .args(SELECT_ARG_NAMES.iter().copied().chain(["dataset", "list_scanners"])))]
+    .args(SELECT_ARG_NAMES.iter().copied().chain(["dataset", "skip_dataset", "list_scanners"])))]
 pub struct Scan2RunArgs {
     /// Scanner to run (repeatable)
     #[arg(short, long = "scanner", value_name = "NAME", display_order = 2)]
@@ -113,12 +113,24 @@ pub struct Scan2RunArgs {
     #[command(flatten)]
     select: SessionSelectArgs,
 
+    /// Run the scan without a dataset
+    ///
+    /// No dataset is created or selected; scanners run with no
+    /// sessions to read.
+    #[arg(
+        long,
+        display_order = 12,
+        conflicts_with = "dataset",
+        conflicts_with_all = SELECT_ARG_NAMES,
+    )]
+    skip_dataset: bool,
+
     /// Run only the scanners named, without pulling in required_by dependents
-    #[arg(long, display_order = 12)]
+    #[arg(long, display_order = 13)]
     no_deps: bool,
 
     /// Show available scanners and exit
-    #[arg(long, exclusive = true, display_order = 13)]
+    #[arg(long, exclusive = true, display_order = 14)]
     list_scanners: bool,
 }
 
@@ -315,11 +327,13 @@ async fn run_scan(args: Scan2RunArgs) {
     // full stop before any work.
     let store = open_store("gage scan2");
 
-    // Either --dataset names an existing dataset, or the
+    // Either --dataset names an existing dataset, the
     // session-selection options mint one populated with the
-    // matching native sessions. The clap group guarantees one of
-    // the two is present.
-    let dataset_record = if let Some(prefix) = args.dataset.as_deref() {
+    // matching native sessions, or --skip-dataset runs with none.
+    // The clap group guarantees one of the three is present.
+    let dataset_sha = if args.skip_dataset {
+        None
+    } else if let Some(prefix) = args.dataset.as_deref() {
         let record = match DatasetStore::from(&store).get(prefix) {
             Ok(record) => record,
             Err(e) => {
@@ -340,20 +354,19 @@ async fn run_scan(args: Scan2RunArgs) {
                 short_uuid(&record.id)
             );
         }
-        record
+        Some(record.commit_sha)
     } else {
         let id = cmd_dataset::create_dataset("gage scan2", &store);
         println!("Created dataset {}", short_uuid(&id));
         cmd_dataset::populate_dataset("gage scan2", &store, &id, None, &args.select, None).await;
         match DatasetStore::from(&store).get(&id) {
-            Ok(record) => record,
+            Ok(record) => Some(record.commit_sha),
             Err(e) => {
                 eprintln!("gage scan2: {e}");
                 std::process::exit(1);
             }
         }
     };
-    let dataset_sha = Some(dataset_record.commit_sha.clone());
 
     // Named scanners come from the registry; `-f` files are parsed on
     // this invocation. Named scanners run first, then files. Either
