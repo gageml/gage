@@ -10,7 +10,9 @@ use datafusion::arrow::array::{
 };
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
-use gage_registry::scanner::{ScannerDef, ScannerRegistry, parse_scanner_file};
+use gage_registry::scanner::{
+    Scanner, ScannerDef, ScannerRegistry, parse_scanner_file, split_scanner_spec,
+};
 use gage_runtime2::{Output, TaskOutput};
 use gage_scan2::staging::staging_root;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
@@ -102,7 +104,7 @@ pub struct Scan2RunArgs {
 
     /// Scanner file to run (repeatable)
     #[arg(short, long = "file", value_name = "PATH", display_order = 4)]
-    files: Vec<PathBuf>,
+    files: Vec<String>,
 
     /// Tasks to run at once
     #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 5)]
@@ -354,18 +356,16 @@ async fn run_scan(args: Scan2RunArgs) {
     let dataset_sha = Some(dataset_record.commit_sha.clone());
 
     // Named scanners come from the registry; `-f` files are parsed on
-    // this invocation. Named scanners run first, then files.
+    // this invocation. Named scanners run first, then files. Either
+    // spec may carry a `#{...}` params override suffix.
     let registry = ScannerRegistry::load();
     let mut errors = 0;
     let mut seen: Vec<&str> = Vec::new();
-    let mut defs: Vec<&ScannerDef> = Vec::new();
-    for name in &args.scanners {
-        if name.contains("#{") {
-            eprintln!("gage scan2: scanner params are not supported: {name}");
-            errors += 1;
-            continue;
-        }
-        if seen.contains(&name.as_str()) {
+    let mut scanners: Vec<Scanner<'_>> = Vec::new();
+    let mut file_defs: Vec<(ScannerDef, &str)> = Vec::new();
+    for spec in &args.scanners {
+        let (name, params_override) = split_scanner_spec(spec);
+        if seen.contains(&name) {
             eprintln!("gage scan2: Scanner '{name}' specified more than once");
             errors += 1;
             continue;
@@ -374,17 +374,33 @@ async fn run_scan(args: Scan2RunArgs) {
         // Library scanners are not selectable: same error as an
         // unknown name
         match registry.get_def(name) {
-            Some(def) if !def.library => defs.push(def),
+            Some(def) if !def.library => match Scanner::from_spec(def, params_override, spec) {
+                Ok(scanner) => scanners.push(scanner),
+                Err(e) => {
+                    eprintln!("gage scan2: {e}");
+                    errors += 1;
+                }
+            },
             _ => {
                 eprintln!("gage scan2: Unknown scanner: {name}");
                 errors += 1;
             }
         }
     }
-    let mut file_defs = Vec::new();
-    for path in &args.files {
-        match parse_scanner_file(path) {
-            Ok(def) => file_defs.push(def),
+    for spec in &args.files {
+        let (path, _) = split_scanner_spec(spec);
+        match parse_scanner_file(&PathBuf::from(path)) {
+            Ok(def) => file_defs.push((def, spec)),
+            Err(e) => {
+                eprintln!("gage scan2: {e}");
+                errors += 1;
+            }
+        }
+    }
+    for (def, spec) in &file_defs {
+        let (_, params_override) = split_scanner_spec(spec);
+        match Scanner::from_spec(def, params_override, spec) {
+            Ok(scanner) => scanners.push(scanner),
             Err(e) => {
                 eprintln!("gage scan2: {e}");
                 errors += 1;
@@ -394,7 +410,7 @@ async fn run_scan(args: Scan2RunArgs) {
     if errors > 0 {
         std::process::exit(1);
     }
-    defs.extend(file_defs.iter());
+    let defs: Vec<&ScannerDef> = scanners.iter().map(|s| s.def).collect();
 
     // Pull in tasks that declare themselves `required_by` what the
     // selection writes. `--no-deps` skips the pull-in so only the
@@ -421,15 +437,15 @@ async fn run_scan(args: Scan2RunArgs) {
 
     // Every scanner compiles before any task runs, so a broken
     // scanner is a full stop.
-    let mut scanners: Vec<CompiledScanner> = Vec::new();
-    let compiled = defs.iter().map(|def| gage_scan2::compile(def)).chain(
+    let mut compiled: Vec<CompiledScanner> = Vec::new();
+    let results = scanners.iter().map(gage_scan2::compile).chain(
         required
             .iter()
-            .map(|(def, tasks)| gage_scan2::compile_required(def, tasks)),
+            .map(|(def, tasks)| gage_scan2::compile(&Scanner::with_tasks(def, tasks.clone()))),
     );
-    for result in compiled {
+    for result in results {
         match result {
-            Ok(s) => scanners.push(s),
+            Ok(s) => compiled.push(s),
             Err(e) => {
                 eprintln!("gage scan2: {e}");
                 errors += 1;
@@ -463,7 +479,7 @@ async fn run_scan(args: Scan2RunArgs) {
     // Headless: task output and the scan's own lines go to the
     // terminal as they happen, unprefixed; records go to the scan
     // record only
-    let result = gage_scan2::scan(&store, &config, &scanners, &cancel, |event| match event {
+    let result = gage_scan2::scan(&store, &config, &compiled, &cancel, |event| match event {
         Event::Output(TaskOutput { output, .. }) => match output {
             Output::Print(s) => print!("{s}"),
             Output::Println(s) => println!("{s}"),

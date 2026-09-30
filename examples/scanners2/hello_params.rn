@@ -1,0 +1,15 @@
+use gage::params;
+
+pub const SCANNER = #{
+    name: "hello-params",
+    description: "Basic param usage",
+    tasks: #{ main: #{} },
+    params: #{ x: #{ value: 1 }, y: #{ value: 2 } },
+};
+
+pub async fn main() {
+    let x = params().x;
+    let y = params().y;
+    let z = x + y;
+    println(`${x} + ${y} = ${z}`);
+}

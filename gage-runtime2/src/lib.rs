@@ -140,7 +140,7 @@ pub(crate) fn send(output: Output) {
 
 /// The Rune context every scanner compiles against: the standard
 /// library without its stdio, this crate's `print`/`println` and
-/// `log` macros, `gage::scan` and the values it returns, the message
+/// `log` macros, `gage::scan` and the values it returns, `gage::params`, the message
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::write_note`,
 /// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,

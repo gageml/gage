@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 
 use gage_core::datetime::now_ms;
 use gage_core::uuid::{new_uuid, short_uuid};
-use gage_registry::scanner::{ScannerDef, TaskDef};
+use gage_registry::scanner::{Scanner, TaskDef};
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{
     CURRENT_RUNTIME_SCHEME, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext,
@@ -55,6 +55,7 @@ use gage_store::{
 use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
 use rune::{Diagnostics, Source, Sources, Vm};
+use serde_json as json;
 use tokio::sync::mpsc;
 use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -145,6 +146,8 @@ pub struct CompiledScanner {
     /// scanner, the pulled tasks for one pulled in by `required_by`
     tasks: BTreeMap<String, TaskDef>,
     selection: Selection,
+    /// The scanner's resolved params, read by `params()` in its tasks
+    params: Option<json::Value>,
     /// The files the scanner is built from, recorded with the scan
     source_files: Vec<SourceFile>,
     rt: RuneArc<RuntimeContext>,
@@ -164,31 +167,23 @@ impl CompiledScanner {
             rt: self.rt.clone(),
             unit: self.unit.clone(),
             sources: Arc::clone(&self.sources),
+            params: self.params.clone(),
         }
     }
 }
 
-/// Compile a scanner named on the command line or given as a file,
-/// planning every declared task.
-pub fn compile(def: &ScannerDef) -> Result<CompiledScanner, Error> {
-    compile_selected(def, Selection::Explicit, None)
-}
-
-/// Compile a scanner pulled in by `required_by`, planning only
-/// `tasks`.
-pub fn compile_required(def: &ScannerDef, tasks: &[String]) -> Result<CompiledScanner, Error> {
-    compile_selected(def, Selection::RequiredBy, Some(tasks))
-}
-
 /// Compile a scanner and verify that every declared task maps to a
 /// function of the same name. A scanner that fails here is a full
-/// stop for the caller: nothing has run yet. `only` restricts the
-/// planned tasks; every declared task is verified regardless.
-pub fn compile_selected(
-    def: &ScannerDef,
-    selection: Selection,
-    only: Option<&[String]>,
-) -> Result<CompiledScanner, Error> {
+/// stop for the caller: nothing has run yet. A scanner selected by
+/// name or file plans every declared task; one pulled in by
+/// `required_by` carries the pulled tasks in `only_tasks` and plans
+/// those alone. Every declared task is verified regardless.
+pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
+    let def = scanner.def;
+    let (selection, only) = match &scanner.only_tasks {
+        Some(tasks) => (Selection::RequiredBy, Some(tasks.as_slice())),
+        None => (Selection::Explicit, None),
+    };
     let context = gage_runtime2::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
 
@@ -256,6 +251,7 @@ pub fn compile_selected(
         name: def.name.clone(),
         tasks,
         selection,
+        params: scanner.params.clone(),
         source_files: files,
         rt,
         unit,
@@ -642,10 +638,13 @@ impl<F: FnMut(Event)> Run<'_, F> {
             scanner: t.scanner.clone(),
             task: t.task.clone(),
         });
+        let unit = self.units[&t.scanner].clone();
+        let mut ctx = self.scan_ctx.clone();
+        ctx.params = unit.params.clone();
         let exec = TaskExec {
-            unit: self.units[&t.scanner].clone(),
+            unit,
             task: t.task.clone(),
-            ctx: self.scan_ctx.clone(),
+            ctx,
             sink: OutputSink {
                 scanner: t.scanner.clone(),
                 task: t.task.clone(),
@@ -796,6 +795,7 @@ struct TaskUnit {
     rt: RuneArc<RuntimeContext>,
     unit: RuneArc<Unit>,
     sources: Arc<Sources>,
+    params: Option<json::Value>,
 }
 
 /// Everything a worker needs to run one task: the scanner's
@@ -906,7 +906,7 @@ fn returned_error(value: &str, scanner: &TaskUnit, task: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gage_registry::scanner::parse_scanner_file;
+    use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_store::DatasetStore;
     use tempfile::TempDir;
 
@@ -915,12 +915,27 @@ mod tests {
     /// Write `source` as a scanner file and compile it. The directory
     /// guard is returned so the file outlives the compiled scanner.
     fn compile_source(source: &str) -> (TempDir, Result<CompiledScanner, Error>) {
+        compile_source_with_params(source, None)
+    }
+
+    /// As [`compile_source`], with a `#{...}` params override applied
+    /// over the scanner's declared defaults.
+    fn compile_source_with_params(
+        source: &str,
+        params: Option<&str>,
+    ) -> (TempDir, Result<CompiledScanner, Error>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scanner.rn");
         std::fs::write(&path, source).unwrap();
         let def = parse_scanner_file(&path).unwrap();
-        let compiled = compile(&def);
+        let scanner = Scanner::from_spec(&def, params, "scanner.rn").unwrap();
+        let compiled = compile(&scanner);
         (dir, compiled)
+    }
+
+    /// Compile `def` as its own explicit selection with default params.
+    fn compile_def(def: &ScannerDef) -> Result<CompiledScanner, Error> {
+        compile(&Scanner::from_spec(def, None, &def.name).unwrap())
     }
 
     /// A fresh store and staging root under one directory.
@@ -989,6 +1004,81 @@ mod tests {
             println!("b ran");
         }
     "#;
+
+    const PARAMS: &str = r#"
+        use gage::params;
+
+        pub const SCANNER = #{
+            name: "params",
+            description: "Prints params",
+            params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
+            tasks: #{ show: #{} },
+        };
+
+        pub fn show() {
+            let p = params();
+            println!("{} {}", p.mode, p.budget);
+        }
+    "#;
+
+    #[tokio::test]
+    async fn params_returns_the_declared_defaults() {
+        let (_dir, compiled) = compile_source(PARAMS);
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        outcome.unwrap();
+        assert_eq!(outputs(&events), [&Output::Println("roadmap 0".into())]);
+    }
+
+    #[tokio::test]
+    async fn params_override_replaces_a_declared_default() {
+        let (_dir, compiled) = compile_source_with_params(PARAMS, Some(r#"#{ mode: "query" }"#));
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        outcome.unwrap();
+        assert_eq!(outputs(&events), [&Output::Println("query 0".into())]);
+    }
+
+    #[tokio::test]
+    async fn params_is_an_empty_object_for_a_scanner_without_params() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::params;
+
+            pub const SCANNER = #{
+                name: "noparams",
+                description: "Has no params",
+                tasks: #{ show: #{} },
+            };
+
+            pub fn show() {
+                println!("{}", params().is_empty());
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("staging"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        outcome.unwrap();
+        assert_eq!(outputs(&events), [&Output::Println("true".into())]);
+    }
 
     #[tokio::test]
     async fn print_and_println_reach_the_sink_in_order() {
@@ -1278,7 +1368,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let compiled = compile(&parse_scanner_file(&path).unwrap()).unwrap();
+        let compiled = compile_def(&parse_scanner_file(&path).unwrap()).unwrap();
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,
@@ -3084,7 +3174,7 @@ mod tests {
         )
         .unwrap();
         let lib_def = parse_scanner_file(&lib_path).unwrap();
-        let lib = compile_required(&lib_def, &["b".to_string()]).unwrap();
+        let lib = compile(&Scanner::with_tasks(&lib_def, vec!["b".to_string()])).unwrap();
         let (tmp, store) = open_store();
         let (outcome, events) = run_all(
             &store,

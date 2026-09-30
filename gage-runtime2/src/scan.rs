@@ -1,4 +1,5 @@
-//! `scan()`: the running scan and its sessions, for scanners.
+//! `scan()` and `params()`: the running scan, its sessions, and the
+//! scanner's params, for scanners.
 //!
 //! `scan()` returns the [`Scan`]: its id and its dataset.
 //! `scan().sessions()` is a [`SessionsQuery`]; awaiting it reads the
@@ -7,6 +8,10 @@
 //! store's read order, which scanners must not rely on. Every task
 //! runs under a [`ScanContext`], scoped by the orchestrator through
 //! [`SCAN_CTX`]; `scan()` outside one is a VM error.
+//!
+//! `params()` returns the scanner's resolved params as an object: the
+//! declared defaults with the scan's per-scanner overrides applied, or
+//! an empty object for a scanner that declares none.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -18,10 +23,12 @@ use datafusion::prelude::SessionContext;
 use gage_query2::ContextBuilder;
 use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
+use gage_runtime::value::json_to_value;
 use gage_store::{Store, StoreError};
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Protocol, Value, VmError};
+use rune::runtime::{Formatter, Object, Protocol, Value, VmError};
 use rune::{Any, ContextError, Module};
+use serde_json as json;
 use tokio::sync::OnceCell;
 
 tokio::task_local! {
@@ -43,6 +50,11 @@ pub struct ScanContext {
     pub scan_id: String,
     /// `None` when the scan has no dataset; `sessions()` is then empty
     pub dataset: Option<ScanDatasetRef>,
+    /// The resolved params of the scanner whose task runs under this
+    /// context; `None` when the scanner declares none. The
+    /// orchestrator sets it per task, since params are per scanner
+    /// and the context is otherwise per scan.
+    pub params: Option<json::Value>,
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Where the runtime writes during the run
     pub paths: StagingPaths,
@@ -76,6 +88,7 @@ impl ScanContext {
         Ok(ScanContext {
             scan_id,
             dataset,
+            params: None,
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             paths,
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
@@ -136,6 +149,7 @@ pub struct ScanDatasetRef {
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
     m.function("scan", scan).build()?;
+    m.function("params", params).build()?;
     Ok(m)
 }
 
@@ -180,6 +194,14 @@ fn scan() -> Result<Scan, VmError> {
     Ok(Scan {
         id: ctx.scan_id,
         dataset: ctx.dataset.map(|d| ScanDataset { id: d.id }),
+    })
+}
+
+fn params() -> Result<Value, VmError> {
+    let ctx = current()?;
+    Ok(match &ctx.params {
+        Some(params) => json_to_value(params),
+        None => rune::to_value(Object::new()).unwrap(),
     })
 }
 
