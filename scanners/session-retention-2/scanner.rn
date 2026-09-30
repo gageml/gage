@@ -26,52 +26,32 @@ pub const SCANNER = #{
     },
 };
 
-/// Report an unset retention policy in the user config.
-///
-/// Reads `settings.json` from the `claude-config` attachment. Without
-/// the attachment or the file there is nothing to check. The issue is
-/// written once: a later scan that finds it in any status, closed
-/// included, writes nothing.
-// pub async fn check() {
-//     let settings = match scan().attachment("claude-config").await {
-//         Some(a) => match a.file("settings.json").await {
-//             Some(f) => f.json()?,
-//             None => {
-//                 log::info!(
-//                     "claude-config has no settings.json; skipping"
-//                 );
-//                 return Ok(());
-//             }
-//         },
-//         None => {
-//             log::info!("no claude-config attachment; skipping");
-//             return Ok(());
-//         }
-//     };
-//     if settings.get("cleanupPeriodDays").is_some() {
-//         return Ok(());
-//     }
-//     write_issue(
-//         "session-retention",
-//         "Unset session retention policy - sessions may be unexpectedly deleted",
-//         include_str!("issue.md"),
-//     )
-//     .keep_named()
-//     .await?;
-// }
-
 pub async fn check() {
-    if let Some(a) = scan().attachment("claude-config").await {
-        if let Some(f) = a.file("settings.json").await {
-            if f.json()?.get("cleanupPeriodDays").is_none() {
-                write_issue(
-                    "session-retention",
-                    "Unset session retention policy",
-                    include_str!("issue.md"),
-                )
-                .keep_named()
-                .await?;
-            }
+    match configured_cleanup_period().await {
+        Some(days) => {
+            log::info!("cleanupPeriodDays set ({} days)", days);
+        }
+        None => {
+            write_issue(
+                "session-retention",
+                "Unset session retention policy",
+                include_str!("issue.md"),
+            )
+            .keep_named()
+            .await?;
         }
     }
+}
+
+async fn configured_cleanup_period() {
+    scan()
+        .attachment("claude-config")
+        .await
+        .expect("claude-config should be attached")
+        .file("settings.json")
+        .await
+        .expect("claude-config should include settings.json")
+        .json()
+        .expect("settings.json should be valid JSON")
+        .get("cleanupPeriodDays2")
 }
