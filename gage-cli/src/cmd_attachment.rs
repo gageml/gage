@@ -3,9 +3,10 @@
 //!
 //! An attachment is added from a directory and a pattern list, listed
 //! on its own or as a dataset's, shown file by file, and removed. A
-//! dataset links attachments the way it links sessions:
-//! `add --dataset` stores and links in one step, `remove --dataset`
-//! unlinks without touching the object.
+//! dataset holds attachments the way it holds sessions:
+//! `add --dataset` stores the attachment and adds it to the dataset in
+//! one step, `remove --dataset` takes it out of the dataset without
+//! touching the object.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -42,7 +43,9 @@ pub enum AttachmentCommand {
     /// not cross `/`, and `{a,b}` and `[a-z]` are supported. Excludes
     /// use the same form, and a directory an exclude matches is not
     /// entered. Adding under an existing name updates the attachment
-    /// when its files changed and is otherwise a no-op.
+    /// when its files changed and is otherwise a no-op. With --stored,
+    /// an attachment already in the store is added to a dataset
+    /// without reading the file system.
     Add(AttachmentAddArgs),
 
     /// List attachments
@@ -53,25 +56,26 @@ pub enum AttachmentCommand {
 
     /// Remove attachments from the store or from a dataset
     ///
-    /// Without --dataset, each attachment is unlinked from every
+    /// Without --dataset, each attachment is removed from every
     /// dataset that holds it, then marked removed in the store. With
-    /// --dataset, each attachment is unlinked from that dataset only
+    /// --dataset, each attachment is removed from that dataset only
     /// and stays in the store.
     Remove(AttachmentRemoveArgs),
 }
 
 #[derive(Args)]
 pub struct AttachmentAddArgs {
-    /// Attachment name
+    /// Attachment name, or with --stored an attachment in the store
     ///
-    /// Letters, digits, `-`, `_`, and `.`. Names the attachment in
-    /// every other command and in scanners
+    /// A name is letters, digits, `-`, `_`, and `.`, and names the
+    /// attachment in every other command and in scanners. With
+    /// --stored, a name, ID, or ID prefix of a stored attachment
     pub name: String,
 
     /// Files to include (path globs relative to the root)
     ///
     /// At least one is required; `**/*` selects every file
-    #[arg(required = true, value_name = "INCLUDE")]
+    #[arg(required_unless_present = "stored", value_name = "INCLUDE")]
     pub includes: Vec<String>,
 
     /// Files to exclude (path glob relative to the root, repeatable)
@@ -84,12 +88,24 @@ pub struct AttachmentAddArgs {
     #[arg(short, long, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
-    /// Link the attachment to a dataset
+    /// Add the attachment to a dataset
     ///
-    /// Dataset ID (or prefix). The attachment is stored and linked in
-    /// one step
+    /// Dataset ID (or prefix). The attachment is stored and added to
+    /// the dataset in one step
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    /// Add an attachment already in the store to a dataset
+    ///
+    /// Takes the attachment from the store instead of the file
+    /// system. Requires --dataset
+    #[arg(
+        short = 'S',
+        long,
+        requires = "dataset",
+        conflicts_with_all = ["includes", "root", "exclude"]
+    )]
+    pub stored: bool,
 }
 
 #[derive(Args)]
@@ -97,9 +113,9 @@ pub struct AttachmentListArgs {
     #[command(flatten)]
     pub limit: crate::limit::LimitArgs,
 
-    /// List the attachments linked to a dataset
+    /// List the attachments in a dataset
     ///
-    /// Dataset ID (or prefix). Rows are in link order
+    /// Dataset ID (or prefix). Rows are in dataset order
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
 
@@ -130,6 +146,16 @@ pub struct AttachmentRemoveArgs {
 pub fn add(args: AttachmentAddArgs) {
     let store = open_store("gage attachment add");
     let attachments = AttachmentStore::from(&store);
+
+    if args.stored {
+        let record = resolve("gage attachment add", &attachments, &args.name);
+        let dataset = args
+            .dataset
+            .as_deref()
+            .expect("clap requires --dataset with --stored");
+        add_to_dataset(&store, dataset, &record.id, &record.attrs.name);
+        return;
+    }
 
     let root = args.root.unwrap_or_else(|| PathBuf::from("."));
     let root = match root.canonicalize() {
@@ -178,12 +204,13 @@ pub fn add(args: AttachmentAddArgs) {
     }
 
     if let Some(prefix) = args.dataset.as_deref() {
-        link_to_dataset(&store, prefix, &added.id, &args.name);
+        add_to_dataset(&store, prefix, &added.id, &args.name);
     }
 }
 
-/// Link one stored attachment to a dataset and report the outcome.
-fn link_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: &str) {
+/// Add one stored attachment to a dataset and report the outcome in
+/// the shape `gage session add` uses.
+fn add_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: &str) {
     let datasets = DatasetStore::from(store);
     let dataset_id = match datasets.resolve_id(dataset_prefix) {
         Ok(id) => id,
@@ -201,23 +228,21 @@ fn link_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: &str) {
     };
     let dataset = short_uuid(&dataset_id);
     for o in &outcomes {
-        match o.outcome {
-            AttachmentLinkOutcome::Linked => {
-                println!("Linked attachment {name} to dataset {dataset}");
-            }
-            AttachmentLinkOutcome::Updated => {
-                println!("Updated attachment {name} in dataset {dataset}");
-            }
-            AttachmentLinkOutcome::Unchanged => {
-                println!("Attachment {name} is already linked to dataset {dataset}");
-            }
-        }
+        let verb = match o.outcome {
+            AttachmentLinkOutcome::Linked => "Added",
+            AttachmentLinkOutcome::Updated => "Updated",
+            AttachmentLinkOutcome::Unchanged => "Unchanged",
+        };
+        println!(
+            "{verb} attachment {name} ({}) to dataset {dataset}",
+            short_uuid(&o.id)
+        );
     }
 }
 
 pub async fn list(args: AttachmentListArgs) {
     let store = open_store("gage attachment list");
-    // With --dataset the rows are the dataset's links in link order;
+    // With --dataset the rows are the dataset's attachments in dataset order;
     // otherwise every live attachment, newest modified first
     let (from, order) = match args.dataset.as_deref() {
         Some(prefix) => {
@@ -357,7 +382,7 @@ pub fn remove(args: AttachmentRemoveArgs) {
     }
 }
 
-/// Unlink attachments from one dataset; the objects stay
+/// Remove attachments from one dataset; the objects stay
 fn remove_from_dataset(store: &Store, dataset_prefix: &str, ids: &[String]) {
     let datasets = DatasetStore::from(store);
     let dataset_id = match datasets.resolve_id(dataset_prefix) {
@@ -384,7 +409,7 @@ fn remove_from_dataset(store: &Store, dataset_prefix: &str, ids: &[String]) {
     }
 }
 
-/// Unlink attachments from every dataset holding them and tombstone
+/// Remove attachments from every dataset holding them and tombstone
 /// them
 fn remove_from_store(store: &Store, ids: &[String]) {
     let outcome = match AttachmentStore::from(store).remove(ids) {

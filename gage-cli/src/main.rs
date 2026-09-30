@@ -154,7 +154,7 @@ enum Command {
     ///
     /// An attachment is a named set of files added from a directory
     /// for scanners to read, such as a Claude Code config directory.
-    /// Datasets link attachments the way they link sessions.
+    /// Datasets hold attachments the way they hold sessions.
     Attachment {
         #[command(subcommand)]
         command: cmd_attachment::AttachmentCommand,
