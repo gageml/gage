@@ -198,7 +198,9 @@ async fn collect_results(runner, key, progress) {
 const SESSION_MIN_TEXT_LEN = 200;
 
 async fn skip_session(s) {
-    let messages = s.messages().await?;
+    // The first 50 messages decide; the sum stops there to bound the
+    // read for a long session
+    let messages = s.messages().limit(50).await?;
     if messages.is_empty() {
         return Ok(Some("empty session"));
     }

@@ -34,6 +34,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function("type", MessageQuery::type_)?;
     m.function_meta(MessageQuery::lines)?;
     m.function_meta(MessageQuery::latest_first)?;
+    m.function_meta(MessageQuery::limit)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: MessageQuery| async move {
         fetch_messages(q).await
     })?;
@@ -41,6 +42,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<EntryQuery>()?;
     m.function_meta(entries)?;
     m.associated_function("type", EntryQuery::type_)?;
+    m.function_meta(EntryQuery::limit)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: EntryQuery| async move {
         fetch_entries(q).await
     })?;
@@ -59,6 +61,8 @@ pub struct MessageQuery {
     type_: Option<Value>,
     #[rune(skip)]
     reverse: bool,
+    #[rune(skip)]
+    limit: Option<u64>,
 }
 
 /// The session's messages, read when awaited.
@@ -69,6 +73,7 @@ fn messages(session: Ref<Session>) -> MessageQuery {
         lines: None,
         type_: None,
         reverse: false,
+        limit: None,
     }
 }
 
@@ -92,6 +97,13 @@ impl MessageQuery {
         self.reverse = true;
         self
     }
+
+    /// Return at most `n` messages, taken in the query's order.
+    #[rune::function(instance)]
+    fn limit(mut self, n: u64) -> Self {
+        self.limit = Some(n);
+        self
+    }
 }
 
 /// The value of `session.entries()`.
@@ -102,6 +114,8 @@ pub struct EntryQuery {
     session_id: String,
     #[rune(skip)]
     type_: Option<Value>,
+    #[rune(skip)]
+    limit: Option<u64>,
 }
 
 /// The session's entries, read when awaited.
@@ -110,12 +124,20 @@ fn entries(session: Ref<Session>) -> EntryQuery {
     EntryQuery {
         session_id: session.id.clone(),
         type_: None,
+        limit: None,
     }
 }
 
 impl EntryQuery {
     fn type_(mut self, t: Value) -> Self {
         self.type_ = Some(t);
+        self
+    }
+
+    /// Return at most `n` entries, in `line` order.
+    #[rune::function(instance)]
+    fn limit(mut self, n: u64) -> Self {
+        self.limit = Some(n);
         self
     }
 }
@@ -130,7 +152,8 @@ async fn fetch_messages(q: MessageQuery) -> Fetched<Vec<Message>> {
         Err(e) => return Ok(Err(e)),
     };
     let order = if q.reverse { " DESC" } else { "" };
-    let sql = format!("SELECT * FROM message{where_clause} ORDER BY line{order}");
+    let limit = limit_clause(q.limit);
+    let sql = format!("SELECT * FROM message{where_clause} ORDER BY line{order}{limit}");
     Ok(run(&sql, params).await?.map(messages_from_batches))
 }
 
@@ -139,8 +162,13 @@ async fn fetch_entries(q: EntryQuery) -> Fetched<Vec<Entry>> {
         Ok(built) => built,
         Err(e) => return Ok(Err(e)),
     };
-    let sql = format!("SELECT * FROM entry{where_clause} ORDER BY line");
+    let limit = limit_clause(q.limit);
+    let sql = format!("SELECT * FROM entry{where_clause} ORDER BY line{limit}");
     Ok(run(&sql, params).await?.map(entries_from_batches))
+}
+
+fn limit_clause(limit: Option<u64>) -> String {
+    limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default()
 }
 
 /// The `WHERE` clause and its parameters for one session, an optional

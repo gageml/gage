@@ -1759,8 +1759,8 @@ mod tests {
 
     /// `messages()` and `entries()` read a member session through
     /// its driver at the commit the dataset links, scoped to that
-    /// session, with `.type(spec)`, `.latest_first()`, and `.lines()`
-    /// applied.
+    /// session, with `.type(spec)`, `.latest_first()`, `.lines()`, and
+    /// `.limit()` applied.
     #[tokio::test]
     async fn tasks_read_session_messages_and_entries() {
         const SCANNER: &str = r#"
@@ -1783,7 +1783,11 @@ mod tests {
                     for m in s.messages().lines(2, 3).await? {
                         println!("lines 2-3: {}", m.text);
                     }
+                    for m in s.messages().latest_first().limit(1).await? {
+                        println!("limit 1: {}", m.text);
+                    }
                     println!("{} entries", s.entries().await?.len());
+                    println!("{} entries limit 2", s.entries().limit(2).await?.len());
                     for e in s.entries().type("summary").await? {
                         println!("entry {}: {}", e.line, e.type);
                     }
@@ -1837,7 +1841,9 @@ mod tests {
                 &Output::Println("latest assistant: hi there".into()),
                 &Output::Println("lines 2-3: hello".into()),
                 &Output::Println("lines 2-3: hi there".into()),
+                &Output::Println("limit 1: anything else?".into()),
                 &Output::Println("4 entries".into()),
+                &Output::Println("2 entries limit 2".into()),
                 &Output::Println("entry 1: summary".into()),
                 &Output::Println("args error: `.type()` object must name at least one type".into()),
             ]
