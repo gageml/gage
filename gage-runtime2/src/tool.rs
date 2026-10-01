@@ -1,12 +1,14 @@
-//! Scanner-defined tools for `call_agent`: `Tool` and `Input`.
+//! Tools for `call_agent`: `Tool`, `Input`, and `Query`.
 //!
-//! A `Tool` is a value with chained setters and no finalizer:
-//! `Tool::new(name, handler)` takes the required data, and
-//! description, inputs, annotations, and `requires_meta` chain.
-//! `call_agent(..).tool(t)` consumes the tools when the agent starts:
-//! names and inputs are validated, the input schema is rendered, and
-//! each tool becomes a [`CustomToolDef`] whose callback runs the
-//! handler.
+//! A `Tool` is a value with chained setters and no finalizer, of one of
+//! two kinds. A scanner-defined tool, `Tool::new(name, handler)`, takes
+//! the required data, and description, inputs, annotations, and
+//! `requires_meta` chain. A Gage tool is one of the tools this runtime
+//! provides, declared by its typed configuration value such as `Query`,
+//! which `.tool()` accepts directly. `call_agent(..).tool(t)` consumes the tools when the agent
+//! starts: names and inputs are validated, each scanner-defined tool
+//! becomes a [`CustomToolDef`] whose callback runs the handler, and
+//! each Gage tool becomes a [`GageTool`] carrying the data it serves.
 //!
 //! The handler is held as a [`SyncFunction`], the `Send + Sync` form of
 //! a Rune function, because the MCP service calls it from the host's
@@ -17,7 +19,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use gage_mcp::{CustomToolCallback, CustomToolDef, CustomToolOutcome, ToolAnnotations};
+use gage_mcp2::{
+    CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, QueryConfig, ToolAnnotations,
+    ToolSpec,
+};
 use gage_runtime::dispatcher::ToolMeta;
 use gage_runtime::error::Error;
 use gage_runtime::value::{json_to_value, value_to_json};
@@ -30,10 +35,10 @@ use rune::runtime::{
 use rune::{Any, ContextError, Module};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::scan::{SCAN_CTX, ScanContext};
+use crate::scan::{SCAN_CTX, ScanContext, Session};
 use crate::{OUTPUT_SINK, OutputSink};
 
-/// `rmcp::model::JsonObject` as gage-mcp exposes it through
+/// `rmcp::model::JsonObject` as gage-mcp2 exposes it through
 /// `CustomToolDef::input_schema`
 mod rmcp_json {
     pub type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -65,23 +70,65 @@ pub(crate) fn module() -> Result<Module, ContextError> {
     Ok(m)
 }
 
-/// One scanner-defined tool
+/// `gage::tools`: the configuration values of the Gage tools, in the
+/// module the legacy runtime kept them in
+pub(crate) fn tools_module() -> Result<Module, ContextError> {
+    let mut m = Module::with_crate_item("gage", ["tools"])?;
+    m.ty::<Query>()?;
+    m.function_meta(Query::new)?;
+    m.function_meta(Query::with_session)?;
+    m.function_meta(Query::with_session_range)?;
+    m.function_meta(Query::debug)?;
+    Ok(m)
+}
+
+/// One tool of either kind
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct Tool {
     #[rune(skip)]
+    kind: ToolKind,
+}
+
+#[derive(Clone)]
+enum ToolKind {
+    Scanner(ScannerTool),
+    Gage(Query),
+}
+
+impl From<Query> for Tool {
+    fn from(query: Query) -> Self {
+        Tool {
+            kind: ToolKind::Gage(query),
+        }
+    }
+}
+
+/// The tool a `.tool()` / `.tools()` argument names: a `Tool`, or a
+/// Gage tool's configuration value, which stands for the tool
+pub(crate) fn tool_from_value(v: &Value) -> Result<Tool, VmError> {
+    if let Ok(tool) = v.borrow_ref::<Tool>() {
+        return Ok(tool.clone());
+    }
+    if let Ok(query) = v.borrow_ref::<Query>() {
+        return Ok(Tool::from(query.clone()));
+    }
+    Err(VmError::panic(format!(
+        "expected a Tool or a Gage tool such as Query, got {}",
+        v.type_info()
+    )))
+}
+
+/// A scanner-defined tool
+#[derive(Clone)]
+struct ScannerTool {
     name: String,
-    #[rune(skip)]
     description: Option<String>,
-    #[rune(skip)]
     inputs: Vec<Input>,
-    #[rune(skip)]
     requires_meta: bool,
     /// `None` until an annotation method is called, so a tool with no
     /// annotations sends none
-    #[rune(skip)]
     annotations: Option<ToolAnnotations>,
-    #[rune(skip)]
     handler: Handler,
 }
 
@@ -100,32 +147,42 @@ impl Tool {
             Err(e) => Handler::Unsendable(e.to_string()),
         };
         Tool {
-            name: name.to_owned(),
-            description: None,
-            inputs: Vec::new(),
-            requires_meta: false,
-            annotations: None,
-            handler,
+            kind: ToolKind::Scanner(ScannerTool {
+                name: name.to_owned(),
+                description: None,
+                inputs: Vec::new(),
+                requires_meta: false,
+                annotations: None,
+                handler,
+            }),
         }
     }
 
     #[rune::function(instance)]
     fn description(mut self, text: Ref<str>) -> Self {
-        self.description = Some(text.to_owned());
+        if let Some(t) = self.scanner_mut("description") {
+            t.description = Some(text.to_owned());
+        }
         self
     }
 
     #[rune::function(instance)]
     fn input(mut self, input: Ref<Input>) -> Self {
-        self.inputs.push(input.clone());
+        if let Some(t) = self.scanner_mut("input") {
+            t.inputs.push(input.clone());
+        }
         self
     }
 
     #[rune::function(instance)]
     fn inputs(mut self, list: Value) -> Result<Self, VmError> {
         let list = list.borrow_ref::<rune::runtime::Vec>()?;
+        let mut inputs = Vec::with_capacity(list.len());
         for item in list.iter() {
-            self.inputs.push(item.borrow_ref::<Input>()?.clone());
+            inputs.push(item.borrow_ref::<Input>()?.clone());
+        }
+        if let Some(t) = self.scanner_mut("inputs") {
+            t.inputs.extend(inputs);
         }
         Ok(self)
     }
@@ -133,53 +190,139 @@ impl Tool {
     /// The handler takes the request's meta as its second argument
     #[rune::function(instance)]
     fn requires_meta(mut self) -> Self {
-        self.requires_meta = true;
+        if let Some(t) = self.scanner_mut("requires_meta") {
+            t.requires_meta = true;
+        }
         self
     }
 
     /// The tool does not modify its environment
     #[rune::function(instance)]
     fn read_only(mut self) -> Self {
-        self.annotations_mut().read_only_hint = Some(true);
+        if let Some(a) = self.annotations_mut("read_only") {
+            a.read_only_hint = Some(true);
+        }
         self
     }
 
     /// Repeated calls with the same inputs have no additional effect
     #[rune::function(instance)]
     fn idempotent(mut self) -> Self {
-        self.annotations_mut().idempotent_hint = Some(true);
+        if let Some(a) = self.annotations_mut("idempotent") {
+            a.idempotent_hint = Some(true);
+        }
         self
     }
 
     /// The tool performs only additive updates
     #[rune::function(instance)]
     fn additive(mut self) -> Self {
-        self.annotations_mut().destructive_hint = Some(false);
+        if let Some(a) = self.annotations_mut("additive") {
+            a.destructive_hint = Some(false);
+        }
         self
     }
 
     /// The tool's domain of interaction is closed
     #[rune::function(instance)]
     fn closed_world(mut self) -> Self {
-        self.annotations_mut().open_world_hint = Some(false);
+        if let Some(a) = self.annotations_mut("closed_world") {
+            a.open_world_hint = Some(false);
+        }
         self
     }
 
-    fn annotations_mut(&mut self) -> &mut ToolAnnotations {
-        self.annotations
-            .get_or_insert_with(ToolAnnotations::default)
+    /// The scanner tool behind a scanner-tool method. A Gage tool has
+    /// none: its methods are unreachable from the value `.tool()`
+    /// accepts, so the method name is unused here.
+    fn scanner_mut(&mut self, _method: &'static str) -> Option<&mut ScannerTool> {
+        match &mut self.kind {
+            ToolKind::Scanner(t) => Some(t),
+            ToolKind::Gage(_) => None,
+        }
+    }
+
+    fn annotations_mut(&mut self, method: &'static str) -> Option<&mut ToolAnnotations> {
+        self.scanner_mut(method)
+            .map(|t| t.annotations.get_or_insert_with(ToolAnnotations::default))
     }
 
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
-        write!(
-            f,
-            "Tool {{ name: {:?}, description: {:?}, inputs: {}, requires_meta: {} }}",
-            self.name,
-            self.description,
-            self.inputs.len(),
-            self.requires_meta
-        )?;
+        match &self.kind {
+            ToolKind::Scanner(t) => write!(
+                f,
+                "Tool {{ name: {:?}, description: {:?}, inputs: {}, requires_meta: {} }}",
+                t.name,
+                t.description,
+                t.inputs.len(),
+                t.requires_meta
+            )?,
+            ToolKind::Gage(query) => write!(f, "Tool {{ gage: {query:?} }}")?,
+        }
+        Ok(())
+    }
+}
+
+/// The configuration of the Gage query tool: the scope its SQL runs
+/// over
+#[derive(Any, Clone, Debug)]
+#[rune(item = ::gage::tools)]
+pub struct Query {
+    #[rune(skip)]
+    scope: QueryScope,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum QueryScope {
+    /// The scan's dataset
+    Dataset,
+    /// One member session, whole or a line range (inclusive)
+    Session {
+        id: String,
+        lines: Option<(u64, u64)>,
+    },
+}
+
+impl Query {
+    /// The scan's dataset
+    #[rune::function(path = Self::new)]
+    fn new() -> Query {
+        Query {
+            scope: QueryScope::Dataset,
+        }
+    }
+
+    /// One session
+    #[rune::function(path = Self::with_session)]
+    fn with_session(session: Ref<Session>) -> Query {
+        Query {
+            scope: QueryScope::Session {
+                id: session.id.clone(),
+                lines: None,
+            },
+        }
+    }
+
+    /// One session's lines `start` through `end`, inclusive
+    #[rune::function(path = Self::with_session_range)]
+    fn with_session_range(session: Ref<Session>, start: i64, end: i64) -> Result<Query, VmError> {
+        if start < 1 || end < start {
+            return Err(VmError::panic(format!(
+                "Query::with_session_range: lines {start}..{end} is not a range from 1"
+            )));
+        }
+        Ok(Query {
+            scope: QueryScope::Session {
+                id: session.id.clone(),
+                lines: Some((start as u64, end as u64)),
+            },
+        })
+    }
+
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "Query {{ scope: {:?} }}", self.scope)?;
         Ok(())
     }
 }
@@ -308,53 +451,76 @@ impl Input {
     }
 }
 
-/// Validate `tools` and build their wire definitions. Each handler
-/// runs under `ctx` with no task params and, when the call is made
-/// from a task, under that task's output sink, so the handler's
-/// output and writes are attributed to the calling task.
-pub(crate) fn consume(
+/// Validate `tools` and build the service spec, with the tool names in
+/// declaration order. Each scanner-defined handler runs under `ctx`
+/// with no task params and, when the call is made from a task, under
+/// that task's output sink, so the handler's output and writes are
+/// attributed to the calling task. Each Gage tool's data is built
+/// from `ctx`.
+pub(crate) async fn consume(
     tools: &[Tool],
     ctx: &ScanContext,
     sink: Option<&OutputSink>,
-) -> Result<Vec<CustomToolDef>, Error> {
-    let mut defs = Vec::with_capacity(tools.len());
+) -> Result<(ToolSpec, Vec<String>), Error> {
+    let mut spec = ToolSpec::default();
+    let mut names: Vec<String> = Vec::with_capacity(tools.len());
     let mut seen = HashSet::new();
     for tool in tools {
-        validate_name(&tool.name)?;
-        if !seen.insert(tool.name.as_str()) {
+        let name = match &tool.kind {
+            ToolKind::Scanner(t) => {
+                validate_name(&t.name)?;
+                t.name.clone()
+            }
+            ToolKind::Gage(_) => gage_mcp2::tools::query::NAME.to_string(),
+        };
+        if !seen.insert(name.clone()) {
+            return Err(Error::agent(format!("tool '{name}' is declared twice")));
+        }
+        match &tool.kind {
+            ToolKind::Scanner(t) => spec.custom.push(custom_def(t, ctx, sink)?),
+            ToolKind::Gage(query) => {
+                let context = ctx.query_tool_context(&query.scope).await?;
+                spec.gage.push(GageTool::Query(QueryConfig {
+                    context: Arc::new(context),
+                }));
+            }
+        }
+        names.push(name);
+    }
+    Ok((spec, names))
+}
+
+fn custom_def(
+    tool: &ScannerTool,
+    ctx: &ScanContext,
+    sink: Option<&OutputSink>,
+) -> Result<CustomToolDef, Error> {
+    for input in &tool.inputs {
+        if let Some(method) = input.conflict {
             return Err(Error::agent(format!(
-                "tool '{}' is declared twice",
+                "tool '{}': input '{}' is declared by a schema, which owns \
+                 `{method}`; set it in the schema",
+                tool.name, input.name
+            )));
+        }
+    }
+    let handler = match &tool.handler {
+        Handler::Sync(f) => Arc::clone(f),
+        Handler::Unsendable(e) => {
+            return Err(Error::agent(format!(
+                "tool '{}': the handler captures a value that cannot be \
+                 called from the MCP service: {e}",
                 tool.name
             )));
         }
-        for input in &tool.inputs {
-            if let Some(method) = input.conflict {
-                return Err(Error::agent(format!(
-                    "tool '{}': input '{}' is declared by a schema, which owns \
-                     `{method}`; set it in the schema",
-                    tool.name, input.name
-                )));
-            }
-        }
-        let handler = match &tool.handler {
-            Handler::Sync(f) => Arc::clone(f),
-            Handler::Unsendable(e) => {
-                return Err(Error::agent(format!(
-                    "tool '{}': the handler captures a value that cannot be \
-                     called from the MCP service: {e}",
-                    tool.name
-                )));
-            }
-        };
-        defs.push(CustomToolDef {
-            name: tool.name.clone(),
-            description: tool.description.clone(),
-            input_schema: render_input_schema(&tool.inputs),
-            annotations: tool.annotations.clone(),
-            callback: callback(tool, handler, ctx, sink),
-        });
-    }
-    Ok(defs)
+    };
+    Ok(CustomToolDef {
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        input_schema: render_input_schema(&tool.inputs),
+        annotations: tool.annotations.clone(),
+        callback: callback(tool, handler, ctx, sink),
+    })
 }
 
 /// The intersection of the MCP spec's tool-name rules and the Claude
@@ -412,7 +578,7 @@ fn render_input_schema(inputs: &[Input]) -> JsonObject {
 /// arguments, call the handler under the scan context and output
 /// sink, and classify what it returned.
 fn callback(
-    tool: &Tool,
+    tool: &ScannerTool,
     handler: Arc<SyncFunction>,
     ctx: &ScanContext,
     sink: Option<&OutputSink>,
@@ -613,16 +779,18 @@ mod tests {
         let list = vm.call(["main"], ()).unwrap();
         let list = list.borrow_ref::<rune::runtime::Vec>().unwrap();
         list.iter()
-            .map(|item| item.borrow_ref::<Tool>().unwrap().clone())
+            .map(|item| tool_from_value(item).unwrap())
             .collect()
     }
 
-    fn defs(tmp: &TempDir, script: &str) -> Result<Vec<CustomToolDef>, Error> {
+    async fn defs(tmp: &TempDir, script: &str) -> Result<Vec<CustomToolDef>, Error> {
         consume(&tools(script), &scan_ctx(tmp), None)
+            .await
+            .map(|(spec, _)| spec.custom)
     }
 
-    fn consume_err(tmp: &TempDir, script: &str) -> String {
-        match defs(tmp, script) {
+    async fn consume_err(tmp: &TempDir, script: &str) -> String {
+        match defs(tmp, script).await {
             Ok(_) => panic!("expected consumption to fail"),
             Err(e) => e.to_string(),
         }
@@ -632,8 +800,8 @@ mod tests {
         (def.callback)(args, meta).await
     }
 
-    #[test]
-    fn simple_inputs_render_as_properties_with_required_and_no_extra_keys() {
+    #[tokio::test]
+    async fn simple_inputs_render_as_properties_with_required_and_no_extra_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let defs = defs(
             &tmp,
@@ -649,6 +817,7 @@ mod tests {
             }
             "#,
         )
+        .await
         .unwrap();
         let def = &defs[0];
         assert_eq!(def.name, "lookup");
@@ -674,8 +843,8 @@ mod tests {
         assert_eq!(annotations.open_world_hint, None);
     }
 
-    #[test]
-    fn a_schema_input_is_sent_verbatim_and_required_still_applies() {
+    #[tokio::test]
+    async fn a_schema_input_is_sent_verbatim_and_required_still_applies() {
         let tmp = tempfile::tempdir().unwrap();
         let defs = defs(
             &tmp,
@@ -687,6 +856,7 @@ mod tests {
             }
             "#,
         )
+        .await
         .unwrap();
         assert_eq!(
             JsonValue::Object(defs[0].input_schema.clone()),
@@ -699,8 +869,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_tool_without_inputs_description_or_annotations_sends_none_of_them() {
+    #[tokio::test]
+    async fn a_tool_without_inputs_description_or_annotations_sends_none_of_them() {
         let tmp = tempfile::tempdir().unwrap();
         let defs = defs(
             &tmp,
@@ -709,6 +879,7 @@ mod tests {
             pub fn main() { [Tool::new("ping", |inputs| Ok("pong"))] }
             "#,
         )
+        .await
         .unwrap();
         assert_eq!(defs[0].description, None);
         assert!(defs[0].annotations.is_none());
@@ -718,22 +889,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn consumption_rejects_bad_names_duplicates_and_schema_conflicts() {
+    #[tokio::test]
+    async fn consumption_rejects_bad_names_duplicates_and_schema_conflicts() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = |script: &str| consume_err(&tmp, script);
+        let err = async |script: &str| consume_err(&tmp, script).await;
         assert_eq!(
             err(r#"
             use gage::Tool;
             pub fn main() { [Tool::new("bad name", |i| Ok(1))] }
-            "#),
+            "#)
+            .await,
             "agent: tool name \"bad name\" is not 1 to 128 ASCII letters, digits, '_', or '-'"
         );
         assert_eq!(
             err(r#"
             use gage::Tool;
             pub fn main() { [Tool::new("a", |i| Ok(1)), Tool::new("a", |i| Ok(2))] }
-            "#),
+            "#)
+            .await,
             "agent: tool 'a' is declared twice"
         );
         assert_eq!(
@@ -743,13 +916,14 @@ mod tests {
                 [Tool::new("a", |i| Ok(1))
                     .input(Input::from_schema("x", #{ type: "string" }).description("no"))]
             }
-            "#),
+            "#)
+            .await,
             "agent: tool 'a': input 'x' is declared by a schema, which owns `description`; set it in the schema"
         );
     }
 
-    #[test]
-    fn a_handler_capturing_a_non_constant_value_is_rejected() {
+    #[tokio::test]
+    async fn a_handler_capturing_a_non_constant_value_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let err = consume_err(
             &tmp,
@@ -760,7 +934,8 @@ mod tests {
                 [Tool::new("a", |i| Ok(captured))]
             }
             "#,
-        );
+        )
+        .await;
         assert!(
             err.starts_with("agent: tool 'a': the handler captures a value"),
             "{err}"
@@ -780,6 +955,7 @@ mod tests {
             }
             "#,
         )
+        .await
         .unwrap();
         assert_eq!(
             call(&defs[0], json!({}), json!({})).await,
@@ -804,6 +980,7 @@ mod tests {
             }
             "#,
         )
+        .await
         .unwrap();
         assert_eq!(
             call(&defs[0], json!({}), json!({})).await,
@@ -829,6 +1006,7 @@ mod tests {
             }
             "#,
         )
+        .await
         .unwrap();
         let fault = |o: CustomToolOutcome| match o {
             CustomToolOutcome::Fault(m) => m,
@@ -864,6 +1042,7 @@ mod tests {
             }
             "#,
         )
+        .await
         .unwrap();
         assert_eq!(
             call(&defs[0], json!({"n": 3, "i": 3}), json!({})).await,
@@ -884,6 +1063,7 @@ mod tests {
             }
             "#,
         )
+        .await
         .unwrap();
         let meta = json!({"claudecode/toolUseId": "toolu_1"});
         assert_eq!(
@@ -909,7 +1089,7 @@ mod tests {
             task: "review".into(),
             tx,
         };
-        let defs = consume(
+        let (spec, _) = consume(
             &tools(
                 r#"
                 use gage::{Tool, write_note};
@@ -924,7 +1104,9 @@ mod tests {
             &ctx,
             Some(&sink),
         )
+        .await
         .unwrap();
+        let defs = spec.custom;
         assert_eq!(
             call(&defs[0], json!({"text": "hello"}), json!({})).await,
             CustomToolOutcome::Success(json!("task:demo:review"))
@@ -935,6 +1117,60 @@ mod tests {
             ("demo", "review")
         );
         assert_eq!(out.output, crate::Output::Println("recording hello".into()));
+    }
+
+    /// A `Query` value consumes to the query tool over the scan's
+    /// dataset, named `Query` alongside the scanner tools.
+    #[tokio::test]
+    async fn a_gage_query_tool_joins_the_spec_under_its_wire_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (spec, names) = consume(
+            &tools(
+                r#"
+                use gage::{Tool, tools::Query};
+                pub fn main() { [Tool::new("ping", |i| Ok("pong")), Query::new()] }
+                "#,
+            ),
+            &scan_ctx(&tmp),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(names, ["ping", "Query"]);
+        assert_eq!(spec.custom.len(), 1);
+        assert_eq!(spec.gage.len(), 1);
+        assert_eq!(spec.gage[0].name(), "Query");
+    }
+
+    #[tokio::test]
+    async fn gage_tools_are_subject_to_name_uniqueness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = async |script: &str| consume_err(&tmp, script).await;
+        assert_eq!(
+            err(r#"
+            use gage::{Tool, tools::Query};
+            pub fn main() { [Query::new(), Query::new()] }
+            "#)
+            .await,
+            "agent: tool 'Query' is declared twice"
+        );
+        assert_eq!(
+            err(r#"
+            use gage::{Tool, tools::Query};
+            pub fn main() { [Tool::new("Query", |i| Ok(1)), Query::new()] }
+            "#)
+            .await,
+            "agent: tool 'Query' is declared twice"
+        );
+    }
+
+    #[test]
+    fn tool_values_accept_tools_and_queries_only() {
+        let err = match tool_from_value(&rune::to_value(7i64).unwrap()) {
+            Ok(_) => panic!("an integer is not a tool"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("expected a Tool or a Gage tool"), "{err}");
     }
 
     #[tokio::test]
@@ -948,6 +1184,7 @@ mod tests {
             pub fn main() { [Tool::new("later", later)] }
             "#,
         )
+        .await
         .unwrap();
         assert_eq!(
             call(&defs[0], json!({}), json!({})).await,

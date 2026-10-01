@@ -1,0 +1,31 @@
+[package]
+name = "gage-mcp2"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+bytes = "1"
+datafusion = { workspace = true }
+gage-query = { path = "../gage-query" }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "server-auto", "tokio"] }
+rmcp = { version = "0.16", features = [
+    "server",
+    "server-side-http",
+    "transport-streamable-http-server",
+] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+toml = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

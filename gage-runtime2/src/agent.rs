@@ -24,7 +24,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gage_mcp::{ServiceHandle, ToolSpec, build_mcp_service};
+use gage_mcp2::{ServiceHandle, build_mcp_service};
 use gage_runtime::error::{AgentError, Error};
 use gage_session::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
 use gage_store::{AgentAttrs, SessionStore};
@@ -34,7 +34,7 @@ use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
 use crate::scan::{ScanContext, current};
-use crate::tool::{self, Tool};
+use crate::tool::{self, Tool, tool_from_value};
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
@@ -153,19 +153,20 @@ impl CallAgent {
         self
     }
 
-    /// Add a scanner-defined tool
+    /// Add a tool: a `Tool`, or a Gage tool's configuration such as
+    /// `Query`
     #[rune::function(instance)]
-    fn tool(mut self, tool: Ref<Tool>) -> Self {
-        self.tools.push(tool.clone());
-        self
+    fn tool(mut self, tool: Value) -> Result<Self, VmError> {
+        self.tools.push(tool_from_value(&tool)?);
+        Ok(self)
     }
 
-    /// Add each scanner-defined tool in `list`
+    /// Add each tool in `list`
     #[rune::function(instance)]
     fn tools(mut self, list: Value) -> Result<Self, VmError> {
         let list = list.borrow_ref::<rune::runtime::Vec>()?;
         for item in list.iter() {
-            self.tools.push(item.borrow_ref::<Tool>()?.clone());
+            self.tools.push(tool_from_value(item)?);
         }
         Ok(self)
     }
@@ -181,16 +182,12 @@ async fn start(c: CallAgent) -> Result<Agent, Error> {
         None
     } else {
         let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
-        let defs = tool::consume(&c.tools, &ctx, sink.as_ref())?;
-        let tool_names = defs.iter().map(|d| d.name.clone()).collect();
+        let (tool_spec, tool_names) = tool::consume(&c.tools, &ctx, sink.as_ref()).await?;
         let host = ctx
             .mcp_host()
             .await
             .map_err(|e| Error::agent(format!("call_agent: mcp host: {e}")))?;
-        let handle = host.register(build_mcp_service(ToolSpec {
-            custom_tools: defs,
-            ..ToolSpec::default()
-        }));
+        let handle = host.register(build_mcp_service(tool_spec));
         spec.mcp = Some(AgentMcp {
             url: handle.url().to_string(),
             tool_names,

@@ -1,0 +1,16 @@
+use gage::{call_agent, tools::Query};
+
+pub const SCANNER = #{
+    name: "gage-tool",
+    description: "Use of gage tool",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let a = call_agent("How many sessions are there?")
+        .model("small")
+        .tool(Query::new())
+        .await?;
+    let result = a.wait().await?;
+    println!("{}", result.text);
+}

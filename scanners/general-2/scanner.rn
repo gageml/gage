@@ -7,6 +7,7 @@ use gage::{
     carry_forward_notes,
     scan,
     watermark,
+    tools::Query,
     write_note,
 };
 // use gage::AgentRunner;
@@ -58,8 +59,7 @@ pub async fn review() {
         let agent = call_agent(prompt)
             .name("general-finding")
             .tool(write_finding_tool())
-            // .tool(Tool::mcp("gage::Query"))
-            // .gage_tool(Query::new().sessions([s]).lines(start, end))
+            .tool(Query::with_session_range(s, start, end))
             .model("medium")
             .await?;
 

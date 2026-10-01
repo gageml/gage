@@ -172,6 +172,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(progress::types_module()?)?;
     context.install(agent::module()?)?;
     context.install(tool::module()?)?;
+    context.install(tool::tools_module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

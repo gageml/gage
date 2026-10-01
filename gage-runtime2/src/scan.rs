@@ -19,11 +19,13 @@ use std::sync::{Arc, Mutex};
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
+use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
-use gage_mcp::{HostError, McpHost};
+use gage_mcp2::{HostError, McpHost};
 use gage_query2::ContextBuilder;
 use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
+use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
 use gage_session::Driver;
 use gage_store::{Store, StoreError};
@@ -32,6 +34,8 @@ use rune::runtime::{Formatter, Object, Protocol, Value, VmError};
 use rune::{Any, ContextError, Module};
 use serde_json as json;
 use tokio::sync::OnceCell;
+
+use crate::tool::QueryScope;
 
 tokio::task_local! {
     /// The running task's scan, read by [`scan`]
@@ -148,6 +152,45 @@ impl ScanContext {
         Ok(&self.scoped().await?.1)
     }
 
+    /// The context the Gage query tool runs over for `scope`: the
+    /// scan's own context for the dataset, or a context over one
+    /// member at its linked version, with `entry` and `message`
+    /// narrowed to the line range when one is given.
+    pub(crate) async fn query_tool_context(
+        &self,
+        scope: &QueryScope,
+    ) -> Result<SessionContext, Error> {
+        let agent_err = |e: VmError| Error::agent(format!("Query tool: {e}"));
+        match scope {
+            QueryScope::Dataset => Ok(self.query_context().await.map_err(agent_err)?.clone()),
+            QueryScope::Session { id, lines } => {
+                let (dataset_scope, _) = self.scoped().await.map_err(agent_err)?;
+                let member = dataset_scope
+                    .sessions(&[])
+                    .map_err(|e| Error::agent(format!("Query tool: {e}")))?
+                    .into_iter()
+                    .find(|s| s.id == *id)
+                    .ok_or_else(|| {
+                        Error::agent(format!(
+                            "Query tool: session {id} is not a member of the scan's dataset"
+                        ))
+                    })?;
+                let scope =
+                    SessionScope::with_sessions(Arc::clone(&self.query_store), vec![member]);
+                let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
+                    .scope(Arc::new(scope))
+                    .build()
+                    .await;
+                if let Some((start, end)) = lines {
+                    restrict_lines(&ctx, *start, *end)
+                        .await
+                        .map_err(|e| Error::agent(format!("Query tool: {e}")))?;
+                }
+                Ok(ctx)
+            }
+        }
+    }
+
     /// The commit the scan reads for the member session `session_id`,
     /// or `None` when it is not a member.
     pub(crate) async fn member_commit(&self, session_id: &str) -> Result<Option<String>, VmError> {
@@ -234,6 +277,27 @@ pub(crate) fn current() -> Result<ScanContext, VmError> {
         .map_err(|_outside_scope| {
             VmError::panic("scan() is available only inside a running scan task")
         })
+}
+
+/// Re-register the row tables as views over lines `start` through
+/// `end`, inclusive. A view's plan holds the provider it was planned
+/// over, so replacing the name does not change what the view reads.
+pub(crate) async fn restrict_lines(
+    ctx: &SessionContext,
+    start: u64,
+    end: u64,
+) -> Result<(), DataFusionError> {
+    for table in ["entry", "message"] {
+        let view = ctx
+            .sql(&format!(
+                "SELECT * FROM {table} WHERE line >= {start} AND line <= {end}"
+            ))
+            .await?
+            .into_view();
+        ctx.deregister_table(table)?;
+        ctx.register_table(table, view)?;
+    }
+    Ok(())
 }
 
 /// The running scan, as a scanner sees it.
@@ -663,6 +727,59 @@ mod tests {
         Session {
             id: id.to_string(),
             commit: format!("commit-{id}"),
+        }
+    }
+
+    /// After `restrict_lines`, the row tables answer only for the
+    /// range, under their original names.
+    #[tokio::test]
+    async fn restrict_lines_narrows_the_row_tables_to_the_range() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use datafusion::datasource::MemTable;
+
+        let ctx = SessionContext::new();
+        for table in ["entry", "message"] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("line", DataType::Int64, false),
+                Field::new("text", DataType::Utf8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+                    Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+                ],
+            )
+            .unwrap();
+            ctx.register_table(
+                table,
+                Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+            )
+            .unwrap();
+        }
+        restrict_lines(&ctx, 2, 3).await.unwrap();
+        for table in ["entry", "message"] {
+            let batches = ctx
+                .sql(&format!("SELECT line FROM {table} ORDER BY line"))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let lines: Vec<i64> = batches
+                .iter()
+                .flat_map(|b| {
+                    b.column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(lines, [2, 3], "{table}");
         }
     }
 

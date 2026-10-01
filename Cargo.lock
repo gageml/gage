@@ -2642,6 +2642,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-mcp2"
+version = "0.2.0-dev"
+dependencies = [
+ "bytes",
+ "datafusion",
+ "gage-query",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "gage-query"
 version = "0.2.0-dev"
 dependencies = [
@@ -2732,7 +2752,7 @@ version = "0.2.0-dev"
 dependencies = [
  "datafusion",
  "gage-core",
- "gage-mcp",
+ "gage-mcp2",
  "gage-query2",
  "gage-runtime",
  "gage-session",

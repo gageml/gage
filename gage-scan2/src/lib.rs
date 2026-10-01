@@ -1289,7 +1289,7 @@ mod tests {
     async fn declared_tools_reach_the_driver_as_an_mcp_server() {
         let (_dir, compiled) = compile_source(
             r#"
-            use gage::{Input, Tool, call_agent};
+            use gage::{Input, Tool, call_agent, tools::Query};
 
             pub const SCANNER = #{
                 name: "agentic",
@@ -1302,7 +1302,7 @@ mod tests {
                 let agent = call_agent("hello")
                     .model("medium")
                     .tool(Tool::new("secret", |inputs| Ok(secret)).input(Input::string("key")))
-                    .tools([Tool::new("ping", |inputs| Ok("pong"))])
+                    .tools([Tool::new("ping", |inputs| Ok("pong")), Query::new()])
                     .await?;
                 println!("{}", agent.wait().await?.text);
             }
@@ -1332,7 +1332,7 @@ mod tests {
         let mcp = driver.mcp_seen.lock().unwrap().clone().unwrap();
         assert!(mcp.url.starts_with("http://127.0.0.1:"), "{}", mcp.url);
         assert!(mcp.url.ends_with("/mcp"), "{}", mcp.url);
-        assert_eq!(mcp.tool_names, ["secret", "ping"]);
+        assert_eq!(mcp.tool_names, ["secret", "ping", "Query"]);
     }
 
     /// A tool declaration the runtime rejects fails the task at
