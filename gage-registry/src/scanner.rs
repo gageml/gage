@@ -1200,24 +1200,9 @@ fn parse_params_def(source: &str, obj: &ast::ExprObject) -> Object {
         let Some((_, expr)) = &field.assign else {
             continue;
         };
-        let ast::Expr::Object(entry_obj) = expr else {
+        let Some(entry) = parse_param_entry(source, expr) else {
             continue;
         };
-
-        let mut entry = Object::new();
-        for (entry_field, _) in &entry_obj.assignments {
-            let Some(entry_key) = field_key(source, &entry_field.key) else {
-                continue;
-            };
-            let Some((_, entry_expr)) = &entry_field.assign else {
-                continue;
-            };
-            if let Some(val) = expr_to_value(source, entry_expr) {
-                entry
-                    .insert(alloc::String::try_from(entry_key.as_str()).unwrap(), val)
-                    .unwrap();
-            }
-        }
 
         params_def
             .insert(
@@ -1228,6 +1213,33 @@ fn parse_params_def(source: &str, obj: &ast::ExprObject) -> Object {
     }
 
     params_def
+}
+
+/// A param entry is `#{ value: ..., ... }`, or a bare scalar that
+/// stands for `#{ value: <scalar> }`.
+fn parse_param_entry(source: &str, expr: &ast::Expr) -> Option<Object> {
+    let mut entry = Object::new();
+    let ast::Expr::Object(entry_obj) = expr else {
+        let val = expr_to_value(source, expr)?;
+        entry
+            .insert(alloc::String::try_from("value").unwrap(), val)
+            .unwrap();
+        return Some(entry);
+    };
+    for (entry_field, _) in &entry_obj.assignments {
+        let Some(entry_key) = field_key(source, &entry_field.key) else {
+            continue;
+        };
+        let Some((_, entry_expr)) = &entry_field.assign else {
+            continue;
+        };
+        if let Some(val) = expr_to_value(source, entry_expr) {
+            entry
+                .insert(alloc::String::try_from(entry_key.as_str()).unwrap(), val)
+                .unwrap();
+        }
+    }
+    Some(entry)
 }
 
 fn expr_to_value(source: &str, expr: &ast::Expr) -> Option<Value> {
@@ -1407,6 +1419,32 @@ pub const SCANNER = #{
         let reconcile = def.tasks.get("reconcile").unwrap();
         assert_eq!(reconcile.issues.wants, vec!["*"]);
         assert!(reconcile.notes.wants.is_empty());
+    }
+
+    #[test]
+    fn parse_params_accepts_a_bare_scalar_as_the_value() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    params: #{
+        prompt: "Say hello",
+        budget: 3,
+        verbose: true,
+        mode: #{ value: "roadmap", description: "Mode" },
+    },
+};
+"#;
+        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let params = resolve_params(&def.params_def()).unwrap();
+        assert_eq!(
+            params,
+            json::json!({
+                "prompt": "Say hello",
+                "budget": 3,
+                "verbose": true,
+                "mode": "roadmap",
+            })
+        );
     }
 
     fn display(path: &str, name: &str, home: Option<&str>) -> String {

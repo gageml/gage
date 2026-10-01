@@ -7,7 +7,9 @@
 //! [`AgentResult`]; `send`, `send_now`, `stop`, and `kill` steer a
 //! running agent. A turn end with no background work outstanding ends
 //! the session on its own, so `call_agent(p).await?.wait().await?` is
-//! the one-shot form.
+//! the one-shot form. Each event is delivered once; a `poll` after
+//! `Stop`, or a `send`, `send_now`, or `kill` after the session has
+//! ended, fails with `AgentError::Stopped`.
 //!
 //! When the agent ends, the runtime stores its transcript as a session
 //! object whose `native_source` is
@@ -22,7 +24,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gage_runtime::error::Error;
+use gage_runtime::error::{AgentError, Error};
 use gage_session::{AgentEvent, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
 use gage_store::{AgentAttrs, SessionStore};
 use rune::alloc::fmt::TryWrite;
@@ -145,13 +147,13 @@ impl CallAgent {
 
 /// Start the agent through the scan's driver.
 async fn start(c: CallAgent) -> Result<Agent, Error> {
-    let ctx = current().map_err(|e| Error::Agent(e.to_string()))?;
+    let ctx = current().map_err(|e| Error::agent(e.to_string()))?;
     let model = c.spec.model.clone();
     let max_turns = c.spec.max_turns;
     let session = ctx
         .driver
         .run_agent(c.spec)
-        .map_err(|e| Error::Agent(format!("call_agent: {e}")))?;
+        .map_err(|e| Error::agent(format!("call_agent: {e}")))?;
     Ok(Agent {
         model,
         max_turns,
@@ -209,30 +211,37 @@ impl Agent {
     }
 }
 
-/// The next event. After the session has ended, `Stop` again.
+/// The next event. `Stop` is the last; a later call fails with
+/// `AgentError::Stopped`.
 #[rune::function(instance)]
 async fn poll(this: Mut<Agent>) -> Result<Result<Event, Error>, VmError> {
     Ok(do_poll(Arc::clone(&this.inner)).await)
 }
 
-/// Drive the agent to its end and return its result. A turn end with
-/// no background work outstanding ends the session; a caller that
-/// wants more turns drives `poll` and `send` and calls `stop` itself.
+/// Drive the agent to its end, consuming its events, and return its
+/// result. A turn end with no background work outstanding ends the
+/// session; a caller that wants more turns drives `poll` and `send`
+/// and calls `stop` itself. After the session has ended, the result
+/// again.
 #[rune::function(instance)]
 async fn wait(this: Mut<Agent>) -> Result<Result<AgentResult, Error>, VmError> {
     let inner = Arc::clone(&this.inner);
     Ok(async {
         loop {
-            if let Event::Stop(_) = do_poll(Arc::clone(&inner)).await? {
-                break;
+            {
+                let g = inner.lock().unwrap();
+                if g.stop_seen && g.event_buf.is_empty() {
+                    break;
+                }
             }
+            do_poll(Arc::clone(&inner)).await?;
         }
         inner
             .lock()
             .unwrap()
             .final_result
             .clone()
-            .ok_or_else(|| Error::Agent("agent.wait: result missing after Stop".into()))
+            .ok_or_else(|| Error::agent("agent.wait: result missing after Stop"))
     }
     .await)
 }
@@ -245,7 +254,7 @@ async fn do_poll(inner: Inner) -> Result<Event, Error> {
                 return Ok(ev);
             }
             if g.stop_seen {
-                return Ok(Event::Stop(g.stop_reason.clone()));
+                return Err(Error::Agent(AgentError::Stopped));
             }
         }
         let mut session = take_session(&inner, "agent.poll")?;
@@ -280,12 +289,13 @@ async fn do_poll(inner: Inner) -> Result<Event, Error> {
 }
 
 fn take_session(inner: &Inner, what: &str) -> Result<Box<dyn AgentSession>, Error> {
-    inner
-        .lock()
-        .unwrap()
-        .session
+    let mut g = inner.lock().unwrap();
+    if g.stop_seen {
+        return Err(Error::Agent(AgentError::Stopped));
+    }
+    g.session
         .take()
-        .ok_or_else(|| Error::Agent(format!("{what}: session not available")))
+        .ok_or_else(|| Error::agent(format!("{what}: session not available")))
 }
 
 /// End the session: interrupt, close input, reap the process, store
@@ -300,17 +310,17 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
         && e.kind() != io::ErrorKind::BrokenPipe
     {
         inner.lock().unwrap().session = Some(session);
-        return Err(Error::Agent(format!("agent.stop: interrupt: {e}")));
+        return Err(Error::agent(format!("agent.stop: interrupt: {e}")));
     }
     session.close_input();
     let exit_code = session
         .wait_exit()
         .await
-        .map_err(|e| Error::Agent(format!("agent.stop: wait: {e}")))?;
+        .map_err(|e| Error::agent(format!("agent.stop: wait: {e}")))?;
     let stderr = session
         .take_stderr()
         .await
-        .map_err(|e| Error::Agent(format!("agent.stop: stderr: {e}")))?;
+        .map_err(|e| Error::agent(format!("agent.stop: stderr: {e}")))?;
     let stderr = String::from_utf8_lossy(&stderr).into_owned();
 
     let (ctx, outcome, stop_reason) = {
@@ -347,7 +357,7 @@ async fn store_transcript(
     let store = ctx.store.lock().await;
     let Some(mut native) = session
         .transcript()
-        .map_err(|e| Error::Agent(format!("agent transcript: {e}")))?
+        .map_err(|e| Error::agent(format!("agent transcript: {e}")))?
     else {
         tracing::warn!("agent wrote no transcript; nothing stored");
         return Ok(());
@@ -362,7 +372,7 @@ async fn store_transcript(
     let added = SessionStore::from(&*store)
         .with_native_source(source)
         .add(&*ctx.driver, &mut *native)
-        .map_err(|e| Error::Agent(format!("storing agent session: {e}")))?;
+        .map_err(|e| Error::agent(format!("storing agent session: {e}")))?;
     drop(store);
     tracing::info!(session = %added.id, "stored agent session");
     write_agent_record(
@@ -373,7 +383,7 @@ async fn store_transcript(
         stderr,
         outcome,
     )
-    .map_err(|e| Error::Agent(format!("writing agent record: {e}")))
+    .map_err(|e| Error::agent(format!("writing agent record: {e}")))
 }
 
 /// `agents/<id>/{attrs.json, stderr, result}` under the task's
@@ -423,7 +433,7 @@ async fn send(this: Mut<Agent>, msg: Ref<str>) -> Result<Result<(), Error>, VmEr
         let mut session = take_session(&inner, "agent.send")?;
         let res = session.send(&msg).await;
         inner.lock().unwrap().session = Some(session);
-        res.map_err(|e| Error::Agent(format!("agent.send: {e}")))
+        res.map_err(|e| Error::agent(format!("agent.send: {e}")))
     }
     .await)
 }
@@ -440,7 +450,7 @@ async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> Result<Result<(), Error>, 
         }
         .await;
         inner.lock().unwrap().session = Some(session);
-        res.map_err(|e| Error::Agent(format!("agent.send_now: {e}")))
+        res.map_err(|e| Error::agent(format!("agent.send_now: {e}")))
     }
     .await)
 }
@@ -461,7 +471,7 @@ async fn kill(this: Mut<Agent>, grace_secs: i64) -> Result<Result<(), Error>, Vm
             .kill(Duration::from_secs(grace_secs.max(0) as u64))
             .await;
         inner.lock().unwrap().session = Some(session);
-        res.map_err(|e| Error::Agent(format!("agent.kill: {e}")))
+        res.map_err(|e| Error::agent(format!("agent.kill: {e}")))
     }
     .await)
 }
@@ -617,7 +627,8 @@ pub enum Event {
     /// had no background work outstanding.
     #[rune(constructor)]
     TurnEnd(#[rune(get)] String),
-    /// The session has ended. Repeats on every later poll.
+    /// The session has ended. The last event; a later poll fails
+    /// with `AgentError::Stopped`.
     #[rune(constructor)]
     Stop(#[rune(get)] String),
     /// A harness message of a kind not modeled here, JSON-encoded

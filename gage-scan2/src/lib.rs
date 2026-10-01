@@ -1270,6 +1270,78 @@ mod tests {
         }
     }
 
+    /// `poll` delivers `Stop` once; a later `poll`, `send`, or `kill`
+    /// fails with `AgentError::Stopped`, and `wait` returns the result
+    /// again.
+    #[tokio::test]
+    async fn agent_calls_after_stop_fail_with_stopped() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::{AgentError, Error, Event, call_agent};
+
+            pub const SCANNER = #{
+                name: "agentic",
+                description: "Runs an agent",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let agent = call_agent("hello").name("greeter").model("medium").await?;
+                loop {
+                    if let Event::Stop(r) = agent.poll().await? {
+                        println!("stop: {r} {}", agent.running());
+                        break;
+                    }
+                }
+                match agent.poll().await {
+                    Err(Error::Agent(AgentError::Stopped)) => println!("poll: stopped"),
+                    other => println!("poll: {other:?}"),
+                }
+                match agent.send("more").await {
+                    Err(Error::Agent(AgentError::Stopped)) => println!("send: stopped"),
+                    other => println!("send: {other:?}"),
+                }
+                match agent.kill(1).await {
+                    Err(Error::Agent(AgentError::Stopped)) => println!("kill: stopped"),
+                    other => println!("kill: {other:?}"),
+                }
+                println!("wait: {}", agent.wait().await?.text);
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            driver: Arc::new(ScriptedDriver {
+                cleaned_up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println("stop: end_turn false".into()),
+                &Output::Println("poll: stopped".into()),
+                &Output::Println("send: stopped".into()),
+                &Output::Println("kill: stopped".into()),
+                &Output::Println("wait: hello there".into()),
+            ]
+        );
+    }
+
     /// `call_agent` runs the agent through the scan's driver, `poll`
     /// and `wait` expose its events and result, the transcript is
     /// stored as a session under the task's `session+task:` source,

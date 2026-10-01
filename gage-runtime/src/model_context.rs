@@ -87,7 +87,7 @@ async fn do_model_context(c: ModelContextCall) -> crate::Result<ModelContext> {
     let ctx = current_scan_ctx();
     if let Some(msg) = ctx.run.agent_fault.get() {
         tracing::debug!("model_context refused: run-wide agent fault is set");
-        return Err(Error::Agent(msg.clone()));
+        return Err(Error::agent(msg.clone()));
     }
 
     let resolved_model = ctx.run.model_map.resolve(Some(&c.model));
@@ -118,11 +118,11 @@ async fn do_model_context(c: ModelContextCall) -> crate::Result<ModelContext> {
     let output = tokio::task::spawn_blocking(move || builder.build().run_print("/context"))
         .await
         .unwrap()
-        .map_err(|e| Error::Agent(format!("model_context: claude spawn failed: {e}")))?;
+        .map_err(|e| Error::agent(format!("model_context: claude spawn failed: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Agent(format!(
+        return Err(Error::agent(format!(
             "model_context: claude exited with {}: {}",
             output.status,
             stderr.trim()
@@ -140,7 +140,7 @@ async fn do_model_context(c: ModelContextCall) -> crate::Result<ModelContext> {
             tracing::error!("disabling agent calls for this scan: {msg}");
         }
         tracing::debug!(output = %stdout, "unparseable /context output");
-        return Err(Error::Agent(msg));
+        return Err(Error::agent(msg));
     };
 
     ctx.run

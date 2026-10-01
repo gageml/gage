@@ -45,12 +45,30 @@ pub enum Error {
     #[rune(constructor)]
     Template(#[rune(get)] String),
 
-    /// Agent subprocess failure (spawn, wait timeout, sandbox merge).
+    /// Agent failure.
     #[rune(constructor)]
-    Agent(#[rune(get)] String),
+    Agent(#[rune(get)] AgentError),
+}
+
+/// What went wrong with an agent. `General` carries the failures not
+/// yet given their own variant.
+#[derive(Any, Clone, PartialEq, Eq)]
+#[rune(item = ::gage)]
+pub enum AgentError {
+    /// The session has ended and the call needs a live one.
+    #[rune(constructor)]
+    Stopped,
+
+    #[rune(constructor)]
+    General(#[rune(get)] String),
 }
 
 impl Error {
+    /// `Error::Agent(AgentError::General(msg))`
+    pub fn agent(msg: impl Into<String>) -> Self {
+        Error::Agent(AgentError::General(msg.into()))
+    }
+
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(f, "{self:?}")?;
@@ -68,7 +86,22 @@ impl std::fmt::Display for Error {
             Error::Http { status, body } => write!(f, "http {status}: {body}"),
             Error::Decode(m) => write!(f, "decode: {m}"),
             Error::Template(m) => write!(f, "template: {m}"),
-            Error::Agent(m) => write!(f, "agent: {m}"),
+            Error::Agent(e) => write!(f, "agent: {e}"),
+        }
+    }
+}
+
+impl rune::alloc::prelude::TryClone for AgentError {
+    fn try_clone(&self) -> rune::alloc::Result<Self> {
+        Ok(self.clone())
+    }
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentError::Stopped => write!(f, "session has stopped"),
+            AgentError::General(m) => write!(f, "{m}"),
         }
     }
 }
@@ -89,8 +122,25 @@ impl std::fmt::Debug for Error {
                 .finish(),
             Error::Decode(m) => write!(f, "Decode({m:?})"),
             Error::Template(m) => write!(f, "Template({m:?})"),
-            Error::Agent(m) => write!(f, "Agent({m:?})"),
+            Error::Agent(e) => write!(f, "Agent({e:?})"),
         }
+    }
+}
+
+impl std::fmt::Debug for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentError::Stopped => write!(f, "Stopped"),
+            AgentError::General(m) => write!(f, "General({m:?})"),
+        }
+    }
+}
+
+impl AgentError {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "{self:?}")?;
+        Ok(())
     }
 }
 
@@ -99,6 +149,8 @@ impl std::error::Error for Error {}
 pub fn register_types(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<Error>()?;
     m.function_meta(Error::debug)?;
+    m.ty::<AgentError>()?;
+    m.function_meta(AgentError::debug)?;
     Ok(())
 }
 
@@ -146,6 +198,22 @@ mod tests {
         assert_eq!(
             Error::Decode("bad json".into()).to_string(),
             "decode: bad json"
+        );
+    }
+
+    #[test]
+    fn display_agent() {
+        assert_eq!(
+            Error::Agent(AgentError::Stopped).to_string(),
+            "agent: session has stopped"
+        );
+        assert_eq!(
+            Error::agent("spawn failed").to_string(),
+            "agent: spawn failed"
+        );
+        assert_eq!(
+            format!("{:?}", Error::agent("spawn failed")),
+            r#"Agent(General("spawn failed"))"#
         );
     }
 

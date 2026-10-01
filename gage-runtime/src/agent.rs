@@ -235,7 +235,7 @@ impl AgentRecord {
                 result: None,
             },
         )
-        .map_err(|e| Error::Agent(format!("call_agent: record session: {e}")))?;
+        .map_err(|e| Error::agent(format!("call_agent: record session: {e}")))?;
         self.session_id = Some(session_id);
         Ok(())
     }
@@ -257,7 +257,7 @@ impl AgentRecord {
             stderr,
             result.map(|v| v.to_string()).as_deref(),
         )
-        .map_err(|e| Error::Agent(format!("call_agent: record result: {e}")))
+        .map_err(|e| Error::agent(format!("call_agent: record result: {e}")))
     }
 }
 
@@ -519,7 +519,7 @@ async fn wait_inner(inner: Arc<Mutex<AgentInner>>) -> super::Result<AgentResult>
         .unwrap()
         .final_result
         .clone()
-        .ok_or_else(|| Error::Agent("agent.wait: result missing after Stop".into()))
+        .ok_or_else(|| Error::agent("agent.wait: result missing after Stop"))
 }
 
 async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
@@ -544,7 +544,7 @@ async fn do_poll(inner: Arc<Mutex<AgentInner>>) -> super::Result<Event> {
             .unwrap()
             .session
             .take()
-            .ok_or_else(|| Error::Agent("agent.poll: session not available".into()))?;
+            .ok_or_else(|| Error::agent("agent.poll: session not available"))?;
         tracing::trace!("agent.poll awaiting next stream message");
         let msg = session.recv_event().await;
         tracing::debug!(
@@ -664,7 +664,7 @@ async fn handle_auth_failure(
     if let Err(e) = do_stop(inner).await {
         tracing::warn!(error = %e, "agent stop after authentication failure failed");
     }
-    Err(Error::Agent(AUTH_FAULT_MSG.into()))
+    Err(Error::agent(AUTH_FAULT_MSG))
 }
 
 /// Gate a Rune-visible agent entry point on the run-wide agent fault.
@@ -708,7 +708,7 @@ async fn do_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()> {
         .unwrap()
         .session
         .take()
-        .ok_or_else(|| Error::Agent("agent.stop: session not available".into()))?;
+        .ok_or_else(|| Error::agent("agent.stop: session not available"))?;
 
     // Best-effort interrupt; ignore BrokenPipe (the child may have
     // exited on its own already — common on the EOF path).
@@ -716,27 +716,27 @@ async fn do_stop(inner: Arc<Mutex<AgentInner>>) -> super::Result<()> {
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
         inner.lock().unwrap().session = Some(session);
-        return Err(Error::Agent(format!("agent.stop: send interrupt: {e}")));
+        return Err(Error::agent(format!("agent.stop: send interrupt: {e}")));
     }
     session.close_stdin();
     tracing::debug!(pid = ?session.id(), "agent.stop: stdin closed, awaiting child exit");
     let status = session
         .wait_exit()
         .await
-        .map_err(|e| Error::Agent(format!("agent.stop: wait child: {e}")))?;
+        .map_err(|e| Error::agent(format!("agent.stop: wait child: {e}")))?;
     tracing::debug!(?status, "agent.stop: child exited");
     session.join_stdout().await;
     let stderr_bytes = session
         .drain_stderr()
         .await
-        .map_err(|e| Error::Agent(format!("agent.stop: drain stderr: {e}")))?;
+        .map_err(|e| Error::agent(format!("agent.stop: drain stderr: {e}")))?;
     tracing::debug!(
         stderr_len = stderr_bytes.len(),
         "agent.stop: stderr drained"
     );
     session
         .finalize()
-        .map_err(|e| Error::Agent(format!("agent.stop: finalize: {e}")))?;
+        .map_err(|e| Error::agent(format!("agent.stop: finalize: {e}")))?;
     tracing::debug!("agent.stop: gage-agent finalize done");
     drop(session);
 
@@ -987,10 +987,10 @@ async fn send(this: Mut<Agent>, msg: Ref<str>) -> Result<super::Result<()>, VmEr
             .unwrap()
             .session
             .take()
-            .ok_or_else(|| Error::Agent("agent.send: session not available".into()))?;
+            .ok_or_else(|| Error::agent("agent.send: session not available"))?;
         let res = session.send_user_message(&msg).await;
         inner.lock().unwrap().session = Some(session);
-        res.map_err(|e| Error::Agent(format!("agent.send: {e}")))
+        res.map_err(|e| Error::agent(format!("agent.send: {e}")))
     })
     .await
 }
@@ -1008,14 +1008,14 @@ async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> Result<super::Result<()>, 
             .unwrap()
             .session
             .take()
-            .ok_or_else(|| Error::Agent("agent.send_now: session not available".into()))?;
+            .ok_or_else(|| Error::agent("agent.send_now: session not available"))?;
         let res = async {
             session.send_interrupt().await?;
             session.send_user_message(&msg).await
         }
         .await;
         inner.lock().unwrap().session = Some(session);
-        res.map_err(|e| Error::Agent(format!("agent.send_now: {e}")))
+        res.map_err(|e| Error::agent(format!("agent.send_now: {e}")))
     })
     .await
 }
@@ -1039,11 +1039,11 @@ async fn kill(this: Mut<Agent>, grace_secs: i64) -> Result<super::Result<()>, Vm
             .unwrap()
             .session
             .take()
-            .ok_or_else(|| Error::Agent("agent.kill: session not available".into()))?;
+            .ok_or_else(|| Error::agent("agent.kill: session not available"))?;
         let grace = std::time::Duration::from_secs(grace_secs.max(0) as u64);
         let res = session.kill(grace).await;
         inner.lock().unwrap().session = Some(session);
-        res.map_err(|e| Error::Agent(format!("agent.kill: {e}")))
+        res.map_err(|e| Error::agent(format!("agent.kill: {e}")))
     })
     .await
 }
@@ -1110,7 +1110,7 @@ impl CallAgent {
 
 fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
     let items = v.borrow_ref::<rune::runtime::Vec>().map_err(|e| {
-        Error::Agent(format!(
+        Error::agent(format!(
             "'gage_tools' must be a list of tool names or gage::tools values: {e}"
         ))
     })?;
@@ -1123,7 +1123,7 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
                 continue;
             }
             let tool = GageTool::from_name(&s)
-                .ok_or_else(|| Error::Agent(format!("'gage_tools': unknown tool '{}'", &*s)))?;
+                .ok_or_else(|| Error::agent(format!("'gage_tools': unknown tool '{}'", &*s)))?;
             out.push(crate::tools::apply_default_scan(tool));
             continue;
         }
@@ -1131,9 +1131,7 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
     }
     if star {
         if !out.is_empty() {
-            return Err(Error::Agent(
-                "'gage_tools': \"*\" must be the only entry".into(),
-            ));
+            return Err(Error::agent("'gage_tools': \"*\" must be the only entry"));
         }
         return Ok(GageTools::All);
     }
@@ -1144,15 +1142,15 @@ fn parse_gage_tools(v: Value) -> super::Result<GageTools> {
 fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
     if let Ok(t) = item.borrow_ref::<crate::tools::Query>() {
         return GageTool::try_from(t.clone())
-            .map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
+            .map_err(|e| Error::agent(format!("'gage_tools': {e}")));
     }
     if let Ok(t) = item.borrow_ref::<crate::tools::IssueWrite>() {
         return GageTool::try_from(t.clone())
-            .map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
+            .map_err(|e| Error::agent(format!("'gage_tools': {e}")));
     }
     if let Ok(t) = item.borrow_ref::<crate::tools::NoteWrite>() {
         return GageTool::try_from(t.clone())
-            .map_err(|e| Error::Agent(format!("'gage_tools': {e}")));
+            .map_err(|e| Error::agent(format!("'gage_tools': {e}")));
     }
     if item.borrow_ref::<crate::tools::IssueUpdate>().is_ok() {
         return Ok(GageTool::IssueUpdate);
@@ -1160,7 +1158,7 @@ fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
     if item.borrow_ref::<crate::tools::IssueComment>().is_ok() {
         return Ok(GageTool::IssueComment);
     }
-    Err(Error::Agent(format!(
+    Err(Error::agent(format!(
         "'gage_tools': entries must be tool names or gage::tools values, got {:?}",
         item.type_info()
     )))
@@ -1168,7 +1166,7 @@ fn parse_tool_def(item: &Value) -> super::Result<GageTool> {
 
 fn parse_custom_tools(v: Value) -> super::Result<Vec<CustomToolDef>> {
     let obj = v.borrow_ref::<Object>().map_err(|e| {
-        Error::Agent(format!(
+        Error::agent(format!(
             "'tools' must be an object keyed by function name: {e}"
         ))
     })?;
@@ -1186,7 +1184,7 @@ fn parse_custom_tools(v: Value) -> super::Result<Vec<CustomToolDef>> {
 
 fn parse_one_custom_tool(fn_name: String, decl: Value) -> super::Result<CustomToolDef> {
     let obj_ref = decl.borrow_ref::<Object>().map_err(|e| {
-        Error::Agent(format!(
+        Error::agent(format!(
             "'tools.{fn_name}' must be an object {{ name, description, inputs }}: {e}"
         ))
     })?;
@@ -1208,15 +1206,15 @@ fn parse_one_custom_tool(fn_name: String, decl: Value) -> super::Result<CustomTo
 fn pop_string(obj: &Object, key: &str, fn_name: &str) -> super::Result<String> {
     let v = obj
         .get(&rune::alloc::String::try_from(key).unwrap())
-        .ok_or_else(|| Error::Agent(format!("'tools.{fn_name}.{key}' is required")))?;
+        .ok_or_else(|| Error::agent(format!("'tools.{fn_name}.{key}' is required")))?;
     v.borrow_string_ref()
         .map(|s| s.to_string())
-        .map_err(|e| Error::Agent(format!("'tools.{fn_name}.{key}' must be a string: {e}")))
+        .map_err(|e| Error::agent(format!("'tools.{fn_name}.{key}' must be a string: {e}")))
 }
 
 fn parse_inputs(v: Value, fn_name: &str) -> super::Result<Vec<InputDecl>> {
     let obj = v.borrow_ref::<Object>().map_err(|e| {
-        Error::Agent(format!(
+        Error::agent(format!(
             "'tools.{fn_name}.inputs' must be an object keyed by input name: {e}"
         ))
     })?;
@@ -1233,14 +1231,14 @@ fn parse_inputs(v: Value, fn_name: &str) -> super::Result<Vec<InputDecl>> {
 
 fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<InputDecl> {
     let obj = decl.borrow_ref::<Object>().map_err(|e| {
-        Error::Agent(format!(
+        Error::agent(format!(
             "'tools.{fn_name}.inputs.{name}' must be an object \
              {{ type, required?, description? }}: {e}"
         ))
     })?;
     let type_str = match obj.get(&rune::alloc::String::try_from("type").unwrap()) {
         Some(v) => v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
-            Error::Agent(format!(
+            Error::agent(format!(
                 "'tools.{fn_name}.inputs.{name}.type' must be a string: {e}"
             ))
         })?,
@@ -1248,7 +1246,7 @@ fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<In
     };
     let required = match obj.get(&rune::alloc::String::try_from("required").unwrap()) {
         Some(v) => v.as_bool().map_err(|e| {
-            Error::Agent(format!(
+            Error::agent(format!(
                 "'tools.{fn_name}.inputs.{name}.required' must be a bool: {e}"
             ))
         })?,
@@ -1256,7 +1254,7 @@ fn parse_one_input(fn_name: &str, name: String, decl: Value) -> super::Result<In
     };
     let description = match obj.get(&rune::alloc::String::try_from("description").unwrap()) {
         Some(v) => Some(v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
-            Error::Agent(format!(
+            Error::agent(format!(
                 "'tools.{fn_name}.inputs.{name}.description' must be a string: {e}"
             ))
         })?),
@@ -1344,10 +1342,9 @@ fn register_service(
     } else {
         let ctx = current_scan_ctx();
         let host = ctx.run.mcp_host.clone().ok_or_else(|| {
-            Error::Agent(
+            Error::agent(
                 "call_agent: tools declared but no MCP host available in this run \
-                 (host startup failed?)"
-                    .into(),
+                 (host startup failed?)",
             )
         })?;
         let svc = host.register(gage_mcp::build_mcp_service(tool_spec));
@@ -1363,7 +1360,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
     // barriered entry point), so the check must live in this function.
     if let Some(msg) = current_scan_ctx().run.agent_fault.get() {
         tracing::debug!("call_agent refused: run-wide agent fault is set");
-        return Err(Error::Agent(msg.clone()));
+        return Err(Error::agent(msg.clone()));
     }
     let spec = resolve_spec(c)?;
 
@@ -1421,7 +1418,7 @@ async fn do_call_agent(c: CallAgent) -> super::Result<Agent> {
         .build()
         .start_streaming_session(&spec.prompt)
         .await
-        .map_err(|e| Error::Agent(format!("call_agent: start_streaming_session: {e}")))?;
+        .map_err(|e| Error::agent(format!("call_agent: start_streaming_session: {e}")))?;
 
     let ctx = current_scan_ctx();
     let record = AgentRecord {
@@ -1681,7 +1678,7 @@ async fn call_and_wait(call: CallAgent) -> super::Result<AgentResult> {
         .unwrap()
         .final_result
         .clone()
-        .ok_or_else(|| Error::Agent("agent.wait: result missing after Stop".into()))?;
+        .ok_or_else(|| Error::agent("agent.wait: result missing after Stop"))?;
     drop(agent);
     Ok(result)
 }
@@ -1737,7 +1734,7 @@ pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
 )]
 fn call_from_value(v: rune::Value) -> Result<CallAgent, Error> {
     rune::from_value(v).map_err(|e| {
-        Error::Agent(format!(
+        Error::agent(format!(
             "agent def must return an un-awaited call_agent(..) builder: {e}"
         ))
     })
