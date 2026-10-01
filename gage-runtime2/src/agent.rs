@@ -24,14 +24,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gage_mcp::{ServiceHandle, ToolSpec, build_mcp_service};
 use gage_runtime::error::{AgentError, Error};
-use gage_session::{AgentEvent, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
+use gage_session::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
 use gage_store::{AgentAttrs, SessionStore};
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, VmError};
+use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
+use crate::OUTPUT_SINK;
 use crate::scan::{ScanContext, current};
+use crate::tool::{self, Tool};
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
@@ -44,6 +47,8 @@ pub(crate) fn module() -> Result<Module, ContextError> {
     m.function_meta(CallAgent::default_system_prompt)?;
     m.function_meta(CallAgent::default_system_prompt_append)?;
     m.function_meta(CallAgent::name)?;
+    m.function_meta(CallAgent::tool)?;
+    m.function_meta(CallAgent::tools)?;
     m.associated_function(&Protocol::INTO_FUTURE, |c: CallAgent| async move {
         Ok::<_, VmError>(start(c).await)
     })?;
@@ -74,6 +79,8 @@ pub(crate) fn module() -> Result<Module, ContextError> {
 pub struct CallAgent {
     #[rune(skip)]
     spec: AgentSpec,
+    #[rune(skip)]
+    tools: Vec<Tool>,
 }
 
 #[rune::function]
@@ -87,7 +94,9 @@ fn call_agent(prompt: Ref<str>) -> CallAgent {
             max_turns: None,
             timeout: None,
             project: None,
+            mcp: None,
         },
+        tools: Vec::new(),
     }
 }
 
@@ -143,22 +152,63 @@ impl CallAgent {
         self.spec.project = Some(name.to_owned());
         self
     }
+
+    /// Add a scanner-defined tool
+    #[rune::function(instance)]
+    fn tool(mut self, tool: Ref<Tool>) -> Self {
+        self.tools.push(tool.clone());
+        self
+    }
+
+    /// Add each scanner-defined tool in `list`
+    #[rune::function(instance)]
+    fn tools(mut self, list: Value) -> Result<Self, VmError> {
+        let list = list.borrow_ref::<rune::runtime::Vec>()?;
+        for item in list.iter() {
+            self.tools.push(item.borrow_ref::<Tool>()?.clone());
+        }
+        Ok(self)
+    }
 }
 
-/// Start the agent through the scan's driver.
+/// Start the agent through the scan's driver. Declared tools are
+/// validated, served from the scan's MCP host, and named to the
+/// driver along with the service URL.
 async fn start(c: CallAgent) -> Result<Agent, Error> {
     let ctx = current().map_err(|e| Error::agent(e.to_string()))?;
-    let model = c.spec.model.clone();
-    let max_turns = c.spec.max_turns;
+    let mut spec = c.spec;
+    let service = if c.tools.is_empty() {
+        None
+    } else {
+        let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
+        let defs = tool::consume(&c.tools, &ctx, sink.as_ref())?;
+        let tool_names = defs.iter().map(|d| d.name.clone()).collect();
+        let host = ctx
+            .mcp_host()
+            .await
+            .map_err(|e| Error::agent(format!("call_agent: mcp host: {e}")))?;
+        let handle = host.register(build_mcp_service(ToolSpec {
+            custom_tools: defs,
+            ..ToolSpec::default()
+        }));
+        spec.mcp = Some(AgentMcp {
+            url: handle.url().to_string(),
+            tool_names,
+        });
+        Some(handle)
+    };
+    let model = spec.model.clone();
+    let max_turns = spec.max_turns;
     let session = ctx
         .driver
-        .run_agent(c.spec)
+        .run_agent(spec)
         .map_err(|e| Error::agent(format!("call_agent: {e}")))?;
     Ok(Agent {
         model,
         max_turns,
         inner: Arc::new(Mutex::new(AgentInner {
             session: Some(session),
+            service,
             ctx,
             event_buf: VecDeque::new(),
             stop_seen: false,
@@ -187,6 +237,9 @@ struct AgentInner {
     /// `None` while a method holds the session across an await, and
     /// after the session has ended
     session: Option<Box<dyn AgentSession>>,
+    /// The tool service registered for this session; unregistered
+    /// when the session ends
+    service: Option<ServiceHandle>,
     ctx: ScanContext,
     event_buf: VecDeque<Event>,
     stop_seen: bool,
@@ -334,6 +387,7 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
     drop(session);
 
     let mut g = inner.lock().unwrap();
+    g.service = None;
     g.final_result = Some(AgentResult::new(
         outcome.unwrap_or_default(),
         &stop_reason,

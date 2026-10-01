@@ -20,6 +20,7 @@ use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datafusion::prelude::SessionContext;
+use gage_mcp::{HostError, McpHost};
 use gage_query2::ContextBuilder;
 use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
@@ -67,6 +68,9 @@ pub struct ScanContext {
     pub paths: ScanDirPaths,
     query_store: Arc<Mutex<Store>>,
     query: Arc<OnceCell<(Arc<SessionScope>, SessionContext)>>,
+    /// The MCP host serving scanner-defined tools to agents, started
+    /// by the first `call_agent` that declares tools
+    mcp_host: Arc<OnceCell<McpHost>>,
 }
 
 /// The scan directory paths the runtime writes under. The orchestrator owns
@@ -107,7 +111,12 @@ impl ScanContext {
             paths,
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
             query: Arc::new(OnceCell::new()),
+            mcp_host: Arc::new(OnceCell::new()),
         })
+    }
+
+    pub(crate) async fn mcp_host(&self) -> Result<&McpHost, HostError> {
+        self.mcp_host.get_or_try_init(McpHost::start).await
     }
 
     /// The scope and query context over the dataset's members at the

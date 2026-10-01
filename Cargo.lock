@@ -2732,6 +2732,7 @@ version = "0.2.0-dev"
 dependencies = [
  "datafusion",
  "gage-core",
+ "gage-mcp",
  "gage-query2",
  "gage-runtime",
  "gage-session",

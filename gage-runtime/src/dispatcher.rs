@@ -289,7 +289,7 @@ fn value_to_json_lossy(v: &rune::runtime::Value) -> JsonValue {
 /// call from the wire data itself.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub(crate) struct ToolMeta {
+pub struct ToolMeta {
     #[rune(skip)]
     entries: serde_json::Map<String, JsonValue>,
     #[rune(skip)]
@@ -304,7 +304,7 @@ const TOOL_USE_ID_KEY: &str = "claudecode/toolUseId";
 impl ToolMeta {
     /// Wrap a request's `_meta` value. Anything but a JSON object
     /// (including absent meta, passed as `Null`) wraps as empty.
-    pub(crate) fn new(meta: JsonValue, scanner_name: String) -> Self {
+    pub fn new(meta: JsonValue, scanner_name: String) -> Self {
         let entries = match meta {
             JsonValue::Object(m) => m,
             _ => serde_json::Map::new(),
@@ -394,7 +394,7 @@ impl ToolMeta {
 /// Iterator over a [`ToolMeta`]'s `(key, value)` pairs.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub(crate) struct ToolMetaIter {
+pub struct ToolMetaIter {
     #[rune(skip)]
     items: std::vec::IntoIter<(String, Value)>,
 }
@@ -411,7 +411,7 @@ impl ToolMetaIter {
     }
 }
 
-pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
+pub fn register(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<ToolMeta>()?;
     m.function_meta(ToolMeta::agent_tool_use)?;
     m.function_meta(ToolMeta::index_get)?;

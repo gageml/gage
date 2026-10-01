@@ -19,7 +19,7 @@ use datafusion::datasource::TableProvider;
 pub mod agent;
 pub mod filter;
 
-pub use agent::{AgentEvent, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
+pub use agent::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
 
 pub trait Driver: Send + Sync {
     /// The driver's name, recorded on stored sessions. Not a scheme.

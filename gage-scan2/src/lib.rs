@@ -921,8 +921,8 @@ fn returned_error(value: &str, scanner: &TaskUnit, task: &str) -> String {
 mod tests {
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_session::{
-        AgentEvent, AgentOutcome, AgentSession, AgentSpec, ContentSink, ContentSource, DriverError,
-        NativeSession, SessionAttrs, Source, StoredSession,
+        AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, ContentSink, ContentSource,
+        DriverError, NativeSession, SessionAttrs, Source, StoredSession,
     };
     use gage_store::DatasetStore;
     use tempfile::TempDir;
@@ -1120,6 +1120,17 @@ mod tests {
     /// transcript is a fixed native session.
     struct ScriptedDriver {
         cleaned_up: Arc<std::sync::atomic::AtomicBool>,
+        /// The MCP server the last `run_agent` was given
+        mcp_seen: Arc<std::sync::Mutex<Option<AgentMcp>>>,
+    }
+
+    impl ScriptedDriver {
+        fn new() -> Self {
+            ScriptedDriver {
+                cleaned_up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                mcp_seen: Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
     }
 
     struct ScriptedAgent {
@@ -1245,6 +1256,7 @@ mod tests {
         fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
             assert_eq!(spec.prompt, "hello");
             assert_eq!(spec.model.as_deref(), Some("medium"));
+            *self.mcp_seen.lock().unwrap() = spec.mcp.clone();
             let outcome = AgentOutcome {
                 text: "hello there".into(),
                 stop_reason: "end_turn".into(),
@@ -1268,6 +1280,111 @@ mod tests {
                 cleaned_up: Arc::clone(&self.cleaned_up),
             }))
         }
+    }
+
+    /// A call that declares tools is handed to the driver with the
+    /// tool service's URL and the tool names; a call without tools
+    /// has no MCP server.
+    #[tokio::test]
+    async fn declared_tools_reach_the_driver_as_an_mcp_server() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::{Input, Tool, call_agent};
+
+            pub const SCANNER = #{
+                name: "agentic",
+                description: "Runs an agent with a tool",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let secret = "abc";
+                let agent = call_agent("hello")
+                    .model("medium")
+                    .tool(Tool::new("secret", |inputs| Ok(secret)).input(Input::string("key")))
+                    .tools([Tool::new("ping", |inputs| Ok("pong"))])
+                    .await?;
+                println!("{}", agent.wait().await?.text);
+            }
+            "#,
+        );
+        let driver = Arc::new(ScriptedDriver::new());
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            driver: driver.clone(),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(outputs(&events), [&Output::Println("hello there".into())]);
+        let mcp = driver.mcp_seen.lock().unwrap().clone().unwrap();
+        assert!(mcp.url.starts_with("http://127.0.0.1:"), "{}", mcp.url);
+        assert!(mcp.url.ends_with("/mcp"), "{}", mcp.url);
+        assert_eq!(mcp.tool_names, ["secret", "ping"]);
+    }
+
+    /// A tool declaration the runtime rejects fails the task at
+    /// `call_agent`, before any agent starts.
+    #[tokio::test]
+    async fn an_invalid_tool_declaration_fails_the_call() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::{Tool, call_agent};
+
+            pub const SCANNER = #{
+                name: "agentic",
+                description: "Runs an agent with a bad tool",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                match call_agent("hello").model("medium").tool(Tool::new("no spaces", |i| Ok(1))).await {
+                    Err(e) => println!("{e:?}"),
+                    Ok(_) => println!("started"),
+                }
+            }
+            "#,
+        );
+        let driver = Arc::new(ScriptedDriver::new());
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            driver: driver.clone(),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [&Output::Println(
+                r#"Agent(General("tool name \"no spaces\" is not 1 to 128 ASCII letters, digits, '_', or '-'"))"#
+                    .into()
+            )]
+        );
+        assert!(driver.mcp_seen.lock().unwrap().is_none());
     }
 
     /// `poll` delivers `Stop` once; a later `poll`, `send`, or `kill`
@@ -1316,9 +1433,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
-            driver: Arc::new(ScriptedDriver {
-                cleaned_up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }),
+            driver: Arc::new(ScriptedDriver::new()),
         };
         let outcome = scan(
             &store,
@@ -1375,7 +1490,8 @@ mod tests {
             }
             "#,
         );
-        let cleaned_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let driver = Arc::new(ScriptedDriver::new());
+        let cleaned_up = Arc::clone(&driver.cleaned_up);
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
@@ -1383,9 +1499,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
-            driver: Arc::new(ScriptedDriver {
-                cleaned_up: Arc::clone(&cleaned_up),
-            }),
+            driver,
         };
         let outcome = scan(
             &store,

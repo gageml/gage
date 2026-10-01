@@ -1,8 +1,15 @@
-use gage::{Progress, Template, call_agent, carry_forward_notes, scan, watermark, write_note};
-// FUTURE: the agent runner and gage tools are not in the rethink
-// runtime
-use gage::AgentRunner;
-use gage::tools::Query;
+use gage::{
+    Input,
+    Progress,
+    Template,
+    Tool,
+    call_agent,
+    carry_forward_notes,
+    scan,
+    watermark,
+    write_note,
+};
+// use gage::AgentRunner;
 
 pub const SCANNER = #{
     name: "general-2",
@@ -33,7 +40,7 @@ pub async fn review() {
     let progress = Progress::new(sessions.len());
 
     // FUTURE: AgentRunner
-    let runner = AgentRunner::new();
+    // let runner = AgentRunner::new();
     for (s, start, end) in sessions {
         if let Some(reason) = skip_session(s).await? {
             log::info!("Skipping session {}: {}", s.id, reason);
@@ -41,19 +48,37 @@ pub async fn review() {
             progress.tick();
             continue;
         }
-        let prompt = t.render(#{ session_id: s.id })?;
-        runner.add(
-            // FUTURE: gage_tools and tools. The Query view is clipped
-            // to the session's unseen lines
-            call_agent(prompt)
-                .name("general-finding")
-                .gage_tools([Query::new().sessions([s]).lines(start, end)])
-                .tools(#{ write_finding_tool: write_finding_tooldef() })
-                .model("medium"),
-            #{ session: s },
+        // let prompt = t.render(#{ session_id: s.id })?;
+
+        let prompt = format!(
+            "Write a finding 'This is a test' for session {}",
+            s.id
         );
+
+        let agent = call_agent(prompt)
+            .name("general-finding")
+            .tool(write_finding_tool())
+            // .tool(Tool::mcp("gage::Query"))
+            // .gage_tool(Query::new().sessions([s]).lines(start, end))
+            .model("medium")
+            .await?;
+
+        agent.wait().await?;
+
+        watermark(s, REVIEW_KEY).await?;
+        progress.tick();
+
+        // runner.add(
+        // call_agent(prompt)
+        //     .name("general-finding")
+        //     .tool(write_finding_tool())
+        //     .tool(Tool::mcp("gage::Query"))
+        //     .gage_tool(Query::new().sessions([s]).lines(start, end))
+        //     .model("medium"),
+        // #{ session: s },
+        // );
     }
-    collect_results(runner, progress).await
+    // collect_results(runner, progress).await
 }
 
 async fn unseen_sessions() {
@@ -87,55 +112,43 @@ async fn skip_session(s) {
     Ok(Some(format!("text len {text_len} < min {SESSION_MIN_TEXT_LEN}")))
 }
 
-fn write_finding_tooldef() {
-    #{
-        name: "Finding",
-        description: "Write a finding about the session",
-        inputs: #{
-            description: #{
-                type: "string",
-                description: "Finding description",
-            },
-            session: #{ type: "string", description: "Session ID" },
-            lines: #{
-                type: "string",
-                description: "Session line numbers associated with the finding: \
-                              a line (`112`), a range (`61-72`), or a \
-                              comma-separated list (`28,31`)",
-                required: false,
-            },
-        },
-    }
+// async fn collect_results(runner, progress) {
+//     // FUTURE: AgentRunner results
+//     let results = runner.start();
+//     while let Some(item) = results.next().await {
+//         let (result, #{ session }) = item?;
+//         log::info!(
+//             "findings: {:?}",
+//             #{
+//                 session: session.id,
+//                 result: result.text,
+//                 metadata: result.as_metadata(),
+//             },
+//         );
+//         watermark(session, REVIEW_KEY).await?;
+//         progress.tick();
+//     }
+// }
+
+fn write_finding_tool() {
+    Tool::new("Finding", write_finding)
+        .description("Write a finding about the session")
+        .input(Input::string("description").required())
+        .input(Input::string("session_id").required())
+        .input(
+            Input::string("lines")
+                .description(
+                    "Session line numbers associated with the finding: \
+                     a line (`112`), a range (`61-72`), or a \
+                     comma-separated list (`28,31`)",
+                ),
+        )
 }
 
-async fn collect_results(runner, progress) {
-    // FUTURE: AgentRunner results
-    let results = runner.start();
-    while let Some(item) = results.next().await {
-        let (result, #{ session }) = item?;
-        log::info!(
-            "findings: {:?}",
-            #{
-                session: session.id,
-                result: result.text,
-                metadata: result.as_metadata(),
-            },
-        );
-        watermark(session, REVIEW_KEY).await?;
-        progress.tick();
-    }
-}
-
-// FUTURE: tool callbacks. The rethink runtime has no agent tool
-// dispatch. When it does, a callback runs inside the task's scan
-// context, and the note's author is the agent session that made the
-// call (`session+task:<scan>/<scanner>:<task>/<native id>`), recorded
-// by the runtime rather than passed by the scanner.
-
-pub async fn write_finding_tool(inputs, meta) {
+pub async fn write_finding(inputs) {
     let lines = inputs.get("lines").unwrap_or("");
     let note = write_note("general[finding]", inputs.description)
-        .for_session_lines(inputs.session, lines)
+        .for_session_lines(inputs.session_id, lines)
         .metadata(#{ lines })
         .work_key(REVIEW_KEY)
         .await?;

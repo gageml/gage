@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use gage_agent::{
     AgentBuilder as GageAgentBuilder, StreamMessage, StreamingAgentSession, SystemPrompt,
 };
-use gage_mcp::{CustomToolCallback, GageTool, ServiceHandle, ToolSpec};
+use gage_mcp::{CustomToolCallback, CustomToolOutcome, GageTool, ServiceHandle, ToolSpec};
 use rune::Any;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
@@ -1498,8 +1498,9 @@ fn build_tool_spec(spec: &CallSpec) -> ToolSpec {
         .iter()
         .map(|def| gage_mcp::CustomToolDef {
             name: def.mcp_name.clone(),
-            description: def.description.clone(),
+            description: Some(def.description.clone()),
             input_schema: render_input_schema(&def.inputs),
+            annotations: None,
             callback: dispatcher_callback(
                 module_id.clone(),
                 def.fn_name.clone(),
@@ -1554,22 +1555,29 @@ fn dispatcher_callback(
         let fn_name = fn_name.clone();
         let sender = sender.clone();
         Box::pin(async move {
-            let sender = sender.ok_or_else(|| {
-                "tool dispatcher unavailable for this run (startup failed?)".to_string()
-            })?;
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            sender
-                .send(crate::dispatcher::DispatchRequest {
-                    module_id,
-                    fn_name,
-                    args,
-                    meta,
-                    reply: reply_tx,
-                })
-                .map_err(|_send_err| "tool dispatcher channel closed".to_string())?;
-            reply_rx
-                .await
-                .map_err(|_recv_err| "tool dispatcher dropped reply".to_string())?
+            let dispatched: Result<serde_json::Value, String> = async {
+                let sender = sender.ok_or_else(|| {
+                    "tool dispatcher unavailable for this run (startup failed?)".to_string()
+                })?;
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                sender
+                    .send(crate::dispatcher::DispatchRequest {
+                        module_id,
+                        fn_name,
+                        args,
+                        meta,
+                        reply: reply_tx,
+                    })
+                    .map_err(|_send_err| "tool dispatcher channel closed".to_string())?;
+                reply_rx
+                    .await
+                    .map_err(|_recv_err| "tool dispatcher dropped reply".to_string())?
+            }
+            .await;
+            match dispatched {
+                Ok(v) => CustomToolOutcome::Success(v),
+                Err(e) => CustomToolOutcome::Error(e),
+            }
         })
     })
 }

@@ -47,7 +47,13 @@ const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 /// Spawn the child. Requires a tokio runtime: the child's pipes are
 /// tokio handles and its stdout reader is a tokio task.
 pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
-    let run = prepare_run()?;
+    let allowed_tools: Vec<String> = spec
+        .mcp
+        .iter()
+        .flat_map(|m| m.tool_names.iter())
+        .map(|name| format!("{MCP_TOOL_PREFIX}{name}"))
+        .collect();
+    let run = prepare_run(&allowed_tools)?;
     let mut cmd = Command::new(&run.claude_bin);
     cmd.arg("-p");
     cmd.args(["--input-format", "stream-json"]);
@@ -69,6 +75,9 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
         cmd.args(["--append-system-prompt", s]);
     }
     cmd.args(isolation_args(&run.claude_home));
+    if let Some(mcp) = &spec.mcp {
+        cmd.arg("--mcp-config").arg(mcp_config_json(&mcp.url));
+    }
     cmd.arg("--model")
         .arg(resolved_model(spec.model.as_deref()));
     if let Some(n) = spec.max_turns {
@@ -158,9 +167,25 @@ where
     })
 }
 
-/// `--strict-mcp-config` limits MCP to a `--mcp-config` server, of
-/// which there is none; `--setting-sources ""` suppresses user,
-/// project, and local settings; `--settings` supplies the seeded file.
+/// The MCP server name the child sees. Tool names reach the model as
+/// `mcp__gage__<name>`, and the allowlist uses the same prefix. The
+/// name must not start with `plugin_`: claude treats such a server as
+/// plugin-installed and attaches plugin-identity context to it.
+const MCP_SERVER_NAME: &str = "gage";
+
+const MCP_TOOL_PREFIX: &str = "mcp__gage__";
+
+/// The `--mcp-config` argument: one streamable-HTTP server at `url`
+fn mcp_config_json(url: &str) -> String {
+    serde_json::json!({
+        "mcpServers": { MCP_SERVER_NAME: { "type": "http", "url": url } }
+    })
+    .to_string()
+}
+
+/// `--strict-mcp-config` limits MCP to the `--mcp-config` server, when
+/// there is one; `--setting-sources ""` suppresses user, project, and
+/// local settings; `--settings` supplies the seeded file.
 fn isolation_args(claude_home: &Path) -> Vec<OsString> {
     vec![
         OsString::from("--strict-mcp-config"),
@@ -193,14 +218,15 @@ struct PreparedRun {
 }
 
 /// The throwaway run directory: an empty cwd for the child and the
-/// seeded settings file.
-fn prepare_run() -> Result<PreparedRun, DriverError> {
+/// seeded settings file. `allowed_tools` are the full tool names the
+/// child runs without prompting.
+fn prepare_run(allowed_tools: &[String]) -> Result<PreparedRun, DriverError> {
     let run_dir = gage_home().join("tmp").join(Uuid::new_v4().to_string());
     let cwd = run_dir.join("cwd");
     let claude_home = run_dir.join("claude");
     fs::create_dir_all(&cwd)?;
     fs::create_dir_all(&claude_home)?;
-    seed_settings(&claude_home)?;
+    seed_settings(&claude_home, allowed_tools)?;
     let claude_bin = find_claude()
         .ok_or_else(|| DriverError::Other("`claude` binary not on PATH".to_string()))?;
     Ok(PreparedRun {
@@ -212,9 +238,9 @@ fn prepare_run() -> Result<PreparedRun, DriverError> {
 }
 
 /// The one settings file the child reads: thinking summaries on, the
-/// user's theme and tui settings, and an empty permission allowlist
-/// (no tools are exposed).
-fn seed_settings(claude_home: &Path) -> io::Result<()> {
+/// user's theme and tui settings, and the permission allowlist naming
+/// the MCP tools served to this run.
+fn seed_settings(claude_home: &Path, allowed_tools: &[String]) -> io::Result<()> {
     let user_settings = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|home| read_json(&home.join(".claude").join("settings.json")));
@@ -225,8 +251,12 @@ fn seed_settings(claude_home: &Path) -> io::Result<()> {
             settings.insert(key.into(), v.clone());
         }
     }
+    let allow = allowed_tools
+        .iter()
+        .map(|t| Json::String(t.clone()))
+        .collect();
     let mut permissions = serde_json::Map::new();
-    permissions.insert("allow".into(), Json::Array(Vec::new()));
+    permissions.insert("allow".into(), Json::Array(allow));
     settings.insert("permissions".into(), Json::Object(permissions));
     fs::write(
         claude_home.join("settings.json"),

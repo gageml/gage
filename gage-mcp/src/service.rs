@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use gage_db::issue::IssueStatus;
 pub use gage_query::scope::SessionScope;
+use rmcp::ErrorData;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta};
+use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta, ToolAnnotations};
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use serde_json::Value;
@@ -154,25 +155,37 @@ pub struct ToolSpec {
 /// callback that runs when the model invokes it.
 pub struct CustomToolDef {
     pub name: String,
-    pub description: String,
+    /// Omitted from the wire definition when `None`
+    pub description: Option<String>,
     /// JSON Schema for the tool's input. The object form expected by
     /// MCP — i.e. `{"type": "object", "properties": {...}, "required":
     /// [...]}`. Pass an empty object schema for tools that take no
     /// arguments.
     pub input_schema: JsonObject,
+    pub annotations: Option<ToolAnnotations>,
     pub callback: CustomToolCallback,
 }
 
 /// Async closure invoked when the model calls a [`CustomToolDef`].
 /// Receives the tool's argument object and the request's `_meta`
-/// object as JSON values; returns either a success value (rendered as
-/// JSON text in the tool result) or an error string (returned to the
-/// model as a tool error).
+/// object as JSON values.
 pub type CustomToolCallback = Arc<
-    dyn Fn(Value, Value) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(Value, Value) -> Pin<Box<dyn Future<Output = CustomToolOutcome> + Send>> + Send + Sync,
 >;
+
+/// What a [`CustomToolCallback`] produced. MCP reports a tool call at
+/// two levels: a result the model reads, which may be an error the
+/// model can act on, and a protocol error for a tool that is broken.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CustomToolOutcome {
+    /// The tool result. A string is sent as is; any other value is
+    /// sent as JSON text.
+    Success(Value),
+    /// A tool result with `isError: true` carrying this text
+    Error(String),
+    /// A JSON-RPC internal error carrying this text
+    Fault(String),
+}
 
 /// Construct a streamable-HTTP MCP service exposing every tool the
 /// spec declares. The returned service plugs into an
@@ -221,10 +234,10 @@ fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
     let meta = ToolMeta {
         name: def.name.clone().into(),
         title: None,
-        description: Some(def.description.clone().into()),
+        description: def.description.clone().map(Into::into),
         input_schema: Arc::new(def.input_schema.clone()),
         output_schema: None,
-        annotations: None,
+        annotations: def.annotations.clone(),
         execution: None,
         icons: None,
         meta: None,
@@ -241,15 +254,20 @@ fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
         // emptied).
         let meta = Value::Object(ctx.request_context.meta.0.clone());
         let callback = Arc::clone(&callback);
-        Box::pin(async move {
-            match (callback)(args, meta).await {
-                Ok(out) => Ok(CallToolResult::success(vec![Content::text(render_output(
-                    &out,
-                ))])),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-            }
-        })
+        Box::pin(async move { call_result((callback)(args, meta).await) })
     })
+}
+
+/// The wire form of a callback's outcome: a success or error result
+/// the model reads, or a JSON-RPC internal error for a fault.
+fn call_result(outcome: CustomToolOutcome) -> Result<CallToolResult, ErrorData> {
+    match outcome {
+        CustomToolOutcome::Success(out) => Ok(CallToolResult::success(vec![Content::text(
+            render_output(&out),
+        )])),
+        CustomToolOutcome::Error(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        CustomToolOutcome::Fault(e) => Err(ErrorData::internal_error(e, None)),
+    }
 }
 
 /// Render a callback's JSON return value for the tool result. Strings
@@ -295,14 +313,48 @@ mod tests {
             ],
             custom_tools: vec![CustomToolDef {
                 name: "secret".into(),
-                description: "Returns the secret.".into(),
+                description: Some("Returns the secret.".into()),
                 input_schema: empty_object_schema(),
-                callback: Arc::new(|_args, _meta| Box::pin(async { Ok(json!("abc123")) })),
+                annotations: None,
+                callback: Arc::new(|_args, _meta| {
+                    Box::pin(async { CustomToolOutcome::Success(json!("abc123")) })
+                }),
             }],
             author: None,
         };
         let svc = build_mcp_service(spec);
         drop(svc);
+    }
+
+    fn text_of(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn success_string_is_sent_as_is_and_other_values_as_json() {
+        let r = call_result(CustomToolOutcome::Success(json!("plain"))).unwrap();
+        assert_eq!(r.is_error, Some(false));
+        assert_eq!(text_of(&r), "plain");
+        let r = call_result(CustomToolOutcome::Success(json!({"a": [1, 2]}))).unwrap();
+        assert_eq!(text_of(&r), r#"{"a":[1,2]}"#);
+    }
+
+    #[test]
+    fn error_is_a_result_the_model_reads() {
+        let r = call_result(CustomToolOutcome::Error("bad key".into())).unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(text_of(&r), "bad key");
+    }
+
+    #[test]
+    fn fault_is_a_protocol_error() {
+        let e = call_result(CustomToolOutcome::Fault("handler broke".into())).unwrap_err();
+        assert_eq!(e.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(e.message, "handler broke");
     }
 
     // End-to-end wire test deferred to step 6.4: speaking the

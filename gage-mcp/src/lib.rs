@@ -5,8 +5,9 @@ pub mod tool;
 pub mod tools;
 
 pub use host::{HostError, McpHost, ServiceHandle};
+pub use rmcp::model::ToolAnnotations;
 pub use server::{GageServer, serve_stdio};
 pub use service::{
-    CustomToolCallback, CustomToolDef, GageTool, IssueWriteConfig, NoteWriteConfig, QueryConfig,
-    SessionScope, ToolSpec, ToolsConfig, build_mcp_service,
+    CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteConfig,
+    NoteWriteConfig, QueryConfig, SessionScope, ToolSpec, ToolsConfig, build_mcp_service,
 };

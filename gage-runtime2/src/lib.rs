@@ -44,6 +44,7 @@ mod query;
 mod scan;
 pub mod source;
 mod template;
+mod tool;
 mod validate;
 
 use rune::{Context, ContextError};
@@ -170,6 +171,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(template::module()?)?;
     context.install(progress::types_module()?)?;
     context.install(agent::module()?)?;
+    context.install(tool::module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

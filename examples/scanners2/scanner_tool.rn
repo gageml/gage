@@ -1,0 +1,18 @@
+use gage::{Tool, call_agent, params};
+
+pub const SCANNER = #{
+    name: "agent-tool",
+    description: "Scanner provided tool",
+    tasks: #{ main: #{} },
+    params: #{ secret: "abc" },
+};
+
+pub async fn main() {
+    let secret = params().secret;
+    let a = call_agent("What's the secret?")
+        .model("small")
+        .tool(Tool::new("secret", |_| Ok(secret)))
+        .await?;
+    let result = a.wait().await?;
+    println!("{}", result.text);
+}

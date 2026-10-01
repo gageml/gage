@@ -36,6 +36,18 @@ pub struct AgentSpec {
     /// caller gives one. The harness's own notion of project for the
     /// run is otherwise recorded.
     pub project: Option<String>,
+    /// An MCP server the harness connects to for the run, when the
+    /// caller serves tools. `None` runs the agent with no tools.
+    pub mcp: Option<AgentMcp>,
+}
+
+/// An MCP server to expose to the agent: its streamable-HTTP URL and
+/// the names of the tools it serves, which the driver allows without
+/// prompting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMcp {
+    pub url: String,
+    pub tool_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
