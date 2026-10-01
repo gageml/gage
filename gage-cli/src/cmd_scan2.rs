@@ -84,7 +84,7 @@ enum Scan2Command {
 #[command(group = ArgGroup::new("scan2_dataset")
     .required(true)
     .multiple(true)
-    .args(SELECT_ARG_NAMES.iter().copied().chain(["dataset", "skip_dataset", "list_scanners"])))]
+    .args(SELECT_ARG_NAMES.iter().copied().chain(["dataset", "no_dataset", "list_scanners"])))]
 pub struct Scan2RunArgs {
     /// Scanner to run (repeatable)
     #[arg(short, long = "scanner", value_name = "NAME", display_order = 2)]
@@ -124,7 +124,7 @@ pub struct Scan2RunArgs {
         conflicts_with = "dataset",
         conflicts_with_all = SELECT_ARG_NAMES,
     )]
-    skip_dataset: bool,
+    no_dataset: bool,
 
     /// Run only the scanners named, without pulling in required_by dependents
     #[arg(long, display_order = 13)]
@@ -330,9 +330,9 @@ async fn run_scan(args: Scan2RunArgs) {
 
     // Either --dataset names an existing dataset, the
     // session-selection options mint one populated with the
-    // matching native sessions, or --skip-dataset runs with none.
+    // matching native sessions, or --no-dataset runs with none.
     // The clap group guarantees one of the three is present.
-    let dataset_sha = if args.skip_dataset {
+    let dataset_sha = if args.no_dataset {
         None
     } else if let Some(prefix) = args.dataset.as_deref() {
         let record = match DatasetStore::from(&store).get(prefix) {
