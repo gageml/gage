@@ -5,7 +5,8 @@
 //! database). The handle serves the source's tables, id lookup, and
 //! project naming, and may cache whatever it reads. A driver writes a
 //! native session's bytes into the store through a [`ContentSink`]
-//! and reads a stored session back through a [`ContentSource`].
+//! and reads a stored session back through a [`ContentSource`]. A
+//! driver may also run an agent on its harness; see [`agent`].
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -15,7 +16,10 @@ use std::time::SystemTime;
 
 use datafusion::datasource::TableProvider;
 
+pub mod agent;
 pub mod filter;
+
+pub use agent::{AgentEvent, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
 
 pub trait Driver: Send + Sync {
     /// The driver's name, recorded on stored sessions. Not a scheme.
@@ -63,6 +67,15 @@ pub trait Driver: Send + Sync {
     /// the name as stored.
     fn format_project(&self, name: &str, _max_chars: usize) -> String {
         name.to_string()
+    }
+
+    /// Start an agent on this driver's harness. The default is that
+    /// the driver does not run agents.
+    fn run_agent(&self, _spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+        Err(DriverError::Other(format!(
+            "driver {} does not run agents",
+            self.name()
+        )))
     }
 }
 

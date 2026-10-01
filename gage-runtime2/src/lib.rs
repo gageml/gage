@@ -33,6 +33,7 @@
 //! files are a scanner's source ([`source`]). Task orchestration lives
 //! in `gage-scan2`.
 
+mod agent;
 mod attachment;
 mod io;
 mod issue;
@@ -148,8 +149,9 @@ pub(crate) fn send(output: Output) {
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::write_note`,
 /// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,
-/// `gage::watermark`, `gage::Template`, `gage::Progress`, and the
-/// include macros from `gage-runtime`. Every file-reading facility
+/// `gage::watermark`, `gage::Template`, `gage::Progress`,
+/// `gage::call_agent` and the values it returns, and the include
+/// macros from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
     let mut context = Context::with_config(false)?;
@@ -167,6 +169,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(validate::types_module()?)?;
     context.install(template::module()?)?;
     context.install(progress::types_module()?)?;
+    context.install(agent::module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

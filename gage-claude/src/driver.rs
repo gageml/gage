@@ -19,8 +19,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use gage_session::{
-    ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry, NativeLookupError,
-    NativeSession, SessionAttrs, Source, StoredSession, split_scheme,
+    AgentSession, AgentSpec, ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry,
+    NativeLookupError, NativeSession, SessionAttrs, Source, StoredSession, split_scheme,
 };
 
 use crate::home::ClaudeHome;
@@ -111,6 +111,12 @@ impl Driver for ClaudeDriver {
             content_format: content_format.to_string(),
             source,
         }))
+    }
+
+    /// Spawn a `claude -p` child; see [`crate::agent`]. Requires a
+    /// tokio runtime.
+    fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+        Ok(Box::new(crate::agent::start(spec)?))
     }
 }
 
@@ -472,6 +478,12 @@ impl ClaudeNativeSession {
 
     pub fn session_path(&self) -> &Path {
         &self.session_path
+    }
+
+    /// Record `project` as the session's project in place of the slug
+    /// of the directory the transcript sits in.
+    pub fn set_project(&mut self, project: String) {
+        self.attrs.project_slug = project;
     }
 
     /// The full derived summary, including the token counts the

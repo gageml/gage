@@ -1,7 +1,8 @@
-use gage::{Progress, Template, carry_forward_notes, scan, watermark, write_note};
-// FUTURE: agents are not in the rethink runtime
+use gage::{Progress, Template, call_agent, carry_forward_notes, scan, watermark, write_note};
+// FUTURE: the agent runner and gage tools are not in the rethink
+// runtime
+use gage::AgentRunner;
 use gage::tools::Query;
-use gage::{AgentRunner, call_agent};
 
 pub const SCANNER = #{
     name: "general-2",
@@ -42,8 +43,8 @@ pub async fn review() {
         }
         let prompt = t.render(#{ session_id: s.id })?;
         runner.add(
-            // FUTURE: call_agent. The Query view is clipped to the
-            // session's unseen lines
+            // FUTURE: gage_tools and tools. The Query view is clipped
+            // to the session's unseen lines
             call_agent(prompt)
                 .name("general-finding")
                 .gage_tools([Query::new().sessions([s]).lines(start, end)])

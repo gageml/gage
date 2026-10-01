@@ -84,9 +84,9 @@ pub use query::{
     issue_event_table, issue_table, link_table, scan_table, scan_watermark_table,
 };
 pub use scan::{
-    DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted, ScanFiles,
-    ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAttrs, TaskCounts, TaskStatus,
-    Watermark,
+    AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
+    ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,
+    TaskCounts, TaskStatus, Watermark,
 };
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,

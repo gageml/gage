@@ -48,6 +48,7 @@ use gage_runtime2::{
     ScanDatasetRef, TaskOutput,
 };
 use gage_scan::error::render_task_error;
+use gage_session::Driver;
 use gage_store::{
     DatasetStore, IssueStore, NoteStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs,
     TaskCounts, TaskStatus,
@@ -313,6 +314,8 @@ pub struct ScanConfig<'a> {
     pub dataset: Option<&'a str>,
     /// Tasks run at once. Treated as at least 1.
     pub jobs: usize,
+    /// The driver that runs the scan's agents
+    pub driver: Arc<dyn Driver>,
 }
 
 /// What a finished scan wrote.
@@ -378,7 +381,13 @@ pub async fn scan(
         .collect();
     let scan_dir = ScanDir::create(config.scans_dir, &id, config.dataset, &scanner_plans)?;
     scan_dir.write_plan(&plan.to_json())?;
-    let scan_ctx = ScanContext::new(id.clone(), dataset, store.path(), scan_dir.runtime_paths())?;
+    let scan_ctx = ScanContext::new(
+        id.clone(),
+        dataset,
+        store.path(),
+        scan_dir.runtime_paths(),
+        Arc::clone(&config.driver),
+    )?;
     trace::install_panic_hook();
     let scope = LogScope {
         object_dir: scan_dir.object_dir(),
@@ -641,6 +650,8 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let unit = self.units[&t.scanner].clone();
         let mut ctx = self.scan_ctx.clone();
         ctx.params = unit.params.clone();
+        ctx.scanner = t.scanner.clone();
+        ctx.task = t.task.clone();
         let exec = TaskExec {
             unit,
             task: t.task.clone(),
@@ -909,6 +920,10 @@ fn returned_error(value: &str, scanner: &TaskUnit, task: &str) -> String {
 #[cfg(test)]
 mod tests {
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
+    use gage_session::{
+        AgentEvent, AgentOutcome, AgentSession, AgentSpec, ContentSink, ContentSource, DriverError,
+        NativeSession, SessionAttrs, Source, StoredSession,
+    };
     use gage_store::DatasetStore;
     use tempfile::TempDir;
 
@@ -940,6 +955,11 @@ mod tests {
         compile(&Scanner::from_spec(def, None, &def.name).unwrap())
     }
 
+    /// The driver a test scan runs agents with when it runs none
+    fn claude_driver() -> Arc<dyn Driver> {
+        Arc::new(gage_claude::driver::ClaudeDriver::new())
+    }
+
     /// A fresh store and scans directory under one directory.
     fn open_store() -> (TempDir, Store) {
         let tmp = tempfile::tempdir().unwrap();
@@ -962,6 +982,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(store, &config, scanners, cancel, |e| events.push(e)).await;
         (outcome, events)
@@ -1092,6 +1113,284 @@ mod tests {
                 &Output::Progress { pos: 2, total: 2 },
                 &Output::Println("20".into()),
             ]
+        );
+    }
+
+    /// A driver whose agent replays a fixed event sequence and whose
+    /// transcript is a fixed native session.
+    struct ScriptedDriver {
+        cleaned_up: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct ScriptedAgent {
+        events: std::collections::VecDeque<AgentEvent>,
+        project: Option<String>,
+        cleaned_up: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct ScriptedNative {
+        project: Option<String>,
+    }
+
+    impl SessionAttrs for ScriptedNative {
+        fn native_mtime(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+        fn native_size(&self) -> u64 {
+            0
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+        fn project_name(&self) -> Option<&str> {
+            self.project.as_deref()
+        }
+        fn title(&self) -> Option<&str> {
+            None
+        }
+        fn model(&self) -> Option<&str> {
+            None
+        }
+        fn message_count(&self) -> Option<u64> {
+            Some(2)
+        }
+        fn line_count(&self) -> Option<u64> {
+            Some(2)
+        }
+    }
+
+    impl NativeSession for ScriptedNative {
+        fn id(&self) -> &str {
+            "native-1"
+        }
+        fn session_type(&self) -> &str {
+            "scripted"
+        }
+        fn source(&self) -> &str {
+            "scripted:native-1"
+        }
+        fn attrs(&self) -> &dyn SessionAttrs {
+            self
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for ScriptedAgent {
+        async fn next_event(&mut self) -> Option<AgentEvent> {
+            self.events.pop_front()
+        }
+        async fn send(&mut self, _text: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn interrupt(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn close_input(&mut self) {}
+        async fn wait_exit(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
+        async fn kill(&mut self, _grace: std::time::Duration) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn take_stderr(&mut self) -> std::io::Result<Vec<u8>> {
+            Ok(b"warned\n".to_vec())
+        }
+        fn transcript(&mut self) -> Result<Option<Box<dyn NativeSession + Send>>, DriverError> {
+            Ok(Some(Box::new(ScriptedNative {
+                project: self.project.clone(),
+            })))
+        }
+        fn cleanup(&mut self) -> Result<(), DriverError> {
+            self.cleaned_up
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl Driver for ScriptedDriver {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        fn version(&self) -> &'static str {
+            "0.1"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            &["scripted"]
+        }
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("open_source not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            use std::io::Write as _;
+            let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
+            w.write_all(b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
+                .map_err(DriverError::Io)?;
+            Ok("scripted 1".to_string())
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used".into()))
+        }
+        fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+            assert_eq!(spec.prompt, "hello");
+            assert_eq!(spec.model.as_deref(), Some("medium"));
+            let outcome = AgentOutcome {
+                text: "hello there".into(),
+                stop_reason: "end_turn".into(),
+                turns: 1,
+                session_id: "native-1".into(),
+                raw: r#"{"type":"result","result":"hello there"}"#.into(),
+                ..AgentOutcome::default()
+            };
+            Ok(Box::new(ScriptedAgent {
+                events: [
+                    AgentEvent::System(r#"{"subtype":"init"}"#.into()),
+                    AgentEvent::Assistant("hello there".into()),
+                    AgentEvent::TurnEnd {
+                        outcome: Box::new(outcome),
+                        idle: true,
+                    },
+                ]
+                .into_iter()
+                .collect(),
+                project: spec.project,
+                cleaned_up: Arc::clone(&self.cleaned_up),
+            }))
+        }
+    }
+
+    /// `call_agent` runs the agent through the scan's driver, `poll`
+    /// and `wait` expose its events and result, the transcript is
+    /// stored as a session under the task's `session+task:` source,
+    /// and the task's agent record is in the scan object.
+    #[tokio::test]
+    async fn tasks_run_agents_and_the_scan_records_them() {
+        use gage_store::{AgentAttrs, SessionStore, TaskAgent, session_object_id};
+
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::{Event, call_agent};
+
+            pub const SCANNER = #{
+                name: "agentic",
+                description: "Runs an agent",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let agent = call_agent("hello").name("greeter").model("medium").await?;
+                while agent.running() {
+                    match agent.poll().await? {
+                        Event::Assistant(t) => println!("assistant: {t}"),
+                        Event::TurnEnd(r) => println!("turn end: {r}"),
+                        other => println!("other: {other:?}"),
+                    }
+                }
+                let r = agent.wait().await?;
+                println!("{} {} {} {}", r.text, r.stop_reason, r.exit_code, r.stderr.trim());
+                println!("{:?}", r.as_metadata().turns);
+            }
+            "#,
+        );
+        let cleaned_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            driver: Arc::new(ScriptedDriver {
+                cleaned_up: Arc::clone(&cleaned_up),
+            }),
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(r#"other: System({"subtype":"init"})"#.into()),
+                &Output::Println("assistant: hello there".into()),
+                &Output::Println("turn end: end_turn".into()),
+                &Output::Println("hello there end_turn 0 warned".into()),
+                &Output::Println("1".into()),
+            ]
+        );
+        assert!(cleaned_up.load(std::sync::atomic::Ordering::SeqCst));
+
+        let session_id = session_object_id("scripted", "native-1");
+        let session = SessionStore::from(&store).get(&session_id).unwrap();
+        assert_eq!(
+            session.attrs.native_source,
+            format!("session+task:{}/agentic:main/native-1", outcome.id)
+        );
+        assert_eq!(session.attrs.project.as_deref(), Some("greeter"));
+
+        let scans = ScanStore::from(&store);
+        let record = scans.get(&outcome.id).unwrap();
+        let task = &record.content.tasks[0];
+        assert_eq!(
+            (task.scanner.as_str(), task.task.as_str()),
+            ("agentic", "main")
+        );
+        assert_eq!(task.agent_sessions, [session.commit_sha.clone()]);
+        assert_eq!(
+            task.agents,
+            [TaskAgent {
+                id: session_id.clone(),
+                attrs: AgentAttrs { exit_code: 0 },
+            }]
+        );
+        assert_eq!(
+            scans
+                .agent_file(
+                    &outcome.commit_sha,
+                    "agentic",
+                    "main",
+                    &session_id,
+                    "result"
+                )
+                .unwrap(),
+            Some(br#"{"type":"result","result":"hello there"}"#.to_vec())
+        );
+        assert_eq!(
+            scans
+                .agent_file(
+                    &outcome.commit_sha,
+                    "agentic",
+                    "main",
+                    &session_id,
+                    "stderr"
+                )
+                .unwrap(),
+            Some(b"warned\n".to_vec())
+        );
+        assert!(
+            store
+                .read_commit(&outcome.commit_sha)
+                .unwrap()
+                .parents
+                .contains(&session.commit_sha),
+            "the agent session is a parent of the scan commit"
         );
     }
 
@@ -1629,6 +1928,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -1719,6 +2019,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -1774,6 +2075,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -1910,6 +2212,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -2008,6 +2311,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -2185,6 +2489,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -2371,6 +2676,7 @@ mod tests {
                     gage_version: "test-version",
                     dataset: Some(&dataset_sha),
                     jobs: 1,
+                    driver: claude_driver(),
                 };
                 let outcome = scan(
                     store,
@@ -2548,6 +2854,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -2613,6 +2920,7 @@ mod tests {
                     gage_version: "test-version",
                     dataset: None,
                     jobs: 1,
+                    driver: claude_driver(),
                 };
                 let outcome = scan(
                     store,
@@ -2742,6 +3050,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -2866,6 +3175,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(dataset_sha),
             jobs: 1,
+            driver: claude_driver(),
         };
         let outcome = scan(
             store,
@@ -3199,6 +3509,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 2,
+            driver: claude_driver(),
         };
         let outcome = scan(
             &store,
@@ -3346,6 +3657,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 2,
+            driver: claude_driver(),
         };
         let mut events = Vec::new();
         let outcome = scan(

@@ -8,6 +8,7 @@ use cliclack as cli;
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
+use gage_claude::driver::ClaudeDriver;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
 use gage_registry::scanner::{
@@ -488,6 +489,7 @@ async fn run_scan(args: Scan2RunArgs) {
         gage_version: crate::VERSION,
         dataset: dataset_sha.as_deref(),
         jobs: args.jobs,
+        driver: Arc::new(ClaudeDriver::new()),
     };
     // Headless: task output and the scan's own lines go to the
     // terminal as they happen, unprefixed; records go to the scan

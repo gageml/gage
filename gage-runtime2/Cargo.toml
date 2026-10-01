@@ -11,6 +11,7 @@ datafusion = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-query2 = { path = "../gage-query2" }
 gage-runtime = { path = "../gage-runtime" }
+gage-session = { path = "../gage-session" }
 minijinja = "2"
 gage-store = { path = "../gage-store" }
 serde_json = { workspace = true }

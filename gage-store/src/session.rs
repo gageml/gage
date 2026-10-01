@@ -39,6 +39,7 @@ const FILES_TREE: &str = "files.d";
 pub struct SessionStore<'a> {
     store: &'a Store,
     max_session_bytes: Option<u64>,
+    native_source: Option<String>,
 }
 
 impl<'a> From<&'a Store> for SessionStore<'a> {
@@ -46,6 +47,7 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
         SessionStore {
             store,
             max_session_bytes: None,
+            native_source: None,
         }
     }
 }
@@ -191,6 +193,16 @@ impl<'a> SessionStore<'a> {
         self
     }
 
+    /// Record `source` as the session's `native_source` in place of
+    /// what the native session reports. For a session whose only home
+    /// was a scan task's agent run, the runtime names the task here,
+    /// since the place the driver read it from does not outlive the
+    /// scan.
+    pub fn with_native_source(mut self, source: String) -> Self {
+        self.native_source = Some(source);
+        self
+    }
+
     /// Write `session`'s content as a session object. `driver` drives
     /// the serialization through [`Driver::write_native`]; the
     /// returned string is stored as the session's `content_format`.
@@ -203,7 +215,10 @@ impl<'a> SessionStore<'a> {
     ) -> Result<SessionAddOutcome, StoreError> {
         let path = self.store.path();
         let native_id = session.id().to_string();
-        let native_source = session.source().to_string();
+        let native_source = self
+            .native_source
+            .clone()
+            .unwrap_or_else(|| session.source().to_string());
         let native_mtime = system_time_ms(session.attrs().native_mtime());
         let native_size = session.attrs().native_size();
         let project = session.attrs().project_name().map(String::from);

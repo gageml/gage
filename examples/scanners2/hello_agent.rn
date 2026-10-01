@@ -1,0 +1,13 @@
+use gage::call_agent;
+
+pub const SCANNER = #{
+    name: "hello-agent",
+    description: "Agent greeting",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let a = call_agent("Say hello").model("small").await?;
+    let result = a.wait().await?;
+    println(result.text);
+}

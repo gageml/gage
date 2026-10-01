@@ -12,8 +12,11 @@
 //! directory as the object's content. Under `watermarks/`, the
 //! commits each task finished processing.
 //! `notes.link`, `notes_carried.link`, and `issues.link` name the
-//! commits of the notes and issues the scan wrote or carried. The
-//! agent records are not written yet.
+//! commits of the notes and issues the scan wrote or carried. A task
+//! that ran agents holds `agents.link`, the commits of the agent
+//! session objects, and under `agents/<session object id>/` each
+//! agent's `attrs.json` (its exit code), `stderr`, and `result`, the
+//! harness's result message verbatim.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,7 +31,7 @@ use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::issue::{IssueStore, OBJECT_TYPE as ISSUE_TYPE};
 use crate::note::{NoteStore, OBJECT_TYPE as NOTE_TYPE};
 use crate::object::{ObjectTree, require_type};
-use crate::session::build_files_tree_inner;
+use crate::session::{OBJECT_TYPE as SESSION_TYPE, build_files_tree_inner};
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
@@ -44,6 +47,12 @@ const DATASET_LINK: &str = "dataset.link";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
 const ISSUES_LINK: &str = "issues.link";
+const AGENTS_LINK: &str = "agents.link";
+const AGENTS_DIR: &str = "agents";
+const STDERR_FILE: &str = "stderr";
+const RESULT_FILE: &str = "result";
+/// The blobs an `agents/<id>/` directory may hold
+const AGENT_FILES: [&str; 3] = [ATTRS_FILE, STDERR_FILE, RESULT_FILE];
 const WATERMARKS_DIR: &str = "watermarks";
 const LOGS_DIR: &str = "logs";
 /// The blobs `logs/` may hold
@@ -149,6 +158,27 @@ pub struct ScanTask {
     pub scanner: String,
     pub task: String,
     pub attrs: TaskAttrs,
+    /// The commit SHAs of the agent sessions the task ran, from
+    /// `agents.link`, in file order. Empty when it ran none.
+    pub agent_sessions: Vec<String>,
+    /// The task's agent records, from `agents/<id>/`, in id order
+    pub agents: Vec<TaskAgent>,
+}
+
+/// One agent a task ran, decoded from `agents/<id>/`. `stderr` and
+/// `result` are read through [`ScanStore::agent_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAgent {
+    /// The agent session's object id
+    pub id: String,
+    pub attrs: AgentAttrs,
+}
+
+/// An agent's `attrs.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAttrs {
+    /// The harness process's exit code; -1 when it was signaled
+    pub exit_code: i64,
 }
 
 /// One `watermarks/<kind>/<oid>/<key>` record: the commit of the
@@ -235,9 +265,10 @@ pub trait ScanFiles {
 impl ScanStore<'_> {
     /// Write a scan from its staging `scan/` directory under the given
     /// id. The directory is validated first: every task status must be
-    /// terminal, a task directory may hold only `attrs.json`, and
-    /// `dataset.link`, when present, must name a live dataset commit.
-    /// Returns the commit SHA.
+    /// terminal, a task directory may hold only `attrs.json`,
+    /// `agents.link`, and `agents/`, every linked agent session must be
+    /// live, and `dataset.link`, when present, must name a live dataset
+    /// commit. Returns the commit SHA.
     pub fn create(&self, id: &str, scan_dir: &Path) -> Result<String, StoreError> {
         let content = ScanContent::from_files(&DirFiles::new(scan_dir))?;
         for task in &content.tasks {
@@ -248,6 +279,9 @@ impl ScanStore<'_> {
                     task.task,
                     task.attrs.status.as_str()
                 )));
+            }
+            for sha in &task.agent_sessions {
+                self.require_live(sha, SESSION_TYPE)?;
             }
         }
         let mut tree = ObjectTree {
@@ -345,6 +379,25 @@ impl ScanStore<'_> {
             commit: commit_sha,
         }
         .read(&format!("{LOGS_DIR}/{name}"))
+    }
+
+    /// The bytes of one file of a task's agent record at `commit_sha`:
+    /// `name` is `stderr` or `result`. `None` when the record lacks it.
+    pub fn agent_file(
+        &self,
+        commit_sha: &str,
+        scanner: &str,
+        task: &str,
+        agent_id: &str,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        CommitFiles {
+            store: self.store,
+            commit: commit_sha,
+        }
+        .read(&format!(
+            "{TASKS_DIR}/{scanner}/{task}/{AGENTS_DIR}/{agent_id}/{name}"
+        ))
     }
 
     /// The bytes of `plan.json`, the resolved task plan of the scan at
@@ -529,10 +582,22 @@ impl ScanContent {
             for task in files.list_dirs(&scanner_path)? {
                 let task_path = format!("{scanner_path}/{task}");
                 let attrs = read_json(files, &format!("{task_path}/{ATTRS_FILE}"))?;
+                let agent_sessions =
+                    read_link(files, &format!("{task_path}/{AGENTS_LINK}"))?.unwrap_or_default();
+                let mut agents = Vec::new();
+                for id in files.list_dirs(&format!("{task_path}/{AGENTS_DIR}"))? {
+                    let attrs = read_json(
+                        files,
+                        &format!("{task_path}/{AGENTS_DIR}/{id}/{ATTRS_FILE}"),
+                    )?;
+                    agents.push(TaskAgent { id, attrs });
+                }
                 tasks.push(ScanTask {
                     scanner: scanner.clone(),
                     task,
                     attrs,
+                    agent_sessions,
+                    agents,
                 });
             }
         }
@@ -684,15 +749,21 @@ fn import_tasks_tree(store_path: &Path, tasks_dir: &Path) -> Result<Option<Strin
     Ok(Some(tree_of_trees(store_path, &scanner_trees)?))
 }
 
-/// Build one task's tree. Only `attrs.json` is accepted; anything
-/// else is an error.
+/// Build one task's tree: the `attrs.json` and `agents.link` blobs
+/// and the `agents/` subtree of per-agent fixed blobs. Anything else
+/// is an error.
 fn import_task_tree(store_path: &Path, task_dir: &Path) -> Result<String, StoreError> {
     let mut blobs: BTreeMap<String, String> = BTreeMap::new();
+    let mut agents_tree: Option<String> = None;
     for entry in fs::read_dir(task_dir).map_err(|e| read_error(task_dir, e))? {
         let entry = entry.map_err(|e| read_error(task_dir, e))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        if !path.is_file() || name != ATTRS_FILE {
+        if path.is_dir() && name == AGENTS_DIR {
+            agents_tree = Some(import_agents_tree(store_path, &path)?);
+            continue;
+        }
+        if !path.is_file() || !(name == ATTRS_FILE || name == AGENTS_LINK) {
             return Err(StoreError::InvalidPath {
                 path: path.display().to_string(),
                 reason: "unexpected entry in a task directory".to_string(),
@@ -701,7 +772,7 @@ fn import_task_tree(store_path: &Path, task_dir: &Path) -> Result<String, StoreE
         let bytes = fs::read(&path).map_err(|e| read_error(&path, e))?;
         blobs.insert(name, write_blob(store_path, &bytes)?);
     }
-    let entries: Vec<TreeInput<'_>> = blobs
+    let mut entries: Vec<TreeInput<'_>> = blobs
         .iter()
         .map(|(name, sha)| TreeInput {
             mode: "100644",
@@ -709,7 +780,28 @@ fn import_task_tree(store_path: &Path, task_dir: &Path) -> Result<String, StoreE
             name,
         })
         .collect();
+    if let Some(sha) = &agents_tree {
+        entries.push(TreeInput {
+            mode: "040000",
+            sha,
+            name: AGENTS_DIR,
+        });
+    }
     mktree(store_path, &entries)
+}
+
+/// Build a task's `agents/` tree: one subtree per agent session id,
+/// each holding only [`AGENT_FILES`].
+fn import_agents_tree(store_path: &Path, agents_dir: &Path) -> Result<String, StoreError> {
+    require_dirs_only(agents_dir)?;
+    let mut trees: Vec<(String, String)> = Vec::new();
+    for agent_dir in subdirs(agents_dir)? {
+        trees.push((
+            dir_name(&agent_dir),
+            import_fixed_blobs(store_path, &agent_dir, &AGENT_FILES)?,
+        ));
+    }
+    tree_of_trees(store_path, &trees)
 }
 
 /// Build a tree of blobs from a directory whose files must each be
@@ -990,9 +1082,16 @@ impl CommitFiles<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
+    use gage_session::{
+        ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
+        StoredSession,
+    };
+
     use super::*;
-    use crate::DatasetStore;
     use crate::test_support::open_store;
+    use crate::{DatasetStore, SessionStore};
 
     fn write(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1134,6 +1233,178 @@ mod tests {
         assert_eq!(greet.task, "greet");
         assert_eq!(greet.attrs.status, TaskStatus::Completed);
         assert_eq!(scans.at_commit(&commit).unwrap(), record);
+    }
+
+    struct FakeSession {
+        id: String,
+        source: String,
+        content: String,
+        attrs: FakeAttrs,
+    }
+
+    struct FakeAttrs;
+
+    impl SessionAttrs for FakeAttrs {
+        fn native_mtime(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+        fn native_size(&self) -> u64 {
+            0
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+        fn project_name(&self) -> Option<&str> {
+            None
+        }
+        fn title(&self) -> Option<&str> {
+            None
+        }
+        fn model(&self) -> Option<&str> {
+            None
+        }
+        fn message_count(&self) -> Option<u64> {
+            None
+        }
+        fn line_count(&self) -> Option<u64> {
+            Some(1)
+        }
+    }
+
+    impl NativeSession for FakeSession {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn session_type(&self) -> &str {
+            "fake"
+        }
+        fn source(&self) -> &str {
+            &self.source
+        }
+        fn attrs(&self) -> &dyn SessionAttrs {
+            &self.attrs
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct FakeDriver;
+
+    impl Driver for FakeDriver {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn version(&self) -> &'static str {
+            "0.1"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            &["fake"]
+        }
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("open_source not used".into()))
+        }
+        fn write_native(
+            &self,
+            session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            let fake = session
+                .as_any()
+                .downcast_ref::<FakeSession>()
+                .ok_or_else(|| DriverError::Other("not a FakeSession".into()))?;
+            let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
+            w.write_all(fake.content.as_bytes())
+                .map_err(DriverError::Io)?;
+            Ok("fake-lines 1".to_string())
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used".into()))
+        }
+    }
+
+    /// A task's agent record links the agent session, carries the
+    /// agent's attrs, stderr, and result, and the session commit is
+    /// a parent of the scan commit. The session's `native_source` is
+    /// the value the runtime supplied.
+    #[test]
+    fn create_writes_a_task_agent_record_and_links_its_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut native = FakeSession {
+            id: "agent-native-1".into(),
+            source: "fake:agent-native-1".into(),
+            content: "{}\n".into(),
+            attrs: FakeAttrs,
+        };
+        let added = SessionStore::from(&store)
+            .with_native_source("session+task:SCANA/hello:greet/agent-native-1".into())
+            .add(&FakeDriver, &mut native)
+            .unwrap();
+        let record = SessionStore::from(&store).get(&added.id).unwrap();
+        assert_eq!(
+            record.attrs.native_source,
+            "session+task:SCANA/hello:greet/agent-native-1"
+        );
+
+        let scan_dir = staged_scan(tmp.path());
+        let agent_dir = scan_dir.join(format!("tasks/hello/greet/agents/{}", added.id));
+        write(&agent_dir.join("attrs.json"), r#"{"exit_code":0}"#);
+        write(&agent_dir.join("stderr"), "warn: x\n");
+        write(
+            &agent_dir.join("result"),
+            r#"{"type":"result","result":"ok"}"#,
+        );
+        write(
+            &scan_dir.join("tasks/hello/greet/agents.link"),
+            &format!("{}\n", added.commit_sha),
+        );
+        let scans = ScanStore::from(&store);
+        let commit = scans.create("SCANA", &scan_dir).unwrap();
+
+        let greet = &scans.get("SCANA").unwrap().content.tasks[1];
+        assert_eq!(greet.task, "greet");
+        assert_eq!(greet.agent_sessions, [added.commit_sha.clone()]);
+        assert_eq!(
+            greet.agents,
+            [TaskAgent {
+                id: added.id.clone(),
+                attrs: AgentAttrs { exit_code: 0 },
+            }]
+        );
+        assert_eq!(
+            scans
+                .agent_file(&commit, "hello", "greet", &added.id, "stderr")
+                .unwrap(),
+            Some(b"warn: x\n".to_vec())
+        );
+        assert_eq!(
+            scans
+                .agent_file(&commit, "hello", "greet", &added.id, "result")
+                .unwrap(),
+            Some(br#"{"type":"result","result":"ok"}"#.to_vec())
+        );
+        assert!(
+            store
+                .read_commit(&commit)
+                .unwrap()
+                .parents
+                .contains(&added.commit_sha),
+            "the agent session commit is a parent of the scan commit"
+        );
+
+        // An agent directory holding anything but the fixed files is
+        // rejected
+        write(&agent_dir.join("notes.txt"), "x");
+        let err = ScanStore::from(&store)
+            .create("SCANB", &scan_dir)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InvalidPath { .. }), "{err:?}");
     }
 
     #[test]

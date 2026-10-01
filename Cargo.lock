@@ -2506,6 +2506,7 @@ dependencies = [
  "futures",
  "gage-core",
  "gage-session",
+ "libc",
  "regex",
  "rmp-serde",
  "rust-embed",
@@ -2733,6 +2734,7 @@ dependencies = [
  "gage-core",
  "gage-query2",
  "gage-runtime",
+ "gage-session",
  "gage-store",
  "minijinja",
  "percent-encoding",
@@ -2773,6 +2775,7 @@ dependencies = [
 name = "gage-scan2"
 version = "0.2.0-dev"
 dependencies = [
+ "async-trait",
  "codespan-reporting",
  "datafusion",
  "gage-claude",
@@ -2797,6 +2800,7 @@ dependencies = [
 name = "gage-session"
 version = "0.2.0-dev"
 dependencies = [
+ "async-trait",
  "datafusion",
 ]
 

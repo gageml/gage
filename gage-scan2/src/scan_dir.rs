@@ -222,6 +222,7 @@ impl ScanDir {
             issues_dir: self.issues_dir(),
             watermarks_dir: self.object_dir().join(WATERMARKS_DIR),
             carried_notes: self.dir.join(CARRIED_NOTES_FILE),
+            tasks_dir: self.object_dir().join(TASKS_DIR),
         }
     }
 

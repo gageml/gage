@@ -24,6 +24,7 @@ use gage_query2::ContextBuilder;
 use gage_query2::scope::SessionScope;
 use gage_runtime::datetime::{self, DateTime};
 use gage_runtime::value::json_to_value;
+use gage_session::Driver;
 use gage_store::{Store, StoreError};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Object, Protocol, Value, VmError};
@@ -55,6 +56,12 @@ pub struct ScanContext {
     /// orchestrator sets it per task, since params are per scanner
     /// and the context is otherwise per scan.
     pub params: Option<json::Value>,
+    /// The scanner and task running under this context, set by the
+    /// orchestrator per task. Agent sessions are attributed to them.
+    pub scanner: String,
+    pub task: String,
+    /// The driver that runs the scan's agents
+    pub driver: Arc<dyn Driver>,
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Where the runtime writes during the run
     pub paths: ScanDirPaths,
@@ -74,6 +81,9 @@ pub struct ScanDirPaths {
     pub watermarks_dir: PathBuf,
     /// Carry-forward appends carried note commits here, one per line
     pub carried_notes: PathBuf,
+    /// `call_agent` writes a task's agent records under
+    /// `<scanner>/<task>/` here
+    pub tasks_dir: PathBuf,
 }
 
 impl ScanContext {
@@ -84,11 +94,15 @@ impl ScanContext {
         dataset: Option<ScanDatasetRef>,
         store_path: &Path,
         paths: ScanDirPaths,
+        driver: Arc<dyn Driver>,
     ) -> Result<Self, StoreError> {
         Ok(ScanContext {
             scan_id,
             dataset,
             params: None,
+            scanner: String::new(),
+            task: String::new(),
+            driver,
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             paths,
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
