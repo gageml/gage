@@ -127,7 +127,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -138,7 +138,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2133,7 +2133,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4100,7 +4100,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5412,7 +5412,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "anyhow",
  "base64",
@@ -5453,7 +5453,7 @@ dependencies = [
 [[package]]
 name = "rune-alloc"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "ahash 0.8.12",
  "musli-core",
@@ -5465,7 +5465,7 @@ dependencies = [
 [[package]]
 name = "rune-alloc-macros"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5475,7 +5475,7 @@ dependencies = [
 [[package]]
 name = "rune-core"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "rune-alloc",
  "serde",
@@ -5485,7 +5485,7 @@ dependencies = [
 [[package]]
 name = "rune-macros"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5496,7 +5496,7 @@ dependencies = [
 [[package]]
 name = "rune-modules"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "rand 0.9.4",
  "rune",
@@ -5506,7 +5506,7 @@ dependencies = [
 [[package]]
 name = "rune-tracing"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "rune-tracing-macros",
 ]
@@ -5514,7 +5514,7 @@ dependencies = [
 [[package]]
 name = "rune-tracing-macros"
 version = "0.14.0"
-source = "git+https://github.com/gar1t/rune.git?branch=gage#d12edd35bf2f7cf91074a72f12258530e5bd9825"
+source = "git+https://github.com/gar1t/rune.git?branch=gage#7f7ed96302179966827506ce42adaeb7397aa5e4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5622,7 +5622,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6165,7 +6165,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6219,7 +6219,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6549,7 +6549,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6568,7 +6568,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7629,7 +7629,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
