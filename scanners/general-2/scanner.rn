@@ -15,8 +15,6 @@ use gage::{
 pub const SCANNER = #{
     name: "general-2",
     description: "Scan sessions for general findings",
-    // FUTURE: groups: ["default"] when this scanner replaces `general`.
-    // Left out so a legacy default scan does not select it.
     tasks: #{
         review: #{
             notes: #{

@@ -35,7 +35,7 @@ use rune::runtime::{
 use rune::{Any, ContextError, Module};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::scan::{SCAN_CTX, ScanContext, Session};
+use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error};
 use crate::{OUTPUT_SINK, OutputSink};
 
 /// `rmcp::model::JsonObject` as gage-mcp2 exposes it through
@@ -606,6 +606,8 @@ fn callback(
         let ctx = ctx.clone();
         let sink = sink.clone();
         let scanner = ctx.scanner.clone();
+        let log_scanner = scanner.clone();
+        let log_sources = ctx.sources.clone();
         let inputs = InputsArg(coerce_floats(args, &float_inputs));
         Box::pin(async move {
             let call = async move {
@@ -625,7 +627,15 @@ fn callback(
             };
             match called {
                 Ok(outcome) => outcome.0,
-                Err(e) => CustomToolOutcome::Fault(format!("tool handler failed: {e}")),
+                Err(e) => {
+                    let rendered = render_vm_error(&e, log_sources.as_deref());
+                    tracing::error!(
+                        scanner = %log_scanner,
+                        error = %rendered,
+                        "tool handler failed",
+                    );
+                    CustomToolOutcome::Fault("internal server error".into())
+                }
             }
         })
     })
@@ -673,20 +683,29 @@ impl FromValue for HandlerOutcome {
         let outcome = match rune::from_value::<Result<Value, Value>>(value) {
             Ok(Ok(v)) => match render(&v) {
                 Ok(json) => CustomToolOutcome::Success(json),
-                Err(e) => CustomToolOutcome::Fault(format!(
-                    "tool handler returned a value that cannot be encoded as JSON: {e}"
-                )),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "tool handler returned a value that cannot be encoded as JSON",
+                    );
+                    CustomToolOutcome::Fault("internal server error".into())
+                }
             },
             Ok(Err(v)) => match render(&v) {
                 Ok(JsonValue::String(s)) => CustomToolOutcome::Error(s),
                 Ok(json) => CustomToolOutcome::Error(json.to_string()),
-                Err(e) => CustomToolOutcome::Fault(format!(
-                    "tool handler returned an error that cannot be encoded as JSON: {e}"
-                )),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "tool handler returned an error that cannot be encoded as JSON",
+                    );
+                    CustomToolOutcome::Fault("internal server error".into())
+                }
             },
-            Err(_not_a_result) => CustomToolOutcome::Fault(
-                "tool handler returned a value that is not a Result".to_string(),
-            ),
+            Err(_not_a_result) => {
+                tracing::error!("tool handler returned a value that is not a Result");
+                CustomToolOutcome::Fault("internal server error".into())
+            }
         };
         Ok(HandlerOutcome(outcome))
     }
@@ -1014,14 +1033,15 @@ mod tests {
         };
         assert_eq!(
             fault(call(&defs[0], json!({}), json!({})).await),
-            "tool handler returned a value that is not a Result"
+            "internal server error"
         );
-        assert!(
-            fault(call(&defs[1], json!({}), json!({})).await)
-                .starts_with("tool handler returned a value that cannot be encoded as JSON")
+        assert_eq!(
+            fault(call(&defs[1], json!({}), json!({})).await),
+            "internal server error"
         );
-        assert!(
-            fault(call(&defs[2], json!({}), json!({})).await).starts_with("tool handler failed")
+        assert_eq!(
+            fault(call(&defs[2], json!({}), json!({})).await),
+            "internal server error"
         );
     }
 

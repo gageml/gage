@@ -23,8 +23,8 @@ pub const SCANNER = #{
                 // `required_by` pulls this task into any scan whose
                 // selected tasks write a matching note
                 wants: ["finding.*"],
-                required_by: ["finding.*"],
             },
+            // required_by: ["finding.*"],
             issues: #{
                 writes: #{ "findings": "Issue derived from session findings" },
             },

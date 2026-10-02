@@ -29,6 +29,7 @@ use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
 use gage_session::Driver;
 use gage_store::{Store, StoreError};
+use rune::Sources;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Object, Protocol, Value, VmError};
 use rune::{Any, ContextError, Module};
@@ -65,6 +66,10 @@ pub struct ScanContext {
     /// orchestrator per task. Agent sessions are attributed to them.
     pub scanner: String,
     pub task: String,
+    /// The Rune sources of the scanner's compiled unit, set by the
+    /// orchestrator per task. Used to render `VmError` with source
+    /// excerpts, resolved field names, and a backtrace.
+    pub sources: Option<Arc<Sources>>,
     /// The driver that runs the scan's agents
     pub driver: Arc<dyn Driver>,
     pub store: Arc<tokio::sync::Mutex<Store>>,
@@ -110,6 +115,7 @@ impl ScanContext {
             params: None,
             scanner: String::new(),
             task: String::new(),
+            sources: None,
             driver,
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             paths,
@@ -277,6 +283,18 @@ pub(crate) fn current() -> Result<ScanContext, VmError> {
         .map_err(|_outside_scope| {
             VmError::panic("scan() is available only inside a running scan task")
         })
+}
+
+/// Render a `VmError` as Rune does: the diagnostic with its source
+/// excerpt, then a `Backtrace:` section listing every frame. Without
+/// sources the renderer falls back to the error's `Display` form.
+pub fn render_vm_error(e: &VmError, sources: Option<&Sources>) -> String {
+    let Some(sources) = sources else {
+        return e.to_string();
+    };
+    let mut buf = rune::termcolor::Buffer::no_color();
+    e.emit(&mut buf, sources).unwrap();
+    String::from_utf8(buf.into_inner()).unwrap()
 }
 
 /// Re-register the row tables as views over lines `start` through
@@ -820,5 +838,39 @@ mod tests {
                 .contains("scan() is available only inside a running scan task"),
             "{err}"
         );
+    }
+
+    /// With sources, `render_vm_error` resolves the missing field name,
+    /// shows the source excerpt, and appends a `Backtrace:` section.
+    /// Without sources it falls back to the `Display` form, which
+    /// carries only the kind-level message.
+    #[test]
+    fn render_vm_error_with_sources_names_fields_and_shows_backtrace() {
+        let script = r#"
+            pub fn check(inputs) { inputs.session_id }
+            "#;
+        let context = crate::context().unwrap();
+        let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
+        let mut sources = Sources::new();
+        sources.insert(Source::memory(script).unwrap()).unwrap();
+        let mut diagnostics = Diagnostics::new();
+        let unit = rune::prepare(&mut sources)
+            .with_context(&context)
+            .with_diagnostics(&mut diagnostics)
+            .build()
+            .unwrap();
+        let mut vm = Vm::new(rt, RuneArc::try_new(unit).unwrap());
+        let empty = rune::to_value(Object::new()).unwrap();
+        let err = vm.call(["check"], (empty,)).unwrap_err();
+
+        let bare = render_vm_error(&err, None);
+        assert_eq!(bare, err.to_string());
+        assert!(!bare.contains("session_id"), "{bare}");
+        assert!(!bare.contains("Backtrace"), "{bare}");
+
+        let rich = render_vm_error(&err, Some(&sources));
+        assert!(rich.contains("session_id"), "{rich}");
+        assert!(rich.contains("Backtrace"), "{rich}");
+        assert!(rich.contains("inputs.session_id"), "{rich}");
     }
 }

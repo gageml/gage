@@ -53,6 +53,7 @@ use tokio::sync::mpsc;
 pub use attachment::{Attachment, AttachmentFile, Attachments};
 pub use scan::{
     SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, ScanDirPaths, Session, Sessions,
+    render_vm_error,
 };
 
 /// The scheme term a scan records in its `runtime` attr, followed by

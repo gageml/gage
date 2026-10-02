@@ -652,6 +652,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         ctx.params = unit.params.clone();
         ctx.scanner = t.scanner.clone();
         ctx.task = t.task.clone();
+        ctx.sources = Some(Arc::clone(&unit.sources));
         let exec = TaskExec {
             unit,
             task: t.task.clone(),
@@ -857,9 +858,7 @@ async fn execute(scanner: &TaskUnit, task: &str) -> Result<(), String> {
 /// Render a VM error as Rune does: the diagnostic with its source
 /// excerpt, then a `Backtrace:` section listing every frame.
 fn vm_error(e: &VmError, sources: &Sources) -> String {
-    let mut buf = rune::termcolor::Buffer::no_color();
-    e.emit(&mut buf, sources).unwrap();
-    String::from_utf8(buf.into_inner()).unwrap()
+    gage_runtime2::render_vm_error(e, Some(sources))
 }
 
 /// Interpret a task's return value. A task returning unit or `Ok`
