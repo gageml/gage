@@ -181,7 +181,8 @@ enum Command {
 
     /// Manage tags
     ///
-    /// A tag is a name for an object of any type.
+    /// A tag is a name for an object of any type. Any argument that
+    /// takes an object ID accepts a tag name in its place.
     Tag {
         #[command(subcommand)]
         command: cmd_tag::TagCommand,

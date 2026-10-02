@@ -31,7 +31,7 @@ use serde_json::Value as JsonValue;
 use crate::git::{EntryKind, git_in, run};
 use crate::index::IdMatch;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
-use crate::{Store, StoreError};
+use crate::{Store, StoreError, TagStore};
 
 /// Full ref name of the object with the given id.
 /// Size of the short-prefix set; see [`Store::resolve_in`].
@@ -129,14 +129,20 @@ pub(crate) enum EditOutcome {
 }
 
 impl Store {
-    /// Resolve an id or unique prefix to `(id, tip SHA)` across every
-    /// object type. See [`Store::resolve_in`] for the scoping rule.
-    pub fn resolve_id(&self, id_or_prefix: &str) -> Result<(String, String), StoreError> {
-        let found = self.resolve_in(id_or_prefix, None)?;
+    /// Resolve an object-ish to `(id, tip SHA)` across every object
+    /// type. See [`Store::resolve_in`] for the scoping rule.
+    pub fn resolve_id(&self, objectish: &str) -> Result<(String, String), StoreError> {
+        let found = self.resolve_in(objectish, None)?;
         Ok((found.id, found.tip_sha))
     }
 
-    /// Resolve an id or prefix, live or tombstoned, preferring the
+    /// Resolve an object-ish, live or tombstoned: a tag name matched
+    /// exactly, else an id or unique prefix. A tag name that is also
+    /// a valid prefix resolves as the tag. `object_type` scopes the
+    /// prefix match only; a tag naming an object of another type is
+    /// returned as is, for the caller's type check to report.
+    ///
+    /// A prefix is resolved preferring the
     /// short-prefix set: the [`SHORT_PREFIX_SET_SIZE`] most recently
     /// modified live objects, of `object_type` when given. A prefix
     /// that matches exactly one object in that set names it even when
@@ -148,10 +154,13 @@ impl Store {
     /// prefix resolves.
     pub fn resolve_in(
         &self,
-        id_or_prefix: &str,
+        objectish: &str,
         object_type: Option<&str>,
     ) -> Result<IdMatch, StoreError> {
-        self.resolve_scoped(id_or_prefix, object_type, SHORT_PREFIX_SET_SIZE)
+        if let Some(found) = TagStore::from(self).resolve(objectish)? {
+            return Ok(found);
+        }
+        self.resolve_scoped(objectish, object_type, SHORT_PREFIX_SET_SIZE)
     }
 
     fn resolve_scoped(

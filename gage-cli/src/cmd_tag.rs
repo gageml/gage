@@ -1,7 +1,8 @@
 //! `gage tag`: user-chosen names for objects in the Gage store.
 //!
-//! A tag names an object of any type. `add` resolves its object
-//! argument as an object-ish: a tag name, an id, or a unique prefix.
+//! A tag names an object of any type. Every argument that takes an
+//! object id resolves an object-ish: a tag name, an id, or a unique
+//! prefix.
 
 use clap::{Args, Subcommand};
 use cliclack as cli;

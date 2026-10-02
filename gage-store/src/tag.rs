@@ -114,7 +114,7 @@ impl TagStore<'_> {
     /// tombstoned object cannot be tagged.
     pub fn add(&self, name: &str, objectish: &str, force: bool) -> Result<TagAdded, StoreError> {
         self.validate_name(name)?;
-        let found = self.store.resolve_objectish(objectish)?;
+        let found = self.store.resolve_in(objectish, None)?;
         if found.deleted {
             return Err(StoreError::ObjectDeleted(found.id));
         }
@@ -265,23 +265,11 @@ impl TagStore<'_> {
     }
 }
 
-impl Store {
-    /// Resolve an object-ish: a tag name, matched exactly, else an id
-    /// or unique prefix as [`Store::resolve_id`] resolves it. A tag
-    /// name that is also a valid prefix resolves as the tag.
-    pub fn resolve_objectish(&self, value: &str) -> Result<IdMatch, StoreError> {
-        if let Some(found) = TagStore::from(self).resolve(value)? {
-            return Ok(found);
-        }
-        self.resolve_in(value, None)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::open_store;
-    use crate::{NoteEdit, NoteInput, NoteStore, NoteValue};
+    use crate::{DatasetStore, NoteEdit, NoteInput, NoteStore, NoteValue};
 
     fn note(store: &Store, value: &str) -> String {
         NoteStore::from(store)
@@ -438,7 +426,7 @@ mod tests {
         let (_, tip) = store.resolve_id(&id).unwrap();
         assert_ne!(tip, added.commit_sha);
 
-        let found = store.resolve_objectish("t").unwrap();
+        let found = store.resolve_in("t", None).unwrap();
         assert_eq!(found.id, id);
         assert_eq!(found.tip_sha, tip);
         assert!(!found.deleted);
@@ -452,7 +440,7 @@ mod tests {
         TagStore::from(&store).add("t", &id, false).unwrap();
         NoteStore::from(&store).delete(&id).unwrap();
 
-        let found = store.resolve_objectish("t").unwrap();
+        let found = store.resolve_in("t", None).unwrap();
         assert_eq!(found.id, id);
         assert!(found.deleted);
     }
@@ -466,7 +454,8 @@ mod tests {
         let prefix = a[..6].to_string();
         TagStore::from(&store).add(&prefix, &b, false).unwrap();
 
-        assert_eq!(store.resolve_objectish(&prefix).unwrap().id, b);
+        assert_eq!(store.resolve_id(&prefix).unwrap().0, b);
+        TagStore::from(&store).delete(&prefix).unwrap();
         assert_eq!(store.resolve_id(&prefix).unwrap().0, a);
     }
 
@@ -551,11 +540,33 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_resolves_through_a_typed_store_and_is_type_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "v1");
+        TagStore::from(&store).add("t", &id, false).unwrap();
+
+        assert_eq!(NoteStore::from(&store).get("t").unwrap().id, id);
+        match DatasetStore::from(&store).get("t").unwrap_err() {
+            StoreError::WrongType {
+                id: wrong,
+                expected,
+                actual,
+            } => {
+                assert_eq!(wrong, id);
+                assert_eq!(expected, "gage::dataset");
+                assert_eq!(actual, "gage::note");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
     fn an_unknown_objectish_is_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
-        match store.resolve_objectish("nothing").unwrap_err() {
+        match store.resolve_id("nothing").unwrap_err() {
             StoreError::ObjectNotFound(v) => assert_eq!(v, "nothing"),
             other => panic!("unexpected error: {other}"),
         }
