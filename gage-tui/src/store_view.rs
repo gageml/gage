@@ -20,7 +20,7 @@ use std::io;
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_store::object::{LinkFile, ObjectHeader, ObjectRef};
-use gage_store::{CommitMeta, EntryKind, Store, StoreError, TreeEntry};
+use gage_store::{CommitMeta, EntryKind, Store, StoreError, TagRef, TagStore, TreeEntry};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -100,11 +100,19 @@ enum Focus {
 
 /// A node of the left pane
 enum Node {
-    /// A root grouping objects by whether their tip is a tombstone
+    /// A root: tags, objects, or objects whose tip is a tombstone
     Group {
         label: &'static str,
-        /// Objects under the group
+        /// What one child is, for the group's summary line
+        noun: &'static str,
+        /// Children under the group
         count: usize,
+    },
+    /// One tag ref under the `Tags` group, with the header of the
+    /// commit it points at, or the error reading it
+    Tag {
+        tag: TagRef,
+        header: Result<ObjectHeader, String>,
     },
     /// One object ref under a group, with the type name read from its
     /// tip
@@ -173,12 +181,31 @@ impl ViewState {
         }
     }
 
-    /// Rebuild the tree from the ref list: an `Active` group and a
-    /// `Deleted` group, each expanded over its objects. Expansion
-    /// state is discarded; listings already read stay cached by SHA.
+    /// Rebuild the tree from the ref lists: a `Tags` group, an
+    /// `Objects` group, and a `Deleted` group, each expanded over its
+    /// children. Expansion state is discarded; listings already read
+    /// stay cached by SHA.
     fn reload(&mut self) {
         self.tree.clear();
         self.object_count = 0;
+        match TagStore::from(&self.store).list() {
+            Ok(tags) => {
+                let children = tags
+                    .into_iter()
+                    .map(|tag| {
+                        let header = self
+                            .store
+                            .read_header(&tag.commit_sha)
+                            .map_err(|e| e.to_string());
+                        (tag.ref_name.clone(), Node::Tag { tag, header }, false)
+                    })
+                    .collect();
+                self.add_group("Tags", "tag", children);
+            }
+            Err(e) => {
+                self.error = Some(format!("list tags: {e}"));
+            }
+        }
         match self.store.list_object_refs() {
             Ok(refs) => {
                 let mut objects: Vec<(ObjectRef, String, bool)> = refs
@@ -194,10 +221,10 @@ impl ViewState {
                     .collect();
                 objects.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id)));
                 self.object_count = objects.len();
-                let (deleted, active): (Vec<_>, Vec<_>) =
+                let (deleted, objects): (Vec<_>, Vec<_>) =
                     objects.into_iter().partition(|(_, _, deleted)| *deleted);
-                self.add_group("Active", active);
-                self.add_group("Deleted", deleted);
+                self.add_group("Objects", "object", object_children(objects));
+                self.add_group("Deleted", "deleted object", object_children(deleted));
             }
             Err(e) => {
                 self.error = Some(format!("list refs: {e}"));
@@ -208,8 +235,8 @@ impl ViewState {
     }
 
     /// Select the first visible object whose id starts with `prefix`,
-    /// in display order: active objects, then deleted. No match leaves
-    /// the selection alone and reports the miss in the footer.
+    /// in display order: objects, then deleted. No match leaves the
+    /// selection alone and reports the miss in the footer.
     fn select_object(&mut self, prefix: &str) {
         let keys = self.tree.visible_keys();
         let found = (0..keys.len()).find(|&idx| {
@@ -230,29 +257,23 @@ impl ViewState {
         }
     }
 
-    /// Add a group root expanded over `objects`. An empty group is a
+    /// Add a group root expanded over `children`. An empty group is a
     /// leaf.
-    fn add_group(&mut self, label: &'static str, objects: Vec<(ObjectRef, String, bool)>) {
-        let count = objects.len();
-        let node = self
-            .tree
-            .add_root(label.to_string(), Node::Group { label, count }, count > 0);
+    fn add_group(
+        &mut self,
+        label: &'static str,
+        noun: &'static str,
+        children: Vec<(String, Node, bool)>,
+    ) {
+        let count = children.len();
+        let node = self.tree.add_root(
+            label.to_string(),
+            Node::Group { label, noun, count },
+            count > 0,
+        );
         if count == 0 {
             return;
         }
-        let children = objects
-            .into_iter()
-            .map(|(object_ref, type_name, _)| {
-                (
-                    object_ref.ref_name.clone(),
-                    Node::Object {
-                        object_ref,
-                        type_name,
-                    },
-                    true,
-                )
-            })
-            .collect();
         self.tree.set_children(node, children);
     }
 
@@ -399,6 +420,24 @@ impl ViewState {
             Focus::Detail => Focus::Tree,
         };
     }
+}
+
+/// Object rows for a group, keyed by ref name and expandable into the
+/// object's commit tree
+fn object_children(objects: Vec<(ObjectRef, String, bool)>) -> Vec<(String, Node, bool)> {
+    objects
+        .into_iter()
+        .map(|(object_ref, type_name, _)| {
+            (
+                object_ref.ref_name.clone(),
+                Node::Object {
+                    object_ref,
+                    type_name,
+                },
+                true,
+            )
+        })
+        .collect()
 }
 
 /// Text when the bytes are valid UTF-8 with no NUL in the probe
@@ -551,6 +590,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             let mut spans = vec![Span::raw(format!("{indent}{glyph}"))];
             match node {
                 Node::Group { label, .. } => spans.push(Span::raw(*label)),
+                Node::Tag { tag, .. } => spans.push(Span::raw(tag.name.clone())),
                 Node::Object {
                     object_ref,
                     type_name,
@@ -603,7 +643,8 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
 
     enum Selected {
         None,
-        Group { label: &'static str, count: usize },
+        Group { noun: &'static str, count: usize },
+        Tag(Vec<Line<'static>>),
         Object { commit: String, ref_name: String },
         Tree(String),
         Blob { sha: String, name: String },
@@ -611,10 +652,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     }
     let selected = match state.selected_node() {
         None => Selected::None,
-        Some(Node::Group { label, count }) => Selected::Group {
-            label,
+        Some(Node::Group { noun, count, .. }) => Selected::Group {
+            noun,
             count: *count,
         },
+        Some(Node::Tag { tag, header }) => Selected::Tag(tag_lines(tag, header)),
         Some(Node::Object { object_ref, .. }) => Selected::Object {
             commit: object_ref.tip_sha.clone(),
             ref_name: object_ref.ref_name.clone(),
@@ -639,15 +681,18 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 inner,
             );
         }
-        Selected::Group { label, count } => {
-            let noun = if count == 1 { "object" } else { "objects" };
+        Selected::Group { noun, count } => {
+            let plural = if count == 1 { "" } else { "s" };
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    format!("{count} {} {noun}", label.to_ascii_lowercase()),
+                    format!("{count} {noun}{plural}"),
                     styles::Text::dim(),
                 )),
                 inner,
             );
+        }
+        Selected::Tag(lines) => {
+            frame.render_widget(Paragraph::new(lines), inner);
         }
         Selected::Object { commit, ref_name } => {
             let store = &state.store;
@@ -719,6 +764,27 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
             );
         }
     }
+}
+
+/// The detail pane for a tag: the ref and the type and id of the
+/// object it names, or the error reading the tagged commit
+fn tag_lines(tag: &TagRef, header: &Result<ObjectHeader, String>) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        kv("tag", tag.name.clone()),
+        kv("ref", tag.ref_name.clone()),
+        kv("commit", tag.commit_sha.clone()),
+    ];
+    match header {
+        Ok(header) => {
+            lines.push(kv(
+                "type",
+                format!("{} {}", header.object_type, header.version),
+            ));
+            lines.push(kv("id", header.id.clone()));
+        }
+        Err(e) => lines.push(err_line(format!("read header: {e}"))),
+    }
+    lines
 }
 
 /// The direct entries of a tree as a table: what git lists without
@@ -1155,14 +1221,22 @@ mod tests {
 
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("▼ Active"), "{text}");
+        assert!(text.contains("▼ Objects"), "{text}");
         assert!(text.contains("  Deleted"), "empty group is a leaf: {text}");
         assert!(
             text.contains(&format!("  ▶ note {}", short_uuid(&note_id))),
             "{text}"
         );
         assert!(!text.contains("attrs.json"), "nothing expanded yet: {text}");
-        assert!(text.contains("1 active object"), "group detail: {text}");
+        assert!(text.contains("0 tags"), "group detail: {text}");
+
+        // Select the Objects group: its summary counts the note
+        let keys = state.tree.visible_keys();
+        state.table.select_by(1, &keys);
+        state.selection_changed();
+        terminal.draw(|f| draw(f, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("1 object"), "group detail: {text}");
 
         // Expand the object: its commit tree appears, name-sorted
         let keys = state.tree.visible_keys();
@@ -1179,10 +1253,10 @@ mod tests {
             .tree
             .rows()
             .iter()
-            .skip(2)
+            .skip(3)
             .filter_map(|r| match state.tree.data(r.node)? {
                 Node::Entry(e) => Some(e.name.as_str()),
-                Node::Group { .. } | Node::Object { .. } => None,
+                Node::Group { .. } | Node::Tag { .. } | Node::Object { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -1215,12 +1289,42 @@ mod tests {
         assert!(text.contains("  \"author\": \"user:test\""), "{text}");
 
         // Collapse from a leaf moves to the parent; collapsing the
-        // parent hides the entries, leaving the two groups and the
+        // parent hides the entries, leaving the three groups and the
         // object
         state.collapse_selected();
-        assert_eq!(state.table.selected_index(), Some(1));
+        assert_eq!(state.table.selected_index(), Some(2));
         state.collapse_selected();
-        assert_eq!(state.tree.rows().len(), 3);
+        assert_eq!(state.tree.rows().len(), 4);
+    }
+
+    #[test]
+    fn tags_group_lists_names_and_detail_shows_the_tagged_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, ids) = store_with_notes(&tmp.path().join("store.git"), &["a"]);
+        TagStore::from(&store)
+            .add("garrett/baseline", &ids[0], false)
+            .unwrap();
+
+        let mut state = ViewState::new(store);
+        state.reload();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let tags_row = text.find("▼ Tags").unwrap();
+        let tag_row = text.find("garrett/baseline").unwrap();
+        let objects_row = text.find("▼ Objects").unwrap();
+        assert!(tags_row < tag_row && tag_row < objects_row, "{text}");
+        assert!(text.contains("1 tag"), "group detail: {text}");
+
+        // Select the tag: the detail names the object's type and id
+        let keys = state.tree.visible_keys();
+        state.table.select_by(1, &keys);
+        state.selection_changed();
+        terminal.draw(|f| draw(f, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("refs/gage/tag/garrett/baseline"), "{text}");
+        assert!(text.contains("gage::note"), "{text}");
+        assert!(text.contains(&ids[0]), "{text}");
     }
 
     #[test]
@@ -1258,19 +1362,19 @@ mod tests {
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
         assert!(text.contains("Objects (2)"), "{text}");
-        let active_row = text.find("▼ Active").unwrap();
+        let objects_row = text.find("▼ Objects").unwrap();
         let keep_row = text.find(&short_uuid(&keep).to_string()).unwrap();
         let deleted_row = text.find("▼ Deleted").unwrap();
         let gone_row = text.find(&short_uuid(&gone).to_string()).unwrap();
         assert!(
-            active_row < keep_row && keep_row < deleted_row && deleted_row < gone_row,
+            objects_row < keep_row && keep_row < deleted_row && deleted_row < gone_row,
             "{text}"
         );
 
         // Select the deleted object: the tombstone marker follows the
         // deleted timestamp on its own line
         let keys = state.tree.visible_keys();
-        state.table.select_by(3, &keys);
+        state.table.select_by(4, &keys);
         state.selection_changed();
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
@@ -1391,17 +1495,17 @@ mod tests {
 
         // Expand the session: the tree lists first, then the blobs
         let keys = state.tree.visible_keys();
-        state.table.select_by(1, &keys);
+        state.table.select_by(2, &keys);
         state.selection_changed();
         state.expand_selected();
         let names: Vec<&str> = state
             .tree
             .rows()
             .iter()
-            .skip(2)
+            .skip(3)
             .filter_map(|r| match state.tree.data(r.node)? {
                 Node::Entry(e) => Some(e.name.as_str()),
-                Node::Group { .. } | Node::Object { .. } => None,
+                Node::Group { .. } | Node::Tag { .. } | Node::Object { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -1498,7 +1602,7 @@ mod tests {
     fn selected_object_id(state: &ViewState) -> Option<&str> {
         match state.selected_node()? {
             Node::Object { object_ref, .. } => Some(object_ref.id.as_str()),
-            Node::Group { .. } | Node::Entry(_) => None,
+            Node::Group { .. } | Node::Tag { .. } | Node::Entry(_) => None,
         }
     }
 

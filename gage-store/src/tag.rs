@@ -42,7 +42,44 @@ pub struct TagAdded {
     pub previous_id: Option<String>,
 }
 
+/// One ref under `refs/gage/tag/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRef {
+    pub name: String,
+    /// Full ref name, e.g. `refs/gage/tag/<name>`.
+    pub ref_name: String,
+    /// The commit the tag points at.
+    pub commit_sha: String,
+}
+
 impl TagStore<'_> {
+    /// Every tag, name-sorted, with the commit each points at.
+    pub fn list(&self) -> Result<Vec<TagRef>, StoreError> {
+        let out = run(git_in(
+            self.store.path(),
+            [
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/gage/tag/",
+            ],
+        ))?;
+        let mut tags = Vec::new();
+        for line in out.lines() {
+            let (ref_name, sha) = line
+                .split_once(' ')
+                .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
+            let Some(name) = ref_name.strip_prefix("refs/gage/tag/") else {
+                continue;
+            };
+            tags.push(TagRef {
+                name: name.to_string(),
+                ref_name: ref_name.to_string(),
+                commit_sha: sha.to_string(),
+            });
+        }
+        Ok(tags)
+    }
+
     /// Point `refs/gage/tag/<name>` at the current commit of the object
     /// `objectish` names. A name that exists is
     /// [`StoreError::TagExists`] unless `force`, which moves it. A
@@ -175,6 +212,35 @@ mod tests {
         assert_eq!(
             store.rev_parse("refs/gage/tag/baseline").unwrap(),
             Some(tip)
+        );
+    }
+
+    #[test]
+    fn list_returns_every_tag_name_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        assert_eq!(tags.list().unwrap(), vec![]);
+
+        let a = note(&store, "a");
+        let b = note(&store, "b");
+        let added_b = tags.add("beta", &b, false).unwrap();
+        let added_a = tags.add("alpha/one", &a, false).unwrap();
+
+        assert_eq!(
+            tags.list().unwrap(),
+            vec![
+                TagRef {
+                    name: "alpha/one".to_string(),
+                    ref_name: "refs/gage/tag/alpha/one".to_string(),
+                    commit_sha: added_a.commit_sha,
+                },
+                TagRef {
+                    name: "beta".to_string(),
+                    ref_name: "refs/gage/tag/beta".to_string(),
+                    commit_sha: added_b.commit_sha,
+                },
+            ]
         );
     }
 

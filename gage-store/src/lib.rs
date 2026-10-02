@@ -98,4 +98,4 @@ pub use session::{
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::{INDEX_FILE, Store};
-pub use tag::{TagAdded, TagStore};
+pub use tag::{TagAdded, TagRef, TagStore};
