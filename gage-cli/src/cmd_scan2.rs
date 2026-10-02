@@ -130,8 +130,15 @@ pub struct Scan2RunArgs {
     #[arg(long, display_order = 13)]
     no_deps: bool,
 
+    /// Ignore prior work
+    ///
+    /// Every session is scanned in full regardless of earlier scans,
+    /// and no notes from earlier scans are carried forward.
+    #[arg(long, display_order = 14)]
+    invalidate: bool,
+
     /// Show available scanners and exit
-    #[arg(long, exclusive = true, display_order = 14)]
+    #[arg(long, exclusive = true, display_order = 15)]
     list_scanners: bool,
 }
 
@@ -490,6 +497,7 @@ async fn run_scan(args: Scan2RunArgs) {
         dataset: dataset_sha.as_deref(),
         jobs: args.jobs,
         driver: Arc::new(ClaudeDriver::new()),
+        invalidate: args.invalidate,
     };
     // Headless: task output and the scan's own lines go to the
     // terminal as they happen, unprefixed; records go to the scan

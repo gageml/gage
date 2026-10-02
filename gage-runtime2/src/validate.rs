@@ -12,6 +12,9 @@
 //! work key is `key` and whose target commit is in a session's chain. A commit that is
 //! not in the chain, such as a later commit of the same session, is
 //! never consulted.
+//!
+//! A scan run with `invalidate` set reports every session as wholly
+//! unseen and carries no notes; it still writes watermarks.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -121,6 +124,13 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
         Err(e) => return Ok(Err(e)),
     };
     let ctx = current()?;
+    if ctx.invalidate {
+        tracing::info!(
+            key,
+            "carry_forward_notes skipped: scan invalidates prior work"
+        );
+        return Ok(Ok(0));
+    }
     let members = members(&ctx, false).await?;
     if members.is_empty() {
         return Ok(Ok(0));
@@ -196,24 +206,15 @@ async fn do_unseen(q: UnseenQuery) -> Result<Result<Vec<Value>, Error>, VmError>
     if members.is_empty() {
         return Ok(Ok(Vec::new()));
     }
-    let sql = format!(
-        "SELECT oid, commit FROM scan_watermark \
-         WHERE kind = '{SESSIONS_KIND}' AND key = '{}' AND oid IN ({})",
-        sql_str(&key),
-        id_list(&members)
-    );
-    let batches = run(ctx.query_context().await?, &sql).await?;
-    let mut marks: HashMap<String, HashSet<String>> = HashMap::new();
-    for batch in &batches {
-        let oids = string_column(batch, 0);
-        let commits = string_column(batch, 1);
-        for i in 0..batch.num_rows() {
-            marks
-                .entry(oids.value(i).to_string())
-                .or_default()
-                .insert(commits.value(i).to_string());
-        }
-    }
+    let marks = if ctx.invalidate {
+        tracing::info!(
+            key,
+            "unseen ignores watermarks: scan invalidates prior work"
+        );
+        HashMap::new()
+    } else {
+        watermarks(&ctx, &key, &members).await?
+    };
     let store = ctx.store.lock().await;
     let mut out = Vec::with_capacity(members.len());
     for m in members {
@@ -247,6 +248,33 @@ async fn do_unseen(q: UnseenQuery) -> Result<Result<Vec<Value>, Error>, VmError>
         out.push(rune::to_value((m.session, unseen)).map_err(VmError::from)?);
     }
     Ok(Ok(out))
+}
+
+/// The watermarked commits under `key` per member session id.
+async fn watermarks(
+    ctx: &ScanContext,
+    key: &str,
+    members: &[Member],
+) -> Result<HashMap<String, HashSet<String>>, VmError> {
+    let sql = format!(
+        "SELECT oid, commit FROM scan_watermark \
+         WHERE kind = '{SESSIONS_KIND}' AND key = '{}' AND oid IN ({})",
+        sql_str(key),
+        id_list(members)
+    );
+    let batches = run(ctx.query_context().await?, &sql).await?;
+    let mut marks: HashMap<String, HashSet<String>> = HashMap::new();
+    for batch in &batches {
+        let oids = string_column(batch, 0);
+        let commits = string_column(batch, 1);
+        for i in 0..batch.num_rows() {
+            marks
+                .entry(oids.value(i).to_string())
+                .or_default()
+                .insert(commits.value(i).to_string());
+        }
+    }
+    Ok(marks)
 }
 
 /// Record that the task under `key` finished processing `session` at

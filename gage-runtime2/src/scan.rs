@@ -75,6 +75,10 @@ pub struct ScanContext {
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Where the runtime writes during the run
     pub paths: ScanDirPaths,
+    /// Ignore prior work: `unseen` reports every session in full and
+    /// `carry_forward_notes` links nothing. Watermarks are still
+    /// written, so the next scan resumes from this one.
+    pub invalidate: bool,
     query_store: Arc<Mutex<Store>>,
     query: Arc<OnceCell<(Arc<SessionScope>, SessionContext)>>,
     /// The MCP host serving scanner-defined tools to agents, started
@@ -119,6 +123,7 @@ impl ScanContext {
             driver,
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             paths,
+            invalidate: false,
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
             query: Arc::new(OnceCell::new()),
             mcp_host: Arc::new(OnceCell::new()),

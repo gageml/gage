@@ -324,6 +324,9 @@ pub struct ScanConfig<'a> {
     pub jobs: usize,
     /// The driver that runs the scan's agents
     pub driver: Arc<dyn Driver>,
+    /// Ignore prior work: every session is unseen and no notes are
+    /// carried forward. Watermarks are still written.
+    pub invalidate: bool,
 }
 
 /// What a finished scan wrote.
@@ -389,13 +392,14 @@ pub async fn scan(
         .collect();
     let scan_dir = ScanDir::create(config.scans_dir, &id, config.dataset, &scanner_plans)?;
     scan_dir.write_plan(&plan.to_json())?;
-    let scan_ctx = ScanContext::new(
+    let mut scan_ctx = ScanContext::new(
         id.clone(),
         dataset,
         store.path(),
         scan_dir.runtime_paths(),
         Arc::clone(&config.driver),
     )?;
+    scan_ctx.invalidate = config.invalidate;
     trace::install_panic_hook();
     let scope = LogScope {
         object_dir: scan_dir.object_dir(),
@@ -991,6 +995,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(store, &config, scanners, cancel, |e| events.push(e)).await;
         (outcome, events)
@@ -1325,6 +1330,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             driver: driver.clone(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -1374,6 +1380,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             driver: driver.clone(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -1442,6 +1449,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             driver: Arc::new(ScriptedDriver::new()),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -1508,6 +1516,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             driver,
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -2136,6 +2145,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -2227,6 +2237,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -2283,6 +2294,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -2420,6 +2432,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -2519,6 +2532,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -2697,6 +2711,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -2884,6 +2899,7 @@ mod tests {
                     dataset: Some(&dataset_sha),
                     jobs: 1,
                     driver: claude_driver(),
+                    invalidate: false,
                 };
                 let outcome = scan(
                     store,
@@ -3062,6 +3078,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -3128,6 +3145,7 @@ mod tests {
                     dataset: None,
                     jobs: 1,
                     driver: claude_driver(),
+                    invalidate: false,
                 };
                 let outcome = scan(
                     store,
@@ -3258,6 +3276,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -3376,6 +3395,16 @@ mod tests {
         compiled: &CompiledScanner,
         dataset_sha: &str,
     ) -> (ScanOutcome, Vec<String>) {
+        run_watermark_scan_with(tmp, store, compiled, dataset_sha, false).await
+    }
+
+    async fn run_watermark_scan_with(
+        tmp: &TempDir,
+        store: &Store,
+        compiled: &CompiledScanner,
+        dataset_sha: &str,
+        invalidate: bool,
+    ) -> (ScanOutcome, Vec<String>) {
         let mut events = Vec::new();
         let config = ScanConfig {
             scans_dir: &tmp.path().join("scans"),
@@ -3383,6 +3412,7 @@ mod tests {
             dataset: Some(dataset_sha),
             jobs: 1,
             driver: claude_driver(),
+            invalidate,
         };
         let outcome = scan(
             store,
@@ -3410,7 +3440,9 @@ mod tests {
     /// session finds the appended lines unseen and still carries the
     /// note written against the earlier commit; a scan of the
     /// earlier dataset commit again ignores the later scan's
-    /// watermark and note, which sit on a descendant commit.
+    /// watermark and note, which sit on a descendant commit; an
+    /// invalidating scan of the grown session finds the whole session
+    /// unseen, carries nothing, rewrites the note, and watermarks it.
     #[tokio::test]
     async fn watermarks_resume_grown_sessions_and_carry_tagged_notes() {
         let (tmp, store) = open_store();
@@ -3531,6 +3563,33 @@ mod tests {
             "the third scan's note targets a descendant commit and is not carried"
         );
 
+        let (fifth, printed) =
+            run_watermark_scan_with(&tmp, &store, &compiled, &dataset_sha_2, true).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 0".to_string(),
+                "unseen Some((1, 3))".to_string(),
+                args_lines[0].clone(),
+                args_lines[1].clone(),
+            ]
+        );
+        let fifth_record = scans.get(&fifth.id).unwrap();
+        assert_eq!(fifth_record.content.notes.len(), 2);
+        assert!(fifth_record.content.notes_carried.is_empty());
+        assert_eq!(fifth_record.content.watermarks[0].commit, member_sha_2);
+        let tagged_5 = fifth_record
+            .content
+            .notes
+            .iter()
+            .map(|sha| notes.at_commit(sha).unwrap())
+            .find(|n| n.name == "seen")
+            .expect("the invalidating scan rewrote the tagged note");
+        assert_eq!(
+            tagged_5.target.as_deref(),
+            Some(format!("session:{session_id}#1-3").as_str())
+        );
+
         let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
             Store::open(store.path()).unwrap(),
         ))))
@@ -3544,7 +3603,7 @@ mod tests {
             .await
             .unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(rows, 2, "the first and third scans hold watermarks");
+        assert_eq!(rows, 3, "the first, third, and fifth scans hold watermarks");
         let carried = ctx
             .sql(&format!(
                 "SELECT note_id FROM scan_note WHERE scan_id = '{}' AND carried",
@@ -3724,6 +3783,7 @@ mod tests {
             dataset: None,
             jobs: 2,
             driver: claude_driver(),
+            invalidate: false,
         };
         let outcome = scan(
             &store,
@@ -3872,6 +3932,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 2,
             driver: claude_driver(),
+            invalidate: false,
         };
         let mut events = Vec::new();
         let outcome = scan(
