@@ -375,17 +375,20 @@ pub async fn list(args: DatasetListArgs) {
     let show = args.limit.show_count(total);
     let sql = format!(
         "SELECT d.id, d.id_prefix, d.created, \
-         COALESCE(a.n, 0) AS attachments, COALESCE(m.n, 0) AS sessions \
+         COALESCE(a.n, 0) AS attachments, COALESCE(m.n, 0) AS sessions, \
+         arrow_cast(COALESCE(t.names, ''), 'Utf8') AS tags \
          FROM dataset d \
          LEFT JOIN (SELECT dataset_id, COUNT(*) AS n FROM dataset_attachment \
                     GROUP BY dataset_id) a ON a.dataset_id = d.id \
          LEFT JOIN (SELECT dataset_id, COUNT(*) AS n FROM dataset_session \
                     GROUP BY dataset_id) m ON m.dataset_id = d.id \
+         LEFT JOIN (SELECT id, string_agg(name, ', ' ORDER BY name) AS names FROM tag \
+                    GROUP BY id) t ON t.id = d.id \
          ORDER BY d.modified DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 
-    let header: Vec<String> = ["Id", "Sessions", "Attachments", "Created"]
+    let header: Vec<String> = ["Id", "Sessions", "Attachments", "Tags", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -396,11 +399,13 @@ pub async fn list(args: DatasetListArgs) {
         let createds = column::<TimestampMillisecondArray>(batch, 2);
         let attachments = column::<Int64Array>(batch, 3);
         let sessions = column::<Int64Array>(batch, 4);
+        let tags = column::<StringArray>(batch, 5);
         for i in 0..batch.num_rows() {
             rows.push(vec![
                 styled_id(short_uuid(ids.value(i)), prefixes.value(i), IdKind::Gage),
                 sessions.value(i).to_string(),
                 attachments.value(i).to_string(),
+                tags.value(i).to_string(),
                 format_elapsed_ms(createds.value(i)),
             ]);
         }
@@ -410,7 +415,12 @@ pub async fn list(args: DatasetListArgs) {
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(1..3), Alignment::right())
-        .modify(Columns::new(1..).not(Rows::first()), style::dim())
+        .modify(
+            Columns::one(3).not(Rows::first()),
+            style::tty(Color::FG_BRIGHT_CYAN),
+        )
+        .modify(Columns::new(1..3).not(Rows::first()), style::dim())
+        .modify(Columns::one(4).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
     args.limit.print_summary(shown, total, "dataset");

@@ -35,6 +35,8 @@ Tables:
   skipped, dataset); scan_session (scan_id, session_num, session_id);
   scan_note (scan_id, note_id, carried); scan_issue (scan_id, issue_id)
 - dataset (id, commit); dataset_session (dataset_id, session_num, session_id)
+- tag (name, id) - user-chosen names for objects of any type; `id` is the
+  tagged object
 - attachment (id, name, root, includes, excludes, file_count, size, created,
   modified)
 

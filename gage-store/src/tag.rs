@@ -59,6 +59,17 @@ pub struct TagAdded {
     pub previous_id: Option<String>,
 }
 
+/// A tag and the id of the object it names, read from the tagged
+/// commit alone. The object's current state is not consulted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagTarget {
+    pub name: String,
+    /// The named object's id.
+    pub id: String,
+    /// The commit the tag ref points at.
+    pub commit_sha: String,
+}
+
 /// One ref under `refs/gage/tag/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagRef {
@@ -161,6 +172,26 @@ impl TagStore<'_> {
             object_type: record.object_type,
             deleted: record.deleted,
         }))
+    }
+
+    /// Every tag in name order with the id of the object it names.
+    /// One blob read per tag, the `id` entry of the tagged commit's
+    /// tree; the object itself is not read. This is the reverse
+    /// lookup from objects to their tags, done as one scan.
+    pub fn targets(&self) -> Result<Vec<TagTarget>, StoreError> {
+        self.list()?
+            .into_iter()
+            .map(|tag| {
+                let bytes = self
+                    .store
+                    .read_blob_bytes(&format!("{}:id", tag.commit_sha))?;
+                Ok(TagTarget {
+                    name: tag.name,
+                    id: String::from_utf8_lossy(&bytes).trim().to_string(),
+                    commit_sha: tag.commit_sha,
+                })
+            })
+            .collect()
     }
 
     /// Every tag in name order, each with the current state of the
@@ -415,6 +446,34 @@ mod tests {
 
         assert_eq!(store.resolve_objectish(&prefix).unwrap().id, b);
         assert_eq!(store.resolve_id(&prefix).unwrap().0, a);
+    }
+
+    #[test]
+    fn targets_pair_each_tag_with_its_object_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        let a = note(&store, "a");
+        let b = note(&store, "b");
+        let added_b = tags.add("beta", &b, false).unwrap();
+        let added_a = tags.add("alpha", &a, false).unwrap();
+        NoteStore::from(&store).delete(&b).unwrap();
+
+        assert_eq!(
+            tags.targets().unwrap(),
+            vec![
+                TagTarget {
+                    name: "alpha".to_string(),
+                    id: a,
+                    commit_sha: added_a.commit_sha,
+                },
+                TagTarget {
+                    name: "beta".to_string(),
+                    id: b,
+                    commit_sha: added_b.commit_sha,
+                },
+            ]
+        );
     }
 
     #[test]

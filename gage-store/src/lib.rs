@@ -84,7 +84,7 @@ pub use note::{
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{
     LinkKind, StoredNoteTable, StoredSessionTable, attachment_table, dataset_table,
-    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table,
+    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table, tag_table,
 };
 pub use scan::{
     AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
@@ -98,4 +98,4 @@ pub use session::{
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::{INDEX_FILE, Store};
-pub use tag::{TagAdded, TagRecord, TagRef, TagStore};
+pub use tag::{TagAdded, TagRecord, TagRef, TagStore, TagTarget};

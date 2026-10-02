@@ -43,7 +43,7 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
 use gage_store::{
     LinkKind, Store, StoredNoteTable, StoredSessionTable, attachment_table, dataset_table,
-    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table,
+    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table, tag_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -122,6 +122,7 @@ impl ContextBuilder {
             ("scan", scan_table(Arc::clone(&store))),
             ("issue", issue_table(Arc::clone(&store))),
             ("issue_event", issue_event_table(Arc::clone(&store))),
+            ("tag", tag_table(Arc::clone(&store))),
         ];
         for (name, table) in &base {
             ctx.register_table(*name, Arc::clone(table))
@@ -273,7 +274,7 @@ mod tests {
     use gage_registry::driver::DriverRegistry;
     use gage_store::{
         DatasetStore, IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue,
-        SessionSpec, SessionStore, StatusReason, Store,
+        SessionSpec, SessionStore, StatusReason, Store, TagStore,
     };
     use tempfile::TempDir;
 
@@ -569,5 +570,45 @@ mod tests {
         .await;
         assert!(tables.is_empty(), "{tables:?}");
         assert!(user.sql("SELECT commit FROM dataset").await.is_err());
+    }
+
+    /// `tag` pairs each tag name with the id of the object it names,
+    /// aggregates per object, and hides the tagged commit from a
+    /// user-facing context.
+    #[tokio::test]
+    async fn tag_table_names_objects_and_aggregates_per_object() {
+        let (_tmp, store) = open_store();
+        let dataset_id = {
+            let guard = store.lock().unwrap();
+            let datasets = DatasetStore::from(&*guard);
+            let id = datasets.create().unwrap();
+            let other = datasets.create().unwrap();
+            let tags = TagStore::from(&*guard);
+            tags.add("zeta", &id, false).unwrap();
+            tags.add("alpha", &id, false).unwrap();
+            tags.add("other", &other, false).unwrap();
+            id
+        };
+
+        let user = ContextBuilder::new(Some(store))
+            .skip_system_cols()
+            .build()
+            .await;
+        assert_eq!(
+            strings(
+                &user,
+                &format!(
+                    "SELECT arrow_cast(string_agg(name, ', ' ORDER BY name), 'Utf8') \
+                     FROM tag WHERE id = '{dataset_id}' GROUP BY id"
+                )
+            )
+            .await,
+            ["alpha, zeta"]
+        );
+        assert_eq!(
+            strings(&user, "SELECT name FROM tag ORDER BY name").await,
+            ["alpha", "other", "zeta"]
+        );
+        assert!(user.sql("SELECT commit FROM tag").await.is_err());
     }
 }
