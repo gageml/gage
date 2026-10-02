@@ -1,4 +1,5 @@
 use gage::{
+    AgentRunner,
     Input,
     Progress,
     Template,
@@ -10,7 +11,6 @@ use gage::{
     tools::Query,
     write_note,
 };
-// use gage::AgentRunner;
 
 pub const SCANNER = #{
     name: "general-2",
@@ -34,44 +34,55 @@ pub async fn review() {
     let t = Template::new(include_str!("prompt.md.j2"))?;
 
     carry_forward_notes(REVIEW_KEY).await?;
-    let sessions = unseen_sessions().await?;
 
+    let sessions = unseen_sessions().await?;
     let progress = Progress::new(sessions.len());
 
-    // FUTURE: AgentRunner
-    // let runner = AgentRunner::new();
+    let runner = AgentRunner::new();
+
+    // Add an agent for each non-skipped session
     for (s, start, end) in sessions {
         if let Some(reason) = skip_session(s).await? {
-            log::info!("Skipping session {}: {}", s.id, reason);
+            log::info!("skip session {}: {}", s.id, reason);
             watermark(s, REVIEW_KEY).await?;
             progress.tick();
             continue;
         }
-        let prompt = t.render(#{ session_id: s.id })?;
 
-        let agent = call_agent(prompt)
-            .name("general-finding")
-            .tool(finding_tool())
-            .tool(Query::with_session_range(s, start, end))
-            .model("medium")
-            .await?;
+        let session_id = s.id;
+        let prompt = t.render(#{ session_id })?;
 
-        agent.wait().await?;
-
-        watermark(s, REVIEW_KEY).await?;
-        progress.tick();
-
-        // runner.add(
-        // call_agent(prompt)
-        //     .name("general-finding")
-        //     .tool(finding_tool())
-        //     .tool(Tool::mcp("gage::Query"))
-        //     .gage_tool(Query::new().sessions([s]).lines(start, end))
-        //     .model("medium"),
-        // #{ session: s },
-        // );
+        runner.add(
+            call_agent(prompt)
+                .name("general-finding")
+                .tool(finding_tool())
+                .tool(Query::with_session_range(s, start, end))
+                .model("medium"),
+            #{ session_id },
+        );
     }
-    // collect_results(runner, progress).await
+
+    // Collect agent results
+    let results = runner.start();
+    while let Some(next) = results.next().await {
+        match next {
+            Ok((result, #{ session_id })) => {
+                log::info!(
+                    "agent result: {:?}",
+                    #{
+                        session: session_id,
+                        result: result.text,
+                        metadata: result.as_metadata(),
+                    },
+                );
+                watermark(session_id, REVIEW_KEY).await?;
+            }
+            Err(err) => {
+                log::error!("agent error: {err:?}");
+            }
+        }
+        progress.tick();
+    }
 }
 
 async fn unseen_sessions() {
@@ -104,24 +115,6 @@ async fn skip_session(s) {
     }
     Ok(Some(format!("text len {text_len} < min {SESSION_MIN_TEXT_LEN}")))
 }
-
-// async fn collect_results(runner, progress) {
-//     // FUTURE: AgentRunner results
-//     let results = runner.start();
-//     while let Some(item) = results.next().await {
-//         let (result, #{ session }) = item?;
-//         log::info!(
-//             "findings: {:?}",
-//             #{
-//                 session: session.id,
-//                 result: result.text,
-//                 metadata: result.as_metadata(),
-//             },
-//         );
-//         watermark(session, REVIEW_KEY).await?;
-//         progress.tick();
-//     }
-// }
 
 fn finding_tool() {
     Tool::new("Finding", write_finding)

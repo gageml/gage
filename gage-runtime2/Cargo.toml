@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 datafusion = { workspace = true }
+futures = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-mcp2 = { path = "../gage-mcp2" }
 gage-query2 = { path = "../gage-query2" }

@@ -16,14 +16,24 @@
 //! `session+task:<scan id>/<scanner>:<task>/<native id>`, writes the
 //! agent's record into the scan directory under the task, and has the
 //! driver remove the run's working files.
+//!
+//! `AgentRunner` runs several one-shot calls concurrently. `add(call,
+//! ctx)` queues a call with a context value, `start()` begins every
+//! queued call, and `next().await` on the result yields each
+//! `(AgentResult, ctx)` pair in completion order, then `None`. The
+//! calls run inline on the task that polls `next`.
 
 use std::collections::VecDeque;
 use std::fs;
+use std::future::Future;
 use std::io::{self, Write};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use gage_mcp2::{ServiceHandle, build_mcp_service};
 use gage_runtime::error::{AgentError, Error};
 use gage_session::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
@@ -63,6 +73,13 @@ pub(crate) fn module() -> Result<Module, ContextError> {
     m.function_meta(send_now)?;
     m.function_meta(stop)?;
     m.function_meta(kill)?;
+
+    m.ty::<AgentRunner>()?;
+    m.function_meta(AgentRunner::new)?;
+    m.function_meta(runner_add)?;
+    m.function_meta(runner_start)?;
+    m.ty::<AgentRunnerResults>()?;
+    m.function_meta(runner_next)?;
 
     m.ty::<AgentResult>()?;
     m.function_meta(AgentResult::debug)?;
@@ -275,25 +292,25 @@ async fn poll(this: Mut<Agent>) -> Result<Result<Event, Error>, VmError> {
 /// again.
 #[rune::function(instance)]
 async fn wait(this: Mut<Agent>) -> Result<Result<AgentResult, Error>, VmError> {
-    let inner = Arc::clone(&this.inner);
-    Ok(async {
-        loop {
-            {
-                let g = inner.lock().unwrap();
-                if g.stop_seen && g.event_buf.is_empty() {
-                    break;
-                }
+    Ok(wait_inner(Arc::clone(&this.inner)).await)
+}
+
+async fn wait_inner(inner: Inner) -> Result<AgentResult, Error> {
+    loop {
+        {
+            let g = inner.lock().unwrap();
+            if g.stop_seen && g.event_buf.is_empty() {
+                break;
             }
-            do_poll(Arc::clone(&inner)).await?;
         }
-        inner
-            .lock()
-            .unwrap()
-            .final_result
-            .clone()
-            .ok_or_else(|| Error::agent("agent.wait: result missing after Stop"))
+        do_poll(Arc::clone(&inner)).await?;
     }
-    .await)
+    inner
+        .lock()
+        .unwrap()
+        .final_result
+        .clone()
+        .ok_or_else(|| Error::agent("agent.wait: result missing after Stop"))
 }
 
 async fn do_poll(inner: Inner) -> Result<Event, Error> {
@@ -525,6 +542,73 @@ async fn kill(this: Mut<Agent>, grace_secs: i64) -> Result<Result<(), Error>, Vm
         res.map_err(|e| Error::agent(format!("agent.kill: {e}")))
     }
     .await)
+}
+
+/// Queued one-shot calls, each with a context value handed back with
+/// its result. The runner imposes no concurrency limit of its own.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct AgentRunner {
+    #[rune(skip)]
+    queue: Vec<(CallAgent, Value)>,
+}
+
+impl AgentRunner {
+    #[rune::function(path = Self::new)]
+    fn new() -> Self {
+        AgentRunner { queue: Vec::new() }
+    }
+}
+
+/// Queue `call`. `ctx` is any value; `next` returns it with the
+/// call's result.
+#[rune::function(instance, path = add)]
+fn runner_add(mut this: Mut<AgentRunner>, call: CallAgent, ctx: Value) {
+    this.queue.push((call, ctx));
+}
+
+/// Start every queued call. The calls run as `next` is polled.
+#[rune::function(instance, path = start)]
+fn runner_start(this: AgentRunner) -> AgentRunnerResults {
+    let futures = FuturesUnordered::new();
+    for (call, ctx) in this.queue {
+        let fut: RunFuture = Box::pin(async move {
+            let result = call_and_wait(call).await;
+            if let Err(e) = &result {
+                tracing::warn!(error = %e, "AgentRunner: agent run failed");
+            }
+            result.map(|r| (r, ctx))
+        });
+        futures.push(fut);
+    }
+    AgentRunnerResults { futures }
+}
+
+/// Start `c` and drive it to its result, the one-shot form of
+/// `call_agent(p).await?.wait().await?`.
+async fn call_and_wait(c: CallAgent) -> Result<AgentResult, Error> {
+    let agent = start(c).await?;
+    wait_inner(agent.inner).await
+}
+
+type RunFuture = Pin<Box<dyn Future<Output = Result<(AgentResult, Value), Error>>>>;
+
+/// The value of `AgentRunner::start`. The runs in flight, polled
+/// together by `next`.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct AgentRunnerResults {
+    #[rune(skip)]
+    futures: FuturesUnordered<RunFuture>,
+}
+
+/// The next completed run as `(result, ctx)`, or `None` once every
+/// queued run has completed
+#[rune::function(instance, path = next)]
+async fn runner_next(
+    mut this: Mut<AgentRunnerResults>,
+) -> Option<Result<(AgentResult, Value), Error>> {
+    this.futures.next().await
 }
 
 /// What the agent produced, once it has ended.

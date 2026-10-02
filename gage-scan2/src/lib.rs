@@ -1148,11 +1148,15 @@ mod tests {
 
     struct ScriptedAgent {
         events: std::collections::VecDeque<AgentEvent>,
+        /// The id of the native session the transcript reports
+        native_id: String,
         project: Option<String>,
         cleaned_up: Arc<std::sync::atomic::AtomicBool>,
     }
 
     struct ScriptedNative {
+        id: String,
+        source: String,
         project: Option<String>,
     }
 
@@ -1185,13 +1189,13 @@ mod tests {
 
     impl NativeSession for ScriptedNative {
         fn id(&self) -> &str {
-            "native-1"
+            &self.id
         }
         fn session_type(&self) -> &str {
             "scripted"
         }
         fn source(&self) -> &str {
-            "scripted:native-1"
+            &self.source
         }
         fn attrs(&self) -> &dyn SessionAttrs {
             self
@@ -1224,6 +1228,8 @@ mod tests {
         }
         fn transcript(&mut self) -> Result<Option<Box<dyn NativeSession + Send>>, DriverError> {
             Ok(Some(Box::new(ScriptedNative {
+                id: self.native_id.clone(),
+                source: format!("scripted:{}", self.native_id),
                 project: self.project.clone(),
             })))
         }
@@ -1289,6 +1295,73 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                native_id: "native-1".into(),
+                project: spec.project,
+                cleaned_up: Arc::clone(&self.cleaned_up),
+            }))
+        }
+    }
+
+    /// A driver whose agent answers with its prompt and whose
+    /// transcript's native id is `native-<prompt>`, so several agents
+    /// of one task store distinct sessions.
+    struct EchoDriver {
+        cleaned_up: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Driver for EchoDriver {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        fn version(&self) -> &'static str {
+            "0.1"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            &["scripted"]
+        }
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("open_source not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            use std::io::Write as _;
+            let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
+            w.write_all(b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
+                .map_err(DriverError::Io)?;
+            Ok("scripted 1".to_string())
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used".into()))
+        }
+        fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+            let native_id = format!("native-{}", spec.prompt);
+            let outcome = AgentOutcome {
+                text: spec.prompt.clone(),
+                stop_reason: "end_turn".into(),
+                turns: 1,
+                session_id: native_id.clone(),
+                raw: String::new(),
+                ..AgentOutcome::default()
+            };
+            Ok(Box::new(ScriptedAgent {
+                events: [
+                    AgentEvent::Assistant(spec.prompt),
+                    AgentEvent::TurnEnd {
+                        outcome: Box::new(outcome),
+                        idle: true,
+                    },
+                ]
+                .into_iter()
+                .collect(),
+                native_id,
                 project: spec.project,
                 cleaned_up: Arc::clone(&self.cleaned_up),
             }))
@@ -1595,6 +1668,98 @@ mod tests {
                 .contains(&session.commit_sha),
             "the agent session is a parent of the scan commit"
         );
+    }
+
+    /// `AgentRunner` runs every queued call and `next` yields each
+    /// result with the context value it was queued with. The context
+    /// value stays readable by the caller after `add`. Every run's
+    /// transcript is stored and recorded on the task.
+    #[tokio::test]
+    async fn agent_runner_yields_each_result_with_its_context() {
+        use gage_store::{SessionStore, session_object_id};
+
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::{AgentRunner, call_agent};
+
+            pub const SCANNER = #{
+                name: "runner",
+                description: "Runs agents through a runner",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let runner = AgentRunner::new();
+                let ctx = #{ session: "c" };
+                runner.add(call_agent("a").name("agent-a"), #{ session: "a" });
+                runner.add(call_agent("b").name("agent-b"), #{ session: "b" });
+                runner.add(call_agent("c").name("agent-c"), ctx);
+                println!("ctx {}", ctx.session);
+                let results = runner.start();
+                let seen = #{};
+                while let Some(item) = results.next().await {
+                    let (result, #{ session }) = item?;
+                    seen[session] = format!("{}:{}", result.text, result.stop_reason);
+                }
+                println!("{} {} {}", seen.a, seen.b, seen.c);
+                println!("{:?}", results.next().await);
+            }
+            "#,
+        );
+        let driver = Arc::new(EchoDriver {
+            cleaned_up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            driver,
+            invalidate: false,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println("ctx c".into()),
+                &Output::Println("a:end_turn b:end_turn c:end_turn".into()),
+                &Output::Println("None".into()),
+            ]
+        );
+
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        let task = &record.content.tasks[0];
+        let mut agent_ids: Vec<_> = task.agents.iter().map(|a| a.id.clone()).collect();
+        agent_ids.sort();
+        let mut expected_ids =
+            ["a", "b", "c"].map(|p| session_object_id("scripted", &format!("native-{p}")));
+        expected_ids.sort();
+        assert_eq!(agent_ids, expected_ids);
+        assert_eq!(task.agent_sessions.len(), 3);
+        for p in ["a", "b", "c"] {
+            let session = SessionStore::from(&store)
+                .get(&session_object_id("scripted", &format!("native-{p}")))
+                .unwrap();
+            assert_eq!(
+                session.attrs.native_source,
+                format!("session+task:{}/runner:main/native-{p}", outcome.id)
+            );
+            assert_eq!(
+                session.attrs.project.as_deref(),
+                Some(format!("agent-{p}").as_str())
+            );
+        }
     }
 
     const PARAMS: &str = r#"
