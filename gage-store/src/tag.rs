@@ -150,6 +150,28 @@ impl TagStore<'_> {
         })
     }
 
+    /// Remove `refs/gage/tag/<name>`. The object the tag named is not
+    /// touched. A name no tag has is [`StoreError::TagNotFound`].
+    /// Returns the ref as it was.
+    pub fn delete(&self, name: &str) -> Result<TagRef, StoreError> {
+        let ref_name = tag_ref(name);
+        let sha = self
+            .store
+            .rev_parse(&ref_name)?
+            .ok_or_else(|| StoreError::TagNotFound(name.to_string()))?;
+        // The expected-old-value argument makes a concurrent move of
+        // the tag fail the delete rather than be silently discarded
+        run(git_in(
+            self.store.path(),
+            ["update-ref", "-d", &ref_name, &sha],
+        ))?;
+        Ok(TagRef {
+            name: name.to_string(),
+            ref_name,
+            commit_sha: sha,
+        })
+    }
+
     /// The object a tag names, or `None` when no tag has the name.
     /// The match is the object's current state, which may be a
     /// tombstone; the tag is then dangling.
@@ -446,6 +468,31 @@ mod tests {
 
         assert_eq!(store.resolve_objectish(&prefix).unwrap().id, b);
         assert_eq!(store.resolve_id(&prefix).unwrap().0, a);
+    }
+
+    #[test]
+    fn delete_removes_the_ref_and_leaves_the_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        let id = note(&store, "v1");
+        let added = tags.add("t", &id, false).unwrap();
+        tags.add("keep", &id, false).unwrap();
+
+        let deleted = tags.delete("t").unwrap();
+
+        assert_eq!(deleted.name, "t");
+        assert_eq!(deleted.ref_name, "refs/gage/tag/t");
+        assert_eq!(deleted.commit_sha, added.commit_sha);
+        assert_eq!(store.rev_parse("refs/gage/tag/t").unwrap(), None);
+        assert_eq!(tags.resolve("t").unwrap(), None);
+        assert_eq!(tags.resolve("keep").unwrap().unwrap().id, id);
+        assert!(!store.resolve_id(&id).unwrap().0.is_empty());
+
+        match tags.delete("t").unwrap_err() {
+            StoreError::TagNotFound(name) => assert_eq!(name, "t"),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! argument as an object-ish: a tag name, an id, or a unique prefix.
 
 use clap::{Args, Subcommand};
+use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_store::{Store, TagStore};
@@ -15,6 +16,7 @@ use tabled::{
     },
 };
 
+use crate::dialog::{self, DialogError};
 use crate::human::format_elapsed_ms;
 use crate::style;
 
@@ -28,6 +30,11 @@ pub enum TagCommand {
 
     /// List tags
     List(TagListArgs),
+
+    /// Delete tags
+    ///
+    /// Removes the tags only. The objects they named are not changed.
+    Delete(TagDeleteArgs),
 }
 
 #[derive(Args)]
@@ -60,6 +67,17 @@ pub struct TagListArgs {
 
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
+}
+
+#[derive(Args)]
+pub struct TagDeleteArgs {
+    /// Tag names
+    #[arg(required = true)]
+    names: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 pub fn add(args: TagAddArgs) {
@@ -162,6 +180,68 @@ pub fn list(args: TagListArgs) {
     println!("{table}");
 
     args.limit.print_summary(shown, total, "tag");
+}
+
+pub fn delete(args: TagDeleteArgs) {
+    let store = open_store("gage tag delete");
+    let tags = TagStore::from(&store);
+
+    // Resolve every argument before deleting anything, so one bad
+    // argument leaves the store untouched
+    let mut lines: Vec<String> = Vec::with_capacity(args.names.len());
+    let mut errors = 0;
+    for name in &args.names {
+        match tags.resolve(name) {
+            Ok(Some(found)) => {
+                let type_name = found
+                    .object_type
+                    .strip_prefix("gage::")
+                    .unwrap_or(&found.object_type);
+                let state = if found.deleted { " (deleted)" } else { "" };
+                lines.push(format!(
+                    "{name} -> {type_name} {}{state}",
+                    short_uuid(&found.id)
+                ));
+            }
+            Ok(None) => {
+                eprintln!("gage tag delete: tag not found: {name}");
+                errors += 1;
+            }
+            Err(e) => {
+                eprintln!("gage tag delete: {name}: {e}");
+                errors += 1;
+            }
+        }
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+
+    let count = args.names.len();
+    dialog::run("Delete tags", || {
+        cli::log::remark(lines.join("\n"))?;
+
+        if !args.yes {
+            let plural = if count == 1 { "tag" } else { "tags" };
+            let prompt = format!("Delete {count} {plural}? (tagged objects are unaffected)");
+            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        let mut deleted = 0;
+        for name in &args.names {
+            if let Err(e) = tags.delete(name) {
+                eprintln!("warning: failed to delete {name}: {e}");
+            } else {
+                deleted += 1;
+            }
+        }
+
+        let plural = if deleted == 1 { "tag" } else { "tags" };
+        Ok(format!("Deleted {deleted} {plural}").into())
+    });
 }
 
 /// Open the default store, or print `command: <error>` and exit

@@ -75,6 +75,8 @@ pub enum StoreError {
     TagName(String),
     /// A tag with the name exists and names the given object
     TagExists { name: String, id: String },
+    /// No tag has the given name
+    TagNotFound(String),
 }
 
 impl fmt::Display for StoreError {
@@ -172,6 +174,7 @@ impl fmt::Display for StoreError {
                     "tag {name} exists and names {id} (use --force to move it)"
                 )
             }
+            StoreError::TagNotFound(name) => write!(f, "tag not found: {name}"),
         }
     }
 }
@@ -207,7 +210,8 @@ impl std::error::Error for StoreError {
             | StoreError::IssueStatusUnchanged { .. }
             | StoreError::AttachmentInput(_)
             | StoreError::TagName(_)
-            | StoreError::TagExists { .. } => None,
+            | StoreError::TagExists { .. }
+            | StoreError::TagNotFound(_) => None,
         }
     }
 }
