@@ -7,7 +7,7 @@ use gage_core::config::{ByteSize, Config};
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
-use gage_store::{DatasetStore, SessionSpec, Store};
+use gage_store::{DatasetStore, SessionSpec, Store, TagStore};
 use tabled::{
     Table,
     settings::{
@@ -444,6 +444,7 @@ pub fn show(args: DatasetShowArgs) {
     }
     let sessions = or_exit(datasets.sessions(&record.id));
     let attachments = or_exit(datasets.attachments(&record.id));
+    let tags = or_exit(TagStore::from(&store).targets());
     let header = or_exit(store.read_header(&record.commit_sha));
     let iso = |ms: Option<i64>| ms.map(ms_to_iso8601).unwrap_or_default();
 
@@ -457,10 +458,17 @@ pub fn show(args: DatasetShowArgs) {
         .map(|a| format!("{} {}", a.id, a.attrs.name))
         .collect::<Vec<_>>()
         .join("\n");
+    let tags_cell = tags
+        .iter()
+        .filter(|t| t.id == record.id)
+        .map(|t| t.name.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
     let rows = [
         ("id", record.id.clone()),
         ("sessions", sessions_cell),
         ("attachments", attachments_cell),
+        ("tags", tags_cell),
         ("created", iso(Some(record.created_ms))),
         ("modified", iso(header.modified_ms)),
     ];
