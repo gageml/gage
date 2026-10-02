@@ -576,10 +576,12 @@ fn render_input_schema(inputs: &[Input]) -> JsonObject {
 
 /// The callback the MCP service runs for a call of `tool`: convert the
 /// arguments, call the handler under the scan context and output
-/// sink, and classify what it returned. A handler that fails with a
-/// VM error is a fault; the rendered error is logged to the task's
-/// sink, since the service calls the handler from the host's server
-/// tasks, outside the scan's own record scope.
+/// sink, and classify what it returned. Arguments that violate the
+/// declared inputs are an error result the model reads; the handler
+/// is not called. A handler that fails with a VM error is a fault;
+/// the rendered error is logged to the task's sink, since the service
+/// calls the handler from the host's server tasks, outside the scan's
+/// own record scope.
 fn callback(
     tool: &ScannerTool,
     handler: Arc<SyncFunction>,
@@ -589,20 +591,7 @@ fn callback(
     let mut ctx = ctx.clone();
     ctx.params = None;
     let sink = sink.cloned();
-    let float_inputs: Vec<String> = tool
-        .inputs
-        .iter()
-        .filter(|i| {
-            matches!(
-                i.kind,
-                InputKind::Simple {
-                    ty: SimpleType::Number,
-                    ..
-                }
-            )
-        })
-        .map(|i| i.name.clone())
-        .collect();
+    let declared = DeclaredInputs::new(&tool.inputs);
     let requires_meta = tool.requires_meta;
     let tool_name = tool.name.clone();
     Arc::new(move |args, meta| {
@@ -613,8 +602,13 @@ fn callback(
         let log_scanner = scanner.clone();
         let log_sources = ctx.sources.clone();
         let tool_name = tool_name.clone();
-        let inputs = InputsArg(coerce_floats(args, &float_inputs));
+        let args = declared.check(args);
         Box::pin(async move {
+            let args = match args {
+                Ok(args) => args,
+                Err(message) => return CustomToolOutcome::Error(message),
+            };
+            let inputs = InputsArg(args);
             let call = async move {
                 if requires_meta {
                     let meta = ToolMeta::new(meta, scanner);
@@ -653,19 +647,91 @@ fn callback(
     })
 }
 
-/// A whole number sent for a `number` input becomes a float, so the
-/// handler sees the declared type
-fn coerce_floats(mut args: JsonValue, names: &[String]) -> JsonValue {
-    if let JsonValue::Object(map) = &mut args {
-        for name in names {
+/// The names a tool declares, for checking a call's arguments against
+/// the schema the tool advertised
+struct DeclaredInputs {
+    names: Vec<String>,
+    required: Vec<String>,
+    floats: Vec<String>,
+}
+
+impl DeclaredInputs {
+    fn new(inputs: &[Input]) -> Self {
+        let is_float = |i: &Input| {
+            matches!(
+                i.kind,
+                InputKind::Simple {
+                    ty: SimpleType::Number,
+                    ..
+                }
+            )
+        };
+        DeclaredInputs {
+            names: inputs.iter().map(|i| i.name.clone()).collect(),
+            required: inputs
+                .iter()
+                .filter(|i| i.required)
+                .map(|i| i.name.clone())
+                .collect(),
+            floats: inputs
+                .iter()
+                .filter(|i| is_float(i))
+                .map(|i| i.name.clone())
+                .collect(),
+        }
+    }
+
+    /// The arguments as the handler receives them, or the message for
+    /// the model when a required input is missing or a key is not
+    /// declared. A whole number sent for a `number` input becomes a
+    /// float, so the handler sees the declared type.
+    fn check(&self, args: JsonValue) -> Result<JsonValue, String> {
+        let mut map = match args {
+            JsonValue::Object(map) => map,
+            _ => JsonMap::new(),
+        };
+        let missing: Vec<&str> = self
+            .required
+            .iter()
+            .filter(|name| !map.contains_key(name.as_str()))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "missing required {}: {}",
+                plural("input", missing.len()),
+                missing.join(", ")
+            ));
+        }
+        let undeclared: Vec<&str> = map
+            .keys()
+            .filter(|key| !self.names.contains(key))
+            .map(String::as_str)
+            .collect();
+        if !undeclared.is_empty() {
+            return Err(format!(
+                "undeclared {}: {}",
+                plural("input", undeclared.len()),
+                undeclared.join(", ")
+            ));
+        }
+        for name in &self.floats {
             if let Some(JsonValue::Number(n)) = map.get(name)
                 && let Some(i) = n.as_i64()
             {
                 map.insert(name.clone(), JsonValue::from(i as f64));
             }
         }
+        Ok(JsonValue::Object(map))
     }
-    args
+}
+
+fn plural(noun: &str, count: usize) -> String {
+    if count == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
+    }
 }
 
 /// The handler's first argument: the call's arguments as a Rune
@@ -979,10 +1045,11 @@ mod tests {
         let defs = defs(
             &tmp,
             r#"
-            use gage::Tool;
+            use gage::{Input, Tool};
             pub fn main() {
                 [Tool::new("text", |inputs| Ok("plain")),
-                 Tool::new("data", |inputs| Ok(#{ key: inputs.key, n: [1, 2] }))]
+                 Tool::new("data", |inputs| Ok(#{ key: inputs.key, n: [1, 2] }))
+                    .input(Input::string("key"))]
             }
             "#,
         )
@@ -1124,13 +1191,13 @@ mod tests {
         let (spec, _) = consume(
             &tools(
                 r#"
-                use gage::{Tool, write_note};
+                use gage::{Input, Tool, write_note};
                 async fn record(inputs) {
                     println!("recording {}", inputs.text);
                     let note = write_note("finding", inputs.text).await?;
                     Ok(note.author)
                 }
-                pub fn main() { [Tool::new("record", record)] }
+                pub fn main() { [Tool::new("record", record).input(Input::string("text"))] }
                 "#,
             ),
             &ctx,
@@ -1149,6 +1216,70 @@ mod tests {
             ("demo", "review")
         );
         assert_eq!(out.output, crate::Output::Println("recording hello".into()));
+    }
+
+    /// Arguments are checked against the declared inputs before the
+    /// handler runs: a missing required input or an undeclared key is
+    /// an error result naming the inputs, and the handler is not
+    /// called. Null arguments count as an empty object.
+    #[tokio::test]
+    async fn arguments_are_checked_against_the_declared_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let defs = defs(
+            &tmp,
+            r#"
+            use gage::{Input, Tool};
+            pub fn main() {
+                [Tool::new("finding", |inputs| Ok(inputs.description))
+                    .input(Input::string("description").required())
+                    .input(Input::string("session_id").required())
+                    .input(Input::string("lines"))]
+            }
+            "#,
+        )
+        .await
+        .unwrap();
+        let finding = &defs[0];
+        assert_eq!(
+            call(
+                finding,
+                json!({"session_id": "s</parameter>junk"}),
+                json!({})
+            )
+            .await,
+            CustomToolOutcome::Error("missing required input: description".into())
+        );
+        assert_eq!(
+            call(finding, JsonValue::Null, json!({})).await,
+            CustomToolOutcome::Error("missing required inputs: description, session_id".into())
+        );
+        assert_eq!(
+            call(
+                finding,
+                json!({"description": "d", "session_id": "s", "extra": 1, "more": 2}),
+                json!({})
+            )
+            .await,
+            CustomToolOutcome::Error("undeclared inputs: extra, more".into())
+        );
+        assert_eq!(
+            call(
+                finding,
+                json!({"description": "d", "session_id": "s", "lines": "1-3"}),
+                json!({})
+            )
+            .await,
+            CustomToolOutcome::Success(json!("d"))
+        );
+        assert_eq!(
+            call(
+                finding,
+                json!({"description": "d", "session_id": "s"}),
+                json!({})
+            )
+            .await,
+            CustomToolOutcome::Success(json!("d"))
+        );
     }
 
     /// A handler that fails with a VM error logs the rendered error
