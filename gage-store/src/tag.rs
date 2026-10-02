@@ -113,7 +113,7 @@ impl TagStore<'_> {
     /// [`StoreError::TagExists`] unless `force`, which moves it. A
     /// tombstoned object cannot be tagged.
     pub fn add(&self, name: &str, objectish: &str, force: bool) -> Result<TagAdded, StoreError> {
-        self.validate_name(name)?;
+        self.check_available(name, force)?;
         let found = self.store.resolve_in(objectish, None)?;
         if found.deleted {
             return Err(StoreError::ObjectDeleted(found.id));
@@ -242,6 +242,26 @@ impl TagStore<'_> {
             object_type: header.object_type,
             modified_ms: header.modified_ms,
         })
+    }
+
+    /// Check that [`add`] would accept `name`: the name is valid and
+    /// either no tag has it or `force` is set. A caller that creates
+    /// the object to be tagged in the same operation checks first, so
+    /// a bad tag leaves the store untouched.
+    ///
+    /// [`add`]: TagStore::add
+    pub fn check_available(&self, name: &str, force: bool) -> Result<(), StoreError> {
+        self.validate_name(name)?;
+        if force {
+            return Ok(());
+        }
+        match self.store.rev_parse(&tag_ref(name))? {
+            Some(sha) => Err(StoreError::TagExists {
+                name: name.to_string(),
+                id: self.store.read_header(&sha)?.id,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Git's ref name rules apply to a tag name. `check-ref-format`
@@ -373,6 +393,29 @@ mod tests {
         assert_eq!(moved.id, b);
         assert_eq!(moved.previous_id, Some(a));
         assert_eq!(tags.resolve("t").unwrap().unwrap().id, b);
+    }
+
+    #[test]
+    fn check_available_reports_what_add_would_reject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        let id = note(&store, "v1");
+        tags.add("taken", &id, false).unwrap();
+
+        tags.check_available("free", false).unwrap();
+        tags.check_available("taken", true).unwrap();
+        match tags.check_available("taken", false).unwrap_err() {
+            StoreError::TagExists { name, id: holder } => {
+                assert_eq!(name, "taken");
+                assert_eq!(holder, id);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        match tags.check_available("a b", true).unwrap_err() {
+            StoreError::TagName(name) => assert_eq!(name, "a b"),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]

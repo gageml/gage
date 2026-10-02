@@ -169,10 +169,7 @@ impl fmt::Display for StoreError {
                  leading '-' or '.'; no trailing '/', '.', or '.lock')"
             ),
             StoreError::TagExists { name, id } => {
-                write!(
-                    f,
-                    "tag {name} exists and names {id} (use --force to move it)"
-                )
+                write!(f, "tag {name} exists and names {id}")
             }
             StoreError::TagNotFound(name) => write!(f, "tag not found: {name}"),
         }

@@ -8,7 +8,7 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
-use gage_store::{Store, TagStore};
+use gage_store::{Store, StoreError, TagStore};
 use tabled::{
     Table,
     settings::{
@@ -85,6 +85,10 @@ pub fn add(args: TagAddArgs) {
     let store = open_store("gage tag add");
     let added = match TagStore::from(&store).add(&args.name, &args.object, args.force) {
         Ok(added) => added,
+        Err(e @ StoreError::TagExists { .. }) => {
+            eprintln!("gage tag add: {e} (use --force to move it)");
+            std::process::exit(1);
+        }
         Err(e) => {
             eprintln!("gage tag add: {e}");
             std::process::exit(1);

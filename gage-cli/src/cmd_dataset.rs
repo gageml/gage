@@ -7,7 +7,7 @@ use gage_core::config::{ByteSize, Config};
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
-use gage_store::{DatasetStore, SessionSpec, Store, TagStore};
+use gage_store::{DatasetStore, SessionSpec, Store, StoreError, TagStore};
 use tabled::{
     Table,
     settings::{
@@ -64,6 +64,13 @@ pub struct DatasetAddArgs {
     #[arg(short, long, value_name = "SOURCE", display_order = 1)]
     pub source: Option<String>,
 
+    /// Tag the new dataset
+    ///
+    /// Follows git's ref naming rules. An existing tag is an error
+    /// unless --force-tag is given.
+    #[arg(short, long, value_name = "NAME", display_order = 2)]
+    pub tag: Option<String>,
+
     /// Maximum stored size per session
     ///
     /// Overrides the configured default. Accepts a byte count or a
@@ -77,6 +84,10 @@ pub struct DatasetAddArgs {
     /// Stores the session even when it exceeds the size limit.
     #[arg(long, display_order = 5)]
     pub force: bool,
+
+    /// Move the tag if it exists
+    #[arg(long, requires = "tag", display_order = 6)]
+    pub force_tag: bool,
 
     #[command(flatten)]
     pub select: SessionSelectArgs,
@@ -142,8 +153,40 @@ pub struct DatasetDeleteArgs {
 
 pub async fn add(args: DatasetAddArgs) {
     let store = open_store("gage dataset add");
+    let tags = TagStore::from(&store);
+    // A tag that cannot be added is reported before the dataset
+    // exists, so the failure leaves the store untouched
+    if let Some(name) = &args.tag {
+        match tags.check_available(name, args.force_tag) {
+            Ok(()) => {}
+            Err(e @ StoreError::TagExists { .. }) => {
+                eprintln!("gage dataset add: {e} (use --force-tag to move it)");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("gage dataset add: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let dataset_id = create_dataset("gage dataset add", &store);
     println!("Created dataset {}", short_uuid(&dataset_id));
+    if let Some(name) = &args.tag {
+        match tags.add(name, &dataset_id, args.force_tag) {
+            Ok(added) => match added.previous_id {
+                Some(previous) => println!(
+                    "Moved tag {name} from {} to dataset {}",
+                    short_uuid(&previous),
+                    short_uuid(&dataset_id)
+                ),
+                None => println!("Tagged dataset {} as {name}", short_uuid(&dataset_id)),
+            },
+            Err(e) => {
+                eprintln!("gage dataset add: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if args.select.is_empty() {
         return;
