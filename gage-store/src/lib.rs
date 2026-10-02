@@ -34,6 +34,8 @@
 //! - `note`, `issue`, `dataset`, `session`, `attachment`, `scan` --- object types: each supplies its
 //!   `attrs.json` shape, its content files, its decoder, and its typed
 //!   store.
+//! - [`tag`] --- tags: refs under `refs/gage/tag/` naming objects, and
+//!   object-ish resolution (tag name, id, or unique prefix).
 
 mod admin;
 mod attachment;
@@ -50,6 +52,7 @@ mod scan;
 mod session;
 mod sqlite_index;
 mod store;
+mod tag;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod url;
@@ -95,3 +98,4 @@ pub use session::{
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::{INDEX_FILE, Store};
+pub use tag::{TagAdded, TagStore};

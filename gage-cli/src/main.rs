@@ -43,6 +43,7 @@ mod cmd_session;
 mod cmd_status;
 mod cmd_store;
 mod cmd_sync;
+mod cmd_tag;
 mod cmd_test;
 mod dialog;
 mod human;
@@ -178,6 +179,14 @@ enum Command {
         command: cmd_note::NoteCommand,
     },
 
+    /// Manage tags
+    ///
+    /// A tag is a name for an object of any type.
+    Tag {
+        #[command(subcommand)]
+        command: cmd_tag::TagCommand,
+    },
+
     /// Show Gage login, plugin, corpus, and storage status
     Status(cmd_status::StatusArgs),
 
@@ -307,6 +316,9 @@ async fn main() {
                 cmd_note::NoteCommand::Show(args) => cmd_note::show(args).await,
                 cmd_note::NoteCommand::Edit(args) => cmd_note::edit(args),
                 cmd_note::NoteCommand::Delete(args) => cmd_note::delete(args),
+            },
+            Command::Tag { command } => match command {
+                cmd_tag::TagCommand::Add(args) => cmd_tag::add(args),
             },
             Command::Session {
                 source,

@@ -71,6 +71,10 @@ pub enum StoreError {
     AttachmentInput(String),
     /// A file under an attachment root could not be read or listed
     Read { path: PathBuf, source: io::Error },
+    /// A tag name git's ref rules reject
+    TagName(String),
+    /// A tag with the name exists and names the given object
+    TagExists { name: String, id: String },
 }
 
 impl fmt::Display for StoreError {
@@ -156,6 +160,18 @@ impl fmt::Display for StoreError {
             StoreError::Read { path, source } => {
                 write!(f, "failed to read {}: {source}", path.display())
             }
+            StoreError::TagName(name) => write!(
+                f,
+                "invalid tag name {name:?}: a tag name follows git's ref rules \
+                 (no spaces, '..', '~', '^', ':', '?', '*', '[', or '\\'; no \
+                 leading '-' or '.'; no trailing '/', '.', or '.lock')"
+            ),
+            StoreError::TagExists { name, id } => {
+                write!(
+                    f,
+                    "tag {name} exists and names {id} (use --force to move it)"
+                )
+            }
         }
     }
 }
@@ -189,7 +205,9 @@ impl std::error::Error for StoreError {
             | StoreError::SessionTooLarge { .. }
             | StoreError::IssueInput(_)
             | StoreError::IssueStatusUnchanged { .. }
-            | StoreError::AttachmentInput(_) => None,
+            | StoreError::AttachmentInput(_)
+            | StoreError::TagName(_)
+            | StoreError::TagExists { .. } => None,
         }
     }
 }
