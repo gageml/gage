@@ -134,15 +134,20 @@ tokio::task_local! {
 
 /// Send one output item from the running task.
 pub(crate) fn send(output: Output) {
-    OUTPUT_SINK.with(|sink| {
-        sink.tx
+    OUTPUT_SINK.with(|sink| sink.send(output));
+}
+
+impl OutputSink {
+    /// Send one output item under this sink's task
+    pub(crate) fn send(&self, output: Output) {
+        self.tx
             .send(TaskOutput {
-                scanner: sink.scanner.clone(),
-                task: sink.task.clone(),
+                scanner: self.scanner.clone(),
+                task: self.task.clone(),
                 output,
             })
             .expect("output receiver should be held open for the task's lifetime")
-    });
+    }
 }
 
 /// The Rune context every scanner compiles against: the standard

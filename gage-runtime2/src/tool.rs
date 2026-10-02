@@ -36,7 +36,7 @@ use rune::{Any, ContextError, Module};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error};
-use crate::{OUTPUT_SINK, OutputSink};
+use crate::{Level, OUTPUT_SINK, Output, OutputSink};
 
 /// `rmcp::model::JsonObject` as gage-mcp2 exposes it through
 /// `CustomToolDef::input_schema`
@@ -576,7 +576,10 @@ fn render_input_schema(inputs: &[Input]) -> JsonObject {
 
 /// The callback the MCP service runs for a call of `tool`: convert the
 /// arguments, call the handler under the scan context and output
-/// sink, and classify what it returned.
+/// sink, and classify what it returned. A handler that fails with a
+/// VM error is a fault; the rendered error is logged to the task's
+/// sink, since the service calls the handler from the host's server
+/// tasks, outside the scan's own record scope.
 fn callback(
     tool: &ScannerTool,
     handler: Arc<SyncFunction>,
@@ -601,6 +604,7 @@ fn callback(
         .map(|i| i.name.clone())
         .collect();
     let requires_meta = tool.requires_meta;
+    let tool_name = tool.name.clone();
     Arc::new(move |args, meta| {
         let handler = Arc::clone(&handler);
         let ctx = ctx.clone();
@@ -608,6 +612,7 @@ fn callback(
         let scanner = ctx.scanner.clone();
         let log_scanner = scanner.clone();
         let log_sources = ctx.sources.clone();
+        let tool_name = tool_name.clone();
         let inputs = InputsArg(coerce_floats(args, &float_inputs));
         Box::pin(async move {
             let call = async move {
@@ -621,8 +626,8 @@ fn callback(
                 }
             };
             let scoped = SCAN_CTX.scope(ctx, call);
-            let called = match sink {
-                Some(sink) => OUTPUT_SINK.scope(sink, scoped).await,
+            let called = match &sink {
+                Some(sink) => OUTPUT_SINK.scope(sink.clone(), scoped).await,
                 None => scoped.await,
             };
             match called {
@@ -631,9 +636,16 @@ fn callback(
                     let rendered = render_vm_error(&e, log_sources.as_deref());
                     tracing::error!(
                         scanner = %log_scanner,
+                        tool = %tool_name,
                         error = %rendered,
                         "tool handler failed",
                     );
+                    if let Some(sink) = &sink {
+                        sink.send(Output::Log {
+                            level: Level::Error,
+                            message: format!("tool {tool_name} failed: {rendered}"),
+                        });
+                    }
                     CustomToolOutcome::Fault("internal server error".into())
                 }
             }
@@ -1137,6 +1149,50 @@ mod tests {
             ("demo", "review")
         );
         assert_eq!(out.output, crate::Output::Println("recording hello".into()));
+    }
+
+    /// A handler that fails with a VM error logs the rendered error
+    /// to the calling task's sink, so the fault reaches the scan
+    /// record under the task's name.
+    #[tokio::test]
+    async fn handler_faults_log_to_the_calling_task_sink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = scan_ctx(&tmp);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = OutputSink {
+            scanner: "demo".into(),
+            task: "review".into(),
+            tx,
+        };
+        let (spec, _) = consume(
+            &tools(
+                r#"
+                use gage::Tool;
+                pub fn main() { [Tool::new("broken", |inputs| Ok(inputs.missing))] }
+                "#,
+            ),
+            &ctx,
+            Some(&sink),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            call(&spec.custom[0], json!({}), json!({})).await,
+            CustomToolOutcome::Fault("internal server error".into())
+        );
+        let out = rx.recv().await.unwrap();
+        assert_eq!(
+            (out.scanner.as_str(), out.task.as_str()),
+            ("demo", "review")
+        );
+        let Output::Log { level, message } = out.output else {
+            panic!("expected a log record, got {:?}", out.output);
+        };
+        assert_eq!(level, Level::Error);
+        assert!(
+            message.starts_with("tool broken failed: Missing index"),
+            "{message}"
+        );
     }
 
     /// A `Query` value consumes to the query tool over the scan's
