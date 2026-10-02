@@ -47,16 +47,11 @@ pub async fn review() {
             progress.tick();
             continue;
         }
-        // let prompt = t.render(#{ session_id: s.id })?;
-
-        let prompt = format!(
-            "Write a finding 'This is a test' for session {}",
-            s.id
-        );
+        let prompt = t.render(#{ session_id: s.id })?;
 
         let agent = call_agent(prompt)
             .name("general-finding")
-            .tool(write_finding_tool())
+            .tool(finding_tool())
             .tool(Query::with_session_range(s, start, end))
             .model("medium")
             .await?;
@@ -69,7 +64,7 @@ pub async fn review() {
         // runner.add(
         // call_agent(prompt)
         //     .name("general-finding")
-        //     .tool(write_finding_tool())
+        //     .tool(finding_tool())
         //     .tool(Tool::mcp("gage::Query"))
         //     .gage_tool(Query::new().sessions([s]).lines(start, end))
         //     .model("medium"),
@@ -128,9 +123,8 @@ async fn skip_session(s) {
 //     }
 // }
 
-fn write_finding_tool() {
+fn finding_tool() {
     Tool::new("Finding", write_finding)
-        .description("Write a finding about the session")
         .input(Input::string("description").required())
         .input(Input::string("session_id").required())
         .input(

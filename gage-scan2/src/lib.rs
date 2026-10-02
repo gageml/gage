@@ -73,6 +73,14 @@ pub enum Event {
     /// The scan's own output for a person, already recorded in the
     /// scan's `logs/`
     Scan(ScanOutput),
+    /// The scan's closing line, given once after every task has
+    /// reached a terminal status. Already recorded in the scan's
+    /// `logs/out` as [`summary_line`] over the short id; the sink
+    /// renders the id its own way.
+    Summary {
+        id: String,
+        attrs: ScanAttrs,
+    },
     /// A plan warning, given before any task runs and already
     /// recorded in the scan's `logs/records`: the task wants a note
     /// no planned task writes
@@ -501,10 +509,11 @@ impl<F: FnMut(Event)> Run<'_, F> {
             canceled,
             tasks: dispatch.counts,
         };
-        self.say(
-            &mut scan_logs,
-            ScanOutput::Out(format!("{}\n", summary_line(&self.id, &attrs))),
-        )?;
+        scan_logs.out(&format!("{}\n", summary_line(short_uuid(&self.id), &attrs)))?;
+        (self.on_event)(Event::Summary {
+            id: self.id.clone(),
+            attrs: attrs.clone(),
+        });
         drop(scan_logs);
         if let Some(e) = self.scope.failure.lock().unwrap().take() {
             return Err(ScanError::ScanDir(e));
@@ -740,10 +749,11 @@ impl<F: FnMut(Event)> Run<'_, F> {
     }
 }
 
-/// The scan's closing line: `Scan <short id> completed: 3 tasks: 2
+/// The scan's closing line: `Scan <shown id> completed: 3 tasks: 2
 /// completed, 1 failed`, with skipped and canceled counts when
-/// nonzero.
-pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
+/// nonzero. `shown_id` is the id as the caller displays it: the plain
+/// short id in the scan log, a styled one on a terminal.
+pub fn summary_line(shown_id: &str, attrs: &ScanAttrs) -> String {
     let state = if attrs.canceled {
         "canceled"
     } else {
@@ -762,8 +772,7 @@ pub fn summary_line(id: &str, attrs: &ScanAttrs) -> String {
         parts.push(format!("{canceled} canceled"));
     }
     format!(
-        "Scan {} {state}: {} tasks: {}",
-        short_uuid(id),
+        "Scan {shown_id} {state}: {} tasks: {}",
         counts.total,
         parts.join(", ")
     )
@@ -1738,7 +1747,7 @@ mod tests {
             other => panic!("expected the failure of task a, got {other:?}"),
         };
         let notice = format!("task fail:a failed\n{failure}");
-        let summary = format!("{}\n", summary_line(&outcome.id, &outcome.attrs));
+        let summary = summary_line(short_uuid(&outcome.id), &outcome.attrs);
         assert_eq!(
             events,
             [
@@ -1768,13 +1777,16 @@ mod tests {
                     status: TaskStatus::Completed,
                     error: None,
                 },
-                Event::Scan(ScanOutput::Out(summary.clone())),
+                Event::Summary {
+                    id: outcome.id.clone(),
+                    attrs: outcome.attrs.clone(),
+                },
             ]
         );
         assert_eq!(
             summary,
             format!(
-                "Scan {} completed: 2 tasks: 1 completed, 1 failed\n",
+                "Scan {} completed: 2 tasks: 1 completed, 1 failed",
                 short_uuid(&outcome.id)
             )
         );
@@ -1814,7 +1826,7 @@ mod tests {
         let scans = ScanStore::from(&store);
         assert_eq!(
             scans.scan_log(&outcome.commit_sha, "out").unwrap(),
-            Some(format!("b ran\n{summary}").into_bytes()),
+            Some(format!("b ran\n{summary}\n").into_bytes()),
             "the scan's out holds what the terminal showed"
         );
         assert_eq!(
@@ -1894,7 +1906,10 @@ mod tests {
         let out = scans.scan_log(&outcome.commit_sha, "out").unwrap().unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("ab\n{}\n", summary_line(&outcome.id, &outcome.attrs))
+            format!(
+                "ab\n{}\n",
+                summary_line(short_uuid(&outcome.id), &outcome.attrs)
+            )
         );
         let records = scans
             .scan_log(&outcome.commit_sha, "records")
@@ -2057,10 +2072,17 @@ mod tests {
         );
         assert_eq!(
             events.last(),
-            Some(&Event::Scan(ScanOutput::Out(format!(
-                "Scan {} canceled: 2 tasks: 0 completed, 0 failed, 2 canceled\n",
+            Some(&Event::Summary {
+                id: outcome.id.clone(),
+                attrs: outcome.attrs.clone(),
+            })
+        );
+        assert_eq!(
+            summary_line(short_uuid(&outcome.id), &outcome.attrs),
+            format!(
+                "Scan {} canceled: 2 tasks: 0 completed, 0 failed, 2 canceled",
                 short_uuid(&outcome.id)
-            ))))
+            )
         );
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
         assert!(
@@ -3618,12 +3640,19 @@ mod tests {
             task: "chained".into(),
             output: Output::Println("chained ran".into()),
         })));
-        assert!(
-            events.last().unwrap()
-                == &Event::Scan(ScanOutput::Out(format!(
-                    "Scan {} completed: 3 tasks: 2 completed, 1 failed\n",
-                    short_uuid(&outcome.id)
-                )))
+        assert_eq!(
+            events.last(),
+            Some(&Event::Summary {
+                id: outcome.id.clone(),
+                attrs: outcome.attrs.clone(),
+            })
+        );
+        assert_eq!(
+            summary_line(short_uuid(&outcome.id), &outcome.attrs),
+            format!(
+                "Scan {} completed: 3 tasks: 2 completed, 1 failed",
+                short_uuid(&outcome.id)
+            )
         );
 
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();

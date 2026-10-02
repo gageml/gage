@@ -16,8 +16,8 @@ use gage_registry::scanner::{
 };
 use gage_runtime2::{Output, TaskOutput};
 use gage_scan2::scan_dir::scans_dir;
-use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput};
-use gage_store::{DatasetStore, ScanStore, Store};
+use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
+use gage_store::{DatasetStore, SCAN_TYPE, ScanStore, Store};
 use tabled::{
     Table,
     settings::{
@@ -502,6 +502,9 @@ async fn run_scan(args: Scan2RunArgs) {
         },
         Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
         Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
+        Event::Summary { id, attrs } => {
+            println!("{}", summary_line(&styled_scan_id(&store, &id), &attrs))
+        }
         Event::Warning {
             scanner,
             task,
@@ -524,6 +527,19 @@ async fn run_scan(args: Scan2RunArgs) {
     let attrs = &outcome.attrs;
     if attrs.canceled || attrs.tasks.failed > 0 {
         std::process::exit(1);
+    }
+}
+
+/// The scan's short id, highlighted against the same set a scan id
+/// argument resolves against. When that set cannot be read the id is
+/// shown plain and the failure goes to stderr.
+fn styled_scan_id(store: &Store, id: &str) -> String {
+    match store.short_prefix_ids(Some(SCAN_TYPE)) {
+        Ok(peers) => s::IdHighlighter::new(peers).short(id),
+        Err(e) => {
+            eprintln!("warning: reading scan ids: {e}");
+            short_uuid(id).to_string()
+        }
     }
 }
 
