@@ -319,6 +319,7 @@ async fn main() {
             },
             Command::Tag { command } => match command {
                 cmd_tag::TagCommand::Add(args) => cmd_tag::add(args),
+                cmd_tag::TagCommand::List(args) => cmd_tag::list(args),
             },
             Command::Session {
                 source,

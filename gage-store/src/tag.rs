@@ -28,6 +28,23 @@ impl<'a> From<&'a Store> for TagStore<'a> {
     }
 }
 
+/// One tag with the current state of the object it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRecord {
+    pub name: String,
+    /// The commit the tag ref points at.
+    pub commit_sha: String,
+    /// The named object's id.
+    pub id: String,
+    /// The named object's type at its current commit, e.g. `gage::note`.
+    pub object_type: String,
+    /// True when the object's current commit is a tombstone: the tag
+    /// is dangling.
+    pub deleted: bool,
+    /// The object's `modified` marker at its current commit.
+    pub modified_ms: Option<i64>,
+}
+
 /// Outcome of [`TagStore::add`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagAdded {
@@ -129,19 +146,49 @@ impl TagStore<'_> {
         let Some(sha) = self.store.rev_parse(&tag_ref(name))? else {
             return Ok(None);
         };
-        let id = self.store.read_header(&sha)?.id;
+        let record = self.read(&TagRef {
+            name: name.to_string(),
+            ref_name: tag_ref(name),
+            commit_sha: sha,
+        })?;
+        let tip = self
+            .store
+            .rev_parse(&object_ref(&record.id))?
+            .ok_or_else(|| StoreError::ObjectNotFound(record.id.clone()))?;
+        Ok(Some(IdMatch {
+            id: record.id,
+            tip_sha: tip,
+            object_type: record.object_type,
+            deleted: record.deleted,
+        }))
+    }
+
+    /// Every tag in name order, each with the current state of the
+    /// object it names. Reads three commits per tag where [`list`]
+    /// reads none.
+    ///
+    /// [`list`]: TagStore::list
+    pub fn records(&self) -> Result<Vec<TagRecord>, StoreError> {
+        self.list()?.iter().map(|tag| self.read(tag)).collect()
+    }
+
+    /// The record of `tag`: the id from the tagged commit, the rest
+    /// from the object's current commit.
+    fn read(&self, tag: &TagRef) -> Result<TagRecord, StoreError> {
+        let id = self.store.read_header(&tag.commit_sha)?.id;
         let tip = self
             .store
             .rev_parse(&object_ref(&id))?
             .ok_or_else(|| StoreError::ObjectNotFound(id.clone()))?;
         let header = self.store.read_header(&tip)?;
-        let deleted = header.is_tombstone();
-        Ok(Some(IdMatch {
+        Ok(TagRecord {
+            name: tag.name.clone(),
+            commit_sha: tag.commit_sha.clone(),
             id,
-            tip_sha: tip,
+            deleted: header.is_tombstone(),
             object_type: header.object_type,
-            deleted,
-        }))
+            modified_ms: header.modified_ms,
+        })
     }
 
     /// Git's ref name rules apply to a tag name. `check-ref-format`
@@ -368,6 +415,33 @@ mod tests {
 
         assert_eq!(store.resolve_objectish(&prefix).unwrap().id, b);
         assert_eq!(store.resolve_id(&prefix).unwrap().0, a);
+    }
+
+    #[test]
+    fn records_are_in_name_order_and_flag_dangling_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        assert_eq!(tags.records().unwrap(), Vec::new());
+
+        let a = note(&store, "a");
+        let b = note(&store, "b");
+        tags.add("zeta", &a, false).unwrap();
+        tags.add("alpha/one", &b, false).unwrap();
+        tags.add("alpha/two", &a, false).unwrap();
+        NoteStore::from(&store).delete(&b).unwrap();
+        let (_, a_tip) = store.resolve_id(&a).unwrap();
+
+        let listed = tags.records().unwrap();
+        let names: Vec<&str> = listed.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["alpha/one", "alpha/two", "zeta"]);
+        assert_eq!(listed[0].id, b);
+        assert!(listed[0].deleted);
+        assert_eq!(listed[1].id, a);
+        assert!(!listed[1].deleted);
+        assert_eq!(listed[1].commit_sha, a_tip);
+        assert_eq!(listed[1].object_type, "gage::note");
+        assert!(listed[1].modified_ms.is_some());
     }
 
     #[test]
