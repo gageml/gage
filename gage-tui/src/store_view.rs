@@ -148,7 +148,7 @@ struct ViewState {
     /// A load or refresh error; shown in the footer until the next
     /// keypress.
     error: Option<String>,
-    /// Object refs at the last reload, live and deleted
+    /// Object refs at the last reload, active and deleted
     object_count: usize,
 }
 
@@ -173,7 +173,7 @@ impl ViewState {
         }
     }
 
-    /// Rebuild the tree from the ref list: a `Live` group and a
+    /// Rebuild the tree from the ref list: an `Active` group and a
     /// `Deleted` group, each expanded over its objects. Expansion
     /// state is discarded; listings already read stay cached by SHA.
     fn reload(&mut self) {
@@ -194,9 +194,9 @@ impl ViewState {
                     .collect();
                 objects.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id)));
                 self.object_count = objects.len();
-                let (deleted, live): (Vec<_>, Vec<_>) =
+                let (deleted, active): (Vec<_>, Vec<_>) =
                     objects.into_iter().partition(|(_, _, deleted)| *deleted);
-                self.add_group("Live", live);
+                self.add_group("Active", active);
                 self.add_group("Deleted", deleted);
             }
             Err(e) => {
@@ -208,7 +208,7 @@ impl ViewState {
     }
 
     /// Select the first visible object whose id starts with `prefix`,
-    /// in display order: live objects, then deleted. No match leaves
+    /// in display order: active objects, then deleted. No match leaves
     /// the selection alone and reports the miss in the footer.
     fn select_object(&mut self, prefix: &str) {
         let keys = self.tree.visible_keys();
@@ -234,11 +234,9 @@ impl ViewState {
     /// leaf.
     fn add_group(&mut self, label: &'static str, objects: Vec<(ObjectRef, String, bool)>) {
         let count = objects.len();
-        let node = self.tree.add_root(
-            label.to_ascii_lowercase(),
-            Node::Group { label, count },
-            count > 0,
-        );
+        let node = self
+            .tree
+            .add_root(label.to_string(), Node::Group { label, count }, count > 0);
         if count == 0 {
             return;
         }
@@ -1157,14 +1155,14 @@ mod tests {
 
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("▼ Live"), "{text}");
+        assert!(text.contains("▼ Active"), "{text}");
         assert!(text.contains("  Deleted"), "empty group is a leaf: {text}");
         assert!(
             text.contains(&format!("  ▶ note {}", short_uuid(&note_id))),
             "{text}"
         );
         assert!(!text.contains("attrs.json"), "nothing expanded yet: {text}");
-        assert!(text.contains("1 live object"), "group detail: {text}");
+        assert!(text.contains("1 active object"), "group detail: {text}");
 
         // Expand the object: its commit tree appears, name-sorted
         let keys = state.tree.visible_keys();
@@ -1260,12 +1258,12 @@ mod tests {
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
         assert!(text.contains("Objects (2)"), "{text}");
-        let live_row = text.find("▼ Live").unwrap();
+        let active_row = text.find("▼ Active").unwrap();
         let keep_row = text.find(&short_uuid(&keep).to_string()).unwrap();
         let deleted_row = text.find("▼ Deleted").unwrap();
         let gone_row = text.find(&short_uuid(&gone).to_string()).unwrap();
         assert!(
-            live_row < keep_row && keep_row < deleted_row && deleted_row < gone_row,
+            active_row < keep_row && keep_row < deleted_row && deleted_row < gone_row,
             "{text}"
         );
 
