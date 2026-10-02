@@ -18,11 +18,9 @@ pub const SCANNER = #{
     tasks: #{
         review: #{
             notes: #{
-                writes: #{
-                    "general[finding]": include_str!(
-                        "finding-doc.md"
-                    ),
-                },
+                writes: #{ "general[finding]": include_str!(
+                    "finding.md"
+                ) },
             },
         },
     },
@@ -38,7 +36,7 @@ pub async fn review() {
     let sessions = unseen_sessions().await?;
     let progress = Progress::new(sessions.len());
 
-    let runner = AgentRunner::new();
+    let agents = AgentRunner::new();
 
     // Add an agent for each non-skipped session
     for (s, start, end) in sessions {
@@ -52,7 +50,7 @@ pub async fn review() {
         let session_id = s.id;
         let prompt = t.render(#{ session_id })?;
 
-        runner.add(
+        agents.add(
             call_agent(prompt)
                 .name("general-finding")
                 .tool(finding_tool())
@@ -63,7 +61,7 @@ pub async fn review() {
     }
 
     // Collect agent results
-    let results = runner.start();
+    let results = agents.start();
     while let Some(next) = results.next().await {
         match next {
             Ok((result, #{ session_id })) => {

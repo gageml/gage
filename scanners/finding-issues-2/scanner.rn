@@ -47,7 +47,7 @@ pub async fn report() {
     // scan records `validation/note/<key>/<id>` holding the note
     // commit; `partition(KEY)` splits the notes into `valid` and
     // `invalid`, and `mark_valid` records one when the work is done.
-    let p = scan().notes().name("finding.*").partition(REPORT_KEY).await?;
+    let p = scan().notes().name("*[finding]").partition(REPORT_KEY).await?;
     if p.invalid.is_empty() {
         log::info!("no new findings");
         return Ok(());
@@ -57,9 +57,9 @@ pub async fn report() {
     // their docs through Query; IssueWrite writes `findings` issues.
     // The initial status (`pending`) is the writer's decision under the
     // rethink; how the tool states it is undecided.
-    let agent = call_agent(include_str!("issues-prompt.md"))
+    let agent = call_agent(include_str!("prompt.md"))
         .name("issue-writer")
-        .gage_tools([Query::new(), IssueWrite::new().name("findings")])
+        .tools([Query::new(), IssueWriter::new().name("findings")])
         .model("large")
         .await?;
     let result = agent.wait().await?;
