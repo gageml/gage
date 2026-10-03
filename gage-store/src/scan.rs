@@ -10,7 +10,7 @@
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
 //! view over a commit. [`ScanStore::create`] imports a staging `scan/`
 //! directory as the object's content. Under `watermarks/`, the
-//! commits each task finished processing.
+//! position each task reached on each object it processed.
 //! `notes.link`, `notes_carried.link`, and `issues.link` name the
 //! commits of the notes and issues the scan wrote or carried. A task
 //! that ran agents holds `agents.link`, the commits of the agent
@@ -181,17 +181,20 @@ pub struct AgentAttrs {
     pub exit_code: i64,
 }
 
-/// One `watermarks/<kind>/<oid>/<key>` record: the commit of the
-/// object `oid` that a task under `key` finished processing.
+/// One `watermarks/<oid>/<key>` record: how far the task under `key`
+/// got on the object `oid`, at the object's commit the task read. The
+/// file holds `<commit> <mark>` on one line. The mark's axis is the
+/// object's: lines for a session, 0 or 1 for a whole object such as
+/// a note.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watermark {
-    /// `sessions`, `notes`, or `attachments`
-    pub kind: String,
     /// The Gage object id
     pub oid: String,
     pub key: String,
-    /// The file's content, trimmed: the object's commit SHA
+    /// The object's commit SHA
     pub commit: String,
+    /// The position reached
+    pub mark: u64,
 }
 
 /// A scan's content, decoded from either location.
@@ -624,17 +627,17 @@ impl ScanContent {
 }
 
 /// Every record under `watermarks/`, in path order. A path that is
-/// not `<kind>/<oid>/<key>`, or a content that is not a commit SHA,
-/// is an error.
+/// not `<oid>/<key>`, or a content that is not `<commit> <mark>`, is
+/// an error.
 fn read_watermarks(files: &dyn ScanFiles) -> Result<Vec<Watermark>, StoreError> {
     let mut paths = Vec::new();
     walk_files(files, WATERMARKS_DIR, "", &mut paths)?;
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
         let parts: Vec<&str> = path.split('/').collect();
-        let [kind, oid, key] = parts.as_slice() else {
+        let [oid, key] = parts.as_slice() else {
             return Err(StoreError::Parse(format!(
-                "scan file {WATERMARKS_DIR}/{path}: expected <kind>/<oid>/<key>"
+                "scan file {WATERMARKS_DIR}/{path}: expected <oid>/<key>"
             )));
         };
         let bytes = files
@@ -642,20 +645,33 @@ fn read_watermarks(files: &dyn ScanFiles) -> Result<Vec<Watermark>, StoreError> 
             .ok_or_else(|| {
                 StoreError::Parse(format!("scan file {WATERMARKS_DIR}/{path} is missing"))
             })?;
-        let commit = String::from_utf8_lossy(&bytes).trim().to_string();
-        if !is_sha(&commit) {
-            return Err(StoreError::Parse(format!(
-                "scan file {WATERMARKS_DIR}/{path}: {commit:?} is not a commit SHA"
-            )));
-        }
+        let content = String::from_utf8_lossy(&bytes);
+        let (commit, mark) = parse_watermark(content.trim()).ok_or_else(|| {
+            StoreError::Parse(format!(
+                "scan file {WATERMARKS_DIR}/{path}: {:?} is not <commit> <mark>",
+                content.trim()
+            ))
+        })?;
         out.push(Watermark {
-            kind: kind.to_string(),
             oid: oid.to_string(),
             key: key.to_string(),
-            commit,
+            commit: commit.to_string(),
+            mark,
         });
     }
     Ok(out)
+}
+
+/// The `(commit, mark)` of a watermark file's content, or `None` when
+/// it is not a commit SHA followed by an integer.
+fn parse_watermark(content: &str) -> Option<(&str, u64)> {
+    let mut parts = content.split_whitespace();
+    let commit = parts.next().filter(|s| is_sha(s))?;
+    let mark = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((commit, mark))
 }
 
 /// The SHAs in the link file `name`, one per line, or `None` when
@@ -1614,7 +1630,7 @@ mod tests {
                     author: "task:s:t",
                     target: None,
                     metadata: None,
-                    work_key: None,
+                    carry_forward_key: None,
                 })
                 .unwrap();
             shas.push(
@@ -1695,12 +1711,12 @@ mod tests {
         let session_sha = "0123456789abcdef0123456789abcdef01234567";
         let note_sha = "89abcdef0123456789abcdef0123456789abcdef";
         write(
-            &scan_dir.join("watermarks/sessions/SESSION1/s:t:1"),
-            &format!("{session_sha}\n"),
+            &scan_dir.join("watermarks/SESSION1/s:t:1"),
+            &format!("{session_sha} 120\n"),
         );
         write(
-            &scan_dir.join("watermarks/notes/NOTE1/s:t:1"),
-            &format!("{note_sha}\n"),
+            &scan_dir.join("watermarks/NOTE1/s:t:1"),
+            &format!("{note_sha} 1\n"),
         );
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN15", &scan_dir).unwrap();
@@ -1709,16 +1725,16 @@ mod tests {
             record.content.watermarks,
             [
                 Watermark {
-                    kind: "notes".into(),
                     oid: "NOTE1".into(),
                     key: "s:t:1".into(),
                     commit: note_sha.into(),
+                    mark: 1,
                 },
                 Watermark {
-                    kind: "sessions".into(),
                     oid: "SESSION1".into(),
                     key: "s:t:1".into(),
                     commit: session_sha.into(),
+                    mark: 120,
                 },
             ]
         );
@@ -1731,26 +1747,26 @@ mod tests {
                 .ls(&commit)
                 .unwrap()
                 .iter()
-                .any(|e| e.name == "watermarks/sessions/SESSION1/s:t:1")
+                .any(|e| e.name == "watermarks/SESSION1/s:t:1")
         );
     }
 
     #[test]
-    fn create_rejects_a_watermark_that_is_not_a_sha() {
+    fn create_rejects_a_watermark_without_a_sha_and_a_mark() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let scan_dir = staged_scan(tmp.path());
-        write(
-            &scan_dir.join("watermarks/sessions/SESSION1/s:t:1"),
-            "1234\n",
-        );
-        let err = ScanStore::from(&store)
-            .create("SCAN16", &scan_dir)
-            .unwrap_err();
-        assert!(
-            matches!(&err, StoreError::Parse(m) if m.contains("is not a commit SHA")),
-            "{err}"
-        );
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        for content in ["1234 7\n", &format!("{sha}\n"), &format!("{sha} x\n")] {
+            write(&scan_dir.join("watermarks/SESSION1/s:t:1"), content);
+            let err = ScanStore::from(&store)
+                .create("SCAN16", &scan_dir)
+                .unwrap_err();
+            assert!(
+                matches!(&err, StoreError::Parse(m) if m.contains("is not <commit> <mark>")),
+                "{content:?}: {err}"
+            );
+        }
     }
 
     /// A staged scan under `id` linking two written notes, one carried
@@ -1771,7 +1787,7 @@ mod tests {
                     author: "task:s:t",
                     target: None,
                     metadata: None,
-                    work_key: None,
+                    carry_forward_key: None,
                 })
                 .unwrap()
         };

@@ -1,4 +1,4 @@
-use gage::{carry_forward, scan, watermark, write_note};
+use gage::{carry_forward_notes, scan, write_note};
 
 pub const SCANNER = #{
     name: "carry-forward",
@@ -9,21 +9,14 @@ pub const SCANNER = #{
 const KEY = ("carry-forward-example", "main", 1);
 
 pub async fn main() {
-    carry_forward(KEY).await?;
+    carry_forward_notes(KEY).await?;
     let carried = scan().notes().name("native-size").await?;
-    log::info!("Carried forward {} native-size notes", carried.len());
-    for s in scan().sessions().await? {
-        if !carried_for_session(s, carried) {
-            let attrs = s.attrs().await;
-            write_note("native-size", attrs.native_size)
-                .for_session(s.id)
-                .work_key(KEY)
-                .await?;
-        }
+    println!("Notes from previous scans: {carried:?}");
+    for s in scan().sessions().await {
+        let attrs = s.attrs().await;
+        write_note("native-size", attrs.native_size)
+            .for_session(s.id)
+            .carry_forward_key(KEY)
+            .await?;
     }
-}
-
-fn carried_for_session(s, carried) {
-    println!("{carried:?}");
-    return false;
 }

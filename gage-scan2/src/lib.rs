@@ -324,8 +324,8 @@ pub struct ScanConfig<'a> {
     pub jobs: usize,
     /// The driver that runs the scan's agents
     pub driver: Arc<dyn Driver>,
-    /// Ignore prior work: every session is unseen and no notes are
-    /// carried forward. Watermarks are still written.
+    /// Ignore prior work: every object's high-water mark is 0 and no
+    /// notes are carried forward. Watermarks are still written.
     pub invalidate: bool,
 }
 
@@ -532,11 +532,23 @@ impl<F: FnMut(Event)> Run<'_, F> {
         // can link them
         let notes = NoteStore::from(store);
         let mut note_shas = Vec::new();
+        let mut note_commits: HashMap<String, String> = HashMap::new();
         for dir in self.scan_dir.staged_notes()? {
-            let (_, sha) = notes.create_staged(&dir)?;
-            note_shas.push(sha);
+            let (id, sha) = notes.create_staged(&dir)?;
+            note_shas.push(sha.clone());
+            note_commits.insert(id, sha);
         }
         self.scan_dir.write_notes_link(&note_shas)?;
+        // A watermark on a staged note waited for the note's commit
+        for (id, key, mark) in self.scan_dir.staged_note_watermarks()? {
+            let Some(commit) = note_commits.get(&id) else {
+                return Err(ScanError::ScanDir(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("note watermark names {id}, which the scan did not stage"),
+                )));
+            };
+            self.scan_dir.write_watermark(&id, &key, commit, mark)?;
+        }
         self.scan_dir
             .write_notes_carried_link(&self.scan_dir.staged_carried_notes()?)?;
         // Issues follow the notes they cite, so their evidence resolves
@@ -3544,7 +3556,7 @@ mod tests {
     }
 
     const WATERMARK_SCANNER: &str = r#"
-        use gage::{carry_forward_notes, scan, watermark, write_note};
+        use gage::{Mark, carry_forward_notes, scan, watermark, write_note};
 
         pub const SCANNER = #{
             name: "wm",
@@ -3557,18 +3569,29 @@ mod tests {
         pub async fn main() {
             let carried = carry_forward_notes(KEY).await?;
             println!("carried {carried}");
-            for (s, unseen) in scan().sessions().unseen(KEY).await? {
-                println!("unseen {unseen:?}");
-                if let Some((start, end)) = unseen {
-                    write_note("seen", format!("{start}-{end}"))
-                        .for_session_range(s.id, start, end)
-                        .work_key(KEY)
-                        .await?;
-                    write_note("untagged", "x").for_session(s.id).await?;
-                    watermark(s, KEY).await?;
-                }
+            for (s, hwm) in scan().sessions().hwm(KEY).await? {
+                println!("hwm {hwm} of {}", s.line_count);
             }
-            match watermark("not-a-member", KEY).await {
+            for (s, (start, end)) in scan().sessions().unseen(KEY).await? {
+                println!("unseen {start}-{end}");
+                let note = write_note("seen", format!("{start}-{end}"))
+                    .for_session_range(s.id, start, end)
+                    .carry_forward_key(KEY)
+                    .await?;
+                write_note("untagged", "x").for_session(s.id).await?;
+                watermark(Mark::session(s), KEY).await?;
+                watermark(Mark::note(note), KEY).await?;
+            }
+            for (n, hwm) in scan().notes().name("seen").hwm(KEY).await? {
+                println!("note {} hwm {hwm}", n.value);
+            }
+            let unseen = scan().notes().name("seen").unseen(KEY).await?;
+            println!("notes unseen {}", unseen.len());
+            match watermark(Mark::session("not-a-member"), KEY).await {
+                Err(gage::Error::Args(m)) => println!("args: {m}"),
+                other => println!("unexpected: {other:?}"),
+            }
+            match watermark(Mark::note("not-a-note"), KEY).await {
                 Err(gage::Error::Args(m)) => println!("args: {m}"),
                 other => println!("unexpected: {other:?}"),
             }
@@ -3641,15 +3664,16 @@ mod tests {
         (outcome, printed)
     }
 
-    /// The first scan finds the whole session unseen and watermarks
-    /// it; a second scan of the same dataset commit finds nothing
-    /// unseen and carries the tagged note; a scan of the grown
-    /// session finds the appended lines unseen and still carries the
-    /// note written against the earlier commit; a scan of the
-    /// earlier dataset commit again ignores the later scan's
-    /// watermark and note, which sit on a descendant commit; an
-    /// invalidating scan of the grown session finds the whole session
-    /// unseen, carries nothing, rewrites the note, and watermarks it.
+    /// The first scan finds the whole session unseen, watermarks it
+    /// and the note it wrote; a second scan of the same dataset
+    /// commit finds nothing unseen, carries the tagged note, and
+    /// finds it marked; a scan of the grown session finds the
+    /// appended lines unseen and still carries the note written
+    /// against the earlier commit; a scan of the earlier dataset
+    /// commit again ignores the later scan's watermark and note,
+    /// which sit on a descendant commit; an invalidating scan of the
+    /// grown session finds the whole session unseen, carries nothing,
+    /// rewrites the note, and watermarks it.
     #[tokio::test]
     async fn watermarks_resume_grown_sessions_and_carry_tagged_notes() {
         let (tmp, store) = open_store();
@@ -3658,6 +3682,7 @@ mod tests {
         let compiled = compiled.unwrap();
         let args_lines = [
             "args: session not-a-member is not a member of the scan".to_string(),
+            "args: note not-a-note is not staged or carried by the scan".to_string(),
             "args: key must be non-empty and must not contain '/': \"a/b\"".to_string(),
         ];
 
@@ -3666,9 +3691,13 @@ mod tests {
             printed,
             [
                 "carried 0".to_string(),
-                "unseen Some((1, 1))".to_string(),
+                "hwm 0 of 1".to_string(),
+                "unseen 1-1".to_string(),
+                "note 1-1 hwm 0".to_string(),
+                "notes unseen 1".to_string(),
                 args_lines[0].clone(),
                 args_lines[1].clone(),
+                args_lines[2].clone(),
             ]
         );
         let scans = ScanStore::from(&store);
@@ -3680,15 +3709,6 @@ mod tests {
             .unwrap()[0]
             .commit_sha
             .clone();
-        assert_eq!(
-            first_record.content.watermarks,
-            [gage_store::Watermark {
-                kind: "sessions".into(),
-                oid: session_id.clone(),
-                key: "wm:main:1".into(),
-                commit: member_sha_1.clone(),
-            }]
-        );
         let notes = NoteStore::from(&store);
         let tagged_1 = first_record
             .content
@@ -3697,10 +3717,29 @@ mod tests {
             .map(|sha| (sha.clone(), notes.at_commit(sha).unwrap()))
             .find(|(_, n)| n.name == "seen")
             .expect("the scanner wrote the tagged note");
-        assert_eq!(tagged_1.1.work_key.as_deref(), Some("wm:main:1"));
+        assert_eq!(tagged_1.1.carry_forward_key.as_deref(), Some("wm:main:1"));
         assert_eq!(
             tagged_1.1.target.as_deref(),
             Some(format!("session:{session_id}#1-1").as_str())
+        );
+        let mut expected = vec![
+            gage_store::Watermark {
+                oid: session_id.clone(),
+                key: "wm:main:1".into(),
+                commit: member_sha_1.clone(),
+                mark: 1,
+            },
+            gage_store::Watermark {
+                oid: tagged_1.1.id.clone(),
+                key: "wm:main:1".into(),
+                commit: tagged_1.0.clone(),
+                mark: 1,
+            },
+        ];
+        expected.sort_by(|a, b| a.oid.cmp(&b.oid));
+        assert_eq!(
+            first_record.content.watermarks, expected,
+            "the staged note's watermark resolved to its commit at apply"
         );
 
         let (second, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
@@ -3708,9 +3747,12 @@ mod tests {
             printed,
             [
                 "carried 1".to_string(),
-                "unseen None".to_string(),
+                "hwm 1 of 1".to_string(),
+                "note 1-1 hwm 1".to_string(),
+                "notes unseen 0".to_string(),
                 args_lines[0].clone(),
                 args_lines[1].clone(),
+                args_lines[2].clone(),
             ]
         );
         let second_record = scans.get(&second.id).unwrap();
@@ -3737,9 +3779,14 @@ mod tests {
             printed,
             [
                 "carried 1".to_string(),
-                "unseen Some((2, 3))".to_string(),
+                "hwm 1 of 3".to_string(),
+                "unseen 2-3".to_string(),
+                "note 1-1 hwm 1".to_string(),
+                "note 2-3 hwm 0".to_string(),
+                "notes unseen 1".to_string(),
                 args_lines[0].clone(),
                 args_lines[1].clone(),
+                args_lines[2].clone(),
             ]
         );
         let third_record = scans.get(&third.id).unwrap();
@@ -3751,16 +3798,29 @@ mod tests {
             .commit_sha
             .clone();
         assert_ne!(member_sha_2, member_sha_1);
-        assert_eq!(third_record.content.watermarks[0].commit, member_sha_2);
+        let session_mark = |record: &gage_store::ScanRecord| {
+            record
+                .content
+                .watermarks
+                .iter()
+                .find(|w| w.oid == session_id)
+                .cloned()
+                .expect("the scan watermarked its session")
+        };
+        assert_eq!(session_mark(&third_record).commit, member_sha_2);
+        assert_eq!(session_mark(&third_record).mark, 3);
 
         let (fourth, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
         assert_eq!(
             printed,
             [
                 "carried 1".to_string(),
-                "unseen None".to_string(),
+                "hwm 1 of 1".to_string(),
+                "note 1-1 hwm 1".to_string(),
+                "notes unseen 0".to_string(),
                 args_lines[0].clone(),
                 args_lines[1].clone(),
+                args_lines[2].clone(),
             ]
         );
         let fourth_record = scans.get(&fourth.id).unwrap();
@@ -3776,15 +3836,20 @@ mod tests {
             printed,
             [
                 "carried 0".to_string(),
-                "unseen Some((1, 3))".to_string(),
+                "hwm 0 of 3".to_string(),
+                "unseen 1-3".to_string(),
+                "note 1-3 hwm 0".to_string(),
+                "notes unseen 1".to_string(),
                 args_lines[0].clone(),
                 args_lines[1].clone(),
+                args_lines[2].clone(),
             ]
         );
         let fifth_record = scans.get(&fifth.id).unwrap();
         assert_eq!(fifth_record.content.notes.len(), 2);
         assert!(fifth_record.content.notes_carried.is_empty());
-        assert_eq!(fifth_record.content.watermarks[0].commit, member_sha_2);
+        assert_eq!(session_mark(&fifth_record).commit, member_sha_2);
+        assert_eq!(session_mark(&fifth_record).mark, 3);
         let tagged_5 = fifth_record
             .content
             .notes
@@ -3803,14 +3868,17 @@ mod tests {
         .build()
         .await;
         let batches = ctx
-            .sql("SELECT scan_id, commit FROM scan_watermark WHERE kind = 'sessions'")
+            .sql("SELECT scan_id, commit, mark FROM scan_watermark")
             .await
             .unwrap()
             .collect()
             .await
             .unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(rows, 3, "the first, third, and fifth scans hold watermarks");
+        assert_eq!(
+            rows, 6,
+            "the first, third, and fifth scans each hold a session and a note watermark"
+        );
         let carried = ctx
             .sql(&format!(
                 "SELECT note_id FROM scan_note WHERE scan_id = '{}' AND carried",

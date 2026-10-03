@@ -48,7 +48,7 @@ use rune::{Any, ContextError, Module};
 use crate::OUTPUT_SINK;
 use crate::note::Note;
 use crate::scan::{ScanContext, current};
-use crate::validate::work_key;
+use crate::validate::encode_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
@@ -329,7 +329,7 @@ async fn do_write_issue(w: IssueWrite) -> Written {
     if let Err(e) = check_evidence(&ctx, &w.evidence).await? {
         return Ok(Err(e));
     }
-    let replace_key = match w.replace_key.as_ref().map(work_key).transpose() {
+    let replace_key = match w.replace_key.as_ref().map(encode_key).transpose() {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };

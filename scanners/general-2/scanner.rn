@@ -1,6 +1,7 @@
 use gage::{
     AgentRunner,
     Input,
+    Mark,
     Progress,
     Template,
     Tool,
@@ -33,16 +34,16 @@ pub async fn review() {
 
     carry_forward_notes(REVIEW_KEY).await?;
 
-    let sessions = unseen_sessions().await?;
+    let sessions = scan().sessions().unseen(REVIEW_KEY).await?;
     let progress = Progress::new(sessions.len());
 
     let agents = AgentRunner::new();
 
     // Add an agent for each non-skipped session
-    for (s, start, end) in sessions {
+    for (s, (start, end)) in sessions {
         if let Some(reason) = skip_session(s).await? {
             log::info!("skip session {}: {}", s.id, reason);
-            watermark(s, REVIEW_KEY).await?;
+            watermark(Mark::session(s), REVIEW_KEY).await?;
             progress.tick();
             continue;
         }
@@ -73,7 +74,7 @@ pub async fn review() {
                         metadata: result.as_metadata(),
                     },
                 );
-                watermark(session_id, REVIEW_KEY).await?;
+                watermark(Mark::session(session_id), REVIEW_KEY).await?;
             }
             Err(err) => {
                 log::error!("agent error: {err:?}");
@@ -81,20 +82,6 @@ pub async fn review() {
         }
         progress.tick();
     }
-}
-
-async fn unseen_sessions() {
-    Ok(
-        scan()
-            .sessions()
-            .unseen(REVIEW_KEY)
-            .await?
-            .iter()
-            .filter_map(
-                |(s, unseen)| unseen.map(|(start, end)| (s, start, end)),
-            )
-            .collect::<Vec>(),
-    )
 }
 
 const SESSION_MIN_TEXT_LEN = 200;
@@ -133,7 +120,7 @@ pub async fn write_finding(inputs) {
     let note = write_note("general[finding]", inputs.description)
         .for_session_lines(inputs.session_id, lines)
         .metadata(#{ lines })
-        .work_key(REVIEW_KEY)
+        .carry_forward_key(REVIEW_KEY)
         .await?;
     Ok(format!("Wrote finding note {}", note.id))
 }

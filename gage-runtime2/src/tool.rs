@@ -850,6 +850,7 @@ mod tests {
         let paths = ScanDirPaths {
             notes_dir: dir("notes"),
             issues_dir: dir("issues"),
+            note_watermarks: dir("note_watermarks"),
             watermarks_dir: dir("watermarks"),
             carried_notes: dir("carried"),
             tasks_dir: dir("tasks"),

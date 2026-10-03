@@ -75,7 +75,7 @@ pub struct ScanContext {
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Where the runtime writes during the run
     pub paths: ScanDirPaths,
-    /// Ignore prior work: `unseen` reports every session in full and
+    /// Ignore prior work: `hwm` reports 0 for every object and
     /// `carry_forward_notes` links nothing. Watermarks are still
     /// written, so the next scan resumes from this one.
     pub invalidate: bool,
@@ -94,7 +94,11 @@ pub struct ScanDirPaths {
     pub notes_dir: PathBuf,
     /// `write_issue` stages issue trees here, one directory per id
     pub issues_dir: PathBuf,
-    /// `watermark` writes `<kind>/<oid>/<key>` here
+    /// `watermark` on a note this scan staged appends `<id> <key>
+    /// <mark>` here; apply resolves the note's commit and writes the
+    /// record
+    pub note_watermarks: PathBuf,
+    /// `watermark` writes `<oid>/<key>` here
     pub watermarks_dir: PathBuf,
     /// Carry-forward appends carried note commits here, one per line
     pub carried_notes: PathBuf,
@@ -242,7 +246,8 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
         fetch_sessions(q).await
     })?;
-    m.function_meta(crate::validate::unseen)?;
+    m.function_meta(crate::validate::sessions_hwm)?;
+    m.function_meta(crate::validate::sessions_unseen)?;
     m.ty::<Session>()?;
     m.function_meta(Session::attrs)?;
     m.function_meta(Session::debug)?;
@@ -407,24 +412,42 @@ pub(crate) fn session_order(newest_first: bool) -> &'static str {
 
 /// The scan's sessions, read from the scoped `session` table, whose
 /// rows are the members in member order unless `newest_first` is set.
-/// Only the id and the version are held per session; `attrs()` reads
-/// the rest on request.
+/// Only the id, the version, and the line count are held per session;
+/// `attrs()` reads the rest on request.
 async fn fetch_sessions(query: SessionsQuery) -> Result<Sessions, VmError> {
-    let sql = format!(
-        "SELECT id, locator FROM session{}",
-        session_order(query.newest_first)
-    );
     let ctx = current()?;
+    Ok(Sessions::new(members(&ctx, query.newest_first).await?))
+}
+
+/// The scan's sessions, in member order unless `newest_first` is set.
+pub(crate) async fn members(
+    ctx: &ScanContext,
+    newest_first: bool,
+) -> Result<Vec<Session>, VmError> {
+    let sql = format!(
+        "SELECT id, locator, line_count FROM session{}",
+        session_order(newest_first)
+    );
     let batches = run(ctx.query_context().await?, &sql).await?;
     let mut items = Vec::new();
     for batch in &batches {
         let ids = string_column(batch, 0);
         let locators = string_column(batch, 1);
+        let lines = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("line_count is an integer column");
         for i in 0..batch.num_rows() {
-            items.push(Session::from_row(ids.value(i), locators.value(i)));
+            let line_count = lines.is_valid(i).then(|| lines.value(i));
+            items.push(Session::from_row(
+                ids.value(i),
+                locators.value(i),
+                line_count,
+            ));
         }
     }
-    Ok(Sessions::new(items))
+    Ok(items)
 }
 
 /// Run `sql` on the scan's query context.
@@ -453,27 +476,36 @@ pub(crate) fn string_column(
         .expect("session table column types are fixed")
 }
 
-/// A stored session, as a scanner sees it: its id and, held for the
-/// runtime, the version the scan reads. Everything else is read on
-/// request through [`Session::attrs`].
+/// A stored session, as a scanner sees it: its id, its line count,
+/// and, held for the runtime, the version the scan reads. Everything
+/// else is read on request through [`Session::attrs`].
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct Session {
     /// The Gage object id
     #[rune(get)]
     pub id: String,
+    /// The lines the session holds at the commit the scan reads
+    #[rune(get)]
+    pub line_count: i64,
     #[rune(skip)]
     pub commit: String,
 }
 
 impl Session {
-    /// A session from its `id` and `locator` columns.
-    pub(crate) fn from_row(id: &str, locator: &str) -> Session {
+    /// A session from its `id`, `locator`, and `line_count` columns.
+    /// Every session written by a line-structured driver carries a
+    /// line count; its absence is a store fault.
+    pub(crate) fn from_row(id: &str, locator: &str, line_count: Option<i64>) -> Session {
         let commit = locator
             .strip_prefix("git:")
             .unwrap_or_else(|| panic!("session locator is git:<sha>, got {locator:?}"));
+        let line_count = line_count.unwrap_or_else(|| {
+            panic!("session {id} has no line_count; its driver does not report one")
+        });
         Session {
             id: id.to_string(),
+            line_count,
             commit: commit.to_string(),
         }
     }
@@ -749,6 +781,7 @@ mod tests {
     fn session(id: &str) -> Session {
         Session {
             id: id.to_string(),
+            line_count: 1,
             commit: format!("commit-{id}"),
         }
     }

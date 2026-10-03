@@ -1,8 +1,8 @@
 use gage::{call_agent, tools::Query};
 
 pub const SCANNER = #{
-    name: "gage-tool",
-    description: "Use of gage tool",
+    name: "gage-query-tool",
+    description: "Query tool use",
     tasks: #{ main: #{} },
 };
 

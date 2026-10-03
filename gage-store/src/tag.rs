@@ -299,7 +299,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                work_key: None,
+                carry_forward_key: None,
             })
             .unwrap()
     }

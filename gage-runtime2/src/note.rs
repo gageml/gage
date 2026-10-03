@@ -17,7 +17,8 @@
 //! nothing else.
 //! `.name(name)` and `.names([...])` match names exactly. A task sees
 //! every note its upstream tasks wrote because the runner releases it
-//! only after they returned.
+//! only after they returned. `.hwm(key)` and `.unseen(key)` read the
+//! notes' watermarks under `key`; see `crate::validate`.
 //!
 //! A `DateTime` value, as a note value or inside metadata, is stored
 //! as its RFC 3339 string.
@@ -37,7 +38,7 @@ use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
 use crate::scan::{Scan, ScanContext, current, session_id};
-use crate::validate::work_key;
+use crate::validate::encode_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
@@ -53,7 +54,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(NoteWrite::for_session_range)?;
     m.function_meta(NoteWrite::for_session_lines)?;
     m.function_meta(NoteWrite::metadata)?;
-    m.function_meta(NoteWrite::work_key)?;
+    m.function_meta(NoteWrite::carry_forward_key)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: NoteWrite| async move {
         do_write_note(w).await
     })?;
@@ -63,6 +64,8 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(notes)?;
     m.function_meta(NotesQuery::name)?;
     m.function_meta(NotesQuery::names)?;
+    m.function_meta(crate::validate::notes_hwm)?;
+    m.function_meta(crate::validate::notes_unseen)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
         fetch_notes(q).await
     })?;
@@ -83,7 +86,7 @@ pub struct NoteWrite {
     #[rune(skip)]
     metadata: Option<Value>,
     #[rune(skip)]
-    work_key: Option<Value>,
+    carry_forward_key: Option<Value>,
 }
 
 /// A session target before rendering: the id and the lines as the
@@ -106,7 +109,7 @@ fn write_note(name: &str, value: Value) -> NoteWrite {
         value,
         target: None,
         metadata: None,
-        work_key: None,
+        carry_forward_key: None,
     }
 }
 
@@ -165,13 +168,13 @@ impl NoteWrite {
         self
     }
 
-    /// Set the note's work key: a later scan's
+    /// Set the note's carry-forward key: a later scan's
     /// `carry_forward_notes(key)` links it when its target session is
     /// in that scan. A string, or a tuple of strings and integers
     /// rendered colon-joined.
     #[rune::function(instance)]
-    fn work_key(mut self, key: Value) -> Self {
-        self.work_key = Some(key);
+    fn carry_forward_key(mut self, key: Value) -> Self {
+        self.carry_forward_key = Some(key);
         self
     }
 }
@@ -197,6 +200,11 @@ pub struct Note {
     /// UNIX time millis
     #[rune(get)]
     pub created: i64,
+    /// The note's commit: the carried commit for a carried note,
+    /// `None` for a note staged by this scan, which has none until
+    /// apply
+    #[rune(skip)]
+    pub(crate) commit: Option<String>,
 }
 
 impl Note {
@@ -240,7 +248,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
         Ok(m) => m,
         Err(e) => return Ok(Err(e)),
     };
-    let key = match w.work_key.as_ref().map(work_key).transpose() {
+    let key = match w.carry_forward_key.as_ref().map(encode_key).transpose() {
         Ok(k) => k,
         Err(e) => return Ok(Err(e)),
     };
@@ -256,7 +264,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
         author: &author,
         target: target.as_deref(),
         metadata: metadata.clone(),
-        work_key: key.as_deref(),
+        carry_forward_key: key.as_deref(),
     };
     let staged = {
         let store = ctx.store.lock().await;
@@ -296,6 +304,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
         target,
         metadata,
         created: now_ms(),
+        commit: None,
     }))
 }
 
@@ -400,7 +409,7 @@ fn json_value(v: &Value) -> Result<serde_json::Value, String> {
 
 /// The value of `scan().notes()`: the scan's own notes, read when
 /// awaited.
-#[derive(Any)]
+#[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct NotesQuery {
     /// Exact names to keep; `None` keeps every note
@@ -439,19 +448,28 @@ impl NotesQuery {
 
 /// Read the staged and carried notes, filtered by name, oldest first
 /// and by id among equals.
-async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error>, VmError> {
+pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error>, VmError> {
     let ctx = current()?;
-    let mut full = staged_notes(&ctx).await?;
-    full.extend(carried_notes(&ctx).await?);
-    full.retain(|n| q.names.as_ref().is_none_or(|names| names.contains(&n.name)));
-    full.sort_by(|a, b| {
+    let mut full: Vec<(NoteFull, Option<String>)> = staged_notes(&ctx)
+        .await?
+        .into_iter()
+        .map(|n| (n, None))
+        .collect();
+    full.extend(
+        carried_notes(&ctx)
+            .await?
+            .into_iter()
+            .map(|(n, sha)| (n, Some(sha))),
+    );
+    full.retain(|(n, _)| q.names.as_ref().is_none_or(|names| names.contains(&n.name)));
+    full.sort_by(|(a, _), (b, _)| {
         a.created_ms
             .cmp(&b.created_ms)
             .then_with(|| a.id.cmp(&b.id))
     });
     let mut out = Vec::with_capacity(full.len());
-    for n in full {
-        out.push(note_from_full(n)?);
+    for (n, commit) in full {
+        out.push(note_from_full(n, commit)?);
     }
     Ok(Ok(out))
 }
@@ -486,9 +504,9 @@ async fn staged_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
     Ok(out)
 }
 
-/// The notes carried into the scan so far, in the order they were
-/// carried.
-async fn carried_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
+/// The notes carried into the scan so far with their carried commits,
+/// in the order they were carried.
+async fn carried_notes(ctx: &ScanContext) -> Result<Vec<(NoteFull, String)>, VmError> {
     let text = match fs::read_to_string(&ctx.paths.carried_notes) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -498,16 +516,15 @@ async fn carried_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
     let notes = NoteStore::from(&*store);
     let mut out = Vec::new();
     for sha in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        out.push(
-            notes
-                .at_commit(sha)
-                .map_err(|e| VmError::panic(format!("carried note {sha}: {e}")))?,
-        );
+        let note = notes
+            .at_commit(sha)
+            .map_err(|e| VmError::panic(format!("carried note {sha}: {e}")))?;
+        out.push((note, sha.to_string()));
     }
     Ok(out)
 }
 
-fn note_from_full(n: NoteFull) -> Result<Note, VmError> {
+fn note_from_full(n: NoteFull, commit: Option<String>) -> Result<Note, VmError> {
     let value = match n.value {
         NoteValue::Text(s) => rune::to_value(s).map_err(VmError::from)?,
         NoteValue::Json(json) => json_to_value(&json),
@@ -524,6 +541,7 @@ fn note_from_full(n: NoteFull) -> Result<Note, VmError> {
         target: n.target,
         metadata,
         created: n.created_ms,
+        commit,
     })
 }
 

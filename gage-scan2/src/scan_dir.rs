@@ -16,10 +16,11 @@
 //! scan/notes.link                        # the notes' commits, written at apply
 //! scan/notes_carried.link                # carried notes' commits, written at apply
 //! scan/issues.link                       # the issues' commits, written at apply
-//! scan/watermarks/<kind>/<oid>/<key>     # watermarks, written by watermark
+//! scan/watermarks/<oid>/<key>            # watermarks, written by watermark and at apply
 //! notes/<id>/**                          # note trees, written by write_note
 //! issues/<id>/**                         # issue trees, written by write_issue
 //! carried_notes                          # carried note commits, appended by carry-forward
+//! note_watermarks                        # `<id> <key> <mark>` per staged-note watermark, resolved at apply
 //! scan/logs/out                          # output lines, the scan's own and every task's
 //! scan/logs/err                          # error lines: task failures, the cancel notice, panics
 //! scan/logs/records                      # log records, runtime and scanner
@@ -54,6 +55,7 @@ const ISSUES_DIR: &str = "issues";
 const ISSUES_LINK: &str = "issues.link";
 const WATERMARKS_DIR: &str = "watermarks";
 const CARRIED_NOTES_FILE: &str = "carried_notes";
+const NOTE_WATERMARKS_FILE: &str = "note_watermarks";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
 const TASKS_DIR: &str = "tasks";
@@ -220,6 +222,7 @@ impl ScanDir {
         ScanDirPaths {
             notes_dir: self.notes_dir(),
             issues_dir: self.issues_dir(),
+            note_watermarks: self.dir.join(NOTE_WATERMARKS_FILE),
             watermarks_dir: self.object_dir().join(WATERMARKS_DIR),
             carried_notes: self.dir.join(CARRIED_NOTES_FILE),
             tasks_dir: self.object_dir().join(TASKS_DIR),
@@ -234,6 +237,39 @@ impl ScanDir {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e),
         }
+    }
+
+    /// The staged-note watermarks the runtime deferred, as
+    /// `(note id, key, mark)` in file order; empty when none.
+    pub fn staged_note_watermarks(&self) -> io::Result<Vec<(String, String, u64)>> {
+        let text = match fs::read_to_string(self.dir.join(NOTE_WATERMARKS_FILE)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let parsed = match fields.as_slice() {
+                [id, key, mark] => mark.parse::<u64>().ok().map(|m| (*id, *key, m)),
+                _ => None,
+            };
+            let Some((id, key, mark)) = parsed else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("note watermark line is not <id> <key> <mark>: {line:?}"),
+                ));
+            };
+            out.push((id.to_string(), key.to_string(), mark));
+        }
+        Ok(out)
+    }
+
+    /// Write `scan/watermarks/<oid>/<key>` holding `<commit> <mark>`.
+    pub fn write_watermark(&self, oid: &str, key: &str, commit: &str, mark: u64) -> io::Result<()> {
+        let dir = self.object_dir().join(WATERMARKS_DIR).join(oid);
+        fs::create_dir_all(&dir)?;
+        write_atomic(&dir.join(key), format!("{commit} {mark}\n").as_bytes())
     }
 
     pub fn set_state(&self, state: State) -> io::Result<()> {

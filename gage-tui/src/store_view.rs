@@ -24,6 +24,7 @@ use gage_store::{CommitMeta, EntryKind, Store, StoreError, TagRef, TagStore, Tre
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame, Terminal};
@@ -843,10 +844,7 @@ fn blob_sections(
     width: usize,
 ) -> Vec<Vec<Line<'static>>> {
     if text.is_empty() {
-        return vec![vec![Line::from(Span::styled(
-            "(empty)",
-            styles::Text::dim(),
-        ))]];
+        return vec![vec![note_line("", "Empty")]];
     }
     let lines: Vec<Line<'static>> = match pretty_json(text, name) {
         Some(pretty) => highlighter.highlight(&pretty, "json"),
@@ -966,7 +964,7 @@ fn parents_section(store: &Store, commit: &str, width: u16) -> Vec<Line<'static>
         }
     };
     if classified.parent.is_none() && classified.links.is_empty() {
-        lines.push(Line::from(Span::styled("  (none)", styles::Text::dim())));
+        lines.push(note_line("  ", "None"));
         return lines;
     }
     if let Some(parent) = &classified.parent {
@@ -1026,7 +1024,7 @@ fn link_files_section(store: &Store, commit: &str, width: u16) -> Vec<Line<'stat
         }
     };
     if files.is_empty() {
-        lines.push(Line::from(Span::styled("  (none)", styles::Text::dim())));
+        lines.push(note_line("  ", "None"));
         return lines;
     }
     for file in &files {
@@ -1042,7 +1040,7 @@ fn push_link_file(lines: &mut Vec<Line<'static>>, store: &Store, file: &LinkFile
         Span::styled(format!("  ({} sha)", file.shas.len()), styles::Text::dim()),
     ]));
     if file.shas.is_empty() {
-        lines.push(Line::from(Span::styled("    (empty)", styles::Text::dim())));
+        lines.push(note_line("    ", "Empty"));
         return;
     }
     for sha in &file.shas {
@@ -1069,10 +1067,7 @@ fn parent_chain_section(store: &Store, commit: &str, width: u16) -> Vec<Line<'st
         }
     };
     if chain.len() <= 1 {
-        lines.push(Line::from(Span::styled(
-            "  (this is the only version)",
-            styles::Text::dim(),
-        )));
+        lines.push(note_line("  ", "This is the only version"));
         return lines;
     }
     for (idx, sha) in chain.iter().enumerate() {
@@ -1135,6 +1130,16 @@ fn err_line(text: String) -> Line<'static> {
     Line::from(Span::styled(format!("  {text}"), styles::LogLevel::error()))
 }
 
+/// A note standing in for absent content, e.g. "None" or "This is
+/// the only version". Rendered dim italic with no decoration so it
+/// reads as commentary rather than data.
+fn note_line(indent: &str, text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("{indent}{text}"),
+        styles::Text::dim().add_modifier(Modifier::ITALIC),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,7 +1177,7 @@ mod tests {
                     author: "user:test",
                     target: None,
                     metadata: None,
-                    work_key: None,
+                    carry_forward_key: None,
                 })
                 .unwrap();
             last = last.max(id);
@@ -1211,7 +1216,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                work_key: None,
+                carry_forward_key: None,
             })
             .unwrap();
 
@@ -1341,7 +1346,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                work_key: None,
+                carry_forward_key: None,
             })
             .unwrap();
         let gone = notes
@@ -1351,7 +1356,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                work_key: None,
+                carry_forward_key: None,
             })
             .unwrap();
         notes.delete(&gone).unwrap();
@@ -1591,7 +1596,7 @@ mod tests {
                         author: "user:test",
                         target: None,
                         metadata: None,
-                        work_key: None,
+                        carry_forward_key: None,
                     })
                     .unwrap()
             })

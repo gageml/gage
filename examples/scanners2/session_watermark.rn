@@ -1,0 +1,18 @@
+use gage::{Mark, scan, watermark};
+
+pub const SCANNER = #{
+    name: "session-watermark",
+    description: "Session watermarks",
+    tasks: #{ main: #{} },
+};
+
+const KEY = ("session-watermark", 1);
+
+pub async fn main() {
+    for (s, hwm) in scan().sessions().hwm(KEY).await? {
+        println!("{} hwm {} of {}", s.id, hwm, s.line_count);
+        if hwm < s.line_count {
+            watermark(Mark::session(s), KEY).await?;
+        }
+    }
+}

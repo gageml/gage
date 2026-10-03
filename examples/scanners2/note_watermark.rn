@@ -1,0 +1,22 @@
+use gage::{Mark, scan, watermark};
+
+pub const SCANNER = #{
+    name: "note-watermark",
+    description: "Note watermarks",
+    tasks: #{ main: #{} },
+};
+
+const KEY = ("note-watermark", 1);
+
+pub async fn main() {
+    // Hwm interface tells us if we've seen the note (1) or not (0)
+    for (n, hwm) in scan().notes().hwm(KEY).await? {
+        println!("{n:?}: hwm {hwm}");
+    }
+
+    // Unseen interface is a convenience for filtering out seen notes (hwm 1)
+    for n in scan().notes().unseen(KEY).await? {
+        // Mark the note as seen (sets hwm 1)
+        watermark(Mark::note(n), KEY).await?;
+    }
+}

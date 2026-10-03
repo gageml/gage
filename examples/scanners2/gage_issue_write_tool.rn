@@ -1,0 +1,15 @@
+use gage::{call_agent, tools::IssueWrite};
+
+pub const SCANNER = #{
+    name: "gage-issue-write-tool",
+    description: "IssueWrite tool use",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let a = call_agent("Write an issue \"Delete this issue it's a test\"")
+        .tool(IssueWrite::new())
+        .await?;
+    let result = a.wait().await?;
+    println!("{}", result.text);
+}

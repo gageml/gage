@@ -157,7 +157,7 @@ impl OutputSink {
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::write_note`,
 /// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,
-/// `gage::watermark`, `gage::Template`, `gage::Progress`,
+/// `gage::Mark`, `gage::watermark`, `gage::Template`, `gage::Progress`,
 /// `gage::call_agent` and the values it returns, `gage::AgentRunner`,
 /// and the include macros from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].
