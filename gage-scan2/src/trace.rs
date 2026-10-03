@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once};
 
 use gage_core::datetime::{ms_to_iso8601, now_ms};
+use gage_runtime2::LOG_TARGET;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::Layer;
@@ -65,6 +66,9 @@ pub struct RecordsLayer;
 
 impl<S: Subscriber> Layer<S> for RecordsLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() == LOG_TARGET {
+            return;
+        }
         let Ok(scope) = LOG_SCOPE.try_with(|s| s.clone()) else {
             return;
         };
@@ -89,8 +93,8 @@ impl<S: Subscriber> Layer<S> for RecordsLayer {
 /// Collects an event's `message` field, then any other fields as
 /// `key=value` pairs.
 #[derive(Default)]
-struct MessageVisitor {
-    text: String,
+pub(crate) struct MessageVisitor {
+    pub(crate) text: String,
 }
 
 impl Visit for MessageVisitor {

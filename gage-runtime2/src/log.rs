@@ -2,9 +2,17 @@
 //!
 //! `log::trace!` through `log::error!` accept the full format grammar
 //! and expand to `::log::__write(level, message)`, which sends one
-//! [`Output::Log`] record through the task's output sink. The scan
-//! writes records to its `logs/records`. Distinct from `println`,
-//! which is task output and lands in `logs/out`.
+//! [`Output::Log`] record through the task's output sink and raises
+//! the same record as a `tracing` event under [`LOG_TARGET`] with
+//! `scanner` and `task` fields. The scanner code's counterpart of a
+//! module path is `scanner::<scanner>::<task>`, but a `tracing` event
+//! carries `'static` metadata, so the two names travel as fields and
+//! a subscriber that renders the path assembles it from them. The
+//! scan writes the sink's record to its `logs/records`; the event is
+//! for live subscribers such as the CLI's stderr layer, so a
+//! subscriber that also writes `logs/records` skips the target.
+//! Distinct from `println`, which is task output and lands in
+//! `logs/out`.
 //!
 //! The module lives at the root (`::log`), not under `::gage`: Rune
 //! resolves macro paths literally, so `log::info!(...)` only works if
@@ -14,7 +22,11 @@ use rune::macros::FormatArgs;
 use rune::parse::Parser;
 use rune::{ContextError, Module};
 
-use crate::{Level, Output, send};
+use crate::{Level, OUTPUT_SINK, Output, send};
+
+/// The `tracing` target of the events the `log` macros raise. Their
+/// `scanner` and `task` fields name the running task.
+pub const LOG_TARGET: &str = "scanner";
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("log")?;
@@ -43,5 +55,15 @@ fn __write(level: &str, message: &str) {
     send(Output::Log {
         level,
         message: message.to_string(),
+    });
+    OUTPUT_SINK.with(|sink| {
+        let (scanner, task) = (&sink.scanner, &sink.task);
+        match level {
+            Level::Trace => tracing::trace!(target: LOG_TARGET, %scanner, %task, "{message}"),
+            Level::Debug => tracing::debug!(target: LOG_TARGET, %scanner, %task, "{message}"),
+            Level::Info => tracing::info!(target: LOG_TARGET, %scanner, %task, "{message}"),
+            Level::Warn => tracing::warn!(target: LOG_TARGET, %scanner, %task, "{message}"),
+            Level::Error => tracing::error!(target: LOG_TARGET, %scanner, %task, "{message}"),
+        }
     });
 }

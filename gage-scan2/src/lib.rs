@@ -2041,6 +2041,7 @@ mod tests {
     /// and log records in `logs/records` with the task as origin.
     #[tokio::test]
     async fn task_output_and_records_are_stored_under_the_scan_logs() {
+        let scanner_events = install_subscriber();
         let (_dir, compiled) = compile_source(
             r#"
             pub const SCANNER = #{
@@ -2090,8 +2091,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let records = String::from_utf8(records).unwrap();
-        // Runtime records share the file when another test has
-        // installed the process-wide records layer
+        // Runtime records share the file; the `log` macros' tracing
+        // events do not, since the sink's copy is the one written
         let lines: Vec<&str> = records
             .lines()
             .filter(|l| l.contains(" logs:loud: "))
@@ -2099,6 +2100,60 @@ mod tests {
         assert_eq!(lines.len(), 2, "{records}");
         assert!(lines[0].ends_with("Z INFO logs:loud: count 3"), "{records}");
         assert!(lines[1].ends_with("Z WARN logs:loud: careful"), "{records}");
+        assert!(!records.contains(" scanner::"), "{records}");
+        let scanner_events = scanner_events.lock().unwrap();
+        assert!(
+            scanner_events.contains(&"INFO scanner: count 3 scanner=logs task=loud".to_string())
+                && scanner_events
+                    .contains(&"WARN scanner: careful scanner=logs task=loud".to_string()),
+            "{scanner_events:?}"
+        );
+    }
+
+    /// Install, once per process, the records layer and a layer that
+    /// collects every event the `log` macros raise as `LEVEL target:
+    /// message`. Process-wide: a thread-scoped subscriber would miss
+    /// callsites other tests hit first with no subscriber, whose
+    /// cached interest stays disabled. The records layer drops events
+    /// outside a scan scope, so other tests are unaffected.
+    fn install_subscriber() -> &'static Mutex<Vec<String>> {
+        use std::sync::Once;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        static SCANNER_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry()
+                    .with(trace::layer())
+                    .with(ScannerEvents),
+            )
+            .unwrap();
+        });
+        &SCANNER_EVENTS
+    }
+
+    struct ScannerEvents;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ScannerEvents {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            if meta.target() != gage_runtime2::LOG_TARGET {
+                return;
+            }
+            let mut message = trace::MessageVisitor::default();
+            event.record(&mut message);
+            install_subscriber().lock().unwrap().push(format!(
+                "{} {}: {}",
+                meta.level(),
+                meta.target(),
+                message.text
+            ));
+        }
     }
 
     /// A scanner's includes are stored beside it under their literal
@@ -2273,20 +2328,7 @@ mod tests {
     /// attribute when raised inside one.
     #[tokio::test]
     async fn runtime_records_name_the_running_task() {
-        use std::sync::Once;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        // Process-wide, once: a thread-scoped subscriber would miss
-        // callsites other tests hit first with no subscriber, whose
-        // cached interest stays disabled. The layer drops events
-        // outside a scan scope, so other tests are unaffected.
-        static INSTALL: Once = Once::new();
-        INSTALL.call_once(|| {
-            tracing::subscriber::set_global_default(
-                tracing_subscriber::registry().with(trace::layer()),
-            )
-            .unwrap();
-        });
+        install_subscriber();
 
         // The runtime's `write_note` raises a debug record from inside
         // the task; the sink runs on the scan loop, outside any task

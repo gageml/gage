@@ -70,10 +70,12 @@ struct Cli {
     command: Command,
 }
 
-/// Crate-name log targets for `--log`. Underscored form (clap target =
-/// crate name with `-` → `_`). Keep in sync with the workspace members
-/// that actually emit tracing events.
+/// Log targets for `--log`: the crate names in underscored form
+/// (clap target = crate name with `-` → `_`), plus the runtime's
+/// `LOG_TARGET` for a scanner's own `log` records. Keep in sync with
+/// the workspace members that actually emit tracing events.
 const GAGE_LOG_TARGETS: &[&str] = &[
+    gage_runtime2::LOG_TARGET,
     "gage_agent",
     "gage_claude",
     "gage_cli",

@@ -1,3 +1,4 @@
+use std::fmt::{self, Write as _};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,7 @@ use gage_query2::ContextBuilder;
 use gage_registry::scanner::{
     Scanner, ScannerDef, ScannerRegistry, parse_scanner_file, split_scanner_spec,
 };
-use gage_runtime2::{Output, TaskOutput};
+use gage_runtime2::{LOG_TARGET, Output, TaskOutput};
 use gage_scan2::scan_dir::scans_dir;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
 use gage_store::{DatasetStore, SCAN_TYPE, ScanStore, Store};
@@ -25,6 +26,10 @@ use tabled::{
         object::{Columns, Object, Rows},
     },
 };
+use tracing::field::{Field, Visit};
+use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::FormatFields;
+use tracing_subscriber::fmt::format::Writer;
 
 use crate::cmd_dataset;
 use crate::cmd_note::count_rows;
@@ -34,29 +39,88 @@ use crate::human::{format_duration, format_elapsed_ms};
 use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::style as s;
 
-/// Install the `tracing` subscriber for a scan: warnings and above to
+/// Install the `tracing` subscriber for a scan: `info` and above to
 /// stderr, and the records layer into the running scan's staging at
 /// `info` and above for the Gage crates. `GAGE_LOG` (set by `--log`)
-/// overrides both.
+/// overrides both. A scanner's own `log` records reach stderr through
+/// a second layer that renders their target as
+/// `scanner::<scanner>::<task>`, the scanner code's counterpart of a
+/// crate's module path.
 pub fn init_logging() {
+    use tracing_subscriber::filter::{FilterExt, filter_fn};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{EnvFilter, Layer, fmt};
 
+    let stderr_filter =
+        || EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let stderr = fmt::layer()
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .without_time()
-        .with_filter(
-            EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
-        );
+        .with_filter(stderr_filter().and(filter_fn(|meta| meta.target() != LOG_TARGET)));
+    let scanner_stderr = fmt::layer()
+        .with_writer(io::stderr)
+        .without_time()
+        .with_target(false)
+        .fmt_fields(ScannerFields)
+        .with_filter(stderr_filter().and(filter_fn(|meta| meta.target() == LOG_TARGET)));
     let records =
         gage_scan2::trace::layer().with_filter(EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(
             |_| EnvFilter::new("warn,gage_store=info,gage_scan2=info,gage_runtime2=info"),
         ));
     tracing_subscriber::registry()
         .with(stderr)
+        .with(scanner_stderr)
         .with(records)
         .init();
+}
+
+/// Field formatter for a scanner's `log` events: the `scanner` and
+/// `task` fields become the target, `scanner::<scanner>::<task>:`,
+/// styled as the default formatter styles a target, followed by the
+/// message and any other fields as `key=value`.
+struct ScannerFields;
+
+impl<'w> FormatFields<'w> for ScannerFields {
+    fn format_fields<R: RecordFields>(&self, mut writer: Writer<'w>, fields: R) -> fmt::Result {
+        let mut v = ScannerFieldsVisitor::default();
+        fields.record(&mut v);
+        let target = format!("{LOG_TARGET}::{}::{}", v.scanner, v.task);
+        if writer.has_ansi_escapes() {
+            write!(writer, "\x1b[2m{target}\x1b[0m\x1b[2m:\x1b[0m")?;
+        } else {
+            write!(writer, "{target}:")?;
+        }
+        write!(writer, " {}", v.message)?;
+        if !v.rest.is_empty() {
+            write!(writer, " {}", v.rest)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ScannerFieldsVisitor {
+    scanner: String,
+    task: String,
+    message: String,
+    rest: String,
+}
+
+impl Visit for ScannerFieldsVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        match field.name() {
+            "scanner" => self.scanner = format!("{value:?}"),
+            "task" => self.task = format!("{value:?}"),
+            "message" => self.message = format!("{value:?}"),
+            name => {
+                if !self.rest.is_empty() {
+                    self.rest.push(' ');
+                }
+                write!(self.rest, "{name}={value:?}").unwrap();
+            }
+        }
+    }
 }
 
 #[derive(Args)]

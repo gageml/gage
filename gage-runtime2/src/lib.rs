@@ -51,6 +51,7 @@ use rune::{Context, ContextError};
 use tokio::sync::mpsc;
 
 pub use attachment::{Attachment, AttachmentFile, Attachments};
+pub use log::LOG_TARGET;
 pub use scan::{
     SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, ScanDirPaths, Session, Sessions,
     render_vm_error,
