@@ -1,0 +1,19 @@
+use gage::{AgentRunner, call_agent};
+
+pub const SCANNER = #{
+    name: "agent-runner",
+    description: "Run agents concurrently",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let agents = AgentRunner::new();
+    for model in ("opus", "sonnet", "haiku") {
+        agents.add(call_agent("What model is this?").model(model), ());
+    }
+    let results = agents.start();
+    while let Some(next) = results.next().await {
+        let (result, _) = next?;
+        log::info!("{}", result.text);
+    }
+}
