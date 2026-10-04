@@ -60,6 +60,7 @@ use serde_json as json;
 use tokio::sync::mpsc;
 use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::plan::{Plan, PlanError, PlannedScanner, Selection};
 use crate::scan_dir::{Logs, ScanDir, ScannerPlan, State};
@@ -477,7 +478,14 @@ impl<F: FnMut(Event)> Run<'_, F> {
     )]
     async fn execute(mut self, store: &Store) -> Result<ScanOutcome, ScanError> {
         let plan = Arc::clone(&self.plan);
-        tracing::info!("scan {} started with {} tasks", self.id, plan.tasks.len());
+        tracing::info!(
+            id = %self.id,
+            tasks = plan.tasks.len(),
+            dataset = self.scan_ctx.dataset.as_ref().map(|d| d.id.as_str()),
+            commit = self.scan_ctx.dataset.as_ref().map(|d| d.commit_sha.as_str()),
+            jobs = self.config.jobs.max(1),
+            "scan started"
+        );
         let mut scan_logs = self.scan_dir.scan_logs();
         let started = now_ms();
         for t in &plan.tasks {
@@ -549,8 +557,8 @@ impl<F: FnMut(Event)> Run<'_, F> {
             };
             self.scan_dir.write_watermark(&id, &key, commit, mark)?;
         }
-        self.scan_dir
-            .write_notes_carried_link(&self.scan_dir.staged_carried_notes()?)?;
+        let carried = self.scan_dir.staged_carried_notes()?;
+        self.scan_dir.write_notes_carried_link(&carried)?;
         // Issues follow the notes they cite, so their evidence resolves
         let issues = IssueStore::from(store);
         let mut issue_shas = Vec::new();
@@ -560,6 +568,13 @@ impl<F: FnMut(Event)> Run<'_, F> {
         }
         self.scan_dir.write_issues_link(&issue_shas)?;
         let commit_sha = ScanStore::from(store).create(&self.id, &self.scan_dir.object_dir())?;
+        tracing::info!(
+            notes = note_shas.len(),
+            issues = issue_shas.len(),
+            carried = carried.len(),
+            commit = %commit_sha,
+            "scan applied"
+        );
         self.scan_dir.mark_applied()?;
         self.scan_dir.remove()?;
         Ok(ScanOutcome {
@@ -635,6 +650,8 @@ impl<F: FnMut(Event)> Run<'_, F> {
         }
         let canceled = d.counts.completed + d.counts.failed + d.counts.skipped < total;
         if canceled {
+            let unstarted = d.status.iter().filter(|s| s.is_none()).count() - d.running.len();
+            tracing::info!(aborted = d.running.len(), unstarted, "scan canceled");
             running.abort_all();
             while running.join_next().await.is_some() {}
             self.drain_output(logs)?;
@@ -672,6 +689,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
             scanner: t.scanner.clone(),
             task: t.task.clone(),
         });
+        tracing::info!(scanner = %t.scanner, task = %t.task, "task started");
         let unit = self.units[&t.scanner].clone();
         let mut ctx = self.scan_ctx.clone();
         ctx.params = unit.params.clone();
@@ -716,6 +734,13 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let stopped = d.started[i].map(|_| now_ms());
         let attrs = task_attrs(status, d.started[i], stopped);
         self.scan_dir.write_task(&t.scanner, &t.task, &attrs)?;
+        tracing::info!(
+            scanner = %t.scanner,
+            task = %t.task,
+            status = status.as_str(),
+            elapsed_ms = d.started[i].zip(stopped).map(|(a, b)| b - a),
+            "task finished"
+        );
         match status {
             TaskStatus::Completed => d.counts.completed += 1,
             TaskStatus::Failed => d.counts.failed += 1,
@@ -848,8 +873,10 @@ struct TaskExec {
 }
 
 impl TaskExec {
-    /// Run the task under its scan context, output sink, and log
-    /// scope.
+    /// Run the task under its scan context, output sink, log scope,
+    /// and a `task` span naming the scanner and task. The span is
+    /// created inside the log scope so the records layer can attach
+    /// the scope to it.
     async fn run(self) -> Result<(), String> {
         let TaskExec {
             unit,
@@ -859,10 +886,13 @@ impl TaskExec {
             scope,
         } = self;
         LOG_SCOPE
-            .scope(
-                scope,
-                SCAN_CTX.scope(ctx, OUTPUT_SINK.scope(sink, execute(&unit, &task))),
-            )
+            .scope(scope, async move {
+                let span = tracing::info_span!("task", scanner = %ctx.scanner, task = %task);
+                SCAN_CTX
+                    .scope(ctx, OUTPUT_SINK.scope(sink, execute(&unit, &task)))
+                    .instrument(span)
+                    .await
+            })
             .await
     }
 }
@@ -2389,8 +2419,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            records.contains(" INFO gage_scan2: scan ")
-                && records.contains(" started with 1 tasks\n"),
+            records
+                .lines()
+                .any(|l| l.contains(" INFO gage_scan2: scan started id=")
+                    && l.ends_with(" tasks=1 jobs=1")),
             "{records}"
         );
         assert!(

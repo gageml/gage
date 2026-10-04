@@ -10,9 +10,13 @@
 //! them.
 //!
 //! The scan sets the destination through a task-local [`LogScope`],
-//! so no handle is shared with the layer. [`install_panic_hook`] uses
-//! the same scope to append a panic and its backtrace to the scan's
-//! `logs/err` before the process dies, leaving staging for recovery.
+//! so no handle is shared with the layer. A span created inside a
+//! scope carries the scope with it, so an event raised outside any
+//! scope but under such a span is still recorded: a scanner tool
+//! handler runs on the MCP host's own tasks under a span parented to
+//! the calling task's. [`install_panic_hook`] uses the task-local
+//! scope to append a panic and its backtrace to the scan's `logs/err`
+//! before the process dies, leaving staging for recovery.
 
 use std::fmt::Write as _;
 use std::io;
@@ -22,9 +26,11 @@ use std::sync::{Arc, Mutex, Once};
 use gage_core::datetime::{ms_to_iso8601, now_ms};
 use gage_runtime2::LOG_TARGET;
 use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 
 use crate::scan_dir;
 
@@ -64,12 +70,23 @@ pub fn layer() -> RecordsLayer {
 
 pub struct RecordsLayer;
 
-impl<S: Subscriber> Layer<S> for RecordsLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+impl<S> Layer<S> for RecordsLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(&self, _attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if let Ok(scope) = LOG_SCOPE.try_with(|s| s.clone())
+            && let Some(span) = ctx.span(id)
+        {
+            span.extensions_mut().insert(scope);
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         if event.metadata().target() == LOG_TARGET {
             return;
         }
-        let Ok(scope) = LOG_SCOPE.try_with(|s| s.clone()) else {
+        let Some(scope) = log_scope(event, &ctx) else {
             return;
         };
         let mut message = MessageVisitor::default();
@@ -88,6 +105,21 @@ impl<S: Subscriber> Layer<S> for RecordsLayer {
         line.push('\n');
         scope.append(scan_dir::RECORDS_LOG, line.as_bytes());
     }
+}
+
+/// The scope `event` is recorded under: the task-local scope where
+/// it is raised, or the scope the nearest enclosing span was created
+/// in.
+fn log_scope<S>(event: &Event<'_>, ctx: &Context<'_, S>) -> Option<LogScope>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    if let Ok(scope) = LOG_SCOPE.try_with(|s| s.clone()) {
+        return Some(scope);
+    }
+    ctx.event_span(event)?
+        .scope()
+        .find_map(|span| span.extensions().get::<LogScope>().cloned())
 }
 
 /// Collects an event's `message` field, then any other fields as
@@ -131,4 +163,48 @@ pub fn install_panic_hook() {
             previous(info);
         }));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+
+    /// An event raised outside any log scope is recorded when it
+    /// runs under a span created inside one, and dropped otherwise.
+    #[test]
+    fn events_under_a_scoped_span_are_recorded_outside_the_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let object_dir = dir.path().join("scan");
+        let scope = LogScope {
+            object_dir: object_dir.clone(),
+            task: Some(("s".into(), "t".into())),
+            failure: Arc::new(Mutex::new(None)),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer());
+        tracing::subscriber::with_default(subscriber, || {
+            let span = LOG_SCOPE.sync_scope(scope.clone(), || tracing::info_span!("task"));
+            tracing::info!("dropped: no scope");
+            span.in_scope(|| tracing::info!("recorded: under the span"));
+            let child = span.in_scope(|| tracing::info_span!("tool"));
+            child.in_scope(|| tracing::info!("recorded: under a child span"));
+        });
+        let records =
+            fs::read_to_string(scan_dir::scan_logs_dir(&object_dir).join(scan_dir::RECORDS_LOG))
+                .unwrap();
+        let lines: Vec<&str> = records.lines().collect();
+        assert_eq!(lines.len(), 2, "{records}");
+        assert!(
+            lines[0].ends_with("INFO gage_scan2::trace::tests: recorded: under the span task=s:t"),
+            "{records}"
+        );
+        assert!(
+            lines[1].ends_with("recorded: under a child span task=s:t"),
+            "{records}"
+        );
+        assert!(scope.failure.lock().unwrap().is_none());
+    }
 }

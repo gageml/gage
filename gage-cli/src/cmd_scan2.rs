@@ -39,7 +39,7 @@ use crate::human::{format_duration, format_elapsed_ms};
 use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::style as s;
 
-/// Install the `tracing` subscriber for a scan: `info` and above to
+/// Install the `tracing` subscriber for a scan: warnings and above to
 /// stderr, and the records layer into the running scan's staging at
 /// `info` and above for the Gage crates. `GAGE_LOG` (set by `--log`)
 /// overrides both. A scanner's own `log` records reach stderr through
@@ -53,7 +53,7 @@ pub fn init_logging() {
     use tracing_subscriber::{EnvFilter, Layer, fmt};
 
     let stderr_filter =
-        || EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+        || EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
     let stderr = fmt::layer()
         .with_writer(io::stderr)
         .without_time()

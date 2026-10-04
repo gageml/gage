@@ -34,6 +34,7 @@ use rune::runtime::{
 };
 use rune::{Any, ContextError, Module};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use tracing::{Instrument, Span};
 
 use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error};
 use crate::{Level, OUTPUT_SINK, Output, OutputSink};
@@ -579,9 +580,10 @@ fn render_input_schema(inputs: &[Input]) -> JsonObject {
 /// sink, and classify what it returned. Arguments that violate the
 /// declared inputs are an error result the model reads; the handler
 /// is not called. A handler that fails with a VM error is a fault;
-/// the rendered error is logged to the task's sink, since the service
-/// calls the handler from the host's server tasks, outside the scan's
-/// own record scope.
+/// the rendered error is logged to the task's sink. The service calls
+/// the handler from the host's server tasks, outside the task's
+/// task-locals, so each call runs under a `tool` span parented to
+/// the span current where the callback is built, the calling agent's.
 fn callback(
     tool: &ScannerTool,
     handler: Arc<SyncFunction>,
@@ -594,16 +596,17 @@ fn callback(
     let declared = DeclaredInputs::new(&tool.inputs);
     let requires_meta = tool.requires_meta;
     let tool_name = tool.name.clone();
+    let parent = Span::current();
     Arc::new(move |args, meta| {
+        let span = tracing::info_span!(parent: &parent, "tool", name = %tool_name);
         let handler = Arc::clone(&handler);
         let ctx = ctx.clone();
         let sink = sink.clone();
         let scanner = ctx.scanner.clone();
-        let log_scanner = scanner.clone();
         let log_sources = ctx.sources.clone();
         let tool_name = tool_name.clone();
         let args = declared.check(args);
-        Box::pin(async move {
+        let call = async move {
             let args = match args {
                 Ok(args) => args,
                 Err(message) => return CustomToolOutcome::Error(message),
@@ -628,12 +631,7 @@ fn callback(
                 Ok(outcome) => outcome.0,
                 Err(e) => {
                     let rendered = render_vm_error(&e, log_sources.as_deref());
-                    tracing::error!(
-                        scanner = %log_scanner,
-                        tool = %tool_name,
-                        error = %rendered,
-                        "tool handler failed",
-                    );
+                    tracing::error!(error = %rendered, "tool handler failed");
                     if let Some(sink) = &sink {
                         sink.send(Output::Log {
                             level: Level::Error,
@@ -643,7 +641,8 @@ fn callback(
                     CustomToolOutcome::Fault("internal server error".into())
                 }
             }
-        })
+        };
+        Box::pin(call.instrument(span))
     })
 }
 

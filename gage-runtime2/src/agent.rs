@@ -30,7 +30,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -41,6 +41,7 @@ use gage_store::{AgentAttrs, SessionStore};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
+use tracing::{Instrument, Span, field};
 
 use crate::OUTPUT_SINK;
 use crate::scan::{ScanContext, current};
@@ -192,9 +193,23 @@ impl CallAgent {
 /// Start the agent through the scan's driver. Declared tools are
 /// validated, served from the scan's MCP host, and named to the
 /// driver along with the service URL.
+/// Start the agent under an `agent` span naming its model, turn
+/// limit, and name. Every later method of the agent runs under the
+/// same span.
 async fn start(c: CallAgent) -> Result<Agent, Error> {
+    let span = tracing::info_span!(
+        "agent",
+        model = c.spec.model.as_deref().map(field::display),
+        max_turns = c.spec.max_turns,
+        name = c.spec.project.as_deref().map(field::display),
+    );
+    start_in_span(c, span.clone()).instrument(span).await
+}
+
+async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     let ctx = current().map_err(|e| Error::agent(e.to_string()))?;
     let mut spec = c.spec;
+    let tools = c.tools.len();
     let service = if c.tools.is_empty() {
         None
     } else {
@@ -217,6 +232,7 @@ async fn start(c: CallAgent) -> Result<Agent, Error> {
         .driver
         .run_agent(spec)
         .map_err(|e| Error::agent(format!("call_agent: {e}")))?;
+    tracing::info!(tools, "agent started");
     Ok(Agent {
         model,
         max_turns,
@@ -229,6 +245,8 @@ async fn start(c: CallAgent) -> Result<Agent, Error> {
             stop_reason: String::new(),
             last_outcome: None,
             final_result: None,
+            span,
+            started: Instant::now(),
         })),
     })
 }
@@ -262,9 +280,17 @@ struct AgentInner {
     stop_reason: String,
     last_outcome: Option<AgentOutcome>,
     final_result: Option<AgentResult>,
+    /// The `agent` span every method runs under
+    span: Span,
+    started: Instant,
 }
 
 type Inner = Arc<Mutex<AgentInner>>;
+
+/// The agent's span, for instrumenting a method's future
+fn span_of(inner: &Inner) -> Span {
+    inner.lock().unwrap().span.clone()
+}
 
 impl Agent {
     #[rune::function(protocol = DEBUG_FMT)]
@@ -282,7 +308,9 @@ impl Agent {
 /// `AgentError::Stopped`.
 #[rune::function(instance)]
 async fn poll(this: Mut<Agent>) -> Result<Result<Event, Error>, VmError> {
-    Ok(do_poll(Arc::clone(&this.inner)).await)
+    let inner = Arc::clone(&this.inner);
+    let span = span_of(&inner);
+    Ok(do_poll(inner).instrument(span).await)
 }
 
 /// Drive the agent to its end, consuming its events, and return its
@@ -292,7 +320,9 @@ async fn poll(this: Mut<Agent>) -> Result<Result<Event, Error>, VmError> {
 /// again.
 #[rune::function(instance)]
 async fn wait(this: Mut<Agent>) -> Result<Result<AgentResult, Error>, VmError> {
-    Ok(wait_inner(Arc::clone(&this.inner)).await)
+    let inner = Arc::clone(&this.inner);
+    let span = span_of(&inner);
+    Ok(wait_inner(inner).instrument(span).await)
 }
 
 async fn wait_inner(inner: Inner) -> Result<AgentResult, Error> {
@@ -390,10 +420,21 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
         .map_err(|e| Error::agent(format!("agent.stop: stderr: {e}")))?;
     let stderr = String::from_utf8_lossy(&stderr).into_owned();
 
-    let (ctx, outcome, stop_reason) = {
+    let (ctx, outcome, stop_reason, started) = {
         let g = inner.lock().unwrap();
-        (g.ctx.clone(), g.last_outcome.clone(), g.stop_reason.clone())
+        (
+            g.ctx.clone(),
+            g.last_outcome.clone(),
+            g.stop_reason.clone(),
+            g.started,
+        )
     };
+    tracing::info!(
+        exit_code,
+        stop_reason = %stop_reason,
+        elapsed_ms = started.elapsed().as_millis(),
+        "agent stopped"
+    );
     store_transcript(&ctx, session.as_mut(), exit_code, &stderr, outcome.as_ref()).await?;
     if let Err(e) = session.cleanup() {
         tracing::warn!(error = %e, "agent cleanup");
@@ -497,12 +538,14 @@ fn running(this: &Agent) -> bool {
 #[rune::function(instance)]
 async fn send(this: Mut<Agent>, msg: Ref<str>) -> Result<Result<(), Error>, VmError> {
     let inner = Arc::clone(&this.inner);
+    let span = span_of(&inner);
     Ok(async {
         let mut session = take_session(&inner, "agent.send")?;
         let res = session.send(&msg).await;
         inner.lock().unwrap().session = Some(session);
         res.map_err(|e| Error::agent(format!("agent.send: {e}")))
     }
+    .instrument(span)
     .await)
 }
 
@@ -510,6 +553,7 @@ async fn send(this: Mut<Agent>, msg: Ref<str>) -> Result<Result<(), Error>, VmEr
 #[rune::function(instance)]
 async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> Result<Result<(), Error>, VmError> {
     let inner = Arc::clone(&this.inner);
+    let span = span_of(&inner);
     Ok(async {
         let mut session = take_session(&inner, "agent.send_now")?;
         let res = async {
@@ -520,19 +564,23 @@ async fn send_now(this: Mut<Agent>, msg: Ref<str>) -> Result<Result<(), Error>, 
         inner.lock().unwrap().session = Some(session);
         res.map_err(|e| Error::agent(format!("agent.send_now: {e}")))
     }
+    .instrument(span)
     .await)
 }
 
 /// End the session. `result()` is `Some` afterwards.
 #[rune::function(instance)]
 async fn stop(this: Mut<Agent>) -> Result<Result<(), Error>, VmError> {
-    Ok(do_stop(Arc::clone(&this.inner)).await)
+    let inner = Arc::clone(&this.inner);
+    let span = span_of(&inner);
+    Ok(do_stop(inner).instrument(span).await)
 }
 
 /// Terminate the process, forcibly after `grace_secs`
 #[rune::function(instance)]
 async fn kill(this: Mut<Agent>, grace_secs: i64) -> Result<Result<(), Error>, VmError> {
     let inner = Arc::clone(&this.inner);
+    let span = span_of(&inner);
     Ok(async {
         let mut session = take_session(&inner, "agent.kill")?;
         let res = session
@@ -541,6 +589,7 @@ async fn kill(this: Mut<Agent>, grace_secs: i64) -> Result<Result<(), Error>, Vm
         inner.lock().unwrap().session = Some(session);
         res.map_err(|e| Error::agent(format!("agent.kill: {e}")))
     }
+    .instrument(span)
     .await)
 }
 
@@ -570,6 +619,7 @@ fn runner_add(mut this: Mut<AgentRunner>, call: CallAgent, ctx: Value) {
 /// Start every queued call. The calls run as `next` is polled.
 #[rune::function(instance, path = start)]
 fn runner_start(this: AgentRunner) -> AgentRunnerResults {
+    tracing::info!(calls = this.queue.len(), "AgentRunner started");
     let futures = FuturesUnordered::new();
     for (call, ctx) in this.queue {
         let fut: RunFuture = Box::pin(async move {
@@ -588,7 +638,8 @@ fn runner_start(this: AgentRunner) -> AgentRunnerResults {
 /// `call_agent(p).await?.wait().await?`.
 async fn call_and_wait(c: CallAgent) -> Result<AgentResult, Error> {
     let agent = start(c).await?;
-    wait_inner(agent.inner).await
+    let span = span_of(&agent.inner);
+    wait_inner(agent.inner).instrument(span).await
 }
 
 type RunFuture = Pin<Box<dyn Future<Output = Result<(AgentResult, Value), Error>>>>;

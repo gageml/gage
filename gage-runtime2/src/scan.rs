@@ -135,7 +135,13 @@ impl ScanContext {
     }
 
     pub(crate) async fn mcp_host(&self) -> Result<&McpHost, HostError> {
-        self.mcp_host.get_or_try_init(McpHost::start).await
+        self.mcp_host
+            .get_or_try_init(|| async {
+                let host = McpHost::start().await?;
+                tracing::info!(addr = %host.addr(), "mcp host started");
+                Ok(host)
+            })
+            .await
     }
 
     /// The scope and query context over the dataset's members at the
@@ -157,6 +163,10 @@ impl ScanContext {
                     .scope(Arc::clone(&scope))
                     .build()
                     .await;
+                tracing::info!(
+                    members = scope.fixed_versions().map_or(0, |v| v.len()),
+                    "dataset query context built"
+                );
                 Ok((scope, ctx))
             })
             .await

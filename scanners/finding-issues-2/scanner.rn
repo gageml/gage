@@ -1,16 +1,4 @@
-// Model of the `finding-issues` scanner for the rethink runtime
-// (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
-// the task names the action.
-//
-// Untagged code runs on the rethink runtime today. Code tagged
-// `// FUTURE` needs a facility the rethink runtime does not have yet.
-// Where the rethink design specifies the interface, FUTURE code is
-// written against it; otherwise it follows the legacy interface as a
-// placeholder. This file is a target, not a runnable scanner.
-
-use gage::scan;
-// FUTURE: agents and Gage tools are not in the rethink runtime
-use gage::call_agent;
+use gage::{Mark, call_agent, scan, watermark};
 use gage::tools::{IssueWrite, Query};
 
 pub const SCANNER = #{
@@ -22,9 +10,9 @@ pub const SCANNER = #{
             notes: #{
                 // `required_by` pulls this task into any scan whose
                 // selected tasks write a matching note
-                wants: ["finding.*"],
+                wants: ["*[finding]"],
             },
-            // required_by: ["finding.*"],
+            // required_by: ["*[finding]"],
             issues: #{
                 writes: #{ "findings": "Issue derived from session findings" },
             },
@@ -32,31 +20,15 @@ pub const SCANNER = #{
     },
 };
 
-// Validation key, named for the promoted scanner
 const REPORT_KEY = ("finding-issues", "report", 1);
 
-/// Ask an agent to review the scan's new findings and write issues.
-///
-/// The findings the agent sees are those written or carried into the
-/// current scan. Skips the agent when every finding was already
-/// analyzed under the current key.
 pub async fn report() {
-    // FUTURE: a notes query over the scan's notes that matches a name
-    // pattern (legacy matched names exactly, so the finding names were
-    // listed concretely), and validation over notes. Designed: the
-    // scan records `validation/note/<key>/<id>` holding the note
-    // commit; `partition(KEY)` splits the notes into `valid` and
-    // `invalid`, and `mark_valid` records one when the work is done.
-    let p = scan().notes().name("*[finding]").partition(REPORT_KEY).await?;
-    if p.invalid.is_empty() {
-        log::info!("no new findings");
+    let findings = scan().notes().name("*[finding]").unseen(REPORT_KEY).await?;
+    if findings.is_empty() {
+        log::info!("no unseen findings for this scan");
         return Ok(());
     }
 
-    // FUTURE: call_agent with Gage tools. The agent reads findings and
-    // their docs through Query; IssueWrite writes `findings` issues.
-    // The initial status (`pending`) is the writer's decision under the
-    // rethink; how the tool states it is undecided.
     let agent = call_agent(include_str!("prompt.md"))
         .name("issue-writer")
         .tools([Query::new(), IssueWriter::new().name("findings")])
@@ -70,8 +42,8 @@ pub async fn report() {
             metadata: result.as_metadata(),
         },
     );
-    for n in p.invalid {
-        p.mark_valid(n).await?;
+    for n in findings {
+        watermark(Mark::note(n), REPORT_KEY).await?;
     }
     Ok(())
 }
