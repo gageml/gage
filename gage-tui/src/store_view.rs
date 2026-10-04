@@ -1327,7 +1327,7 @@ mod tests {
         state.selection_changed();
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("refs/gage/tag/garrett/baseline"), "{text}");
+        assert!(text.contains("refs/gage/1/tag/garrett/baseline"), "{text}");
         assert!(text.contains("gage::note"), "{text}");
         assert!(text.contains(&ids[0]), "{text}");
     }

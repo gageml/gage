@@ -34,7 +34,9 @@
 //! - `note`, `issue`, `dataset`, `session`, `attachment`, `scan` --- object types: each supplies its
 //!   `attrs.json` shape, its content files, its decoder, and its typed
 //!   store.
-//! - [`tag`] --- tags: refs under `refs/gage/tag/` naming objects, and
+//! - [`refs`] --- the ref layout: every ref lives under
+//!   `refs/gage/<generation>/`.
+//! - [`tag`] --- tags: refs under the tag namespace naming objects, and
 //!   object-ish resolution (tag name, id, or unique prefix).
 
 mod admin;
@@ -48,6 +50,7 @@ mod issue;
 mod note;
 pub mod object;
 pub mod query;
+pub mod refs;
 mod scan;
 mod session;
 mod sqlite_index;
@@ -86,6 +89,7 @@ pub use query::{
     LinkKind, StoredNoteTable, StoredSessionTable, attachment_table, dataset_table,
     issue_event_table, issue_table, link_table, scan_table, scan_watermark_table, tag_table,
 };
+pub use refs::{GENERATION, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use scan::{
     AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
     ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,

@@ -5,7 +5,7 @@ Benchmarks for the Gage store.
 ## Background
 
 The Gage store is a bare Git repository. Every object is a commit under
-`refs/gage/object/<id>`. Reads go through one long-lived `git cat-file
+`refs/gage/1/object/<id>`. Reads go through one long-lived `git cat-file
 --batch-command` child per store, so a lookup costs a pipe round trip;
 writes emit loose objects (blob, tree, commit) directly into `objects/`
 and use `git update-ref` for the ref. Selection is served by a SQLite

@@ -13,13 +13,14 @@ use crate::git::{git_cmd, git_in, run};
 use crate::store::remove_index_file;
 use crate::{Store, StoreError};
 
-/// Schema version stamped into `gage.version` at init. Bumped when the
-/// ref layout or another store-wide convention changes.
-pub const STORE_VERSION: u32 = 1;
+/// The ref generation stamped into `gage.version` at init, the
+/// repository's own record of the layout it was created for. The refs
+/// themselves carry it in their names; see [`crate::refs`].
+pub const STORE_VERSION: u32 = crate::refs::GENERATION;
 
 /// Settings every store carries. `denyDeletes` and `denyNonFastForwards`
-/// cover `refs/heads/*` and are branch-scoped by git; `refs/gage/object/*`
-/// is protected by the `update` hook installed below. `fsckObjects`
+/// cover `refs/heads/*` and are branch-scoped by git; the object refs
+/// are protected by the `update` hook installed below. `fsckObjects`
 /// verifies every object received over the wire.
 const STORE_CONFIG: [(&str, &str); 3] = [
     ("receive.denyDeletes", "true"),
@@ -28,7 +29,9 @@ const STORE_CONFIG: [(&str, &str); 3] = [
 ];
 
 /// Update hook script installed at `hooks/update` on init. The script
-/// enforces the ref rules for `refs/gage/object/*`.
+/// enforces the ref rules for this generation's object refs and
+/// accepts every other ref, so a later generation can be pushed into
+/// a repository initialized for this one.
 pub(crate) const UPDATE_HOOK: &str = include_str!("hooks/update");
 
 /// Relative path of the update hook inside the store.
@@ -123,9 +126,9 @@ pub struct StoreStatus {
     pub size: u64,
     pub refs: u64,
     /// Count of refs under each proper prefix beneath `refs/gage/`,
-    /// sorted by prefix. A ref `refs/gage/object/<id>` contributes to
-    /// `refs/gage` and `refs/gage/object`; the leaf ref name itself is
-    /// not a prefix.
+    /// sorted by prefix. A ref `refs/gage/1/object/<id>` contributes
+    /// to `refs/gage`, `refs/gage/1`, and `refs/gage/1/object`; the
+    /// leaf ref name itself is not a prefix.
     pub ref_prefixes: Vec<(String, u64)>,
     pub remotes: Vec<Remote>,
 }
@@ -260,9 +263,9 @@ fn parse_count_objects(output: &str) -> Result<CountObjects, StoreError> {
 }
 
 /// Counts every proper prefix under `refs/gage/` across the given
-/// newline-separated ref names. `refs/gage/object/<id>` contributes to
-/// `refs/gage` and `refs/gage/object`; the full ref name is not a
-/// prefix. Refs outside `refs/gage/` are ignored.
+/// newline-separated ref names. `refs/gage/1/object/<id>` contributes
+/// to `refs/gage`, `refs/gage/1`, and `refs/gage/1/object`; the full
+/// ref name is not a prefix. Refs outside `refs/gage/` are ignored.
 fn compute_ref_prefixes(ref_names: &str) -> Vec<(String, u64)> {
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
     for name in ref_names.lines() {
@@ -548,20 +551,20 @@ mod tests {
     #[test]
     fn counts_ref_prefixes() {
         let refs = "\
-refs/gage/object/abc123\n\
-refs/gage/object/def456\n\
-refs/gage/index/claude/1/xyz\n\
-refs/gage/index/claude/1/uvw\n\
+refs/gage/1/object/abc123\n\
+refs/gage/1/object/def456\n\
+refs/gage/1/tag/alpha/one\n\
+refs/gage/1/tag/beta\n\
 refs/heads/main\n";
         let prefixes = compute_ref_prefixes(refs);
         assert_eq!(
             prefixes,
             vec![
                 ("refs/gage".to_string(), 4),
-                ("refs/gage/index".to_string(), 2),
-                ("refs/gage/index/claude".to_string(), 2),
-                ("refs/gage/index/claude/1".to_string(), 2),
-                ("refs/gage/object".to_string(), 2),
+                ("refs/gage/1".to_string(), 4),
+                ("refs/gage/1/object".to_string(), 2),
+                ("refs/gage/1/tag".to_string(), 2),
+                ("refs/gage/1/tag/alpha".to_string(), 1),
             ]
         );
     }

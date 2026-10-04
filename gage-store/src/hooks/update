@@ -1,5 +1,8 @@
 #!/bin/sh
-# Gage store update hook. Enforces the ref rules for refs/gage/object/*.
+# Gage store update hook. Enforces the ref rules for the object refs
+# of ref generation 1, refs/gage/1/object/*. Any other ref, including
+# the object refs of a later generation, passes: the rules below are
+# this generation's conventions and may not hold for the next.
 # Written verbatim by gage-store at init; edits are clobbered on the
 # next `gage store init`. Uses shell builtins and git only, so the
 # receiving host needs nothing beyond git itself.
@@ -9,7 +12,7 @@ old="$2"
 new="$3"
 
 case "$refname" in
-    refs/gage/object/*) ;;
+    refs/gage/1/object/*) ;;
     *) exit 0 ;;
 esac
 

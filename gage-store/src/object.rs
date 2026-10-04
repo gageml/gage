@@ -1,7 +1,8 @@
 //! The Gage object model: one tree grammar and one create, edit, and
 //! delete path for every object type.
 //!
-//! An object is a commit under `refs/gage/object/<id>`. Its tree
+//! An object is a commit under `refs/gage/<generation>/object/<id>`
+//! (see [`crate::refs`]). Its tree
 //! carries the marker files `type` (`gage::<name> <version>`), `id`,
 //! `created`, `modified`, and, on a tombstone, `deleted`; an edit adds
 //! `parent` holding the previous version's SHA. Type-specific content
@@ -30,21 +31,18 @@ use serde_json::Value as JsonValue;
 
 use crate::git::{EntryKind, git_in, run};
 use crate::index::IdMatch;
+use crate::refs::OBJECT_REFS;
+pub(crate) use crate::refs::object_ref;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
 use crate::{Store, StoreError, TagStore};
 
-/// Full ref name of the object with the given id.
 /// Size of the short-prefix set; see [`Store::resolve_in`].
 pub const SHORT_PREFIX_SET_SIZE: usize = 10_000;
 
-pub(crate) fn object_ref(id: &str) -> String {
-    format!("refs/gage/object/{id}")
-}
-
-/// One ref under `refs/gage/object/`.
+/// One ref under the object namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRef {
-    /// Full ref name, e.g. `refs/gage/object/<id>`.
+    /// Full ref name, e.g. `refs/gage/1/object/<id>`.
     pub ref_name: String,
     pub id: String,
     /// SHA the ref points to.
@@ -276,7 +274,7 @@ impl Store {
     }
 
     /// Write a new object: a parentless commit (except for link
-    /// parents) under `refs/gage/object/<id>`, which must not exist.
+    /// parents) under the object's ref, which must not exist.
     /// Returns the commit SHA.
     pub(crate) fn create(
         &self,
@@ -475,7 +473,7 @@ impl Store {
         Ok(commit_sha)
     }
 
-    /// List every ref under `refs/gage/object/` with its id and tip
+    /// List every ref under the object namespace with its id and tip
     /// SHA.
     pub fn list_object_refs(&self) -> Result<Vec<ObjectRef>, StoreError> {
         let out = run(git_in(
@@ -483,7 +481,7 @@ impl Store {
             [
                 "for-each-ref",
                 "--format=%(refname) %(objectname)",
-                "refs/gage/object/",
+                OBJECT_REFS,
             ],
         ))?;
         let mut refs = Vec::new();
@@ -491,7 +489,7 @@ impl Store {
             let (name, sha) = line
                 .split_once(' ')
                 .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
-            let Some(id) = name.strip_prefix("refs/gage/object/") else {
+            let Some(id) = name.strip_prefix(OBJECT_REFS) else {
                 continue;
             };
             if id.is_empty() {
@@ -1005,7 +1003,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let id = note(&store, "n", None);
-        let commit = plant_blob(&store, &id, "things.link", "refs/gage/object/x\n");
+        let commit = plant_blob(&store, &id, "things.link", "refs/gage/1/object/x\n");
 
         match store.read_object(&commit) {
             Err(StoreError::Parse(what)) => {

@@ -1,21 +1,16 @@
 //! Tags: user-chosen names for objects.
 //!
-//! A tag is a ref `refs/gage/tag/<name>` pointing at a commit of the
-//! object it names. The commit is the carrier of the object id: a
-//! reader takes `id` from the commit's tree and resolves the object
-//! from `refs/gage/object/<id>`, so a tag that lags its object, or
+//! A tag is a ref `refs/gage/<generation>/tag/<name>` pointing at a
+//! commit of the object it names. The commit is the carrier of the
+//! object id: a reader takes `id` from the commit's tree and resolves
+//! the object from its object ref, so a tag that lags its object, or
 //! names a tombstoned object, still resolves. Which commit the ref
 //! points at is not part of the tag's meaning.
 
 use crate::git::{git_in, run};
 use crate::index::IdMatch;
-use crate::object::object_ref;
+use crate::refs::{TAG_REFS, object_ref, tag_ref};
 use crate::{Store, StoreError};
-
-/// Full ref name of the tag with the given name.
-pub(crate) fn tag_ref(name: &str) -> String {
-    format!("refs/gage/tag/{name}")
-}
 
 /// Typed view over a [`Store`] for tags.
 pub struct TagStore<'a> {
@@ -70,11 +65,11 @@ pub struct TagTarget {
     pub commit_sha: String,
 }
 
-/// One ref under `refs/gage/tag/`.
+/// One ref under the tag namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagRef {
     pub name: String,
-    /// Full ref name, e.g. `refs/gage/tag/<name>`.
+    /// Full ref name, e.g. `refs/gage/1/tag/<name>`.
     pub ref_name: String,
     /// The commit the tag points at.
     pub commit_sha: String,
@@ -88,7 +83,7 @@ impl TagStore<'_> {
             [
                 "for-each-ref",
                 "--format=%(refname) %(objectname)",
-                "refs/gage/tag/",
+                TAG_REFS,
             ],
         ))?;
         let mut tags = Vec::new();
@@ -96,7 +91,7 @@ impl TagStore<'_> {
             let (ref_name, sha) = line
                 .split_once(' ')
                 .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
-            let Some(name) = ref_name.strip_prefix("refs/gage/tag/") else {
+            let Some(name) = ref_name.strip_prefix(TAG_REFS) else {
                 continue;
             };
             tags.push(TagRef {
@@ -108,7 +103,7 @@ impl TagStore<'_> {
         Ok(tags)
     }
 
-    /// Point `refs/gage/tag/<name>` at the current commit of the object
+    /// Point the tag ref `<name>` at the current commit of the object
     /// `objectish` names. A name that exists is
     /// [`StoreError::TagExists`] unless `force`, which moves it. A
     /// tombstoned object cannot be tagged.
@@ -150,7 +145,7 @@ impl TagStore<'_> {
         })
     }
 
-    /// Remove `refs/gage/tag/<name>`. The object the tag named is not
+    /// Remove the tag ref `<name>`. The object the tag named is not
     /// touched. A name no tag has is [`StoreError::TagNotFound`].
     /// Returns the ref as it was.
     pub fn delete(&self, name: &str) -> Result<TagRef, StoreError> {
@@ -318,7 +313,7 @@ mod tests {
         assert_eq!(added.commit_sha, tip);
         assert_eq!(added.previous_id, None);
         assert_eq!(
-            store.rev_parse("refs/gage/tag/baseline").unwrap(),
+            store.rev_parse("refs/gage/1/tag/baseline").unwrap(),
             Some(tip)
         );
     }
@@ -340,12 +335,12 @@ mod tests {
             vec![
                 TagRef {
                     name: "alpha/one".to_string(),
-                    ref_name: "refs/gage/tag/alpha/one".to_string(),
+                    ref_name: "refs/gage/1/tag/alpha/one".to_string(),
                     commit_sha: added_a.commit_sha,
                 },
                 TagRef {
                     name: "beta".to_string(),
-                    ref_name: "refs/gage/tag/beta".to_string(),
+                    ref_name: "refs/gage/1/tag/beta".to_string(),
                     commit_sha: added_b.commit_sha,
                 },
             ]
@@ -365,7 +360,7 @@ mod tests {
         assert_eq!(added.id, id);
         assert!(
             store
-                .rev_parse("refs/gage/tag/garrett/baseline")
+                .rev_parse("refs/gage/1/tag/garrett/baseline")
                 .unwrap()
                 .is_some()
         );
@@ -433,7 +428,7 @@ mod tests {
                 other => panic!("{bad:?}: unexpected error: {other}"),
             }
         }
-        assert!(store.rev_parse("refs/gage/tag/").unwrap().is_none());
+        assert!(store.rev_parse("refs/gage/1/tag/").unwrap().is_none());
     }
 
     #[test]
@@ -514,9 +509,9 @@ mod tests {
         let deleted = tags.delete("t").unwrap();
 
         assert_eq!(deleted.name, "t");
-        assert_eq!(deleted.ref_name, "refs/gage/tag/t");
+        assert_eq!(deleted.ref_name, "refs/gage/1/tag/t");
         assert_eq!(deleted.commit_sha, added.commit_sha);
-        assert_eq!(store.rev_parse("refs/gage/tag/t").unwrap(), None);
+        assert_eq!(store.rev_parse("refs/gage/1/tag/t").unwrap(), None);
         assert_eq!(tags.resolve("t").unwrap(), None);
         assert_eq!(tags.resolve("keep").unwrap().unwrap().id, id);
         assert!(!store.resolve_id(&id).unwrap().0.is_empty());

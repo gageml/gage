@@ -44,7 +44,7 @@ pub enum StoreCommand {
     /// List entries under a tree-ish
     ///
     /// Runs `git ls-tree -l <REF>`. `<REF>` is any git tree-ish: a full
-    /// ref path (`refs/gage/object/<id>`), an object sha, or
+    /// ref path (`refs/gage/1/object/<id>`), an object sha, or
     /// `<ref>:<path>`.
     Ls(LsArgs),
 
@@ -65,7 +65,7 @@ pub enum StoreCommand {
 
     /// Browse the store's object graph
     ///
-    /// Opens an interactive view of `refs/gage/object/*`: refs listing
+    /// Opens an interactive view of the object refs: refs listing
     /// on the left, per-commit detail (header, parents classified as
     /// `parent` vs link, tree, resolved link files, and the `parent`
     /// chain) on the right. Payload agnostic --- object type names are

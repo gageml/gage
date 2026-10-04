@@ -2,7 +2,7 @@
 //! object graph.
 //!
 //! The refs are the log. Git's state for the object graph is the map of
-//! `refs/gage/object/<id>` to tip SHA, and one `for-each-ref` returns
+//! object refs to tip SHAs, and one `for-each-ref` returns
 //! it without reading any object. The index records the tip it last
 //! saw for every ref, so validation is the diff between that table and
 //! the live map; only refs whose tip changed are re-read, and re-reading
