@@ -57,6 +57,16 @@ impl Panel {
         Style::new().fg(Color::Cyan).remove_modifier(Modifier::DIM)
     }
 
+    /// A view label in the view row: reversed for the active view,
+    /// dim like footer text otherwise.
+    pub fn view_tab(active: bool) -> Style {
+        if active {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Self::footer()
+        }
+    }
+
     pub fn gauge() -> Style {
         Style::new().fg(Color::Green)
     }
