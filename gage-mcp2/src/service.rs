@@ -37,6 +37,7 @@ pub struct ToolSpec {
 #[derive(Clone)]
 pub enum GageTool {
     Query(QueryConfig),
+    IssueWrite(IssueWriteConfig),
 }
 
 impl GageTool {
@@ -44,6 +45,7 @@ impl GageTool {
     pub fn name(&self) -> &'static str {
         match self {
             GageTool::Query(_) => tools::query::NAME,
+            GageTool::IssueWrite(_) => tools::issue_write::NAME,
         }
     }
 }
@@ -54,12 +56,40 @@ pub struct QueryConfig {
     pub context: Arc<SessionContext>,
 }
 
+/// The `IssueWrite` tool's data: the callback that writes the issue.
+/// The write path belongs to the runtime, which stages issues in the
+/// scan directory, so the tool carries the writer rather than the
+/// data; the route parses the call and hands the callback an
+/// [`IssueWriteInput`].
+#[derive(Clone)]
+pub struct IssueWriteConfig {
+    pub callback: IssueWriteCallback,
+}
+
+/// Async closure that writes one issue from a parsed call.
+pub type IssueWriteCallback = Arc<
+    dyn Fn(IssueWriteInput) -> Pin<Box<dyn Future<Output = CustomToolOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// One `IssueWrite` call, parsed
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueWriteInput {
+    pub title: String,
+    /// `None` when absent or empty
+    pub description: Option<String>,
+    /// The cited note ids, in call order
+    pub evidence: Vec<String>,
+}
+
 /// The configuration the Gage tool handlers read through
 /// [`GageServer`]. A tool absent from the spec has no entry and no
 /// route.
 #[derive(Clone, Default)]
 pub struct ToolsConfig {
     pub query: Option<QueryConfig>,
+    pub issue_write: Option<IssueWriteConfig>,
 }
 
 /// One scanner-defined tool: the wire-visible definition plus the
@@ -120,6 +150,10 @@ fn build_server(spec: &ToolSpec) -> GageServer {
                 config.query = Some(c.clone());
                 router = router.with_route((tools::query::TOOL)());
             }
+            GageTool::IssueWrite(c) => {
+                config.issue_write = Some(c.clone());
+                router = router.with_route((tools::issue_write::TOOL)());
+            }
         }
     }
     for def in &spec.custom {
@@ -158,7 +192,7 @@ fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
 
 /// The wire form of a callback's outcome: a success or error result
 /// the model reads, or a JSON-RPC internal error for a fault.
-fn call_result(outcome: CustomToolOutcome) -> Result<CallToolResult, ErrorData> {
+pub(crate) fn call_result(outcome: CustomToolOutcome) -> Result<CallToolResult, ErrorData> {
     match outcome {
         CustomToolOutcome::Success(out) => Ok(CallToolResult::success(vec![Content::text(
             render_output(&out),

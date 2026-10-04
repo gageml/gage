@@ -31,7 +31,7 @@ pub async fn report() {
 
     let agent = call_agent(include_str!("prompt.md"))
         .name("issue-writer")
-        .tools([Query::new(), IssueWriter::new().name("findings")])
+        .tools([Query::new(), IssueWrite::new().name("findings").pending()])
         .model("large")
         .await?;
     let result = agent.wait().await?;

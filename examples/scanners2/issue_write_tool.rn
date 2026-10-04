@@ -11,5 +11,5 @@ pub async fn main() {
         .tool(IssueWrite::new())
         .await?;
     let result = a.wait().await?;
-    println!("{}", result.text);
+    println!("{result:?}");
 }

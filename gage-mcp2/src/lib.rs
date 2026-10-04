@@ -15,6 +15,6 @@ pub mod tools;
 pub use host::{HostError, McpHost, ServiceHandle};
 pub use rmcp::model::ToolAnnotations;
 pub use service::{
-    CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, QueryConfig, ToolSpec,
-    ToolsConfig, build_mcp_service,
+    CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteCallback,
+    IssueWriteConfig, IssueWriteInput, QueryConfig, ToolSpec, ToolsConfig, build_mcp_service,
 };

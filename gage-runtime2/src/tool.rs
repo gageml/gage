@@ -1,4 +1,5 @@
-//! Tools for `call_agent`: `Tool`, `Input`, and `Query`.
+//! Tools for `call_agent`: `Tool`, `Input`, and the Gage tool
+//! configurations `Query` and `IssueWrite`.
 //!
 //! A `Tool` is a value with chained setters and no finalizer, of one of
 //! two kinds. A scanner-defined tool, `Tool::new(name, handler)`, takes
@@ -9,6 +10,10 @@
 //! starts: names and inputs are validated, each scanner-defined tool
 //! becomes a [`CustomToolDef`] whose callback runs the handler, and
 //! each Gage tool becomes a [`GageTool`] carrying the data it serves.
+//! `Query` carries a query context; `IssueWrite` carries a callback
+//! that stages the issue through the runtime's own write path, under
+//! the calling task's scan context and output sink as a scanner-defined
+//! handler runs.
 //!
 //! The handler is held as a [`SyncFunction`], the `Send + Sync` form of
 //! a Rune function, because the MCP service calls it from the host's
@@ -19,13 +24,15 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use gage_core::uuid::short_uuid;
 use gage_mcp2::{
-    CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, QueryConfig, ToolAnnotations,
-    ToolSpec,
+    CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteCallback,
+    IssueWriteConfig, IssueWriteInput, QueryConfig, ToolAnnotations, ToolSpec,
 };
 use gage_runtime::dispatcher::ToolMeta;
 use gage_runtime::error::Error;
 use gage_runtime::value::{json_to_value, value_to_json};
+use gage_store::IssueStatus;
 use rmcp_json::JsonObject;
 use rune::alloc::clone::TryClone;
 use rune::alloc::fmt::TryWrite;
@@ -36,6 +43,7 @@ use rune::{Any, ContextError, Module};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tracing::{Instrument, Span};
 
+use crate::issue::write_issue_tool;
 use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error};
 use crate::{Level, OUTPUT_SINK, Output, OutputSink};
 
@@ -80,6 +88,11 @@ pub(crate) fn tools_module() -> Result<Module, ContextError> {
     m.function_meta(Query::with_session)?;
     m.function_meta(Query::with_session_range)?;
     m.function_meta(Query::debug)?;
+    m.ty::<IssueWrite>()?;
+    m.function_meta(IssueWrite::new)?;
+    m.function_meta(IssueWrite::name)?;
+    m.function_meta(IssueWrite::pending)?;
+    m.function_meta(IssueWrite::debug)?;
     Ok(m)
 }
 
@@ -94,13 +107,38 @@ pub struct Tool {
 #[derive(Clone)]
 enum ToolKind {
     Scanner(ScannerTool),
-    Gage(Query),
+    Gage(GageConfig),
+}
+
+/// The configuration value of one Gage tool
+#[derive(Clone, Debug)]
+enum GageConfig {
+    Query(Query),
+    IssueWrite(IssueWrite),
+}
+
+impl GageConfig {
+    /// The tool's wire name
+    fn name(&self) -> &'static str {
+        match self {
+            GageConfig::Query(_) => gage_mcp2::tools::query::NAME,
+            GageConfig::IssueWrite(_) => gage_mcp2::tools::issue_write::NAME,
+        }
+    }
 }
 
 impl From<Query> for Tool {
     fn from(query: Query) -> Self {
         Tool {
-            kind: ToolKind::Gage(query),
+            kind: ToolKind::Gage(GageConfig::Query(query)),
+        }
+    }
+}
+
+impl From<IssueWrite> for Tool {
+    fn from(config: IssueWrite) -> Self {
+        Tool {
+            kind: ToolKind::Gage(GageConfig::IssueWrite(config)),
         }
     }
 }
@@ -114,8 +152,11 @@ pub(crate) fn tool_from_value(v: &Value) -> Result<Tool, VmError> {
     if let Ok(query) = v.borrow_ref::<Query>() {
         return Ok(Tool::from(query.clone()));
     }
+    if let Ok(config) = v.borrow_ref::<IssueWrite>() {
+        return Ok(Tool::from(config.clone()));
+    }
     Err(VmError::panic(format!(
-        "expected a Tool or a Gage tool such as Query, got {}",
+        "expected a Tool or a Gage tool such as Query or IssueWrite, got {}",
         v.type_info()
     )))
 }
@@ -259,7 +300,7 @@ impl Tool {
                 t.inputs.len(),
                 t.requires_meta
             )?,
-            ToolKind::Gage(query) => write!(f, "Tool {{ gage: {query:?} }}")?,
+            ToolKind::Gage(config) => write!(f, "Tool {{ gage: {config:?} }}")?,
         }
         Ok(())
     }
@@ -324,6 +365,55 @@ impl Query {
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(f, "Query {{ scope: {:?} }}", self.scope)?;
+        Ok(())
+    }
+}
+
+/// The configuration of the Gage issue-writing tool: the name every
+/// issue is written under and the initial status. The model supplies
+/// the title, description, and evidence per call.
+#[derive(Any, Clone, Debug)]
+#[rune(item = ::gage::tools)]
+pub struct IssueWrite {
+    #[rune(skip)]
+    name: String,
+    #[rune(skip)]
+    status: IssueStatus,
+}
+
+impl IssueWrite {
+    /// Issues named `general`, written `open`
+    #[rune::function(path = Self::new)]
+    fn new() -> IssueWrite {
+        IssueWrite {
+            name: "general".into(),
+            status: IssueStatus::Open,
+        }
+    }
+
+    /// The name every issue is written under
+    #[rune::function(instance)]
+    fn name(mut self, name: Ref<str>) -> Self {
+        self.name = name.to_owned();
+        self
+    }
+
+    /// Write issues with status `pending`, for reconciliation by the
+    /// resolve workflow, instead of `open`
+    #[rune::function(instance)]
+    fn pending(mut self) -> Self {
+        self.status = IssueStatus::Pending;
+        self
+    }
+
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(
+            f,
+            "IssueWrite {{ name: {:?}, status: {:?} }}",
+            self.name,
+            self.status.as_str()
+        )?;
         Ok(())
     }
 }
@@ -472,17 +562,22 @@ pub(crate) async fn consume(
                 validate_name(&t.name)?;
                 t.name.clone()
             }
-            ToolKind::Gage(_) => gage_mcp2::tools::query::NAME.to_string(),
+            ToolKind::Gage(config) => config.name().to_string(),
         };
         if !seen.insert(name.clone()) {
             return Err(Error::agent(format!("tool '{name}' is declared twice")));
         }
         match &tool.kind {
             ToolKind::Scanner(t) => spec.custom.push(custom_def(t, ctx, sink)?),
-            ToolKind::Gage(query) => {
+            ToolKind::Gage(GageConfig::Query(query)) => {
                 let context = ctx.query_tool_context(&query.scope).await?;
                 spec.gage.push(GageTool::Query(QueryConfig {
                     context: Arc::new(context),
+                }));
+            }
+            ToolKind::Gage(GageConfig::IssueWrite(config)) => {
+                spec.gage.push(GageTool::IssueWrite(IssueWriteConfig {
+                    callback: issue_write_callback(config, ctx, sink),
                 }));
             }
         }
@@ -629,17 +724,79 @@ fn callback(
             };
             match called {
                 Ok(outcome) => outcome.0,
-                Err(e) => {
-                    let rendered = render_vm_error(&e, log_sources.as_deref());
-                    tracing::error!(error = %rendered, "tool handler failed");
-                    if let Some(sink) = &sink {
-                        sink.send(Output::Log {
-                            level: Level::Error,
-                            message: format!("tool {tool_name} failed: {rendered}"),
-                        });
-                    }
-                    CustomToolOutcome::Fault("internal server error".into())
-                }
+                Err(e) => fault(&tool_name, &e, log_sources.as_deref(), sink.as_ref()),
+            }
+        };
+        Box::pin(call.instrument(span))
+    })
+}
+
+/// Report a tool that broke: the rendered VM error goes to the log and
+/// to the task's sink, since the service calls the tool from the
+/// host's server tasks, outside the scan's own record scope, and the
+/// model receives a fault.
+fn fault(
+    tool_name: &str,
+    e: &VmError,
+    sources: Option<&rune::Sources>,
+    sink: Option<&OutputSink>,
+) -> CustomToolOutcome {
+    let rendered = render_vm_error(e, sources);
+    tracing::error!(error = %rendered, "tool handler failed");
+    if let Some(sink) = sink {
+        sink.send(Output::Log {
+            level: Level::Error,
+            message: format!("tool {tool_name} failed: {rendered}"),
+        });
+    }
+    CustomToolOutcome::Fault("internal server error".into())
+}
+
+/// The callback the MCP service runs for an `IssueWrite` call: stage
+/// the issue under the calling task's scan context and output sink,
+/// as a scanner-defined handler runs. The scanner's input error, such
+/// as a cited note that does not exist, is an error result the model
+/// reads; a VM error is a fault.
+fn issue_write_callback(
+    config: &IssueWrite,
+    ctx: &ScanContext,
+    sink: Option<&OutputSink>,
+) -> IssueWriteCallback {
+    let mut ctx = ctx.clone();
+    ctx.params = None;
+    let sink = sink.cloned();
+    let name = config.name.clone();
+    let status = config.status;
+    let parent = Span::current();
+    Arc::new(move |input: IssueWriteInput| {
+        let tool_name = gage_mcp2::tools::issue_write::NAME;
+        let span = tracing::info_span!(parent: &parent, "tool", name = %tool_name);
+        let ctx = ctx.clone();
+        let sink = sink.clone();
+        let name = name.clone();
+        let log_sources = ctx.sources.clone();
+        let call = async move {
+            let mut cited = input.evidence.clone();
+            cited.sort();
+            cited.dedup();
+            let write =
+                write_issue_tool(name, input.title, input.description, input.evidence, status);
+            let scoped = SCAN_CTX.scope(ctx, write);
+            let written = match &sink {
+                Some(sink) => OUTPUT_SINK.scope(sink.clone(), scoped).await,
+                None => scoped.await,
+            };
+            match written {
+                Ok(Ok(issue)) => CustomToolOutcome::Success(JsonValue::String(format!(
+                    "Wrote {} issue {} ({}) with {} evidence note(s).",
+                    issue.status,
+                    short_uuid(&issue.id),
+                    issue.title,
+                    cited.len()
+                ))),
+                Ok(Err(Error::Args(message))) => CustomToolOutcome::Error(message),
+                Ok(Err(e)) => CustomToolOutcome::Error(e.to_string()),
+                Err(e) => fault(tool_name, &e, log_sources.as_deref(), sink.as_ref()),
             }
         };
         Box::pin(call.instrument(span))
@@ -1372,12 +1529,137 @@ mod tests {
     }
 
     #[test]
-    fn tool_values_accept_tools_and_queries_only() {
+    fn tool_values_accept_tools_and_gage_configs_only() {
         let err = match tool_from_value(&rune::to_value(7i64).unwrap()) {
             Ok(_) => panic!("an integer is not a tool"),
             Err(e) => e.to_string(),
         };
         assert!(err.contains("expected a Tool or a Gage tool"), "{err}");
+    }
+
+    /// The consumed `IssueWrite` tool: its config and the wire names
+    /// the spec declares.
+    async fn issue_write_tool(
+        tmp: &TempDir,
+        script: &str,
+        sink: Option<&OutputSink>,
+    ) -> (gage_mcp2::IssueWriteConfig, Vec<String>) {
+        let (spec, names) = consume(&tools(script), &scan_ctx(tmp), sink).await.unwrap();
+        let config = spec
+            .gage
+            .into_iter()
+            .find_map(|t| match t {
+                GageTool::IssueWrite(c) => Some(c),
+                GageTool::Query(_) => None,
+            })
+            .expect("the spec holds the IssueWrite tool");
+        (config, names)
+    }
+
+    #[tokio::test]
+    async fn an_issue_write_tool_stages_an_issue_under_the_task_sink() {
+        use gage_store::{IssueStatus, IssueStore};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = OutputSink {
+            scanner: "demo".into(),
+            task: "report".into(),
+            tx,
+        };
+        let (config, names) = issue_write_tool(
+            &tmp,
+            r#"
+            use gage::tools::{IssueWrite, Query};
+            pub fn main() { [IssueWrite::new().name("findings").pending(), Query::new()] }
+            "#,
+            Some(&sink),
+        )
+        .await;
+        assert_eq!(names, ["IssueWrite", "Query"]);
+        let outcome = (config.callback)(IssueWriteInput {
+            title: "Flaky build".into(),
+            description: Some("## Summary\nIt flakes.".into()),
+            evidence: Vec::new(),
+        })
+        .await;
+        let CustomToolOutcome::Success(JsonValue::String(text)) = outcome else {
+            panic!("unexpected outcome {outcome:?}");
+        };
+        assert!(text.starts_with("Wrote pending issue "), "{text}");
+        assert!(
+            text.ends_with("(Flaky build) with 0 evidence note(s)."),
+            "{text}"
+        );
+
+        let ctx = scan_ctx(&tmp);
+        let dirs: Vec<_> = std::fs::read_dir(&ctx.paths.issues_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(dirs.len(), 1);
+        let store = ctx.store.lock().await;
+        let staged = IssueStore::from(&*store).read_staged(&dirs[0]).unwrap();
+        assert_eq!(staged.name, "findings");
+        assert_eq!(staged.title, "Flaky build");
+        assert_eq!(
+            staged.description.as_deref(),
+            Some("## Summary\nIt flakes.")
+        );
+        assert_eq!(staged.status, IssueStatus::Pending);
+        assert_eq!(staged.author, "task:demo:report");
+        assert_eq!(staged.scan.as_deref(), Some("scan-1"));
+        assert!(staged.evidence.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_issue_write_tool_reports_bad_evidence_to_the_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = OutputSink {
+            scanner: "demo".into(),
+            task: "report".into(),
+            tx,
+        };
+        let (config, _) = issue_write_tool(
+            &tmp,
+            r#"
+            use gage::tools::IssueWrite;
+            pub fn main() { [IssueWrite::new()] }
+            "#,
+            Some(&sink),
+        )
+        .await;
+        let outcome = (config.callback)(IssueWriteInput {
+            title: "t".into(),
+            description: None,
+            evidence: vec!["not-a-note".into()],
+        })
+        .await;
+        let CustomToolOutcome::Error(message) = outcome else {
+            panic!("unexpected outcome {outcome:?}");
+        };
+        assert!(message.starts_with("write_issue evidence: "), "{message}");
+        assert!(
+            !std::fs::exists(scan_ctx(&tmp).paths.issues_dir).unwrap(),
+            "nothing is staged for a rejected write"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_issue_write_tool_is_subject_to_name_uniqueness() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            consume_err(
+                &tmp,
+                r#"
+                use gage::tools::IssueWrite;
+                pub fn main() { [IssueWrite::new(), IssueWrite::new().name("x")] }
+                "#
+            )
+            .await,
+            "agent: tool 'IssueWrite' is declared twice"
+        );
     }
 
     #[tokio::test]

@@ -313,26 +313,76 @@ impl Issue {
 }
 
 /// The outer error is a VM error; the inner is the scanner's `Result`.
-type Written = Result<Result<Issue, Error>, VmError>;
+pub(crate) type Written = Result<Result<Issue, Error>, VmError>;
+
+/// Write an issue on behalf of the `IssueWrite` Gage tool: the call's
+/// title, description, and cited notes under the name and status the
+/// scanner configured. The write is the one `write_issue(..).await`
+/// performs, with no replace key.
+pub(crate) async fn write_issue_tool(
+    name: String,
+    title: String,
+    description: Option<String>,
+    evidence: Vec<String>,
+    status: IssueStatus,
+) -> Written {
+    write_issue_spec(IssueSpec {
+        name,
+        title,
+        description: description.unwrap_or_default(),
+        evidence,
+        status,
+        replace_key: None,
+        policy: KeyPolicy::Replace,
+    })
+    .await
+}
+
+/// A write with its Rune-held inputs resolved: the builder's fields
+/// as owned strings, so the write is a `Send` future the MCP service
+/// can run.
+struct IssueSpec {
+    name: String,
+    title: String,
+    description: String,
+    evidence: Vec<String>,
+    status: IssueStatus,
+    replace_key: Option<String>,
+    policy: KeyPolicy,
+}
 
 async fn do_write_issue(w: IssueWrite) -> Written {
-    let ctx = current()?;
-    let (scanner, task) = OUTPUT_SINK
-        .try_with(|sink| (sink.scanner.clone(), sink.task.clone()))
-        .map_err(|_outside_task| {
-            VmError::panic("write_issue is available only inside a running scan task")
-        })?;
     if let Some(e) = w.evidence_error {
-        return Ok(Err(e));
-    }
-    let author = format!("task:{scanner}:{task}");
-    if let Err(e) = check_evidence(&ctx, &w.evidence).await? {
         return Ok(Err(e));
     }
     let replace_key = match w.replace_key.as_ref().map(encode_key).transpose() {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
+    write_issue_spec(IssueSpec {
+        name: w.name,
+        title: w.title,
+        description: w.description,
+        evidence: w.evidence,
+        status: w.status,
+        replace_key,
+        policy: w.policy,
+    })
+    .await
+}
+
+async fn write_issue_spec(w: IssueSpec) -> Written {
+    let ctx = current()?;
+    let (scanner, task) = OUTPUT_SINK
+        .try_with(|sink| (sink.scanner.clone(), sink.task.clone()))
+        .map_err(|_outside_task| {
+            VmError::panic("write_issue is available only inside a running scan task")
+        })?;
+    let author = format!("task:{scanner}:{task}");
+    if let Err(e) = check_evidence(&ctx, &w.evidence).await? {
+        return Ok(Err(e));
+    }
+    let replace_key = w.replace_key;
     let description = (!w.description.trim().is_empty()).then_some(w.description.as_str());
     let input = IssueInput {
         name: &w.name,
