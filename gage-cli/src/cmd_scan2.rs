@@ -40,7 +40,7 @@ use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::style as s;
 
 /// Install the `tracing` subscriber for a scan: warnings and above to
-/// stderr, and the records layer into the running scan's staging at
+/// stderr, and the records layer into the running scan's directory at
 /// `info` and above for the Gage crates. `GAGE_LOG` (set by `--log`)
 /// overrides both. A scanner's own `log` records reach stderr through
 /// a second layer that renders their target as

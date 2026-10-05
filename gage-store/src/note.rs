@@ -168,13 +168,14 @@ impl NoteStore<'_> {
         Ok(id)
     }
 
-    /// Write a note as a staged tree under `dir`, the object tree the
-    /// note will carry, for a scan to create at apply. `id` is the
+    /// Write a note as a tree under `dir` in a scan directory, the
+    /// object tree the note will carry, for the scan to create at
+    /// apply. `id` is the
     /// note's id, `scan` the writing scan's id, and `target_commit`,
     /// when given, the commit `target.link` names in place of the
     /// target's tip: a scan links the version it read. The target is
     /// validated as on [`NoteStore::create`].
-    pub fn stage(
+    pub fn write_to_dir(
         &self,
         dir: &Path,
         id: &str,
@@ -225,29 +226,29 @@ impl NoteStore<'_> {
         Ok(())
     }
 
-    /// Create the note staged under `dir` by [`NoteStore::stage`]. The
-    /// directory name is the note's id. Idempotent: a note whose ref
+    /// Create the note [`NoteStore::write_to_dir`] wrote under `dir`.
+    /// The directory name is the note's id. Idempotent: a note whose ref
     /// already exists is not rewritten. Returns `(id, commit SHA)`.
-    pub fn create_staged(&self, dir: &Path) -> Result<(String, String), StoreError> {
-        let staged = read_staged_tree(dir)?;
-        if let Some(sha) = self.store.rev_parse(&object_ref(&staged.id))? {
-            return Ok((staged.id, sha));
+    pub fn create_from_dir(&self, dir: &Path) -> Result<(String, String), StoreError> {
+        let record = read_note_dir(dir)?;
+        if let Some(sha) = self.store.rev_parse(&object_ref(&record.id))? {
+            return Ok((record.id, sha));
         }
-        let tree = build_tree(&staged.attrs, &staged.value, staged.targets)?;
-        let message = format!("note: {}", staged.attrs.name);
+        let tree = build_tree(&record.attrs, &record.value, record.targets)?;
+        let message = format!("note: {}", record.attrs.name);
         let sha = self
             .store
-            .create(OBJECT_TYPE, OBJECT_VERSION, &staged.id, &tree, &message)?;
-        Ok((staged.id, sha))
+            .create(OBJECT_TYPE, OBJECT_VERSION, &record.id, &tree, &message)?;
+        Ok((record.id, sha))
     }
 
-    /// Read the note staged under `dir` by [`NoteStore::stage`], as a
-    /// running scan reads its own notes before apply. The note has no
-    /// commit yet, so `created_ms` and `modified_ms` are the time it
-    /// was staged.
-    pub fn read_staged(&self, dir: &Path) -> Result<NoteFull, StoreError> {
-        let staged = read_staged_tree(dir)?;
-        let staged_ms = fs::metadata(dir.join(ATTRS_FILE))
+    /// Read the note [`NoteStore::write_to_dir`] wrote under `dir`, as
+    /// a running scan reads its own notes before apply. The note has
+    /// no commit yet, so `created_ms` and `modified_ms` are the time
+    /// it was written.
+    pub fn read_from_dir(&self, dir: &Path) -> Result<NoteFull, StoreError> {
+        let record = read_note_dir(dir)?;
+        let written_ms = fs::metadata(dir.join(ATTRS_FILE))
             .and_then(|m| m.modified())
             .map_err(|e| StoreError::Write {
                 path: dir.join(ATTRS_FILE),
@@ -257,17 +258,17 @@ impl NoteStore<'_> {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         Ok(NoteFull {
-            id: staged.id,
-            name: staged.attrs.name,
-            value: staged.value,
-            author: staged.attrs.author,
-            target: staged.attrs.target,
-            metadata: staged.attrs.metadata,
-            scan: staged.attrs.scan,
-            carry_forward_key: staged.attrs.carry_forward_key,
-            targets: staged.targets,
-            created_ms: staged_ms,
-            modified_ms: staged_ms,
+            id: record.id,
+            name: record.attrs.name,
+            value: record.value,
+            author: record.attrs.author,
+            target: record.attrs.target,
+            metadata: record.attrs.metadata,
+            scan: record.attrs.scan,
+            carry_forward_key: record.attrs.carry_forward_key,
+            targets: record.targets,
+            created_ms: written_ms,
+            modified_ms: written_ms,
         })
     }
 
@@ -470,23 +471,23 @@ fn build_tree(
     Ok(tree)
 }
 
-/// A note's staged files, decoded.
-struct StagedNote {
+/// A note's files in a scan directory, decoded.
+struct NoteDir {
     id: String,
     attrs: NoteAttrs,
     value: NoteValue,
     targets: Vec<String>,
 }
 
-/// Decode the files [`NoteStore::stage`] wrote under `dir`. The
+/// Decode the files [`NoteStore::write_to_dir`] wrote under `dir`. The
 /// directory name is the note's id.
-fn read_staged_tree(dir: &Path) -> Result<StagedNote, StoreError> {
+fn read_note_dir(dir: &Path) -> Result<NoteDir, StoreError> {
     let id = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .ok_or_else(|| StoreError::InvalidPath {
             path: dir.display().to_string(),
-            reason: "a staged note directory is named by its id".to_string(),
+            reason: "a note directory is named by its id".to_string(),
         })?;
     let read = |name: &str| -> Result<Option<Vec<u8>>, StoreError> {
         match fs::read(dir.join(name)) {
@@ -499,23 +500,24 @@ fn read_staged_tree(dir: &Path) -> Result<StagedNote, StoreError> {
         }
     };
     let attrs_bytes = read(ATTRS_FILE)?
-        .ok_or_else(|| StoreError::Parse(format!("staged note {id}: missing {ATTRS_FILE}")))?;
+        .ok_or_else(|| StoreError::Parse(format!("note dir {id}: missing {ATTRS_FILE}")))?;
     let attrs: NoteAttrs = serde_json::from_slice(&attrs_bytes)
-        .map_err(|e| StoreError::Parse(format!("staged note {id} {ATTRS_FILE}: {e}")))?;
-    let value =
-        if let Some(bytes) = read(TEXT_VALUE_FILE)? {
-            NoteValue::Text(String::from_utf8(bytes).map_err(|e| {
-                StoreError::Parse(format!("staged note {id} {TEXT_VALUE_FILE}: {e}"))
-            })?)
-        } else if let Some(bytes) = read(JSON_VALUE_FILE)? {
-            NoteValue::Json(serde_json::from_slice(&bytes).map_err(|e| {
-                StoreError::Parse(format!("staged note {id} {JSON_VALUE_FILE}: {e}"))
-            })?)
-        } else {
-            return Err(StoreError::Parse(format!(
-                "staged note {id}: missing {TEXT_VALUE_FILE} or {JSON_VALUE_FILE}"
-            )));
-        };
+        .map_err(|e| StoreError::Parse(format!("note dir {id} {ATTRS_FILE}: {e}")))?;
+    let value = if let Some(bytes) = read(TEXT_VALUE_FILE)? {
+        NoteValue::Text(
+            String::from_utf8(bytes)
+                .map_err(|e| StoreError::Parse(format!("note dir {id} {TEXT_VALUE_FILE}: {e}")))?,
+        )
+    } else if let Some(bytes) = read(JSON_VALUE_FILE)? {
+        NoteValue::Json(
+            serde_json::from_slice(&bytes)
+                .map_err(|e| StoreError::Parse(format!("note dir {id} {JSON_VALUE_FILE}: {e}")))?,
+        )
+    } else {
+        return Err(StoreError::Parse(format!(
+            "note dir {id}: missing {TEXT_VALUE_FILE} or {JSON_VALUE_FILE}"
+        )));
+    };
     let targets: Vec<String> = match read(TARGET_LINK)? {
         Some(bytes) => String::from_utf8_lossy(&bytes)
             .lines()
@@ -525,7 +527,7 @@ fn read_staged_tree(dir: &Path) -> Result<StagedNote, StoreError> {
             .collect(),
         None => Vec::new(),
     };
-    Ok(StagedNote {
+    Ok(NoteDir {
         id,
         attrs,
         value,
@@ -1285,10 +1287,10 @@ mod tests {
         ));
     }
 
-    /// A staged note carries the writing scan and the pinned target
-    /// commit; creating it is idempotent.
+    /// A note written to a scan directory carries the writing scan and
+    /// the pinned target commit; creating it is idempotent.
     #[test]
-    fn stage_then_create_staged_round_trips_with_scan_and_pinned_target() {
+    fn write_to_dir_then_create_round_trips_with_scan_and_pinned_target() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let notes = NoteStore::from(&store);
@@ -1313,11 +1315,11 @@ mod tests {
             )
             .unwrap();
 
-        let id = "stagedstagedstagedstaged00";
+        let id = "writtenwrittenwrittenwrit00";
         let dir = tmp.path().join("notes").join(id);
         let url = format!("note:{target_id}");
         notes
-            .stage(
+            .write_to_dir(
                 &dir,
                 id,
                 &NoteInput {
@@ -1339,7 +1341,7 @@ mod tests {
             format!("{pinned}\n")
         );
 
-        let (created_id, sha) = notes.create_staged(&dir).unwrap();
+        let (created_id, sha) = notes.create_from_dir(&dir).unwrap();
         assert_eq!(created_id, id);
         let full = notes.get(id).unwrap();
         assert_eq!(full.name, "finding");
@@ -1354,16 +1356,16 @@ mod tests {
             [pinned],
             "the pinned commit is the link parent"
         );
-        assert_eq!(notes.create_staged(&dir).unwrap(), (id.to_string(), sha));
+        assert_eq!(notes.create_from_dir(&dir).unwrap(), (id.to_string(), sha));
     }
 
     #[test]
-    fn stage_rejects_a_bad_target_before_writing() {
+    fn write_to_dir_rejects_a_bad_target_before_writing() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let dir = tmp.path().join("notes").join("badbadbadbadbadbadbadbad00");
         let err = NoteStore::from(&store)
-            .stage(
+            .write_to_dir(
                 &dir,
                 "badbadbadbadbadbadbadbad00",
                 &NoteInput {

@@ -20,7 +20,7 @@
 //! notes/<id>/**                          # note trees, written by write_note
 //! issues/<id>/**                         # issue trees, written by write_issue
 //! carried_notes                          # carried note commits, appended by carry-forward
-//! note_watermarks                        # `<id> <key> <mark>` per staged-note watermark, resolved at apply
+//! note_watermarks                        # `<id> <key> <mark>` per watermark on a note the scan wrote, resolved at apply
 //! scan/logs/out                          # output lines, the scan's own and every task's
 //! scan/logs/err                          # error lines: task failures, the cancel notice, panics
 //! scan/logs/records                      # log records, runtime and scanner
@@ -171,26 +171,26 @@ impl ScanDir {
         self.dir.join(SCAN_DIR)
     }
 
-    /// The `notes/` directory `write_note` stages note trees under.
+    /// The `notes/` directory `write_note` writes note trees under.
     pub fn notes_dir(&self) -> PathBuf {
         self.dir.join(NOTES_DIR)
     }
 
-    /// The staged note directories, in id order. Empty when no note
-    /// was written.
-    pub fn staged_notes(&self) -> io::Result<Vec<PathBuf>> {
-        staged_dirs(&self.notes_dir())
+    /// The note directories, in id order. Empty when no note was
+    /// written.
+    pub fn note_dirs(&self) -> io::Result<Vec<PathBuf>> {
+        object_dirs(&self.notes_dir())
     }
 
-    /// The `issues/` directory `write_issue` stages issue trees under.
+    /// The `issues/` directory `write_issue` writes issue trees under.
     pub fn issues_dir(&self) -> PathBuf {
         self.dir.join(ISSUES_DIR)
     }
 
-    /// The staged issue directories, in id order. Empty when no issue
-    /// was written.
-    pub fn staged_issues(&self) -> io::Result<Vec<PathBuf>> {
-        staged_dirs(&self.issues_dir())
+    /// The issue directories, in id order. Empty when no issue was
+    /// written.
+    pub fn issue_dirs(&self) -> io::Result<Vec<PathBuf>> {
+        object_dirs(&self.issues_dir())
     }
 
     /// Write `scan/issues.link` listing `shas`; nothing when empty.
@@ -231,7 +231,7 @@ impl ScanDir {
 
     /// The note commits carry-forward appended, one per line; empty
     /// when none.
-    pub fn staged_carried_notes(&self) -> io::Result<Vec<String>> {
+    pub fn carried_notes(&self) -> io::Result<Vec<String>> {
         match fs::read_to_string(self.dir.join(CARRIED_NOTES_FILE)) {
             Ok(text) => Ok(text.lines().map(String::from).collect()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -239,9 +239,9 @@ impl ScanDir {
         }
     }
 
-    /// The staged-note watermarks the runtime deferred, as
+    /// The watermarks on the scan's own notes the runtime deferred, as
     /// `(note id, key, mark)` in file order; empty when none.
-    pub fn staged_note_watermarks(&self) -> io::Result<Vec<(String, String, u64)>> {
+    pub fn note_watermarks(&self) -> io::Result<Vec<(String, String, u64)>> {
         let text = match fs::read_to_string(self.dir.join(NOTE_WATERMARKS_FILE)) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -320,7 +320,7 @@ impl ScanDir {
 
 /// The subdirectories of `dir`, sorted by name. Empty when `dir` does
 /// not exist.
-fn staged_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
+fn object_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),

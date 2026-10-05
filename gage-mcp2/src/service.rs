@@ -57,7 +57,7 @@ pub struct QueryConfig {
 }
 
 /// The `IssueWrite` tool's data: the callback that writes the issue.
-/// The write path belongs to the runtime, which stages issues in the
+/// The write path belongs to the runtime, which writes issues into the
 /// scan directory, so the tool carries the writer rather than the
 /// data; the route parses the call and hands the callback an
 /// [`IssueWriteInput`].

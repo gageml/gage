@@ -44,14 +44,14 @@ const DESCRIPTION_FILE: &str = "description.txt";
 const EVIDENCE_LINK: &str = "evidence.link";
 const CHANGES_DIR: &str = "changes";
 const MESSAGE_FILE: &str = "message.txt";
-/// Staging only: the cited note ids, one per line. Apply resolves them
-/// to commits and writes `evidence.link`; the ids may name notes the
-/// same scan staged, which have no commit until apply.
-const STAGED_EVIDENCE_FILE: &str = "evidence";
-/// Staging only: present when the staged tree replaces a live issue,
+/// Scan directory only: the cited note ids, one per line. Apply
+/// resolves them to commits and writes `evidence.link`; the ids may
+/// name notes the same scan wrote, which have no commit until apply.
+const EVIDENCE_FILE: &str = "evidence";
+/// Scan directory only: present when the tree replaces a live issue,
 /// holding the commit the writer replaced. Apply writes the tree as a
 /// new commit of that issue.
-const STAGED_PARENT_FILE: &str = "parent";
+const PARENT_FILE: &str = "parent";
 
 /// Issue operations over an opened store.
 pub struct IssueStore<'a> {
@@ -234,25 +234,25 @@ pub struct IssueFull {
     pub modified_ms: i64,
 }
 
-/// An issue staged by a scan and not yet created, as the running scan
-/// reads its own issues. Evidence is the cited note ids, since a
-/// staged note has no commit yet.
+/// An issue in a scan directory, not yet created, as the running scan
+/// reads its own issues. Evidence is the cited note ids, since a note
+/// the same scan wrote has no commit yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IssueStaged {
+pub struct IssueDirRecord {
     pub id: String,
     pub name: String,
     pub title: String,
     pub description: Option<String>,
     pub author: String,
     pub status: IssueStatus,
-    /// The staging scan's id, from `attrs.scan`
+    /// The writing scan's id, from `attrs.scan`
     pub scan: Option<String>,
     pub replace_key: Option<String>,
     /// The cited note ids, in citation order
     pub evidence: Vec<String>,
     /// The commit this write replaces, when it replaces a live issue
     pub replaces: Option<String>,
-    /// The time the issue was staged, from the first staged change's
+    /// The time the issue was written, from the first change entry's
     /// ULID
     pub created_ms: i64,
 }
@@ -304,12 +304,13 @@ impl IssueStore<'_> {
         Ok(id)
     }
 
-    /// Write an issue as a staged tree under `dir`, for a scan to
-    /// create at apply. `id` is the issue's id and `scan` the staging
-    /// scan's id. The cited note ids are written as given and resolved
-    /// at apply, so a note the same scan staged may be cited; the
-    /// caller checks that each id names a staged or stored note.
-    pub fn stage(
+    /// Write an issue as a tree under `dir` in a scan directory, for
+    /// the scan to create at apply. `id` is the issue's id and `scan`
+    /// the writing scan's id. The cited note ids are written as given
+    /// and resolved at apply, so a note the same scan wrote may be
+    /// cited; the caller checks that each id names a note the scan
+    /// wrote or a stored note.
+    pub fn write_to_dir(
         &self,
         dir: &Path,
         id: &str,
@@ -319,15 +320,16 @@ impl IssueStore<'_> {
         validate_input(input)?;
         let attrs = create_attrs(input, Some(scan));
         let _ = id;
-        write_staged(dir, &attrs, input, &create_change(input), None)
+        write_issue_dir(dir, &attrs, input, &create_change(input), None)
     }
 
-    /// Write a replacement of the live issue `prev` as a staged tree
-    /// under `dir`, for a scan to apply as a new commit of that issue.
+    /// Write a replacement of the live issue `prev` as a tree under
+    /// `dir` in a scan directory, for the scan to apply as a new
+    /// commit of that issue.
     /// The tree carries the new write's whole state; the change entry
     /// is a `status` event when the status differs from `prev`'s and
     /// an `edit` event otherwise. `dir` is named by `prev`'s id.
-    pub fn stage_replace(
+    pub fn write_replace_to_dir(
         &self,
         dir: &Path,
         input: &IssueInput,
@@ -337,88 +339,88 @@ impl IssueStore<'_> {
         validate_input(input)?;
         let attrs = create_attrs(input, Some(scan));
         let change = replace_change(input, prev.status);
-        write_staged(dir, &attrs, input, &change, Some(&prev.commit_sha))
+        write_issue_dir(dir, &attrs, input, &change, Some(&prev.commit_sha))
     }
 
-    /// Apply the issue staged under `dir`: create it, or when the
-    /// tree replaces a live issue, write it as that issue's new
-    /// commit. Returns `(id, commit SHA)`.
-    pub fn apply_staged(&self, dir: &Path) -> Result<(String, String), StoreError> {
-        let staged = read_staged_dir(dir)?;
-        match staged.replaces {
-            Some(_) => self.replace_staged(staged),
-            None => self.create_staged(staged),
+    /// Apply the issue under `dir`: create it, or when the tree
+    /// replaces a live issue, write it as that issue's new commit.
+    /// Returns `(id, commit SHA)`.
+    pub fn apply_from_dir(&self, dir: &Path) -> Result<(String, String), StoreError> {
+        let record = read_issue_dir(dir)?;
+        match record.replaces {
+            Some(_) => self.replace_from_dir(record),
+            None => self.create_from_dir(record),
         }
     }
 
-    /// Create the issue staged under `dir` by [`IssueStore::stage`].
+    /// Create the issue [`IssueStore::write_to_dir`] wrote under `dir`.
     /// The directory name is the issue's id. Each cited note id is
     /// resolved to its current commit; a note that does not exist or
     /// is deleted is an error. Idempotent: an issue whose ref already
     /// exists is not rewritten. Returns `(id, commit SHA)`.
-    fn create_staged(&self, staged: StagedIssue) -> Result<(String, String), StoreError> {
-        if let Some(sha) = self.store.rev_parse(&object_ref(&staged.id))? {
-            return Ok((staged.id, sha));
+    fn create_from_dir(&self, record: IssueDir) -> Result<(String, String), StoreError> {
+        if let Some(sha) = self.store.rev_parse(&object_ref(&record.id))? {
+            return Ok((record.id, sha));
         }
-        let evidence = self.resolve_evidence(&staged.evidence)?;
-        let changes_sha = self.staged_changes_tree(&[], &staged.changes)?;
+        let evidence = self.resolve_evidence(&record.evidence)?;
+        let changes_sha = self.changes_tree(&[], &record.changes)?;
         let tree = build_tree(
-            &staged.attrs,
-            staged.description.as_deref(),
+            &record.attrs,
+            record.description.as_deref(),
             evidence,
             changes_sha,
         )?;
-        let message = format!("issue: {}", staged.attrs.name);
+        let message = format!("issue: {}", record.attrs.name);
         let sha = self
             .store
-            .create(OBJECT_TYPE, OBJECT_VERSION, &staged.id, &tree, &message)?;
-        Ok((staged.id, sha))
+            .create(OBJECT_TYPE, OBJECT_VERSION, &record.id, &tree, &message)?;
+        Ok((record.id, sha))
     }
 
-    /// Write the tree staged by [`IssueStore::stage_replace`] as a new
-    /// commit of the live issue, from its current commit, with the
-    /// staged change entries appended to its history. Idempotent: an
-    /// issue whose history already holds the staged entries is not
+    /// Write the tree [`IssueStore::write_replace_to_dir`] wrote as a
+    /// new commit of the live issue, from its current commit, with the
+    /// tree's change entries appended to its history. Idempotent: an
+    /// issue whose history already holds those entries is not
     /// rewritten. Returns `(id, commit SHA)`.
-    fn replace_staged(&self, staged: StagedIssue) -> Result<(String, String), StoreError> {
-        let object = self.store.resolve_typed(&staged.id, OBJECT_TYPE)?;
+    fn replace_from_dir(&self, record: IssueDir) -> Result<(String, String), StoreError> {
+        let object = self.store.resolve_typed(&record.id, OBJECT_TYPE)?;
         let existing = match object.tree.subtrees.get(CHANGES_DIR) {
             Some(sha) => self.store.read_tree(sha)?,
             None => Vec::new(),
         };
-        let applied = staged
+        let applied = record
             .changes
             .iter()
             .all(|(ulid, _, _)| existing.iter().any(|e| &e.name == ulid));
         if applied {
-            return Ok((staged.id, object.commit_sha));
+            return Ok((record.id, object.commit_sha));
         }
-        let evidence = self.resolve_evidence(&staged.evidence)?;
-        let changes_sha = self.staged_changes_tree(&existing, &staged.changes)?;
+        let evidence = self.resolve_evidence(&record.evidence)?;
+        let changes_sha = self.changes_tree(&existing, &record.changes)?;
         let tree = build_tree(
-            &staged.attrs,
-            staged.description.as_deref(),
+            &record.attrs,
+            record.description.as_deref(),
             evidence,
             changes_sha,
         )?;
-        let message = format!("issue replace: {}", staged.attrs.name);
+        let message = format!("issue replace: {}", record.attrs.name);
         match self.store.edit(&object, &tree, &message)? {
-            EditOutcome::Written(sha) => Ok((staged.id, sha)),
+            EditOutcome::Written(sha) => Ok((record.id, sha)),
             // A change entry is new content, so an edit always writes
-            EditOutcome::Unchanged => Ok((staged.id, object.commit_sha)),
+            EditOutcome::Unchanged => Ok((record.id, object.commit_sha)),
         }
     }
 
-    /// The `changes/` tree: `existing` entries plus the staged ones,
-    /// each written as an entry tree.
-    fn staged_changes_tree(
+    /// The `changes/` tree: `existing` entries plus `written`, each
+    /// written as an entry tree.
+    fn changes_tree(
         &self,
         existing: &[TreeEntry],
-        staged: &[StagedChange],
+        written: &[DirChange],
     ) -> Result<String, StoreError> {
         let path = self.store.path();
-        let mut entries: Vec<(String, String)> = Vec::with_capacity(staged.len());
-        for (ulid, change_json, message) in staged {
+        let mut entries: Vec<(String, String)> = Vec::with_capacity(written.len());
+        for (ulid, change_json, message) in written {
             entries.push((
                 ulid.clone(),
                 change_entry(path, change_json, message.as_deref())?,
@@ -440,28 +442,28 @@ impl IssueStore<'_> {
         mktree(path, &inputs)
     }
 
-    /// Read the issue staged under `dir` by [`IssueStore::stage`], as
-    /// a running scan reads its own issues before apply.
-    pub fn read_staged(&self, dir: &Path) -> Result<IssueStaged, StoreError> {
-        let staged = read_staged_dir(dir)?;
-        let created_ms = staged
+    /// Read the issue [`IssueStore::write_to_dir`] wrote under `dir`,
+    /// as a running scan reads its own issues before apply.
+    pub fn read_from_dir(&self, dir: &Path) -> Result<IssueDirRecord, StoreError> {
+        let record = read_issue_dir(dir)?;
+        let created_ms = record
             .changes
             .first()
             .and_then(|(ulid, _, _)| ulid_timestamp_ms(ulid))
             .ok_or_else(|| {
-                StoreError::Parse(format!("staged issue {}: missing change entry", staged.id))
+                StoreError::Parse(format!("issue dir {}: missing change entry", record.id))
             })?;
-        Ok(IssueStaged {
-            id: staged.id,
-            name: staged.attrs.name,
-            title: staged.attrs.title,
-            description: staged.description,
-            author: staged.attrs.author,
-            status: staged.attrs.status,
-            scan: staged.attrs.scan,
-            replace_key: staged.attrs.replace_key,
-            evidence: staged.evidence,
-            replaces: staged.replaces,
+        Ok(IssueDirRecord {
+            id: record.id,
+            name: record.attrs.name,
+            title: record.attrs.title,
+            description: record.description,
+            author: record.attrs.author,
+            status: record.attrs.status,
+            scan: record.attrs.scan,
+            replace_key: record.attrs.replace_key,
+            evidence: record.evidence,
+            replaces: record.replaces,
             created_ms,
         })
     }
@@ -873,10 +875,10 @@ fn replace_change(input: &IssueInput, prev_status: IssueStatus) -> ChangeAttrs {
     }
 }
 
-/// Write a staged issue tree under `dir`: the attrs, the description,
+/// Write an issue tree under `dir` in a scan directory: the attrs, the description,
 /// the cited note ids once each, one change entry, and, for a
 /// replacement, the replaced commit.
-fn write_staged(
+fn write_issue_dir(
     dir: &Path,
     attrs: &IssueAttrs,
     input: &IssueInput,
@@ -906,10 +908,10 @@ fn write_staged(
     }
     if !ids.is_empty() {
         let content: String = ids.iter().map(|id| format!("{id}\n")).collect();
-        write(&dir.join(STAGED_EVIDENCE_FILE), content.as_bytes())?;
+        write(&dir.join(EVIDENCE_FILE), content.as_bytes())?;
     }
     if let Some(sha) = replaces {
-        write(&dir.join(STAGED_PARENT_FILE), format!("{sha}\n").as_bytes())?;
+        write(&dir.join(PARENT_FILE), format!("{sha}\n").as_bytes())?;
     }
     write(
         &change_dir.join(ATTRS_FILE),
@@ -979,12 +981,12 @@ fn changes_tree(
     mktree(store_path, &entries)
 }
 
-/// A staged change entry: `(ulid, attrs.json bytes, message.txt
-/// bytes)`.
-type StagedChange = (String, Vec<u8>, Option<Vec<u8>>);
+/// A change entry read from a scan directory: `(ulid, attrs.json
+/// bytes, message.txt bytes)`.
+type DirChange = (String, Vec<u8>, Option<Vec<u8>>);
 
-/// An issue's staged files, decoded.
-struct StagedIssue {
+/// An issue's files in a scan directory, decoded.
+struct IssueDir {
     id: String,
     attrs: IssueAttrs,
     description: Option<String>,
@@ -993,30 +995,31 @@ struct StagedIssue {
     /// The replaced commit, when the tree replaces a live issue
     replaces: Option<String>,
     /// In ULID order
-    changes: Vec<StagedChange>,
+    changes: Vec<DirChange>,
 }
 
-/// Decode the files [`IssueStore::stage`] wrote under `dir`. The
+/// Decode the files [`IssueStore::write_to_dir`] wrote under `dir`. The
 /// directory name is the issue's id.
-fn read_staged_dir(dir: &Path) -> Result<StagedIssue, StoreError> {
+fn read_issue_dir(dir: &Path) -> Result<IssueDir, StoreError> {
     let id = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .ok_or_else(|| StoreError::InvalidPath {
             path: dir.display().to_string(),
-            reason: "a staged issue directory is named by its id".to_string(),
+            reason: "an issue directory is named by its id".to_string(),
         })?;
     let attrs_bytes = read_optional(&dir.join(ATTRS_FILE))?
-        .ok_or_else(|| StoreError::Parse(format!("staged issue {id}: missing {ATTRS_FILE}")))?;
+        .ok_or_else(|| StoreError::Parse(format!("issue dir {id}: missing {ATTRS_FILE}")))?;
     let attrs: IssueAttrs = serde_json::from_slice(&attrs_bytes)
-        .map_err(|e| StoreError::Parse(format!("staged issue {id} {ATTRS_FILE}: {e}")))?;
-    let description = match read_optional(&dir.join(DESCRIPTION_FILE))? {
-        Some(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
-            StoreError::Parse(format!("staged issue {id} {DESCRIPTION_FILE}: {e}"))
-        })?),
-        None => None,
-    };
-    let evidence: Vec<String> = match read_optional(&dir.join(STAGED_EVIDENCE_FILE))? {
+        .map_err(|e| StoreError::Parse(format!("issue dir {id} {ATTRS_FILE}: {e}")))?;
+    let description =
+        match read_optional(&dir.join(DESCRIPTION_FILE))? {
+            Some(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
+                StoreError::Parse(format!("issue dir {id} {DESCRIPTION_FILE}: {e}"))
+            })?),
+            None => None,
+        };
+    let evidence: Vec<String> = match read_optional(&dir.join(EVIDENCE_FILE))? {
         Some(bytes) => String::from_utf8_lossy(&bytes)
             .lines()
             .map(str::trim)
@@ -1025,7 +1028,7 @@ fn read_staged_dir(dir: &Path) -> Result<StagedIssue, StoreError> {
             .collect(),
         None => Vec::new(),
     };
-    let replaces = read_optional(&dir.join(STAGED_PARENT_FILE))?
+    let replaces = read_optional(&dir.join(PARENT_FILE))?
         .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string());
     let changes_dir = dir.join(CHANGES_DIR);
     let mut ulids: Vec<String> = match fs::read_dir(&changes_dir) {
@@ -1053,13 +1056,13 @@ fn read_staged_dir(dir: &Path) -> Result<StagedIssue, StoreError> {
         let entry_dir = changes_dir.join(&ulid);
         let json = read_optional(&entry_dir.join(ATTRS_FILE))?.ok_or_else(|| {
             StoreError::Parse(format!(
-                "staged issue {id} {CHANGES_DIR}/{ulid}: missing {ATTRS_FILE}"
+                "issue dir {id} {CHANGES_DIR}/{ulid}: missing {ATTRS_FILE}"
             ))
         })?;
         let message = read_optional(&entry_dir.join(MESSAGE_FILE))?;
         changes.push((ulid, json, message));
     }
-    Ok(StagedIssue {
+    Ok(IssueDir {
         id,
         attrs,
         description,
@@ -1386,13 +1389,13 @@ mod tests {
     }
 
     #[test]
-    fn stage_and_create_staged_resolve_evidence_at_apply() {
+    fn write_to_dir_and_create_resolve_evidence_at_apply() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let issues = IssueStore::from(&store);
         let input = IssueInput {
             name: "findings",
-            title: "Staged",
+            title: "Written",
             description: Some("body"),
             author: "task:s:t",
             status: IssueStatus::Pending,
@@ -1400,7 +1403,9 @@ mod tests {
             replace_key: None,
         };
         let dir = tmp.path().join("issues").join("ISSUE1");
-        issues.stage(&dir, "ISSUE1", &input, "SCAN1").unwrap();
+        issues
+            .write_to_dir(&dir, "ISSUE1", &input, "SCAN1")
+            .unwrap();
         assert_eq!(
             fs::read_to_string(dir.join("evidence")).unwrap(),
             "NOTELATER\n",
@@ -1408,18 +1413,18 @@ mod tests {
         );
         assert!(!dir.join("evidence.link").exists());
 
-        let staged = issues.read_staged(&dir).unwrap();
-        assert_eq!(staged.id, "ISSUE1");
-        assert_eq!(staged.status, IssueStatus::Pending);
-        assert_eq!(staged.scan.as_deref(), Some("SCAN1"));
-        assert_eq!(staged.evidence, ["NOTELATER"]);
-        assert_eq!(staged.description.as_deref(), Some("body"));
-        assert!(staged.created_ms > 0);
+        let record = issues.read_from_dir(&dir).unwrap();
+        assert_eq!(record.id, "ISSUE1");
+        assert_eq!(record.status, IssueStatus::Pending);
+        assert_eq!(record.scan.as_deref(), Some("SCAN1"));
+        assert_eq!(record.evidence, ["NOTELATER"]);
+        assert_eq!(record.description.as_deref(), Some("body"));
+        assert!(record.created_ms > 0);
 
         // The cited note does not exist yet: apply fails and writes
         // nothing
         assert!(matches!(
-            issues.apply_staged(&dir),
+            issues.apply_from_dir(&dir),
             Err(StoreError::ObjectNotFound(_))
         ));
         assert!(store.rev_parse(&object_ref("ISSUE1")).unwrap().is_none());
@@ -1428,14 +1433,14 @@ mod tests {
         let note_id = note(&store, "finding.code");
         let note_commit = rev_parse(&store, &note_id);
         fs::write(dir.join("evidence"), format!("{note_id}\n")).unwrap();
-        let (id, sha) = issues.apply_staged(&dir).unwrap();
+        let (id, sha) = issues.apply_from_dir(&dir).unwrap();
         assert_eq!(id, "ISSUE1");
         let full = issues.at_commit(&sha).unwrap();
         assert_eq!(full.evidence, [note_commit.clone()]);
         assert_eq!(full.scan.as_deref(), Some("SCAN1"));
         assert_eq!(full.changes.len(), 1);
         assert_eq!(full.changes[0].event, ChangeEvent::Create);
-        assert_eq!(full.changes[0].timestamp_ms, staged.created_ms);
+        assert_eq!(full.changes[0].timestamp_ms, record.created_ms);
         assert!(
             store
                 .read_commit(&sha)
@@ -1444,11 +1449,11 @@ mod tests {
                 .contains(&note_commit)
         );
         // Idempotent
-        assert_eq!(issues.apply_staged(&dir).unwrap(), (id, sha));
+        assert_eq!(issues.apply_from_dir(&dir).unwrap(), (id, sha));
     }
 
     #[test]
-    fn stage_replace_and_apply_write_a_new_commit_of_the_prior_issue() {
+    fn write_replace_and_apply_write_a_new_commit_of_the_prior_issue() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let issues = IssueStore::from(&store);
@@ -1493,17 +1498,19 @@ mod tests {
             replace_key: Some("hidden-thinking"),
         };
         let dir = tmp.path().join("issues").join(&prior_id);
-        issues.stage_replace(&dir, &input, "SCAN2", &prior).unwrap();
+        issues
+            .write_replace_to_dir(&dir, &input, "SCAN2", &prior)
+            .unwrap();
         assert_eq!(
             fs::read_to_string(dir.join("parent")).unwrap().trim(),
             prior.commit_sha
         );
-        let staged = issues.read_staged(&dir).unwrap();
-        assert_eq!(staged.id, prior_id);
-        assert_eq!(staged.replaces.as_deref(), Some(prior.commit_sha.as_str()));
-        assert_eq!(staged.replace_key.as_deref(), Some("hidden-thinking"));
+        let record = issues.read_from_dir(&dir).unwrap();
+        assert_eq!(record.id, prior_id);
+        assert_eq!(record.replaces.as_deref(), Some(prior.commit_sha.as_str()));
+        assert_eq!(record.replace_key.as_deref(), Some("hidden-thinking"));
 
-        let (id, sha) = issues.apply_staged(&dir).unwrap();
+        let (id, sha) = issues.apply_from_dir(&dir).unwrap();
         assert_eq!(id, prior_id);
         assert_ne!(sha, prior.commit_sha);
         let full = issues.at_commit(&sha).unwrap();
@@ -1544,13 +1551,15 @@ mod tests {
         );
         assert_eq!(issues.get(&prior_id).unwrap().commit_sha, sha);
         // Idempotent
-        assert_eq!(issues.apply_staged(&dir).unwrap(), (id, sha));
+        assert_eq!(issues.apply_from_dir(&dir).unwrap(), (id, sha));
 
         // A replacement with the same status records an edit
         let same = issues.get(&prior_id).unwrap();
         let dir2 = tmp.path().join("issues2").join(&prior_id);
-        issues.stage_replace(&dir2, &input, "SCAN3", &same).unwrap();
-        let (_, sha3) = issues.apply_staged(&dir2).unwrap();
+        issues
+            .write_replace_to_dir(&dir2, &input, "SCAN3", &same)
+            .unwrap();
+        let (_, sha3) = issues.apply_from_dir(&dir2).unwrap();
         let full = issues.at_commit(&sha3).unwrap();
         assert_eq!(full.changes.last().unwrap().event, ChangeEvent::Edit);
         assert_eq!(full.scan.as_deref(), Some("SCAN3"));

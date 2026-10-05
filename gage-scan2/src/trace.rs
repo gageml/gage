@@ -16,7 +16,7 @@
 //! handler runs on the MCP host's own tasks under a span parented to
 //! the calling task's. [`install_panic_hook`] uses the task-local
 //! scope to append a panic and its backtrace to the scan's `logs/err`
-//! before the process dies, leaving staging for recovery.
+//! before the process dies, leaving the scan directory for recovery.
 
 use std::fmt::Write as _;
 use std::io;

@@ -1,32 +1,32 @@
 //! `write_issue(name, title, description)`: an issue written to the
-//! scan's staging, and `issues()`: the store's issues read back.
+//! scan directory, and `issues()`: the store's issues read back.
 //!
 //! The builder carries the name, title, description, the cited note
 //! ids, the initial status, and the optional replace key. Awaiting it
-//! checks each cited note against the scan's staged notes and the
-//! store, writes the issue tree under the scan's staging
-//! (`gage_store::IssueStore::stage`), and returns the [`Issue`]. The
+//! checks each cited note against the scan's own notes and the
+//! store, writes the issue tree into the scan directory
+//! (`gage_store::IssueStore::write_to_dir`), and returns the [`Issue`]. The
 //! runtime sets `author` to `task:<scanner>:<task>` and `attrs.scan`
 //! to the running scan. Apply creates the object, resolving the cited
 //! notes to their commits, and links it from the scan through
 //! `issues.link`. An issue has no target; a session it concerns is
 //! reached through the notes it cites. Bad input is `Error::Args`; a
-//! failure to reach staging or the store is a VM error.
+//! failure to reach the scan directory or the store is a VM error.
 //!
 //! `.replace_named()` and `.replace_keyed(key)` give the issue a
-//! replace key, the name or a key encoded like a work key. When a
-//! live issue in the store carries the same key, the write is staged
-//! as a replacement of it: apply writes the new state as that issue's
-//! next commit, and the scan links that commit. A second write under
-//! the same key in one scan replaces the first staged one.
+//! replace key, the name or a key encoded like a watermark key. When
+//! a live issue in the store carries the same key, the write is
+//! recorded as a replacement of it: apply writes the new state as that
+//! issue's next commit, and the scan links that commit. A second write
+//! under the same key in one scan replaces the first.
 //! `.keep_named()` and `.keep_keyed(key)` give the issue the same key
 //! with the opposite policy: when an issue under the key exists,
-//! staged by this scan or live in the store in any status, nothing is
+//! written by this scan or live in the store in any status, nothing is
 //! written and the existing issue is returned. A closed issue counts,
 //! so a condition reported once and closed is not reported again.
 //!
 //! `issues()` is an [`IssuesQuery`]; awaiting it reads every live
-//! issue in the store plus the issues this scan has staged, since a
+//! issue in the store plus the issues this scan has written, since a
 //! task sees what its upstream tasks wrote. Issues are store-wide, so
 //! the query hangs off no scan value. `.name(..)` and `.status(..)`
 //! each take one value or a list, and a list matches any of its
@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use gage_core::uuid::new_uuid;
 use gage_runtime::error::Error;
 use gage_store::{
-    IssueFull, IssueInput, IssueStaged, IssueStatus, IssueStore, NOTE_TYPE, Store, StoreError,
+    IssueDirRecord, IssueFull, IssueInput, IssueStatus, IssueStore, NOTE_TYPE, Store, StoreError,
 };
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Value, Vec as RuneVec, VmError};
@@ -110,7 +110,7 @@ pub struct IssueWrite {
 /// The action when the key names an existing issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyPolicy {
-    /// Stage this write as the existing issue's next state
+    /// Record this write as the existing issue's next state
     Replace,
     /// Write nothing and return the existing issue
     Keep,
@@ -282,20 +282,20 @@ impl Issue {
         })
     }
 
-    /// An issue staged by this scan.
-    fn from_staged(staged: IssueStaged) -> Result<Issue, VmError> {
+    /// An issue this scan wrote, read from the scan directory.
+    fn from_dir_record(record: IssueDirRecord) -> Result<Issue, VmError> {
         Ok(Issue {
-            id: staged.id,
-            name: staged.name,
-            title: staged.title,
-            description: staged.description,
-            author: staged.author,
-            status: staged.status.as_str().to_string(),
+            id: record.id,
+            name: record.name,
+            title: record.title,
+            description: record.description,
+            author: record.author,
+            status: record.status.as_str().to_string(),
             status_reason: None,
-            scan: staged.scan,
-            replace_key: staged.replace_key,
-            evidence: rune::to_value(staged.evidence).map_err(VmError::from)?,
-            created: staged.created_ms,
+            scan: record.scan,
+            replace_key: record.replace_key,
+            evidence: rune::to_value(record.evidence).map_err(VmError::from)?,
+            created: record.created_ms,
         })
     }
 
@@ -396,20 +396,25 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
     let store = ctx.store.lock().await;
     let issues = IssueStore::from(&*store);
     // A key names the issue to replace or keep: the one this scan
-    // already staged under the key, else the live one in the store
+    // already wrote under the key, else the live one in the store
     let prev = match &replace_key {
         Some(key) => prior_issue(&ctx, &issues, key)?,
         None => None,
     };
     if w.policy == KeyPolicy::Keep {
         match prev {
-            Some(Prior::Staged(id)) => {
+            Some(Prior::InDir(id)) => {
                 let dir = ctx.paths.issues_dir.join(&id);
-                let staged = issues
-                    .read_staged(&dir)
-                    .map_err(|e| VmError::panic(format!("staged issue {id}: {e}")))?;
-                tracing::debug!(id, name = w.name, replace_key, "write_issue: kept staged");
-                return Ok(Ok(Issue::from_staged(staged)?));
+                let record = issues
+                    .read_from_dir(&dir)
+                    .map_err(|e| VmError::panic(format!("issue dir {id}: {e}")))?;
+                tracing::debug!(
+                    id,
+                    name = w.name,
+                    replace_key,
+                    "write_issue: kept the scan's own"
+                );
+                return Ok(Ok(Issue::from_dir_record(record)?));
             }
             Some(Prior::Stored(live)) => {
                 tracing::debug!(
@@ -423,36 +428,43 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
             None => {}
         }
     }
-    let (id, staged) = match prev {
-        Some(Prior::Staged(id)) => {
+    let (id, written) = match prev {
+        Some(Prior::InDir(id)) => {
             let dir = ctx.paths.issues_dir.join(&id);
             fs::remove_dir_all(&dir)
-                .map_err(|e| VmError::panic(format!("write_issue: unstage {id}: {e}")))?;
-            // The first staging replaced a live issue, or created one
+                .map_err(|e| VmError::panic(format!("write_issue: remove {id}: {e}")))?;
+            // The first write replaced a live issue, or created one
             match issues.get(&id) {
                 Ok(live) => (
                     id.clone(),
-                    issues.stage_replace(&dir, &input, &ctx.scan_id, &live),
+                    issues.write_replace_to_dir(&dir, &input, &ctx.scan_id, &live),
                 ),
-                Err(StoreError::ObjectNotFound(_)) => {
-                    (id.clone(), issues.stage(&dir, &id, &input, &ctx.scan_id))
-                }
+                Err(StoreError::ObjectNotFound(_)) => (
+                    id.clone(),
+                    issues.write_to_dir(&dir, &id, &input, &ctx.scan_id),
+                ),
                 Err(e) => return Err(VmError::panic(format!("write_issue: read issue {id}: {e}"))),
             }
         }
         Some(Prior::Stored(live)) => {
             let id = live.id.clone();
             let dir = ctx.paths.issues_dir.join(&id);
-            (id, issues.stage_replace(&dir, &input, &ctx.scan_id, &live))
+            (
+                id,
+                issues.write_replace_to_dir(&dir, &input, &ctx.scan_id, &live),
+            )
         }
         None => {
             let id = new_uuid();
             let dir = ctx.paths.issues_dir.join(&id);
-            (id.clone(), issues.stage(&dir, &id, &input, &ctx.scan_id))
+            (
+                id.clone(),
+                issues.write_to_dir(&dir, &id, &input, &ctx.scan_id),
+            )
         }
     };
     drop(store);
-    match staged {
+    match written {
         Ok(()) => {}
         Err(StoreError::IssueInput(m)) => return Ok(Err(Error::Args(format!("write_issue: {m}")))),
         Err(e) => return Err(VmError::panic(format!("write_issue: {e}"))),
@@ -482,13 +494,13 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
 
 /// The issue a replace key names.
 enum Prior {
-    /// Staged by this scan, by id
-    Staged(String),
+    /// Written by this scan, in the scan directory, by id
+    InDir(String),
     /// Live in the store
     Stored(Box<IssueFull>),
 }
 
-/// The issue `key` replaces: one this scan staged under the key, else
+/// The issue `key` replaces: one this scan wrote under the key, else
 /// the live issue in the store carrying it. Two live issues under one
 /// key is a store fault.
 fn prior_issue(
@@ -496,12 +508,12 @@ fn prior_issue(
     issues: &IssueStore<'_>,
     key: &str,
 ) -> Result<Option<Prior>, VmError> {
-    for dir in staged_issue_dirs(ctx)? {
-        let staged = issues
-            .read_staged(&dir)
-            .map_err(|e| VmError::panic(format!("staged issue {}: {e}", dir.display())))?;
-        if staged.replace_key.as_deref() == Some(key) {
-            return Ok(Some(Prior::Staged(staged.id)));
+    for dir in issue_dirs(ctx)? {
+        let record = issues
+            .read_from_dir(&dir)
+            .map_err(|e| VmError::panic(format!("issue dir {}: {e}", dir.display())))?;
+        if record.replace_key.as_deref() == Some(key) {
+            return Ok(Some(Prior::InDir(record.id)));
         }
     }
     let tips = issues
@@ -524,7 +536,7 @@ fn prior_issue(
     }
 }
 
-/// Every cited note must be one this scan staged or a live note in
+/// Every cited note must be one this scan wrote or a live note in
 /// the store. A cited id that is neither is the scanner's error.
 async fn check_evidence(ctx: &ScanContext, ids: &[String]) -> Result<Result<(), Error>, VmError> {
     for id in ids {
@@ -557,8 +569,8 @@ async fn check_evidence(ctx: &ScanContext, ids: &[String]) -> Result<Result<(), 
     Ok(Ok(()))
 }
 
-/// The value of `issues()`: the store's issues plus this scan's
-/// staged issues, read when awaited.
+/// The value of `issues()`: the store's issues plus this scan's own
+/// issues, read when awaited.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct IssuesQuery {
@@ -646,7 +658,7 @@ fn strings(v: &Value, what: &str) -> Result<Vec<String>, Error> {
     )))
 }
 
-/// Read the store's live issues and this scan's staged issues,
+/// Read the store's live issues and this scan's own issues,
 /// filtered, oldest first and by id among equals.
 async fn fetch_issues(q: IssuesQuery) -> Result<Result<Vec<Issue>, Error>, VmError> {
     if let Some(e) = q.error {
@@ -654,7 +666,7 @@ async fn fetch_issues(q: IssuesQuery) -> Result<Result<Vec<Issue>, Error>, VmErr
     }
     let ctx = current()?;
     let mut out = stored_issues(&ctx).await?;
-    out.extend(staged_issues(&ctx).await?);
+    out.extend(scan_dir_issues(&ctx).await?);
     out.retain(|i| {
         q.names.as_ref().is_none_or(|names| names.contains(&i.name))
             && q.statuses
@@ -680,32 +692,32 @@ async fn stored_issues(ctx: &ScanContext) -> Result<Vec<Issue>, VmError> {
     Ok(out)
 }
 
-/// The issues staged under the scan's issues directory, in id order.
-async fn staged_issues(ctx: &ScanContext) -> Result<Vec<Issue>, VmError> {
-    let dirs = staged_issue_dirs(ctx)?;
+/// The issues in the scan directory, in id order.
+async fn scan_dir_issues(ctx: &ScanContext) -> Result<Vec<Issue>, VmError> {
+    let dirs = issue_dirs(ctx)?;
     let store = ctx.store.lock().await;
     let issues = IssueStore::from(&*store);
     let mut out = Vec::with_capacity(dirs.len());
     for dir in dirs {
-        let staged = issues
-            .read_staged(&dir)
-            .map_err(|e| VmError::panic(format!("staged issue {}: {e}", dir.display())))?;
-        out.push(Issue::from_staged(staged)?);
+        let record = issues
+            .read_from_dir(&dir)
+            .map_err(|e| VmError::panic(format!("issue dir {}: {e}", dir.display())))?;
+        out.push(Issue::from_dir_record(record)?);
     }
     Ok(out)
 }
 
-/// The staged issue directories, in id order.
-fn staged_issue_dirs(ctx: &ScanContext) -> Result<Vec<PathBuf>, VmError> {
+/// The scan directory's issue directories, in id order.
+fn issue_dirs(ctx: &ScanContext) -> Result<Vec<PathBuf>, VmError> {
     let entries = match fs::read_dir(&ctx.paths.issues_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(VmError::panic(format!("staged issues: {e}"))),
+        Err(e) => return Err(VmError::panic(format!("scan directory issues: {e}"))),
     };
     let mut dirs = Vec::new();
     for entry in entries {
         let path = entry
-            .map_err(|e| VmError::panic(format!("staged issues: {e}")))?
+            .map_err(|e| VmError::panic(format!("scan directory issues: {e}")))?
             .path();
         if path.is_dir() {
             dirs.push(path);

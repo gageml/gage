@@ -8,7 +8,7 @@
 //! whole object such as a note. A `Mark` names an object and the
 //! position its constructor derives, `line_count` for
 //! `Mark::session(s)` and 1 for `Mark::note(n)`, and
-//! `watermark(mark, key)` writes the record into staging.
+//! `watermark(mark, key)` writes the record into the scan directory.
 //!
 //! `scan().sessions().hwm(key)` and `scan().notes().hwm(key)` read
 //! every live scan's watermarks through the `scan_watermark` table
@@ -102,7 +102,7 @@ enum NoteCommit {
     /// write
     Unresolved,
     /// A `Note` value: its carried commit, or `None` when this scan
-    /// staged it
+    /// wrote it
     Known(Option<String>),
 }
 
@@ -172,10 +172,11 @@ fn watermark(mark: Ref<Mark>, key: Value) -> WatermarkWrite {
 }
 
 /// Record the mark under `key`. A session that is not a member of
-/// the scan, or a note the scan neither staged nor carried, is an
-/// `Args` error. A note this scan staged has no commit until apply,
-/// so its record is deferred through the `note_watermarks` staging
-/// file; apply resolves the commit and writes the record.
+/// the scan, or a note the scan neither wrote nor carried, is an
+/// `Args` error. A note this scan wrote has no commit until apply, so
+/// its record is deferred through the scan directory's
+/// `note_watermarks` file; apply resolves the commit and writes the
+/// record.
 async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
     let key = match encode_key(&w.key) {
         Ok(key) => key,
@@ -204,14 +205,14 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
                 NoteCommit::Known(Some(commit)) => commit,
                 NoteCommit::Known(None) => {
                     return Err(VmError::panic(format!(
-                        "note {id} was staged by this scan but its staging is gone"
+                        "note {id} was written by this scan but its directory is gone"
                     )));
                 }
                 NoteCommit::Unresolved => match carried_commit(&ctx, &id).await? {
                     Some(commit) => commit,
                     None => {
                         return Ok(Err(Error::Args(format!(
-                            "note {id} is not staged or carried by the scan"
+                            "note {id} was neither written nor carried by the scan"
                         ))));
                     }
                 },
@@ -261,7 +262,7 @@ fn append(path: &Path, line: &str) -> io::Result<()> {
 }
 
 /// Write `bytes` to a sibling temp file and rename it over `path`,
-/// the staging convention for whole files.
+/// the scan directory's convention for whole files.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes)?;
@@ -405,7 +406,7 @@ async fn do_notes_hwm(q: NotesHwm) -> Result<Result<Vec<Value>, Error>, VmError>
 /// The high-water mark under `key` of each object given as
 /// `(id, commit)`, in order: the largest mark recorded by any live
 /// scan at a commit on the object's chain, or 0 with none. An object
-/// with no commit, such as a note staged by this scan, is 0.
+/// with no commit, such as a note this scan wrote, is 0.
 async fn hwm(
     ctx: &ScanContext,
     key: &str,
@@ -494,8 +495,9 @@ fn carry_forward_notes(key: Value) -> CarryForwardNotes {
 
 /// Link into this scan every note whose carry-forward key is `key`
 /// and whose target is one of the scan's sessions at a commit in that
-/// session's chain. The note commits are appended to the staged
-/// carried list, which apply writes as `notes_carried.link`. Returns
+/// session's chain. The note commits are appended to the scan
+/// directory's carried list, which apply writes as
+/// `notes_carried.link`. Returns
 /// the number of notes newly linked; a note already carried by this
 /// scan counts zero.
 async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Error>, VmError> {
@@ -545,7 +547,7 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
     Ok(Ok(i64::try_from(added).unwrap()))
 }
 
-/// Append the commits not already listed to the staged carried list.
+/// Append the commits not already listed to the carried list.
 /// Returns how many were appended.
 fn append_carried(path: &Path, commits: &BTreeSet<String>) -> Result<usize, VmError> {
     let already: BTreeSet<String> = match fs::read_to_string(path) {

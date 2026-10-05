@@ -1,19 +1,19 @@
-//! `write_note(name, value)`: a note written to the scan's staging,
+//! `write_note(name, value)`: a note written to the scan directory,
 //! and `scan().notes()`: the scan's own notes read back.
 //!
 //! The builder carries the name, the value, the target set by one of
 //! the `for_session*` methods, and the metadata. Each `for_session*`
 //! method takes the session as a `Session` or an id string and keeps
 //! the id. Awaiting the builder validates
-//! the target through the store, writes the note tree under the scan's
-//! staging (`gage_store::NoteStore::stage`), and returns the [`Note`].
-//! The runtime sets `author` to `task:<scanner>:<task>` and
+//! the target through the store, writes the note tree into the scan
+//! directory (`gage_store::NoteStore::write_to_dir`), and returns the
+//! [`Note`]. The runtime sets `author` to `task:<scanner>:<task>` and
 //! `attrs.scan` to the running scan. Apply creates the object. Bad
-//! input is `Error::Args`; a failure to reach staging or the store is
-//! a VM error.
+//! input is `Error::Args`; a failure to reach the scan directory or
+//! the store is a VM error.
 //!
 //! `scan().notes()` is a [`NotesQuery`]; awaiting it reads the notes
-//! staged by this scan's tasks and the notes carried into it, and
+//! written by this scan's tasks and the notes carried into it, and
 //! nothing else.
 //! `.name(name)` and `.names([...])` match names exactly. A task sees
 //! every note its upstream tasks wrote because the runner releases it
@@ -201,8 +201,7 @@ pub struct Note {
     #[rune(get)]
     pub created: i64,
     /// The note's commit: the carried commit for a carried note,
-    /// `None` for a note staged by this scan, which has none until
-    /// apply
+    /// `None` for a note this scan wrote, which has none until apply
     #[rune(skip)]
     pub(crate) commit: Option<String>,
 }
@@ -266,9 +265,9 @@ async fn do_write_note(w: NoteWrite) -> Written {
         metadata: metadata.clone(),
         carry_forward_key: key.as_deref(),
     };
-    let staged = {
+    let written = {
         let store = ctx.store.lock().await;
-        NoteStore::from(&*store).stage(
+        NoteStore::from(&*store).write_to_dir(
             &ctx.paths.notes_dir.join(&id),
             &id,
             &input,
@@ -276,7 +275,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
             pinned.as_deref(),
         )
     };
-    match staged {
+    match written {
         Ok(()) => {}
         // A target the scanner named wrong is its error; anything else
         // is the store's
@@ -446,11 +445,11 @@ impl NotesQuery {
     }
 }
 
-/// Read the staged and carried notes, filtered by name, oldest first
-/// and by id among equals.
+/// Read the scan's own and carried notes, filtered by name, oldest
+/// first and by id among equals.
 pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error>, VmError> {
     let ctx = current()?;
-    let mut full: Vec<(NoteFull, Option<String>)> = staged_notes(&ctx)
+    let mut full: Vec<(NoteFull, Option<String>)> = scan_dir_notes(&ctx)
         .await?
         .into_iter()
         .map(|n| (n, None))
@@ -474,17 +473,17 @@ pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error
     Ok(Ok(out))
 }
 
-/// The notes staged under the scan's notes directory, in id order.
-async fn staged_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
+/// The notes in the scan directory, in id order.
+async fn scan_dir_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
     let entries = match fs::read_dir(&ctx.paths.notes_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(VmError::panic(format!("staged notes: {e}"))),
+        Err(e) => return Err(VmError::panic(format!("scan directory notes: {e}"))),
     };
     let mut dirs = Vec::new();
     for entry in entries {
         let path = entry
-            .map_err(|e| VmError::panic(format!("staged notes: {e}")))?
+            .map_err(|e| VmError::panic(format!("scan directory notes: {e}")))?
             .path();
         if path.is_dir() {
             dirs.push(path);
@@ -497,8 +496,8 @@ async fn staged_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
     for dir in dirs {
         out.push(
             notes
-                .read_staged(&dir)
-                .map_err(|e| VmError::panic(format!("staged note {}: {e}", dir.display())))?,
+                .read_from_dir(&dir)
+                .map_err(|e| VmError::panic(format!("note dir {}: {e}", dir.display())))?,
         );
     }
     Ok(out)

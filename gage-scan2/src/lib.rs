@@ -310,7 +310,7 @@ impl From<StoreError> for ScanError {
     }
 }
 
-/// Where a scan stages, how many tasks it runs at once, and what it
+/// Where a scan's directory lives, how many tasks it runs at once, and what it
 /// records about its runtime.
 pub struct ScanConfig<'a> {
     /// The parent of scan directories, `scans/` under Gage home in production
@@ -342,7 +342,7 @@ pub struct ScanOutcome {
 /// `config.jobs` workers as their upstream tasks finish, and record
 /// the scan in `store`.
 ///
-/// The scan is staged under `config.scans_dir/<id>/` while it runs
+/// The scan runs in its scan directory, `config.scans_dir/<id>/`,
 /// (see [`scan_dir`]) and applied to the store at its terminal state,
 /// after which the scan directory is removed. Output and task
 /// status reach `on_event` as they happen. A failed task is recorded
@@ -536,34 +536,34 @@ impl<F: FnMut(Event)> Run<'_, F> {
         } else {
             State::Completed
         })?;
-        // Apply: the staged notes become objects first, so the scan
+        // Apply: the scan's notes become objects first, so the scan
         // can link them
         let notes = NoteStore::from(store);
         let mut note_shas = Vec::new();
         let mut note_commits: HashMap<String, String> = HashMap::new();
-        for dir in self.scan_dir.staged_notes()? {
-            let (id, sha) = notes.create_staged(&dir)?;
+        for dir in self.scan_dir.note_dirs()? {
+            let (id, sha) = notes.create_from_dir(&dir)?;
             note_shas.push(sha.clone());
             note_commits.insert(id, sha);
         }
         self.scan_dir.write_notes_link(&note_shas)?;
-        // A watermark on a staged note waited for the note's commit
-        for (id, key, mark) in self.scan_dir.staged_note_watermarks()? {
+        // A watermark on one of the scan's notes waited for its commit
+        for (id, key, mark) in self.scan_dir.note_watermarks()? {
             let Some(commit) = note_commits.get(&id) else {
                 return Err(ScanError::ScanDir(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("note watermark names {id}, which the scan did not stage"),
+                    format!("note watermark names {id}, which the scan did not write"),
                 )));
             };
             self.scan_dir.write_watermark(&id, &key, commit, mark)?;
         }
-        let carried = self.scan_dir.staged_carried_notes()?;
+        let carried = self.scan_dir.carried_notes()?;
         self.scan_dir.write_notes_carried_link(&carried)?;
         // Issues follow the notes they cite, so their evidence resolves
         let issues = IssueStore::from(store);
         let mut issue_shas = Vec::new();
-        for dir in self.scan_dir.staged_issues()? {
-            let (_, sha) = issues.apply_staged(&dir)?;
+        for dir in self.scan_dir.issue_dirs()? {
+            let (_, sha) = issues.apply_from_dir(&dir)?;
             issue_shas.push(sha);
         }
         self.scan_dir.write_issues_link(&issue_shas)?;
@@ -2714,7 +2714,7 @@ mod tests {
         );
     }
 
-    /// `write_note` stages a note the apply creates and the scan links:
+    /// `write_note` writes a note the apply creates and the scan links:
     /// the author is the task, `attrs.scan` is the scan, a session
     /// target pins the member commit, and bad lines are the scanner's
     /// error.
@@ -2882,7 +2882,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tasks_write_issues_that_cite_staged_notes_and_the_scan_links() {
+    async fn tasks_write_issues_that_cite_the_scans_notes_and_the_scan_links() {
         use gage_store::{IssueInput, IssueStatus, IssueStore, NoteStore};
 
         const SCANNER: &str = r###"
@@ -3000,7 +3000,7 @@ mod tests {
         assert_eq!(
             findings.evidence,
             [note_sha.clone()],
-            "the issue links the staged note's commit"
+            "the issue links the commit of the note the scan wrote"
         );
         assert_eq!(
             findings.description.as_deref(),
@@ -3090,7 +3090,7 @@ mod tests {
     /// `replace_named()` and `replace_keyed(key)` store a replace key.
     /// A later scan's write under the same key is a new commit of the
     /// live issue, with the write's whole state, and the scan links
-    /// that commit. A second write in one scan replaces the staged one.
+    /// that commit. A second write in one scan replaces the first.
     #[tokio::test]
     async fn issues_written_under_a_replace_key_replace_the_live_issue() {
         use gage_store::{ChangeEvent, IssueStatus, IssueStore};
@@ -3190,7 +3190,7 @@ mod tests {
         assert_eq!(
             hidden.description.as_deref(),
             Some("second"),
-            "the second write in the scan replaced the first staged one"
+            "the second write in the scan replaced the first"
         );
         assert_eq!(hidden.changes.len(), 1);
         assert_eq!(hidden.evidence, [record.content.notes[0].clone()]);
@@ -3355,7 +3355,7 @@ mod tests {
 
     /// `keep_named()` writes once: a second scan finds the issue live
     /// in the store, in any status, and returns it without a write;
-    /// a second write in one scan returns the staged one.
+    /// a second write in one scan returns the first.
     #[tokio::test]
     async fn issues_written_under_a_keep_key_are_not_rewritten() {
         use gage_store::{IssueStatus, IssueStore};
@@ -3714,7 +3714,7 @@ mod tests {
         let compiled = compiled.unwrap();
         let args_lines = [
             "args: session not-a-member is not a member of the scan".to_string(),
-            "args: note not-a-note is not staged or carried by the scan".to_string(),
+            "args: note not-a-note was neither written nor carried by the scan".to_string(),
             "args: key must be non-empty and must not contain '/': \"a/b\"".to_string(),
         ];
 
@@ -3771,7 +3771,7 @@ mod tests {
         expected.sort_by(|a, b| a.oid.cmp(&b.oid));
         assert_eq!(
             first_record.content.watermarks, expected,
-            "the staged note's watermark resolved to its commit at apply"
+            "the watermark on the note the scan wrote resolved to its commit at apply"
         );
 
         let (second, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;

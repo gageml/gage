@@ -12,6 +12,7 @@ pub async fn main() {
     carry_forward_notes(KEY).await?;
     let carried = scan().notes().name("native-size").await?;
     println!("Notes from previous scans: {carried:?}");
+
     for s in scan().sessions().await {
         let attrs = s.attrs().await;
         write_note("native-size", attrs.native_size)

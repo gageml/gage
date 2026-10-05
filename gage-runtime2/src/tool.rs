@@ -11,7 +11,7 @@
 //! becomes a [`CustomToolDef`] whose callback runs the handler, and
 //! each Gage tool becomes a [`GageTool`] carrying the data it serves.
 //! `Query` carries a query context; `IssueWrite` carries a callback
-//! that stages the issue through the runtime's own write path, under
+//! that writes the issue through the runtime's own write path, under
 //! the calling task's scan context and output sink as a scanner-defined
 //! handler runs.
 //!
@@ -752,7 +752,7 @@ fn fault(
     CustomToolOutcome::Fault("internal server error".into())
 }
 
-/// The callback the MCP service runs for an `IssueWrite` call: stage
+/// The callback the MCP service runs for an `IssueWrite` call: write
 /// the issue under the calling task's scan context and output sink,
 /// as a scanner-defined handler runs. The scanner's input error, such
 /// as a cited note that does not exist, is an error result the model
@@ -1557,7 +1557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_issue_write_tool_stages_an_issue_under_the_task_sink() {
+    async fn an_issue_write_tool_writes_an_issue_under_the_task_sink() {
         use gage_store::{IssueStatus, IssueStore};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1599,17 +1599,17 @@ mod tests {
             .collect();
         assert_eq!(dirs.len(), 1);
         let store = ctx.store.lock().await;
-        let staged = IssueStore::from(&*store).read_staged(&dirs[0]).unwrap();
-        assert_eq!(staged.name, "findings");
-        assert_eq!(staged.title, "Flaky build");
+        let record = IssueStore::from(&*store).read_from_dir(&dirs[0]).unwrap();
+        assert_eq!(record.name, "findings");
+        assert_eq!(record.title, "Flaky build");
         assert_eq!(
-            staged.description.as_deref(),
+            record.description.as_deref(),
             Some("## Summary\nIt flakes.")
         );
-        assert_eq!(staged.status, IssueStatus::Pending);
-        assert_eq!(staged.author, "task:demo:report");
-        assert_eq!(staged.scan.as_deref(), Some("scan-1"));
-        assert!(staged.evidence.is_empty());
+        assert_eq!(record.status, IssueStatus::Pending);
+        assert_eq!(record.author, "task:demo:report");
+        assert_eq!(record.scan.as_deref(), Some("scan-1"));
+        assert!(record.evidence.is_empty());
     }
 
     #[tokio::test]
@@ -1642,7 +1642,7 @@ mod tests {
         assert!(message.starts_with("write_issue evidence: "), "{message}");
         assert!(
             !std::fs::exists(scan_ctx(&tmp).paths.issues_dir).unwrap(),
-            "nothing is staged for a rejected write"
+            "nothing is written for a rejected write"
         );
     }
 

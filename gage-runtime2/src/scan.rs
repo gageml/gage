@@ -46,7 +46,7 @@ tokio::task_local! {
 /// The scan a task runs under: its id, its dataset, and the store
 /// the dataset is read from. The store's git reader is
 /// single-threaded, so each handle is shared under a lock. The
-/// runtime's own reads and staging writes go through `store`, an
+/// runtime's own reads and scan directory writes go through `store`, an
 /// async lock, so a task waiting for it parks instead of holding a
 /// runtime thread. The query context over the dataset's members has
 /// its own handle, since its table providers read synchronously; it
@@ -90,11 +90,11 @@ pub struct ScanContext {
 /// the layout and supplies them.
 #[derive(Debug, Clone)]
 pub struct ScanDirPaths {
-    /// `write_note` stages note trees here, one directory per id
+    /// `write_note` writes note trees here, one directory per id
     pub notes_dir: PathBuf,
-    /// `write_issue` stages issue trees here, one directory per id
+    /// `write_issue` writes issue trees here, one directory per id
     pub issues_dir: PathBuf,
-    /// `watermark` on a note this scan staged appends `<id> <key>
+    /// `watermark` on a note this scan wrote appends `<id> <key>
     /// <mark>` here; apply resolves the note's commit and writes the
     /// record
     pub note_watermarks: PathBuf,

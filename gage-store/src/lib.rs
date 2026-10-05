@@ -77,7 +77,7 @@ pub use error::StoreError;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{IdMatch, IndexCounts, IndexStatus, Order, SelectedTip};
 pub use issue::{
-    ChangeEvent, IssueChange, IssueFull, IssueInput, IssueQuery, IssueStaged, IssueStatus,
+    ChangeEvent, IssueChange, IssueDirRecord, IssueFull, IssueInput, IssueQuery, IssueStatus,
     IssueStore, OBJECT_TYPE as ISSUE_TYPE, StatusReason,
 };
 pub use note::{

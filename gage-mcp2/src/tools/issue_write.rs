@@ -218,7 +218,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.is_error, Some(true));
         assert_eq!(text_of(&r), "note x is deleted");
-        let (config, _) = recording(CustomToolOutcome::Fault("staging gone".into()));
+        let (config, _) = recording(CustomToolOutcome::Fault("scan directory gone".into()));
         let e = execute(&config, object(json!({"title": "t"})))
             .await
             .unwrap_err();

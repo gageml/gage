@@ -5,11 +5,11 @@
 //! `err`, and `records`; under `tasks/<scanner>/<task>/`, each task's
 //! `attrs.json`; and under `scanners/<name>/sourcecode.d/`, the
 //! scanner's source files as run, opaque to the store. Tasks have no
-//! logs of their own. The layout is the same in a scan's staging
+//! logs of their own. The layout is the same in a running scan's
 //! directory and in the store, so one decoder serves both through
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
-//! view over a commit. [`ScanStore::create`] imports a staging `scan/`
-//! directory as the object's content. Under `watermarks/`, the
+//! view over a commit. [`ScanStore::create`] imports a scan
+//! directory's `scan/` tree as the object's content. Under `watermarks/`, the
 //! position each task reached on each object it processed.
 //! `notes.link`, `notes_carried.link`, and `issues.link` name the
 //! commits of the notes and issues the scan wrote or carried. A task
@@ -93,8 +93,9 @@ pub struct TaskCounts {
     pub skipped: usize,
 }
 
-/// A task's `status`. `Pending` and `Started` occur only in staging
-/// while the scan runs; a stored scan carries the terminal statuses.
+/// A task's `status`. `Pending` and `Started` occur only in the scan
+/// directory while the scan runs; a stored scan carries the terminal
+/// statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -266,7 +267,7 @@ pub trait ScanFiles {
 }
 
 impl ScanStore<'_> {
-    /// Write a scan from its staging `scan/` directory under the given
+    /// Write a scan from its scan directory's `scan/` tree under the given
     /// id. The directory is validated first: every task status must be
     /// terminal, a task directory may hold only `attrs.json`,
     /// `agents.link`, and `agents/`, every linked agent session must be
@@ -740,7 +741,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&bytes).map_err(|e| StoreError::Parse(format!("scan file {path}: {e}")))
 }
 
-/// Build the `tasks/` tree from a staging `tasks/` directory. Returns
+/// Build the `tasks/` tree from a scan directory's `tasks/`. Returns
 /// `None` when the directory is absent or holds no scanner.
 fn import_tasks_tree(store_path: &Path, tasks_dir: &Path) -> Result<Option<String>, StoreError> {
     let mut scanner_trees: Vec<(String, String)> = Vec::new();
@@ -852,7 +853,7 @@ fn import_fixed_blobs(
     mktree(store_path, &entries)
 }
 
-/// Build the `scanners/` tree from a staging `scanners/` directory:
+/// Build the `scanners/` tree from a scan directory's `scanners/`:
 /// one subtree per scanner holding its opaque `sourcecode.d/` tree,
 /// imported as it is. Returns `None` when the directory is absent or
 /// holds no scanner.
@@ -993,7 +994,7 @@ fn read_error(path: &Path, e: io::Error) -> StoreError {
     }
 }
 
-/// [`ScanFiles`] over a directory: a scan's staging `scan/` directory.
+/// [`ScanFiles`] over a directory: a scan directory's `scan/` tree.
 pub struct DirFiles {
     root: PathBuf,
 }
@@ -1114,9 +1115,9 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
-    /// A staging `scan/` directory with one completed and one failed
-    /// task.
-    fn staged_scan(dir: &Path) -> PathBuf {
+    /// A scan directory's `scan/` tree with one completed and one
+    /// failed task.
+    fn new_scan_dir(dir: &Path) -> PathBuf {
         let scan = dir.join("scan");
         write(
             &scan.join("attrs.json"),
@@ -1151,10 +1152,10 @@ mod tests {
     }
 
     #[test]
-    fn create_writes_the_staged_layout_and_get_reads_it_back() {
+    fn create_writes_the_scan_dir_layout_and_get_reads_it_back() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN1", &scan_dir).unwrap();
 
@@ -1368,7 +1369,7 @@ mod tests {
             "session+task:SCANA/hello:greet/agent-native-1"
         );
 
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let agent_dir = scan_dir.join(format!("tasks/hello/greet/agents/{}", added.id));
         write(&agent_dir.join("attrs.json"), r#"{"exit_code":0}"#);
         write(&agent_dir.join("stderr"), "warn: x\n");
@@ -1448,7 +1449,7 @@ mod tests {
     fn query_lists_scans_newest_first_with_count_ignoring_limit() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let scans = ScanStore::from(&store);
         for id in ["SCANA", "SCANB", "SCANC"] {
             scans.create(id, &scan_dir).unwrap();
@@ -1481,7 +1482,7 @@ mod tests {
     fn create_rejects_an_in_flight_task_status() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         write(
             &scan_dir.join("tasks/hello/greet/attrs.json"),
             r#"{"status":"started","started":1000}"#,
@@ -1500,7 +1501,7 @@ mod tests {
     fn create_rejects_a_stray_file_in_a_scanner_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         write(&scan_dir.join("scanners/hello/notes.txt"), "x");
         let err = ScanStore::from(&store)
             .create("SCAN5", &scan_dir)
@@ -1513,7 +1514,7 @@ mod tests {
         for path in ["tasks/hello/greet/logs/out", "logs/trace"] {
             let tmp = tempfile::tempdir().unwrap();
             let (store, _fsck) = open_store(tmp.path());
-            let scan_dir = staged_scan(tmp.path());
+            let scan_dir = new_scan_dir(tmp.path());
             write(&scan_dir.join(path), "x");
             let err = ScanStore::from(&store)
                 .create("SCAN6", &scan_dir)
@@ -1529,7 +1530,7 @@ mod tests {
     fn create_rejects_an_unexpected_task_file() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         write(&scan_dir.join("tasks/hello/greet/notes.txt"), "x");
         let err = ScanStore::from(&store)
             .create("SCAN4", &scan_dir)
@@ -1544,7 +1545,7 @@ mod tests {
         let datasets = DatasetStore::from(&store);
         let dataset_id = datasets.create().unwrap();
         let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         write(&scan_dir.join("dataset.link"), &format!("{dataset_sha}\n"));
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN7", &scan_dir).unwrap();
@@ -1565,7 +1566,7 @@ mod tests {
     fn create_without_a_dataset_link_has_no_parents() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN8", &scan_dir).unwrap();
         assert!(store.read_commit(&commit).unwrap().parents.is_empty());
@@ -1576,7 +1577,7 @@ mod tests {
     fn create_rejects_a_dataset_link_to_a_non_dataset() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let other = ScanStore::from(&store).create("SCAN9", &scan_dir).unwrap();
         write(&scan_dir.join("dataset.link"), &format!("{other}\n"));
         let err = ScanStore::from(&store)
@@ -1603,7 +1604,7 @@ mod tests {
             ("\n".to_string(), "expected one SHA, found 0"),
             ("not-a-sha\n".to_string(), "is not a commit SHA"),
         ] {
-            let scan_dir = staged_scan(tmp.path());
+            let scan_dir = new_scan_dir(tmp.path());
             write(&scan_dir.join("dataset.link"), &content);
             let err = ScanStore::from(&store)
                 .create("SCAN11", &scan_dir)
@@ -1640,7 +1641,7 @@ mod tests {
                     .unwrap(),
             );
         }
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         write(
             &scan_dir.join("notes.link"),
             &format!("{}\n{}\n", shas[0], shas[1]),
@@ -1671,14 +1672,14 @@ mod tests {
             .rev_parse(&crate::object::object_ref(&id))
             .unwrap()
             .unwrap();
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         write(&scan_dir.join("issues.link"), &format!("{sha}\n"));
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN12I", &scan_dir).unwrap();
         assert_eq!(store.read_commit(&commit).unwrap().parents, [sha.clone()]);
         assert_eq!(scans.get("SCAN12I").unwrap().content.issues, [sha]);
 
-        let other_dir = staged_scan(tmp.path());
+        let other_dir = new_scan_dir(tmp.path());
         write(&other_dir.join("issues.link"), &format!("{commit}\n"));
         let err = scans.create("SCAN13I", &other_dir).unwrap_err();
         assert!(
@@ -1691,7 +1692,7 @@ mod tests {
     fn create_rejects_a_notes_link_to_a_non_note() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let other = ScanStore::from(&store).create("SCAN13", &scan_dir).unwrap();
         write(&scan_dir.join("notes.link"), &format!("{other}\n"));
         let err = ScanStore::from(&store)
@@ -1707,7 +1708,7 @@ mod tests {
     fn create_imports_watermarks_and_decodes_them() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let session_sha = "0123456789abcdef0123456789abcdef01234567";
         let note_sha = "89abcdef0123456789abcdef0123456789abcdef";
         write(
@@ -1755,7 +1756,7 @@ mod tests {
     fn create_rejects_a_watermark_without_a_sha_and_a_mark() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = staged_scan(tmp.path());
+        let scan_dir = new_scan_dir(tmp.path());
         let sha = "0123456789abcdef0123456789abcdef01234567";
         for content in ["1234 7\n", &format!("{sha}\n"), &format!("{sha} x\n")] {
             write(&scan_dir.join("watermarks/SESSION1/s:t:1"), content);
@@ -1769,7 +1770,7 @@ mod tests {
         }
     }
 
-    /// A staged scan under `id` linking two written notes, one carried
+    /// A stored scan under `id` linking two written notes, one carried
     /// note, and one issue. Returns the scan commit and the ids of the
     /// written notes, the carried note, and the issue.
     fn scan_with_links(
@@ -1810,7 +1811,7 @@ mod tests {
                 replace_key: None,
             })
             .unwrap();
-        let scan_dir = staged_scan(tmp);
+        let scan_dir = new_scan_dir(tmp);
         write(
             &scan_dir.join("notes.link"),
             &format!("{}\n{}\n", sha(&written[0]), sha(&written[1])),
