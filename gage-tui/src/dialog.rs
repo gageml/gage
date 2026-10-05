@@ -7,11 +7,18 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, ScrollbarState, Wrap};
 use unicode_width::UnicodeWidthStr;
 
+use crate::item_table::scrollbar;
 use crate::styles;
+use crate::textarea::TextArea;
+
+/// Rows of editor text an editor dialog shows; the text scrolls
+/// beyond them
+const EDITOR_ROWS: u16 = 8;
 
 /// Draw a centered one-line message with a key hint below it.
 pub(crate) fn draw_message(frame: &mut Frame, message: &str, hint: &str) {
@@ -89,6 +96,63 @@ pub(crate) fn draw_wrapped_message(frame: &mut Frame, message: &str, hint: &str)
     ])
     .areas(content);
     frame.render_widget(para, text);
+}
+
+/// Draw a text editor dialog: an optional one-line prompt above
+/// the editor body inside a titled border, with a key-hint footer
+/// below the border. A scrollbar appears once the text outgrows the
+/// body.
+pub(crate) fn draw_editor(
+    frame: &mut Frame,
+    title: &str,
+    prompt: Option<&str>,
+    editor: &mut TextArea,
+    hint: &str,
+) {
+    let frame_area = frame.area();
+    let text_width = frame_area.width.saturating_sub(8).clamp(30, 72);
+    let prompt_rows = u16::from(prompt.is_some());
+    let content = draw_chrome(
+        frame,
+        Some(title),
+        text_width,
+        EDITOR_ROWS + prompt_rows,
+        hint,
+    );
+    let [_, column, _] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(text_width),
+        Constraint::Fill(1),
+    ])
+    .areas(content);
+    let [prompt_area, body] =
+        Layout::vertical([Constraint::Length(prompt_rows), Constraint::Fill(1)]).areas(column);
+    if let Some(prompt) = prompt {
+        frame.render_widget(
+            Paragraph::new(Span::styled(prompt.to_string(), styles::Dialog::dim())),
+            prompt_area,
+        );
+    }
+    // Wrap is measured against the body less the scrollbar column.
+    // The bar appears only once the text exceeds the body, so the
+    // narrower width is the one that matters.
+    let probe_width = body.width.saturating_sub(1).max(1);
+    let needs_bar = editor.visual_row_count(probe_width) > body.height as usize;
+    let (text_area, bar_area) = if needs_bar {
+        let [t, b] = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body);
+        (t, Some(b))
+    } else {
+        (body, None)
+    };
+    if let Some((x, y)) = editor.render(text_area, frame.buffer_mut(), Style::default()) {
+        frame.set_cursor_position((x, y));
+    }
+    if let Some(bar_area) = bar_area {
+        let mut state = ScrollbarState::new(editor.visual_row_count(text_area.width))
+            .viewport_content_length(text_area.height as usize)
+            .position(editor.visual_cursor_row(text_area.width));
+        frame.render_stateful_widget(scrollbar(true), bar_area, &mut state);
+    }
 }
 
 /// Draw centered content lines with a key-hint footer below the

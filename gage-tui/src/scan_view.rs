@@ -2478,12 +2478,12 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 StatusReason::Duplicate => "Comment — name the surviving issue ID",
                 _ => "Comment (optional)",
             };
-            draw_status_comment(
+            dialog::draw_editor(
                 frame,
-                format!(" Close issue ({}) ", reason.as_str()),
-                comment_prompt,
-                "Enter close · Shift-Enter newline · Esc cancel",
+                &format!("Close issue ({})", reason.as_str()),
+                Some(comment_prompt),
                 editor,
+                "Enter close · Shift-Enter newline · Esc cancel",
             );
         }
         Prompt::Resolve { issue } => {
@@ -2519,19 +2519,19 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 rows,
             );
         }
-        Prompt::Open { status, editor, .. } => draw_status_comment(
+        Prompt::Open { status, editor, .. } => dialog::draw_editor(
             frame,
-            format!(" Open issue ({}) ", status.as_str()),
-            "Comment (optional)",
+            &format!("Open issue ({})", status.as_str()),
+            Some("Comment (optional)"),
+            editor,
             "Enter open · Shift-Enter newline · Esc cancel",
-            editor,
         ),
-        Prompt::Comment { editor, .. } => draw_status_comment(
+        Prompt::Comment { editor, .. } => dialog::draw_editor(
             frame,
-            " Comment issue ".to_string(),
-            "Comment",
-            "Enter comment · Shift-Enter newline · Esc cancel",
+            "Comment issue",
+            Some("Comment"),
             editor,
+            "Enter comment · Shift-Enter newline · Esc cancel",
         ),
     }
 }
@@ -2891,47 +2891,6 @@ fn token_ranges(line: &str, n: usize) -> Vec<(usize, usize)> {
 
 fn draw_confirm_quit(frame: &mut Frame) {
     dialog::draw_message(frame, "Cancel the scan? It cannot be restarted.", "y / n");
-}
-
-/// Comment entry for the close and reopen dialogs: a bordered editor
-/// with the chosen status in the title and a key-hint footer, centered
-/// like the message dialogs.
-fn draw_status_comment(
-    frame: &mut Frame,
-    title: String,
-    prompt: &'static str,
-    hint: &'static str,
-    editor: &mut TextArea,
-) {
-    let frame_area = frame.area();
-    let width = frame_area.width.saturating_sub(8).clamp(24, 72);
-    let height = 10.min(frame_area.height.saturating_sub(2));
-    let area = Rect {
-        x: frame_area.x + (frame_area.width.saturating_sub(width)) / 2,
-        y: frame_area.y + (frame_area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
-    frame.render_widget(Clear, area);
-    frame.render_widget(Block::new().style(styles::Dialog::surface()), area);
-    let [border_area, hint_row] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
-    let block = Block::bordered().title(title);
-    let inner = block.inner(border_area);
-    frame.render_widget(block, border_area);
-    let [prompt_area, editor_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
-    frame.render_widget(
-        Paragraph::new(Span::styled(prompt, styles::Dialog::dim())),
-        prompt_area,
-    );
-    if let Some((x, y)) = editor.render(editor_area, frame.buffer_mut(), Style::default()) {
-        frame.set_cursor_position((x, y));
-    }
-    frame.render_widget(
-        Paragraph::new(Span::styled(hint, styles::Dialog::dim())).centered(),
-        hint_row,
-    );
 }
 
 fn draw_scan_done(frame: &mut Frame, model: &ScanModel, canceled: bool) {

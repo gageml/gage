@@ -18,8 +18,8 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, Borders, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
 };
 use serde_json::Value;
 
@@ -1541,138 +1541,14 @@ fn draw_note_type(frame: &mut Frame) {
     crate::dialog::draw_lines_titled(frame, Some("Note type"), lines, "q cancel");
 }
 
-const EDITOR_BODY_HEIGHT: u16 = 8;
+const EDITOR_HINT: &str = "Enter save · Shift/Alt+Enter or Ctrl+J newline · Esc cancel";
 
 fn draw_editor(frame: &mut Frame, title: &str, editor: &mut TextArea) {
-    let area = editor_rect(frame.area());
-    let (body_area, hint_area) = draw_dialog_block(frame, area, title);
-
-    // Compute wrap against the body width minus a potential 1-col scrollbar.
-    // We don't yet know if the bar is needed, but it only appears once content
-    // exceeds the viewport, so probe at the narrower width first.
-    let probe_width = body_area.width.saturating_sub(1).max(1);
-    let total_visual = editor.visual_row_count(probe_width);
-    let needs_bar = total_visual > body_area.height as usize;
-    let (text_area, bar_area) = if needs_bar {
-        let [t, b] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body_area);
-        (t, Some(b))
-    } else {
-        (body_area, None)
-    };
-    let cursor_pos = editor.render(text_area, frame.buffer_mut(), Style::default());
-    if let Some((x, y)) = cursor_pos {
-        frame.set_cursor_position((x, y));
-    }
-
-    if let Some(bar_area) = bar_area {
-        let cursor_row = editor.visual_cursor_row(text_area.width);
-        let mut sb_state = ScrollbarState::new(editor.visual_row_count(text_area.width))
-            .viewport_content_length(text_area.height as usize)
-            .position(cursor_row);
-        frame.render_stateful_widget(scrollbar(true), bar_area, &mut sb_state);
-    }
-
-    draw_hint(
-        frame,
-        hint_area,
-        "Enter save · Shift/Alt+Enter or Ctrl+J newline · Esc cancel",
-    );
-}
-
-/// Editor dialog sizing: width capped at 80 columns, height fits a fixed
-/// `EDITOR_BODY_HEIGHT` body plus the 5 chrome rows (borders, top pad, gap,
-/// hint). The body scrolls so content can exceed its visible height.
-fn editor_rect(frame: Rect) -> Rect {
-    let width = frame.width.saturating_sub(4).clamp(30, 80);
-    let height = (EDITOR_BODY_HEIGHT + 5).min(frame.height.saturating_sub(2));
-    let x = frame.x + (frame.width.saturating_sub(width)) / 2;
-    let y = frame.y + (frame.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
+    crate::dialog::draw_editor(frame, title, None, editor, EDITOR_HINT);
 }
 
 fn draw_confirm(frame: &mut Frame, message: &str) {
-    let area = confirm_rect(frame.area(), message);
-    let (body_area, hint_area) = draw_dialog_block(frame, area, "Confirm");
-
-    frame.render_widget(
-        Paragraph::new(message.to_string())
-            .wrap(Wrap { trim: false })
-            .alignment(ratatui::layout::Alignment::Center),
-        body_area,
-    );
-    draw_hint(frame, hint_area, "y / n");
-}
-
-/// Confirm prompts size to their content: width capped at 60 columns and at
-/// most half the frame; height matches the wrapped message plus the dialog
-/// chrome — top + bottom border, 1-row top pad, 1-row gap, and 1-row hint
-/// (5 chrome rows total).
-fn confirm_rect(frame: Rect, message: &str) -> Rect {
-    let max_w = frame.width.saturating_sub(4).clamp(20, 60);
-    let inner_w = max_w.saturating_sub(4);
-    let lines = wrapped_line_count(message, inner_w);
-    let height = (lines + 5).min(frame.height.saturating_sub(2));
-    let width = max_w;
-    let x = frame.x + (frame.width.saturating_sub(width)) / 2;
-    let y = frame.y + (frame.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
-}
-
-fn wrapped_line_count(text: &str, width: u16) -> u16 {
-    let p = Paragraph::new(text.to_string()).wrap(Wrap { trim: false });
-    u16::try_from(p.line_count(width)).unwrap_or(u16::MAX)
-}
-
-/// Renders the bordered dialog frame and returns `(body_area, hint_area)`.
-/// Layout inside the border:
-///
-/// ```text
-/// -----
-/// | <space>
-/// | body
-/// | <space>
-/// | hint
-/// -----
-/// ```
-///
-/// The hint sits flush with the bottom border; padding around the body is one
-/// row on top and one column on each side.
-fn draw_dialog_block(frame: &mut Frame, area: Rect, title: &str) -> (Rect, Rect) {
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(title.to_string(), styles::Text::dim()))
-        .border_style(styles::Text::dim())
-        .padding(Padding::new(1, 1, 1, 0));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [body_area, _gap, hint_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    (body_area, hint_area)
-}
-
-fn draw_hint(frame: &mut Frame, area: Rect, hint: &str) {
-    let p = Paragraph::new(Line::from(Span::styled(
-        hint.to_string(),
-        styles::Text::dim(),
-    )))
-    .alignment(ratatui::layout::Alignment::Center);
-    frame.render_widget(p, area);
+    crate::dialog::draw_wrapped_message(frame, message, "y / n");
 }
 
 fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
@@ -1814,6 +1690,38 @@ mod tests {
             press(&mut state, &backend, KeyCode::Char('d')),
             KeyOutcome::Ignored
         );
+    }
+
+    /// The note editor and the delete confirm draw through the shared
+    /// dialog chrome: title in the border, hint on the row below it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn note_dialogs_use_the_shared_chrome() {
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        press(&mut state, &backend, KeyCode::Char('n'));
+        press(&mut state, &backend, KeyCode::Char('c'));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Add comment"), "{text}");
+        assert!(text.contains("Enter save"), "{text}");
+
+        press(&mut state, &backend, KeyCode::Esc);
+        backend
+            .add_note(&f.session_id, None, "comment", "x".into(), &state.author())
+            .unwrap();
+        state.reload(&backend).unwrap();
+        press(&mut state, &backend, KeyCode::Right);
+        press(&mut state, &backend, KeyCode::Char('j'));
+        press(&mut state, &backend, KeyCode::Char('d'));
+        assert!(matches!(state.dialog, Dialog::ConfirmDelete { .. }));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Delete this note?"), "{text}");
+        assert!(text.contains("y / n"), "{text}");
     }
 
     /// The notice wraps inside a terminal narrower than its text, so
