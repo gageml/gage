@@ -35,10 +35,15 @@ use super::issue::{IssueRow, issue_event_rows, issue_event_schema, issue_rows, i
 use super::note::note_rows;
 use super::note_doc::{note_doc_rows, note_doc_rows_from_plan, note_doc_schema};
 use super::scan::{ScanRow, scan_rows, scan_schema};
+use super::scan_task::{
+    agent_rows_of, scan_task_agent_rows, scan_task_agent_schema, scan_task_rows, scan_task_schema,
+    task_rows_of,
+};
+use crate::scan::{DirFiles, ScanFiles, agent_file_path, read_tasks};
 use crate::scan_dir::ScanDirLayout;
 use crate::{
     AttachmentRecord, DatasetStore, IssueChange, IssueStore, NoteFull, NoteStore, ScanStore,
-    SessionRecord, Store, StoreError, TaskAttrs, TaskStatus, url,
+    ScanTask, SessionRecord, Store, StoreError, TaskStatus, url,
 };
 
 /// The scan a scope serves.
@@ -224,6 +229,54 @@ impl ScanSource {
         Ok(out)
     }
 
+    /// The scan's tasks, in tree order, from the task records as they
+    /// stand for an active scan and from the object for a stored one.
+    pub fn tasks(&self, store: &Store) -> Result<Vec<ScanTask>> {
+        match self {
+            ScanSource::ScanDir(dir) => {
+                read_tasks(&DirFiles::new(&dir.object_dir())).map_err(external)
+            }
+            ScanSource::Stored(id) => Ok(ScanStore::from(store)
+                .get(id)
+                .map_err(external)?
+                .content
+                .tasks),
+        }
+    }
+
+    /// The bytes of an agent's `result` file, or `None` when the
+    /// record lacks one.
+    fn agent_result(
+        &self,
+        store: &Store,
+        scanner: &str,
+        task: &str,
+        agent_id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        match self {
+            ScanSource::ScanDir(dir) => DirFiles::new(&dir.object_dir())
+                .read(&agent_file_path(scanner, task, agent_id, "result"))
+                .map_err(external),
+            ScanSource::Stored(id) => {
+                let scans = ScanStore::from(store);
+                let record = scans.get(id).map_err(external)?;
+                scans
+                    .agent_file(&record.commit_sha, scanner, task, agent_id, "result")
+                    .map_err(external)
+            }
+        }
+    }
+
+    /// The scan's commit for a stored scan; an active scan has none.
+    fn commit(&self, store: &Store) -> Result<Option<String>> {
+        match self {
+            ScanSource::ScanDir(_) => Ok(None),
+            ScanSource::Stored(id) => Ok(Some(
+                ScanStore::from(store).get(id).map_err(external)?.commit_sha,
+            )),
+        }
+    }
+
     /// The scan's plan, from `scan/plan.json`, or `None` for a scan
     /// written without one.
     fn plan(&self, store: &Store) -> Result<Option<serde_json::Value>> {
@@ -263,7 +316,7 @@ impl ScanSource {
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as i64);
-                let counts = task_counts(dir)?;
+                let counts = task_counts(&self.tasks(store)?);
                 Ok(ScanRow {
                     id_prefix: id.clone(),
                     id,
@@ -294,39 +347,20 @@ impl ScanSource {
     }
 }
 
-/// `(total, completed, failed, skipped)` over the task records of an
-/// active scan.
-fn task_counts(dir: &ScanDirLayout) -> Result<(i64, i64, i64, i64)> {
+/// `(total, completed, failed, skipped)` over an active scan's task
+/// records.
+fn task_counts(tasks: &[ScanTask]) -> (i64, i64, i64, i64) {
     let mut counts = (0, 0, 0, 0);
-    let scanners = match fs::read_dir(dir.tasks_dir()) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(counts),
-        Err(e) => return Err(io_error(e)),
-    };
-    for scanner in scanners {
-        let scanner = scanner.map_err(io_error)?.path();
-        if !scanner.is_dir() {
-            continue;
-        }
-        for task in fs::read_dir(&scanner).map_err(io_error)? {
-            let attrs = task.map_err(io_error)?.path().join("attrs.json");
-            let bytes = match fs::read(&attrs) {
-                Ok(bytes) => bytes,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(io_error(e)),
-            };
-            let attrs: TaskAttrs = serde_json::from_slice(&bytes)
-                .map_err(|e| external(StoreError::Parse(format!("{}: {e}", attrs.display()))))?;
-            counts.0 += 1;
-            match attrs.status {
-                TaskStatus::Completed => counts.1 += 1,
-                TaskStatus::Failed => counts.2 += 1,
-                TaskStatus::Skipped => counts.3 += 1,
-                TaskStatus::Pending | TaskStatus::Started | TaskStatus::Canceled => {}
-            }
+    for t in tasks {
+        counts.0 += 1;
+        match t.attrs.status {
+            TaskStatus::Completed => counts.1 += 1,
+            TaskStatus::Failed => counts.2 += 1,
+            TaskStatus::Skipped => counts.3 += 1,
+            TaskStatus::Pending | TaskStatus::Started | TaskStatus::Canceled => {}
         }
     }
-    Ok(counts)
+    counts
 }
 
 fn io_error(e: io::Error) -> datafusion::error::DataFusionError {
@@ -466,6 +500,32 @@ pub fn scan_scope_tables(
         "scan",
         table(store, scan_schema(), move |store| {
             scan_rows(&[s.scan_row(store)?])
+        }),
+    ));
+
+    let s = src(source);
+    tables.push((
+        "scan_task",
+        table(store, scan_task_schema(), move |store| {
+            let id = s.scan_id(store)?;
+            let commit = s.commit(store)?;
+            let tasks = s.tasks(store)?;
+            let plan = s.plan(store)?;
+            scan_task_rows(&task_rows_of(&id, commit.as_deref(), &tasks, plan.as_ref()))
+        }),
+    ));
+
+    let s = src(source);
+    tables.push((
+        "scan_task_agent",
+        table(store, scan_task_agent_schema(), move |store| {
+            let id = s.scan_id(store)?;
+            let commit = s.commit(store)?;
+            let tasks = s.tasks(store)?;
+            let rows = agent_rows_of(&id, commit.as_deref(), &tasks, |scanner, task, agent| {
+                s.agent_result(store, scanner, task, agent)
+            })?;
+            scan_task_agent_rows(&rows)
         }),
     ));
 

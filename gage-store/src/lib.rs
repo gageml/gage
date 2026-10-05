@@ -90,13 +90,13 @@ pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_table,
     link_table, note_doc_rows, note_doc_schema, scan_scope_tables, scan_table,
-    scan_watermark_table, tag_table,
+    scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
 };
 pub use refs::{GENERATION, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use scan::{
     AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
     ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,
-    TaskCounts, TaskStatus, Watermark,
+    TaskCounts, TaskStatus, Watermark, agent_file_path, read_tasks,
 };
 pub use scan_dir::ScanDirLayout;
 pub use session::{

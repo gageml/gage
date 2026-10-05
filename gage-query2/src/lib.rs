@@ -15,6 +15,9 @@
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
+//! `scan` is one row per live scan object, `scan_task` one row per
+//! task of those scans, and `scan_task_agent` one row per agent a
+//! task ran.
 //!
 //! Native session data is reached through driver-provided functions,
 //! present on every context: `native_session`, `native_message`, and
@@ -45,7 +48,8 @@ use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
     LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
     attachment_table, dataset_table, issue_event_table, issue_table, link_table, note_doc_rows,
-    note_doc_schema, scan_scope_tables, scan_table, scan_watermark_table, tag_table,
+    note_doc_schema, scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table,
+    scan_watermark_table, tag_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -126,6 +130,8 @@ impl ContextBuilder {
             ("attachment", attachment_table(Arc::clone(&store))),
             ("attachment_file", attachment_file_table(Arc::clone(&store))),
             ("scan", scan_table(Arc::clone(&store))),
+            ("scan_task", scan_task_table(Arc::clone(&store))),
+            ("scan_task_agent", scan_task_agent_table(Arc::clone(&store))),
             ("issue", issue_table(Arc::clone(&store))),
             ("issue_event", issue_event_table(Arc::clone(&store))),
             ("tag", tag_table(Arc::clone(&store))),
@@ -356,11 +362,11 @@ mod tests {
     use gage_registry::driver::DriverRegistry;
     use gage_store::{
         DatasetStore, IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue,
-        SessionSpec, SessionStore, StatusReason, Store, TagStore,
+        ScanStore, SessionSpec, SessionStore, StatusReason, Store, TagStore,
     };
     use tempfile::TempDir;
 
-    use super::ContextBuilder;
+    use super::{ContextBuilder, ScanScope};
 
     /// A fresh store and the guard keeping its directory alive
     fn open_store() -> (TempDir, Arc<Mutex<Store>>) {
@@ -695,5 +701,160 @@ mod tests {
             ["alpha", "other", "zeta"]
         );
         assert!(user.sql("SELECT commit FROM tag").await.is_err());
+    }
+
+    /// A scan directory `scans/SCAN1/` whose `scan/` tree holds three
+    /// tasks and one agent record, with a plan ordering the tasks
+    /// differently from tree order. The root `attrs.json` is absent,
+    /// as for an active scan.
+    fn write_scan_dir(home: &std::path::Path) -> std::path::PathBuf {
+        let root = home.join("scans").join("SCAN1");
+        let scan = root.join("scan");
+        let write = |path: &str, content: &str| {
+            let path = scan.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(
+            "plan.json",
+            r#"{"tasks":[
+                {"task":"hello:greet","selected":"explicit","after":[],"unmatched":[]},
+                {"task":"hello:fail","selected":"group:default","after":[],"unmatched":[]},
+                {"task":"hello:after","selected":"required_by:greeting","after":[],"unmatched":[]}
+            ]}"#,
+        );
+        write(
+            "tasks/hello/greet/attrs.json",
+            r#"{"status":"completed","started":1000,"stopped":1200}"#,
+        );
+        write(
+            "tasks/hello/fail/attrs.json",
+            r#"{"status":"failed","started":1200,"stopped":1500}"#,
+        );
+        write(
+            "tasks/hello/after/attrs.json",
+            r#"{"status":"skipped","skipped":{"needs":"greeting","upstream":["hello:fail"]}}"#,
+        );
+        write(
+            "tasks/hello/greet/agents/AGENT1/attrs.json",
+            r#"{"exit_code":0}"#,
+        );
+        write("tasks/hello/greet/agents/AGENT1/stderr", "");
+        write(
+            "tasks/hello/greet/agents/AGENT1/result",
+            r#"{"is_error":false,"total_cost_usd":0.5}"#,
+        );
+        root
+    }
+
+    /// `scan_task` lists an active scan's tasks in plan order with
+    /// their plan selection, and `scan_task_agent` its agent records
+    /// with the result verbatim; neither has a commit.
+    #[tokio::test]
+    async fn scan_dir_scope_serves_tasks_and_agents() {
+        let (tmp, store) = open_store();
+        let root = write_scan_dir(tmp.path());
+        let ctx = ContextBuilder::new(Some(store))
+            .scope(ScanScope::scan_dir(&root))
+            .build()
+            .await;
+        assert_eq!(
+            strings(&ctx, "SELECT task FROM scan_task ORDER BY num").await,
+            ["greet", "fail", "after"]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT status FROM scan_task ORDER BY num").await,
+            ["completed", "failed", "skipped"]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT selected FROM scan_task ORDER BY num").await,
+            ["explicit", "group:default", "required_by:greeting"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT skipped_upstream FROM scan_task WHERE skipped_needs = 'greeting'"
+            )
+            .await,
+            [r#"["hello:fail"]"#]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT scan_id FROM scan_task WHERE scan_commit IS NULL"
+            )
+            .await,
+            ["SCAN1", "SCAN1", "SCAN1"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT result FROM scan_task_agent \
+                 WHERE task = 'greet' AND session_id = 'AGENT1' AND exit_code = 0"
+            )
+            .await,
+            [r#"{"is_error":false,"total_cost_usd":0.5}"#]
+        );
+    }
+
+    /// Once the scan is stored, the store scope lists its tasks and
+    /// agents under its commit, and the stored scan scope lists the
+    /// same rows.
+    #[tokio::test]
+    async fn stored_scans_serve_tasks_and_agents_in_both_scopes() {
+        let (tmp, store) = open_store();
+        let root = write_scan_dir(tmp.path());
+        std::fs::write(
+            root.join("scan").join("attrs.json"),
+            r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":3,"completed":1,"failed":1,"skipped":1}}"#,
+        )
+        .unwrap();
+        let commit = {
+            let store = store.lock().unwrap();
+            ScanStore::from(&*store)
+                .create("SCAN1", &root.join("scan"))
+                .unwrap()
+        };
+
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
+        assert_eq!(
+            strings(&ctx, "SELECT task FROM scan_task ORDER BY num").await,
+            ["greet", "fail", "after"]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT DISTINCT scan_commit FROM scan_task").await,
+            [commit.clone()]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT session_id FROM scan_task_agent").await,
+            ["AGENT1"]
+        );
+        // The user-facing context keeps the tables and drops the commit
+        let user = ContextBuilder::new(Some(Arc::clone(&store)))
+            .skip_system_cols()
+            .build()
+            .await;
+        assert_eq!(
+            strings(
+                &user,
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_name = 'scan_task' AND column_name LIKE '%commit'"
+            )
+            .await,
+            Vec::<String>::new()
+        );
+
+        let scoped = ContextBuilder::new(Some(store))
+            .scope(ScanScope::stored("SCAN1"))
+            .build()
+            .await;
+        assert_eq!(
+            strings(&scoped, "SELECT task FROM scan_task ORDER BY num").await,
+            ["greet", "fail", "after"]
+        );
+        assert_eq!(
+            strings(&scoped, "SELECT scan_commit FROM scan_task_agent").await,
+            [commit]
+        );
     }
 }

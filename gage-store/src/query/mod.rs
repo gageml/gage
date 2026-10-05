@@ -5,9 +5,10 @@
 //!
 //! Two kinds of provider. `session` and `note` plan their reads
 //! against the index and open objects only for projected columns.
-//! `dataset`, `attachment`, `scan`, `issue`, `issue_event`, `tag`, and the link tables build one batch under the
-//! store lock through [`batch::BatchTable`], which is enough until an
-//! index serves them.
+//! `dataset`, `attachment`, `scan`, `scan_task`, `scan_task_agent`,
+//! `issue`, `issue_event`, `tag`, and the link tables build one batch
+//! under the store lock through [`batch::BatchTable`], which is enough
+//! until an index serves them.
 
 mod attachment;
 mod batch;
@@ -18,6 +19,7 @@ mod note;
 mod note_doc;
 mod scan;
 mod scan_scope;
+mod scan_task;
 mod session;
 mod tag;
 mod watermark;
@@ -30,6 +32,7 @@ pub use note::StoredNoteTable;
 pub use note_doc::{NoteDocRow, note_doc_rows, note_doc_schema};
 pub use scan::scan_table;
 pub use scan_scope::{ScanSource, ScopedIssue, ScopedNote, scan_scope_tables};
+pub use scan_task::{scan_task_agent_table, scan_task_table};
 pub use session::StoredSessionTable;
 pub use tag::tag_table;
 pub use watermark::scan_watermark_table;

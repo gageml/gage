@@ -399,9 +399,7 @@ impl ScanStore<'_> {
             store: self.store,
             commit: commit_sha,
         }
-        .read(&format!(
-            "{TASKS_DIR}/{scanner}/{task}/{AGENTS_DIR}/{agent_id}/{name}"
-        ))
+        .read(&agent_file_path(scanner, task, agent_id, name))
     }
 
     /// The bytes of `plan.json`, the resolved task plan of the scan at
@@ -580,31 +578,7 @@ impl ScanContent {
             None => None,
         };
         let logs = files.list_files(LOGS_DIR)?;
-        let mut tasks = Vec::new();
-        for scanner in files.list_dirs(TASKS_DIR)? {
-            let scanner_path = format!("{TASKS_DIR}/{scanner}");
-            for task in files.list_dirs(&scanner_path)? {
-                let task_path = format!("{scanner_path}/{task}");
-                let attrs = read_json(files, &format!("{task_path}/{ATTRS_FILE}"))?;
-                let agent_sessions =
-                    read_link(files, &format!("{task_path}/{AGENTS_LINK}"))?.unwrap_or_default();
-                let mut agents = Vec::new();
-                for id in files.list_dirs(&format!("{task_path}/{AGENTS_DIR}"))? {
-                    let attrs = read_json(
-                        files,
-                        &format!("{task_path}/{AGENTS_DIR}/{id}/{ATTRS_FILE}"),
-                    )?;
-                    agents.push(TaskAgent { id, attrs });
-                }
-                tasks.push(ScanTask {
-                    scanner: scanner.clone(),
-                    task,
-                    attrs,
-                    agent_sessions,
-                    agents,
-                });
-            }
-        }
+        let tasks = read_tasks(files)?;
         let mut scanners = BTreeMap::new();
         for scanner in files.list_dirs(SCANNERS_DIR)? {
             let source = format!("{SCANNERS_DIR}/{scanner}/{SOURCE_DIR}");
@@ -625,6 +599,45 @@ impl ScanContent {
             scanners,
         })
     }
+}
+
+/// The tasks under `tasks/`, in tree order: by scanner name, then
+/// task name. Every task's `attrs.json` is required. Serves an
+/// active scan's directory, whose root `attrs.json` does not exist
+/// yet, as well as a stored scan.
+pub fn read_tasks(files: &dyn ScanFiles) -> Result<Vec<ScanTask>, StoreError> {
+    let mut tasks = Vec::new();
+    for scanner in files.list_dirs(TASKS_DIR)? {
+        let scanner_path = format!("{TASKS_DIR}/{scanner}");
+        for task in files.list_dirs(&scanner_path)? {
+            let task_path = format!("{scanner_path}/{task}");
+            let attrs = read_json(files, &format!("{task_path}/{ATTRS_FILE}"))?;
+            let agent_sessions =
+                read_link(files, &format!("{task_path}/{AGENTS_LINK}"))?.unwrap_or_default();
+            let mut agents = Vec::new();
+            for id in files.list_dirs(&format!("{task_path}/{AGENTS_DIR}"))? {
+                let attrs = read_json(
+                    files,
+                    &format!("{task_path}/{AGENTS_DIR}/{id}/{ATTRS_FILE}"),
+                )?;
+                agents.push(TaskAgent { id, attrs });
+            }
+            tasks.push(ScanTask {
+                scanner: scanner.clone(),
+                task,
+                attrs,
+                agent_sessions,
+                agents,
+            });
+        }
+    }
+    Ok(tasks)
+}
+
+/// The path of one file of a task's agent record, relative to the
+/// scan root: `name` is `stderr` or `result`.
+pub fn agent_file_path(scanner: &str, task: &str, agent_id: &str, name: &str) -> String {
+    format!("{TASKS_DIR}/{scanner}/{task}/{AGENTS_DIR}/{agent_id}/{name}")
 }
 
 /// Every record under `watermarks/`, in path order. A path that is
