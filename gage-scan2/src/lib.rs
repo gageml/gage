@@ -69,6 +69,12 @@ use crate::trace::{LOG_SCOPE, LogScope};
 /// One item of run output, in the order it happened.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
+    /// The plan is written and the scan directory exists, before any
+    /// task runs. `tasks` are `(scanner, task)` in dispatch order.
+    Started {
+        id: String,
+        tasks: Vec<(String, String)>,
+    },
     /// Task output, already recorded in the scan's `logs/`
     Output(TaskOutput),
     /// The scan's own output for a person, already recorded in the
@@ -393,6 +399,15 @@ pub async fn scan(
         .collect();
     let scan_dir = ScanDir::create(config.scans_dir, &id, config.dataset, &scanner_plans)?;
     scan_dir.write_plan(&plan.to_json())?;
+    let mut on_event = on_event;
+    on_event(Event::Started {
+        id: id.clone(),
+        tasks: plan
+            .tasks
+            .iter()
+            .map(|t| (t.scanner.clone(), t.task.clone()))
+            .collect(),
+    });
     let mut scan_ctx = ScanContext::new(
         id.clone(),
         dataset,
@@ -1955,7 +1970,7 @@ mod tests {
         )
         .await;
         let outcome = outcome.unwrap();
-        let failure = match &events[2] {
+        let failure = match &events[3] {
             Event::TaskFinished {
                 error: Some(message),
                 ..
@@ -1967,6 +1982,10 @@ mod tests {
         assert_eq!(
             events,
             [
+                Event::Started {
+                    id: outcome.id.clone(),
+                    tasks: vec![("fail".into(), "a".into()), ("fail".into(), "b".into()),],
+                },
                 Event::TaskStarted {
                     scanner: "fail".into(),
                     task: "a".into(),
@@ -2337,9 +2356,9 @@ mod tests {
             }
         )));
         assert_eq!(
-            events.first(),
+            events.get(1),
             Some(&Event::Scan(ScanOutput::Err("scan canceled\n".into()))),
-            "the cancel notice is given once, first"
+            "the cancel notice is given once, right after the start"
         );
         assert_eq!(
             events.last(),
@@ -4097,7 +4116,7 @@ mod tests {
             }
         );
         assert_eq!(
-            events[0],
+            events[1],
             Event::Warning {
                 scanner: "deps".into(),
                 task: "wanty".into(),
@@ -4242,8 +4261,8 @@ mod tests {
         };
         assert_eq!(
             (started("a"), started("b")),
-            (0, 1),
-            "both ready tasks start before either finishes: {events:?}"
+            (1, 2),
+            "both ready tasks start right after the start, before either finishes: {events:?}"
         );
         assert!(
             started("c") > finished("a"),

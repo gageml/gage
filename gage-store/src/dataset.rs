@@ -79,6 +79,16 @@ pub struct DatasetSessionAddOutcome {
     pub outcome: SessionOutcome,
 }
 
+/// One step of a [`DatasetStore::sessions_add_with_progress`], as
+/// it happens.
+#[derive(Debug)]
+pub enum AddStep<'a> {
+    /// The session at `index` of the specs is about to be written
+    Starting { index: usize, native_id: &'a str },
+    /// A session was written and placed as a member
+    Added(&'a DatasetSessionAddOutcome),
+}
+
 /// Outcome of unlinking one session from a dataset.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DatasetSessionUnlinkOutcome {
@@ -518,7 +528,20 @@ impl DatasetStore<'_> {
     pub fn sessions_add(
         &self,
         dataset_id: &str,
+        specs: Vec<SessionSpec<'_>>,
+    ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
+        self.sessions_add_with_progress(dataset_id, specs, &mut |_| {})
+    }
+
+    /// [`Self::sessions_add`], reporting each session to `progress`
+    /// as it is written: a [`AddStep::Starting`] before, with the
+    /// session's position and native id, and an [`AddStep::Added`]
+    /// after, with its outcome.
+    pub fn sessions_add_with_progress(
+        &self,
+        dataset_id: &str,
         mut specs: Vec<SessionSpec<'_>>,
+        progress: &mut dyn FnMut(AddStep<'_>),
     ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
         if specs.is_empty() {
             return Ok(Vec::new());
@@ -538,7 +561,11 @@ impl DatasetStore<'_> {
             None => SessionStore::from(self.store),
         };
         let mut outcomes: Vec<DatasetSessionAddOutcome> = Vec::with_capacity(specs.len());
-        for spec in specs.iter_mut() {
+        for (index, spec) in specs.iter_mut().enumerate() {
+            progress(AddStep::Starting {
+                index,
+                native_id: spec.session.id(),
+            });
             let SessionAddOutcome {
                 id,
                 commit_sha,
@@ -550,6 +577,9 @@ impl DatasetStore<'_> {
                 id,
                 outcome,
             });
+            progress(AddStep::Added(
+                outcomes.last().expect("the outcome was just pushed"),
+            ));
         }
         let message = format_session_commit_message(&outcomes);
         self.write_members(&dataset, members, &message)?;

@@ -146,8 +146,9 @@ pub struct TaskId {
 pub struct SessionEntry {
     pub id: String,
     pub title: String,
-    /// The session's JSONL source, read by the session dialog
-    pub path: PathBuf,
+    /// The session's JSONL source, read by the session dialog when
+    /// the backend cannot load the session
+    pub path: Option<PathBuf>,
 }
 
 /// Everything known before a live scan starts.
@@ -392,7 +393,7 @@ impl ScanModel {
             .map(|s| SessionItem {
                 id: s.id,
                 title: s.title,
-                path: Some(s.path),
+                path: s.path,
                 notes: 0,
                 issues: 0,
             })

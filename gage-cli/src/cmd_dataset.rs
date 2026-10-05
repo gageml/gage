@@ -1,3 +1,4 @@
+use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
@@ -7,7 +8,7 @@ use gage_core::config::{ByteSize, Config};
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
-use gage_store::{DatasetStore, SessionSpec, Store, StoreError, TagStore};
+use gage_store::{AddStep, DatasetStore, SessionOutcome, SessionSpec, Store, StoreError, TagStore};
 use tabled::{
     Table,
     settings::{
@@ -275,6 +276,7 @@ pub async fn refresh(args: DatasetRefreshArgs) {
         args.source.as_deref(),
         &selected,
         max_bytes,
+        AddDisplay::Lines,
     );
 }
 
@@ -315,15 +317,100 @@ pub(crate) async fn populate_dataset(
         println!("No sessions matched the selection; dataset is empty");
         return;
     }
-    add_native_to_dataset(command, store, dataset_id, source, &selected, max_bytes);
+    add_native_to_dataset(
+        command,
+        store,
+        dataset_id,
+        source,
+        &selected,
+        max_bytes,
+        AddDisplay::Lines,
+    );
+}
+
+/// How a session add shows each session as it is written: one
+/// `Added session …` line per session on stdout, or a progress bar
+/// in the open dialog, cleared when the add completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddDisplay {
+    Lines,
+    Bar,
+}
+
+impl AddDisplay {
+    /// The bar when stdout is a terminal, lines otherwise
+    pub(crate) fn for_terminal() -> Self {
+        if io::stdout().is_terminal() {
+            AddDisplay::Bar
+        } else {
+            AddDisplay::Lines
+        }
+    }
+}
+
+/// Reports an add through an [`AddDisplay`] and tallies what it
+/// placed for the closing message.
+pub(crate) struct AddReporter {
+    bar: Option<cli::ProgressBar>,
+    dataset: Option<String>,
+    placed: usize,
+}
+
+impl AddReporter {
+    pub(crate) fn new(display: AddDisplay, total: usize, dataset: Option<&str>) -> Self {
+        let bar = match display {
+            AddDisplay::Bar => {
+                let bar = cli::progress_bar(total as u64);
+                bar.start("Adding sessions");
+                Some(bar)
+            }
+            AddDisplay::Lines => None,
+        };
+        Self {
+            bar,
+            dataset: dataset.map(String::from),
+            placed: 0,
+        }
+    }
+
+    /// The session about to be written
+    pub(crate) fn starting(&self, native_id: &str) {
+        if let Some(bar) = &self.bar {
+            bar.set_message(format!("Adding session {}", short_uuid(native_id)));
+        }
+    }
+
+    /// A session written and placed
+    pub(crate) fn added(&mut self, outcome: &SessionOutcome, id: &str, native_id: &str) {
+        self.placed += 1;
+        match &self.bar {
+            Some(bar) => bar.inc(1),
+            None => print_add_outcome(outcome, id, native_id, self.dataset.as_deref()),
+        }
+    }
+
+    /// Clear the bar and return the closing message, `Added N
+    /// sessions to dataset <id>`, where N counts every session the
+    /// add placed, whether written anew, updated, or unchanged.
+    pub(crate) fn finish(self) -> String {
+        if let Some(bar) = &self.bar {
+            bar.clear();
+        }
+        let n = self.placed;
+        let noun = if n == 1 { "session" } else { "sessions" };
+        match &self.dataset {
+            Some(dataset) => format!("Added {n} {noun} to dataset {}", short_uuid(dataset)),
+            None => format!("Added {n} {noun}"),
+        }
+    }
 }
 
 /// Add each already-resolved native session record to `dataset_id`
-/// through the opened source in a single commit. Prints outcome
-/// lines and exits on any failure. `sessions_add` is idempotent per
-/// session — a member whose native content is unchanged is a no-op,
-/// a member whose content grew is updated in its slot, and a
-/// non-member is appended.
+/// through the opened source in a single commit, reporting each
+/// through `display`, and return the closing message. Exits on any
+/// failure. `sessions_add` is idempotent per session — a member
+/// whose native content is unchanged is a no-op, a member whose
+/// content grew is updated in its slot, and a non-member is appended.
 pub(crate) fn add_native_to_dataset(
     command: &str,
     store: &Store,
@@ -331,7 +418,8 @@ pub(crate) fn add_native_to_dataset(
     source: Option<&str>,
     selected: &[gage_claude::session::SessionInfo],
     max_bytes: Option<u64>,
-) {
+    display: AddDisplay,
+) -> String {
     let registry = crate::source::driver_registry();
     let (driver, spec) = match crate::source::resolve_source(&registry, source) {
         Ok(v) => v,
@@ -388,21 +476,31 @@ pub(crate) fn add_native_to_dataset(
         Some(max) => DatasetStore::from(store).with_max_session_size(max),
         None => DatasetStore::from(store),
     };
-    let outcomes = match datasets.sessions_add(dataset_id, specs) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
+    let mut reporter = AddReporter::new(display, ids.len(), Some(dataset_id));
+    // The specs are written in `ids` order; the index of the session
+    // being written names its native id for the outcome line
+    let mut current = 0;
+    let result = datasets.sessions_add_with_progress(dataset_id, specs, &mut |step| match step {
+        AddStep::Starting { index, native_id } => {
+            current = index;
+            reporter.starting(native_id);
         }
-    };
-    for (outcome, id) in outcomes.iter().zip(&ids) {
-        print_add_outcome(&outcome.outcome, &outcome.id, id, Some(dataset_id));
+        AddStep::Added(outcome) => {
+            let native_id = ids.get(current).map_or("", String::as_str);
+            reporter.added(&outcome.outcome, &outcome.id, native_id);
+        }
+    });
+    if let Err(e) = result {
+        eprintln!("{command}: {e}");
+        std::process::exit(1);
     }
+    let message = reporter.finish();
 
     if let Err(e) = source_handle.close() {
         eprintln!("{command}: {spec}: {e}");
         std::process::exit(1);
     }
+    message
 }
 
 pub async fn list(args: DatasetListArgs) {

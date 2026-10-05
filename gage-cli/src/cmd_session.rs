@@ -17,7 +17,7 @@ use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
-use gage_store::{DatasetStore, SessionOutcome, SessionSpec, SessionStore, Store};
+use gage_store::{DatasetStore, SessionOutcome, SessionStore, Store};
 use gage_tui::session::Backend;
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
@@ -29,6 +29,7 @@ use tabled::{
     },
 };
 
+use crate::cmd_dataset::{AddDisplay, AddReporter};
 use crate::dialog::{self, DialogError};
 use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::source;
@@ -667,23 +668,24 @@ pub async fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
         );
         std::process::exit(1);
     }
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage session add: {e}");
-            std::process::exit(1);
-        }
+    dialog::run_async("Add sessions", || add_dialog(source, stored, args)).await;
+}
+
+async fn add_dialog(
+    source: Option<String>,
+    stored: bool,
+    args: SessionAddArgs,
+) -> Result<dialog::DialogResult, DialogError> {
+    let store =
+        Store::open(&gage_store::store_path()).map_err(|e| DialogError::Failed(format!("{e}")))?;
+    let dataset_id = match args.dataset.as_deref() {
+        Some(prefix) => Some(
+            DatasetStore::from(&store)
+                .resolve_id(prefix)
+                .map_err(|e| DialogError::Failed(format!("--dataset {prefix}: {e}")))?,
+        ),
+        None => None,
     };
-    let dataset_id =
-        args.dataset.as_deref().map(
-            |prefix| match DatasetStore::from(&store).resolve_id(prefix) {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!("gage session add: --dataset {prefix}: {e}");
-                    std::process::exit(1);
-                }
-            },
-        );
     // --force lifts the cap; otherwise the flag overrides the
     // configured default.
     let max_bytes = if args.force {
@@ -694,25 +696,33 @@ pub async fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
             .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
         Some(args.max_size.unwrap_or(configured).bytes())
     };
-    match dataset_id {
+    let display = AddDisplay::for_terminal();
+    let message = match dataset_id {
         Some(dataset_id) if stored => {
-            add_stored_to_dataset(&store, &dataset_id, &args.select.sessions);
+            add_stored_to_dataset(&store, &dataset_id, &args.select.sessions, display)?
         }
         _ => {
-            let selected = match args.select.resolve("gage session add").await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("gage session add: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let selected = args
+                .select
+                .resolve("gage session add")
+                .await
+                .map_err(|e| DialogError::Failed(format!("{e}")))?;
             if selected.is_empty() {
-                eprintln!("gage session add: no sessions matched the selection");
-                std::process::exit(1);
+                return Err(DialogError::Failed(
+                    "No sessions matched the selection".to_string(),
+                ));
             }
-            add_native(&store, source, dataset_id.as_deref(), &selected, max_bytes);
+            add_native(
+                &store,
+                source,
+                dataset_id.as_deref(),
+                &selected,
+                max_bytes,
+                display,
+            )?
         }
-    }
+    };
+    Ok(message.into())
 }
 
 /// True when the shared selection was given only as a positional
@@ -729,43 +739,38 @@ fn only_positional_selected(select: &SessionSelectArgs) -> bool {
 }
 
 /// Link sessions already in the store, given by Gage id or prefix, as
-/// members of `dataset_id`.
-fn add_stored_to_dataset(store: &Store, dataset_id: &str, prefixes: &[String]) {
+/// members of `dataset_id`. Returns the closing message.
+fn add_stored_to_dataset(
+    store: &Store,
+    dataset_id: &str,
+    prefixes: &[String],
+    display: AddDisplay,
+) -> Result<String, DialogError> {
     let sessions = SessionStore::from(store);
 
     // Resolve every argument before writing anything, so one bad
     // argument leaves the store untouched
     let mut records = Vec::with_capacity(prefixes.len());
-    let mut errors = 0;
+    let mut errors = Vec::new();
     for prefix in prefixes {
         match sessions.get(prefix) {
             Ok(record) => records.push(record),
-            Err(e) => {
-                eprintln!("gage session add: {e}");
-                errors += 1;
-            }
+            Err(e) => errors.push(e.to_string()),
         }
     }
-    if errors > 0 {
-        std::process::exit(1);
+    if !errors.is_empty() {
+        return Err(DialogError::Failed(errors.join("\n")));
     }
 
     let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
-    let outcomes = match DatasetStore::from(store).sessions_link(dataset_id, &ids) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage session add: {e}");
-            std::process::exit(1);
-        }
-    };
+    let outcomes = DatasetStore::from(store)
+        .sessions_link(dataset_id, &ids)
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    let mut reporter = AddReporter::new(display, records.len(), Some(dataset_id));
     for (outcome, record) in outcomes.iter().zip(&records) {
-        print_add_outcome(
-            &outcome.outcome,
-            &outcome.id,
-            &record.attrs.native_id,
-            Some(dataset_id),
-        );
+        reporter.added(&outcome.outcome, &outcome.id, &record.attrs.native_id);
     }
+    Ok(reporter.finish())
 }
 
 /// Add native sessions from `source` to the store and, when
@@ -773,104 +778,73 @@ fn add_stored_to_dataset(store: &Store, dataset_id: &str, prefixes: &[String]) {
 /// `selected` holds records resolved by the shared session picker;
 /// their ids are re-checked against the opened source so a caller
 /// that walked disk directly still meets the source's own id
-/// contract.
+/// contract. Returns the closing message.
 fn add_native(
     store: &Store,
     source: Option<String>,
     dataset_id: Option<&str>,
     selected: &[gage_claude::session::SessionInfo],
     max_bytes: Option<u64>,
-) {
+    display: AddDisplay,
+) -> Result<String, DialogError> {
+    if let Some(dataset_id) = dataset_id {
+        return Ok(crate::cmd_dataset::add_native_to_dataset(
+            "gage session add",
+            store,
+            dataset_id,
+            source.as_deref(),
+            selected,
+            max_bytes,
+            display,
+        ));
+    }
     let registry = source::driver_registry();
-    let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("gage session add: {e}");
-            std::process::exit(1);
-        }
-    };
-    let source = match driver.open_source(&spec) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("gage session add: {spec}: {e}");
-            std::process::exit(1);
-        }
-    };
+    let (driver, spec) =
+        source::resolve_source(&registry, source.as_deref()).map_err(DialogError::Failed)?;
+    let opened = driver
+        .open_source(&spec)
+        .map_err(|e| DialogError::Failed(format!("{spec}: {e}")))?;
 
     // Confirm every selected session is present in the opened source
     // before writing anything, so one missing session leaves the
     // store untouched.
     let mut ids: Vec<String> = Vec::with_capacity(selected.len());
-    let mut errors = 0;
+    let mut errors = Vec::new();
     for info in selected {
-        match source.find_native(&info.id) {
+        match opened.find_native(&info.id) {
             Ok(id) => ids.push(id),
-            Err(e) => {
-                eprintln!("gage session add: {e}");
-                errors += 1;
-            }
+            Err(e) => errors.push(e.to_string()),
         }
     }
-    if errors > 0 {
-        std::process::exit(1);
+    if !errors.is_empty() {
+        return Err(DialogError::Failed(errors.join("\n")));
     }
 
     let mut natives = Vec::with_capacity(ids.len());
     for id in &ids {
-        match source.open_native(id) {
-            Ok(s) => natives.push(s),
-            Err(e) => {
-                eprintln!("gage session add: {id}: {e}");
-                std::process::exit(1);
-            }
-        }
+        let native = opened
+            .open_native(id)
+            .map_err(|e| DialogError::Failed(format!("{id}: {e}")))?;
+        natives.push(native);
     }
 
-    match dataset_id {
-        Some(dataset_id) => {
-            let specs: Vec<SessionSpec<'_>> = natives
-                .iter_mut()
-                .map(|session| SessionSpec {
-                    driver: driver.as_ref(),
-                    session: session.as_mut(),
-                })
-                .collect();
-            let datasets = match max_bytes {
-                Some(max) => DatasetStore::from(store).with_max_session_size(max),
-                None => DatasetStore::from(store),
-            };
-            let outcomes = match datasets.sessions_add(dataset_id, specs) {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("gage session add: {e}");
-                    std::process::exit(1);
-                }
-            };
-            for (outcome, id) in outcomes.iter().zip(&ids) {
-                print_add_outcome(&outcome.outcome, &outcome.id, id, Some(dataset_id));
-            }
-        }
-        None => {
-            let sessions = match max_bytes {
-                Some(max) => SessionStore::from(store).with_max_session_size(max),
-                None => SessionStore::from(store),
-            };
-            for (session, id) in natives.iter_mut().zip(&ids) {
-                let outcome = match sessions.add(driver.as_ref(), session.as_mut()) {
-                    Ok(o) => o,
-                    Err(e) => {
-                        eprintln!("gage session add: {id}: {e}");
-                        std::process::exit(1);
-                    }
-                };
-                print_add_outcome(&outcome.outcome, &outcome.id, id, None);
-            }
-        }
+    let sessions = match max_bytes {
+        Some(max) => SessionStore::from(store).with_max_session_size(max),
+        None => SessionStore::from(store),
+    };
+    let mut reporter = AddReporter::new(display, ids.len(), None);
+    for (session, id) in natives.iter_mut().zip(&ids) {
+        reporter.starting(id);
+        let outcome = sessions
+            .add(driver.as_ref(), session.as_mut())
+            .map_err(|e| DialogError::Failed(format!("{id}: {e}")))?;
+        reporter.added(&outcome.outcome, &outcome.id, id);
     }
-    if let Err(e) = source.close() {
-        eprintln!("gage session add: {spec}: {e}");
-        std::process::exit(1);
-    }
+    let message = reporter.finish();
+    opened
+        .close()
+        .map_err(|e| DialogError::Failed(format!("{spec}: {e}")))?;
+    Ok(message)
 }
 
 pub(crate) fn print_add_outcome(

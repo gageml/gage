@@ -1984,7 +1984,7 @@ async fn run_scan_tui(
                 .map(|s| SessionEntry {
                     id: s.id.clone(),
                     title: session_title(&store, s),
-                    path: s.src.clone(),
+                    path: Some(s.src.clone()),
                 })
                 .collect()
         },

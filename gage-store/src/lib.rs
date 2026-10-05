@@ -69,7 +69,7 @@ pub use attachment::{
     OBJECT_TYPE as ATTACHMENT_TYPE, attachment_object_id,
 };
 pub use dataset::{
-    AttachmentLinkOutcome, DatasetAttachmentLinkOutcome, DatasetAttachmentUnlinkOutcome,
+    AddStep, AttachmentLinkOutcome, DatasetAttachmentLinkOutcome, DatasetAttachmentUnlinkOutcome,
     DatasetAttachments, DatasetDeleted, DatasetMembers, DatasetQuery, DatasetRecord,
     DatasetSessionAddOutcome, DatasetSessionSummary, DatasetSessionUnlinkOutcome, DatasetStore,
     OBJECT_TYPE as DATASET_TYPE, SessionSpec,

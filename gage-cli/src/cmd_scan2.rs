@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Write as _};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
@@ -26,13 +27,15 @@ use gage_registry::scanner::{
 use gage_runtime2::{LOG_TARGET, Output, TaskOutput};
 use gage_scan2::scan_dir::scans_dir;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
+use gage_store::ScanDirLayout;
 use gage_store::{
     DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store,
 };
 use gage_tui::scan_view::{
     self, AgentItem, AgentState, EventItem, EvidenceItem, IssueItem, IssueSessionItem,
-    IssueStatusUpdate, NoteItem, ScanCost, ScanHost, ScanLogs, ScanModel, ScanPickRow, SessionItem,
-    TaskId, TaskItem, TaskState,
+    IssueStatusUpdate, NoteItem, RunningTask, ScanCost, ScanHost, ScanLogs, ScanModel, ScanPickRow,
+    ScanSetup, SessionCounts, SessionEntry, SessionItem, TaskAgent, TaskCost, TaskId, TaskItem,
+    TaskState,
 };
 use gage_tui::session::Backend;
 use tabled::{
@@ -42,12 +45,14 @@ use tabled::{
         object::{Columns, Object, Rows},
     },
 };
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio_util::sync::CancellationToken;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 
-use crate::cmd_dataset;
+use crate::cmd_dataset::{self, AddDisplay};
 use crate::cmd_issue2::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
@@ -232,8 +237,16 @@ pub struct Scan2RunArgs {
     #[arg(short, long, display_order = 15)]
     yes: bool,
 
+    /// Don't show progress
+    ///
+    /// Task output and the scan's own lines print as they happen
+    /// instead of the progress view. This is the output when stdout
+    /// is not a terminal.
+    #[arg(long, display_order = 16)]
+    no_progress: bool,
+
     /// Show available scanners and exit
-    #[arg(long, exclusive = true, display_order = 16)]
+    #[arg(long, exclusive = true, display_order = 17)]
     list_scanners: bool,
 }
 
@@ -359,6 +372,7 @@ async fn view(args: Scan2ViewArgs) {
     let host = Arc::new(StoreHost {
         store,
         registry: DriverRegistry::builtin(),
+        live: None,
     });
     // No scan arg: the view opens with its scan picker dialog.
     let model = match args.scan.as_deref() {
@@ -377,10 +391,13 @@ async fn view(args: Scan2ViewArgs) {
     }
 }
 
-/// The scan view's host over the store.
+/// The scan view's host over the store. `live` names the scan
+/// directory of the scan being shown while it runs; the logs come
+/// from there until the scan is applied and the directory removed.
 struct StoreHost {
     store: Arc<Mutex<Store>>,
     registry: DriverRegistry,
+    live: Option<ScanDirLayout>,
 }
 
 impl ScanHost for StoreHost {
@@ -397,6 +414,21 @@ impl ScanHost for StoreHost {
     }
 
     fn read_logs(&self, log_key: &str) -> io::Result<ScanLogs> {
+        if let Some(dir) = &self.live
+            && dir.root().exists()
+        {
+            let logs_dir = dir.object_dir().join("logs");
+            let read = |name: &str| match std::fs::read_to_string(logs_dir.join(name)) {
+                Ok(content) => Ok(Some(content)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            };
+            return Ok(ScanLogs {
+                err: read("err")?,
+                out: read("out")?,
+                records: read("records")?,
+            });
+        }
         let store = self.lock();
         let scans = ScanStore::from(&*store);
         let commit = scans.get(log_key).map_err(io::Error::other)?.commit_sha;
@@ -538,18 +570,13 @@ impl StoreHost {
     }
 
     /// The model of a stored scan, read through the scan's own scope:
-    /// every table holds that scan's objects. Agent session time
-    /// bounds come from the store scope, since agent sessions are not
-    /// dataset members.
+    /// every table holds that scan's objects.
     async fn load_model(&self, prefix: &str) -> Result<ScanModel, Box<dyn Error>> {
         let id = {
             let store = self.lock();
             ScanStore::from(&*store).get(prefix)?.id
         };
-        let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
-            .scope(ScanScope::stored(&id))
-            .build()
-            .await;
+        let ctx = self.scoped(ScanScope::stored(&id)).await;
 
         let (scan_elapsed, counts) = {
             let sql = "SELECT started, stopped, tasks, completed, failed, skipped FROM scan";
@@ -564,46 +591,16 @@ impl StoreHost {
             (elapsed(started, stopped, 0), (n(2), n(3) + n(4) + n(5)))
         };
 
+        let results = self.load_results(&ctx).await?;
         let mut agents: HashMap<TaskId, Vec<AgentItem>> = HashMap::new();
-        let mut task_costs: HashMap<TaskId, (f64, bool)> = HashMap::new();
-        let mut agent_ids = Vec::new();
-        for batch in &query(
-            &ctx,
-            "SELECT scanner, task, session_id, exit_code, result FROM scan_task_agent",
-        )
-        .await?
-        {
-            let scanners = column::<StringArray>(batch, 0);
-            let tasks = column::<StringArray>(batch, 1);
-            let sessions = column::<StringArray>(batch, 2);
-            let exit_codes = column::<Int64Array>(batch, 3);
-            let results = column::<StringArray>(batch, 4);
-            for i in 0..batch.num_rows() {
-                let task = TaskId {
-                    scanner: scanners.value(i).to_string(),
-                    task: tasks.value(i).to_string(),
-                };
-                let agent = agent_item(
-                    sessions.value(i),
-                    exit_codes.value(i),
-                    results.is_valid(i).then(|| results.value(i)),
-                );
-                let cost = task_costs.entry(task.clone()).or_insert((0.0, false));
-                match agent.cost {
-                    Some(usd) => cost.0 += usd,
-                    None => cost.1 = true,
-                }
-                agent_ids.push(agent.session_id.clone());
-                agents.entry(task).or_default().push(agent);
-            }
+        for ta in results.agents {
+            agents.entry(ta.task).or_default().push(ta.agent);
         }
-        let times = self.agent_times(&agent_ids).await?;
-        for agent in agents.values_mut().flatten() {
-            if let Some((started_ms, ended_ms)) = times.get(&agent.session_id) {
-                agent.started_ms = Some(*started_ms);
-                agent.ended_ms = Some(*ended_ms);
-            }
-        }
+        let task_costs: HashMap<TaskId, ScanCost> = results
+            .task_costs
+            .into_iter()
+            .map(|tc| (tc.id, tc.cost))
+            .collect();
 
         let mut tasks = Vec::new();
         for batch in &query(
@@ -630,10 +627,7 @@ impl StoreHost {
                     elapsed(started, stopped, i)
                 };
                 tasks.push(TaskItem {
-                    cost: task_costs.get(&id).map(|(usd, incomplete)| ScanCost {
-                        usd: *usd,
-                        incomplete: *incomplete,
-                    }),
+                    cost: task_costs.get(&id).copied(),
                     agents: agents.remove(&id).unwrap_or_default(),
                     state: match statuses.value(i) {
                         "pending" => TaskState::Pending,
@@ -653,16 +647,147 @@ impl StoreHost {
             }
         }
         let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
+
+        let counts_by_session: HashMap<String, (usize, usize)> = results
+            .sessions
+            .into_iter()
+            .map(|c| (c.id, (c.notes, c.issues)))
+            .collect();
+        let mut sessions: Vec<SessionItem> = self
+            .scan_sessions(&ctx)
+            .await?
+            .into_iter()
+            .map(|entry| {
+                let (notes, issues) = counts_by_session.get(&entry.id).copied().unwrap_or((0, 0));
+                SessionItem {
+                    id: entry.id,
+                    title: entry.title,
+                    path: None,
+                    notes,
+                    issues,
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| {
+            b.issues
+                .cmp(&a.issues)
+                .then_with(|| b.notes.cmp(&a.notes))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        Ok(ScanModel {
+            scan_id: short_uuid(&id).to_string(),
+            label: None,
+            log_key: Some(id),
+            total: counts.0,
+            progress: counts.1,
+            notes: results.notes,
+            issues: results.issues,
+            cost: results.cost,
+            errors,
+            finished: true,
+            elapsed: scan_elapsed,
+            tasks,
+            sessions,
+        })
+    }
+
+    /// A context over one scan's objects, active or stored.
+    async fn scoped(&self, scope: ScanScope) -> SessionContext {
+        ContextBuilder::new(Some(Arc::clone(&self.store)))
+            .scope(scope)
+            .build()
+            .await
+    }
+
+    /// The scan's sessions in member order, with titles.
+    async fn scan_sessions(
+        &self,
+        ctx: &SessionContext,
+    ) -> Result<Vec<SessionEntry>, Box<dyn Error>> {
+        let mut sessions = Vec::new();
+        for batch in &query(
+            ctx,
+            "SELECT m.session_id, s.title FROM scan_session m \
+             JOIN session s ON s.id = m.session_id ORDER BY m.session_num",
+        )
+        .await?
+        {
+            let ids = column::<StringArray>(batch, 0);
+            let titles = column::<StringArray>(batch, 1);
+            for i in 0..batch.num_rows() {
+                sessions.push(SessionEntry {
+                    id: ids.value(i).to_string(),
+                    title: string_or_empty(titles, i),
+                    path: None,
+                });
+            }
+        }
+        Ok(sessions)
+    }
+
+    /// Notes, issues, per-session counts, agents, and costs of the
+    /// scan `ctx` is scoped to: the stored loader's results and the
+    /// live view's refresh. Agent session time bounds come from the
+    /// store scope, since agent sessions are not dataset members.
+    async fn load_results(&self, ctx: &SessionContext) -> Result<ScanResults, Box<dyn Error>> {
+        let mut agents = Vec::new();
+        let mut task_costs: HashMap<TaskId, (f64, bool)> = HashMap::new();
+        let mut agent_ids = Vec::new();
+        for batch in &query(
+            ctx,
+            "SELECT scanner, task, session_id, exit_code, result FROM scan_task_agent",
+        )
+        .await?
+        {
+            let scanners = column::<StringArray>(batch, 0);
+            let tasks = column::<StringArray>(batch, 1);
+            let sessions = column::<StringArray>(batch, 2);
+            let exit_codes = column::<Int64Array>(batch, 3);
+            let results = column::<StringArray>(batch, 4);
+            for i in 0..batch.num_rows() {
+                let task = TaskId {
+                    scanner: scanners.value(i).to_string(),
+                    task: tasks.value(i).to_string(),
+                };
+                let agent = agent_item(
+                    sessions.value(i),
+                    exit_codes.value(i),
+                    results.is_valid(i).then(|| results.value(i)),
+                );
+                let cost = task_costs.entry(task.clone()).or_insert((0.0, false));
+                match agent.cost {
+                    Some(usd) => cost.0 += usd,
+                    None => cost.1 = true,
+                }
+                agent_ids.push(agent.session_id.clone());
+                agents.push(TaskAgent { task, agent });
+            }
+        }
+        let times = self.agent_times(&agent_ids).await?;
+        for ta in &mut agents {
+            if let Some((started_ms, ended_ms)) = times.get(&ta.agent.session_id) {
+                ta.agent.started_ms = Some(*started_ms);
+                ta.agent.ended_ms = Some(*ended_ms);
+            }
+        }
         let cost = {
             let usd: f64 = task_costs.values().map(|(usd, _)| usd).sum();
             let incomplete = task_costs.values().any(|(_, incomplete)| *incomplete);
             (usd != 0.0 || incomplete).then_some(ScanCost { usd, incomplete })
         };
+        let task_costs = task_costs
+            .into_iter()
+            .map(|(id, (usd, incomplete))| TaskCost {
+                id,
+                cost: ScanCost { usd, incomplete },
+            })
+            .collect();
 
         let mut notes = Vec::new();
         let mut note_sessions: HashMap<String, usize> = HashMap::new();
         for batch in &query(
-            &ctx,
+            ctx,
             "SELECT id, name, value, text, author, target, metadata, created \
              FROM note ORDER BY created",
         )
@@ -700,7 +825,7 @@ impl StoreHost {
 
         let mut evidence: HashMap<String, Vec<EvidenceItem>> = HashMap::new();
         for batch in &query(
-            &ctx,
+            ctx,
             "SELECT e.issue_id, n.id, n.name, n.target, n.value, n.text \
              FROM issue_evidence e JOIN note n ON n.id = e.note_id",
         )
@@ -728,7 +853,7 @@ impl StoreHost {
         let mut issue_sessions: HashMap<String, Vec<IssueSessionItem>> = HashMap::new();
         let mut session_issues: HashMap<String, usize> = HashMap::new();
         for batch in &query(
-            &ctx,
+            ctx,
             "SELECT i.issue_id, i.session_id, s.project, s.driver, s.title \
              FROM session_issue i JOIN session s ON s.id = i.session_id",
         )
@@ -755,7 +880,7 @@ impl StoreHost {
 
         let mut events: HashMap<String, Vec<EventItem>> = HashMap::new();
         for batch in &query(
-            &ctx,
+            ctx,
             "SELECT issue_id, timestamp, author, event, from_status, to_status, reason, message \
              FROM issue_event ORDER BY timestamp",
         )
@@ -790,7 +915,7 @@ impl StoreHost {
 
         let mut issues = Vec::new();
         for batch in &query(
-            &ctx,
+            ctx,
             "SELECT id, name, title, description, status, status_reason, author, created \
              FROM issue ORDER BY created",
         )
@@ -829,48 +954,26 @@ impl StoreHost {
             }
         }
 
-        let mut sessions = Vec::new();
-        for batch in &query(
-            &ctx,
-            "SELECT m.session_id, s.title FROM scan_session m \
-             JOIN session s ON s.id = m.session_id ORDER BY m.session_num",
-        )
-        .await?
-        {
-            let ids = column::<StringArray>(batch, 0);
-            let titles = column::<StringArray>(batch, 1);
-            for i in 0..batch.num_rows() {
-                let id = ids.value(i).to_string();
-                sessions.push(SessionItem {
-                    title: string_or_empty(titles, i),
-                    path: None,
-                    notes: note_sessions.get(&id).copied().unwrap_or(0),
-                    issues: session_issues.get(&id).copied().unwrap_or(0),
-                    id,
-                });
-            }
-        }
-        sessions.sort_by(|a, b| {
-            b.issues
-                .cmp(&a.issues)
-                .then_with(|| b.notes.cmp(&a.notes))
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        let mut session_ids: Vec<&String> =
+            note_sessions.keys().chain(session_issues.keys()).collect();
+        session_ids.sort();
+        session_ids.dedup();
+        let sessions = session_ids
+            .into_iter()
+            .map(|id| SessionCounts {
+                id: id.clone(),
+                notes: note_sessions.get(id).copied().unwrap_or(0),
+                issues: session_issues.get(id).copied().unwrap_or(0),
+            })
+            .collect();
 
-        Ok(ScanModel {
-            scan_id: short_uuid(&id).to_string(),
-            label: None,
-            log_key: Some(id),
-            total: counts.0,
-            progress: counts.1,
+        Ok(ScanResults {
             notes,
             issues,
-            cost,
-            errors,
-            finished: true,
-            elapsed: scan_elapsed,
-            tasks,
             sessions,
+            cost,
+            task_costs,
+            agents,
         })
     }
 
@@ -924,6 +1027,248 @@ impl StoreHost {
             None => projects.value(i).to_string(),
         }
     }
+}
+
+/// Notes, issues, per-session counts, agents, and costs of a scan,
+/// as the stored loader and the live refresh read them.
+struct ScanResults {
+    notes: Vec<NoteItem>,
+    issues: Vec<IssueItem>,
+    sessions: Vec<SessionCounts>,
+    cost: Option<ScanCost>,
+    task_costs: Vec<TaskCost>,
+    agents: Vec<TaskAgent>,
+}
+
+impl ScanResults {
+    fn into_event(self) -> scan_view::Event {
+        scan_view::Event::Results {
+            notes: self.notes,
+            issues: self.issues,
+            sessions: self.sessions,
+            cost: self.cost,
+            task_costs: self.task_costs,
+            agents: self.agents,
+        }
+    }
+}
+
+/// Show the progress view over a running scan. Runner events arrive
+/// on `events`; the first, `Started`, names the scan and its tasks
+/// and is what the view's model is built from. Task starts, stops,
+/// and progress become status snapshots; task output becomes log
+/// lines; notes, issues, and agents are re-read from the scan
+/// directory once a second and from the store once the scan is
+/// applied. Closing the view mid-scan cancels the run.
+async fn drive_view(
+    mut events: UnboundedReceiver<Event>,
+    store: Arc<Mutex<Store>>,
+    cancel: CancellationToken,
+) -> Result<(), DialogError> {
+    let Some(Event::Started { id, tasks }) = events.recv().await else {
+        // The runner failed before planning; the caller reports it
+        return Ok(());
+    };
+    let layout = ScanDirLayout::new(scans_dir().join(&id));
+    let host = Arc::new(StoreHost {
+        store,
+        registry: DriverRegistry::builtin(),
+        live: Some(layout.clone()),
+    });
+    let sessions = {
+        let ctx = host.scoped(ScanScope::scan_dir(layout.root())).await;
+        host.scan_sessions(&ctx)
+            .await
+            .map_err(|e| DialogError::Failed(format!("reading the scan's sessions: {e}")))?
+    };
+    let task_ids: Vec<TaskId> = tasks
+        .into_iter()
+        .map(|(scanner, task)| TaskId { scanner, task })
+        .collect();
+    let mut model = ScanModel::new(ScanSetup {
+        tasks: task_ids,
+        sessions,
+    });
+    model.scan_id = short_uuid(&id).to_string();
+    model.log_key = Some(id.clone());
+
+    let (view_tx, view_rx) = unbounded_channel();
+    let done = Arc::new(AtomicBool::new(false));
+    let poll = tokio::spawn({
+        let host = Arc::clone(&host);
+        let tx = view_tx.clone();
+        let done = Arc::clone(&done);
+        let root = layout.root().to_path_buf();
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                let ctx = host.scoped(ScanScope::scan_dir(&root)).await;
+                let event = match host.load_results(&ctx).await {
+                    Ok(results) => results.into_event(),
+                    Err(e) => scan_view::Event::Log(format!("results refresh failed: {e}")),
+                };
+                send_view_event(&tx, event);
+            }
+        }
+    });
+
+    let total = model.total;
+    let forward_host = Arc::clone(&host);
+    let forward = async {
+        let mut status = LiveStatus::new(total);
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Started { .. } => {}
+                Event::TaskStarted { scanner, task } => {
+                    status.start(TaskId { scanner, task });
+                    send_view_event(&view_tx, status.snapshot());
+                }
+                Event::TaskFinished {
+                    scanner,
+                    task,
+                    status: task_status,
+                    error,
+                } => {
+                    let id = TaskId { scanner, task };
+                    if task_status == gage_store::TaskStatus::Failed {
+                        send_view_event(
+                            &view_tx,
+                            scan_view::Event::Failed {
+                                scanner: id.scanner.clone(),
+                                task: id.task.clone(),
+                                message: error.unwrap_or_default(),
+                            },
+                        );
+                    }
+                    status.finish(&id);
+                    send_view_event(&view_tx, status.snapshot());
+                }
+                Event::Output(TaskOutput {
+                    scanner,
+                    task,
+                    output,
+                }) => match output {
+                    Output::Progress { pos, total } => {
+                        status.progress(&TaskId { scanner, task }, pos, total);
+                        send_view_event(&view_tx, status.snapshot());
+                    }
+                    Output::Print(text) | Output::Println(text) => send_view_event(
+                        &view_tx,
+                        scan_view::Event::Log(format!("{scanner}:{task}: {text}")),
+                    ),
+                    // Log records are in the scan's `records`, shown by `l`
+                    Output::Log { .. } => {}
+                },
+                Event::Scan(ScanOutput::Out(text) | ScanOutput::Err(text)) => {
+                    send_view_event(&view_tx, scan_view::Event::Log(text.trim_end().to_string()));
+                }
+                Event::Warning {
+                    scanner,
+                    task,
+                    message,
+                } => send_view_event(
+                    &view_tx,
+                    scan_view::Event::Warning {
+                        scanner,
+                        task,
+                        message,
+                    },
+                ),
+                // Every task is terminal; the apply that follows moves
+                // the scan directory into the store, so the poll stops
+                // reading it
+                Event::Summary { .. } => done.store(true, Ordering::Relaxed),
+            }
+        }
+        // The runner returned: the scan is applied, or it failed. One
+        // final read from the store makes the view current.
+        done.store(true, Ordering::Relaxed);
+        poll.abort();
+        if let Err(e) = poll.await
+            && !e.is_cancelled()
+        {
+            panic!("results poll joined cleanly: {e}");
+        }
+        let ctx = forward_host.scoped(ScanScope::stored(&id)).await;
+        let event = match forward_host.load_results(&ctx).await {
+            Ok(results) => results.into_event(),
+            Err(e) => scan_view::Event::Log(format!("results refresh failed: {e}")),
+        };
+        send_view_event(&view_tx, event);
+        send_view_event(&view_tx, scan_view::Event::Finished);
+    };
+    let run_cancel = cancel.clone();
+    let view = scan_view::run(model, view_rx, move || run_cancel.cancel(), host);
+    let ((), view_result) = tokio::join!(forward, view);
+    // Closing the view mid-scan stops the run; after the scan
+    // completes this is a no-op
+    cancel.cancel();
+    view_result.map_err(|e| DialogError::Other(anyhow::anyhow!("progress view: {e}")))
+}
+
+/// The tasks on workers and the counts the view's status snapshot
+/// carries, kept in step with the runner's events.
+struct LiveStatus {
+    total: usize,
+    finished: usize,
+    running: Vec<RunningTask>,
+}
+
+impl LiveStatus {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            finished: 0,
+            running: Vec::new(),
+        }
+    }
+
+    fn start(&mut self, id: TaskId) {
+        self.running.push(RunningTask {
+            id,
+            progress: None,
+            pool_blocked: false,
+            worked: Duration::ZERO,
+            working_since: Some(Instant::now()),
+        });
+    }
+
+    fn finish(&mut self, id: &TaskId) {
+        self.running.retain(|r| r.id != *id);
+        self.finished += 1;
+    }
+
+    fn progress(&mut self, id: &TaskId, pos: u64, total: u64) {
+        if let Some(task) = self.running.iter_mut().find(|r| r.id == *id) {
+            task.progress = Some((pos, total));
+        }
+    }
+
+    fn snapshot(&self) -> scan_view::Event {
+        scan_view::Event::Status {
+            total: self.total,
+            progress: self.finished,
+            running: self.running.clone(),
+        }
+    }
+}
+
+/// Deliver a runner event to the view bridge. A send fails only once
+/// the bridge has dropped its receiver, which happens after the view
+/// has closed; an event then has no reader.
+fn send_runner_event(tx: &UnboundedSender<Event>, event: Event) {
+    if tx.send(event).is_err() {}
+}
+
+/// Deliver an event to the view. A send fails only once the view has
+/// closed its receiver, after which an event has no reader.
+fn send_view_event(tx: &UnboundedSender<scan_view::Event>, event: scan_view::Event) {
+    if tx.send(event).is_err() {}
 }
 
 /// An agent's view entry from its record: state and cost from the
@@ -1217,8 +1562,15 @@ async fn run_scan_dialog(
     }
 
     // Dataset materialization — the one write between the dialog
-    // and the scan.
-    let dataset_sha = materialize_dataset(plan, &store)?;
+    // and the scan. The progress view and the add's progress bar go
+    // together: both are off headless.
+    let progress_ui = !args.no_progress && io::stdout().is_terminal();
+    let display = if progress_ui {
+        AddDisplay::Bar
+    } else {
+        AddDisplay::Lines
+    };
+    let dataset_sha = materialize_dataset(plan, &store, display)?;
 
     // Ctrl-C cancels the run; the scan applies what ran. Once tokio
     // has taken the signal, a second Ctrl-C during apply has no
@@ -1242,32 +1594,47 @@ async fn run_scan_dialog(
         driver: Arc::new(ClaudeDriver::new()),
         invalidate: args.invalidate,
     };
-    // Headless: task output and the scan's own lines go to the
-    // terminal as they happen, unprefixed; the dialog outro renders
-    // the summary line from the returned outcome.
-    let result = gage_scan2::scan(
-        &store,
-        &scan_config,
-        &compiled,
-        &cancel,
-        |event| match event {
-            Event::Output(TaskOutput { output, .. }) => match output {
-                Output::Print(s) => print!("{s}"),
-                Output::Println(s) => println!("{s}"),
-                Output::Log { .. } | Output::Progress { .. } => {}
+    let result = if !progress_ui {
+        // Headless: task output and the scan's own lines go to the
+        // terminal as they happen, unprefixed; the dialog outro
+        // renders the summary line from the returned outcome.
+        gage_scan2::scan(
+            &store,
+            &scan_config,
+            &compiled,
+            &cancel,
+            |event| match event {
+                Event::Output(TaskOutput { output, .. }) => match output {
+                    Output::Print(s) => print!("{s}"),
+                    Output::Println(s) => println!("{s}"),
+                    Output::Log { .. } | Output::Progress { .. } => {}
+                },
+                Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
+                Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
+                Event::Started { .. } | Event::Summary { .. } => {}
+                Event::Warning {
+                    scanner,
+                    task,
+                    message,
+                } => eprintln!("warning: task {scanner}:{task} {message}"),
+                Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
             },
-            Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
-            Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
-            Event::Summary { .. } => {}
-            Event::Warning {
-                scanner,
-                task,
-                message,
-            } => eprintln!("warning: task {scanner}:{task} {message}"),
-            Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
-        },
-    )
-    .await;
+        )
+        .await
+    } else {
+        // The progress view reads the scan through its own store
+        // handle: the runner's stays free for the tasks and the apply
+        let view_store = Store::open(&gage_store::store_path())
+            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        let (tx, rx) = unbounded_channel();
+        let scan_fut = gage_scan2::scan(&store, &scan_config, &compiled, &cancel, move |event| {
+            send_runner_event(&tx, event)
+        });
+        let view_fut = drive_view(rx, Arc::new(Mutex::new(view_store)), cancel.clone());
+        let (result, view_result) = tokio::join!(scan_fut, view_fut);
+        view_result?;
+        result
+    };
     io::stdout().flush().unwrap();
     cancel.cancel();
     signal_task.await.unwrap();
@@ -1535,7 +1902,11 @@ fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
 /// Write the dataset if one needs minting, and return the commit
 /// SHA that `ScanConfig.dataset` wants. `None` plan returns `None`;
 /// `Reuse` returns its stored SHA.
-fn materialize_dataset(plan: DatasetPlan, store: &Store) -> Result<Option<String>, DialogError> {
+fn materialize_dataset(
+    plan: DatasetPlan,
+    store: &Store,
+    display: AddDisplay,
+) -> Result<Option<String>, DialogError> {
     match plan {
         DatasetPlan::None => Ok(None),
         DatasetPlan::Reuse { commit_sha, .. } => Ok(Some(commit_sha)),
@@ -1546,7 +1917,16 @@ fn materialize_dataset(plan: DatasetPlan, store: &Store) -> Result<Option<String
                 ));
             }
             let id = cmd_dataset::create_dataset("gage scan2", store);
-            cmd_dataset::add_native_to_dataset("gage scan2", store, &id, None, &selected, None);
+            let message = cmd_dataset::add_native_to_dataset(
+                "gage scan2",
+                store,
+                &id,
+                None,
+                &selected,
+                None,
+                display,
+            );
+            cli::log::step(message)?;
             let record = DatasetStore::from(store)
                 .get(&id)
                 .map_err(|e| DialogError::Failed(format!("{e}")))?;
