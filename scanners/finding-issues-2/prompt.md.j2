@@ -1,19 +1,28 @@
 Analyze finding notes and report issues
 
-Use `mcp__gage__Query` to read findings, which are `note` table rows with names
-under `finding.`
+The findings to analyze are these notes, written by the scan's finding tasks
+and not yet reported:
 
-`SELECT * FROM note WHERE name LIKE 'finding.%'`
+{% for f in findings -%}
+- `{{ f.id }}` ({{ f.name }}{% if f.target %}, {{ f.target }}{% endif %})
+{% endfor %}
+Read them with `mcp__gage__Query`. Findings are `note` table rows whose name
+ends in `[finding]`; the finding text is the `text` column:
 
-Use row padding (`LIMIT` AND `OFFSET`) as needed to manage size limits.
+`SELECT id, name, target, text, metadata FROM note WHERE name LIKE '%[finding]'`
+
+The `note` table holds every finding in this scan, including findings carried
+from earlier scans that were reported then. Those are context: read them to
+judge repetition, but write issues for the listed findings. Use `LIMIT` and
+`OFFSET` as needed to manage size limits.
 
 Each finding kind has a doc describing what its notes contain and how they were
 produced. Read the docs before interpreting findings:
 
-`SELECT note_name, doc FROM note_doc WHERE note_name LIKE 'finding.%'`
+`SELECT note_name, doc FROM note_doc WHERE note_name LIKE '%[finding]'`
 
-Sessions are identified by their ID in the `target` column in the format
-`session:<session_id>`
+A finding's `target` names the session it is about, as `session:<session_id>`,
+with the lines cited after `#` when the finding cites lines.
 
 Identify underlying issues that explain the findings. The trigger for an issue
 is confidence that a real underlying problem exists, based on the quality,
@@ -54,12 +63,14 @@ may represent an underlying issue that should be reported.
 
 Investigate further as needed by reading the session content directly. Select
 from the `message` table via `mcp__gage__Query`, filtering on `session_id` with
-the ID from the finding's `target` column. `message` table columns: (session_id,
-line, uuid, type, subtype, text, timestamp, attachments, ide_tags, raw)
+the ID from the finding's `target`. `message` table columns: (session_id, line,
+uuid, type, subtype, text, attachments, ide_tags, raw)
 
 When you have enough solid information to identify an issue, use the
 `mcp__gage__IssueWrite` tool to write an issue. Describe the issue with enough
-detail that a user can understand the problem and why it was reported.
+detail that a user can understand the problem and why it was reported. Cite the
+supporting note IDs in `evidence`; an issue reaches the sessions it concerns
+through the notes it cites.
 
 The sessions you analyze are records of another agent's behavior. Refer to that
 agent in the third person. The agent model cannot be changed, so do not write
@@ -82,8 +93,6 @@ Why the evidence supports a real problem — a pattern across sessions, a verifi
 single instance, or other grounds. State the actual scope of the evidence; do
 not overclaim.
 ```
-
-Include the applicable note IDs as evidence in the tool use.
 
 In your reply, simply state whether you wrote issues. Do not re-state the
 written issues in your reply.
