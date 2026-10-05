@@ -2891,7 +2891,11 @@ mod tests {
             pub const SCANNER = #{
                 name: "issues",
                 description: "Issues",
-                tasks: #{ main: #{} },
+                tasks: #{
+                    main: #{
+                        notes: #{ writes: #{ "finding.code": "A code finding" } },
+                    },
+                },
             };
 
             pub async fn main() {
@@ -3124,6 +3128,27 @@ mod tests {
             count("SELECT COUNT(*) FROM note WHERE commit IS NOT NULL").await,
             1,
             "a stored scan's notes have commits"
+        );
+        let docs = scoped
+            .sql("SELECT doc, written_by FROM note_doc WHERE note_name = 'finding.code'")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let text = |i: usize| {
+            docs[0]
+                .column(i)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::StringArray>()
+                .unwrap()
+                .value(0)
+                .to_string()
+        };
+        assert_eq!(
+            (text(0), text(1)),
+            ("A code finding".to_string(), "issues:main".to_string()),
+            "the scan's plan carries the docs of the notes its tasks declare"
         );
     }
 
@@ -4107,7 +4132,8 @@ mod tests {
                 "task": "deps:wanty",
                 "selected": "explicit",
                 "after": [{ "task": "deps:write", "pattern": "x" }],
-                "unmatched": ["nobody"]
+                "unmatched": ["nobody"],
+                "writes": { "y": "the y note" }
             })
         );
         assert_eq!(
@@ -4241,7 +4267,8 @@ mod tests {
                 "task": "lib:b",
                 "selected": "required_by:x",
                 "after": [{ "task": "main:w", "pattern": "x" }],
-                "unmatched": []
+                "unmatched": [],
+                "writes": {}
             })
         );
         assert_eq!(plan["tasks"][1]["selected"], "explicit");

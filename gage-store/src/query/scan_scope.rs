@@ -33,6 +33,7 @@ use super::batch::{BatchSource, BatchTable, external, unique_prefix_lens};
 use super::dataset::{DatasetRow, dataset_rows, dataset_schema};
 use super::issue::{IssueRow, issue_event_rows, issue_event_schema, issue_rows, issue_schema};
 use super::note::note_rows;
+use super::note_doc::{note_doc_rows, note_doc_rows_from_plan, note_doc_schema};
 use super::scan::{ScanRow, scan_rows, scan_schema};
 use crate::scan_dir::ScanDirLayout;
 use crate::{
@@ -221,6 +222,28 @@ impl ScanSource {
             }
         }
         Ok(out)
+    }
+
+    /// The scan's plan, from `scan/plan.json`, or `None` for a scan
+    /// written without one.
+    fn plan(&self, store: &Store) -> Result<Option<serde_json::Value>> {
+        match self {
+            ScanSource::ScanDir(dir) => match fs::read(dir.plan_file()) {
+                Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+                    external(StoreError::Parse(format!(
+                        "{}: {e}",
+                        dir.plan_file().display()
+                    )))
+                }),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(io_error(e)),
+            },
+            ScanSource::Stored(id) => Ok(ScanStore::from(store)
+                .get(id)
+                .map_err(external)?
+                .content
+                .plan),
+        }
     }
 
     /// The scan's own row. An active scan has no markers, no commit,
@@ -443,6 +466,18 @@ pub fn scan_scope_tables(
         "scan",
         table(store, scan_schema(), move |store| {
             scan_rows(&[s.scan_row(store)?])
+        }),
+    ));
+
+    let s = src(source);
+    tables.push((
+        "note_doc",
+        table(store, note_doc_schema(), move |store| {
+            let rows = match s.plan(store)? {
+                Some(plan) => note_doc_rows_from_plan(&plan),
+                None => Vec::new(),
+            };
+            note_doc_rows(&rows)
         }),
     ));
 

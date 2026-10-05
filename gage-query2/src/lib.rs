@@ -37,14 +37,15 @@ pub mod system_cols;
 
 use std::sync::{Arc, Mutex};
 
-use datafusion::datasource::{TableProvider, ViewTable};
+use datafusion::datasource::{MemTable, TableProvider, ViewTable};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
+use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
-    LinkKind, Store, StoredNoteTable, StoredSessionTable, attachment_file_table, attachment_table,
-    dataset_table, issue_event_table, issue_table, link_table, scan_scope_tables, scan_table,
-    scan_watermark_table, tag_table,
+    LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
+    attachment_table, dataset_table, issue_event_table, issue_table, link_table, note_doc_rows,
+    note_doc_schema, scan_scope_tables, scan_table, scan_watermark_table, tag_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -139,6 +140,8 @@ impl ContextBuilder {
         }
         ctx.register_table(SCAN_WATERMARK, scan_watermark_table(Arc::clone(&store)))
             .expect("register the watermark table on a fresh context");
+        ctx.register_table("note_doc", registry_note_doc_table())
+            .expect("register the note doc table on a fresh context");
         // Views are planned over the raw providers, so they survive the
         // user-facing context hiding what they read
         for (name, sql) in VIEWS {
@@ -219,6 +222,29 @@ fn build_scan_scope(
             .expect("register scan tables on a fresh context");
     }
     ctx
+}
+
+/// The `note_doc` table of the store scope: every `writes` declaration
+/// of every registered scanner, read once when the context is built.
+fn registry_note_doc_table() -> Arc<dyn TableProvider> {
+    let registry = ScannerRegistry::load();
+    let mut rows = Vec::new();
+    for def in registry.list() {
+        for (task, def_task) in &def.tasks {
+            for (name, doc) in &def_task.notes.writes {
+                rows.push(NoteDocRow {
+                    note_name: name.clone(),
+                    doc: doc.clone(),
+                    written_by: format!("{}:{task}", def.name),
+                });
+            }
+        }
+    }
+    let batch = note_doc_rows(&rows).expect("note doc rows are plain strings");
+    Arc::new(
+        MemTable::try_new(note_doc_schema(), vec![vec![batch]])
+            .expect("a batch of its own schema is a valid table"),
+    )
 }
 
 /// The system-tier table of watermarks

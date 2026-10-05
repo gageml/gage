@@ -81,6 +81,11 @@ pub struct PlanTask {
     pub after: Vec<Edge>,
     /// `wants` patterns no planned task writes
     pub unmatched: Vec<String>,
+    /// The note names the task declares it writes, each with its
+    /// doc. The plan records them so a scan carries the docs of the
+    /// notes it holds; the `note_doc` table of the scan's scope reads
+    /// them from here.
+    pub writes: BTreeMap<String, String>,
 }
 
 impl PlanTask {
@@ -216,6 +221,7 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
             selected,
             after,
             unmatched,
+            writes: def.notes.writes.clone(),
         });
     }
 
@@ -316,6 +322,7 @@ impl Plan {
                     })
                     .collect(),
                 unmatched: t.unmatched.clone(),
+                writes: t.writes.clone(),
             })
             .collect();
         serde_json::to_value(PlanJson { tasks }).expect("plan fields are plain data")
@@ -333,6 +340,7 @@ struct TaskJson {
     selected: String,
     after: Vec<EdgeJson>,
     unmatched: Vec<String>,
+    writes: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -556,13 +564,15 @@ mod tests {
                         "after": [
                             { "task": "a:summarize", "pattern": "project-summary.*" }
                         ],
-                        "unmatched": ["missing"]
+                        "unmatched": ["missing"],
+                        "writes": { "finding.code": "" }
                     },
                     {
                         "task": "a:summarize",
                         "selected": "group:default",
                         "after": [],
-                        "unmatched": []
+                        "unmatched": [],
+                        "writes": { "project-summary.rules": "" }
                     },
                     {
                         "task": "c:report",
@@ -570,7 +580,8 @@ mod tests {
                         "after": [
                             { "task": "a:review", "pattern": "finding.*" }
                         ],
-                        "unmatched": []
+                        "unmatched": [],
+                        "writes": {}
                     }
                 ]
             })
