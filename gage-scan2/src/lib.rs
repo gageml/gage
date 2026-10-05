@@ -397,7 +397,7 @@ pub async fn scan(
         id.clone(),
         dataset,
         store.path(),
-        scan_dir.runtime_paths(),
+        scan_dir.layout(),
         Arc::clone(&config.driver),
     )?;
     scan_ctx.invalidate = config.invalidate;

@@ -485,7 +485,7 @@ async fn store_transcript(
     drop(store);
     tracing::info!(session = %added.id, "stored agent session");
     write_agent_record(
-        &ctx.paths.tasks_dir.join(&ctx.scanner).join(&ctx.task),
+        &ctx.paths.tasks_dir().join(&ctx.scanner).join(&ctx.task),
         &added.id,
         &added.commit_sha,
         exit_code,

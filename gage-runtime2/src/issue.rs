@@ -386,7 +386,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
     if w.policy == KeyPolicy::Once {
         match prev {
             Some(Prior::InDir(id)) => {
-                let dir = ctx.paths.issues_dir.join(&id);
+                let dir = ctx.paths.issues_dir().join(&id);
                 let record = issues
                     .read_from_dir(&dir)
                     .map_err(|e| VmError::panic(format!("issue dir {id}: {e}")))?;
@@ -402,7 +402,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
     }
     let (id, written) = match prev {
         Some(Prior::InDir(id)) => {
-            let dir = ctx.paths.issues_dir.join(&id);
+            let dir = ctx.paths.issues_dir().join(&id);
             fs::remove_dir_all(&dir)
                 .map_err(|e| VmError::panic(format!("write_issue: remove {id}: {e}")))?;
             // The first write replaced a live issue, or created one
@@ -420,7 +420,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
         }
         Some(Prior::Stored(live)) => {
             let id = live.id.clone();
-            let dir = ctx.paths.issues_dir.join(&id);
+            let dir = ctx.paths.issues_dir().join(&id);
             (
                 id,
                 issues.write_replace_to_dir(&dir, &input, &ctx.scan_id, &live),
@@ -428,7 +428,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
         }
         None => {
             let id = new_uuid();
-            let dir = ctx.paths.issues_dir.join(&id);
+            let dir = ctx.paths.issues_dir().join(&id);
             (
                 id.clone(),
                 issues.write_to_dir(&dir, &id, &input, &ctx.scan_id),
@@ -512,7 +512,7 @@ fn prior_issue(
 /// the store. A cited id that is neither is the scanner's error.
 async fn check_evidence(ctx: &ScanContext, ids: &[String]) -> Result<Result<(), Error>, VmError> {
     for id in ids {
-        if ctx.paths.notes_dir.join(id).is_dir() {
+        if ctx.paths.notes_dir().join(id).is_dir() {
             continue;
         }
         let store = ctx.store.lock().await;
@@ -728,7 +728,7 @@ fn quoted_list<'a>(items: impl Iterator<Item = &'a str>) -> String {
 
 /// The scan directory's issue directories, in id order.
 fn issue_dirs(ctx: &ScanContext) -> Result<Vec<PathBuf>, VmError> {
-    let entries = match fs::read_dir(&ctx.paths.issues_dir) {
+    let entries = match fs::read_dir(ctx.paths.issues_dir()) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(VmError::panic(format!("scan directory issues: {e}"))),

@@ -196,7 +196,7 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
                 .expect("note commit is a string column");
             if !commits.is_valid(0) {
                 let line = format!("{id} {key} 1\n");
-                append(&ctx.paths.note_watermarks, &line)
+                append(&ctx.paths.note_watermarks(), &line)
                     .map_err(|e| VmError::panic(format!("note watermarks: {e}")))?;
                 tracing::debug!(key, note = id, "watermark deferred to apply");
                 return Ok(Ok(()));
@@ -204,7 +204,7 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
             (id, commits.value(0).to_string(), 1)
         }
     };
-    let dir = ctx.paths.watermarks_dir.join(&oid);
+    let dir = ctx.paths.watermarks_dir().join(&oid);
     let written = fs::create_dir_all(&dir)
         .and_then(|()| write_atomic(&dir.join(&key), format!("{commit} {mark}\n").as_bytes()));
     match written {
@@ -505,7 +505,7 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
             }
         }
     }
-    let added = append_carried(&ctx.paths.carried_notes, &commits)?;
+    let added = append_carried(&ctx.paths.carried_notes(), &commits)?;
     tracing::info!(key, notes = added, "carry_forward_notes");
     Ok(Ok(i64::try_from(added).unwrap()))
 }

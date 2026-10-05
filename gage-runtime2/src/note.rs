@@ -267,7 +267,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
     let written = {
         let store = ctx.store.lock().await;
         NoteStore::from(&*store).write_to_dir(
-            &ctx.paths.notes_dir.join(&id),
+            &ctx.paths.notes_dir().join(&id),
             &id,
             &input,
             &ctx.scan_id,

@@ -39,29 +39,20 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use gage_core::datetime::{ms_to_iso8601, now_ms};
+use gage_runtime2::Level;
 use gage_runtime2::source::SourceFile;
-use gage_runtime2::{Level, ScanDirPaths};
-use gage_store::{ScanAttrs, TaskAttrs, TaskStatus};
+use gage_store::{ScanAttrs, ScanDirLayout, TaskAttrs, TaskStatus};
 use serde::Serialize;
 
 const STATE_FILE: &str = "state";
 const PID_FILE: &str = "pid";
 const APPLIED_FILE: &str = "applied";
-const SCAN_DIR: &str = "scan";
-const NOTES_DIR: &str = "notes";
 const NOTES_LINK: &str = "notes.link";
 const NOTES_CARRIED_LINK: &str = "notes_carried.link";
-const ISSUES_DIR: &str = "issues";
 const ISSUES_LINK: &str = "issues.link";
-const WATERMARKS_DIR: &str = "watermarks";
-const CARRIED_NOTES_FILE: &str = "carried_notes";
-const NOTE_WATERMARKS_FILE: &str = "note_watermarks";
 const SCANNERS_DIR: &str = "scanners";
 const SOURCE_DIR: &str = "sourcecode.d";
-const TASKS_DIR: &str = "tasks";
 const ATTRS_FILE: &str = "attrs.json";
-const DATASET_LINK: &str = "dataset.link";
-const PLAN_FILE: &str = "plan.json";
 const LOGS_DIR: &str = "logs";
 pub(crate) const OUT_LOG: &str = "out";
 pub(crate) const ERR_LOG: &str = "err";
@@ -96,9 +87,10 @@ pub struct ScannerPlan<'a> {
     pub sources: &'a [SourceFile],
 }
 
-/// One active scan's directory
+/// One active scan's directory. The layout, shared with the query
+/// layer, names the paths; this type writes them.
 pub struct ScanDir {
-    dir: PathBuf,
+    layout: ScanDirLayout,
 }
 
 impl ScanDir {
@@ -113,16 +105,16 @@ impl ScanDir {
         dataset: Option<&str>,
         scanners: &[ScannerPlan],
     ) -> io::Result<ScanDir> {
-        let dir = root.join(scan_id);
-        fs::create_dir_all(dir.join(SCAN_DIR))?;
-        let scan_dir = ScanDir { dir };
+        let layout = ScanDirLayout::new(root.join(scan_id));
+        fs::create_dir_all(layout.object_dir())?;
+        let scan_dir = ScanDir { layout };
         write_atomic(
-            &scan_dir.dir.join(PID_FILE),
+            &scan_dir.layout.root().join(PID_FILE),
             format!("{}\n", std::process::id()).as_bytes(),
         )?;
         if let Some(sha) = dataset {
             write_atomic(
-                &scan_dir.object_dir().join(DATASET_LINK),
+                &scan_dir.layout.dataset_link(),
                 format!("{sha}\n").as_bytes(),
             )?;
         }
@@ -163,34 +155,34 @@ impl ScanDir {
     }
 
     pub fn dir(&self) -> &Path {
-        &self.dir
+        self.layout.root()
     }
 
     /// The `scan/` subtree, the content applied to the store.
     pub fn object_dir(&self) -> PathBuf {
-        self.dir.join(SCAN_DIR)
+        self.layout.object_dir()
     }
 
     /// The `notes/` directory `write_note` writes note trees under.
     pub fn notes_dir(&self) -> PathBuf {
-        self.dir.join(NOTES_DIR)
+        self.layout.notes_dir()
     }
 
     /// The note directories, in id order. Empty when no note was
     /// written.
     pub fn note_dirs(&self) -> io::Result<Vec<PathBuf>> {
-        object_dirs(&self.notes_dir())
+        self.layout.note_dirs()
     }
 
     /// The `issues/` directory `write_issue` writes issue trees under.
     pub fn issues_dir(&self) -> PathBuf {
-        self.dir.join(ISSUES_DIR)
+        self.layout.issues_dir()
     }
 
     /// The issue directories, in id order. Empty when no issue was
     /// written.
     pub fn issue_dirs(&self) -> io::Result<Vec<PathBuf>> {
-        object_dirs(&self.issues_dir())
+        self.layout.issue_dirs()
     }
 
     /// Write `scan/issues.link` listing `shas`; nothing when empty.
@@ -217,33 +209,22 @@ impl ScanDir {
         write_atomic(&self.object_dir().join(name), content.as_bytes())
     }
 
-    /// The paths the runtime writes under during the run.
-    pub fn runtime_paths(&self) -> ScanDirPaths {
-        ScanDirPaths {
-            dir: self.dir.clone(),
-            notes_dir: self.notes_dir(),
-            issues_dir: self.issues_dir(),
-            note_watermarks: self.dir.join(NOTE_WATERMARKS_FILE),
-            watermarks_dir: self.object_dir().join(WATERMARKS_DIR),
-            carried_notes: self.dir.join(CARRIED_NOTES_FILE),
-            tasks_dir: self.object_dir().join(TASKS_DIR),
-        }
+    /// The layout, for the runtime to write under and to scope its
+    /// query context to.
+    pub fn layout(&self) -> ScanDirLayout {
+        self.layout.clone()
     }
 
     /// The note commits carry-forward appended, one per line; empty
     /// when none.
     pub fn carried_notes(&self) -> io::Result<Vec<String>> {
-        match fs::read_to_string(self.dir.join(CARRIED_NOTES_FILE)) {
-            Ok(text) => Ok(text.lines().map(String::from).collect()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+        self.layout.carried_note_commits()
     }
 
     /// The watermarks on the scan's own notes the runtime deferred, as
     /// `(note id, key, mark)` in file order; empty when none.
     pub fn note_watermarks(&self) -> io::Result<Vec<(String, String, u64)>> {
-        let text = match fs::read_to_string(self.dir.join(NOTE_WATERMARKS_FILE)) {
+        let text = match fs::read_to_string(self.layout.note_watermarks()) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
@@ -268,14 +249,14 @@ impl ScanDir {
 
     /// Write `scan/watermarks/<oid>/<key>` holding `<commit> <mark>`.
     pub fn write_watermark(&self, oid: &str, key: &str, commit: &str, mark: u64) -> io::Result<()> {
-        let dir = self.object_dir().join(WATERMARKS_DIR).join(oid);
+        let dir = self.layout.watermarks_dir().join(oid);
         fs::create_dir_all(&dir)?;
         write_atomic(&dir.join(key), format!("{commit} {mark}\n").as_bytes())
     }
 
     pub fn set_state(&self, state: State) -> io::Result<()> {
         write_atomic(
-            &self.dir.join(STATE_FILE),
+            &self.layout.root().join(STATE_FILE),
             format!("{}\n", state.as_str()).as_bytes(),
         )
     }
@@ -296,7 +277,7 @@ impl ScanDir {
 
     /// Write `scan/plan.json`, the resolved plan (see `crate::plan`).
     pub fn write_plan(&self, plan: &serde_json::Value) -> io::Result<()> {
-        write_json(&self.object_dir().join(PLAN_FILE), plan)
+        write_json(&self.layout.plan_file(), plan)
     }
 
     /// Write the scan's `attrs.json`.
@@ -306,36 +287,17 @@ impl ScanDir {
 
     /// Record that the scan has been written to the store.
     pub fn mark_applied(&self) -> io::Result<()> {
-        write_atomic(&self.dir.join(APPLIED_FILE), b"")
+        write_atomic(&self.layout.root().join(APPLIED_FILE), b"")
     }
 
     /// Remove the directory. Called after `mark_applied`.
     pub fn remove(self) -> io::Result<()> {
-        fs::remove_dir_all(&self.dir)
+        fs::remove_dir_all(self.layout.root())
     }
 
     fn task_dir(&self, scanner: &str, task: &str) -> PathBuf {
-        self.object_dir().join(TASKS_DIR).join(scanner).join(task)
+        self.layout.tasks_dir().join(scanner).join(task)
     }
-}
-
-/// The subdirectories of `dir`, sorted by name. Empty when `dir` does
-/// not exist.
-fn object_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let mut dirs = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        if path.is_dir() {
-            dirs.push(path);
-        }
-    }
-    dirs.sort();
-    Ok(dirs)
 }
 
 /// The `logs/` directory of the scan under a scan directory's `scan/` subtree

@@ -13,7 +13,7 @@
 //! declared defaults with the scan's per-scanner overrides applied, or
 //! an empty object for a scanner that declares none.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::array::{
@@ -27,7 +27,7 @@ use gage_runtime::datetime::{self, DateTime};
 use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
 use gage_session::Driver;
-use gage_store::{Store, StoreError};
+use gage_store::{ScanDirLayout, Store, StoreError};
 use rune::Sources;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Object, Protocol, Value, VmError};
@@ -72,8 +72,9 @@ pub struct ScanContext {
     /// The driver that runs the scan's agents
     pub driver: Arc<dyn Driver>,
     pub store: Arc<tokio::sync::Mutex<Store>>,
-    /// Where the runtime writes during the run
-    pub paths: ScanDirPaths,
+    /// The scan directory: where the runtime writes during the run
+    /// and the source of the scan-scoped query context
+    pub paths: ScanDirLayout,
     /// Ignore prior work: `hwm` reports 0 for every object and
     /// `carry_forward_notes` links nothing. Watermarks are still
     /// written, so the next scan resumes from this one.
@@ -89,30 +90,6 @@ pub struct ScanContext {
     mcp_host: Arc<OnceCell<McpHost>>,
 }
 
-/// The scan directory paths the runtime writes under. The orchestrator owns
-/// the layout and supplies them.
-#[derive(Debug, Clone)]
-pub struct ScanDirPaths {
-    /// The scan directory itself, the source of the scan-scoped query
-    /// context
-    pub dir: PathBuf,
-    /// `write_note` writes note trees here, one directory per id
-    pub notes_dir: PathBuf,
-    /// `write_issue` writes issue trees here, one directory per id
-    pub issues_dir: PathBuf,
-    /// `watermark` on a note this scan wrote appends `<id> <key>
-    /// <mark>` here; apply resolves the note's commit and writes the
-    /// record
-    pub note_watermarks: PathBuf,
-    /// `watermark` writes `<oid>/<key>` here
-    pub watermarks_dir: PathBuf,
-    /// Carry-forward appends carried note commits here, one per line
-    pub carried_notes: PathBuf,
-    /// `call_agent` writes a task's agent records under
-    /// `<scanner>/<task>/` here
-    pub tasks_dir: PathBuf,
-}
-
 impl ScanContext {
     /// Open the context over the store at `store_path`: one handle for
     /// the runtime and one for the query context.
@@ -120,7 +97,7 @@ impl ScanContext {
         scan_id: String,
         dataset: Option<ScanDatasetRef>,
         store_path: &Path,
-        paths: ScanDirPaths,
+        paths: ScanDirLayout,
         driver: Arc<dyn Driver>,
     ) -> Result<Self, StoreError> {
         Ok(ScanContext {
@@ -160,7 +137,7 @@ impl ScanContext {
         self.scan_query
             .get_or_try_init(|| async {
                 let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
-                    .scope(ScanScope::scan_dir(&self.paths.dir))
+                    .scope(ScanScope::scan_dir(self.paths.root()))
                     .build()
                     .await;
                 tracing::info!("scan query context built");
@@ -201,7 +178,7 @@ impl ScanContext {
                     )));
                 }
                 let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
-                    .scope(ScanScope::scan_dir(&self.paths.dir).session(id))
+                    .scope(ScanScope::scan_dir(self.paths.root()).session(id))
                     .build()
                     .await;
                 if let Some((start, end)) = lines {

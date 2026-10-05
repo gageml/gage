@@ -964,7 +964,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::scan::ScanDirPaths;
+    use gage_store::ScanDirLayout;
 
     /// A driver that runs nothing; tools need a context, not a harness
     struct NoDriver;
@@ -1002,16 +1002,7 @@ mod tests {
     fn scan_ctx(tmp: &TempDir) -> ScanContext {
         let store = tmp.path().join("store.git");
         gage_store::init(&store).unwrap();
-        let dir = |name: &str| tmp.path().join(name);
-        let paths = ScanDirPaths {
-            dir: tmp.path().to_path_buf(),
-            notes_dir: dir("notes"),
-            issues_dir: dir("issues"),
-            note_watermarks: dir("note_watermarks"),
-            watermarks_dir: dir("watermarks"),
-            carried_notes: dir("carried"),
-            tasks_dir: dir("tasks"),
-        };
+        let paths = ScanDirLayout::new(tmp.path());
         let mut ctx =
             ScanContext::new("scan-1".into(), None, &store, paths, Arc::new(NoDriver)).unwrap();
         ctx.scanner = "demo".into();
@@ -1594,7 +1585,7 @@ mod tests {
         );
 
         let ctx = scan_ctx(&tmp);
-        let dirs: Vec<_> = std::fs::read_dir(&ctx.paths.issues_dir)
+        let dirs: Vec<_> = std::fs::read_dir(ctx.paths.issues_dir())
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();
@@ -1642,7 +1633,7 @@ mod tests {
         };
         assert!(message.starts_with("write_issue evidence: "), "{message}");
         assert!(
-            !std::fs::exists(scan_ctx(&tmp).paths.issues_dir).unwrap(),
+            !std::fs::exists(scan_ctx(&tmp).paths.issues_dir()).unwrap(),
             "nothing is written for a rejected write"
         );
     }
