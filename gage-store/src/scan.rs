@@ -1665,7 +1665,7 @@ mod tests {
                 author: "task:s:t",
                 status: IssueStatus::Pending,
                 evidence: &[],
-                replace_key: None,
+                key: None,
             })
             .unwrap();
         let sha = store
@@ -1808,7 +1808,7 @@ mod tests {
                 author: "task:s:t",
                 status: IssueStatus::Pending,
                 evidence: &[],
-                replace_key: None,
+                key: None,
             })
             .unwrap();
         let scan_dir = new_scan_dir(tmp);

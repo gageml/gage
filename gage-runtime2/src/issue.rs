@@ -13,17 +13,17 @@
 //! reached through the notes it cites. Bad input is `Error::Args`; a
 //! failure to reach the scan directory or the store is a VM error.
 //!
-//! `.replace_named()` and `.replace_keyed(key)` give the issue a
-//! replace key, the name or a key encoded like a watermark key. When
-//! a live issue in the store carries the same key, the write is
-//! recorded as a replacement of it: apply writes the new state as that
-//! issue's next commit, and the scan links that commit. A second write
-//! under the same key in one scan replaces the first.
-//! `.keep_named()` and `.keep_keyed(key)` give the issue the same key
-//! with the opposite policy: when an issue under the key exists,
-//! written by this scan or live in the store in any status, nothing is
-//! written and the existing issue is returned. A closed issue counts,
-//! so a condition reported once and closed is not reported again.
+//! `.key(key)` gives the issue an identity across scans, a string or
+//! a tuple encoded like a watermark key. When a live issue in the
+//! store carries the same key, the write is recorded as a replacement
+//! of it: apply writes the new state as that issue's next commit, and
+//! the scan links that commit. A second write under the same key in
+//! one scan replaces the first. `.once()` changes what the key does:
+//! when an issue under the key exists, written by this scan or live in
+//! the store in any status, nothing is written and the existing issue
+//! is returned. A closed issue counts, so a condition reported once
+//! and closed is not reported again. `.once()` without `.key()` is an
+//! `Args` error at the await.
 //!
 //! `issues()` is an [`IssuesQuery`]; awaiting it reads every live
 //! issue in the store plus the issues this scan has written, since a
@@ -62,10 +62,8 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<IssueWrite>()?;
     m.function_meta(IssueWrite::evidence)?;
     m.function_meta(IssueWrite::pending)?;
-    m.function_meta(IssueWrite::replace_named)?;
-    m.function_meta(IssueWrite::replace_keyed)?;
-    m.function_meta(IssueWrite::keep_named)?;
-    m.function_meta(IssueWrite::keep_keyed)?;
+    m.function_meta(IssueWrite::key)?;
+    m.function_meta(IssueWrite::once)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: IssueWrite| async move {
         do_write_issue(w).await
     })?;
@@ -99,9 +97,9 @@ pub struct IssueWrite {
     evidence_error: Option<Error>,
     #[rune(skip)]
     status: IssueStatus,
-    /// The replace key as given; encoded at the await
+    /// The identity key as given; encoded at the await
     #[rune(skip)]
-    replace_key: Option<Value>,
+    key: Option<Value>,
     /// What a write does when an issue under the key exists
     #[rune(skip)]
     policy: KeyPolicy,
@@ -113,7 +111,7 @@ enum KeyPolicy {
     /// Record this write as the existing issue's next state
     Replace,
     /// Write nothing and return the existing issue
-    Keep,
+    Once,
 }
 
 fn write_issue(name: &str, title: &str, description: &str) -> IssueWrite {
@@ -124,7 +122,7 @@ fn write_issue(name: &str, title: &str, description: &str) -> IssueWrite {
         evidence: Vec::new(),
         evidence_error: None,
         status: IssueStatus::Open,
-        replace_key: None,
+        key: None,
         policy: KeyPolicy::Replace,
     }
 }
@@ -153,44 +151,22 @@ impl IssueWrite {
         self
     }
 
-    /// Replace the live issue keyed by this issue's name, if there is
-    /// one, instead of writing a second issue. The same as
-    /// `replace_keyed(name)`.
+    /// Give the issue an identity across scans. A later write under
+    /// the same key replaces the live issue instead of writing a
+    /// second one. `key` is a string, or a tuple of strings and
+    /// integers rendered colon-joined, and is stored on the issue as
+    /// `key`.
     #[rune::function(instance)]
-    fn replace_named(mut self) -> Result<Self, VmError> {
-        self.replace_key = Some(rune::to_value(self.name.clone())?);
-        Ok(self)
-    }
-
-    /// Replace the live issue keyed by `key`, if there is one, instead
-    /// of writing a second issue. `key` is a string, or a tuple of
-    /// strings and integers rendered colon-joined, and is stored on
-    /// the issue as `replace_key`.
-    #[rune::function(instance)]
-    fn replace_keyed(mut self, key: Value) -> Self {
-        self.replace_key = Some(key);
-        self.policy = KeyPolicy::Replace;
+    fn key(mut self, key: Value) -> Self {
+        self.key = Some(key);
         self
     }
 
-    /// Write nothing when an issue keyed by this issue's name exists,
-    /// in any status, and return it instead. The same as
-    /// `keep_keyed(name)`.
+    /// Write only when no issue under the key exists, in any status,
+    /// and return the existing issue otherwise. Requires `.key()`.
     #[rune::function(instance)]
-    fn keep_named(mut self) -> Result<Self, VmError> {
-        self.replace_key = Some(rune::to_value(self.name.clone())?);
-        self.policy = KeyPolicy::Keep;
-        Ok(self)
-    }
-
-    /// Write nothing when an issue keyed by `key` exists, in any
-    /// status, and return it instead. `key` is a string, or a tuple
-    /// of strings and integers rendered colon-joined, and is stored
-    /// on the issue as `replace_key`.
-    #[rune::function(instance)]
-    fn keep_keyed(mut self, key: Value) -> Self {
-        self.replace_key = Some(key);
-        self.policy = KeyPolicy::Keep;
+    fn once(mut self) -> Self {
+        self.policy = KeyPolicy::Once;
         self
     }
 }
@@ -247,7 +223,7 @@ pub struct Issue {
     #[rune(get)]
     pub scan: Option<String>,
     #[rune(get)]
-    pub replace_key: Option<String>,
+    pub key: Option<String>,
     /// The ids of the cited notes, a list of strings
     #[rune(get)]
     pub evidence: Value,
@@ -276,7 +252,7 @@ impl Issue {
             status: full.status.as_str().to_string(),
             status_reason: full.status_reason.map(|r| r.as_str().to_string()),
             scan: full.scan,
-            replace_key: full.replace_key,
+            key: full.key,
             evidence: rune::to_value(evidence).map_err(VmError::from)?,
             created: full.created_ms,
         })
@@ -293,7 +269,7 @@ impl Issue {
             status: record.status.as_str().to_string(),
             status_reason: None,
             scan: record.scan,
-            replace_key: record.replace_key,
+            key: record.key,
             evidence: rune::to_value(record.evidence).map_err(VmError::from)?,
             created: record.created_ms,
         })
@@ -332,7 +308,7 @@ pub(crate) async fn write_issue_tool(
         description: description.unwrap_or_default(),
         evidence,
         status,
-        replace_key: None,
+        key: None,
         policy: KeyPolicy::Replace,
     })
     .await
@@ -347,7 +323,7 @@ struct IssueSpec {
     description: String,
     evidence: Vec<String>,
     status: IssueStatus,
-    replace_key: Option<String>,
+    key: Option<String>,
     policy: KeyPolicy,
 }
 
@@ -355,7 +331,12 @@ async fn do_write_issue(w: IssueWrite) -> Written {
     if let Some(e) = w.evidence_error {
         return Ok(Err(e));
     }
-    let replace_key = match w.replace_key.as_ref().map(encode_key).transpose() {
+    if w.policy == KeyPolicy::Once && w.key.is_none() {
+        return Ok(Err(Error::Args(
+            "write_issue: once() requires key()".into(),
+        )));
+    }
+    let key = match w.key.as_ref().map(encode_key).transpose() {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
@@ -365,7 +346,7 @@ async fn do_write_issue(w: IssueWrite) -> Written {
         description: w.description,
         evidence: w.evidence,
         status: w.status,
-        replace_key,
+        key,
         policy: w.policy,
     })
     .await
@@ -382,7 +363,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
     if let Err(e) = check_evidence(&ctx, &w.evidence).await? {
         return Ok(Err(e));
     }
-    let replace_key = w.replace_key;
+    let key = w.key;
     let description = (!w.description.trim().is_empty()).then_some(w.description.as_str());
     let input = IssueInput {
         name: &w.name,
@@ -391,38 +372,28 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
         author: &author,
         status: w.status,
         evidence: &w.evidence,
-        replace_key: replace_key.as_deref(),
+        key: key.as_deref(),
     };
     let store = ctx.store.lock().await;
     let issues = IssueStore::from(&*store);
-    // A key names the issue to replace or keep: the one this scan
+    // A key names the issue to replace or return: the one this scan
     // already wrote under the key, else the live one in the store
-    let prev = match &replace_key {
+    let prev = match &key {
         Some(key) => prior_issue(&ctx, &issues, key)?,
         None => None,
     };
-    if w.policy == KeyPolicy::Keep {
+    if w.policy == KeyPolicy::Once {
         match prev {
             Some(Prior::InDir(id)) => {
                 let dir = ctx.paths.issues_dir.join(&id);
                 let record = issues
                     .read_from_dir(&dir)
                     .map_err(|e| VmError::panic(format!("issue dir {id}: {e}")))?;
-                tracing::debug!(
-                    id,
-                    name = w.name,
-                    replace_key,
-                    "write_issue: kept the scan's own"
-                );
+                tracing::debug!(id, name = w.name, key, "write_issue: kept the scan's own");
                 return Ok(Ok(Issue::from_dir_record(record)?));
             }
             Some(Prior::Stored(live)) => {
-                tracing::debug!(
-                    id = live.id,
-                    name = w.name,
-                    replace_key,
-                    "write_issue: kept"
-                );
+                tracing::debug!(id = live.id, name = w.name, key, "write_issue: kept");
                 return Ok(Ok(Issue::from_full(&store, *live)?));
             }
             None => {}
@@ -469,7 +440,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
         Err(StoreError::IssueInput(m)) => return Ok(Err(Error::Args(format!("write_issue: {m}")))),
         Err(e) => return Err(VmError::panic(format!("write_issue: {e}"))),
     }
-    tracing::debug!(id, name = w.name, author, replace_key, "write_issue");
+    tracing::debug!(id, name = w.name, author, key, "write_issue");
 
     let mut evidence = Vec::with_capacity(w.evidence.len());
     for note in &w.evidence {
@@ -486,7 +457,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
         status: w.status.as_str().to_string(),
         status_reason: None,
         scan: Some(ctx.scan_id.clone()),
-        replace_key,
+        key,
         evidence: rune::to_value(evidence).map_err(VmError::from)?,
         created: gage_core::datetime::now_ms(),
     }))
@@ -500,7 +471,7 @@ enum Prior {
     Stored(Box<IssueFull>),
 }
 
-/// The issue `key` replaces: one this scan wrote under the key, else
+/// The issue `key` names: one this scan wrote under the key, else
 /// the live issue in the store carrying it. Two live issues under one
 /// key is a store fault.
 fn prior_issue(
@@ -512,13 +483,13 @@ fn prior_issue(
         let record = issues
             .read_from_dir(&dir)
             .map_err(|e| VmError::panic(format!("issue dir {}: {e}", dir.display())))?;
-        if record.replace_key.as_deref() == Some(key) {
+        if record.key.as_deref() == Some(key) {
             return Ok(Some(Prior::InDir(record.id)));
         }
     }
     let tips = issues
         .query()
-        .replace_key(key)
+        .key(key)
         .tips()
         .map_err(|e| VmError::panic(format!("write_issue: replace key {key}: {e}")))?;
     match tips.as_slice() {

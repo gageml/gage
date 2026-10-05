@@ -2,13 +2,13 @@ use gage::{scan, write_issue};
 
 pub const SCANNER = #{
     name: "replace-issue",
-    description: "Replace named and keyed issue",
+    description: "Issues with an identity key",
     tasks: #{ main: #{} },
 };
 
 pub async fn main() {
     write_issue("named-example", "Example issue re-opened by name", "")
-        .replace_named()
+        .key("named-example")
         .await?;
 
     for s in scan().sessions().await {
@@ -17,7 +17,7 @@ pub async fn main() {
             format!("Example issue re-opened by key for {}", s.id),
             "",
         )
-        .replace_keyed(("keyed", s.id))
+        .key(("keyed", s.id))
         .await?;
     }
 }

@@ -2950,7 +2950,7 @@ mod tests {
                 author: "user:t",
                 status: IssueStatus::Open,
                 evidence: &[],
-                replace_key: None,
+                key: None,
             })
             .unwrap();
 
@@ -3087,12 +3087,12 @@ mod tests {
         );
     }
 
-    /// `replace_named()` and `replace_keyed(key)` store a replace key.
-    /// A later scan's write under the same key is a new commit of the
+    /// `key(k)` stores an identity key. A later scan's write under
+    /// the same key is a new commit of the
     /// live issue, with the write's whole state, and the scan links
     /// that commit. A second write in one scan replaces the first.
     #[tokio::test]
-    async fn issues_written_under_a_replace_key_replace_the_live_issue() {
+    async fn issues_written_under_a_key_replace_the_live_issue() {
         use gage_store::{ChangeEvent, IssueStatus, IssueStore};
 
         const SCANNER: &str = r###"
@@ -3113,18 +3113,18 @@ mod tests {
                 }
                 let note = note.unwrap();
                 let first = write_issue("hidden-thinking", "Hidden", "first")
-                    .replace_named()
+                    .key("hidden-thinking")
                     .evidence(note)
                     .await?;
                 let i = write_issue("hidden-thinking", "Hidden", "second")
-                    .replace_named()
+                    .key("hidden-thinking")
                     .evidence(note)
                     .await?;
-                println!("{} {} {:?} {}", i.id == first.id, i.status, i.replace_key, i.evidence.len());
+                println!("{} {} {:?} {}", i.id == first.id, i.status, i.key, i.evidence.len());
                 let k = write_issue("per-session", "Per session", "")
-                    .replace_keyed(("per-session", 7))
+                    .key(("per-session", 7))
                     .await?;
-                println!("{:?}", k.replace_key);
+                println!("{:?}", k.key);
                 Ok(())
             }
         "###;
@@ -3186,7 +3186,7 @@ mod tests {
         written.sort_by(|a, b| a.name.cmp(&b.name));
         let hidden = written[0].clone();
         assert_eq!(hidden.name, "hidden-thinking");
-        assert_eq!(hidden.replace_key.as_deref(), Some("hidden-thinking"));
+        assert_eq!(hidden.key.as_deref(), Some("hidden-thinking"));
         assert_eq!(
             hidden.description.as_deref(),
             Some("second"),
@@ -3195,7 +3195,7 @@ mod tests {
         assert_eq!(hidden.changes.len(), 1);
         assert_eq!(hidden.evidence, [record.content.notes[0].clone()]);
         let per_session = written[1].clone();
-        assert_eq!(per_session.replace_key.as_deref(), Some("per-session:7"));
+        assert_eq!(per_session.key.as_deref(), Some("per-session:7"));
 
         issues
             .set_status(&hidden.id, IssueStatus::Closed, None, "user:t", None)
@@ -3353,9 +3353,10 @@ mod tests {
         );
     }
 
-    /// `keep_named()` writes once: a second scan finds the issue live
+    /// `key(k).once()` writes once: a second scan finds the issue live
     /// in the store, in any status, and returns it without a write;
-    /// a second write in one scan returns the first.
+    /// a second write in one scan returns the first. `once()` without
+    /// a key is an `Args` error.
     #[tokio::test]
     async fn issues_written_under_a_keep_key_are_not_rewritten() {
         use gage_store::{IssueStatus, IssueStore};
@@ -3371,12 +3372,18 @@ mod tests {
 
             pub async fn main() {
                 let first = write_issue("retention", "Retention", "first")
-                    .keep_named()
+                    .key("retention")
+                    .once()
                     .await?;
                 let again = write_issue("retention", "Retention", "second")
-                    .keep_named()
+                    .key("retention")
+                    .once()
                     .await?;
-                println!("{} {} {:?} {:?}", again.id == first.id, again.status, again.description, again.replace_key);
+                println!("{} {} {:?} {:?}", again.id == first.id, again.status, again.description, again.key);
+                match write_issue("retention", "Retention", "third").once().await {
+                    Err(gage::Error::Args(m)) => println!("args: {m}"),
+                    other => println!("unexpected: {other:?}"),
+                }
                 Ok(())
             }
         "###;
@@ -3408,7 +3415,13 @@ mod tests {
                 .await
                 .unwrap();
                 assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
-                assert_eq!(outputs(&events), [&Output::Println(expected.into())]);
+                assert_eq!(
+                    outputs(&events),
+                    [
+                        &Output::Println(expected.into()),
+                        &Output::Println("args: write_issue: once() requires key()".into()),
+                    ]
+                );
                 outcome
             }
         };

@@ -460,7 +460,7 @@ mod tests {
                     author: "user:t",
                     status: IssueStatus::Pending,
                     evidence: &[note_id.clone()],
-                    replace_key: None,
+                    key: None,
                 })
                 .unwrap();
             issues

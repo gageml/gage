@@ -37,7 +37,8 @@ pub async fn check() {
                 "Unset session retention policy",
                 include_str!("issue.md"),
             )
-            .keep_named()
+            .key("session-retention")
+            .once()
             .await?;
         }
     }
