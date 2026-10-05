@@ -12,9 +12,7 @@ use gage::{scan, write_issue};
 pub const SCANNER = #{
     name: "session-retention-2",
     description: "Highlight unset session retention policy",
-    // FUTURE: groups: ["default"] when this scanner replaces
-    // `session-retention`. Left out so a legacy default scan does not
-    // select it.
+    groups: ["default"],
     tasks: #{
         check: #{
             issues: #{

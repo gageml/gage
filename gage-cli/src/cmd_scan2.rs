@@ -4,12 +4,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::{ArgGroup, Args, Subcommand};
+use clap::{Args, Subcommand};
 use cliclack as cli;
+use console::style;
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use gage_claude::driver::ClaudeDriver;
+use gage_claude::session::SessionInfo;
+use gage_core::config::Config;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
 use gage_registry::scanner::{
@@ -145,14 +148,14 @@ enum Scan2Command {
 }
 
 #[derive(Args)]
-#[command(group = ArgGroup::new("scan2_dataset")
-    .required(true)
-    .multiple(true)
-    .args(SELECT_ARG_NAMES.iter().copied().chain(["dataset", "no_dataset", "list_scanners"])))]
 pub struct Scan2RunArgs {
     /// Scanner to run (repeatable)
     #[arg(short, long = "scanner", value_name = "NAME", display_order = 2)]
     scanners: Vec<String>,
+
+    /// Run the scanners in a group (repeatable)
+    #[arg(short, long = "group", value_name = "NAME", display_order = 3)]
+    groups: Vec<String>,
 
     /// Dataset to scan (ID or prefix)
     ///
@@ -162,17 +165,17 @@ pub struct Scan2RunArgs {
         short,
         long,
         value_name = "DATASET",
-        display_order = 3,
+        display_order = 4,
         conflicts_with_all = SELECT_ARG_NAMES,
     )]
     dataset: Option<String>,
 
     /// Scanner file to run (repeatable)
-    #[arg(short, long = "file", value_name = "PATH", display_order = 4)]
+    #[arg(short, long = "file", value_name = "PATH", display_order = 5)]
     files: Vec<String>,
 
     /// Tasks to run at once
-    #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 5)]
+    #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 6)]
     jobs: usize,
 
     #[command(flatten)]
@@ -201,8 +204,17 @@ pub struct Scan2RunArgs {
     #[arg(long, display_order = 14)]
     invalidate: bool,
 
+    /// Skip prompts and confirmation
+    ///
+    /// Fills unspecified selections with defaults: the `default`
+    /// scanner group when none of --scanner, --file, or --group is
+    /// set, and the past 30 days capped at 20 sessions when no
+    /// session selection or dataset option is set.
+    #[arg(short, long, display_order = 15)]
+    yes: bool,
+
     /// Show available scanners and exit
-    #[arg(long, exclusive = true, display_order = 15)]
+    #[arg(long, exclusive = true, display_order = 16)]
     list_scanners: bool,
 }
 
@@ -390,156 +402,134 @@ async fn run_scan(args: Scan2RunArgs) {
         crate::cmd_scan::list_scanners(&ScannerRegistry::load());
         return;
     }
-    if args.scanners.is_empty() && args.files.is_empty() {
-        eprintln!("gage scan2: at least one --scanner or --file is required");
-        std::process::exit(2);
-    }
 
-    // The store is needed only at the end, but a missing store is a
-    // full stop before any work.
+    let registry = ScannerRegistry::load();
     let store = open_store("gage scan2");
-
-    // Either --dataset names an existing dataset, the
-    // session-selection options mint one populated with the
-    // matching native sessions, or --no-dataset runs with none.
-    // The clap group guarantees one of the three is present.
-    let dataset_sha = if args.no_dataset {
-        None
-    } else if let Some(prefix) = args.dataset.as_deref() {
-        let record = match DatasetStore::from(&store).get(prefix) {
-            Ok(record) => record,
-            Err(e) => {
-                eprintln!("gage scan2: --dataset {prefix}: {e}");
-                std::process::exit(1);
-            }
-        };
-        let members = match DatasetStore::from(&store).sessions_list(&record.id) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("gage scan2: --dataset {prefix}: {e}");
-                std::process::exit(1);
-            }
-        };
-        if members.is_empty() {
-            println!(
-                "Note: dataset {} contains no sessions; the scan will run against an empty set",
-                short_uuid(&record.id)
-            );
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("gage scan2: reading cwd: {e}");
+            std::process::exit(1);
         }
-        Some(record.commit_sha)
-    } else {
-        let id = cmd_dataset::create_dataset("gage scan2", &store);
-        println!("Created dataset {}", short_uuid(&id));
-        cmd_dataset::populate_dataset("gage scan2", &store, &id, None, &args.select, None).await;
-        match DatasetStore::from(&store).get(&id) {
-            Ok(record) => Some(record.commit_sha),
-            Err(e) => {
-                eprintln!("gage scan2: {e}");
-                std::process::exit(1);
-            }
+    };
+    let config = match gage_core::config::load_merged(&cwd) {
+        Ok((config, _)) => config,
+        Err(e) => {
+            eprintln!("gage scan2: reading config: {e}");
+            std::process::exit(1);
         }
     };
 
-    // Named scanners come from the registry; `-f` files are parsed on
-    // this invocation. Named scanners run first, then files. Either
-    // spec may carry a `#{...}` params override suffix.
-    let registry = ScannerRegistry::load();
-    let mut errors = 0;
-    let mut seen: Vec<&str> = Vec::new();
-    let mut scanners: Vec<Scanner<'_>> = Vec::new();
-    let mut file_defs: Vec<(ScannerDef, &str)> = Vec::new();
-    for spec in &args.scanners {
-        let (name, params_override) = split_scanner_spec(spec);
-        if seen.contains(&name) {
-            eprintln!("gage scan2: Scanner '{name}' specified more than once");
-            errors += 1;
-            continue;
-        }
-        seen.push(name);
-        // Library scanners are not selectable: same error as an
-        // unknown name
-        match registry.get_def(name) {
-            Some(def) if !def.library => match Scanner::from_spec(def, params_override, spec) {
-                Ok(scanner) => scanners.push(scanner),
-                Err(e) => {
-                    eprintln!("gage scan2: {e}");
-                    errors += 1;
-                }
-            },
-            _ => {
-                eprintln!("gage scan2: Unknown scanner: {name}");
-                errors += 1;
-            }
-        }
-    }
-    for spec in &args.files {
-        let (path, _) = split_scanner_spec(spec);
-        match parse_scanner_file(&PathBuf::from(path)) {
-            Ok(def) => file_defs.push((def, spec)),
-            Err(e) => {
-                eprintln!("gage scan2: {e}");
-                errors += 1;
-            }
-        }
-    }
-    for (def, spec) in &file_defs {
-        let (_, params_override) = split_scanner_spec(spec);
-        match Scanner::from_spec(def, params_override, spec) {
-            Ok(scanner) => scanners.push(scanner),
-            Err(e) => {
-                eprintln!("gage scan2: {e}");
-                errors += 1;
-            }
-        }
-    }
-    if errors > 0 {
-        std::process::exit(1);
-    }
-    let defs: Vec<&ScannerDef> = scanners.iter().map(|s| s.def).collect();
+    dialog::run_async("Scan sessions", move || {
+        run_scan_dialog(args, registry, config, store)
+    })
+    .await;
+}
 
-    // Pull in tasks that declare themselves `required_by` what the
-    // selection writes. `--no-deps` skips the pull-in so only the
-    // named scanners run.
+/// A chosen session set for the scan: an existing dataset, a new
+/// dataset to be built from the resolved native sessions, or none.
+/// `Reuse` and `None` carry everything needed to preview the plan;
+/// `New` carries the sessions resolved from `SessionSelectArgs`
+/// before any dataset is written.
+enum DatasetPlan {
+    Reuse {
+        id: String,
+        commit_sha: String,
+        session_count: usize,
+    },
+    New {
+        selected: Vec<SessionInfo>,
+    },
+    None,
+}
+
+/// Session-axis window prompt choices.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Window {
+    Today,
+    Days(u32),
+    All,
+}
+
+async fn run_scan_dialog(
+    mut args: Scan2RunArgs,
+    registry: ScannerRegistry,
+    config: Config,
+    store: Store,
+) -> Result<dialog::DialogResult, DialogError> {
+    // Scanner selection: -s/-g/-f, the `default` group under -y, or
+    // an interactive multi-select when the user supplied nothing.
+    let (scanner_specs, prompted) = resolve_scanner_specs(&args, &registry, &config)?;
+    let file_defs = parse_file_scanners(&args.files)?;
+    let mut scanners: Vec<Scanner<'_>> = Vec::new();
+    for spec in &scanner_specs {
+        let (name, params_override) = split_scanner_spec(spec);
+        let def = registry
+            .get_def(name)
+            .expect("resolve_scanner_specs validated the name against the registry");
+        let scanner = Scanner::from_spec(def, params_override, spec)
+            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        scanners.push(scanner);
+    }
+    for (def, spec) in file_defs.iter().zip(&args.files) {
+        let (_, params_override) = split_scanner_spec(spec);
+        let scanner = Scanner::from_spec(def, params_override, spec)
+            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        scanners.push(scanner);
+    }
+    // The multi-select has already displayed the user's choice;
+    // the preview is for pinned/defaulted selections only.
+    if !prompted {
+        preview_scanners(&scanners)?;
+    }
+
+    // Session / dataset axis: either reuse, mint from a selection,
+    // or none. The plan is a preview only; nothing is written until
+    // after the confirmation.
+    let plan = resolve_dataset_plan(&mut args, &store).await?;
+    preview_dataset(&plan)?;
+
+    // Preflight: compile every selected scanner and every pulled-in
+    // required_by dependent before any task runs.
+    let defs: Vec<&ScannerDef> = scanners.iter().map(|s| s.def).collect();
     let required = if args.no_deps {
         Vec::new()
     } else {
-        let cwd = match std::env::current_dir() {
-            Ok(cwd) => cwd,
-            Err(e) => {
-                eprintln!("gage scan2: reading cwd: {e}");
-                std::process::exit(1);
-            }
-        };
-        let config = match gage_core::config::load_merged(&cwd) {
-            Ok((config, _)) => config,
-            Err(e) => {
-                eprintln!("gage scan2: reading config: {e}");
-                std::process::exit(1);
-            }
-        };
         registry.required_tasks(&defs, &config)
     };
-
-    // Every scanner compiles before any task runs, so a broken
-    // scanner is a full stop.
     let mut compiled: Vec<CompiledScanner> = Vec::new();
-    let results = scanners.iter().map(gage_scan2::compile).chain(
+    let mut errors = 0;
+    let compile_results = scanners.iter().map(gage_scan2::compile).chain(
         required
             .iter()
             .map(|(def, tasks)| gage_scan2::compile(&Scanner::with_tasks(def, tasks.clone()))),
     );
-    for result in results {
+    for result in compile_results {
         match result {
-            Ok(s) => compiled.push(s),
+            Ok(c) => compiled.push(c),
             Err(e) => {
-                eprintln!("gage scan2: {e}");
+                cli::log::error(format!("{e}"))?;
                 errors += 1;
             }
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(DialogError::Failed(
+            "Scan not started due to scanner errors".to_string(),
+        ));
     }
+
+    // Confirmation.
+    if !args.yes {
+        let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+        if !confirmed {
+            return Err(DialogError::Canceled);
+        }
+    }
+
+    // Dataset materialization — the one write between the dialog
+    // and the scan.
+    let dataset_sha = materialize_dataset(plan, &store)?;
 
     // Ctrl-C cancels the run; the scan applies what ran. Once tokio
     // has taken the signal, a second Ctrl-C during apply has no
@@ -555,7 +545,7 @@ async fn run_scan(args: Scan2RunArgs) {
         })
     };
 
-    let config = ScanConfig {
+    let scan_config = ScanConfig {
         scans_dir: &scans_dir(),
         gage_version: crate::VERSION,
         dataset: dataset_sha.as_deref(),
@@ -564,41 +554,315 @@ async fn run_scan(args: Scan2RunArgs) {
         invalidate: args.invalidate,
     };
     // Headless: task output and the scan's own lines go to the
-    // terminal as they happen, unprefixed; records go to the scan
-    // record only
-    let result = gage_scan2::scan(&store, &config, &compiled, &cancel, |event| match event {
-        Event::Output(TaskOutput { output, .. }) => match output {
-            Output::Print(s) => print!("{s}"),
-            Output::Println(s) => println!("{s}"),
-            Output::Log { .. } | Output::Progress { .. } => {}
+    // terminal as they happen, unprefixed; the dialog outro renders
+    // the summary line from the returned outcome.
+    let result = gage_scan2::scan(
+        &store,
+        &scan_config,
+        &compiled,
+        &cancel,
+        |event| match event {
+            Event::Output(TaskOutput { output, .. }) => match output {
+                Output::Print(s) => print!("{s}"),
+                Output::Println(s) => println!("{s}"),
+                Output::Log { .. } | Output::Progress { .. } => {}
+            },
+            Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
+            Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
+            Event::Summary { .. } => {}
+            Event::Warning {
+                scanner,
+                task,
+                message,
+            } => eprintln!("warning: task {scanner}:{task} {message}"),
+            Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
         },
-        Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
-        Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
-        Event::Summary { id, attrs } => {
-            println!("{}", summary_line(&styled_scan_id(&store, &id), &attrs))
-        }
-        Event::Warning {
-            scanner,
-            task,
-            message,
-        } => eprintln!("warning: task {scanner}:{task} {message}"),
-        Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
-    })
+    )
     .await;
     io::stdout().flush().unwrap();
     cancel.cancel();
     signal_task.await.unwrap();
 
-    let outcome = match result {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            eprintln!("gage scan2: {e}");
-            std::process::exit(1);
+    let outcome = result.map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
+    let shown_id = styled_scan_id(&store, &outcome.id);
+    let summary = summary_line(&shown_id, &outcome.attrs);
+    if outcome.attrs.canceled || outcome.attrs.tasks.failed > 0 {
+        return Err(DialogError::Failed(summary));
+    }
+    Ok(summary.into())
+}
+
+/// Resolve the ordered list of registry scanner specs from `-s`,
+/// `-g`, the `-y` default, or an interactive multi-select when the
+/// user supplied no scanner input at all. `-f` paths are handled by
+/// the caller and are not part of this list. Returns `(specs,
+/// prompted)` where `prompted` is true when the selection came from
+/// the multi-select so the caller can skip its own preview.
+fn resolve_scanner_specs(
+    args: &Scan2RunArgs,
+    registry: &ScannerRegistry,
+    config: &Config,
+) -> Result<(Vec<String>, bool), DialogError> {
+    let s_bare: Vec<&str> = args
+        .scanners
+        .iter()
+        .map(|s| split_scanner_spec(s).0)
+        .collect();
+    for (i, name) in s_bare.iter().enumerate() {
+        if s_bare.iter().take(i).any(|n| n == name) {
+            return Err(DialogError::Failed(format!(
+                "Scanner '{name}' specified more than once"
+            )));
         }
-    };
-    let attrs = &outcome.attrs;
-    if attrs.canceled || attrs.tasks.failed > 0 {
-        std::process::exit(1);
+    }
+    for name in &s_bare {
+        match registry.get_def(name) {
+            Some(def) if !def.library => (),
+            _ => return Err(DialogError::Failed(format!("Unknown scanner: {name}"))),
+        }
+    }
+
+    let mut group_names: Vec<String> = Vec::new();
+    for group in &args.groups {
+        let members: Vec<&str> = registry
+            .group_members(group)
+            .into_iter()
+            .filter(|d| config.is_scanner_enabled(&d.name))
+            .map(|d| d.name.as_str())
+            .collect();
+        if members.is_empty() {
+            return Err(DialogError::Failed(format!(
+                "No scanners for group '{group}'"
+            )));
+        }
+        for name in members {
+            if !group_names.iter().any(|n| n == name) {
+                group_names.push(name.to_string());
+            }
+        }
+    }
+
+    let no_scanner_input =
+        args.scanners.is_empty() && args.groups.is_empty() && args.files.is_empty();
+    let mut prompted = false;
+    if no_scanner_input {
+        if args.yes {
+            let members: Vec<&str> = registry
+                .group_members("default")
+                .into_iter()
+                .filter(|d| config.is_scanner_enabled(&d.name))
+                .map(|d| d.name.as_str())
+                .collect();
+            if members.is_empty() {
+                return Err(DialogError::Failed(
+                    "No scanners in the default group".to_string(),
+                ));
+            }
+            for name in members {
+                group_names.push(name.to_string());
+            }
+        } else {
+            let selected = prompt_scanner_multiselect(registry, config)?;
+            if selected.is_empty() {
+                return Err(DialogError::Failed("No scanners selected".to_string()));
+            }
+            for name in selected {
+                group_names.push(name);
+            }
+            prompted = true;
+        }
+    }
+
+    // -s wins over -g on bare-name collision.
+    let group_names: Vec<String> = group_names
+        .into_iter()
+        .filter(|g| !s_bare.contains(&g.as_str()))
+        .collect();
+
+    let mut out: Vec<String> = Vec::with_capacity(args.scanners.len() + group_names.len());
+    out.extend(args.scanners.iter().cloned());
+    out.extend(group_names);
+    Ok((out, prompted))
+}
+
+/// Multi-select over enabled, non-library scanners with the
+/// `default` group pre-selected. The hint shown for each item is
+/// the first line of the scanner's description.
+fn prompt_scanner_multiselect(
+    registry: &ScannerRegistry,
+    config: &Config,
+) -> Result<Vec<String>, DialogError> {
+    let defs = registry.list_enabled(config);
+    let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    names.sort();
+    let default_indices: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            registry
+                .group_members("default")
+                .iter()
+                .any(|d| d.name == **n)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let mut prompt = cli::multiselect("Scanners").initial_values(default_indices);
+    for (i, name) in names.iter().enumerate() {
+        let hint = registry
+            .get_def(name)
+            .map(|d| d.description.lines().next().unwrap_or("").to_string())
+            .unwrap_or_default();
+        prompt = prompt.item(i, (*name).to_string(), hint);
+    }
+    let indices: Vec<usize> = prompt.interact()?;
+    Ok(indices
+        .into_iter()
+        .map(|i| {
+            names
+                .get(i)
+                .expect("selected index points into names")
+                .to_string()
+        })
+        .collect())
+}
+
+/// Parse `-f` paths into owned `ScannerDef` values. Reports every
+/// parse failure in one `Failed` so the user sees them all at once.
+fn parse_file_scanners(files: &[String]) -> Result<Vec<ScannerDef>, DialogError> {
+    let mut out = Vec::with_capacity(files.len());
+    let mut errors: Vec<String> = Vec::new();
+    for spec in files {
+        let (path, _) = split_scanner_spec(spec);
+        match parse_scanner_file(&PathBuf::from(path)) {
+            Ok(def) => out.push(def),
+            Err(e) => errors.push(format!("{e}")),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(DialogError::Failed(errors.join("\n")));
+    }
+    Ok(out)
+}
+
+fn preview_scanners(scanners: &[Scanner<'_>]) -> Result<(), DialogError> {
+    let lines: String = scanners
+        .iter()
+        .map(|s| format!("\n{}", style(&s.def.name).dim()))
+        .collect();
+    cli::log::step(format!("Scanners{lines}"))?;
+    Ok(())
+}
+
+/// Decide what the scan's dataset will be. Reuses `--dataset`,
+/// honors `--no-dataset`, otherwise prompts the session axis under
+/// an empty-and-not-`-y` call and runs `SessionSelectArgs::resolve`
+/// for the final native-session list.
+async fn resolve_dataset_plan(
+    args: &mut Scan2RunArgs,
+    store: &Store,
+) -> Result<DatasetPlan, DialogError> {
+    if args.no_dataset {
+        return Ok(DatasetPlan::None);
+    }
+    if let Some(prefix) = args.dataset.as_deref() {
+        let record = DatasetStore::from(store)
+            .get(prefix)
+            .map_err(|e| DialogError::Failed(format!("--dataset {prefix}: {e}")))?;
+        let members = DatasetStore::from(store)
+            .sessions_list(&record.id)
+            .map_err(|e| DialogError::Failed(format!("--dataset {prefix}: {e}")))?;
+        return Ok(DatasetPlan::Reuse {
+            id: record.id,
+            commit_sha: record.commit_sha,
+            session_count: members.len(),
+        });
+    }
+
+    if args.select.is_empty() && !args.yes {
+        prompt_session_axis(&mut args.select)?;
+    }
+    let selected = args
+        .select
+        .resolve("gage scan2")
+        .await
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    Ok(DatasetPlan::New { selected })
+}
+
+fn prompt_session_axis(select: &mut SessionSelectArgs) -> Result<(), DialogError> {
+    let window = cli::select("Timeframe")
+        .item(Window::Today, "Today", "")
+        .item(Window::Days(7), "This week", "")
+        .item(Window::Days(30), "30 days", "")
+        .item(Window::All, "All available", "")
+        .initial_value(Window::Days(30))
+        .interact()?;
+    match window {
+        Window::Today => select.today = true,
+        Window::Days(n) => select.days = Some(n),
+        Window::All => {
+            // "All available" implies no session cap; the limit
+            // prompt is skipped.
+            select.all = true;
+            return Ok(());
+        }
+    }
+    let limit = cli::select("Session limit")
+        .item(Some(20_usize), "20", "")
+        .item(Some(50_usize), "50", "")
+        .item(Some(100_usize), "100", "")
+        .item(None, "All available", "")
+        .initial_value(Some(20_usize))
+        .interact()?;
+    select.limit = limit;
+    Ok(())
+}
+
+fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
+    match plan {
+        DatasetPlan::Reuse {
+            id, session_count, ..
+        } => {
+            let line = format!(
+                "dataset {} ({} {})",
+                short_uuid(id),
+                session_count,
+                plural(*session_count, "session"),
+            );
+            cli::log::step(format!("Dataset\n{}", style(line).dim()))?;
+        }
+        DatasetPlan::New { selected } => {
+            let n = selected.len();
+            let line = format!("{n} {}", plural(n, "session"));
+            cli::log::step(format!("Sessions\n{}", style(line).dim()))?;
+        }
+        DatasetPlan::None => {
+            cli::log::step(format!("Dataset\n{}", style("none").dim()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write the dataset if one needs minting, and return the commit
+/// SHA that `ScanConfig.dataset` wants. `None` plan returns `None`;
+/// `Reuse` returns its stored SHA.
+fn materialize_dataset(plan: DatasetPlan, store: &Store) -> Result<Option<String>, DialogError> {
+    match plan {
+        DatasetPlan::None => Ok(None),
+        DatasetPlan::Reuse { commit_sha, .. } => Ok(Some(commit_sha)),
+        DatasetPlan::New { selected } => {
+            if selected.is_empty() {
+                return Err(DialogError::Failed(
+                    "No sessions matched the selection".to_string(),
+                ));
+            }
+            let id = cmd_dataset::create_dataset("gage scan2", store);
+            cmd_dataset::add_native_to_dataset("gage scan2", store, &id, None, &selected, None);
+            let record = DatasetStore::from(store)
+                .get(&id)
+                .map_err(|e| DialogError::Failed(format!("{e}")))?;
+            Ok(Some(record.commit_sha))
+        }
     }
 }
 
