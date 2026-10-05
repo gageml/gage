@@ -4,24 +4,27 @@
 use std::error::Error;
 use std::io;
 
-use gage_db::db::open_db;
 use ratatui::crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 
+use crate::app;
 use crate::options::ViewOptions;
-use crate::{app, session};
+use crate::session::Backend;
 
-pub async fn run(session_id: Option<&str>, options: ViewOptions) -> Result<(), Box<dyn Error>> {
-    let db = open_db()?;
+pub async fn run(
+    backend: Backend,
+    session_id: Option<&str>,
+    options: ViewOptions,
+) -> Result<(), Box<dyn Error>> {
     let document = match session_id {
-        Some(id) => Some(session::load(id, &db).await?),
+        Some(id) => Some(backend.load(id).await?),
         None => None,
     };
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = app::run(&mut terminal, document, &options, &db);
+    let result = app::run(&mut terminal, document, &options, &backend);
     if enhanced_keys {
         pop_keyboard_enhancements();
     }

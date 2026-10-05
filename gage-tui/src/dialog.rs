@@ -70,6 +70,27 @@ pub(crate) fn draw_wrapped_options(
     frame.render_widget(para, content);
 }
 
+/// Draw a centered message that wraps to a readable width, with a
+/// key-hint footer below the dialog border.
+pub(crate) fn draw_wrapped_message(frame: &mut Frame, message: &str, hint: &str) {
+    let frame_area = frame.area();
+    let text_width = (message.width() as u16)
+        .min(frame_area.width.saturating_sub(8).clamp(20, 52))
+        .max(hint.width() as u16);
+    let para = Paragraph::new(message.to_string())
+        .wrap(Wrap { trim: true })
+        .centered();
+    let content_height = (para.line_count(text_width) as u16).max(1);
+    let content = draw_chrome(frame, None, text_width, content_height, hint);
+    let [_, text, _] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(text_width),
+        Constraint::Fill(1),
+    ])
+    .areas(content);
+    frame.render_widget(para, text);
+}
+
 /// Draw centered content lines with a key-hint footer below the
 /// dialog border. The dialog is sized to fit the widest line.
 pub(crate) fn draw_lines(frame: &mut Frame, lines: Vec<Line>, hint: &str) {
@@ -83,16 +104,26 @@ pub(crate) fn draw_lines_titled(
     lines: Vec<Line>,
     hint: &str,
 ) {
+    let text_width = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let content = draw_chrome(frame, title, text_width, lines.len() as u16, hint);
+    frame.render_widget(Paragraph::new(lines).centered(), content);
+}
+
+/// Draw the dialog surface, border, and hint row for content
+/// `text_width` wide and `content_height` tall, centered on the
+/// frame, and return the content area: the border's interior less
+/// one row of padding above and below. The interior is four columns
+/// wider than the text, two each side, and is clipped to the frame.
+fn draw_chrome(
+    frame: &mut Frame,
+    title: Option<&str>,
+    text_width: u16,
+    content_height: u16,
+    hint: &str,
+) -> Rect {
     let frame_area = frame.area();
-    let content_width = lines
-        .iter()
-        .map(|l| l.width())
-        .max()
-        .unwrap_or(0)
-        .max(hint.width())
-        + 6;
-    let width = (content_width as u16).min(frame_area.width.saturating_sub(2));
-    let height = (lines.len() as u16 + 5).min(frame_area.height.saturating_sub(2));
+    let width = (text_width.max(hint.width() as u16) + 6).min(frame_area.width.saturating_sub(2));
+    let height = (content_height + 5).min(frame_area.height.saturating_sub(2));
     let area = Rect {
         x: frame_area.x + (frame_area.width.saturating_sub(width)) / 2,
         y: frame_area.y + (frame_area.height.saturating_sub(height)) / 2,
@@ -113,13 +144,13 @@ pub(crate) fn draw_lines_titled(
     frame.render_widget(block, border_area);
     let [_, content, _] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(lines.len() as u16),
+        Constraint::Length(content_height),
         Constraint::Length(1),
     ])
     .areas(inner);
-    frame.render_widget(Paragraph::new(lines).centered(), content);
     frame.render_widget(
         Paragraph::new(Span::styled(hint.to_string(), styles::Dialog::dim())).centered(),
         hint_row,
     );
+    content
 }

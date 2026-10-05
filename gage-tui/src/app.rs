@@ -7,16 +7,10 @@
 //! the parent at a terminus). `[`/`]` are deliberately unbound so a host
 //! embedding the view can step between sessions with them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use gage_claude::home::ClaudeHome;
-use gage_claude::project::project_display;
-
-use gage_db::note::{self, Note, NoteValue};
-use gage_db::rusqlite::Connection;
-use gage_db::target::{NoteTarget, SessionTarget};
+use gage_store::NoteValue;
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -29,12 +23,12 @@ use ratatui::widgets::{
 };
 use serde_json::Value;
 
-use crate::doc::Document;
+use crate::doc::{Document, Note};
 use crate::hint;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
-use crate::session;
+use crate::session::{self, Backend};
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
 use crate::{message, styles};
@@ -43,23 +37,23 @@ pub fn run(
     terminal: &mut DefaultTerminal,
     doc: Option<Document>,
     options: &ViewOptions,
-    db: &Connection,
+    backend: &Backend,
 ) -> io::Result<()> {
     let doc = match doc {
         Some(doc) => doc,
         // No session given: the open dialog doubles as the initial
         // picker; canceling it exits the app.
-        None => match standalone_pick(terminal, db)? {
+        None => match standalone_pick(terminal, backend)? {
             Some(doc) => doc,
             None => return Ok(()),
         },
     };
-    let mut state = AppState::new(doc, options, DocSource::Query);
+    let mut state = AppState::new(doc, options, DocSource::Backend, backend.supports_notes());
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
-            && handle_key(&mut state, key, db)? == KeyOutcome::Close
+            && handle_key(&mut state, key, backend)? == KeyOutcome::Close
         {
             return Ok(());
         }
@@ -70,9 +64,9 @@ pub fn run(
 /// session or cancels.
 fn standalone_pick(
     terminal: &mut DefaultTerminal,
-    db: &Connection,
+    backend: &Backend,
 ) -> io::Result<Option<Document>> {
-    let mut picker = session_picker(None)?;
+    let mut picker = session_picker(backend, None)?;
     loop {
         terminal.draw(|frame| {
             draw_empty_shell(frame);
@@ -84,7 +78,7 @@ fn standalone_pick(
             match picker.handle_key(key.code) {
                 PickerAction::None => {}
                 PickerAction::Close => return Ok(None),
-                PickerAction::Open(id) => return load_doc_blocking(&id, db).map(Some),
+                PickerAction::Open(id) => return load_doc_blocking(&id, backend).map(Some),
             }
         }
     }
@@ -124,35 +118,31 @@ fn draw_empty_shell(frame: &mut Frame) {
     );
 }
 
-/// Build the session-open picker from the corpus's recent sessions.
-fn session_picker(current: Option<&str>) -> io::Result<Picker> {
+/// Build the session-open picker from the backend's recent sessions.
+fn session_picker(backend: &Backend, current: Option<&str>) -> io::Result<Picker> {
     let items = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(session::list_recent(200))
+        tokio::runtime::Handle::current().block_on(backend.list_recent(200))
     })
     .map_err(|e| io::Error::other(e.to_string()))?;
-    let home = ClaudeHome::from_env().ok();
-    let mut displays: HashMap<String, String> = HashMap::new();
+    let (id_heading, id_style) = if backend.is_native() {
+        ("Native Id", styles::Text::native_id())
+    } else {
+        ("Id", styles::Text::id())
+    };
     let items: Vec<PickItem> = items
         .into_iter()
-        .map(|item| {
-            let short = gage_core::uuid::short_uuid(&item.id).to_string();
-            let project = displays
-                .entry(item.project)
-                .or_insert_with_key(|encoded| project_display(home.as_ref(), encoded))
-                .clone();
-            PickItem {
-                cells: vec![
-                    Span::styled(short, styles::Text::native_id()),
-                    Span::raw(project),
-                    Span::raw(item.title),
-                    Span::styled(picker::ago(item.mtime_ms), styles::Text::dim()),
-                ],
-                id: item.id,
-            }
+        .map(|item| PickItem {
+            cells: vec![
+                Span::styled(item.id_display, id_style),
+                Span::raw(item.project),
+                Span::raw(item.title),
+                Span::styled(picker::ago(item.time_ms), styles::Text::dim()),
+            ],
+            id: item.id,
         })
         .collect();
     let columns = vec![
-        PickColumn::new("Native Id", 9),
+        PickColumn::new(id_heading, 9),
         PickColumn::fit("Project", 24),
         PickColumn::fill("Title"),
         PickColumn::right("Modified", 8),
@@ -161,9 +151,9 @@ fn session_picker(current: Option<&str>) -> io::Result<Picker> {
 }
 
 /// Load a session document from the sync event loop.
-fn load_doc_blocking(session_id: &str, db: &Connection) -> io::Result<Document> {
+fn load_doc_blocking(session_id: &str, backend: &Backend) -> io::Result<Document> {
     tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(session::load(session_id, db))
+        tokio::runtime::Handle::current().block_on(backend.load(session_id))
     })
     .map_err(|e| io::Error::other(e.to_string()))
 }
@@ -172,7 +162,7 @@ fn load_doc_blocking(session_id: &str, db: &Connection) -> io::Result<Document> 
 /// request to dismiss the view (`q`/`Esc`); `Ignored` means the key had
 /// no effect at the current position, letting a host bind its own
 /// meaning (e.g. `[`/`]` stepping to another session).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyOutcome {
     Consumed,
     Close,
@@ -184,11 +174,11 @@ pub(crate) enum KeyOutcome {
 pub(crate) fn handle_key(
     state: &mut AppState,
     key: KeyEvent,
-    db: &Connection,
+    backend: &Backend,
 ) -> io::Result<KeyOutcome> {
     match &mut state.dialog {
         Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
-            handle_note_dialog(state, key, db);
+            handle_note_dialog(state, key, backend)?;
             return Ok(KeyOutcome::Consumed);
         }
         Dialog::ConfirmCancel { .. } => {
@@ -196,7 +186,7 @@ pub(crate) fn handle_key(
             return Ok(KeyOutcome::Consumed);
         }
         Dialog::ConfirmDelete { .. } => {
-            handle_confirm_delete(state, key.code, db);
+            handle_confirm_delete(state, key.code, backend)?;
             return Ok(KeyOutcome::Consumed);
         }
         Dialog::OpenSession(picker) => {
@@ -206,7 +196,7 @@ pub(crate) fn handle_key(
                 PickerAction::Open(id) => {
                     state.dialog = Dialog::None;
                     if id != state.doc.session.id {
-                        let doc = load_doc_blocking(&id, db)?;
+                        let doc = load_doc_blocking(&id, backend)?;
                         state.replace_doc(doc);
                     }
                 }
@@ -243,6 +233,12 @@ pub(crate) fn handle_key(
                     state.dialog = Dialog::None;
                 }
                 _ => {}
+            }
+            return Ok(KeyOutcome::Consumed);
+        }
+        Dialog::NotesUnavailable => {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc) {
+                state.dialog = Dialog::None;
             }
             return Ok(KeyOutcome::Consumed);
         }
@@ -321,7 +317,11 @@ pub(crate) fn handle_key(
             KeyOutcome::Consumed
         }
         KeyCode::Char('n') => {
-            state.begin_add_note();
+            if state.notes_writable {
+                state.begin_add_note();
+            } else {
+                state.dialog = Dialog::NotesUnavailable;
+            }
             KeyOutcome::Consumed
         }
         KeyCode::Char('v') => {
@@ -329,19 +329,20 @@ pub(crate) fn handle_key(
             KeyOutcome::Consumed
         }
         KeyCode::Char('o') => {
-            state.dialog = Dialog::OpenSession(session_picker(Some(&state.doc.session.id))?);
+            state.dialog =
+                Dialog::OpenSession(session_picker(backend, Some(&state.doc.session.id))?);
             KeyOutcome::Consumed
         }
-        KeyCode::Char('e') => {
+        KeyCode::Char('e') if state.notes_writable => {
             state.begin_edit_note();
             KeyOutcome::Consumed
         }
-        KeyCode::Char('d') => {
+        KeyCode::Char('d') if state.notes_writable => {
             state.begin_delete_note();
             KeyOutcome::Consumed
         }
         KeyCode::Char('r') => {
-            state.reload(db)?;
+            state.reload(backend)?;
             KeyOutcome::Consumed
         }
         _ => KeyOutcome::Ignored,
@@ -357,10 +358,10 @@ enum Focus {
 
 /// Where the document came from, so `reload` can re-read it.
 pub(crate) enum DocSource {
-    /// The indexed corpus via `gage-query` (`session::load`)
-    Query,
+    /// The backend the view runs over (`Backend::load`)
+    Backend,
     /// A session JSONL read directly (`session::load_from_path`) — used
-    /// for sessions outside the active corpus index
+    /// for sessions outside any source
     Path(std::path::PathBuf),
 }
 
@@ -416,17 +417,15 @@ enum Dialog {
     OpenSession(Picker),
     /// View-options toggles (`v`)
     Options,
+    /// Notice that `n` has nothing to write to over a native source
+    NotesUnavailable,
 }
+
+const NOTES_UNAVAILABLE: &str = "Notes cannot be added to native sessions. \
+Add the session to the store to write notes for it.";
 
 fn new_editor(text: &str) -> TextArea {
     TextArea::new(text)
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 pub(crate) struct AppState {
@@ -443,10 +442,17 @@ pub(crate) struct AppState {
     dialog: Dialog,
     turns: Option<Vec<Option<usize>>>,
     source: DocSource,
+    /// Whether the backend writes notes; gates the note keys
+    notes_writable: bool,
 }
 
 impl AppState {
-    pub(crate) fn new(doc: Document, options: &ViewOptions, source: DocSource) -> Self {
+    pub(crate) fn new(
+        doc: Document,
+        options: &ViewOptions,
+        source: DocSource,
+        notes_writable: bool,
+    ) -> Self {
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let outline = Outline::new(
             session_note_ids,
@@ -471,6 +477,7 @@ impl AppState {
             dialog: Dialog::None,
             turns,
             source,
+            notes_writable,
         }
     }
 
@@ -638,7 +645,7 @@ impl AppState {
         self.body_scroll = self.body_max_scroll;
     }
 
-    fn reload(&mut self, db: &Connection) -> io::Result<()> {
+    fn reload(&mut self, backend: &Backend) -> io::Result<()> {
         let session_id = self.doc.session.id.clone();
         let prior = self
             .list_state
@@ -646,10 +653,10 @@ impl AppState {
             .and_then(|i| self.outline.row(i))
             .map(|r| r.kind.clone());
         let doc = match &self.source {
-            DocSource::Query => tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(session::load(&session_id, db))
+            DocSource::Backend => tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(backend.load(&session_id))
             }),
-            DocSource::Path(path) => session::load_from_path(&session_id, path, db),
+            DocSource::Path(path) => session::load_from_path(&session_id, path),
         }
         .map_err(|e| io::Error::other(e.to_string()))?;
         if self.turns.is_some() {
@@ -721,7 +728,7 @@ impl AppState {
         *self.list_state.offset_mut() = 0;
         self.body_scroll = 0;
         self.focus = Focus::Outline;
-        self.source = DocSource::Query;
+        self.source = DocSource::Backend;
     }
 
     fn center_selected(&mut self) {
@@ -800,7 +807,7 @@ impl AppState {
         } else {
             "Edit comment"
         };
-        let (note_id, text) = (note.id.clone(), note_text(note));
+        let (note_id, text) = (note.id.clone(), note.text());
         self.open_note_editor(note_id, text, title);
         true
     }
@@ -891,22 +898,12 @@ fn note_projection(doc: &Document) -> (Vec<String>, Vec<Vec<String>>) {
     (session, entries)
 }
 
-/// A note's text for the editor: the plain string when the value is
-/// one, otherwise its JSON form.
-fn note_text(note: &Note) -> String {
-    note.value
-        .0
-        .as_str()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| note.value.to_json())
-}
-
 /// User-editable note names: comments and open codes.
 fn is_editable(name: &str) -> bool {
     matches!(name, "comment" | "open")
 }
 
-fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
+fn handle_note_dialog(state: &mut AppState, key: KeyEvent, backend: &Backend) -> io::Result<()> {
     // Newline shortcuts. Terminals without the Kitty keyboard protocol can't
     // distinguish Shift+Enter from Enter, so accept Alt+Enter and Ctrl+J as
     // fallbacks that legacy input layers always report.
@@ -926,7 +923,7 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
             if empty {
                 state.dialog = Dialog::None;
             } else {
-                commit_note(state, db);
+                commit_note(state, backend)?;
             }
         }
         KeyCode::Esc => {
@@ -949,7 +946,7 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
         _ => {
             let editor = match &mut state.dialog {
                 Dialog::AddNote { editor, .. } | Dialog::EditNote { editor, .. } => editor,
-                _ => return,
+                _ => return Ok(()),
             };
             if is_newline_shortcut {
                 editor.insert_newline();
@@ -958,9 +955,14 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, db: &Connection) {
             }
         }
     }
+    Ok(())
 }
 
-fn commit_note(state: &mut AppState, db: &Connection) {
+/// Write the editor's note through the backend and reflect it in the
+/// document. A write failure is returned; the dialog is already
+/// closed, so the host surfaces the error and the view stays as it
+/// was.
+fn commit_note(state: &mut AppState, backend: &Backend) -> io::Result<()> {
     match std::mem::replace(&mut state.dialog, Dialog::None) {
         Dialog::AddNote {
             entry_index,
@@ -971,44 +973,39 @@ fn commit_note(state: &mut AppState, db: &Connection) {
             let line = match entry_index {
                 Some(i) => match state.doc.entries.get(i) {
                     Some(entry) => Some(entry.line),
-                    None => return,
+                    None => return Ok(()),
                 },
                 // Session-level note: a session target with no line
                 None => None,
             };
-            let text = editor.text();
-            let mut target = SessionTarget::new(&state.doc.session.id);
-            if let Some(line) = line {
-                target = target.with_line(line);
-            }
-            let target = NoteTarget::Session(target);
-            let note = Note::new(target, name, NoteValue::from(text), &state.author());
-            if let Ok(()) = note::insert(db, &note) {
-                let id = note.id.clone();
-                state.doc.add_note(note);
-                // Selection stays on the row that opened the dialog; the new
-                // note rows are appended after it, so the index is unaffected.
-                state.outline.add_note(entry_index, id);
-            }
+            let note = backend
+                .add_note(
+                    &state.doc.session.id,
+                    line,
+                    name,
+                    editor.text(),
+                    &state.author(),
+                )
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let id = note.id.clone();
+            state.doc.add_note(note);
+            // Selection stays on the row that opened the dialog; the new
+            // note rows are appended after it, so the index is unaffected.
+            state.outline.add_note(entry_index, id);
         }
         Dialog::EditNote {
             note_id, editor, ..
         } => {
-            let Some(existing) = state.doc.note(&note_id).cloned() else {
-                return;
-            };
-            let mut updated = existing;
-            updated.value = NoteValue::from(editor.text());
-            if let Ok(new) = note::replace(db, &note_id, &updated) {
-                state.doc.replace_note_value(
-                    &note_id,
-                    new.value,
-                    new.modified.unwrap_or_else(now_ms),
-                );
-            }
+            let note = backend
+                .edit_note(&note_id, editor.text())
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            state
+                .doc
+                .replace_note_value(&note_id, note.value, note.modified_ms);
         }
         other => state.dialog = other,
     }
+    Ok(())
 }
 
 fn handle_confirm_cancel(state: &mut AppState, code: KeyCode) {
@@ -1027,33 +1024,35 @@ fn handle_confirm_cancel(state: &mut AppState, code: KeyCode) {
     }
 }
 
-fn handle_confirm_delete(state: &mut AppState, code: KeyCode, db: &Connection) {
-    match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            if let Dialog::ConfirmDelete { note_id } =
-                std::mem::replace(&mut state.dialog, Dialog::None)
-                && note::delete(db, &note_id).is_ok()
-            {
-                state.doc.remove_note(&note_id);
-                if let Some(owner) = state.outline.remove_note(&note_id) {
-                    let target_row = match owner {
-                        Some(entry_index) => state.outline.rows().iter().position(
-                            |r| matches!(&r.kind, RowKind::Entry { index } if *index == entry_index),
-                        ),
-                        // Session notes hang off the session row, always row 0
-                        None => Some(0),
-                    };
-                    if let Some(r) = target_row {
-                        state.list_state.select(Some(r));
-                    } else {
-                        state.clamp_selection();
-                    }
-                    state.body_scroll = 0;
-                }
-            }
-        }
-        _ => state.dialog = Dialog::None,
+fn handle_confirm_delete(state: &mut AppState, code: KeyCode, backend: &Backend) -> io::Result<()> {
+    let Dialog::ConfirmDelete { note_id } = std::mem::replace(&mut state.dialog, Dialog::None)
+    else {
+        return Ok(());
+    };
+    if !matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        return Ok(());
     }
+    backend
+        .delete_note(&note_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    state.doc.remove_note(&note_id);
+    if let Some(owner) = state.outline.remove_note(&note_id) {
+        let target_row =
+            match owner {
+                Some(entry_index) => state.outline.rows().iter().position(
+                    |r| matches!(&r.kind, RowKind::Entry { index } if *index == entry_index),
+                ),
+                // Session notes hang off the session row, always row 0
+                None => Some(0),
+            };
+        if let Some(r) = target_row {
+            state.list_state.select(Some(r));
+        } else {
+            state.clamp_selection();
+        }
+        state.body_scroll = 0;
+    }
+    Ok(())
 }
 
 fn page_size(viewport: u16) -> u16 {
@@ -1304,24 +1303,25 @@ fn entry_header(doc: &Document, index: usize) -> String {
 }
 
 fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
-    let value = match &note.value.0 {
-        serde_json::Value::String(s) => s.clone(),
-        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    let value = match &note.value {
+        NoteValue::Text(s) => s.clone(),
+        NoteValue::Json(v) => serde_json::to_string_pretty(v).unwrap(),
     };
-    let modified_suffix = note
-        .modified
-        .map(|m| format!(" · edited {}", format_ms(m)))
-        .unwrap_or_default();
+    let modified_suffix = if note.modified_ms > note.created_ms {
+        format!(" · edited {}", format_ms(note.modified_ms))
+    } else {
+        String::new()
+    };
     let mut header_spans = vec![Span::styled(
         format!(
             "{} · {}{}",
             note.author,
-            format_ms(note.created),
+            format_ms(note.created_ms),
             modified_suffix
         ),
         styles::Text::dim(),
     )];
-    if let Some(n) = target_span_lines(&note.target) {
+    if let Some(n) = note.span_lines() {
         header_spans.push(Span::styled(" · ", styles::Text::dim()));
         header_spans.push(Span::styled(
             format!("spans {n} lines"),
@@ -1336,9 +1336,7 @@ fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
         lines.push(Line::from(l.to_string()));
     }
     if let Some(metadata) = &note.metadata {
-        let pretty = serde_json::from_str::<serde_json::Value>(metadata)
-            .and_then(|v| serde_json::to_string_pretty(&v))
-            .unwrap_or_else(|_| metadata.clone());
+        let pretty = serde_json::to_string_pretty(metadata).unwrap();
         lines.push(Line::from(""));
         for l in pretty.lines() {
             lines.push(Line::from(l.to_string()));
@@ -1348,18 +1346,6 @@ fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
         .wrap(Wrap { trim: false })
         .block(Block::default().padding(Padding::uniform(1)));
     frame.render_widget(p, area);
-}
-
-/// The line count of a session target's range, when it has one. A
-/// single-line or whole-session target yields `None` — no span label.
-fn target_span_lines(target: &NoteTarget) -> Option<u32> {
-    match target {
-        NoteTarget::Session(t) => match (t.line, t.line_end) {
-            (Some(line), Some(end)) if end > line => Some(end - line + 1),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 fn format_ms(ms: i64) -> String {
@@ -1514,6 +1500,9 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, detail: bool, turns: bool
     match dialog {
         Dialog::None => {}
         Dialog::Options => draw_options(frame, detail, turns),
+        Dialog::NotesUnavailable => {
+            crate::dialog::draw_wrapped_message(frame, NOTES_UNAVAILABLE, "Enter dismiss")
+        }
         Dialog::NoteType { .. } => draw_note_type(frame),
         Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor),
         Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor),
@@ -1701,4 +1690,150 @@ fn scrollbar(active: bool) -> Scrollbar<'static> {
         .thumb_symbol("┃")
         .track_symbol(Some("│"))
         .style(styles::Panel::scrollbar(active))
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::KeyEvent;
+
+    use super::*;
+    use crate::session::tests::fixture;
+
+    /// The rendered screen as one string, rows joined by newlines
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn press(state: &mut AppState, backend: &Backend, code: KeyCode) -> KeyOutcome {
+        handle_key(state, KeyEvent::new(code, KeyModifiers::NONE), backend).unwrap()
+    }
+
+    fn type_text(state: &mut AppState, backend: &Backend, text: &str) {
+        for c in text.chars() {
+            press(state, backend, KeyCode::Char(c));
+        }
+    }
+
+    /// The labels of the outline's visible rows
+    fn outline_labels(state: &AppState) -> Vec<String> {
+        state
+            .outline
+            .rows()
+            .iter()
+            .map(|r| match &r.kind {
+                RowKind::Session => "<Session>".to_string(),
+                RowKind::Entry { index } => format!("entry {index}"),
+                RowKind::Note { note_id, .. } => {
+                    format!("note {}", state.doc.note(note_id).unwrap().text())
+                }
+            })
+            .collect()
+    }
+
+    /// Adding, editing, and deleting a note through the keys writes
+    /// the store and keeps the outline in step with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn note_keys_write_the_store() {
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 1"]);
+
+        // Add a comment on the second entry
+        press(&mut state, &backend, KeyCode::Char('j'));
+        press(&mut state, &backend, KeyCode::Char('j'));
+        press(&mut state, &backend, KeyCode::Char('n'));
+        press(&mut state, &backend, KeyCode::Char('c'));
+        type_text(&mut state, &backend, "first");
+        press(&mut state, &backend, KeyCode::Enter);
+        assert!(matches!(state.dialog, Dialog::None));
+        press(&mut state, &backend, KeyCode::Right);
+        assert_eq!(
+            outline_labels(&state),
+            ["<Session>", "entry 0", "entry 1", "note first"]
+        );
+        let stored = backend.load(&f.session_id).await.unwrap();
+        assert_eq!(stored.notes_for_line(2)[0].text(), "first");
+        assert_eq!(stored.notes[0].author, state.author());
+
+        // Edit it: the editor opens with the text, Enter saves
+        press(&mut state, &backend, KeyCode::Char('j'));
+        press(&mut state, &backend, KeyCode::Char('e'));
+        assert!(matches!(state.dialog, Dialog::EditNote { .. }));
+        type_text(&mut state, &backend, " second");
+        press(&mut state, &backend, KeyCode::Enter);
+        assert_eq!(outline_labels(&state)[3], "note first second");
+        let stored = backend.load(&f.session_id).await.unwrap();
+        assert_eq!(stored.notes[0].text(), "first second");
+
+        // Delete it after confirming
+        press(&mut state, &backend, KeyCode::Char('d'));
+        assert!(matches!(state.dialog, Dialog::ConfirmDelete { .. }));
+        press(&mut state, &backend, KeyCode::Char('y'));
+        assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 1"]);
+        let stored = backend.load(&f.session_id).await.unwrap();
+        assert!(stored.notes.is_empty());
+    }
+
+    /// Over a native source `n` explains that notes need a stored
+    /// session, and the edit and delete keys are inert.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn note_key_explains_itself_without_note_support() {
+        let f = fixture();
+        let backend = Backend::native(&f.spec).await.unwrap();
+        let doc = backend.load(&f.native_id).await.unwrap();
+        let mut state = AppState::new(
+            doc,
+            &ViewOptions::default(),
+            DocSource::Backend,
+            backend.supports_notes(),
+        );
+        assert_eq!(
+            press(&mut state, &backend, KeyCode::Char('n')),
+            KeyOutcome::Consumed
+        );
+        assert!(matches!(state.dialog, Dialog::NotesUnavailable));
+        press(&mut state, &backend, KeyCode::Enter);
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(
+            press(&mut state, &backend, KeyCode::Char('e')),
+            KeyOutcome::Ignored
+        );
+        assert_eq!(
+            press(&mut state, &backend, KeyCode::Char('d')),
+            KeyOutcome::Ignored
+        );
+    }
+
+    /// The notice wraps inside a terminal narrower than its text, so
+    /// every word is on screen and the hint sits below it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn notes_unavailable_notice_wraps_to_the_terminal() {
+        let f = fixture();
+        let backend = Backend::native(&f.spec).await.unwrap();
+        let doc = backend.load(&f.native_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        press(&mut state, &backend, KeyCode::Char('n'));
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let rows: Vec<&str> = text.lines().collect();
+        let first = rows
+            .iter()
+            .position(|r| r.contains("Notes cannot be added"))
+            .expect("the notice should be on screen");
+        assert!(rows[first + 1].contains("to the store"), "{text}");
+        assert!(rows.iter().any(|r| r.contains("Enter dismiss")), "{text}");
+    }
 }

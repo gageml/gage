@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +18,7 @@ use gage_query2::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_store::{DatasetStore, SessionOutcome, SessionSpec, SessionStore, Store};
+use gage_tui::session::Backend;
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
     Table,
@@ -994,9 +996,6 @@ fn remove_from_store(store: &Store, ids: &[String]) {
     }
 }
 
-/// The query context over the default source. `delete` and `view`
-/// resolve sessions through the pre-driver path and are not yet
-/// source-aware; they operate on the default source only.
 pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArgs) {
     if stored {
         eprintln!(
@@ -1133,18 +1132,7 @@ async fn delete_targets(ctx: &SessionContext, sql: &str) -> Vec<DeleteTarget> {
     targets
 }
 
-pub async fn view(args: SessionViewArgs) {
-    // No session arg: the view opens with its session picker dialog.
-    let session_id = match args.session {
-        Some(prefix) => match one_session(&prefix) {
-            Ok(s) => Some(s.id),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        },
-        None => None,
-    };
+pub async fn view(source: Option<String>, stored: bool, args: SessionViewArgs) {
     let options = match ViewOptions::parse(&args.options) {
         Ok(o) => o,
         Err(e) => {
@@ -1152,10 +1140,46 @@ pub async fn view(args: SessionViewArgs) {
             std::process::exit(1);
         }
     };
-    if let Err(e) = session_view::run(session_id.as_deref(), options).await {
+    // No session arg: the view opens with its session picker dialog.
+    let result = if stored {
+        view_stored(args.session.as_deref(), options).await
+    } else {
+        view_native(source.as_deref(), args.session.as_deref(), options).await
+    };
+    if let Err(e) = result {
         eprintln!("gage session view: {e}");
         std::process::exit(1);
     }
+}
+
+async fn view_stored(prefix: Option<&str>, options: ViewOptions) -> Result<(), Box<dyn Error>> {
+    let store = Store::open(&gage_store::store_path())?;
+    let id = match prefix {
+        Some(prefix) => Some(SessionStore::from(&store).get(prefix)?.id),
+        None => None,
+    };
+    let backend = Backend::stored(store).await;
+    session_view::run(backend, id.as_deref(), options).await
+}
+
+async fn view_native(
+    source: Option<&str>,
+    prefix: Option<&str>,
+    options: ViewOptions,
+) -> Result<(), Box<dyn Error>> {
+    let registry = source::driver_registry();
+    let (driver, spec) = source::resolve_source(&registry, source)?;
+    let id = match prefix {
+        Some(prefix) => {
+            let opened = driver.open_source(&spec)?;
+            let id = opened.find_native(prefix)?;
+            opened.close()?;
+            Some(id)
+        }
+        None => None,
+    };
+    let backend = Backend::native(&spec).await?;
+    session_view::run(backend, id.as_deref(), options).await
 }
 
 pub fn move_(args: SessionMoveArgs) {

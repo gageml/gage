@@ -8,8 +8,9 @@ datafusion = { workspace = true }
 gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
-gage-query = { path = "../gage-query" }
+gage-query2 = { path = "../gage-query2" }
 gage-registry = { path = "../gage-registry" }
+gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 serde_json = { workspace = true }
@@ -22,7 +23,6 @@ unicode-width = "0.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
-gage-session = { path = "../gage-session" }
 tempfile = { workspace = true }
 
 [lints]

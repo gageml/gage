@@ -12,7 +12,6 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gage_db::rusqlite::Connection;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::{Line, Span};
@@ -23,9 +22,10 @@ use crate::item_table::ItemTable;
 use crate::panel::{header_row, panel_block};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::scroll::ScrollView;
+use crate::session::{self, Backend};
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::text::fmt_duration;
-use crate::{app, attrs::attr_lines, hint, session, styles};
+use crate::{app, attrs::attr_lines, hint, styles};
 
 pub struct TestRunModel {
     pub run_id: String,
@@ -243,11 +243,11 @@ enum Dialog {
         test: usize,
     },
     /// A test's session in the shared session view component. The
-    /// connection serves the view's note operations.
+    /// backend serves the view's session picker.
     Session {
         node: Node,
         view: Box<app::AppState>,
-        db: Connection,
+        backend: Backend,
     },
 }
 
@@ -419,14 +419,17 @@ impl ViewState {
                 else {
                     return;
                 };
-                let db = match gage_db::db::open_db() {
-                    Ok(db) => db,
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(Backend::native(""))
+                });
+                let backend = match backend {
+                    Ok(backend) => backend,
                     Err(e) => {
-                        self.error = Some(format!("open db: {e}"));
+                        self.error = Some(format!("open source: {e}"));
                         return;
                     }
                 };
-                let doc = match session::load_from_path(&id, &path, &db) {
+                let doc = match session::load_from_path(&id, &path) {
                     Ok(d) => d,
                     Err(e) => {
                         self.error = Some(format!("open session {id}: {e}"));
@@ -437,11 +440,11 @@ impl ViewState {
                     show_turns: true,
                     ..Default::default()
                 };
-                let view = app::AppState::new(doc, &options, app::DocSource::Path(path));
+                let view = app::AppState::new(doc, &options, app::DocSource::Path(path), false);
                 self.dialog = Dialog::Session {
                     node,
                     view: Box::new(view),
-                    db,
+                    backend,
                 };
             }
         }
@@ -476,8 +479,8 @@ impl ViewState {
         let mut close = false;
         let mut step: isize = 0;
         let mut error: Option<String> = None;
-        if let Dialog::Session { view, db, .. } = &mut self.dialog {
-            match app::handle_key(view, key, db) {
+        if let Dialog::Session { view, backend, .. } = &mut self.dialog {
+            match app::handle_key(view, key, backend) {
                 Ok(app::KeyOutcome::Consumed) => {}
                 Ok(app::KeyOutcome::Close) => close = true,
                 Ok(app::KeyOutcome::Ignored) => {

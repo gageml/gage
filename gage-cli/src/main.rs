@@ -342,7 +342,9 @@ async fn main() {
                 cmd_session::SessionCommand::Delete(args) => {
                     cmd_session::delete(source, stored, args).await
                 }
-                cmd_session::SessionCommand::View(args) => cmd_session::view(args).await,
+                cmd_session::SessionCommand::View(args) => {
+                    cmd_session::view(source, stored, args).await
+                }
                 cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),
             },
             Command::Dataset { command } => match command {

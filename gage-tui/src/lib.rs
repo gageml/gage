@@ -12,7 +12,7 @@ mod panel;
 mod picker;
 pub mod scan_view;
 mod scroll;
-mod session;
+pub mod session;
 pub mod session_view;
 mod stack;
 pub mod store_view;

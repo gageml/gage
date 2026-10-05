@@ -37,8 +37,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use gage_db::rusqlite::Connection;
-
 use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::doc::Document;
@@ -50,6 +48,7 @@ use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 /// picked scan id. Absent for live-scan views, where `o` is disabled.
 type ScanLoader<'a> = &'a dyn Fn(&str) -> io::Result<ScanModel>;
 use crate::scroll::ScrollView;
+use crate::session::Backend;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::text::{ellipsize, fmt_duration, fmt_duration_live};
 use crate::textarea::TextArea;
@@ -1138,7 +1137,7 @@ enum Dialog {
         id: String,
         view: Box<app::AppState>,
         nav: SessionNav,
-        db: Connection,
+        backend: Backend,
         return_to: Option<Box<Dialog>>,
     },
     /// Pure notification over another dialog; Enter restores it
@@ -1366,13 +1365,13 @@ impl ViewState {
                     show_turns: true,
                     ..Default::default()
                 };
-                let mut view = app::AppState::new(hit.doc, &options, hit.source);
+                let mut view = app::AppState::new(hit.doc, &options, hit.source, false);
                 view.select_entry(hit.entry_index);
                 Dialog::Session {
                     id: hit.item.id,
                     view: Box::new(view),
                     nav: SessionNav::PinnedAgent,
-                    db: hit.db,
+                    backend: hit.backend,
                     return_to: Some(return_to),
                 }
             }
@@ -1395,8 +1394,8 @@ impl ViewState {
             .iter()
             .flat_map(|t| t.agents.iter().map(|a| agent_session_item(t, a)))
             .collect();
-        let db = match gage_db::db::open_db() {
-            Ok(db) => db,
+        let backend = match open_backend() {
+            Ok(backend) => backend,
             Err(e) => {
                 self.push_log(format!("Find tool use {call_id}: {e}"));
                 return None;
@@ -1409,7 +1408,7 @@ impl ViewState {
             {
                 continue;
             }
-            match load_session_doc(&item, &db) {
+            match load_session_doc(&item, &backend) {
                 Ok((doc, source)) => {
                     if let Some(entry_index) = tool_use_entry_index(&doc, call_id) {
                         return Some(ToolUseHit {
@@ -1417,7 +1416,7 @@ impl ViewState {
                             doc,
                             source,
                             entry_index,
-                            db,
+                            backend,
                         });
                     }
                 }
@@ -1457,9 +1456,9 @@ impl ViewState {
     /// the dialog instead.
     fn open_session_at_target(&mut self, target: SessionTarget) {
         let item = self.target_session_item(&target.session_id);
-        let loaded = match gage_db::db::open_db() {
-            Ok(db) => match load_session_doc(&item, &db) {
-                Ok((doc, source)) => Some((doc, source, db)),
+        let loaded = match open_backend() {
+            Ok(backend) => match load_session_doc(&item, &backend) {
+                Ok((doc, source)) => Some((doc, source, backend)),
                 Err(e) => {
                     self.push_log(format!("Open session {}: {e}", item.id));
                     None
@@ -1472,13 +1471,13 @@ impl ViewState {
         };
         let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
         self.dialog = match loaded {
-            Some((doc, source, db)) => {
+            Some((doc, source, backend)) => {
                 let entry_index = target.line.and_then(|l| entry_index_for_line(&doc, l));
                 let options = crate::ViewOptions {
                     show_turns: true,
                     ..Default::default()
                 };
-                let mut view = app::AppState::new(doc, &options, source);
+                let mut view = app::AppState::new(doc, &options, source, false);
                 if let Some(i) = entry_index {
                     view.select_entry(i);
                 }
@@ -1486,7 +1485,7 @@ impl ViewState {
                     id: item.id,
                     view: Box::new(view),
                     nav: SessionNav::PinnedSession,
-                    db,
+                    backend,
                     return_to: Some(return_to),
                 }
             }
@@ -1825,14 +1824,14 @@ impl ViewState {
     /// the same component `gage session view` runs; its UI position is
     /// restored when the session was viewed before.
     fn open_session_dialog(&mut self, item: &SessionItem, nav: SessionNav) {
-        let db = match gage_db::db::open_db() {
-            Ok(db) => db,
+        let backend = match open_backend() {
+            Ok(backend) => backend,
             Err(e) => {
                 self.push_log(format!("Open session {}: {e}", item.id));
                 return;
             }
         };
-        let (doc, source) = match load_session_doc(item, &db) {
+        let (doc, source) = match load_session_doc(item, &backend) {
             Ok(loaded) => loaded,
             Err(e) => {
                 self.push_log(format!("Open session {}: {e}", item.id));
@@ -1843,7 +1842,7 @@ impl ViewState {
             show_turns: true,
             ..Default::default()
         };
-        let mut view = app::AppState::new(doc, &options, source);
+        let mut view = app::AppState::new(doc, &options, source, false);
         if let Some(saved) = self.session_ui.get(&item.id) {
             view.restore_ui(saved);
         }
@@ -1851,7 +1850,7 @@ impl ViewState {
             id: item.id.clone(),
             view: Box::new(view),
             nav,
-            db,
+            backend,
             return_to: None,
         };
     }
@@ -1866,13 +1865,17 @@ impl ViewState {
         let mut step: isize = 0;
         let mut error: Option<String> = None;
         if let Dialog::Session {
-            id, view, nav, db, ..
+            id,
+            view,
+            nav,
+            backend,
+            ..
         } = &mut self.dialog
         {
             // Pinned views are transient peeks positioned at a tool-use
             // entry; saving them would clobber the browsed position.
             let remember = !matches!(nav, SessionNav::PinnedAgent | SessionNav::PinnedSession);
-            match app::handle_key(view, key, db) {
+            match app::handle_key(view, key, backend) {
                 Ok(app::KeyOutcome::Consumed) => {}
                 Ok(app::KeyOutcome::Close) => {
                     if remember {
@@ -2320,13 +2323,13 @@ fn agent_session_item(task: &TaskItem, agent: &AgentItem) -> SessionItem {
 
 /// A located tool-use entry: the agent session it was found in, the
 /// session's loaded document, and the entry's position in it. The
-/// connection is handed on to the session dialog.
+/// backend is handed on to the session dialog.
 struct ToolUseHit {
     item: SessionItem,
     doc: Document,
     source: app::DocSource,
     entry_index: usize,
-    db: Connection,
+    backend: Backend,
 }
 
 /// The tool-use call id embedded in an author of the form
@@ -2704,28 +2707,35 @@ fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<
 /// session's issues, session-level notes (targets with no line
 /// number), and an optional trailing notice (truncation or read
 /// error).
+/// The session view's backend for this legacy view: the default
+/// native source, which is the corpus the legacy scan read.
+fn open_backend() -> Result<Backend, String> {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(Backend::native("")))
+        .map_err(|e| e.to_string())
+}
+
 /// Load the session document for the dialog's embedded view. Prefers
-/// the indexed corpus (matching `gage session view`); a session absent
-/// from the index — agent sessions, or one indexed as empty — falls
-/// back to reading the JSONL directly when its path is known.
+/// the source (matching `gage session view`); a session absent from
+/// the source — agent sessions, or one indexed as empty — falls back
+/// to reading the JSONL directly when its path is known.
 fn load_session_doc(
     item: &SessionItem,
-    db: &Connection,
+    backend: &Backend,
 ) -> Result<(Document, app::DocSource), String> {
     let indexed = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(session::load(&item.id, db))
+        tokio::runtime::Handle::current().block_on(backend.load(&item.id))
     });
     match indexed {
-        Ok(doc) if !doc.entries.is_empty() => Ok((doc, app::DocSource::Query)),
+        Ok(doc) if !doc.entries.is_empty() => Ok((doc, app::DocSource::Backend)),
         other => match &item.path {
             Some(path) => {
-                let doc = session::load_from_path(&item.id, path, db).map_err(|e| e.to_string())?;
+                let doc = session::load_from_path(&item.id, path).map_err(|e| e.to_string())?;
                 Ok((doc, app::DocSource::Path(path.clone())))
             }
             // No JSONL to fall back to: an empty indexed document still
             // renders (as empty); an index error is surfaced.
             None => match other {
-                Ok(doc) => Ok((doc, app::DocSource::Query)),
+                Ok(doc) => Ok((doc, app::DocSource::Backend)),
                 Err(e) => Err(e.to_string()),
             },
         },
@@ -3645,12 +3655,22 @@ mod tests {
             entries: Vec::new(),
             notes: Vec::new(),
         };
-        let view = app::AppState::new(doc, &crate::ViewOptions::default(), app::DocSource::Query);
+        let view = app::AppState::new(
+            doc,
+            &crate::ViewOptions::default(),
+            app::DocSource::Backend,
+            false,
+        );
+        let backend = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(Backend::native(""))
+            .unwrap();
         state.dialog = Dialog::Session {
             id: "s1".into(),
             view: Box::new(view),
             nav,
-            db: Connection::open_in_memory().unwrap(),
+            backend,
             return_to: None,
         };
         state

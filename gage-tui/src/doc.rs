@@ -5,8 +5,7 @@
 //! plus a `yaml()` serializer. The two follow the same pattern so the body
 //! pane renders them through the same highlighter path.
 
-use gage_db::note::Note;
-use gage_db::target::NoteTarget;
+use gage_store::NoteValue;
 use serde_json::Value;
 
 pub struct Document {
@@ -24,18 +23,12 @@ impl Document {
     /// its first line; the range's extent shows in the note body's
     /// header instead.
     pub fn notes_for_line(&self, line: u32) -> Vec<&Note> {
-        self.notes
-            .iter()
-            .filter(|n| matches!(&n.target, NoteTarget::Session(t) if t.line == Some(line)))
-            .collect()
+        self.notes.iter().filter(|n| n.line == Some(line)).collect()
     }
 
     /// Notes attached to the session itself — a session target with no line.
     pub fn session_notes(&self) -> Vec<&Note> {
-        self.notes
-            .iter()
-            .filter(|n| matches!(&n.target, NoteTarget::Session(t) if t.line.is_none()))
-            .collect()
+        self.notes.iter().filter(|n| n.line.is_none()).collect()
     }
 
     pub fn add_note(&mut self, note: Note) {
@@ -46,10 +39,49 @@ impl Document {
         self.notes.retain(|n| n.id != id);
     }
 
-    pub fn replace_note_value(&mut self, id: &str, value: gage_db::note::NoteValue, modified: i64) {
+    pub fn replace_note_value(&mut self, id: &str, value: NoteValue, modified_ms: i64) {
         if let Some(n) = self.notes.iter_mut().find(|n| n.id == id) {
             n.value = value;
-            n.modified = Some(modified);
+            n.modified_ms = modified_ms;
+        }
+    }
+}
+
+/// A note on the document's session, as the viewer shows it. The
+/// target's line selection is reduced to its first range: `line` is
+/// where the note anchors in the outline and `line_end` the range's
+/// last line when it spans more than one.
+#[derive(Debug, Clone)]
+pub struct Note {
+    pub id: String,
+    pub name: String,
+    pub value: NoteValue,
+    /// The writer's Gage URL, `user:<name>` for a person
+    pub author: String,
+    /// The anchor line; `None` for a note on the whole session
+    pub line: Option<u32>,
+    pub line_end: Option<u32>,
+    pub metadata: Option<Value>,
+    pub created_ms: i64,
+    pub modified_ms: i64,
+}
+
+impl Note {
+    /// The line count of the target's range, when it has one. A
+    /// single-line or whole-session target yields `None`.
+    pub fn span_lines(&self) -> Option<u32> {
+        match (self.line, self.line_end) {
+            (Some(line), Some(end)) if end > line => Some(end - line + 1),
+            _ => None,
+        }
+    }
+
+    /// The value as text: the string of a text value, otherwise the
+    /// JSON form.
+    pub fn text(&self) -> String {
+        match &self.value {
+            NoteValue::Text(s) => s.clone(),
+            NoteValue::Json(v) => v.to_string(),
         }
     }
 }

@@ -2894,7 +2894,7 @@ dependencies = [
  "gage-claude",
  "gage-core",
  "gage-db",
- "gage-query",
+ "gage-query2",
  "gage-registry",
  "gage-session",
  "gage-store",
