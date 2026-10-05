@@ -1004,6 +1004,7 @@ mod tests {
         gage_store::init(&store).unwrap();
         let dir = |name: &str| tmp.path().join(name);
         let paths = ScanDirPaths {
+            dir: tmp.path().to_path_buf(),
             notes_dir: dir("notes"),
             issues_dir: dir("issues"),
             note_watermarks: dir("note_watermarks"),

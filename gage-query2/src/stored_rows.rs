@@ -2,7 +2,7 @@
 //!
 //! One provider type serves both tables; [`RowKind`] selects the
 //! shape. A scan resolves the session set through the
-//! [`SessionScope`], then streams one batch per session, reading each
+//! [`SessionSet`], then streams one batch per session, reading each
 //! session's rows through its driver on first touch. Filters on
 //! `session_id` prune the session set before any content is read;
 //! filters on `line` mask rows per batch. `LIMIT` stops the stream
@@ -33,7 +33,7 @@ use futures::StreamExt;
 use gage_session::filter::{self, RowFilter};
 
 use crate::rows::{RowCache, entry_rows, entry_schema, message_rows, message_schema};
-use crate::scope::{SessionScope, StoredSessionRef};
+use crate::scope::{SessionSet, StoredSessionRef};
 
 const SESSION_ID_COL: &str = "session_id";
 
@@ -61,7 +61,7 @@ impl RowKind {
 
 pub struct StoredRowsTable {
     kind: RowKind,
-    scope: Arc<SessionScope>,
+    scope: Arc<SessionSet>,
     schema: SchemaRef,
 }
 
@@ -74,7 +74,7 @@ impl fmt::Debug for StoredRowsTable {
 }
 
 impl StoredRowsTable {
-    pub fn new(kind: RowKind, scope: Arc<SessionScope>) -> Self {
+    pub fn new(kind: RowKind, scope: Arc<SessionSet>) -> Self {
         Self {
             kind,
             scope,
@@ -152,7 +152,7 @@ fn row_cache(state: &dyn Session) -> Result<Arc<RowCache>> {
 #[derive(Clone)]
 struct StoredRowsExec {
     kind: RowKind,
-    scope: Arc<SessionScope>,
+    scope: Arc<SessionSet>,
     sessions: Arc<Vec<StoredSessionRef>>,
     cache: Arc<RowCache>,
     projected_schema: SchemaRef,

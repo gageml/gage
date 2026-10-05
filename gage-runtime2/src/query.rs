@@ -200,7 +200,7 @@ async fn run(
     params: Vec<ScalarValue>,
 ) -> Fetched<Vec<datafusion::arrow::record_batch::RecordBatch>> {
     let ctx = current()?;
-    let df_ctx: &SessionContext = ctx.query_context().await?;
+    let df_ctx: &SessionContext = ctx.scan_context().await?;
     let db = |e: datafusion::error::DataFusionError| Error::Db(e.to_string());
     let df = match df_ctx.sql(sql).await {
         Ok(df) => df,

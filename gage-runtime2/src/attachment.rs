@@ -2,26 +2,27 @@
 //! attachments the scan's dataset holds, for scanners.
 //!
 //! `scan().attachments()` is an [`AttachmentsQuery`]; awaiting it
-//! reads the dataset's `attachments.link` at the commit the scan
-//! links and yields an [`Attachments`] iterator of [`Attachment`]
-//! values in dataset order. `scan().attachment(name)` is an
+//! reads the scan-scoped `attachment` table and yields an
+//! [`Attachments`] iterator of [`Attachment`] values in dataset
+//! order. `scan().attachment(name)` is an
 //! [`AttachmentQuery`]; awaiting it yields `Some(Attachment)` or
 //! `None`. A name names at most one attachment, since the object id
 //! derives from it. An attachment offers `files()`, awaited to the
 //! list of file keys, and `file(key)`, awaited to
-//! `Some(AttachmentFile)` or `None`. A file holds its bytes;
+//! `Some(AttachmentFile)` or `None`, both read from the
+//! `attachment_file` table. A file holds its bytes;
 //! `bytes()` and `text()` return them, and `text()` and `json()` are
 //! fallible, returning `Error::Decode` for content that is not UTF-8
 //! or not JSON.
 
+use datafusion::arrow::array::BinaryArray;
 use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
-use gage_store::{AttachmentStore, DatasetStore};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Bytes, Formatter, Protocol, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::scan::{Scan, current};
+use crate::scan::{Scan, current, run, sql_str, string_column};
 
 pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
@@ -97,35 +98,37 @@ pub struct AttachmentQuery {
 }
 
 async fn fetch_attachment(q: AttachmentQuery) -> Result<Option<Attachment>, VmError> {
-    Ok(fetch_attachments()
-        .await?
-        .into_iter()
-        .find(|a| a.name == q.name))
+    let sql = format!(
+        "SELECT id, name FROM attachment WHERE name = '{}'",
+        sql_str(&q.name)
+    );
+    Ok(attachments(&sql).await?.into_iter().next())
 }
 
-/// The dataset's attachments at the commit the scan links, in
+/// The dataset's attachments at the commits the scan links, in
 /// dataset order. Without a dataset there are none.
 async fn fetch_attachments() -> Result<Vec<Attachment>, VmError> {
-    let ctx = current()?;
-    let Some(dataset) = &ctx.dataset else {
-        return Ok(Vec::new());
-    };
-    let store = ctx.store.lock().await;
-    let records = DatasetStore::from(&*store)
-        .attachments_at(&dataset.commit_sha)
-        .map_err(|e| VmError::panic(format!("attachments of dataset {}: {e}", dataset.id)))?;
-    Ok(records
-        .into_iter()
-        .map(|r| Attachment {
-            id: r.id,
-            name: r.attrs.name,
-            commit: r.commit_sha,
-        })
-        .collect())
+    attachments("SELECT id, name FROM attachment").await
 }
 
-/// An attachment, as a scanner sees it: its id and name and, held for
-/// the runtime, the version the scan reads.
+async fn attachments(sql: &str) -> Result<Vec<Attachment>, VmError> {
+    let ctx = current()?;
+    let batches = run(ctx.scan_context().await?, sql).await?;
+    let mut out = Vec::new();
+    for batch in &batches {
+        let ids = string_column(batch, 0);
+        let names = string_column(batch, 1);
+        for i in 0..batch.num_rows() {
+            out.push(Attachment {
+                id: ids.value(i).to_string(),
+                name: names.value(i).to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// An attachment, as a scanner sees it: its id and name.
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct Attachment {
@@ -134,8 +137,6 @@ pub struct Attachment {
     pub id: String,
     #[rune(get)]
     pub name: String,
-    #[rune(skip)]
-    pub commit: String,
 }
 
 impl Attachment {
@@ -143,7 +144,7 @@ impl Attachment {
     #[rune::function(instance)]
     fn files(&self) -> AttachmentFilesQuery {
         AttachmentFilesQuery {
-            commit: self.commit.clone(),
+            attachment_id: self.id.clone(),
         }
     }
 
@@ -152,7 +153,7 @@ impl Attachment {
     #[rune::function(instance)]
     fn file(&self, key: &str) -> AttachmentFileQuery {
         AttachmentFileQuery {
-            commit: self.commit.clone(),
+            attachment_id: self.id.clone(),
             key: key.to_string(),
         }
     }
@@ -173,16 +174,24 @@ impl Attachment {
 #[rune(item = ::gage)]
 pub struct AttachmentFilesQuery {
     #[rune(skip)]
-    commit: String,
+    attachment_id: String,
 }
 
 async fn fetch_files(q: AttachmentFilesQuery) -> Result<Vec<String>, VmError> {
     let ctx = current()?;
-    let store = ctx.store.lock().await;
-    let files = AttachmentStore::from(&*store)
-        .files(&q.commit)
-        .map_err(|e| VmError::panic(format!("attachment files: {e}")))?;
-    Ok(files.into_iter().map(|f| f.key).collect())
+    let sql = format!(
+        "SELECT key FROM attachment_file WHERE attachment_id = '{}' ORDER BY key",
+        sql_str(&q.attachment_id)
+    );
+    let batches = run(ctx.scan_context().await?, &sql).await?;
+    let mut out = Vec::new();
+    for batch in &batches {
+        let keys = string_column(batch, 0);
+        for i in 0..batch.num_rows() {
+            out.push(keys.value(i).to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// The value of `attachment.file(key)`.
@@ -190,18 +199,31 @@ async fn fetch_files(q: AttachmentFilesQuery) -> Result<Vec<String>, VmError> {
 #[rune(item = ::gage)]
 pub struct AttachmentFileQuery {
     #[rune(skip)]
-    commit: String,
+    attachment_id: String,
     #[rune(skip)]
     key: String,
 }
 
 async fn fetch_file(q: AttachmentFileQuery) -> Result<Option<AttachmentFile>, VmError> {
     let ctx = current()?;
-    let store = ctx.store.lock().await;
-    let bytes = AttachmentStore::from(&*store)
-        .read_file(&q.commit, &q.key)
-        .map_err(|e| VmError::panic(format!("attachment file {}: {e}", q.key)))?;
-    Ok(bytes.map(|bytes| AttachmentFile { key: q.key, bytes }))
+    let sql = format!(
+        "SELECT content FROM attachment_file WHERE attachment_id = '{}' AND key = '{}'",
+        sql_str(&q.attachment_id),
+        sql_str(&q.key)
+    );
+    let batches = run(ctx.scan_context().await?, &sql).await?;
+    let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+        return Ok(None);
+    };
+    let contents = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .expect("attachment_file content is a binary column");
+    Ok(Some(AttachmentFile {
+        key: q.key,
+        bytes: contents.value(0).to_vec(),
+    }))
 }
 
 /// One file of an attachment, with its content.
@@ -385,7 +407,6 @@ mod tests {
         let attachment = |name: &str| Attachment {
             id: format!("id-{name}"),
             name: name.to_string(),
-            commit: format!("commit-{name}"),
         };
         let attachments = Attachments::new(vec![attachment("a"), attachment("b")]);
         let output = vm.call(["check"], (attachments,)).unwrap();

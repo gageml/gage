@@ -234,7 +234,7 @@ pub struct IssueFull {
     pub modified_ms: i64,
 }
 
-/// An issue in a scan directory, not yet created, as the running scan
+/// An issue in a scan directory, not yet created, as the active scan
 /// reads its own issues. Evidence is the cited note ids, since a note
 /// the same scan wrote has no commit yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +252,8 @@ pub struct IssueDirRecord {
     pub evidence: Vec<String>,
     /// The commit this write replaces, when it replaces a live issue
     pub replaces: Option<String>,
+    /// The change entries written so far, in ULID order
+    pub changes: Vec<IssueChange>,
     /// The time the issue was written, from the first change entry's
     /// ULID
     pub created_ms: i64,
@@ -443,16 +445,16 @@ impl IssueStore<'_> {
     }
 
     /// Read the issue [`IssueStore::write_to_dir`] wrote under `dir`,
-    /// as a running scan reads its own issues before apply.
+    /// as a active scan reads its own issues before apply.
     pub fn read_from_dir(&self, dir: &Path) -> Result<IssueDirRecord, StoreError> {
         let record = read_issue_dir(dir)?;
-        let created_ms = record
-            .changes
-            .first()
-            .and_then(|(ulid, _, _)| ulid_timestamp_ms(ulid))
-            .ok_or_else(|| {
-                StoreError::Parse(format!("issue dir {}: missing change entry", record.id))
-            })?;
+        let mut changes = Vec::with_capacity(record.changes.len());
+        for (ulid, json, message) in &record.changes {
+            changes.push(decode_change(&record.id, ulid, json, message.as_deref())?);
+        }
+        let created_ms = changes.first().map(|c| c.timestamp_ms).ok_or_else(|| {
+            StoreError::Parse(format!("issue dir {}: missing change entry", record.id))
+        })?;
         Ok(IssueDirRecord {
             id: record.id,
             name: record.attrs.name,
@@ -464,6 +466,7 @@ impl IssueStore<'_> {
             key: record.attrs.key,
             evidence: record.evidence,
             replaces: record.replaces,
+            changes,
             created_ms,
         })
     }
@@ -675,32 +678,18 @@ impl IssueStore<'_> {
                     entry.name
                 )));
             }
-            let timestamp_ms = ulid_timestamp_ms(&entry.name).ok_or_else(|| {
-                StoreError::Parse(format!(
-                    "issue {id} {CHANGES_DIR}/{}: not a ULID",
-                    entry.name
-                ))
-            })?;
-            let mut attrs: Option<ChangeAttrs> = None;
-            let mut message: Option<String> = None;
+            let mut attrs: Option<Vec<u8>> = None;
+            let mut message: Option<Vec<u8>> = None;
             for file in self.store.read_tree(&entry.sha)? {
                 let bytes = self.store.read_blob_bytes(&file.sha)?;
-                let where_ = format!("issue {id} {CHANGES_DIR}/{}/{}", entry.name, file.name);
                 match file.name.as_str() {
-                    ATTRS_FILE => {
-                        attrs = Some(
-                            serde_json::from_slice(&bytes)
-                                .map_err(|e| StoreError::Parse(format!("{where_}: {e}")))?,
-                        );
-                    }
-                    MESSAGE_FILE => {
-                        message = Some(
-                            String::from_utf8(bytes)
-                                .map_err(|e| StoreError::Parse(format!("{where_}: {e}")))?,
-                        );
-                    }
+                    ATTRS_FILE => attrs = Some(bytes),
+                    MESSAGE_FILE => message = Some(bytes),
                     _ => {
-                        return Err(StoreError::Parse(format!("{where_}: unexpected file")));
+                        return Err(StoreError::Parse(format!(
+                            "issue {id} {CHANGES_DIR}/{}/{}: unexpected file",
+                            entry.name, file.name
+                        )));
                     }
                 }
             }
@@ -710,19 +699,42 @@ impl IssueStore<'_> {
                     entry.name
                 ))
             })?;
-            out.push(IssueChange {
-                id: entry.name,
-                timestamp_ms,
-                author: attrs.author,
-                event: attrs.event,
-                from_status: attrs.from_status,
-                to_status: attrs.to_status,
-                reason: attrs.reason,
-                message,
-            });
+            out.push(decode_change(id, &entry.name, &attrs, message.as_deref())?);
         }
         Ok(out)
     }
+}
+
+/// One change entry from its ULID, `attrs.json` bytes, and optional
+/// `message.txt` bytes, as stored or as written to a scan directory.
+fn decode_change(
+    id: &str,
+    ulid: &str,
+    attrs: &[u8],
+    message: Option<&[u8]>,
+) -> Result<IssueChange, StoreError> {
+    let where_ = |file: &str| format!("issue {id} {CHANGES_DIR}/{ulid}/{file}");
+    let timestamp_ms = ulid_timestamp_ms(ulid)
+        .ok_or_else(|| StoreError::Parse(format!("issue {id} {CHANGES_DIR}/{ulid}: not a ULID")))?;
+    let attrs: ChangeAttrs = serde_json::from_slice(attrs)
+        .map_err(|e| StoreError::Parse(format!("{}: {e}", where_(ATTRS_FILE))))?;
+    let message = match message {
+        Some(bytes) => Some(
+            String::from_utf8(bytes.to_vec())
+                .map_err(|e| StoreError::Parse(format!("{}: {e}", where_(MESSAGE_FILE))))?,
+        ),
+        None => None,
+    };
+    Ok(IssueChange {
+        id: ulid.to_string(),
+        timestamp_ms,
+        author: attrs.author,
+        event: attrs.event,
+        from_status: attrs.from_status,
+        to_status: attrs.to_status,
+        reason: attrs.reason,
+        message,
+    })
 }
 
 /// A selection over issues: filters on the indexed attributes, an

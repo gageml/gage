@@ -156,7 +156,7 @@ impl OutputSink {
 /// `log` macros, `gage::scan` and the values it returns, `gage::params`, the message
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::write_note`,
-/// `gage::write_issue`, `gage::issues`, `gage::carry_forward_notes`,
+/// `gage::write_issue`, `scan().issues()`, `gage::carry_forward_notes`,
 /// `gage::Mark`, `gage::watermark`, `gage::Template`, `gage::Progress`,
 /// `gage::call_agent` and the values it returns, `gage::AgentRunner`,
 /// and the include macros from `gage-runtime`. Every file-reading facility

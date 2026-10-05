@@ -14,7 +14,6 @@ use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
-use gage_query2::scope::SessionScope;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_store::{DatasetStore, SessionOutcome, SessionSpec, SessionStore, Store};
@@ -300,14 +299,7 @@ async fn list_dataset(args: SessionListArgs) {
         }
     };
     let store = Arc::new(Mutex::new(store));
-    let scope = match SessionScope::for_dataset(Arc::clone(&store), &dataset.commit_sha) {
-        Ok(scope) => Arc::new(scope),
-        Err(e) => {
-            eprintln!("gage session list: {e}");
-            std::process::exit(1);
-        }
-    };
-    let ctx = ContextBuilder::new(Some(store)).scope(scope).build().await;
+    let ctx = ContextBuilder::new(Some(store)).build().await;
     let from = "session JOIN dataset_session m ON m.session_id = session.id";
     let member = format!("m.dataset_id = '{}'", dataset.id);
     let (rows, total) = query_sessions(&ctx, &args, Listing::Dataset, from, Some(&member)).await;

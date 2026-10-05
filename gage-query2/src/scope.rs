@@ -1,4 +1,12 @@
-//! The stored sessions a query reads and how their rows are reached.
+//! What a context is scoped to, and how session rows are reached.
+//!
+//! A context has store scope or scan scope. Store scope is every
+//! live object in the store. Scan scope, a [`ScanScope`], is one
+//! scan's objects: its dataset's sessions at the commits the scan
+//! links, the notes it wrote or carried, the issues it wrote, and the
+//! relations among them. The scan is an active one, named by its scan
+//! directory, or a stored one, named by id; the tables read either
+//! source on each query.
 //!
 //! The core knows the store's layout, so it resolves the session set
 //! and plans every read. The driver that wrote a session is the only
@@ -6,6 +14,7 @@
 //! from [`Driver::read_stored`] on that driver, normalized into
 //! [`gage_session::Entry`] values the core turns into a batch.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::record_batch::RecordBatch;
@@ -15,8 +24,66 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::filter::IdFilter;
 use gage_store::{
-    DatasetStore, Order, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
+    Order, ScanDirLayout, ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
 };
+
+/// One scan's objects, as a context is scoped to them.
+#[derive(Debug, Clone)]
+pub struct ScanScope {
+    source: ScanSource,
+    /// Narrow the sessions to this one member
+    session: Option<String>,
+}
+
+impl ScanScope {
+    /// The scope of an active scan, from its scan directory.
+    pub fn scan_dir(root: impl AsRef<Path>) -> Self {
+        Self {
+            source: ScanSource::ScanDir(ScanDirLayout::new(root.as_ref())),
+            session: None,
+        }
+    }
+
+    /// The scope of a stored scan.
+    pub fn stored(scan_id: impl Into<String>) -> Self {
+        Self {
+            source: ScanSource::Stored(scan_id.into()),
+            session: None,
+        }
+    }
+
+    /// Narrow `session`, `entry`, and `message` to the one member
+    /// `session_id`. Every other table stays the whole scan's.
+    pub fn session(mut self, session_id: impl Into<String>) -> Self {
+        self.session = Some(session_id.into());
+        self
+    }
+
+    pub(crate) fn source(&self) -> &ScanSource {
+        &self.source
+    }
+
+    /// The scope's sessions at the commits the scan links, in member
+    /// order, narrowed when a session was named. A named session
+    /// that is not a member is an error.
+    pub(crate) fn members(&self, store: &Store) -> Result<Vec<StoredSessionRef>> {
+        let mut members = self
+            .source
+            .members(store)?
+            .into_iter()
+            .map(StoredSessionRef::from_record)
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(id) = &self.session {
+            members.retain(|m| m.id == *id);
+            if members.is_empty() {
+                return Err(DataFusionError::Plan(format!(
+                    "session {id} is not a member of the scan"
+                )));
+            }
+        }
+        Ok(members)
+    }
+}
 
 use crate::rows::{RowCache, derive_batch};
 
@@ -69,17 +136,17 @@ impl StoredSessionRef {
     }
 }
 
-/// The session set of a store-backed query context: every live
-/// session at its tip, or a fixed set of versions such as a dataset's
-/// members at the commit a scan links.
-pub struct SessionScope {
+/// The sessions the row tables serve: every live session at its tip
+/// in store scope, or the fixed versions of a scan scope's members.
+pub struct SessionSet {
     store: Arc<Mutex<Store>>,
     drivers: DriverRegistry,
     fixed: Option<Vec<StoredSessionRef>>,
 }
 
-impl SessionScope {
-    pub fn new(store: Arc<Mutex<Store>>) -> Self {
+impl SessionSet {
+    /// Every live session at its tip.
+    pub(crate) fn all(store: Arc<Mutex<Store>>) -> Self {
         Self {
             store,
             drivers: DriverRegistry::builtin(),
@@ -87,8 +154,8 @@ impl SessionScope {
         }
     }
 
-    /// A scope over exactly `sessions`, each at the version it names.
-    pub fn with_sessions(store: Arc<Mutex<Store>>, sessions: Vec<StoredSessionRef>) -> Self {
+    /// Exactly `sessions`, each at the version it names.
+    pub(crate) fn fixed(store: Arc<Mutex<Store>>, sessions: Vec<StoredSessionRef>) -> Self {
         Self {
             store,
             drivers: DriverRegistry::builtin(),
@@ -96,39 +163,17 @@ impl SessionScope {
         }
     }
 
-    /// A scope over the members of the dataset at `dataset_commit`,
-    /// each at the version the dataset links, in member order. This
-    /// is the one read a scope makes outside the query interface: it
-    /// pins the versions every table in the context then serves.
-    pub fn for_dataset(store: Arc<Mutex<Store>>, dataset_commit: &str) -> Result<Self> {
-        let members = {
-            let guard = store
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            DatasetStore::from(&*guard)
-                .sessions_at(dataset_commit)
-                .map_err(external)?
-        };
-        Ok(Self::with_sessions(
-            store,
-            members
-                .into_iter()
-                .map(StoredSessionRef::from_record)
-                .collect::<Result<_>>()?,
-        ))
-    }
-
-    /// The versions of a fixed scope, in order; `None` store-wide.
-    pub fn fixed_versions(&self) -> Option<Vec<SelectedTip>> {
+    /// The versions of a fixed set, in order; `None` store-wide.
+    pub(crate) fn fixed_versions(&self) -> Option<Vec<SelectedTip>> {
         self.fixed
             .as_ref()
             .map(|refs| refs.iter().map(StoredSessionRef::as_version).collect())
     }
 
-    /// The scope's sessions, narrowed by the `session_id` predicates
-    /// in `filters`. A store-wide scope lists every live session
-    /// newest modified first; a fixed scope keeps its own order.
-    pub fn sessions(&self, filters: &[Expr]) -> Result<Vec<StoredSessionRef>> {
+    /// The set's sessions, narrowed by the `session_id` predicates in
+    /// `filters`. A store-wide set lists every live session newest
+    /// modified first; a fixed set keeps its own order.
+    pub(crate) fn sessions(&self, filters: &[Expr]) -> Result<Vec<StoredSessionRef>> {
         if let Some(fixed) = &self.fixed {
             let mut sessions = fixed.clone();
             if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
@@ -156,7 +201,11 @@ impl SessionScope {
 
     /// The derived batch of `session`, read through its driver on
     /// first use and served from `cache` after.
-    pub fn rows(&self, session: &StoredSessionRef, cache: &RowCache) -> Result<Arc<RecordBatch>> {
+    pub(crate) fn rows(
+        &self,
+        session: &StoredSessionRef,
+        cache: &RowCache,
+    ) -> Result<Arc<RecordBatch>> {
         if let Some(batch) = cache.get(&session.commit) {
             return Ok(batch);
         }

@@ -1,5 +1,5 @@
 //! `write_issue(name, title, description)`: an issue written to the
-//! scan directory, and `issues()`: the store's issues read back.
+//! scan directory, and `scan().issues()`: the scan's issues read back.
 //!
 //! The builder carries the name, title, description, the cited note
 //! ids, the initial status, and the optional replace key. Awaiting it
@@ -7,7 +7,7 @@
 //! store, writes the issue tree into the scan directory
 //! (`gage_store::IssueStore::write_to_dir`), and returns the [`Issue`]. The
 //! runtime sets `author` to `task:<scanner>:<task>` and `attrs.scan`
-//! to the running scan. Apply creates the object, resolving the cited
+//! to the active scan. Apply creates the object, resolving the cited
 //! notes to their commits, and links it from the scan through
 //! `issues.link`. An issue has no target; a session it concerns is
 //! reached through the notes it cites. Bad input is `Error::Args`; a
@@ -25,17 +25,18 @@
 //! and closed is not reported again. `.once()` without `.key()` is an
 //! `Args` error at the await.
 //!
-//! `issues()` is an [`IssuesQuery`]; awaiting it reads every live
-//! issue in the store plus the issues this scan has written, since a
-//! task sees what its upstream tasks wrote. Issues are store-wide, so
-//! the query hangs off no scan value. `.name(..)` and `.status(..)`
-//! each take one value or a list, and a list matches any of its
-//! members.
+//! `scan().issues()` is an [`IssuesQuery`]; awaiting it reads the
+//! issues this scan has written through the scan-scoped `issue`
+//! table, so a task sees what its upstream tasks wrote. `.name(..)`
+//! and `.status(..)` each take one value or a list, and a list matches
+//! any of its members.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use datafusion::arrow::array::{Array, StringArray, TimestampMillisecondArray};
 use gage_core::uuid::new_uuid;
 use gage_runtime::error::Error;
 use gage_store::{
@@ -47,13 +48,12 @@ use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
 use crate::note::Note;
-use crate::scan::{ScanContext, current};
+use crate::scan::{Scan, ScanContext, current, run, sql_str, string_column};
 use crate::validate::encode_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
     m.function("write_issue", write_issue).build()?;
-    m.function("issues", issues).build()?;
     Ok(m)
 }
 
@@ -70,6 +70,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<Issue>()?;
     m.function_meta(Issue::debug)?;
     m.ty::<IssuesQuery>()?;
+    m.function_meta(Scan::issues)?;
     m.function_meta(IssuesQuery::name)?;
     m.function_meta(IssuesQuery::status)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: IssuesQuery| async move {
@@ -357,7 +358,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
     let (scanner, task) = OUTPUT_SINK
         .try_with(|sink| (sink.scanner.clone(), sink.task.clone()))
         .map_err(|_outside_task| {
-            VmError::panic("write_issue is available only inside a running scan task")
+            VmError::panic("write_issue is available only inside a active scan task")
         })?;
     let author = format!("task:{scanner}:{task}");
     if let Err(e) = check_evidence(&ctx, &w.evidence).await? {
@@ -540,8 +541,8 @@ async fn check_evidence(ctx: &ScanContext, ids: &[String]) -> Result<Result<(), 
     Ok(Ok(()))
 }
 
-/// The value of `issues()`: the store's issues plus this scan's own
-/// issues, read when awaited.
+/// The value of `scan().issues()`: the issues this scan wrote, read
+/// when awaited.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct IssuesQuery {
@@ -557,11 +558,15 @@ pub struct IssuesQuery {
     error: Option<Error>,
 }
 
-fn issues() -> IssuesQuery {
-    IssuesQuery {
-        names: None,
-        statuses: None,
-        error: None,
+impl Scan {
+    /// The issues this scan wrote, read when awaited.
+    #[rune::function(instance)]
+    fn issues(&self) -> IssuesQuery {
+        IssuesQuery {
+            names: None,
+            statuses: None,
+            error: None,
+        }
     }
 }
 
@@ -629,53 +634,96 @@ fn strings(v: &Value, what: &str) -> Result<Vec<String>, Error> {
     )))
 }
 
-/// Read the store's live issues and this scan's own issues,
-/// filtered, oldest first and by id among equals.
+/// Read the scan's issues through the scan-scoped `issue` table,
+/// filtered, oldest first and by id among equals, each with its
+/// evidence from `issue_evidence`.
 async fn fetch_issues(q: IssuesQuery) -> Result<Result<Vec<Issue>, Error>, VmError> {
     if let Some(e) = q.error {
         return Ok(Err(e));
     }
     let ctx = current()?;
-    let mut out = stored_issues(&ctx).await?;
-    out.extend(scan_dir_issues(&ctx).await?);
-    out.retain(|i| {
-        q.names.as_ref().is_none_or(|names| names.contains(&i.name))
-            && q.statuses
-                .as_ref()
-                .is_none_or(|statuses| statuses.iter().any(|s| s.as_str() == i.status))
-    });
-    out.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
+    let mut predicates = Vec::new();
+    if let Some(names) = &q.names {
+        predicates.push(format!(
+            "name IN ({})",
+            quoted_list(names.iter().map(String::as_str))
+        ));
+    }
+    if let Some(statuses) = &q.statuses {
+        predicates.push(format!(
+            "status IN ({})",
+            quoted_list(statuses.iter().map(|s| s.as_str()))
+        ));
+    }
+    let filter = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT id, name, title, description, author, status, status_reason, scan, key, \
+                created \
+         FROM issue{filter} ORDER BY created, id"
+    );
+    let df_ctx = ctx.scan_context().await?;
+    let batches = run(df_ctx, &sql).await?;
+    let evidence = run(df_ctx, "SELECT issue_id, note_id FROM issue_evidence").await?;
+    let mut cited: HashMap<String, Vec<String>> = HashMap::new();
+    for batch in &evidence {
+        let issues = string_column(batch, 0);
+        let notes = string_column(batch, 1);
+        for i in 0..batch.num_rows() {
+            cited
+                .entry(issues.value(i).to_string())
+                .or_default()
+                .push(notes.value(i).to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for batch in &batches {
+        let ids = string_column(batch, 0);
+        let names = string_column(batch, 1);
+        let titles = string_column(batch, 2);
+        let descriptions = string_column(batch, 3);
+        let authors = string_column(batch, 4);
+        let statuses = string_column(batch, 5);
+        let reasons = string_column(batch, 6);
+        let scans = string_column(batch, 7);
+        let keys = string_column(batch, 8);
+        let createds = batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("issue created is a timestamp column");
+        let optional =
+            |arr: &StringArray, i: usize| arr.is_valid(i).then(|| arr.value(i).to_string());
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i).to_string();
+            let evidence = cited.remove(&id).unwrap_or_default();
+            out.push(Issue {
+                name: names.value(i).to_string(),
+                title: titles.value(i).to_string(),
+                description: optional(descriptions, i),
+                author: authors.value(i).to_string(),
+                status: statuses.value(i).to_string(),
+                status_reason: optional(reasons, i),
+                scan: optional(scans, i),
+                key: optional(keys, i),
+                evidence: rune::to_value(evidence).map_err(VmError::from)?,
+                created: createds.value(i),
+                id,
+            });
+        }
+    }
     Ok(Ok(out))
 }
 
-/// Every live issue in the store, with its evidence as note ids.
-async fn stored_issues(ctx: &ScanContext) -> Result<Vec<Issue>, VmError> {
-    let store = ctx.store.lock().await;
-    let issues = IssueStore::from(&*store);
-    let records = issues
-        .iter()
-        .map_err(|e| VmError::panic(format!("issues: {e}")))?;
-    let mut out = Vec::new();
-    for record in records {
-        let full = record.map_err(|e| VmError::panic(format!("issues: {e}")))?;
-        out.push(Issue::from_full(&store, full)?);
-    }
-    Ok(out)
-}
-
-/// The issues in the scan directory, in id order.
-async fn scan_dir_issues(ctx: &ScanContext) -> Result<Vec<Issue>, VmError> {
-    let dirs = issue_dirs(ctx)?;
-    let store = ctx.store.lock().await;
-    let issues = IssueStore::from(&*store);
-    let mut out = Vec::with_capacity(dirs.len());
-    for dir in dirs {
-        let record = issues
-            .read_from_dir(&dir)
-            .map_err(|e| VmError::panic(format!("issue dir {}: {e}", dir.display())))?;
-        out.push(Issue::from_dir_record(record)?);
-    }
-    Ok(out)
+/// `'a', 'b', ...` for an `IN` list.
+fn quoted_list<'a>(items: impl Iterator<Item = &'a str>) -> String {
+    items
+        .map(|s| format!("'{}'", sql_str(s)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The scan directory's issue directories, in id order.
@@ -723,17 +771,21 @@ mod tests {
     #[test]
     fn builders_leave_the_caller_values_readable() {
         let mut vm = vm(r#"
-            pub fn check() {
+            pub fn check(scan) {
                 let notes = ["a", "b"];
                 let one = "c";
                 let write = gage::write_issue("n", "t", "d").evidence(notes).evidence(one);
                 let names = ["x", "y"];
                 let statuses = ["open", "pending"];
-                let query = gage::issues().name(names).status(statuses).status("closed");
+                let query = scan.issues().name(names).status(statuses).status("closed");
                 (notes.len(), notes[1], one, names[0], statuses.len())
             }
             "#);
-        let output = vm.call(["check"], ()).unwrap();
+        let scan = crate::scan::Scan {
+            id: "scan".into(),
+            dataset: None,
+        };
+        let output = vm.call(["check"], (scan,)).unwrap();
         #[expect(
             clippy::disallowed_methods,
             reason = "takes the VM execution's return value; the test holds the only live handle"

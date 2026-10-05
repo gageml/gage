@@ -12,6 +12,7 @@ futures = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-mcp2 = { path = "../gage-mcp2" }
 gage-query2 = { path = "../gage-query2" }
+regex = { workspace = true }
 gage-runtime = { path = "../gage-runtime" }
 gage-session = { path = "../gage-session" }
 minijinja = "2"

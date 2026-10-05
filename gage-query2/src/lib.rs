@@ -42,23 +42,26 @@ use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_query::SessionCache;
 use gage_store::{
-    LinkKind, Store, StoredNoteTable, StoredSessionTable, attachment_table, dataset_table,
-    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table, tag_table,
+    LinkKind, Store, StoredNoteTable, StoredSessionTable, attachment_file_table, attachment_table,
+    dataset_table, issue_event_table, issue_table, link_table, scan_scope_tables, scan_table,
+    scan_watermark_table, tag_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
 use crate::project::project_for_path_udf;
 use crate::rows::RowCache;
-use crate::scope::SessionScope;
+pub use crate::scope::ScanScope;
+use crate::scope::SessionSet;
 use crate::stored_rows::{RowKind, StoredRowsTable};
 use crate::system_cols::SkipSystemCols;
 
-/// Composes a query context. `store` backs the `session` table when
-/// present; without it, `session` is absent and only the native
-/// discovery functions are available.
+/// Composes a query context. `store` backs the store tables when
+/// present; without it, they are absent and only the native discovery
+/// functions are available. A store-backed context has store scope,
+/// every live object, unless a [`ScanScope`] narrows it to one scan.
 pub struct ContextBuilder {
     store: Option<Arc<Mutex<Store>>>,
-    scope: Option<Arc<SessionScope>>,
+    scope: Option<ScanScope>,
     skip_system_cols: bool,
 }
 
@@ -71,9 +74,11 @@ impl ContextBuilder {
         }
     }
 
-    /// Serve `entry` and `message` from `scope` instead of every live
-    /// session in the store. The `session` table stays store-wide.
-    pub fn scope(mut self, scope: Arc<SessionScope>) -> Self {
+    /// Scope the context to one scan: every table serves that scan's
+    /// objects and nothing else. `tag`, `scan_watermark`, and the
+    /// `_link` tables are absent, since none is part of one scan's
+    /// record.
+    pub fn scope(mut self, scope: ScanScope) -> Self {
         self.scope = Some(scope);
         self
     }
@@ -86,39 +91,39 @@ impl ContextBuilder {
         self
     }
 
-    /// Build the context. A store-backed context registers the base
+    /// Build the context. A store-scoped context registers the base
     /// tables, the `_link` tables, and the views over them; with
     /// `skip_system_cols` the `_link` tables are left out and the
     /// base tables lose their system columns, while the views keep
-    /// reading the link tables they were planned over.
+    /// reading the link tables they were planned over. A scan-scoped
+    /// context registers the scan's tables, with the relations as
+    /// tables rather than views.
     pub async fn build(self) -> SessionContext {
         let ctx = new_context(self.skip_system_cols);
         let Some(store) = self.store else {
             return ctx;
         };
-        let scope = self
-            .scope
-            .unwrap_or_else(|| Arc::new(SessionScope::new(Arc::clone(&store))));
-        let session: Arc<dyn TableProvider> = match scope.fixed_versions() {
-            Some(versions) => Arc::new(StoredSessionTable::at_versions(
-                Arc::clone(&store),
-                versions,
-            )),
-            None => Arc::new(StoredSessionTable::new(Arc::clone(&store))),
-        };
+        if let Some(scope) = self.scope {
+            return build_scan_scope(ctx, store, scope, self.skip_system_cols);
+        }
+        let sessions = Arc::new(SessionSet::all(Arc::clone(&store)));
         let base: Vec<(&str, Arc<dyn TableProvider>)> = vec![
-            ("session", session),
+            (
+                "session",
+                Arc::new(StoredSessionTable::new(Arc::clone(&store))),
+            ),
             (
                 "entry",
-                Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&scope))),
+                Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&sessions))),
             ),
             (
                 "message",
-                Arc::new(StoredRowsTable::new(RowKind::Message, scope)),
+                Arc::new(StoredRowsTable::new(RowKind::Message, sessions)),
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
             ("attachment", attachment_table(Arc::clone(&store))),
+            ("attachment_file", attachment_file_table(Arc::clone(&store))),
             ("scan", scan_table(Arc::clone(&store))),
             ("issue", issue_table(Arc::clone(&store))),
             ("issue_event", issue_event_table(Arc::clone(&store))),
@@ -163,6 +168,57 @@ impl ContextBuilder {
         }
         ctx
     }
+}
+
+/// Register one scan's tables: `session` at the members' linked
+/// versions, `entry` and `message` over them, and every other table
+/// from the scan source.
+fn build_scan_scope(
+    ctx: SessionContext,
+    store: Arc<Mutex<Store>>,
+    scope: ScanScope,
+    skip_system_cols: bool,
+) -> SessionContext {
+    let members = {
+        let guard = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        scope
+            .members(&guard)
+            .expect("the scan's dataset and members are readable")
+    };
+    let sessions = Arc::new(SessionSet::fixed(Arc::clone(&store), members));
+    let versions = sessions
+        .fixed_versions()
+        .expect("a scan scope's session set is fixed");
+    let mut tables: Vec<(&str, Arc<dyn TableProvider>)> = vec![
+        (
+            "session",
+            Arc::new(StoredSessionTable::at_versions(
+                Arc::clone(&store),
+                versions,
+            )),
+        ),
+        (
+            "entry",
+            Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&sessions))),
+        ),
+        (
+            "message",
+            Arc::new(StoredRowsTable::new(RowKind::Message, sessions)),
+        ),
+    ];
+    tables.extend(scan_scope_tables(&store, scope.source()));
+    for (name, table) in tables {
+        let table: Arc<dyn TableProvider> = if skip_system_cols {
+            Arc::new(SkipSystemCols::new(table))
+        } else {
+            table
+        };
+        ctx.register_table(name, table)
+            .expect("register scan tables on a fresh context");
+    }
+    ctx
 }
 
 /// The system-tier table of watermarks

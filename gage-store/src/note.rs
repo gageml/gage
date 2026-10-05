@@ -243,7 +243,7 @@ impl NoteStore<'_> {
     }
 
     /// Read the note [`NoteStore::write_to_dir`] wrote under `dir`, as
-    /// a running scan reads its own notes before apply. The note has
+    /// a active scan reads its own notes before apply. The note has
     /// no commit yet, so `created_ms` and `modified_ms` are the time
     /// it was written.
     pub fn read_from_dir(&self, dir: &Path) -> Result<NoteFull, StoreError> {

@@ -32,17 +32,18 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+use datafusion::arrow::array::StringArray;
 use datafusion::arrow::array::{Array, UInt64Array};
 use gage_runtime::error::Error;
 use gage_runtime::validate::key_string;
-use gage_store::{NoteStore, Store};
+use gage_store::Store;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::note::{Note, NotesQuery, fetch_notes};
 use crate::scan::{
-    ScanContext, Session, SessionsQuery, current, members, run, session_id, string_column,
+    ScanContext, Session, SessionsQuery, current, members, run, session_id, sql_str, string_column,
 };
 
 pub(crate) fn module() -> Result<Module, ContextError> {
@@ -92,18 +93,7 @@ enum MarkTarget {
     /// its `line_count`
     Session { id: String },
     /// The whole note: the mark is 1
-    Note { id: String, commit: NoteCommit },
-}
-
-/// What is known of a marked note's commit when the mark is made.
-#[derive(Clone)]
-enum NoteCommit {
-    /// A note id string: resolved against the scan's notes at the
-    /// write
-    Unresolved,
-    /// A `Note` value: its carried commit, or `None` when this scan
-    /// wrote it
-    Known(Option<String>),
+    Note { id: String },
 }
 
 impl Mark {
@@ -125,16 +115,12 @@ impl Mark {
             return Ok(Mark {
                 target: MarkTarget::Note {
                     id: note.id.clone(),
-                    commit: NoteCommit::Known(note.commit.clone()),
                 },
             });
         }
         if let Ok(id) = n.borrow_string_ref() {
             return Ok(Mark {
-                target: MarkTarget::Note {
-                    id: id.to_string(),
-                    commit: NoteCommit::Unresolved,
-                },
+                target: MarkTarget::Note { id: id.to_string() },
             });
         }
         Err(VmError::panic(format!(
@@ -193,31 +179,29 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
             let mark = u64::try_from(member.line_count).unwrap();
             (id, member.commit, mark)
         }
-        MarkTarget::Note { id, commit } => {
-            if ctx.paths.notes_dir.join(&id).is_dir() {
+        MarkTarget::Note { id } => {
+            // The scan's `note` table holds the notes it wrote, with no
+            // commit yet, and the notes it carried, with theirs
+            let sql = format!("SELECT commit FROM note WHERE id = '{}'", sql_str(&id));
+            let batches = run(ctx.scan_context().await?, &sql).await?;
+            let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+                return Ok(Err(Error::Args(format!(
+                    "note {id} was neither written nor carried by the scan"
+                ))));
+            };
+            let commits = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("note commit is a string column");
+            if !commits.is_valid(0) {
                 let line = format!("{id} {key} 1\n");
                 append(&ctx.paths.note_watermarks, &line)
                     .map_err(|e| VmError::panic(format!("note watermarks: {e}")))?;
                 tracing::debug!(key, note = id, "watermark deferred to apply");
                 return Ok(Ok(()));
             }
-            let commit = match commit {
-                NoteCommit::Known(Some(commit)) => commit,
-                NoteCommit::Known(None) => {
-                    return Err(VmError::panic(format!(
-                        "note {id} was written by this scan but its directory is gone"
-                    )));
-                }
-                NoteCommit::Unresolved => match carried_commit(&ctx, &id).await? {
-                    Some(commit) => commit,
-                    None => {
-                        return Ok(Err(Error::Args(format!(
-                            "note {id} was neither written nor carried by the scan"
-                        ))));
-                    }
-                },
-            };
-            (id, commit, 1)
+            (id, commits.value(0).to_string(), 1)
         }
     };
     let dir = ctx.paths.watermarks_dir.join(&oid);
@@ -230,27 +214,6 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
         }
         Err(e) => Err(VmError::panic(format!("watermark {oid}: {e}"))),
     }
-}
-
-/// The carried commit of the note `id`, or `None` when the scan has
-/// not carried it.
-async fn carried_commit(ctx: &ScanContext, id: &str) -> Result<Option<String>, VmError> {
-    let text = match fs::read_to_string(&ctx.paths.carried_notes) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(VmError::panic(format!("carried notes: {e}"))),
-    };
-    let store = ctx.store.lock().await;
-    let notes = NoteStore::from(&*store);
-    for sha in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let note = notes
-            .at_commit(sha)
-            .map_err(|e| VmError::panic(format!("carried note {sha}: {e}")))?;
-        if note.id == id {
-            return Ok(Some(sha.to_string()));
-        }
-    }
-    Ok(None)
 }
 
 fn append(path: &Path, line: &str) -> io::Result<()> {
@@ -461,7 +424,7 @@ async fn marks(
         sql_str(key),
         id_list(ids)
     );
-    let batches = run(ctx.query_context().await?, &sql).await?;
+    let batches = run(ctx.store_context().await?, &sql).await?;
     let mut out: HashMap<String, Vec<(String, u64)>> = HashMap::new();
     for batch in &batches {
         let oids = string_column(batch, 0);
@@ -526,7 +489,7 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
         sql_str(&key),
         id_list(&ids)
     );
-    let batches = run(ctx.query_context().await?, &sql).await?;
+    let batches = run(ctx.store_context().await?, &sql).await?;
     let chains = chains(&ctx, &sessions).await?;
     let mut commits: BTreeSet<String> = BTreeSet::new();
     for batch in &batches {
@@ -602,10 +565,6 @@ fn id_list(ids: &[&str]) -> String {
         .map(|id| format!("'{}'", sql_str(id)))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn sql_str(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 /// A key in storage form: a string as given, or a tuple of strings

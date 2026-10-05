@@ -1,4 +1,4 @@
-//! The scan directory of a running scan.
+//! The scan directory of a active scan.
 //!
 //! A scan is a transaction: while it runs, everything it records goes
 //! to `scans/<scan_id>/` under Gage home, and nothing is written to
@@ -96,7 +96,7 @@ pub struct ScannerPlan<'a> {
     pub sources: &'a [SourceFile],
 }
 
-/// One running scan's directory
+/// One active scan's directory
 pub struct ScanDir {
     dir: PathBuf,
 }
@@ -220,6 +220,7 @@ impl ScanDir {
     /// The paths the runtime writes under during the run.
     pub fn runtime_paths(&self) -> ScanDirPaths {
         ScanDirPaths {
+            dir: self.dir.clone(),
             notes_dir: self.notes_dir(),
             issues_dir: self.issues_dir(),
             note_watermarks: self.dir.join(NOTE_WATERMARKS_FILE),

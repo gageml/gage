@@ -56,7 +56,7 @@ const NAME_COL: &str = "name";
 const CARRY_FORWARD_KEY_COL: &str = "carry_forward_key";
 const CREATED_COL: &str = "created";
 
-fn stored_note_schema() -> SchemaRef {
+pub(crate) fn stored_note_schema() -> SchemaRef {
     // Column order: identity, key, value, timestamps, provenance,
     // system. A new column joins the category it belongs to.
     Arc::new(Schema::new(vec![
@@ -94,10 +94,12 @@ fn stored_note_schema() -> SchemaRef {
         // the note
         Field::new(CARRY_FORWARD_KEY_COL, DataType::Utf8, true),
         // System
-        // Shortest prefix of `id` unique among every live note
+        // Shortest prefix of `id` unique among the notes listed
         Field::new("id_prefix", DataType::Utf8, false),
-        // `git:<commit sha>` of the version listed
-        Field::new("locator", DataType::Utf8, false),
+        // `git:<commit sha>` of the version listed; null for a note an
+        // active scan wrote, which has no commit until apply
+        Field::new("locator", DataType::Utf8, true),
+        Field::new("commit", DataType::Utf8, true),
     ]))
 }
 
@@ -306,6 +308,7 @@ impl StoredNoteExec {
         let mut carry_forward_keys = StringBuilder::new();
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
         let mut locators = StringBuilder::with_capacity(len, len * 44);
+        let mut commits = StringBuilder::with_capacity(len, len * 40);
 
         for tip in &tips {
             ids.append_value(&tip.id);
@@ -317,6 +320,7 @@ impl StoredNoteExec {
                 .expect("prefix set covers every selected tip");
             id_prefixes.append_value(tip.id.chars().take(n).collect::<String>());
             locators.append_value(format!("git:{}", tip.sha));
+            commits.append_value(&tip.sha);
 
             if !needs_attrs {
                 names.append_value("");
@@ -360,6 +364,7 @@ impl StoredNoteExec {
                 Arc::new(carry_forward_keys.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),
+                Arc::new(commits.finish()),
             ],
         )?;
         match &self.projection {
@@ -367,6 +372,71 @@ impl StoredNoteExec {
             None => Ok(batch),
         }
     }
+}
+
+/// The `note` batch for a scan scope's notes, each with its commit
+/// when it has one; `prefix_len` gives each id's unique prefix length
+/// among them.
+pub(crate) fn note_rows(
+    notes: &[super::scan_scope::ScopedNote],
+    prefix_len: &HashMap<String, usize>,
+) -> Result<RecordBatch> {
+    let len = notes.len();
+    let mut ids = StringBuilder::with_capacity(len, len * 26);
+    let mut names = StringBuilder::new();
+    let mut targets = StringBuilder::new();
+    let mut authors = StringBuilder::new();
+    let mut values = StringBuilder::new();
+    let mut texts = StringBuilder::new();
+    let mut metadatas = StringBuilder::new();
+    let mut createds = TimestampMillisecondBuilder::with_capacity(len);
+    let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
+    let mut scans = StringBuilder::new();
+    let mut carry_forward_keys = StringBuilder::new();
+    let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
+    let mut locators = StringBuilder::with_capacity(len, len * 44);
+    let mut commits = StringBuilder::with_capacity(len, len * 40);
+    for scoped in notes {
+        let note = &scoped.note;
+        ids.append_value(&note.id);
+        names.append_value(&note.name);
+        targets.append_option(note.target.as_deref());
+        authors.append_value(&note.author);
+        let (value, text) = match &note.value {
+            NoteValue::Text(t) => (serde_json::Value::String(t.clone()).to_string(), Some(t)),
+            NoteValue::Json(v) => (v.to_string(), None),
+        };
+        values.append_value(value);
+        texts.append_option(text.map(String::as_str));
+        metadatas.append_option(note.metadata.as_ref().map(|m| m.to_string()));
+        createds.append_value(note.created_ms);
+        modifieds.append_value(note.modified_ms);
+        scans.append_option(note.scan.as_deref());
+        carry_forward_keys.append_option(note.carry_forward_key.as_deref());
+        let n = prefix_len.get(&note.id).copied().unwrap_or(note.id.len());
+        id_prefixes.append_value(note.id.chars().take(n).collect::<String>());
+        locators.append_option(scoped.commit.as_ref().map(|c| format!("git:{c}")));
+        commits.append_option(scoped.commit.as_deref());
+    }
+    Ok(RecordBatch::try_new(
+        stored_note_schema(),
+        vec![
+            Arc::new(ids.finish()),
+            Arc::new(names.finish()),
+            Arc::new(targets.finish()),
+            Arc::new(authors.finish()),
+            Arc::new(values.finish()),
+            Arc::new(texts.finish()),
+            Arc::new(metadatas.finish()),
+            Arc::new(createds.finish().with_timezone("UTC")),
+            Arc::new(modifieds.finish().with_timezone("UTC")),
+            Arc::new(scans.finish()),
+            Arc::new(carry_forward_keys.finish()),
+            Arc::new(id_prefixes.finish()),
+            Arc::new(locators.finish()),
+            Arc::new(commits.finish()),
+        ],
+    )?)
 }
 
 /// Unique prefix length of every id among its peers

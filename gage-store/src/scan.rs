@@ -5,7 +5,7 @@
 //! `err`, and `records`; under `tasks/<scanner>/<task>/`, each task's
 //! `attrs.json`; and under `scanners/<name>/sourcecode.d/`, the
 //! scanner's source files as run, opaque to the store. Tasks have no
-//! logs of their own. The layout is the same in a running scan's
+//! logs of their own. The layout is the same in a active scan's
 //! directory and in the store, so one decoder serves both through
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
 //! view over a commit. [`ScanStore::create`] imports a scan

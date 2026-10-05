@@ -2886,7 +2886,7 @@ mod tests {
         use gage_store::{IssueInput, IssueStatus, IssueStore, NoteStore};
 
         const SCANNER: &str = r###"
-            use gage::{issues, scan, write_issue, write_note};
+            use gage::{scan, write_issue, write_note};
 
             pub const SCANNER = #{
                 name: "issues",
@@ -2895,8 +2895,9 @@ mod tests {
             };
 
             pub async fn main() {
-                let before = issues().await?;
-                println!("before {} {}", before.len(), before[0].status);
+                // The scan's issues: none yet, and never the store's
+                let before = scan().issues().await?;
+                println!("before {}", before.len());
                 let note = None;
                 for s in scan().sessions().await {
                     note = Some(write_note("finding.code", "retry loop")
@@ -2921,11 +2922,11 @@ mod tests {
                     Err(gage::Error::Args(m)) => println!("args: {m}"),
                     other => println!("unexpected: {other:?}"),
                 }
-                let all = issues().await?;
-                let pending = issues().status("pending").await?;
-                let named = issues().name(["findings", "prior"]).status(["open", "pending"]).await?;
-                println!("after {} {} {}", all.len(), pending.len(), named.len());
-                match issues().status("bogus").await {
+                let all = scan().issues().await?;
+                let pending = scan().issues().status("pending").await?;
+                let named = scan().issues().name(["findings", "prior"]).status(["open", "pending"]).await?;
+                println!("after {} {} {} {:?}", all.len(), pending.len(), named.len(), all[0].evidence);
+                match scan().issues().status("bogus").await {
                     Err(gage::Error::Args(m)) => println!("args: {m}"),
                     other => println!("unexpected: {other:?}"),
                 }
@@ -2941,7 +2942,7 @@ mod tests {
 
         let (tmp, store) = open_store();
         let (_dataset_id, dataset_sha, session_id) = seeded_dataset(tmp.path(), &store, SESSION);
-        // An issue already in the store is visible to the task
+        // An issue already in the store is outside the scan's scope
         let prior = IssueStore::from(&store)
             .create(IssueInput {
                 name: "prior",
@@ -3022,7 +3023,7 @@ mod tests {
         assert_eq!(
             outputs(&events),
             [
-                &Output::Println("before 1 open".into()),
+                &Output::Println("before 0".into()),
                 &Output::Println(format!(
                     "findings pending task:issues:main [\"{note_id}\"] Some(\"## Summary\\n\\nRetries.\")"
                 )),
@@ -3031,7 +3032,7 @@ mod tests {
                 &Output::Println(
                     "args: evidence must be a note id, a Note, or a list of either".into()
                 ),
-                &Output::Println("after 3 1 2".into()),
+                &Output::Println(format!("after 2 1 1 [\"{note_id}\"]")),
                 &Output::Println(
                     "args: issues status: invalid issue input: unknown issue status \"bogus\""
                         .into()
@@ -3084,6 +3085,45 @@ mod tests {
             ))
             .await,
             1
+        );
+
+        // The stored scan's scope serves the same tables over that scan
+        // alone: the prior issue is outside it
+        let scoped = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+            Store::open(store.path()).unwrap(),
+        ))))
+        .scope(gage_query2::ScanScope::stored(outcome.id.clone()))
+        .build()
+        .await;
+        let count = |sql: &'static str| {
+            let ctx = scoped.clone();
+            async move {
+                let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                    .unwrap()
+                    .value(0)
+            }
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM issue").await, 2);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM issue WHERE name = 'prior'").await,
+            0
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM note").await, 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM scan_note WHERE NOT carried").await,
+            1
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM session").await, 1);
+        assert_eq!(count("SELECT COUNT(*) FROM scan").await, 1);
+        assert_eq!(count("SELECT COUNT(*) FROM issue_evidence").await, 2);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM note WHERE commit IS NOT NULL").await,
+            1,
+            "a stored scan's notes have commits"
         );
     }
 

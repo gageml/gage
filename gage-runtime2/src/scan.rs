@@ -1,4 +1,4 @@
-//! `scan()` and `params()`: the running scan, its sessions, and the
+//! `scan()` and `params()`: the active scan, its sessions, and the
 //! scanner's params, for scanners.
 //!
 //! `scan()` returns the [`Scan`]: its id and its dataset.
@@ -22,8 +22,7 @@ use datafusion::arrow::array::{
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use gage_mcp2::{HostError, McpHost};
-use gage_query2::ContextBuilder;
-use gage_query2::scope::SessionScope;
+use gage_query2::{ContextBuilder, ScanScope};
 use gage_runtime::datetime::{self, DateTime};
 use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
@@ -80,7 +79,11 @@ pub struct ScanContext {
     /// written, so the next scan resumes from this one.
     pub invalidate: bool,
     query_store: Arc<Mutex<Store>>,
-    query: Arc<OnceCell<(Arc<SessionScope>, SessionContext)>>,
+    /// The scan-scoped query context, built on the first read
+    scan_query: Arc<OnceCell<SessionContext>>,
+    /// The store-scoped query context, built on the first read that
+    /// consults prior scans
+    store_query: Arc<OnceCell<SessionContext>>,
     /// The MCP host serving scanner-defined tools to agents, started
     /// by the first `call_agent` that declares tools
     mcp_host: Arc<OnceCell<McpHost>>,
@@ -90,6 +93,9 @@ pub struct ScanContext {
 /// the layout and supplies them.
 #[derive(Debug, Clone)]
 pub struct ScanDirPaths {
+    /// The scan directory itself, the source of the scan-scoped query
+    /// context
+    pub dir: PathBuf,
     /// `write_note` writes note trees here, one directory per id
     pub notes_dir: PathBuf,
     /// `write_issue` writes issue trees here, one directory per id
@@ -129,7 +135,8 @@ impl ScanContext {
             paths,
             invalidate: false,
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
-            query: Arc::new(OnceCell::new()),
+            scan_query: Arc::new(OnceCell::new()),
+            store_query: Arc::new(OnceCell::new()),
             mcp_host: Arc::new(OnceCell::new()),
         })
     }
@@ -144,66 +151,57 @@ impl ScanContext {
             .await
     }
 
-    /// The scope and query context over the dataset's members at the
-    /// commit the scan links, built on the first read of any kind.
-    /// Without a dataset the scope is empty.
-    async fn scoped(&self) -> Result<&(Arc<SessionScope>, SessionContext), VmError> {
-        self.query
+    /// The scan-scoped query context: the scan's sessions at the
+    /// commits it links, the notes it wrote or carried, the issues it
+    /// wrote, and the relations among them, read from the scan
+    /// directory and the store on each query. Every scanner-facing
+    /// read and the agent's Query tool run here.
+    pub(crate) async fn scan_context(&self) -> Result<&SessionContext, VmError> {
+        self.scan_query
             .get_or_try_init(|| async {
-                let scope = match &self.dataset {
-                    Some(dataset) => SessionScope::for_dataset(
-                        Arc::clone(&self.query_store),
-                        &dataset.commit_sha,
-                    )
-                    .map_err(|e| VmError::panic(format!("read dataset {}: {e}", dataset.id)))?,
-                    None => SessionScope::with_sessions(Arc::clone(&self.query_store), Vec::new()),
-                };
-                let scope = Arc::new(scope);
                 let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
-                    .scope(Arc::clone(&scope))
+                    .scope(ScanScope::scan_dir(&self.paths.dir))
                     .build()
                     .await;
-                tracing::info!(
-                    members = scope.fixed_versions().map_or(0, |v| v.len()),
-                    "dataset query context built"
-                );
-                Ok((scope, ctx))
+                tracing::info!("scan query context built");
+                Ok(ctx)
             })
             .await
     }
 
-    /// The query context over the dataset's members.
-    pub(crate) async fn query_context(&self) -> Result<&SessionContext, VmError> {
-        Ok(&self.scoped().await?.1)
+    /// The store-scoped query context, for the reads that consult
+    /// prior scans: `hwm` and `carry_forward_notes`.
+    pub(crate) async fn store_context(&self) -> Result<&SessionContext, VmError> {
+        self.store_query
+            .get_or_try_init(|| async {
+                let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
+                    .build()
+                    .await;
+                tracing::info!("store query context built");
+                Ok(ctx)
+            })
+            .await
     }
 
     /// The context the Gage query tool runs over for `scope`: the
-    /// scan's own context for the dataset, or a context over one
-    /// member at its linked version, with `entry` and `message`
-    /// narrowed to the line range when one is given.
+    /// scan's own context, or a scan-scoped context narrowed to one
+    /// member, with `entry` and `message` narrowed to the line range
+    /// when one is given.
     pub(crate) async fn query_tool_context(
         &self,
         scope: &QueryScope,
     ) -> Result<SessionContext, Error> {
         let agent_err = |e: VmError| Error::agent(format!("Query tool: {e}"));
         match scope {
-            QueryScope::Dataset => Ok(self.query_context().await.map_err(agent_err)?.clone()),
+            QueryScope::Dataset => Ok(self.scan_context().await.map_err(agent_err)?.clone()),
             QueryScope::Session { id, lines } => {
-                let (dataset_scope, _) = self.scoped().await.map_err(agent_err)?;
-                let member = dataset_scope
-                    .sessions(&[])
-                    .map_err(|e| Error::agent(format!("Query tool: {e}")))?
-                    .into_iter()
-                    .find(|s| s.id == *id)
-                    .ok_or_else(|| {
-                        Error::agent(format!(
-                            "Query tool: session {id} is not a member of the scan's dataset"
-                        ))
-                    })?;
-                let scope =
-                    SessionScope::with_sessions(Arc::clone(&self.query_store), vec![member]);
+                if self.member_commit(id).await.map_err(agent_err)?.is_none() {
+                    return Err(Error::agent(format!(
+                        "Query tool: session {id} is not a member of the scan's dataset"
+                    )));
+                }
                 let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
-                    .scope(Arc::new(scope))
+                    .scope(ScanScope::scan_dir(&self.paths.dir).session(id))
                     .build()
                     .await;
                 if let Some((start, end)) = lines {
@@ -219,14 +217,11 @@ impl ScanContext {
     /// The commit the scan reads for the member session `session_id`,
     /// or `None` when it is not a member.
     pub(crate) async fn member_commit(&self, session_id: &str) -> Result<Option<String>, VmError> {
-        let (scope, _) = self.scoped().await?;
-        let members = scope
-            .sessions(&[])
-            .map_err(|e| VmError::panic(format!("scan members: {e}")))?;
-        Ok(members
+        Ok(members(self, false)
+            .await?
             .into_iter()
-            .find(|r| r.id == session_id)
-            .map(|r| r.commit))
+            .find(|s| s.id == session_id)
+            .map(|s| s.commit))
     }
 }
 
@@ -280,7 +275,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     Ok(m)
 }
 
-/// The running scan.
+/// The active scan.
 fn scan() -> Result<Scan, VmError> {
     let ctx = current()?;
     Ok(Scan {
@@ -301,7 +296,7 @@ pub(crate) fn current() -> Result<ScanContext, VmError> {
     SCAN_CTX
         .try_with(|ctx| ctx.clone())
         .map_err(|_outside_scope| {
-            VmError::panic("scan() is available only inside a running scan task")
+            VmError::panic("scan() is available only inside a active scan task")
         })
 }
 
@@ -338,7 +333,7 @@ pub(crate) async fn restrict_lines(
     Ok(())
 }
 
-/// The running scan, as a scanner sees it.
+/// The active scan, as a scanner sees it.
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct Scan {
@@ -438,7 +433,7 @@ pub(crate) async fn members(
         "SELECT id, locator, line_count FROM session{}",
         session_order(newest_first)
     );
-    let batches = run(ctx.query_context().await?, &sql).await?;
+    let batches = run(ctx.scan_context().await?, &sql).await?;
     let mut items = Vec::new();
     for batch in &batches {
         let ids = string_column(batch, 0);
@@ -460,7 +455,12 @@ pub(crate) async fn members(
     Ok(items)
 }
 
-/// Run `sql` on the scan's query context.
+/// `s` as a single-quoted SQL string literal's content.
+pub(crate) fn sql_str(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Run `sql` on a query context.
 pub(crate) async fn run(
     df_ctx: &SessionContext,
     sql: &str,
@@ -642,10 +642,10 @@ async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
                 native_source, session_type, driver, title, model, message_count, is_empty, \
                 line_count \
          FROM session WHERE id = '{}'",
-        q.id.replace('\'', "''")
+        sql_str(&q.id)
     );
     let ctx = current()?;
-    let batches = run(ctx.query_context().await?, &sql).await?;
+    let batches = run(ctx.scan_context().await?, &sql).await?;
     let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
         return Err(VmError::panic(format!(
             "session {} is not a member of the scan",
@@ -883,7 +883,7 @@ mod tests {
         let err = vm.call(["check"], ()).unwrap_err();
         assert!(
             err.to_string()
-                .contains("scan() is available only inside a running scan task"),
+                .contains("scan() is available only inside a active scan task"),
             "{err}"
         );
     }

@@ -1,7 +1,7 @@
 //! Runtime records and panics into the scan record.
 //!
 //! [`layer`] is a `tracing` layer the CLI installs. Every event it
-//! admits is appended as one record to the running scan's
+//! admits is appended as one record to the active scan's
 //! `logs/records` in scan_dir. A runtime record carries the Rust
 //! target as its origin, `… INFO gage_store: …`, where a scanner's
 //! own record carries `<scanner>:<task>`; a runtime record raised
@@ -39,7 +39,7 @@ tokio::task_local! {
     pub(crate) static LOG_SCOPE: LogScope;
 }
 
-/// The running scan's `scan/` subtree in its scan directory and, while a task
+/// The active scan's `scan/` subtree in its scan directory and, while a task
 /// runs, the task, which runtime records name.
 #[derive(Clone)]
 pub(crate) struct LogScope {
@@ -148,7 +148,7 @@ impl Visit for MessageVisitor {
 }
 
 /// Install, once, a panic hook that appends the panic and its
-/// backtrace to the running scan's `logs/err`. Chains to the hook
+/// backtrace to the active scan's `logs/err`. Chains to the hook
 /// already installed.
 pub fn install_panic_hook() {
     static INSTALL: Once = Once::new();

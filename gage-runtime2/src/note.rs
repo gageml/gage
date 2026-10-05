@@ -8,36 +8,35 @@
 //! the target through the store, writes the note tree into the scan
 //! directory (`gage_store::NoteStore::write_to_dir`), and returns the
 //! [`Note`]. The runtime sets `author` to `task:<scanner>:<task>` and
-//! `attrs.scan` to the running scan. Apply creates the object. Bad
+//! `attrs.scan` to the active scan. Apply creates the object. Bad
 //! input is `Error::Args`; a failure to reach the scan directory or
 //! the store is a VM error.
 //!
 //! `scan().notes()` is a [`NotesQuery`]; awaiting it reads the notes
 //! written by this scan's tasks and the notes carried into it, and
-//! nothing else.
-//! `.name(name)` and `.names([...])` match names exactly. A task sees
-//! every note its upstream tasks wrote because the runner releases it
-//! only after they returned. `.hwm(key)` and `.unseen(key)` read the
-//! notes' watermarks under `key`; see `crate::validate`.
+//! nothing else, through the scan-scoped `note` table. `.name(name)`
+//! and `.names([...])` match names exactly or by a `*` pattern. A
+//! task sees every note its upstream tasks wrote because the runner
+//! releases it only after they returned. `.hwm(key)` and
+//! `.unseen(key)` read the notes' watermarks under `key`; see
+//! `crate::validate`.
 //!
 //! A `DateTime` value, as a note value or inside metadata, is stored
 //! as its RFC 3339 string.
 
-use std::fs;
-use std::io;
-
+use datafusion::arrow::array::{Array, StringArray, TimestampMillisecondArray};
 use gage_core::datetime::now_ms;
 use gage_core::uuid::new_uuid;
 use gage_runtime::datetime::DateTime;
 use gage_runtime::error::Error;
 use gage_runtime::value::{json_to_value, value_to_json};
-use gage_store::{NoteFull, NoteInput, NoteStore, NoteValue, StoreError};
+use gage_store::{NoteInput, NoteStore, NoteValue, StoreError};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
-use crate::scan::{Scan, ScanContext, current, session_id};
+use crate::scan::{Scan, current, run, session_id, sql_str, string_column};
 use crate::validate::encode_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
@@ -228,7 +227,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
     let (scanner, task) = OUTPUT_SINK
         .try_with(|sink| (sink.scanner.clone(), sink.task.clone()))
         .map_err(|_outside_task| {
-            VmError::panic("write_note is available only inside a running scan task")
+            VmError::panic("write_note is available only inside a active scan task")
         })?;
     let author = format!("task:{scanner}:{task}");
 
@@ -411,7 +410,7 @@ fn json_value(v: &Value) -> Result<serde_json::Value, String> {
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct NotesQuery {
-    /// Exact names to keep; `None` keeps every note
+    /// Name patterns to keep, any of them; `None` keeps every note
     #[rune(skip)]
     names: Option<Vec<String>>,
 }
@@ -423,14 +422,16 @@ fn notes(_scan: Ref<Scan>) -> NotesQuery {
 }
 
 impl NotesQuery {
-    /// Keep the notes named `name`.
+    /// Keep the notes whose name matches `name`: an exact name, or a
+    /// pattern in which `*` matches any run of characters.
     #[rune::function(instance)]
     fn name(mut self, name: &str) -> Self {
         self.names = Some(vec![name.to_string()]);
         self
     }
 
-    /// Keep the notes with any of `names`.
+    /// Keep the notes whose name matches any of `names`, each an exact
+    /// name or a `*` pattern.
     #[rune::function(instance)]
     fn names(mut self, names: Ref<RuneVec>) -> Result<Self, VmError> {
         let mut out = Vec::with_capacity(names.len());
@@ -445,103 +446,86 @@ impl NotesQuery {
     }
 }
 
-/// Read the scan's own and carried notes, filtered by name, oldest
-/// first and by id among equals.
+/// Read the scan's notes through the scan-scoped `note` table,
+/// filtered by name, oldest first and by id among equals.
 pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error>, VmError> {
     let ctx = current()?;
-    let mut full: Vec<(NoteFull, Option<String>)> = scan_dir_notes(&ctx)
-        .await?
-        .into_iter()
-        .map(|n| (n, None))
-        .collect();
-    full.extend(
-        carried_notes(&ctx)
-            .await?
-            .into_iter()
-            .map(|(n, sha)| (n, Some(sha))),
+    let filter = match &q.names {
+        Some(patterns) => format!(" WHERE {}", name_predicate(patterns)),
+        None => String::new(),
+    };
+    let sql = format!(
+        "SELECT id, name, target, author, value, text, metadata, created, commit \
+         FROM note{filter} ORDER BY created, id"
     );
-    full.retain(|(n, _)| q.names.as_ref().is_none_or(|names| names.contains(&n.name)));
-    full.sort_by(|(a, _), (b, _)| {
-        a.created_ms
-            .cmp(&b.created_ms)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let mut out = Vec::with_capacity(full.len());
-    for (n, commit) in full {
-        out.push(note_from_full(n, commit)?);
+    let batches = run(ctx.scan_context().await?, &sql).await?;
+    let mut out = Vec::new();
+    for batch in &batches {
+        let ids = string_column(batch, 0);
+        let names = string_column(batch, 1);
+        let targets = string_column(batch, 2);
+        let authors = string_column(batch, 3);
+        let values = string_column(batch, 4);
+        let texts = string_column(batch, 5);
+        let metadatas = string_column(batch, 6);
+        let createds = batch
+            .column(7)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("note created is a timestamp column");
+        let commits = string_column(batch, 8);
+        let optional =
+            |arr: &StringArray, i: usize| arr.is_valid(i).then(|| arr.value(i).to_string());
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let value = match optional(texts, i) {
+                Some(text) => rune::to_value(text).map_err(VmError::from)?,
+                None => json_to_value(&parse_json(id, "value", values.value(i))?),
+            };
+            let metadata = match optional(metadatas, i) {
+                Some(json) => json_to_value(&parse_json(id, "metadata", &json)?),
+                None => rune::to_value(Object::new()).map_err(VmError::from)?,
+            };
+            out.push(Note {
+                id: id.to_string(),
+                name: names.value(i).to_string(),
+                value,
+                author: authors.value(i).to_string(),
+                target: optional(targets, i),
+                metadata,
+                created: createds.value(i),
+                commit: optional(commits, i),
+            });
+        }
     }
     Ok(Ok(out))
 }
 
-/// The notes in the scan directory, in id order.
-async fn scan_dir_notes(ctx: &ScanContext) -> Result<Vec<NoteFull>, VmError> {
-    let entries = match fs::read_dir(&ctx.paths.notes_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(VmError::panic(format!("scan directory notes: {e}"))),
-    };
-    let mut dirs = Vec::new();
-    for entry in entries {
-        let path = entry
-            .map_err(|e| VmError::panic(format!("scan directory notes: {e}")))?
-            .path();
-        if path.is_dir() {
-            dirs.push(path);
-        }
-    }
-    dirs.sort();
-    let store = ctx.store.lock().await;
-    let notes = NoteStore::from(&*store);
-    let mut out = Vec::with_capacity(dirs.len());
-    for dir in dirs {
-        out.push(
-            notes
-                .read_from_dir(&dir)
-                .map_err(|e| VmError::panic(format!("note dir {}: {e}", dir.display())))?,
-        );
-    }
-    Ok(out)
+/// The `WHERE` clause for `.name()` patterns: `*` matches any run of
+/// characters, as in a task's `wants`; a pattern without `*` is an
+/// exact name.
+fn name_predicate(patterns: &[String]) -> String {
+    patterns
+        .iter()
+        .map(|p| {
+            if p.contains('*') {
+                let regex: String = p
+                    .split('*')
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join(".*");
+                format!("regexp_like(name, '^{}$')", sql_str(&regex))
+            } else {
+                format!("name = '{}'", sql_str(p))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
-/// The notes carried into the scan so far with their carried commits,
-/// in the order they were carried.
-async fn carried_notes(ctx: &ScanContext) -> Result<Vec<(NoteFull, String)>, VmError> {
-    let text = match fs::read_to_string(&ctx.paths.carried_notes) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(VmError::panic(format!("carried notes: {e}"))),
-    };
-    let store = ctx.store.lock().await;
-    let notes = NoteStore::from(&*store);
-    let mut out = Vec::new();
-    for sha in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let note = notes
-            .at_commit(sha)
-            .map_err(|e| VmError::panic(format!("carried note {sha}: {e}")))?;
-        out.push((note, sha.to_string()));
-    }
-    Ok(out)
-}
-
-fn note_from_full(n: NoteFull, commit: Option<String>) -> Result<Note, VmError> {
-    let value = match n.value {
-        NoteValue::Text(s) => rune::to_value(s).map_err(VmError::from)?,
-        NoteValue::Json(json) => json_to_value(&json),
-    };
-    let metadata = match n.metadata {
-        Some(json) => json_to_value(&json),
-        None => rune::to_value(Object::new()).map_err(VmError::from)?,
-    };
-    Ok(Note {
-        id: n.id,
-        name: n.name,
-        value,
-        author: n.author,
-        target: n.target,
-        metadata,
-        created: n.created_ms,
-        commit,
-    })
+fn parse_json(id: &str, column: &str, text: &str) -> Result<serde_json::Value, VmError> {
+    serde_json::from_str(text)
+        .map_err(|e| VmError::panic(format!("note {id} {column} is not JSON: {e}")))
 }
 
 #[cfg(test)]

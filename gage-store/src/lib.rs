@@ -52,6 +52,7 @@ pub mod object;
 pub mod query;
 pub mod refs;
 mod scan;
+pub mod scan_dir;
 mod session;
 mod sqlite_index;
 mod store;
@@ -86,8 +87,9 @@ pub use note::{
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{
-    LinkKind, StoredNoteTable, StoredSessionTable, attachment_table, dataset_table,
-    issue_event_table, issue_table, link_table, scan_table, scan_watermark_table, tag_table,
+    LinkKind, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,
+    attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_table,
+    link_table, scan_scope_tables, scan_table, scan_watermark_table, tag_table,
 };
 pub use refs::{GENERATION, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use scan::{
@@ -95,6 +97,7 @@ pub use scan::{
     ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,
     TaskCounts, TaskStatus, Watermark,
 };
+pub use scan_dir::ScanDirLayout;
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,
     SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore, SummaryAttrs,
