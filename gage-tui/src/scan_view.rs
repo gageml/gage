@@ -4,11 +4,15 @@
 //!
 //! Two entry points share the rendering and key handling. [`run`]
 //! drives a live scan: the caller runs the scan, adapts runner events
-//! into [`Event`]s, and periodically reconciles notes/issues from the
-//! db into [`Event::Results`]; the view applies them to the model and
-//! lingers for inspection after the scan finishes. [`view`] renders an
-//! already-complete model (a historical scan loaded from the db) with
-//! no event source.
+//! into [`Event`]s, and periodically reconciles notes/issues into
+//! [`Event::Results`]; the view applies them to the model and lingers
+//! for inspection after the scan finishes. [`view`] renders an
+//! already-complete model (a stored scan) with no event source.
+//!
+//! The view reads and writes nothing itself. A [`ScanHost`] supplies
+//! the data behind the picker, the session dialogs, the log dialog,
+//! and the issue actions, so the one view serves the legacy database
+//! and the store.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
@@ -20,8 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gage_claude::model::resolved_model;
 use gage_claude::resolve::resolve_command;
 use gage_core::task::{task_display, task_name_display};
-use gage_db::issue::{self, IssueStatus, StatusReason};
-use gage_db::target::{NoteTarget, SessionTarget};
+use gage_store::{IssueStatus, StatusReason, url};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -43,10 +46,6 @@ use crate::doc::Document;
 use crate::item_table::ItemTable;
 use crate::panel::{header_row, panel_block};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
-
-/// Loader used by the open-scan dialog to rebuild the model for a
-/// picked scan id. Absent for live-scan views, where `o` is disabled.
-type ScanLoader<'a> = &'a dyn Fn(&str) -> io::Result<ScanModel>;
 use crate::scroll::ScrollView;
 use crate::session::Backend;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
@@ -54,8 +53,89 @@ use crate::text::{ellipsize, fmt_duration, fmt_duration_live};
 use crate::textarea::TextArea;
 use crate::{app, hint, markdown, session, styles};
 
-/// A scan task identity, `{scanner}::{task}`.
+/// The data behind the view, supplied by the host: the legacy
+/// database or the store. Every method runs on the event loop's
+/// thread; a host that reads asynchronously blocks in place.
+pub trait ScanHost: Send + Sync {
+    /// Rows for the open-scan picker, newest first
+    fn list_scans(&self) -> io::Result<Vec<ScanPickRow>>;
+    /// The model of a stored scan, by id or unique prefix
+    fn load(&self, scan_id: &str) -> io::Result<ScanModel>;
+    /// A backend the session dialogs read sessions through
+    fn session_backend(&self) -> io::Result<Backend>;
+    /// The scan's captured streams, by the model's `log_key`
+    fn read_logs(&self, log_key: &str) -> io::Result<ScanLogs>;
+    /// An issue's current status fields and history
+    fn issue_status(&self, issue_id: &str) -> Result<IssueStatusUpdate, String>;
+    fn set_issue_status(
+        &self,
+        issue_id: &str,
+        status: IssueStatus,
+        reason: Option<StatusReason>,
+        author: &str,
+        message: Option<&str>,
+    ) -> Result<(), String>;
+    fn add_issue_comment(&self, issue_id: &str, author: &str, message: &str) -> Result<(), String>;
+}
+
+/// One row of the open-scan picker.
+#[derive(Debug, Clone)]
+pub struct ScanPickRow {
+    pub id: String,
+    pub id_display: String,
+    pub tasks: usize,
+    pub sessions: usize,
+    pub issues: usize,
+    pub notes: usize,
+    /// `completed`, `canceled`, `running`, or `incomplete`
+    pub status: &'static str,
+    pub duration: Option<Duration>,
+    pub label: String,
+    pub created_ms: i64,
+}
+
+/// A scan's captured streams, each `None` when the scan produced
+/// none: diagnostics, output, and the log records.
+#[derive(Debug, Clone, Default)]
+pub struct ScanLogs {
+    pub err: Option<String>,
+    pub out: Option<String>,
+    pub records: Option<String>,
+}
+
+/// An issue's re-read status fields and history, applied onto
+/// [`IssueItem`] snapshots after an external change.
+#[derive(Debug, Clone)]
+pub struct IssueStatusUpdate {
+    /// Status display string, e.g. `closed (completed)`
+    pub status: String,
+    /// Compact status for the issues table
+    pub status_cell: String,
+    pub closed: bool,
+    pub events: Vec<EventItem>,
+}
+
+/// A session a note or issue targets, with the first line range of
+/// its selection when it has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionTarget {
+    session_id: String,
+    line: Option<u32>,
+    line_end: Option<u32>,
+}
+
+impl SessionTarget {
+    fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            line: None,
+            line_end: None,
+        }
+    }
+}
+
+/// A scan task identity, `{scanner}::{task}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TaskId {
     pub scanner: String,
     pub task: String,
@@ -97,9 +177,9 @@ pub struct ScanModel {
     pub finished: bool,
     /// Scan duration; None while a live scan is running.
     pub elapsed: Option<Duration>,
-    /// The scan's captured stdout stream (`{scan_id}.out`), shown by
-    /// the log dialog. None disables the dialog.
-    pub out_path: Option<PathBuf>,
+    /// The key the host reads the scan's logs by, shown by the log
+    /// dialog. None disables the dialog.
+    pub log_key: Option<String>,
 }
 
 /// Agent spend in USD. `incomplete` marks a total that understates
@@ -505,10 +585,11 @@ pub async fn run(
     model: ScanModel,
     mut events: UnboundedReceiver<Event>,
     on_cancel: impl Fn(),
+    host: Arc<dyn ScanHost>,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = event_loop(&mut terminal, model, &mut events, &on_cancel, None).await;
+    let result = event_loop(&mut terminal, model, &mut events, &on_cancel, host, false).await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -516,16 +597,13 @@ pub async fn run(
     result
 }
 
-/// Show an already-complete model (a historical scan). `None` opens
-/// the scan picker first (canceling it exits); `load` rebuilds the
+/// Show an already-complete model (a stored scan). `None` opens the
+/// scan picker first (canceling it exits); the host rebuilds the
 /// model when the user opens a different scan (`o`, or the picker).
-pub async fn view(
-    model: Option<ScanModel>,
-    load: impl Fn(&str) -> io::Result<ScanModel>,
-) -> io::Result<()> {
+pub async fn view(model: Option<ScanModel>, host: Arc<dyn ScanHost>) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = view_inner(&mut terminal, model, &load).await;
+    let result = view_inner(&mut terminal, model, host).await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -536,11 +614,11 @@ pub async fn view(
 async fn view_inner(
     terminal: &mut DefaultTerminal,
     model: Option<ScanModel>,
-    load: ScanLoader<'_>,
+    host: Arc<dyn ScanHost>,
 ) -> io::Result<()> {
     let mut model = match model {
         Some(m) => m,
-        None => match standalone_scan_pick(terminal, load)? {
+        None => match standalone_scan_pick(terminal, &host)? {
             Some(m) => m,
             None => return Ok(()),
         },
@@ -549,19 +627,19 @@ async fn view_inner(
     let (tx, mut events) = unbounded_channel();
     drop(tx);
     // A finished model never opens the cancel path
-    event_loop(terminal, model, &mut events, &|| {}, Some(load)).await
+    event_loop(terminal, model, &mut events, &|| {}, host, true).await
 }
 
 /// Run the open dialog on a blank background until the user picks a
 /// scan or cancels.
 fn standalone_scan_pick(
     terminal: &mut DefaultTerminal,
-    load: ScanLoader<'_>,
+    host: &Arc<dyn ScanHost>,
 ) -> io::Result<Option<ScanModel>> {
-    let mut picker = scan_picker(None)?;
+    let mut picker = scan_picker(host.as_ref(), None)?;
     // Empty panels behind the picker, so picking renders in place
     // with no flash.
-    let mut shell = ViewState::new(ScanModel::default());
+    let mut shell = ViewState::new(ScanModel::default(), Arc::clone(host));
     loop {
         terminal.draw(|frame| {
             draw(frame, &mut shell);
@@ -573,54 +651,30 @@ fn standalone_scan_pick(
             match picker.handle_key(key.code) {
                 PickerAction::None => {}
                 PickerAction::Close => return Ok(None),
-                PickerAction::Open(id) => return load(&id).map(Some),
+                PickerAction::Open(id) => return host.load(&id).map(Some),
             }
         }
     }
 }
 
-/// Build the scan-open picker from the db's scans, newest first.
-fn scan_picker(current: Option<&str>) -> io::Result<Picker> {
-    let conn = gage_db::db::open_db().map_err(io::Error::other)?;
-    let mut scans = gage_db::scan::all(&conn).map_err(io::Error::other)?;
-    let counts = gage_db::scan::counts_by_scan(&conn).map_err(io::Error::other)?;
-    scans.sort_by_key(|s| std::cmp::Reverse(s.created));
-    let items = scans
+/// Build the scan-open picker from the host's scans, newest first.
+fn scan_picker(host: &dyn ScanHost, current: Option<&str>) -> io::Result<Picker> {
+    let items = host
+        .list_scans()?
         .into_iter()
-        .map(|scan| {
-            let metadata = scan.parse_metadata();
-            let status = match &metadata {
-                Ok(Some(gage_db::scan::ScanMetadata::Scan(s))) if s.canceled => "canceled",
-                Ok(Some(gage_db::scan::ScanMetadata::Scan(_)))
-                | Ok(Some(gage_db::scan::ScanMetadata::Agent(_))) => "completed",
-                Ok(Some(gage_db::scan::ScanMetadata::Running(_))) => "running",
-                // NULL metadata (a run that died before summarizing) and
-                // unparseable metadata read the same: incomplete.
-                Ok(None) | Err(_) => "incomplete",
-            };
-            let duration = match metadata {
-                Ok(Some(m)) => m
-                    .elapsed_ms()
-                    .map(|ms| fmt_duration(Duration::from_millis(ms)))
-                    .unwrap_or_default(),
-                Ok(None) | Err(_) => String::new(),
-            };
-            let count = counts.get(&scan.id).copied().unwrap_or_default();
-            let short = gage_core::uuid::short_uuid(&scan.id).to_string();
-            PickItem {
-                cells: vec![
-                    Span::styled(short, styles::Text::id()),
-                    Span::raw(count.tasks.to_string()),
-                    Span::raw(count.sessions.to_string()),
-                    Span::raw(count.issues.to_string()),
-                    Span::raw(count.notes.to_string()),
-                    Span::raw(status),
-                    Span::raw(duration),
-                    Span::raw(scan.label.unwrap_or_default()),
-                    Span::styled(picker::ago(scan.created), styles::Text::dim()),
-                ],
-                id: scan.id,
-            }
+        .map(|row| PickItem {
+            cells: vec![
+                Span::styled(row.id_display, styles::Text::id()),
+                Span::raw(row.tasks.to_string()),
+                Span::raw(row.sessions.to_string()),
+                Span::raw(row.issues.to_string()),
+                Span::raw(row.notes.to_string()),
+                Span::raw(row.status),
+                Span::raw(row.duration.map(fmt_duration).unwrap_or_default()),
+                Span::raw(row.label),
+                Span::styled(picker::ago(row.created_ms), styles::Text::dim()),
+            ],
+            id: row.id,
         })
         .collect();
     let columns = vec![
@@ -642,9 +696,11 @@ async fn event_loop(
     model: ScanModel,
     events: &mut UnboundedReceiver<Event>,
     on_cancel: &impl Fn(),
-    loader: Option<ScanLoader<'_>>,
+    host: Arc<dyn ScanHost>,
+    allow_open: bool,
 ) -> io::Result<()> {
-    let mut state = ViewState::new(model);
+    let mut state = ViewState::new(model, host);
+    state.allow_open = allow_open;
     let mut stop_input = Arc::new(AtomicBool::new(false));
     let mut input = spawn_input_thread(Arc::clone(&stop_input));
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -670,7 +726,7 @@ async fn event_loop(
             ev = input.recv() => {
                 match ev {
                     Some(TermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                        if handle_key(&mut state, key, on_cancel, loader) {
+                        if handle_key(&mut state, key, on_cancel) {
                             break;
                         }
                         if state.pending_resolve.is_some() {
@@ -778,12 +834,7 @@ fn spawn_input_thread(stop: Arc<AtomicBool>) -> UnboundedReceiver<TermEvent> {
 }
 
 /// Returns true when the view should close.
-fn handle_key(
-    state: &mut ViewState,
-    key: KeyEvent,
-    on_cancel: &impl Fn(),
-    loader: Option<ScanLoader<'_>>,
-) -> bool {
+fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bool {
     if state.prompt.is_some() {
         handle_prompt_key(state, key);
         return false;
@@ -826,7 +877,7 @@ fn handle_key(
             return false;
         }
         Dialog::OpenScan(_) => {
-            state.handle_open_scan_key(key.code, loader);
+            state.handle_open_scan_key(key.code);
             return false;
         }
         Dialog::Notice { .. } => {
@@ -890,8 +941,8 @@ fn handle_key(
         KeyCode::Right if state.focus == Focus::Tasks => state.expand_task_row(),
         KeyCode::Left if state.focus == Focus::Tasks => state.collapse_task_row(),
         KeyCode::Char('l') => state.open_log(),
-        KeyCode::Char('o') if state.model.finished && loader.is_some() => {
-            match scan_picker(Some(&state.model.scan_id)) {
+        KeyCode::Char('o') if state.model.finished && state.allow_open => {
+            match scan_picker(state.host.as_ref(), Some(&state.model.scan_id)) {
                 Ok(picker) => state.dialog = Dialog::OpenScan(picker),
                 Err(e) => state.push_log(format!("Open scan: {e}")),
             }
@@ -968,15 +1019,6 @@ fn handle_comment_key(state: &mut ViewState, key: KeyEvent) {
     }
 }
 
-/// An issue's re-read status fields and history, applied onto
-/// [`IssueItem`] snapshots after an external change.
-struct IssueStatusUpdate {
-    status: String,
-    status_cell: String,
-    closed: bool,
-    events: Vec<EventItem>,
-}
-
 impl IssueStatusUpdate {
     fn apply(&self, item: &mut IssueItem) {
         item.status = self.status.clone();
@@ -984,55 +1026,6 @@ impl IssueStatusUpdate {
         item.closed = self.closed;
         item.events = self.events.clone();
     }
-}
-
-/// Re-read an issue's status fields and history from the db,
-/// mirroring how the scan model builds them.
-fn load_issue_status(issue_id: &str) -> Result<IssueStatusUpdate, String> {
-    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
-    let issue = issue::get(&conn, issue_id).map_err(|e| e.to_string())?;
-    let events = issue::issue_events_for(&conn, issue_id)
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|ev| EventItem {
-            kind: ev.event.to_label(),
-            author: ev.author.clone(),
-            timestamp: gage_core::datetime::ms_to_iso8601(ev.timestamp),
-            message: ev.event.message().map(str::to_string),
-        })
-        .collect();
-    Ok(IssueStatusUpdate {
-        status: match issue.status_reason {
-            Some(r) => format!("{} ({})", issue.status.as_str(), r.as_str()),
-            None => issue.status.as_str().to_string(),
-        },
-        status_cell: match issue.status_reason {
-            Some(r) => r.as_str().to_string(),
-            None => issue.status.as_str().to_string(),
-        },
-        closed: issue.status == IssueStatus::Closed,
-        events,
-    })
-}
-
-/// Set `issue_id`'s status in the db. A fresh connection per change
-/// keeps the view free of a long-lived handle it rarely needs.
-fn set_issue_status(
-    issue_id: &str,
-    status: IssueStatus,
-    reason: Option<StatusReason>,
-    author: &str,
-    message: Option<&str>,
-) -> Result<(), String> {
-    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
-    issue::set_status(&conn, issue_id, status, reason, author, message).map_err(|e| e.to_string())
-}
-
-/// Record a comment against `issue_id` in the db. A fresh connection
-/// per change, like [`set_issue_status`].
-fn add_issue_comment(issue_id: &str, author: &str, message: &str) -> Result<(), String> {
-    let conn = gage_db::db::open_db().map_err(|e| e.to_string())?;
-    issue::comment(&conn, issue_id, author, message).map_err(|e| e.to_string())
 }
 
 /// Writer identity for issue events, matching the CLI's `user:{name}`.
@@ -1107,6 +1100,10 @@ struct ViewState {
     /// moving backward when a running task resets its reported
     /// position for a second phase.
     max_ratio: f64,
+    host: Arc<dyn ScanHost>,
+    /// Whether `o` and the picker may open another scan; off for a
+    /// live scan
+    allow_open: bool,
 }
 
 enum Dialog {
@@ -1224,7 +1221,7 @@ enum SessionNav {
 }
 
 impl ViewState {
-    fn new(model: ScanModel) -> Self {
+    fn new(model: ScanModel, host: Arc<dyn ScanHost>) -> Self {
         let mut state = Self {
             tasks: ItemTable::new(),
             expanded: HashSet::new(),
@@ -1242,6 +1239,8 @@ impl ViewState {
             pending_resolve: None,
             session_ui: HashMap::new(),
             max_ratio: 0.0,
+            host,
+            allow_open: false,
             model,
         };
         state.sync_tables();
@@ -1252,7 +1251,9 @@ impl ViewState {
     /// the view.
     fn replace_model(&mut self, mut model: ScanModel) {
         model.finished = true;
-        *self = ViewState::new(model);
+        let allow_open = self.allow_open;
+        *self = ViewState::new(model, Arc::clone(&self.host));
+        self.allow_open = allow_open;
     }
 
     /// Overall progress ratio for the gauge. Each task owns an equal
@@ -1284,8 +1285,8 @@ impl ViewState {
     }
 
     /// Route a key to the scan-open picker; Enter loads the picked
-    /// scan through `loader` and swaps the model in.
-    fn handle_open_scan_key(&mut self, code: KeyCode, loader: Option<ScanLoader<'_>>) {
+    /// scan through the host and swaps the model in.
+    fn handle_open_scan_key(&mut self, code: KeyCode) {
         let action = match &mut self.dialog {
             Dialog::OpenScan(picker) => picker.handle_key(code),
             _ => return,
@@ -1295,10 +1296,8 @@ impl ViewState {
             PickerAction::Close => self.dialog = Dialog::None,
             PickerAction::Open(id) => {
                 self.dialog = Dialog::None;
-                if id != self.model.scan_id
-                    && let Some(load) = loader
-                {
-                    match load(&id) {
+                if id != self.model.scan_id && self.allow_open {
+                    match self.host.load(&id) {
                         Ok(model) => self.replace_model(model),
                         Err(e) => self.push_log(format!("Open scan: {e}")),
                     }
@@ -1394,7 +1393,7 @@ impl ViewState {
             .iter()
             .flat_map(|t| t.agents.iter().map(|a| agent_session_item(t, a)))
             .collect();
-        let backend = match open_backend() {
+        let backend = match self.host.session_backend() {
             Ok(backend) => backend,
             Err(e) => {
                 self.push_log(format!("Find tool use {call_id}: {e}"));
@@ -1456,7 +1455,7 @@ impl ViewState {
     /// the dialog instead.
     fn open_session_at_target(&mut self, target: SessionTarget) {
         let item = self.target_session_item(&target.session_id);
-        let loaded = match open_backend() {
+        let loaded = match self.host.session_backend() {
             Ok(backend) => match load_session_doc(&item, &backend) {
                 Ok((doc, source)) => Some((doc, source, backend)),
                 Err(e) => {
@@ -1616,7 +1615,7 @@ impl ViewState {
         let trimmed = text.trim();
         let message = (!trimmed.is_empty()).then(|| trimmed.to_string());
         let author = user_author();
-        if let Err(e) = set_issue_status(
+        if let Err(e) = self.host.set_issue_status(
             &issue.id,
             IssueStatus::Closed,
             Some(reason),
@@ -1676,7 +1675,10 @@ impl ViewState {
         let trimmed = text.trim();
         let message = (!trimmed.is_empty()).then(|| trimmed.to_string());
         let author = user_author();
-        if let Err(e) = set_issue_status(&issue.id, status, None, &author, message.as_deref()) {
+        if let Err(e) =
+            self.host
+                .set_issue_status(&issue.id, status, None, &author, message.as_deref())
+        {
             self.push_log(format!("Open issue {} failed: {e}", issue.id));
             self.prompt = Some(Prompt::Open {
                 issue,
@@ -1714,7 +1716,7 @@ impl ViewState {
             return;
         }
         let author = user_author();
-        if let Err(e) = add_issue_comment(&issue.id, &author, trimmed) {
+        if let Err(e) = self.host.add_issue_comment(&issue.id, &author, trimmed) {
             self.push_log(format!("Comment on issue {} failed: {e}", issue.id));
             self.prompt = Some(Prompt::Comment { issue, editor });
             return;
@@ -1753,7 +1755,7 @@ impl ViewState {
     /// results table and any open issue dialog; a read failure keeps
     /// the stale snapshot and goes to the scan log.
     fn refresh_issue(&mut self, issue_id: &str) {
-        let loaded = match load_issue_status(issue_id) {
+        let loaded = match self.host.issue_status(issue_id) {
             Ok(loaded) => loaded,
             Err(e) => {
                 self.push_log(format!("Refresh issue {issue_id} failed: {e}"));
@@ -1824,7 +1826,7 @@ impl ViewState {
     /// the same component `gage session view` runs; its UI position is
     /// restored when the session was viewed before.
     fn open_session_dialog(&mut self, item: &SessionItem, nav: SessionNav) {
-        let backend = match open_backend() {
+        let backend = match self.host.session_backend() {
             Ok(backend) => backend,
             Err(e) => {
                 self.push_log(format!("Open session {}: {e}", item.id));
@@ -2029,7 +2031,7 @@ impl ViewState {
     }
 
     fn open_log(&mut self) {
-        if self.model.out_path.is_none() {
+        if self.model.log_key.is_none() {
             return;
         }
         self.scroll_view.reset();
@@ -2064,17 +2066,30 @@ impl ViewState {
         }
     }
 
-    /// Read the scan's captured streams — `.err` (in red), `.out`,
-    /// then `.log`, one entry per line with a blank line between
-    /// entries. Absent or empty files are skipped; the files are
-    /// created lazily, so a scan may simply have produced nothing.
+    /// Read the scan's captured streams through the host: `err` (in
+    /// red), `out`, then the log records, one entry per line with a
+    /// blank line between entries. A stream the scan did not produce
+    /// is skipped; a read failure shows in its place.
     fn read_log(&self) -> Vec<Line<'static>> {
-        let Some(out_path) = &self.model.out_path else {
+        let Some(key) = &self.model.log_key else {
             return Vec::new();
         };
+        let logs = match self.host.read_logs(key) {
+            Ok(logs) => logs,
+            Err(e) => {
+                return vec![Line::from(Span::styled(
+                    format!("(log read failed: {e})"),
+                    styles::LogLevel::error(),
+                ))];
+            }
+        };
         let mut lines: Vec<Line<'static>> = Vec::new();
-        for ext in ["err", "out", "log"] {
-            let Ok(content) = std::fs::read_to_string(out_path.with_extension(ext)) else {
+        for (kind, content) in [
+            ("err", logs.err),
+            ("out", logs.out),
+            ("records", logs.records),
+        ] {
+            let Some(content) = content else {
                 continue;
             };
             if content.is_empty() {
@@ -2084,9 +2099,9 @@ impl ViewState {
                 if !lines.is_empty() {
                     lines.push(Line::raw(""));
                 }
-                lines.push(match ext {
+                lines.push(match kind {
                     "err" => Line::from(Span::styled(l.to_string(), styles::LogLevel::error())),
-                    "log" => log_line(l),
+                    "records" => log_line(l),
                     _ => Line::raw(l.to_string()),
                 });
             }
@@ -2356,14 +2371,33 @@ fn tool_use_entry_index(doc: &Document, call_id: &str) -> Option<usize> {
     })
 }
 
-/// The session target parsed from a note's target URI, when it is
+/// The session target parsed from a note's target URL, when it is
 /// one. Scan and project targets name nothing the session dialog can
-/// show.
+/// show. The store's form is `session:<id>#<line>[-<end>]`; the
+/// legacy form is `session:<id>[:<line>[-<end>]]`.
 fn session_target(uri: &str) -> Option<SessionTarget> {
-    match NoteTarget::from_uri(uri).ok()? {
-        NoteTarget::Session(t) => Some(t),
-        _ => None,
+    let parsed = url::parse(uri).ok()?;
+    if parsed.scheme != "session" {
+        return None;
     }
+    let (id, selection) = match parsed.fragment {
+        Some(fragment) => (parsed.body, Some(fragment)),
+        None => match parsed.body.split_once(':') {
+            Some((id, lines)) => (id, Some(lines)),
+            None => (parsed.body, None),
+        },
+    };
+    let mut target = SessionTarget::new(id);
+    if let Some(selection) = selection {
+        let first = selection.split(',').next().unwrap_or(selection);
+        let (start, end) = match first.split_once('-') {
+            Some((s, e)) => (s, Some(e)),
+            None => (first, None),
+        };
+        target.line = start.parse().ok();
+        target.line_end = end.and_then(|e| e.parse().ok());
+    }
+    Some(target)
 }
 
 /// The session target for an issue: the first evidence note with a
@@ -2707,13 +2741,6 @@ fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<
 /// session's issues, session-level notes (targets with no line
 /// number), and an optional trailing notice (truncation or read
 /// error).
-/// The session view's backend for this legacy view: the default
-/// native source, which is the corpus the legacy scan read.
-fn open_backend() -> Result<Backend, String> {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(Backend::native("")))
-        .map_err(|e| e.to_string())
-}
-
 /// Load the session document for the dialog's embedded view. Prefers
 /// the source (matching `gage session view`); a session absent from
 /// the source — agent sessions, or one indexed as empty — falls back
@@ -2904,7 +2931,7 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel, canceled: bool) {
         Line::raw(format!("  {title}")).left_aligned(),
         Line::raw(""),
     ];
-    if model.errors > 0 && model.out_path.is_some() {
+    if model.errors > 0 && model.log_key.is_some() {
         lines.push(
             Line::styled(
                 "  There were errors during this scan. Press 'l'",
@@ -2929,7 +2956,7 @@ fn draw_scan_done(frame: &mut Frame, model: &ScanModel, canceled: bool) {
     for (label, n) in counts {
         lines.push(Line::raw(format!("  {label:<9} {n:>value_width$}")).left_aligned());
     }
-    let hint = if model.out_path.is_some() {
+    let hint = if model.log_key.is_some() {
         "Enter dismiss · l log"
     } else {
         "Enter dismiss"
@@ -3589,6 +3616,46 @@ mod tests {
     use super::*;
     use crate::doc::{Document, Session};
 
+    /// A host with nothing behind it, for views the tests drive
+    /// without data
+    struct NullHost;
+
+    impl ScanHost for NullHost {
+        fn list_scans(&self) -> io::Result<Vec<ScanPickRow>> {
+            Ok(Vec::new())
+        }
+        fn load(&self, scan_id: &str) -> io::Result<ScanModel> {
+            Err(io::Error::other(format!("no scan {scan_id}")))
+        }
+        fn session_backend(&self) -> io::Result<Backend> {
+            Err(io::Error::other("no sessions"))
+        }
+        fn read_logs(&self, _log_key: &str) -> io::Result<ScanLogs> {
+            Ok(ScanLogs::default())
+        }
+        fn issue_status(&self, issue_id: &str) -> Result<IssueStatusUpdate, String> {
+            Err(format!("no issue {issue_id}"))
+        }
+        fn set_issue_status(
+            &self,
+            issue_id: &str,
+            _status: IssueStatus,
+            _reason: Option<StatusReason>,
+            _author: &str,
+            _message: Option<&str>,
+        ) -> Result<(), String> {
+            Err(format!("no issue {issue_id}"))
+        }
+        fn add_issue_comment(
+            &self,
+            issue_id: &str,
+            _author: &str,
+            _message: &str,
+        ) -> Result<(), String> {
+            Err(format!("no issue {issue_id}"))
+        }
+    }
+
     fn state_with_session_dialog(nav: SessionNav) -> ViewState {
         let model = ScanModel {
             scan_id: "scan1".into(),
@@ -3603,9 +3670,9 @@ mod tests {
             cost: None,
             finished: true,
             elapsed: None,
-            out_path: None,
+            log_key: None,
         };
-        let mut state = ViewState::new(model);
+        let mut state = ViewState::new(model, Arc::new(NullHost));
         let doc = Document {
             session: Session {
                 id: "s1".into(),
@@ -3670,9 +3737,9 @@ mod tests {
             cost: None,
             finished: false,
             elapsed: None,
-            out_path: None,
+            log_key: None,
         };
-        let mut state = ViewState::new(model);
+        let mut state = ViewState::new(model, Arc::new(NullHost));
         let before = state.progress_ratio();
         state.model.tasks.first_mut().unwrap().progress = Some((0, 4));
         let after = state.progress_ratio();

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -10,18 +12,29 @@ use console::style;
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::prelude::SessionContext;
 use gage_claude::driver::ClaudeDriver;
 use gage_claude::session::SessionInfo;
 use gage_core::config::Config;
 use gage_core::uuid::short_uuid;
-use gage_query2::ContextBuilder;
+use gage_query2::{ContextBuilder, ScanScope};
+use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::{
     Scanner, ScannerDef, ScannerRegistry, parse_scanner_file, split_scanner_spec,
 };
 use gage_runtime2::{LOG_TARGET, Output, TaskOutput};
 use gage_scan2::scan_dir::scans_dir;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
-use gage_store::{DatasetStore, SCAN_TYPE, ScanStore, Store};
+use gage_store::{
+    DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store,
+};
+use gage_tui::scan_view::{
+    self, AgentItem, AgentState, EventItem, EvidenceItem, IssueItem, IssueSessionItem,
+    IssueStatusUpdate, NoteItem, ScanCost, ScanHost, ScanLogs, ScanModel, ScanPickRow, SessionItem,
+    TaskId, TaskItem, TaskState,
+};
+use gage_tui::session::Backend;
 use tabled::{
     Table,
     settings::{
@@ -35,7 +48,8 @@ use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 
 use crate::cmd_dataset;
-use crate::cmd_note::count_rows;
+use crate::cmd_issue2::event_label;
+use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
 use crate::human::{format_duration, format_elapsed_ms};
@@ -140,6 +154,11 @@ pub struct Scan2Args {
 enum Scan2Command {
     /// List scan runs
     List(Scan2ListArgs),
+    /// View a scan run
+    ///
+    /// Opens the scan's tasks, sessions, issues, and notes. Without a
+    /// scan the view opens with a picker.
+    View(Scan2ViewArgs),
     /// Delete scan runs
     ///
     /// Deletes each scan run and the notes and issues it wrote. Notes
@@ -225,6 +244,12 @@ pub struct Scan2ListArgs {
 }
 
 #[derive(Args)]
+pub struct Scan2ViewArgs {
+    /// Scan run ID (or prefix)
+    scan: Option<String>,
+}
+
+#[derive(Args)]
 pub struct Scan2DeleteArgs {
     /// Scan run IDs (or prefixes)
     #[arg(required = true)]
@@ -238,6 +263,7 @@ pub struct Scan2DeleteArgs {
 pub async fn main(args: Scan2Args) {
     match args.command {
         Some(Scan2Command::List(a)) => list(a).await,
+        Some(Scan2Command::View(a)) => view(a).await,
         Some(Scan2Command::Delete(a)) => delete(a),
         None => run_scan(args.run_args).await,
     }
@@ -326,6 +352,669 @@ async fn list(args: Scan2ListArgs) {
     println!("{table}");
 
     args.limit.print_summary(shown, total, "scan run");
+}
+
+async fn view(args: Scan2ViewArgs) {
+    let store = Arc::new(Mutex::new(open_store("gage scan2 view")));
+    let host = Arc::new(StoreHost {
+        store,
+        registry: DriverRegistry::builtin(),
+    });
+    // No scan arg: the view opens with its scan picker dialog.
+    let model = match args.scan.as_deref() {
+        Some(prefix) => match host.load_model(prefix).await {
+            Ok(model) => Some(model),
+            Err(e) => {
+                eprintln!("gage scan2 view: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    if let Err(e) = scan_view::view(model, host).await {
+        eprintln!("gage scan2 view: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// The scan view's host over the store.
+struct StoreHost {
+    store: Arc<Mutex<Store>>,
+    registry: DriverRegistry,
+}
+
+impl ScanHost for StoreHost {
+    fn list_scans(&self) -> io::Result<Vec<ScanPickRow>> {
+        block_on(self.list_rows()).map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    fn load(&self, scan_id: &str) -> io::Result<ScanModel> {
+        block_on(self.load_model(scan_id)).map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    fn session_backend(&self) -> io::Result<Backend> {
+        Ok(block_on(Backend::shared(Arc::clone(&self.store))))
+    }
+
+    fn read_logs(&self, log_key: &str) -> io::Result<ScanLogs> {
+        let store = self.lock();
+        let scans = ScanStore::from(&*store);
+        let commit = scans.get(log_key).map_err(io::Error::other)?.commit_sha;
+        let read = |name: &str| {
+            scans
+                .scan_log(&commit, name)
+                .map(|bytes| bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
+                .map_err(io::Error::other)
+        };
+        Ok(ScanLogs {
+            err: read("err")?,
+            out: read("out")?,
+            records: read("records")?,
+        })
+    }
+
+    fn issue_status(&self, issue_id: &str) -> Result<IssueStatusUpdate, String> {
+        let store = self.lock();
+        let issue = IssueStore::from(&*store)
+            .get(issue_id)
+            .map_err(|e| e.to_string())?;
+        let (status, status_cell) = status_cells(
+            issue.status.as_str(),
+            issue.status_reason.map(StatusReason::as_str),
+        );
+        Ok(IssueStatusUpdate {
+            status,
+            status_cell,
+            closed: issue.status == IssueStatus::Closed,
+            events: issue
+                .changes
+                .iter()
+                .map(|c| EventItem {
+                    kind: event_label(
+                        c.event.as_str(),
+                        c.from_status.map(IssueStatus::as_str),
+                        c.to_status.map(IssueStatus::as_str),
+                        c.reason.map(StatusReason::as_str),
+                    ),
+                    author: c.author.clone(),
+                    timestamp: gage_core::datetime::ms_to_iso8601(c.timestamp_ms),
+                    message: c.message.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    fn set_issue_status(
+        &self,
+        issue_id: &str,
+        status: IssueStatus,
+        reason: Option<StatusReason>,
+        author: &str,
+        message: Option<&str>,
+    ) -> Result<(), String> {
+        let store = self.lock();
+        IssueStore::from(&*store)
+            .set_status(issue_id, status, reason, author, message)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn add_issue_comment(&self, issue_id: &str, author: &str, message: &str) -> Result<(), String> {
+        let store = self.lock();
+        IssueStore::from(&*store)
+            .comment(issue_id, author, message)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Run a future from the view's synchronous event loop, which lives
+/// on a multi-threaded runtime.
+fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+}
+
+impl StoreHost {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Every live scan, newest first, with its counts.
+    async fn list_rows(&self) -> Result<Vec<ScanPickRow>, Box<dyn Error>> {
+        let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
+            .build()
+            .await;
+        let sql = "SELECT s.id, s.id_display, s.tasks, s.canceled, s.started, s.stopped, \
+                          s.created, ss.n, si.n, sn.n \
+                   FROM scan s \
+                   LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_session GROUP BY scan_id) ss \
+                        ON ss.scan_id = s.id \
+                   LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_issue GROUP BY scan_id) si \
+                        ON si.scan_id = s.id \
+                   LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_note GROUP BY scan_id) sn \
+                        ON sn.scan_id = s.id \
+                   ORDER BY s.modified DESC";
+        let mut rows = Vec::new();
+        for batch in &query(&ctx, sql).await? {
+            let ids = column::<StringArray>(batch, 0);
+            let displays = column::<StringArray>(batch, 1);
+            let tasks = column::<Int64Array>(batch, 2);
+            let canceled = column::<BooleanArray>(batch, 3);
+            let started = column::<TimestampMillisecondArray>(batch, 4);
+            let stopped = column::<TimestampMillisecondArray>(batch, 5);
+            let created = column::<TimestampMillisecondArray>(batch, 6);
+            let sessions = column::<Int64Array>(batch, 7);
+            let issues = column::<Int64Array>(batch, 8);
+            let notes = column::<Int64Array>(batch, 9);
+            for i in 0..batch.num_rows() {
+                let count = |arr: &Int64Array| {
+                    if arr.is_valid(i) {
+                        arr.value(i) as usize
+                    } else {
+                        0
+                    }
+                };
+                rows.push(ScanPickRow {
+                    id: ids.value(i).to_string(),
+                    id_display: displays.value(i).to_string(),
+                    tasks: tasks.value(i) as usize,
+                    sessions: count(sessions),
+                    issues: count(issues),
+                    notes: count(notes),
+                    status: if canceled.value(i) {
+                        "canceled"
+                    } else {
+                        "completed"
+                    },
+                    duration: elapsed(started, stopped, i),
+                    label: String::new(),
+                    created_ms: created.value(i),
+                });
+            }
+        }
+        Ok(rows)
+    }
+
+    /// The model of a stored scan, read through the scan's own scope:
+    /// every table holds that scan's objects. Agent session time
+    /// bounds come from the store scope, since agent sessions are not
+    /// dataset members.
+    async fn load_model(&self, prefix: &str) -> Result<ScanModel, Box<dyn Error>> {
+        let id = {
+            let store = self.lock();
+            ScanStore::from(&*store).get(prefix)?.id
+        };
+        let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
+            .scope(ScanScope::stored(&id))
+            .build()
+            .await;
+
+        let (scan_elapsed, counts) = {
+            let sql = "SELECT started, stopped, tasks, completed, failed, skipped FROM scan";
+            let batches = query(&ctx, sql).await?;
+            let batch = batches
+                .iter()
+                .find(|b| b.num_rows() > 0)
+                .ok_or("scan row is missing")?;
+            let started = column::<TimestampMillisecondArray>(batch, 0);
+            let stopped = column::<TimestampMillisecondArray>(batch, 1);
+            let n = |idx: usize| column::<Int64Array>(batch, idx).value(0) as usize;
+            (elapsed(started, stopped, 0), (n(2), n(3) + n(4) + n(5)))
+        };
+
+        let mut agents: HashMap<TaskId, Vec<AgentItem>> = HashMap::new();
+        let mut task_costs: HashMap<TaskId, (f64, bool)> = HashMap::new();
+        let mut agent_ids = Vec::new();
+        for batch in &query(
+            &ctx,
+            "SELECT scanner, task, session_id, exit_code, result FROM scan_task_agent",
+        )
+        .await?
+        {
+            let scanners = column::<StringArray>(batch, 0);
+            let tasks = column::<StringArray>(batch, 1);
+            let sessions = column::<StringArray>(batch, 2);
+            let exit_codes = column::<Int64Array>(batch, 3);
+            let results = column::<StringArray>(batch, 4);
+            for i in 0..batch.num_rows() {
+                let task = TaskId {
+                    scanner: scanners.value(i).to_string(),
+                    task: tasks.value(i).to_string(),
+                };
+                let agent = agent_item(
+                    sessions.value(i),
+                    exit_codes.value(i),
+                    results.is_valid(i).then(|| results.value(i)),
+                );
+                let cost = task_costs.entry(task.clone()).or_insert((0.0, false));
+                match agent.cost {
+                    Some(usd) => cost.0 += usd,
+                    None => cost.1 = true,
+                }
+                agent_ids.push(agent.session_id.clone());
+                agents.entry(task).or_default().push(agent);
+            }
+        }
+        let times = self.agent_times(&agent_ids).await?;
+        for agent in agents.values_mut().flatten() {
+            if let Some((started_ms, ended_ms)) = times.get(&agent.session_id) {
+                agent.started_ms = Some(*started_ms);
+                agent.ended_ms = Some(*ended_ms);
+            }
+        }
+
+        let mut tasks = Vec::new();
+        for batch in &query(
+            &ctx,
+            "SELECT scanner, task, status, started, stopped, worked_ms \
+             FROM scan_task ORDER BY num",
+        )
+        .await?
+        {
+            let scanners = column::<StringArray>(batch, 0);
+            let names = column::<StringArray>(batch, 1);
+            let statuses = column::<StringArray>(batch, 2);
+            let started = column::<TimestampMillisecondArray>(batch, 3);
+            let stopped = column::<TimestampMillisecondArray>(batch, 4);
+            let worked = column::<Int64Array>(batch, 5);
+            for i in 0..batch.num_rows() {
+                let id = TaskId {
+                    scanner: scanners.value(i).to_string(),
+                    task: names.value(i).to_string(),
+                };
+                let elapsed = if worked.is_valid(i) {
+                    Some(Duration::from_millis(worked.value(i).max(0) as u64))
+                } else {
+                    elapsed(started, stopped, i)
+                };
+                tasks.push(TaskItem {
+                    cost: task_costs.get(&id).map(|(usd, incomplete)| ScanCost {
+                        usd: *usd,
+                        incomplete: *incomplete,
+                    }),
+                    agents: agents.remove(&id).unwrap_or_default(),
+                    state: match statuses.value(i) {
+                        "pending" => TaskState::Pending,
+                        "started" => TaskState::Running,
+                        "completed" => TaskState::Completed,
+                        "failed" => TaskState::Error,
+                        "skipped" => TaskState::Skipped,
+                        _ => TaskState::Canceled,
+                    },
+                    id,
+                    elapsed,
+                    progress: None,
+                    pool_blocked: false,
+                    worked: Duration::ZERO,
+                    working_since: None,
+                });
+            }
+        }
+        let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
+        let cost = {
+            let usd: f64 = task_costs.values().map(|(usd, _)| usd).sum();
+            let incomplete = task_costs.values().any(|(_, incomplete)| *incomplete);
+            (usd != 0.0 || incomplete).then_some(ScanCost { usd, incomplete })
+        };
+
+        let mut notes = Vec::new();
+        let mut note_sessions: HashMap<String, usize> = HashMap::new();
+        for batch in &query(
+            &ctx,
+            "SELECT id, name, value, text, author, target, metadata, created \
+             FROM note ORDER BY created",
+        )
+        .await?
+        {
+            let ids = column::<StringArray>(batch, 0);
+            let names = column::<StringArray>(batch, 1);
+            let values = column::<StringArray>(batch, 2);
+            let texts = column::<StringArray>(batch, 3);
+            let authors = column::<StringArray>(batch, 4);
+            let targets = column::<StringArray>(batch, 5);
+            let metadatas = column::<StringArray>(batch, 6);
+            let createds = column::<TimestampMillisecondArray>(batch, 7);
+            for i in 0..batch.num_rows() {
+                let value_full = note_value(values, texts, i);
+                let target = string_or_empty(targets, i);
+                if let Some(session) = target_session(&target) {
+                    *note_sessions.entry(session).or_default() += 1;
+                }
+                notes.push(NoteItem {
+                    id: ids.value(i).to_string(),
+                    name: names.value(i).to_string(),
+                    value: value_cell(&value_full),
+                    value_full,
+                    target_cell: target_cell(&target),
+                    target,
+                    author: authors.value(i).to_string(),
+                    created: timestamp_display(createds, i),
+                    metadata: metadatas
+                        .is_valid(i)
+                        .then(|| metadatas.value(i).to_string()),
+                });
+            }
+        }
+
+        let mut evidence: HashMap<String, Vec<EvidenceItem>> = HashMap::new();
+        for batch in &query(
+            &ctx,
+            "SELECT e.issue_id, n.id, n.name, n.target, n.value, n.text \
+             FROM issue_evidence e JOIN note n ON n.id = e.note_id",
+        )
+        .await?
+        {
+            let issues = column::<StringArray>(batch, 0);
+            let ids = column::<StringArray>(batch, 1);
+            let names = column::<StringArray>(batch, 2);
+            let targets = column::<StringArray>(batch, 3);
+            let values = column::<StringArray>(batch, 4);
+            let texts = column::<StringArray>(batch, 5);
+            for i in 0..batch.num_rows() {
+                evidence
+                    .entry(issues.value(i).to_string())
+                    .or_default()
+                    .push(EvidenceItem {
+                        id: ids.value(i).to_string(),
+                        name: names.value(i).to_string(),
+                        target: string_or_empty(targets, i),
+                        value: note_value(values, texts, i),
+                    });
+            }
+        }
+
+        let mut issue_sessions: HashMap<String, Vec<IssueSessionItem>> = HashMap::new();
+        let mut session_issues: HashMap<String, usize> = HashMap::new();
+        for batch in &query(
+            &ctx,
+            "SELECT i.issue_id, i.session_id, s.project, s.driver, s.title \
+             FROM session_issue i JOIN session s ON s.id = i.session_id",
+        )
+        .await?
+        {
+            let issues = column::<StringArray>(batch, 0);
+            let sessions = column::<StringArray>(batch, 1);
+            let projects = column::<StringArray>(batch, 2);
+            let drivers = column::<StringArray>(batch, 3);
+            let titles = column::<StringArray>(batch, 4);
+            for i in 0..batch.num_rows() {
+                let session = sessions.value(i).to_string();
+                *session_issues.entry(session.clone()).or_default() += 1;
+                issue_sessions
+                    .entry(issues.value(i).to_string())
+                    .or_default()
+                    .push(IssueSessionItem {
+                        project: self.project_display(drivers.value(i), projects, i),
+                        title: string_or_empty(titles, i),
+                        id: session,
+                    });
+            }
+        }
+
+        let mut events: HashMap<String, Vec<EventItem>> = HashMap::new();
+        for batch in &query(
+            &ctx,
+            "SELECT issue_id, timestamp, author, event, from_status, to_status, reason, message \
+             FROM issue_event ORDER BY timestamp",
+        )
+        .await?
+        {
+            let issues = column::<StringArray>(batch, 0);
+            let timestamps = column::<TimestampMillisecondArray>(batch, 1);
+            let authors = column::<StringArray>(batch, 2);
+            let kinds = column::<StringArray>(batch, 3);
+            let froms = column::<StringArray>(batch, 4);
+            let tos = column::<StringArray>(batch, 5);
+            let reasons = column::<StringArray>(batch, 6);
+            let messages = column::<StringArray>(batch, 7);
+            for i in 0..batch.num_rows() {
+                let opt = |arr: &StringArray| arr.is_valid(i).then(|| arr.value(i).to_string());
+                events
+                    .entry(issues.value(i).to_string())
+                    .or_default()
+                    .push(EventItem {
+                        kind: event_label(
+                            kinds.value(i),
+                            opt(froms).as_deref(),
+                            opt(tos).as_deref(),
+                            opt(reasons).as_deref(),
+                        ),
+                        author: authors.value(i).to_string(),
+                        timestamp: timestamp_display(timestamps, i),
+                        message: opt(messages),
+                    });
+            }
+        }
+
+        let mut issues = Vec::new();
+        for batch in &query(
+            &ctx,
+            "SELECT id, name, title, description, status, status_reason, author, created \
+             FROM issue ORDER BY created",
+        )
+        .await?
+        {
+            let ids = column::<StringArray>(batch, 0);
+            let names = column::<StringArray>(batch, 1);
+            let titles = column::<StringArray>(batch, 2);
+            let descriptions = column::<StringArray>(batch, 3);
+            let statuses = column::<StringArray>(batch, 4);
+            let reasons = column::<StringArray>(batch, 5);
+            let authors = column::<StringArray>(batch, 6);
+            let createds = column::<TimestampMillisecondArray>(batch, 7);
+            for i in 0..batch.num_rows() {
+                let id = ids.value(i).to_string();
+                let (status, status_cell) = status_cells(
+                    statuses.value(i),
+                    reasons.is_valid(i).then(|| reasons.value(i)),
+                );
+                issues.push(IssueItem {
+                    name: names.value(i).to_string(),
+                    title: titles.value(i).lines().next().unwrap_or("").to_string(),
+                    status,
+                    status_cell,
+                    closed: statuses.value(i) == IssueStatus::Closed.as_str(),
+                    author: authors.value(i).to_string(),
+                    created: timestamp_display(createds, i),
+                    description: descriptions
+                        .is_valid(i)
+                        .then(|| descriptions.value(i).to_string()),
+                    sessions: issue_sessions.remove(&id).unwrap_or_default(),
+                    evidence: evidence.remove(&id).unwrap_or_default(),
+                    events: events.remove(&id).unwrap_or_default(),
+                    id,
+                });
+            }
+        }
+
+        let mut sessions = Vec::new();
+        for batch in &query(
+            &ctx,
+            "SELECT m.session_id, s.title FROM scan_session m \
+             JOIN session s ON s.id = m.session_id ORDER BY m.session_num",
+        )
+        .await?
+        {
+            let ids = column::<StringArray>(batch, 0);
+            let titles = column::<StringArray>(batch, 1);
+            for i in 0..batch.num_rows() {
+                let id = ids.value(i).to_string();
+                sessions.push(SessionItem {
+                    title: string_or_empty(titles, i),
+                    path: None,
+                    notes: note_sessions.get(&id).copied().unwrap_or(0),
+                    issues: session_issues.get(&id).copied().unwrap_or(0),
+                    id,
+                });
+            }
+        }
+        sessions.sort_by(|a, b| {
+            b.issues
+                .cmp(&a.issues)
+                .then_with(|| b.notes.cmp(&a.notes))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        Ok(ScanModel {
+            scan_id: short_uuid(&id).to_string(),
+            label: None,
+            log_key: Some(id),
+            total: counts.0,
+            progress: counts.1,
+            notes,
+            issues,
+            cost,
+            errors,
+            finished: true,
+            elapsed: scan_elapsed,
+            tasks,
+            sessions,
+        })
+    }
+
+    /// First and last message timestamps per agent session, from the
+    /// store scope.
+    async fn agent_times(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, (i64, i64)>, Box<dyn Error>> {
+        let mut times = HashMap::new();
+        if ids.is_empty() {
+            return Ok(times);
+        }
+        let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
+            .build()
+            .await;
+        let in_list = ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT session_id, MIN(timestamp), MAX(timestamp) FROM message \
+             WHERE session_id IN ({in_list}) GROUP BY session_id"
+        );
+        for batch in &query(&ctx, &sql).await? {
+            let sessions = column::<StringArray>(batch, 0);
+            let firsts = column::<TimestampMillisecondArray>(batch, 1);
+            let lasts = column::<TimestampMillisecondArray>(batch, 2);
+            for i in 0..batch.num_rows() {
+                if firsts.is_valid(i) && lasts.is_valid(i) {
+                    times.insert(
+                        sessions.value(i).to_string(),
+                        (firsts.value(i), lasts.value(i)),
+                    );
+                }
+            }
+        }
+        Ok(times)
+    }
+
+    /// A session's project as its driver displays it; the stored
+    /// name when the driver is unknown.
+    fn project_display(&self, driver: &str, projects: &StringArray, i: usize) -> String {
+        if !projects.is_valid(i) {
+            return String::new();
+        }
+        let name = driver.split_once(' ').map_or(driver, |(name, _)| name);
+        match self.registry.for_name(name) {
+            Some(driver) => driver.format_project(projects.value(i), 60),
+            None => projects.value(i).to_string(),
+        }
+    }
+}
+
+/// An agent's view entry from its record: state and cost from the
+/// harness result, error from the exit code when there is no result.
+fn agent_item(session_id: &str, exit_code: i64, result: Option<&str>) -> AgentItem {
+    let result = result.and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(session_id, "unparseable agent result: {e}");
+            None
+        }
+    });
+    let state = match &result {
+        Some(r) => {
+            if r.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
+                AgentState::Error
+            } else {
+                AgentState::Done
+            }
+        }
+        None if exit_code == 0 => AgentState::Done,
+        None => AgentState::Error,
+    };
+    AgentItem {
+        session_id: session_id.to_string(),
+        path: None,
+        state,
+        cost: result
+            .as_ref()
+            .and_then(|r| r.get("total_cost_usd"))
+            .and_then(serde_json::Value::as_f64),
+        started_ms: None,
+        ended_ms: None,
+    }
+}
+
+/// Status display strings: the long form `closed (completed)` and
+/// the table cell, which is the reason when there is one.
+fn status_cells(status: &str, reason: Option<&str>) -> (String, String) {
+    match reason {
+        Some(r) => (format!("{status} ({r})"), r.to_string()),
+        None => (status.to_string(), status.to_string()),
+    }
+}
+
+/// A note's value text: the text value, or the JSON value pretty
+/// printed.
+fn note_value(values: &StringArray, texts: &StringArray, i: usize) -> String {
+    if texts.is_valid(i) {
+        return texts.value(i).to_string();
+    }
+    match serde_json::from_str::<serde_json::Value>(values.value(i)) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap(),
+        Err(_) => values.value(i).to_string(),
+    }
+}
+
+/// The session id a `session:` target URL names
+fn target_session(target: &str) -> Option<String> {
+    let parsed = gage_store::url::parse(target).ok()?;
+    (parsed.scheme == "session").then(|| parsed.body.to_string())
+}
+
+fn elapsed(
+    started: &TimestampMillisecondArray,
+    stopped: &TimestampMillisecondArray,
+    i: usize,
+) -> Option<Duration> {
+    (started.is_valid(i) && stopped.is_valid(i)).then(|| {
+        Duration::from_millis(stopped.value(i).saturating_sub(started.value(i)).max(0) as u64)
+    })
+}
+
+fn timestamp_display(col: &TimestampMillisecondArray, i: usize) -> String {
+    if col.is_valid(i) {
+        gage_core::datetime::ms_to_iso8601(col.value(i))
+    } else {
+        String::new()
+    }
+}
+
+fn string_or_empty(col: &StringArray, i: usize) -> String {
+    if col.is_valid(i) {
+        col.value(i).to_string()
+    } else {
+        String::new()
+    }
+}
+
+async fn query(ctx: &SessionContext, sql: &str) -> Result<Vec<RecordBatch>, Box<dyn Error>> {
+    Ok(ctx.sql(sql).await?.collect().await?)
 }
 
 fn delete(args: Scan2DeleteArgs) {

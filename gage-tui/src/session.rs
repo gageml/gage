@@ -65,7 +65,11 @@ impl Backend {
 
     /// Over the store.
     pub async fn stored(store: Store) -> Backend {
-        let store = Arc::new(Mutex::new(store));
+        Self::shared(Arc::new(Mutex::new(store))).await
+    }
+
+    /// Over a store handle the caller shares with other readers.
+    pub async fn shared(store: Arc<Mutex<Store>>) -> Backend {
         Backend {
             ctx: ContextBuilder::new(Some(Arc::clone(&store))).build().await,
             kind: Kind::Stored { store },

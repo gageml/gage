@@ -511,7 +511,12 @@ pub async fn show(args: IssueShowArgs) {
 
 /// One line naming an event: `created pending`, `pending → open`,
 /// `open → closed (wontfix)`, `comment`.
-fn event_label(event: &str, from: Option<&str>, to: Option<&str>, reason: Option<&str>) -> String {
+pub(crate) fn event_label(
+    event: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    reason: Option<&str>,
+) -> String {
     let mut label = match (event, from, to) {
         ("create", _, Some(to)) => format!("created {to}"),
         ("status", Some(from), Some(to)) => format!("{from} → {to}"),

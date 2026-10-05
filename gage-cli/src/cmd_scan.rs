@@ -25,12 +25,16 @@ use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
 use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
+use gage_db::issue::{self, IssueStatus as DbIssueStatus, StatusReason as DbStatusReason};
 use gage_db::{db, scan};
 use gage_query::ScanSessionContext;
 use gage_registry::scanner::{
     Scanner, ScannerDef, ScannerRegistry, display_path, parse_scanner_file, scanner_source,
     split_scanner_spec,
 };
+use gage_store::{IssueStatus, StatusReason};
+use gage_tui::scan_view::{IssueStatusUpdate, ScanHost, ScanLogs, ScanPickRow};
+use gage_tui::session::Backend;
 use rand::seq::SliceRandom;
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -418,13 +422,140 @@ async fn view(args: ScanViewArgs) {
         }
         None => None,
     };
-    let load = move |id: &str| -> io::Result<gage_tui::scan_view::ScanModel> {
-        let conn = db::open_db().map_err(io::Error::other)?;
-        load_scan_model(&conn, id).map_err(io::Error::other)
-    };
-    if let Err(e) = gage_tui::scan_view::view(model, load).await {
+    if let Err(e) = gage_tui::scan_view::view(model, Arc::new(LegacyHost)).await {
         eprintln!("gage scan view: {e}");
         std::process::exit(1);
+    }
+}
+
+/// The scan view's host over the legacy database and the default
+/// native source. A fresh connection per call keeps the view free of
+/// a long-lived handle it rarely needs.
+struct LegacyHost;
+
+impl ScanHost for LegacyHost {
+    fn list_scans(&self) -> io::Result<Vec<ScanPickRow>> {
+        let conn = db::open_db().map_err(io::Error::other)?;
+        let mut scans = scan::all(&conn).map_err(io::Error::other)?;
+        let counts = scan::counts_by_scan(&conn).map_err(io::Error::other)?;
+        scans.sort_by_key(|s| std::cmp::Reverse(s.created));
+        Ok(scans
+            .into_iter()
+            .map(|run| {
+                let metadata = run.parse_metadata();
+                let status = match &metadata {
+                    Ok(Some(scan::ScanMetadata::Scan(s))) if s.canceled => "canceled",
+                    Ok(Some(scan::ScanMetadata::Scan(_) | scan::ScanMetadata::Agent(_))) => {
+                        "completed"
+                    }
+                    Ok(Some(scan::ScanMetadata::Running(_))) => "running",
+                    // NULL metadata (a run that died before summarizing)
+                    // and unparseable metadata read the same: incomplete.
+                    Ok(None) | Err(_) => "incomplete",
+                };
+                let duration = match metadata {
+                    Ok(Some(m)) => m.elapsed_ms().map(Duration::from_millis),
+                    Ok(None) | Err(_) => None,
+                };
+                let count = counts.get(&run.id).copied().unwrap_or_default();
+                ScanPickRow {
+                    id_display: short_uuid(&run.id).to_string(),
+                    tasks: count.tasks as usize,
+                    sessions: count.sessions as usize,
+                    issues: count.issues as usize,
+                    notes: count.notes as usize,
+                    status,
+                    duration,
+                    label: run.label.unwrap_or_default(),
+                    created_ms: run.created,
+                    id: run.id,
+                }
+            })
+            .collect())
+    }
+
+    fn load(&self, scan_id: &str) -> io::Result<gage_tui::scan_view::ScanModel> {
+        let conn = db::open_db().map_err(io::Error::other)?;
+        load_scan_model(&conn, scan_id).map_err(io::Error::other)
+    }
+
+    fn session_backend(&self) -> io::Result<Backend> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(Backend::native(""))
+        })
+        .map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    /// The captured streams beside the `.out` file: `.err`, `.out`,
+    /// and `.log`. The files are created lazily, so an absent one
+    /// means the scan produced nothing on that stream.
+    fn read_logs(&self, log_key: &str) -> io::Result<ScanLogs> {
+        let out_path = ScanStreams::out_path(log_key);
+        let read = |ext: &str| match std::fs::read_to_string(out_path.with_extension(ext)) {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        };
+        Ok(ScanLogs {
+            err: read("err")?,
+            out: read("out")?,
+            records: read("log")?,
+        })
+    }
+
+    fn issue_status(&self, issue_id: &str) -> Result<IssueStatusUpdate, String> {
+        let conn = db::open_db().map_err(|e| e.to_string())?;
+        let issue = issue::get(&conn, issue_id).map_err(|e| e.to_string())?;
+        let events = issue::issue_events_for(&conn, issue_id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|ev| gage_tui::scan_view::EventItem {
+                kind: ev.event.to_label(),
+                author: ev.author.clone(),
+                timestamp: gage_core::datetime::ms_to_iso8601(ev.timestamp),
+                message: ev.event.message().map(str::to_string),
+            })
+            .collect();
+        Ok(IssueStatusUpdate {
+            status: match issue.status_reason {
+                Some(r) => format!("{} ({})", issue.status.as_str(), r.as_str()),
+                None => issue.status.as_str().to_string(),
+            },
+            status_cell: match issue.status_reason {
+                Some(r) => r.as_str().to_string(),
+                None => issue.status.as_str().to_string(),
+            },
+            closed: issue.status == DbIssueStatus::Closed,
+            events,
+        })
+    }
+
+    fn set_issue_status(
+        &self,
+        issue_id: &str,
+        status: IssueStatus,
+        reason: Option<StatusReason>,
+        author: &str,
+        message: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = db::open_db().map_err(|e| e.to_string())?;
+        let status = match status {
+            IssueStatus::Pending => DbIssueStatus::Pending,
+            IssueStatus::Open => DbIssueStatus::Open,
+            IssueStatus::Closed => DbIssueStatus::Closed,
+        };
+        let reason = reason.map(|r| match r {
+            StatusReason::Completed => DbStatusReason::Completed,
+            StatusReason::WontFix => DbStatusReason::WontFix,
+            StatusReason::Duplicate => DbStatusReason::Duplicate,
+        });
+        issue::set_status(&conn, issue_id, status, reason, author, message)
+            .map_err(|e| e.to_string())
+    }
+
+    fn add_issue_comment(&self, issue_id: &str, author: &str, message: &str) -> Result<(), String> {
+        let conn = db::open_db().map_err(|e| e.to_string())?;
+        issue::comment(&conn, issue_id, author, message).map_err(|e| e.to_string())
     }
 }
 
@@ -531,7 +662,7 @@ fn load_scan_model(
     Ok(ScanModel {
         scan_id: short_uuid(&run.id).to_string(),
         label: run.label.clone(),
-        out_path: Some(ScanStreams::out_path(&run.id)),
+        log_key: Some(run.id.clone()),
         total: summary.as_ref().map(|s| s.total).unwrap_or(0),
         progress: summary
             .as_ref()
@@ -1938,13 +2069,14 @@ async fn run_scan_tui(
     let mut model = scan_view::ScanModel::new(setup);
     model.scan_id = short_uuid(&scan_id).to_string();
     model.label = model_label;
-    model.out_path = Some(ScanStreams::out_path(&scan_id));
+    model.log_key = Some(scan_id.clone());
     let ui_cancel = cancel.clone();
     let run_cancel = cancel.clone();
     let ui_fut = async move {
         // The in-view cancel request cancels the run; the view stays up
         // and closes its Canceling dialog on the runner's Finished event.
-        let result = scan_view::run(model, rx, move || run_cancel.cancel()).await;
+        let result =
+            scan_view::run(model, rx, move || run_cancel.cancel(), Arc::new(LegacyHost)).await;
         // Closing the view mid-scan stops the run; after the scan
         // completes this is a no-op.
         ui_cancel.cancel();
