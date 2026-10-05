@@ -451,7 +451,7 @@ impl NotesQuery {
 pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error>, VmError> {
     let ctx = current()?;
     let filter = match &q.names {
-        Some(patterns) => format!(" WHERE {}", name_predicate(patterns)),
+        Some(patterns) => format!(" WHERE {}", name_predicate("name", patterns)),
         None => String::new(),
     };
     let sql = format!(
@@ -501,10 +501,10 @@ pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error
     Ok(Ok(out))
 }
 
-/// The `WHERE` clause for `.name()` patterns: `*` matches any run of
-/// characters, as in a task's `wants`; a pattern without `*` is an
-/// exact name.
-fn name_predicate(patterns: &[String]) -> String {
+/// The `WHERE` clause matching `column` against name patterns: `*`
+/// matches any run of characters, as in a task's `wants`; a pattern
+/// without `*` is an exact name.
+pub(crate) fn name_predicate(column: &str, patterns: &[String]) -> String {
     patterns
         .iter()
         .map(|p| {
@@ -514,9 +514,9 @@ fn name_predicate(patterns: &[String]) -> String {
                     .map(regex::escape)
                     .collect::<Vec<_>>()
                     .join(".*");
-                format!("regexp_like(name, '^{}$')", sql_str(&regex))
+                format!("regexp_like({column}, '^{}$')", sql_str(&regex))
             } else {
-                format!("name = '{}'", sql_str(p))
+                format!("{column} = '{}'", sql_str(p))
             }
         })
         .collect::<Vec<_>>()

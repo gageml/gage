@@ -22,7 +22,12 @@
 //!
 //! `carry_forward_notes(key)` links into this scan every note whose
 //! carry-forward key is `key` and whose target commit is on one of
-//! the scan's sessions' chains.
+//! the scan's sessions' chains: a writer's carry of its own prior
+//! outputs. `carry_forward_notes_named(pattern)` links the notes whose
+//! name matches `pattern` under the same chain rule, whatever key they
+//! carry: a consumer's carry of the notes it reads, so a scan that
+//! runs the consumer alone holds the findings already written for its
+//! sessions.
 //!
 //! A scan run with `invalidate` set reports 0 for every object and
 //! carries no notes; it still writes watermarks.
@@ -41,7 +46,7 @@ use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::note::{Note, NotesQuery, fetch_notes};
+use crate::note::{Note, NotesQuery, fetch_notes, name_predicate};
 use crate::scan::{
     ScanContext, Session, SessionsQuery, current, members, run, session_id, sql_str, string_column,
 };
@@ -49,6 +54,8 @@ use crate::scan::{
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
     m.function("carry_forward_notes", carry_forward_notes)
+        .build()?;
+    m.function("carry_forward_notes_named", carry_forward_notes_named)
         .build()?;
     m.function("watermark", watermark).build()?;
     Ok(m)
@@ -443,35 +450,58 @@ async fn marks(
     Ok(out)
 }
 
-/// The value of `carry_forward_notes(key)`. Awaiting it links the
-/// notes.
+/// The value of `carry_forward_notes(key)` and
+/// `carry_forward_notes_named(pattern)`. Awaiting it links the notes.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct CarryForwardNotes {
     #[rune(skip)]
-    key: Value,
+    select: CarrySelect,
+}
+
+/// Which prior notes a carry links.
+enum CarrySelect {
+    /// The notes carrying this key, as given
+    Key(Value),
+    /// The notes whose name matches, `*` a wildcard
+    Named(String),
 }
 
 fn carry_forward_notes(key: Value) -> CarryForwardNotes {
-    CarryForwardNotes { key }
+    CarryForwardNotes {
+        select: CarrySelect::Key(key),
+    }
 }
 
-/// Link into this scan every note whose carry-forward key is `key`
-/// and whose target is one of the scan's sessions at a commit in that
-/// session's chain. The note commits are appended to the scan
-/// directory's carried list, which apply writes as
-/// `notes_carried.link`. Returns
-/// the number of notes newly linked; a note already carried by this
-/// scan counts zero.
+fn carry_forward_notes_named(pattern: &str) -> CarryForwardNotes {
+    CarryForwardNotes {
+        select: CarrySelect::Named(pattern.to_string()),
+    }
+}
+
+/// Link into this scan every selected note whose target is one of the
+/// scan's sessions at a commit in that session's chain. The note
+/// commits are appended to the scan directory's carried list, which
+/// apply writes as `notes_carried.link`. Returns the number of notes
+/// newly linked; a note already carried by this scan counts zero.
 async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Error>, VmError> {
-    let key = match encode_key(&q.key) {
-        Ok(key) => key,
-        Err(e) => return Ok(Err(e)),
+    let (select, predicate) = match &q.select {
+        CarrySelect::Key(key) => match encode_key(key) {
+            Ok(key) => (
+                key.clone(),
+                format!("n.carry_forward_key = '{}'", sql_str(&key)),
+            ),
+            Err(e) => return Ok(Err(e)),
+        },
+        CarrySelect::Named(pattern) => (
+            pattern.clone(),
+            name_predicate("n.name", std::slice::from_ref(pattern)),
+        ),
     };
     let ctx = current()?;
     if ctx.invalidate {
         tracing::info!(
-            key,
+            select,
             "carry_forward_notes skipped: scan invalidates prior work"
         );
         return Ok(Ok(0));
@@ -484,9 +514,8 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
     let sql = format!(
         "SELECT t.note_commit, t.target_id, t.target_commit \
          FROM note n JOIN note_target_link t ON t.note_id = n.id \
-         WHERE n.carry_forward_key = '{}' AND t.target_type = 'session' \
+         WHERE ({predicate}) AND t.target_type = 'session' \
            AND t.target_id IN ({})",
-        sql_str(&key),
         id_list(&ids)
     );
     let batches = run(ctx.store_context().await?, &sql).await?;
@@ -506,7 +535,7 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
         }
     }
     let added = append_carried(&ctx.paths.carried_notes(), &commits)?;
-    tracing::info!(key, notes = added, "carry_forward_notes");
+    tracing::info!(select, notes = added, "carry_forward_notes");
     Ok(Ok(i64::try_from(added).unwrap()))
 }
 

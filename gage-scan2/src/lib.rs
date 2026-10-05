@@ -4002,6 +4002,53 @@ mod tests {
         assert_eq!(carried.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 
+    /// A scan running only a consumer carries the notes a writer left
+    /// for its sessions by name, whatever key they carry, and sees
+    /// them through `scan().notes()`; a name no note matches carries
+    /// nothing.
+    #[tokio::test]
+    async fn a_consumer_carries_a_writers_notes_by_name() {
+        const CONSUMER: &str = r#"
+            use gage::{carry_forward_notes_named, scan};
+
+            pub const SCANNER = #{
+                name: "consumer",
+                description: "Consumer",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                println!("carried {}", carry_forward_notes_named("se*").await?);
+                println!("again {}", carry_forward_notes_named("seen").await?);
+                println!("other {}", carry_forward_notes_named("nothing-*").await?);
+                let notes = scan().notes().name("seen").await?;
+                println!("notes {} {}", notes.len(), notes[0].value);
+                Ok(())
+            }
+        "#;
+
+        let (tmp, store) = open_store();
+        let (_dataset_id, dataset_sha, _session_id) = seeded_dataset(tmp.path(), &store, ONE_LINE);
+        let (_dir, writer) = compile_source(WATERMARK_SCANNER);
+        run_watermark_scan(&tmp, &store, &writer.unwrap(), &dataset_sha).await;
+
+        let (_dir, consumer) = compile_source(CONSUMER);
+        let (outcome, printed) =
+            run_watermark_scan(&tmp, &store, &consumer.unwrap(), &dataset_sha).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 1".to_string(),
+                "again 0".to_string(),
+                "other 0".to_string(),
+                "notes 1 1-1".to_string(),
+            ]
+        );
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        assert_eq!(record.content.notes_carried.len(), 1);
+        assert!(record.content.notes.is_empty());
+    }
+
     /// Tasks with `wants`, one of them unmatched, behind one failing
     /// writer. Task order is by name: chained, wanty, write.
     const DEPENDENT: &str = r#"
