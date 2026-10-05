@@ -1,16 +1,20 @@
-use gage::tools::{IssueWrite, Query};
-use gage::{Mark, Template, call_agent, carry_forward_notes_named, scan, watermark};
+use gage::{
+    Mark,
+    Template,
+    call_agent,
+    carry_forward_notes_named,
+    scan,
+    tools::{IssueWrite, Query},
+    watermark,
+};
 
 pub const SCANNER = #{
     name: "finding-issues-2",
     description: "Report issues from session findings",
+    groups: ["default"],
     tasks: #{
         report: #{
-            notes: #{
-                // Ordering only: the report runs after any finding
-                // writer in the same scan
-                wants: ["*[finding]"],
-            },
+            notes: #{ wants: ["*[finding]"] },
             issues: #{
                 writes: #{ "findings": "Issue derived from session findings" },
             },
@@ -20,13 +24,6 @@ pub const SCANNER = #{
 
 const REPORT_KEY = ("finding-issues", "report", 1);
 
-/// Report issues from the findings written for the scan's sessions.
-///
-/// The findings already written for the sessions are carried into the
-/// scan by name, so the task works with or without the finding
-/// writers in the same scan. Only the findings no scan has reported
-/// under the key reach the agent; each is watermarked once the agent
-/// returns.
 pub async fn report() {
     let carried = carry_forward_notes_named("*[finding]").await?;
     log::info!("carried {carried} findings");
@@ -47,7 +44,8 @@ pub async fn report() {
         };
         listed.push(#{ id: n.id, name: n.name, target });
     }
-    let prompt = Template::new(include_str!("prompt.md.j2"))?.render(#{ findings: listed })?;
+    let prompt = Template::new(include_str!("prompt.md.j2"))?
+        .render(#{ findings: listed })?;
 
     let agent = call_agent(prompt)
         .name("issue-writer")

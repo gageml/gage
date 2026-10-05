@@ -37,7 +37,6 @@ pub async fn review() {
 
     let sessions = scan().sessions().unseen(REVIEW_KEY).await?;
     let progress = Progress::new(sessions.len());
-
     let agents = AgentRunner::new();
 
     // Add an agent for each non-skipped session

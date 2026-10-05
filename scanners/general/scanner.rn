@@ -14,6 +14,7 @@ use gage::{
 pub const SCANNER = #{
     name: "general",
     description: "Scan sessions for general findings",
+    hidden: true,
     groups: ["default"],
     params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
     tasks: #{

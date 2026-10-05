@@ -17,10 +17,8 @@ use gage::{AgentRunner, Progress, Template, call_agent, model_context, params};
 pub const SCANNER = #{
     name: "code-review-2",
     description: "Review sessions for code quality",
-    // FUTURE: groups: ["default"] when this scanner replaces
-    // `code-review`. Left out so a legacy default scan does not
-    // select it.
-    // FUTURE: params() is not in the rethink runtime
+    hidden: true,
+    groups: ["default"],
     params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
     tasks: #{
         summarize_projects: #{
@@ -41,7 +39,9 @@ pub const SCANNER = #{
                 // and proceeds without them when none were written
                 wants: ["project-summary.*"],
                 writes: #{
-                    "finding.code": include_str!("finding-code-doc.md"),
+                    "finding.code": include_str!(
+                        "finding-code-doc.md"
+                    ),
                 },
             },
             // FUTURE: attachments, as above
@@ -87,7 +87,11 @@ pub async fn summarize_projects() {
     // and carry-forward keys on an attachment commit like any other
     // object. The runtime has watermarks and carry-forward for
     // sessions only; the partition form below is the design's.
-    let p = attachments.values().partition(SUMMARY_KEY).carry_forward_notes().await?;
+    let p = attachments
+        .values()
+        .partition(SUMMARY_KEY)
+        .carry_forward_notes()
+        .await?;
 
     // FUTURE: Template
     let t = Template::new(include_str!(
@@ -116,7 +120,9 @@ pub async fn summarize_projects() {
         }
         let kind = SUMMARY_NOTES[scheme];
         let prompt = t
-            .render(#{ project: a.source, sections: [#{ kind, files: contents }] })
+            .render(
+                #{ project: a.source, sections: [#{ kind, files: contents }] },
+            )
             .await?;
         runner.add(
             // FUTURE: call_agent
@@ -390,7 +396,10 @@ const FILE_EDIT_TOOLS = ["Edit", "Write", "MultiEdit"];
 async fn skip_session(s) {
     for m in s.messages().type(#{ assistant: "tool_use" }).await? {
         for block in m.as_object().message.content {
-            if block.type == "tool_use" && FILE_EDIT_TOOLS.iter().any(|t| t == block.name) {
+            if block.type == "tool_use" && FILE_EDIT_TOOLS
+                .iter()
+                .any(|t| t == block.name)
+            {
                 return Ok(None);
             }
         }

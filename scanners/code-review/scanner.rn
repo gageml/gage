@@ -16,6 +16,7 @@ use gage::{
 pub const SCANNER = #{
     name: "code-review",
     description: "Review sessions for code quality",
+    hidden: true,
     groups: ["default"],
     params: #{ mode: #{ value: "roadmap" }, budget: #{ value: 0 } },
     tasks: #{

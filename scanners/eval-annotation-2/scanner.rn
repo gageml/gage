@@ -18,9 +18,7 @@ pub const SCANNER = #{
     name: "eval-annotation-2",
     description: "Annotate sessions with open codes for error analysis",
     hidden: true,
-    // FUTURE: groups: ["eval"] when this scanner replaces
-    // `eval-annotation`. Left out so a legacy `-g eval` scan does not
-    // select it.
+    groups: ["eval"],
     tasks: #{
         annotate: #{
             notes: #{ writes: #{ open: include_str!("open-doc.md") } },
