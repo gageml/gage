@@ -720,7 +720,7 @@ mod tests {
             r#"{"tasks":[
                 {"task":"hello:greet","selected":"explicit","after":[],"unmatched":[]},
                 {"task":"hello:fail","selected":"group:default","after":[],"unmatched":[]},
-                {"task":"hello:after","selected":"required_by:greeting","after":[],"unmatched":[]}
+                {"task":"hello:after","selected":"group:eval","after":[],"unmatched":[]}
             ]}"#,
         );
         write(
@@ -768,7 +768,7 @@ mod tests {
         );
         assert_eq!(
             strings(&ctx, "SELECT selected FROM scan_task ORDER BY num").await,
-            ["explicit", "group:default", "required_by:greeting"]
+            ["explicit", "group:default", "group:eval"]
         );
         assert_eq!(
             strings(

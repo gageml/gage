@@ -158,8 +158,7 @@ impl std::error::Error for Error {}
 /// fresh one is built per task.
 pub struct CompiledScanner {
     name: String,
-    /// The planned tasks by name: every declared task for a selected
-    /// scanner, the pulled tasks for one pulled in by `required_by`
+    /// The planned tasks by name: every declared task
     tasks: BTreeMap<String, TaskDef>,
     selection: Selection,
     /// The scanner's resolved params, read by `params()` in its tasks
@@ -190,16 +189,9 @@ impl CompiledScanner {
 
 /// Compile a scanner and verify that every declared task maps to a
 /// function of the same name. A scanner that fails here is a full
-/// stop for the caller: nothing has run yet. A scanner selected by
-/// name or file plans every declared task; one pulled in by
-/// `required_by` carries the pulled tasks in `only_tasks` and plans
-/// those alone. Every declared task is verified regardless.
+/// stop for the caller: nothing has run yet.
 pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
     let def = scanner.def;
-    let (selection, only) = match &scanner.only_tasks {
-        Some(tasks) => (Selection::RequiredBy, Some(tasks.as_slice())),
-        None => (Selection::Explicit, None),
-    };
     let context = gage_runtime2::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
 
@@ -256,17 +248,10 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
         }
     }
 
-    let tasks = def
-        .tasks
-        .iter()
-        .filter(|(name, _)| only.is_none_or(|only| only.contains(name)))
-        .map(|(name, task)| (name.clone(), task.clone()))
-        .collect();
-
     Ok(CompiledScanner {
         name: def.name.clone(),
-        tasks,
-        selection,
+        tasks: def.tasks.clone(),
+        selection: Selection::Explicit,
         params: scanner.params.clone(),
         source_files: files,
         rt,
@@ -4353,76 +4338,6 @@ mod tests {
             started("c") > finished("a"),
             "c waits for a, which writes what it wants: {events:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn a_pulled_in_scanner_plans_only_its_pulled_tasks() {
-        let (_w, writer) = compile_source(
-            r#"
-            pub const SCANNER = #{
-                name: "main",
-                description: "Writes x",
-                tasks: #{ w: #{ notes: #{ writes: #{ "x": "the x note" } } } },
-            };
-
-            pub fn w() {}
-            "#,
-        );
-        let lib_dir = tempfile::tempdir().unwrap();
-        let lib_path = lib_dir.path().join("scanner.rn");
-        std::fs::write(
-            &lib_path,
-            r#"
-            pub const SCANNER = #{
-                name: "lib",
-                description: "Pulled in by x",
-                library: true,
-                tasks: #{
-                    a: #{},
-                    b: #{ notes: #{ required_by: ["x"] } },
-                },
-            };
-
-            pub fn a() {
-                println!("a must not run");
-            }
-
-            pub fn b() {}
-            "#,
-        )
-        .unwrap();
-        let lib_def = parse_scanner_file(&lib_path).unwrap();
-        let lib = compile(&Scanner::with_tasks(&lib_def, vec!["b".to_string()])).unwrap();
-        let (tmp, store) = open_store();
-        let (outcome, events) = run_all(
-            &store,
-            &tmp.path().join("scans"),
-            &[writer.unwrap(), lib],
-            &CancellationToken::new(),
-        )
-        .await;
-        let outcome = outcome.unwrap();
-        assert_eq!(outcome.attrs.tasks.total, 2);
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, Event::TaskStarted { task, .. } if task == "a"))
-        );
-        let scans = ScanStore::from(&store);
-        let plan: serde_json::Value =
-            serde_json::from_slice(&scans.plan_file(&outcome.commit_sha).unwrap().unwrap())
-                .unwrap();
-        assert_eq!(
-            plan["tasks"][0],
-            serde_json::json!({
-                "task": "lib:b",
-                "selected": "required_by:x",
-                "after": [{ "task": "main:w", "pattern": "x" }],
-                "unmatched": [],
-                "writes": {}
-            })
-        );
-        assert_eq!(plan["tasks"][1]["selected"], "explicit");
     }
 
     /// The `examples/scanners2/note_deps.rn` shape: `a` writes a dated

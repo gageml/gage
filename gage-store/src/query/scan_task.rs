@@ -39,8 +39,8 @@ pub(crate) fn scan_task_schema() -> SchemaRef {
         // Null until the task stops
         Field::new("stopped", timestamp(), true),
         Field::new("worked_ms", DataType::Int64, true),
-        // How the task entered the plan: `explicit`, `group:<name>`,
-        // or `required_by:<pattern>`; null without a plan
+        // How the task entered the plan: `explicit` or `group:<name>`;
+        // null without a plan
         Field::new("selected", DataType::Utf8, true),
         // For a skipped task, the `needs` pattern no completed
         // upstream task satisfied

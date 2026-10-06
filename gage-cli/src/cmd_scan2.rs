@@ -218,10 +218,6 @@ pub struct Scan2RunArgs {
     )]
     no_dataset: bool,
 
-    /// Run only the scanners named, without pulling in required_by dependents
-    #[arg(long, display_order = 13)]
-    no_deps: bool,
-
     /// Ignore prior work
     ///
     /// Every session is scanned in full regardless of earlier scans,
@@ -1545,22 +1541,10 @@ async fn prepare_scan_dialog(
     let plan = resolve_dataset_plan(&mut args, store).await?;
     preview_dataset(&plan)?;
 
-    // Preflight: compile every selected scanner and every pulled-in
-    // required_by dependent before any task runs.
-    let defs: Vec<&ScannerDef> = scanners.iter().map(|s| s.def).collect();
-    let required = if args.no_deps {
-        Vec::new()
-    } else {
-        registry.required_tasks(&defs, config)
-    };
+    // Preflight: compile every selected scanner before any task runs.
     let mut compiled: Vec<CompiledScanner> = Vec::new();
     let mut errors = 0;
-    let compile_results = scanners.iter().map(gage_scan2::compile).chain(
-        required
-            .iter()
-            .map(|(def, tasks)| gage_scan2::compile(&Scanner::with_tasks(def, tasks.clone()))),
-    );
-    for result in compile_results {
+    for result in scanners.iter().map(gage_scan2::compile) {
         match result {
             Ok(c) => compiled.push(c),
             Err(e) => {
@@ -1754,9 +1738,8 @@ fn resolve_scanner_specs(
         }
     }
     for name in &s_bare {
-        match registry.get_def(name) {
-            Some(def) if !def.library => (),
-            _ => return Err(DialogError::Failed(format!("Unknown scanner: {name}"))),
+        if registry.get_def(name).is_none() {
+            return Err(DialogError::Failed(format!("Unknown scanner: {name}")));
         }
     }
 
@@ -1823,7 +1806,7 @@ fn resolve_scanner_specs(
     Ok((out, prompted))
 }
 
-/// Multi-select over enabled, non-library scanners with the
+/// Multi-select over enabled scanners with the
 /// `default` group pre-selected. The hint shown for each item is
 /// the first line of the scanner's description.
 fn prompt_scanner_multiselect(
