@@ -178,7 +178,11 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
     let ctx = current()?;
     let (oid, commit, mark) = match w.mark.target {
         MarkTarget::Session { id } => {
-            let Some(member) = members(&ctx, false).await?.into_iter().find(|s| s.id == id) else {
+            let Some(member) = members(ctx.scan_context().await?, false)
+                .await?
+                .into_iter()
+                .find(|s| s.id == id)
+            else {
                 return Ok(Err(Error::Args(format!(
                     "session {id} is not a member of the scan"
                 ))));
@@ -290,7 +294,7 @@ async fn do_sessions_hwm(q: SessionsHwm) -> Result<Result<Vec<Value>, Error>, Vm
         Err(e) => return Ok(Err(e)),
     };
     let ctx = current()?;
-    let sessions = members(&ctx, q.newest_first).await?;
+    let sessions = members(ctx.scan_context().await?, q.newest_first).await?;
     let with_commit: Vec<(&str, Option<&str>)> = sessions
         .iter()
         .map(|s| (s.id.as_str(), Some(s.commit.as_str())))
@@ -506,7 +510,7 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
         );
         return Ok(Ok(0));
     }
-    let sessions = members(&ctx, false).await?;
+    let sessions = members(ctx.scan_context().await?, false).await?;
     if sessions.is_empty() {
         return Ok(Ok(0));
     }

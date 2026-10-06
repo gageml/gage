@@ -175,11 +175,25 @@ pub struct TaskDepsDef {
     pub required_by: Vec<String>,
 }
 
+/// The attachment names a task declares: `needs` must be present in
+/// the dataset for the task to run; `wants` are read when present.
+/// Neither orders tasks, since attachments exist before a scan starts.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct TaskAttachmentsDef {
+    pub needs: Vec<String>,
+    pub wants: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDef {
     pub name: String,
+    /// The function that runs the task; the task name unless `f`
+    /// names another. A string, since Rune does not evaluate a
+    /// function reference inside a `const`
+    pub f: String,
     pub notes: TaskDepsDef,
     pub issues: TaskDepsDef,
+    pub attachments: TaskAttachmentsDef,
 }
 
 pub struct ScannerDef {
@@ -196,6 +210,10 @@ pub struct ScannerDef {
     /// specified; `-g --group` selects by any group name.
     pub groups: Vec<String>,
     pub tasks: BTreeMap<String, TaskDef>,
+    /// Attachment functions declared via `SCANNER.attachments`: key →
+    /// function name. `gage attachment add --scanner` runs each
+    /// against a dataset.
+    pub attachments: BTreeMap<String, String>,
     /// Agent defs declared via `SCANNER.agents`: fn name → description.
     /// Each names a public function returning an un-awaited `CallAgent`
     /// builder, runnable via `gage agent <scanner>::<fn>`.
@@ -263,6 +281,11 @@ pub enum ParseError {
         task: String,
         field: &'static str,
     },
+    /// A `SCANNER.attachments` entry is not an object, or its `f` is
+    /// not a function name
+    AttachmentField {
+        key: String,
+    },
     IncludeStr {
         task: String,
         note: String,
@@ -327,6 +350,12 @@ impl fmt::Display for ParseError {
             }
             ParseError::TaskFieldType { task, field } => {
                 write!(f, "task '{task}' field '{field}' has unexpected type")
+            }
+            ParseError::AttachmentField { key } => {
+                write!(
+                    f,
+                    "attachment '{key}' must be an object whose `f` is a function name string"
+                )
             }
             ParseError::IncludeStr {
                 task,
@@ -805,6 +834,7 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     let mut library = false;
     let mut groups: Vec<String> = Vec::new();
     let mut tasks_obj: Option<&ast::ExprObject> = None;
+    let mut attachments_obj: Option<&ast::ExprObject> = None;
     let mut agents_obj: Option<&ast::ExprObject> = None;
 
     for (item, _) in &file.items {
@@ -844,6 +874,11 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
                             tasks_obj = Some(obj);
                         }
                     }
+                    Some("attachments") => {
+                        if let ast::Expr::Object(obj) = expr {
+                            attachments_obj = Some(obj);
+                        }
+                    }
                     Some("agents") => {
                         if let ast::Expr::Object(obj) = expr {
                             agents_obj = Some(obj);
@@ -864,6 +899,11 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         None => BTreeMap::new(),
     };
 
+    let attachments = match attachments_obj {
+        Some(obj) => parse_attachments(source, obj)?,
+        None => BTreeMap::new(),
+    };
+
     let agents = match agents_obj {
         Some(obj) => parse_agents(source, obj),
         None => BTreeMap::new(),
@@ -877,6 +917,7 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         library,
         groups,
         tasks,
+        attachments,
         agents,
         ast: file,
         source: source.to_string(),
@@ -923,6 +964,45 @@ impl fmt::Display for ParseScannerFileError {
 
 impl std::error::Error for ParseScannerFileError {}
 
+/// Parse `SCANNER.attachments`: key → function name. Each value is an
+/// object whose `f` is the function's name as a string and defaults
+/// to the key. A string, not a path: Rune does not evaluate a function
+/// reference inside a `const`.
+fn parse_attachments(
+    source: &str,
+    obj: &ast::ExprObject,
+) -> Result<BTreeMap<String, String>, ParseError> {
+    let mut attachments = BTreeMap::new();
+    for (field, _) in &obj.assignments {
+        let Some(key) = field_key(source, &field.key) else {
+            continue;
+        };
+        let Some((_, expr)) = &field.assign else {
+            continue;
+        };
+        let ast::Expr::Object(entry) = expr else {
+            return Err(ParseError::AttachmentField { key });
+        };
+        let f = match object_field(source, entry, "f") {
+            Some(expr) => {
+                expr_str(source, expr).ok_or(ParseError::AttachmentField { key: key.clone() })?
+            }
+            None => key.clone(),
+        };
+        attachments.insert(key, f);
+    }
+    Ok(attachments)
+}
+
+/// The expression assigned to `name` in an object literal.
+fn object_field<'a>(source: &str, obj: &'a ast::ExprObject, name: &str) -> Option<&'a ast::Expr> {
+    obj.assignments.iter().find_map(|(field, _)| {
+        (field_key(source, &field.key).as_deref() == Some(name))
+            .then(|| field.assign.as_ref().map(|(_, expr)| expr))
+            .flatten()
+    })
+}
+
 /// Parse `SCANNER.agents`: fn name → description. Non-string values
 /// are skipped.
 fn parse_agents(source: &str, obj: &ast::ExprObject) -> BTreeMap<String, String> {
@@ -966,8 +1046,10 @@ fn parse_tasks(
             return Err(ParseError::DuplicateTask(name));
         }
 
+        let mut f = name.clone();
         let mut notes = TaskDepsDef::default();
         let mut issues = TaskDepsDef::default();
+        let mut attachments = TaskAttachmentsDef::default();
 
         for (tf, _) in &task_obj.assignments {
             let Some(tkey) = field_key(source, &tf.key) else {
@@ -976,6 +1058,20 @@ fn parse_tasks(
             let Some((_, texpr)) = &tf.assign else {
                 continue;
             };
+            match tkey.as_str() {
+                "f" => {
+                    f = expr_str(source, texpr).ok_or(ParseError::TaskFieldType {
+                        task: name.clone(),
+                        field: "f",
+                    })?;
+                    continue;
+                }
+                "attachments" => {
+                    attachments = parse_task_attachments(source, texpr, &name)?;
+                    continue;
+                }
+                _ => {}
+            }
             let (dest, kind) = match tkey.as_str() {
                 "notes" => (&mut notes, DepsKind::Notes),
                 "issues" => (&mut issues, DepsKind::Issues),
@@ -994,13 +1090,44 @@ fn parse_tasks(
             name.clone(),
             TaskDef {
                 name,
+                f,
                 notes,
                 issues,
+                attachments,
             },
         );
     }
 
     Ok(tasks)
+}
+
+/// Parse a task's `attachments: #{ needs: [...], wants: [...] }`.
+fn parse_task_attachments(
+    source: &str,
+    expr: &ast::Expr,
+    task: &str,
+) -> Result<TaskAttachmentsDef, ParseError> {
+    let ast::Expr::Object(obj) = expr else {
+        return Err(ParseError::TaskFieldType {
+            task: task.to_string(),
+            field: "attachments",
+        });
+    };
+    let mut def = TaskAttachmentsDef::default();
+    for (field, _) in &obj.assignments {
+        let Some(key) = field_key(source, &field.key) else {
+            continue;
+        };
+        let Some((_, expr)) = &field.assign else {
+            continue;
+        };
+        match key.as_str() {
+            "needs" => def.needs = parse_patterns(source, expr, task, "attachments.needs")?,
+            "wants" => def.wants = parse_patterns(source, expr, task, "attachments.wants")?,
+            _ => {}
+        }
+    }
+    Ok(def)
 }
 
 /// Which task-dependency block is being parsed; selects the field
@@ -1351,6 +1478,80 @@ fn walk_rn_files_rec(dir: &Path, result: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_attachments_and_task_functions() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    attachments: #{
+        claude_config: #{ f: "attach_claude_config" },
+        stack: #{},
+    },
+    tasks: #{
+        check: #{
+            f: "run_check",
+            attachments: #{ needs: ["claude-config"], wants: ["stack-*"] },
+        },
+        plain: #{},
+    },
+};
+"#;
+        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        assert_eq!(
+            def.attachments,
+            BTreeMap::from([
+                (
+                    "claude_config".to_string(),
+                    "attach_claude_config".to_string()
+                ),
+                ("stack".to_string(), "stack".to_string()),
+            ])
+        );
+        let check = &def.tasks["check"];
+        assert_eq!(check.f, "run_check");
+        assert_eq!(check.attachments.needs, ["claude-config"]);
+        assert_eq!(check.attachments.wants, ["stack-*"]);
+        let plain = &def.tasks["plain"];
+        assert_eq!(plain.f, "plain");
+        assert_eq!(plain.attachments, TaskAttachmentsDef::default());
+    }
+
+    #[test]
+    fn bad_attachment_and_task_function_fields_are_errors() {
+        let bad_entry = r#"
+pub const SCANNER = #{ name: "demo", attachments: #{ cfg: attach_cfg } };
+"#;
+        let Err(err) = parse_scanner(bad_entry, "demo", Path::new("/tmp/demo/scanner.rn")) else {
+            panic!("bad_entry parsed");
+        };
+        assert!(
+            matches!(&err, ParseError::AttachmentField { key } if key == "cfg"),
+            "{err}"
+        );
+
+        let bad_f = r#"
+pub const SCANNER = #{ name: "demo", tasks: #{ main: #{ f: my_main } } };
+"#;
+        let Err(err) = parse_scanner(bad_f, "demo", Path::new("/tmp/demo/scanner.rn")) else {
+            panic!("bad_f parsed");
+        };
+        assert!(
+            matches!(&err, ParseError::TaskFieldType { task, field } if task == "main" && *field == "f"),
+            "{err}"
+        );
+
+        let bad_needs = r#"
+pub const SCANNER = #{ name: "demo", tasks: #{ main: #{ attachments: #{ needs: "x" } } } };
+"#;
+        let Err(err) = parse_scanner(bad_needs, "demo", Path::new("/tmp/demo/scanner.rn")) else {
+            panic!("bad_needs parsed");
+        };
+        assert!(
+            matches!(&err, ParseError::TaskFieldType { task, field } if task == "main" && *field == "attachments.needs"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn parse_agents_field() {

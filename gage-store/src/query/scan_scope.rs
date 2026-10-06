@@ -24,7 +24,7 @@ use datafusion::arrow::array::{BooleanBuilder, Int64Builder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 
 use super::attachment::{
     attachment_file_rows, attachment_file_schema, attachment_rows, attachment_schema,
@@ -53,6 +53,15 @@ pub enum ScanSource {
     ScanDir(ScanDirLayout),
     /// A stored scan, by id
     Stored(String),
+    /// No scan: a dataset alone, by the commit to read. The session
+    /// tables serve its members and attachments; the scan tables are
+    /// empty and the scan id is an error.
+    Dataset(String),
+}
+
+/// The error of reading a scan table under a dataset-only scope
+fn not_a_scan() -> DataFusionError {
+    DataFusionError::Plan("the scope is a dataset, not a scan".to_string())
 }
 
 /// One note of the scan: the record, its commit when it has one, and
@@ -92,6 +101,7 @@ impl ScanSource {
                 )))
             }),
             ScanSource::Stored(id) => Ok(ScanStore::from(store).get(id).map_err(external)?.id),
+            ScanSource::Dataset(_) => Err(not_a_scan()),
         }
     }
 
@@ -105,6 +115,7 @@ impl ScanSource {
                 .map_err(external)?
                 .content
                 .dataset),
+            ScanSource::Dataset(sha) => Ok(Some(sha.clone())),
         }
     }
 
@@ -168,6 +179,7 @@ impl ScanSource {
                     });
                 }
             }
+            ScanSource::Dataset(_) => {}
         }
         Ok(out)
     }
@@ -225,6 +237,7 @@ impl ScanSource {
                     });
                 }
             }
+            ScanSource::Dataset(_) => {}
         }
         Ok(out)
     }
@@ -241,6 +254,7 @@ impl ScanSource {
                 .map_err(external)?
                 .content
                 .tasks),
+            ScanSource::Dataset(_) => Ok(Vec::new()),
         }
     }
 
@@ -264,6 +278,7 @@ impl ScanSource {
                     .agent_file(&record.commit_sha, scanner, task, agent_id, "result")
                     .map_err(external)
             }
+            ScanSource::Dataset(_) => Ok(None),
         }
     }
 
@@ -274,6 +289,7 @@ impl ScanSource {
             ScanSource::Stored(id) => Ok(Some(
                 ScanStore::from(store).get(id).map_err(external)?.commit_sha,
             )),
+            ScanSource::Dataset(_) => Ok(None),
         }
     }
 
@@ -296,6 +312,7 @@ impl ScanSource {
                 .map_err(external)?
                 .content
                 .plan),
+            ScanSource::Dataset(_) => Ok(None),
         }
     }
 
@@ -343,6 +360,7 @@ impl ScanSource {
                     id_prefix,
                 ))
             }
+            ScanSource::Dataset(_) => Err(not_a_scan()),
         }
     }
 }

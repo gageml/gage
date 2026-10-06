@@ -17,6 +17,9 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisec
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
+use gage_registry::scanner::{Scanner, ScannerRegistry};
+use gage_runtime2::{Output, TaskOutput};
+use gage_scan2::attach::{AttachEvent, attach};
 use gage_store::{
     AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec, AttachmentStore,
     DatasetStore, Store, StoreError,
@@ -72,7 +75,7 @@ pub struct AttachmentAddArgs {
     /// Files to include (path globs relative to the root)
     ///
     /// At least one is required; `**/*` selects every file
-    #[arg(required_unless_present = "stored", value_name = "INCLUDE")]
+    #[arg(required_unless_present_any = ["stored", "scanners"], value_name = "INCLUDE")]
     pub includes: Vec<String>,
 
     /// Name the attachment
@@ -116,9 +119,22 @@ pub struct AttachmentAddArgs {
         long,
         value_name = "ATTACHMENT",
         requires = "dataset",
-        conflicts_with_all = ["includes", "name", "root", "exclude", "target"]
+        conflicts_with_all = ["includes", "name", "root", "exclude", "target", "scanners"]
     )]
     pub stored: Option<String>,
+
+    /// Run a scanner's attachment functions against a dataset (repeatable)
+    ///
+    /// Each named scanner attaches what its tasks read, preparing the
+    /// dataset for a scan by those scanners. Requires --dataset
+    #[arg(
+        short,
+        long = "scanner",
+        value_name = "SCANNER",
+        requires = "dataset",
+        conflicts_with_all = ["includes", "name", "root", "exclude", "target"]
+    )]
+    pub scanners: Vec<String>,
 }
 
 #[derive(Args)]
@@ -156,9 +172,18 @@ pub struct AttachmentRemoveArgs {
     pub dataset: Option<String>,
 }
 
-pub fn add(args: AttachmentAddArgs) {
+pub async fn add(args: AttachmentAddArgs) {
     let store = open_store("gage attachment add");
     let attachments = AttachmentStore::from(&store);
+
+    if !args.scanners.is_empty() {
+        let dataset = args
+            .dataset
+            .as_deref()
+            .expect("clap requires --dataset with --scanner");
+        add_from_scanners(&store, dataset, &args.scanners).await;
+        return;
+    }
 
     if let Some(stored) = args.stored.as_deref() {
         let record = resolve("gage attachment add", &attachments, stored);
@@ -214,6 +239,68 @@ pub fn add(args: AttachmentAddArgs) {
 
     if let Some(prefix) = args.dataset.as_deref() {
         add_to_dataset(&store, prefix, &added.id, args.name.as_deref());
+    }
+}
+
+/// Run the attachment functions of each named scanner against the
+/// dataset, printing what the functions print and one line per
+/// attachment they write. The first failing function ends the command
+/// with exit 1; attachments linked before it stay linked.
+async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]) {
+    let dataset_id = match DatasetStore::from(store).resolve_id(dataset_prefix) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("gage attachment add: --dataset {dataset_prefix}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let registry = ScannerRegistry::load();
+    let mut compiled = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(def) = registry.get_def(name) else {
+            eprintln!("gage attachment add: unknown scanner {name}");
+            std::process::exit(1);
+        };
+        let scanner = match Scanner::from_spec(def, None, name) {
+            Ok(scanner) => scanner,
+            Err(e) => {
+                eprintln!("gage attachment add: {e}");
+                std::process::exit(1);
+            }
+        };
+        match gage_scan2::compile(&scanner) {
+            Ok(c) => compiled.push(c),
+            Err(e) => {
+                eprintln!("gage attachment add: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let dataset = short_uuid(&dataset_id).to_string();
+    let result = attach(store, &dataset_id, &compiled, |event| match event {
+        AttachEvent::Started { .. } => {}
+        AttachEvent::Output(TaskOutput { output, .. }) => match output {
+            Output::Print(s) => print!("{s}"),
+            Output::Println(s) => println!("{s}"),
+            Output::Log { level, message } => eprintln!("{}: {message}", level.as_str()),
+            Output::Progress { .. } => {}
+        },
+        AttachEvent::Attached { attached, .. } => {
+            let verb = match attached.outcome.as_str() {
+                "added" => "Added",
+                "updated" => "Updated",
+                _ => "Unchanged",
+            };
+            println!(
+                "{verb} attachment {} to dataset {dataset}",
+                describe(attached.name.as_deref(), &attached.id)
+            );
+        }
+    })
+    .await;
+    if let Err(e) = result {
+        eprintln!("gage attachment add: {e}");
+        std::process::exit(1);
     }
 }
 

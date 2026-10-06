@@ -3,19 +3,22 @@
 // the task names the action.
 //
 // The user config reaches the scan as a dataset attachment named
-// `claude-config`, added with `gage attachment add claude-config
-// settings.json --root ~/.claude --dataset <DATASET>`. The scan reads
-// the attachment at the commit its dataset links.
+// `claude-config`. The scanner's attachment function adds it when the
+// dataset is prepared with `gage attachment add -s session-retention-2
+// -d <DATASET>`; the scan reads it at the commit its dataset links.
 
-use gage::{Fail, scan, write_issue};
+use gage::{Fail, Files, attach, scan, write_issue};
 
 pub const SCANNER = #{
     name: "session-retention-2",
     description: "Highlight unset session retention policy",
     groups: ["default"],
-    attachments: #{ wants: ["claude-code"] },
+    attachments: #{
+        claude_config: #{ f: "attach_claude_config" },
+    },
     tasks: #{
         check: #{
+            attachments: #{ needs: ["claude-config"] },
             issues: #{
                 writes: #{
                     "session-retention": "Session retention policy is unset",
@@ -24,6 +27,12 @@ pub const SCANNER = #{
         },
     },
 };
+
+pub async fn attach_claude_config() {
+    attach(Files::include(["settings.json", "settings.local.json"]).root("~/.claude"))
+        .name("claude-config")
+        .await?;
+}
 
 pub async fn check() {
     if let Some(days) = attached_settings().await?.get("cleanupPeriodDays") {
@@ -43,11 +52,13 @@ pub async fn check() {
 async fn attached_settings() {
     Ok(
         scan()
-            .attachment("claude-config")
-            .await
+            .attachments()
+            .name("claude-config")
+            .await?
+            .next()
             .ok_or(Fail(
                 "attachment claude-config is not in the dataset; add it with \
-                 `gage attachment add claude-config settings.json --root ~/.claude --dataset <DATASET>`",
+                 `gage attachment add -s session-retention-2 -d <DATASET>`",
             ))?
             .file("settings.json")
             .await

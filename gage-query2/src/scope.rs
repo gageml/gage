@@ -52,6 +52,15 @@ impl ScanScope {
         }
     }
 
+    /// A dataset alone, at `commit_sha`: the session tables serve its
+    /// members and attachments and the scan tables are empty.
+    pub fn dataset(commit_sha: impl Into<String>) -> Self {
+        Self {
+            source: ScanSource::Dataset(commit_sha.into()),
+            session: None,
+        }
+    }
+
     /// Narrow `session`, `entry`, and `message` to the one member
     /// `session_id`. Every other table stays the whole scan's.
     pub fn session(mut self, session_id: impl Into<String>) -> Self {

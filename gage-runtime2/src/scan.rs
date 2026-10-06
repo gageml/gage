@@ -194,7 +194,7 @@ impl ScanContext {
     /// The commit the scan reads for the member session `session_id`,
     /// or `None` when it is not a member.
     pub(crate) async fn member_commit(&self, session_id: &str) -> Result<Option<String>, VmError> {
-        Ok(members(self, false)
+        Ok(members(self.scan_context().await?, false)
             .await?
             .into_iter()
             .find(|s| s.id == session_id)
@@ -275,6 +275,73 @@ pub(crate) fn current() -> Result<ScanContext, VmError> {
         .map_err(|_outside_scope| {
             VmError::panic("scan() is available only inside a active scan task")
         })
+}
+
+/// The query context over the dataset of whichever context the caller
+/// runs under: a scan task's scan-scoped context, or an attachment
+/// function's dataset-scoped context. The session and attachment
+/// reads go through here so both contexts serve them.
+pub(crate) async fn dataset_query() -> Result<SessionContext, VmError> {
+    if let Ok(ctx) = SCAN_CTX.try_with(|ctx| ctx.clone()) {
+        return Ok(ctx.scan_context().await?.clone());
+    }
+    if let Ok(ctx) = crate::attach::ATTACH_CTX.try_with(|ctx| ctx.clone()) {
+        return Ok(ctx.dataset_context().await?.clone());
+    }
+    Err(VmError::panic(
+        "sessions and attachments are available only inside a scan task or an attachment function",
+    ))
+}
+
+/// The store of whichever context the caller runs under.
+pub(crate) fn store_handle() -> Result<Arc<tokio::sync::Mutex<Store>>, VmError> {
+    if let Ok(store) = SCAN_CTX.try_with(|ctx| Arc::clone(&ctx.store)) {
+        return Ok(store);
+    }
+    if let Ok(store) = crate::attach::ATTACH_CTX.try_with(|ctx| Arc::clone(&ctx.store)) {
+        return Ok(store);
+    }
+    Err(VmError::panic(
+        "the store is available only inside a scan task or an attachment function",
+    ))
+}
+
+/// A target argument as the Gage URL the store expects: a `Session`
+/// is `session:<id>`; a string with a scheme is taken as given; a bare
+/// id or unique prefix resolves to the object's type and full id. The
+/// inner error is the scanner's: a value of the wrong type, or an id
+/// that names nothing.
+pub(crate) async fn target_url(value: &Value) -> Result<Result<String, Error>, VmError> {
+    if let Ok(s) = value.borrow_ref::<Session>() {
+        return Ok(Ok(format!("session:{}", s.id)));
+    }
+    let Ok(text) = value.borrow_string_ref() else {
+        return Ok(Err(Error::Args(format!(
+            "target: expected a Session or a string, got {}",
+            value.type_info()
+        ))));
+    };
+    let text = text.to_string();
+    if text.contains(':') {
+        return Ok(Ok(text));
+    }
+    let store = store_handle()?;
+    let store = store.lock().await;
+    let found = match store.resolve_in(&text, None) {
+        Ok(found) => found,
+        Err(e) => return Ok(Err(Error::Args(format!("target {text}: {e}")))),
+    };
+    if found.deleted {
+        return Ok(Err(Error::Args(format!(
+            "target {text}: object is deleted: {}",
+            found.id
+        ))));
+    }
+    let type_name = found
+        .object_type
+        .strip_prefix("gage::")
+        .unwrap_or(&found.object_type);
+    Ok(Ok(format!("{type_name}:{}", found.id)))
 }
 
 /// Render a `VmError` as Rune does: the diagnostic with its source
@@ -397,20 +464,22 @@ pub(crate) fn session_order(newest_first: bool) -> &'static str {
 /// Only the id, the version, and the line count are held per session;
 /// `attrs()` reads the rest on request.
 async fn fetch_sessions(query: SessionsQuery) -> Result<Sessions, VmError> {
-    let ctx = current()?;
-    Ok(Sessions::new(members(&ctx, query.newest_first).await?))
+    Ok(Sessions::new(
+        members(&dataset_query().await?, query.newest_first).await?,
+    ))
 }
 
-/// The scan's sessions, in member order unless `newest_first` is set.
+/// The dataset's sessions, in member order unless `newest_first` is
+/// set, read from the `session` table of `df_ctx`.
 pub(crate) async fn members(
-    ctx: &ScanContext,
+    df_ctx: &SessionContext,
     newest_first: bool,
 ) -> Result<Vec<Session>, VmError> {
     let sql = format!(
         "SELECT id, locator, line_count FROM session{}",
         session_order(newest_first)
     );
-    let batches = run(ctx.scan_context().await?, &sql).await?;
+    let batches = run(df_ctx, &sql).await?;
     let mut items = Vec::new();
     for batch in &batches {
         let ids = string_column(batch, 0);
@@ -621,11 +690,10 @@ async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
          FROM session WHERE id = '{}'",
         sql_str(&q.id)
     );
-    let ctx = current()?;
-    let batches = run(ctx.scan_context().await?, &sql).await?;
+    let batches = run(&dataset_query().await?, &sql).await?;
     let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
         return Err(VmError::panic(format!(
-            "session {} is not a member of the scan",
+            "session {} is not a member of the dataset",
             q.id
         )));
     };

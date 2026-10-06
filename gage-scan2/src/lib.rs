@@ -30,6 +30,7 @@
 //! the terminal hold the same text. Runtime diagnostics go through
 //! `tracing` and reach the record through [`trace`].
 
+pub mod attach;
 pub mod plan;
 pub mod scan_dir;
 pub mod trace;
@@ -124,9 +125,18 @@ pub enum Error {
         name: String,
         diagnostics: String,
     },
+    /// A declared task names a function the scanner does not define
     MissingTask {
         scanner: String,
         task: String,
+        function: String,
+    },
+    /// A `SCANNER.attachments` entry names a function the scanner
+    /// does not define
+    MissingAttachmentFunction {
+        scanner: String,
+        key: String,
+        function: String,
     },
     /// The scanner's source files cannot be enumerated or stored
     Source {
@@ -141,10 +151,24 @@ impl fmt::Display for Error {
             Error::Compile { name, diagnostics } => {
                 write!(f, "scanner {name} failed to compile\n{diagnostics}")
             }
-            Error::MissingTask { scanner, task } => {
+            Error::MissingTask {
+                scanner,
+                task,
+                function,
+            } => {
                 write!(
                     f,
-                    "scanner {scanner} declares task {task} but defines no such function"
+                    "scanner {scanner} declares task {task} but defines no function {function}"
+                )
+            }
+            Error::MissingAttachmentFunction {
+                scanner,
+                key,
+                function,
+            } => {
+                write!(
+                    f,
+                    "scanner {scanner} declares attachment {key} but defines no function {function}"
                 )
             }
             Error::Source { name, source } => write!(f, "scanner {name}: {source}"),
@@ -160,6 +184,8 @@ pub struct CompiledScanner {
     name: String,
     /// The planned tasks by name: every declared task
     tasks: BTreeMap<String, TaskDef>,
+    /// The attachment functions by key, from `SCANNER.attachments`
+    attachments: BTreeMap<String, String>,
     selection: Selection,
     /// The scanner's resolved params, read by `params()` in its tasks
     params: Option<json::Value>,
@@ -183,13 +209,18 @@ impl CompiledScanner {
             unit: self.unit.clone(),
             sources: Arc::clone(&self.sources),
             params: self.params.clone(),
+            functions: self
+                .tasks
+                .iter()
+                .map(|(name, def)| (name.clone(), def.f.clone()))
+                .collect(),
         }
     }
 }
 
-/// Compile a scanner and verify that every declared task maps to a
-/// function of the same name. A scanner that fails here is a full
-/// stop for the caller: nothing has run yet.
+/// Compile a scanner and verify that every declared task and
+/// attachment maps to a function the scanner defines. A scanner that
+/// fails here is a full stop for the caller: nothing has run yet.
 pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
     let def = scanner.def;
     let context = gage_runtime2::context().unwrap();
@@ -239,11 +270,21 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
     })?;
 
     let vm = Vm::new(rt.clone(), unit.clone());
-    for task in def.tasks.keys() {
-        if vm.lookup_function([task.as_str()]).is_err() {
+    for task in def.tasks.values() {
+        if vm.lookup_function([task.f.as_str()]).is_err() {
             return Err(Error::MissingTask {
                 scanner: def.name.clone(),
-                task: task.clone(),
+                task: task.name.clone(),
+                function: task.f.clone(),
+            });
+        }
+    }
+    for (key, function) in &def.attachments {
+        if vm.lookup_function([function.as_str()]).is_err() {
+            return Err(Error::MissingAttachmentFunction {
+                scanner: def.name.clone(),
+                key: key.clone(),
+                function: function.clone(),
             });
         }
     }
@@ -251,6 +292,7 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
     Ok(CompiledScanner {
         name: def.name.clone(),
         tasks: def.tasks.clone(),
+        attachments: def.attachments.clone(),
         selection: Selection::Explicit,
         params: scanner.params.clone(),
         source_files: files,
@@ -696,9 +738,11 @@ impl<F: FnMut(Event)> Run<'_, F> {
         ctx.scanner = t.scanner.clone();
         ctx.task = t.task.clone();
         ctx.sources = Some(Arc::clone(&unit.sources));
+        let function = unit.functions[&t.task].clone();
         let exec = TaskExec {
             unit,
             task: t.task.clone(),
+            function,
             ctx,
             sink: OutputSink {
                 scanner: t.scanner.clone(),
@@ -860,6 +904,8 @@ struct TaskUnit {
     unit: RuneArc<Unit>,
     sources: Arc<Sources>,
     params: Option<json::Value>,
+    /// The function each task runs, by task name
+    functions: BTreeMap<String, String>,
 }
 
 /// Everything a worker needs to run one task: the scanner's
@@ -867,6 +913,8 @@ struct TaskUnit {
 struct TaskExec {
     unit: TaskUnit,
     task: String,
+    /// The function that runs the task
+    function: String,
     ctx: ScanContext,
     sink: OutputSink,
     scope: LogScope,
@@ -881,6 +929,7 @@ impl TaskExec {
         let TaskExec {
             unit,
             task,
+            function,
             ctx,
             sink,
             scope,
@@ -889,7 +938,7 @@ impl TaskExec {
             .scope(scope, async move {
                 let span = tracing::info_span!("task", scanner = %ctx.scanner, task = %task);
                 SCAN_CTX
-                    .scope(ctx, OUTPUT_SINK.scope(sink, execute(&unit, &task)))
+                    .scope(ctx, OUTPUT_SINK.scope(sink, execute(&unit, &function)))
                     .instrument(span)
                     .await
             })
@@ -897,17 +946,17 @@ impl TaskExec {
     }
 }
 
-/// Run one task on a fresh VM.
-async fn execute(scanner: &TaskUnit, task: &str) -> Result<(), String> {
+/// Run `function` on a fresh VM and interpret its return value.
+pub(crate) async fn execute(scanner: &TaskUnit, function: &str) -> Result<(), String> {
     let vm = Vm::new(scanner.rt.clone(), scanner.unit.clone());
     let execution = vm
-        .send_execute([task], ())
+        .send_execute([function], ())
         .map_err(|e| vm_error(&e, &scanner.sources))?;
     let value = execution
         .complete()
         .await
         .map_err(|e| vm_error(&e, &scanner.sources))?;
-    task_result(value, scanner, task)
+    task_result(value, scanner, function)
 }
 
 /// Render a VM error as Rune does: the diagnostic with its source
@@ -2557,7 +2606,7 @@ mod tests {
         );
         let err = compiled.err().unwrap();
         assert!(
-            matches!(&err, Error::MissingTask { scanner, task } if scanner == "missing" && task == "nope"),
+            matches!(&err, Error::MissingTask { scanner, task, .. } if scanner == "missing" && task == "nope"),
             "{err}"
         );
     }
@@ -2669,6 +2718,227 @@ mod tests {
                 &Output::Println("no dataset".into()),
                 &Output::Println("0 sessions".into()),
             ]
+        );
+    }
+
+    /// The attach phase runs a scanner's attachment functions against
+    /// a dataset: `dataset().sessions()` lists the members, `attach`
+    /// writes and links attachments with and without a target, every
+    /// write is reported, a repeat is `unchanged`, and a failing
+    /// function ends the phase with the earlier links intact.
+    #[tokio::test]
+    async fn attach_phase_writes_and_links_attachments_for_a_dataset() {
+        use crate::attach::{AttachError, AttachEvent, attach};
+        use gage_runtime2::Attached;
+        use gage_store::AttachmentStore;
+
+        const SCANNER: &str = r###"
+            use gage::{attach, dataset, Files};
+
+            pub const SCANNER = #{
+                name: "attacher",
+                description: "Attaches things",
+                attachments: #{
+                    cfg: #{ f: "attach_cfg" },
+                    stack: #{},
+                },
+                tasks: #{
+                    check: #{ f: "run_check", attachments: #{ needs: ["claude-config"] } },
+                },
+            };
+
+            pub async fn attach_cfg() {
+                let a = attach(Files::include(["settings.json"]).root(ROOT))
+                    .name("claude-config")
+                    .await?;
+                println!("{} {}", a.name.unwrap(), a.outcome);
+            }
+
+            pub async fn stack() {
+                for s in dataset().sessions().await {
+                    let project = s.attrs().await.project.unwrap();
+                    log::info!("project {}", project);
+                    attach(Files::include(["CLAUDE.md"]).exclude(["nope"]).root(ROOT))
+                        .name("stack-files")
+                        .target(s)
+                        .await?;
+                }
+            }
+
+            pub async fn run_check() {
+                for s in gage::scan().sessions().await {
+                    for a in s.attachments().name("stack-*").await? {
+                        println!("{} {:?}", a.name.unwrap(), a.target);
+                    }
+                }
+                println!("{}", gage::scan().attachments().name("claude-config").await?.len());
+            }
+        "###;
+
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("files");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), "{}").unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "rules").unwrap();
+        let source = SCANNER.replace("ROOT", &format!("{:?}", root.display().to_string()));
+        let (dataset_id, _sha, session_id) = seeded_dataset(
+            tmp.path(),
+            &store,
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+        );
+        let (_dir, compiled) = compile_source(&source);
+        let compiled = compiled.unwrap();
+        assert_eq!(
+            compiled.attachments,
+            BTreeMap::from([
+                ("cfg".to_string(), "attach_cfg".to_string()),
+                ("stack".to_string(), "stack".to_string()),
+            ])
+        );
+
+        let mut events = Vec::new();
+        attach(&store, &dataset_id, std::slice::from_ref(&compiled), |e| {
+            events.push(e)
+        })
+        .await
+        .unwrap();
+        let attached: Vec<&Attached> = events
+            .iter()
+            .filter_map(|e| match e {
+                AttachEvent::Attached { attached, .. } => Some(attached),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attached.len(), 2, "{events:?}");
+        assert_eq!(attached[0].name.as_deref(), Some("claude-config"));
+        assert_eq!(attached[0].target, None);
+        assert_eq!(attached[0].outcome, "added");
+        assert_eq!(attached[1].name.as_deref(), Some("stack-files"));
+        assert_eq!(
+            attached[1].target.as_deref(),
+            Some(format!("session:{session_id}").as_str())
+        );
+        assert!(
+            events.contains(&AttachEvent::Output(TaskOutput {
+                scanner: "attacher".into(),
+                task: "cfg".into(),
+                output: Output::Println("claude-config added".into()),
+            })),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AttachEvent::Output(TaskOutput { task, output: Output::Log { message, .. }, .. })
+                    if task == "stack" && message.starts_with("project ")
+            )),
+            "{events:?}"
+        );
+        let linked = DatasetStore::from(&store).attachments(&dataset_id).unwrap();
+        assert_eq!(linked.len(), 2);
+        let targeted = linked
+            .iter()
+            .find(|a| a.attrs.name.as_deref() == Some("stack-files"))
+            .unwrap();
+        let object = store.read_object(&targeted.commit_sha).unwrap();
+        assert!(object.tree.links.contains_key("target.link"));
+        assert_eq!(
+            AttachmentStore::from(&store)
+                .files(&targeted.commit_sha)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A repeat changes nothing
+        let mut again = Vec::new();
+        attach(&store, &dataset_id, std::slice::from_ref(&compiled), |e| {
+            again.push(e)
+        })
+        .await
+        .unwrap();
+        let outcomes: Vec<&str> = again
+            .iter()
+            .filter_map(|e| match e {
+                AttachEvent::Attached { attached, .. } => Some(attached.outcome.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outcomes, ["unchanged", "unchanged"]);
+
+        // The scan side reads what the phase attached
+        let dataset_sha = DatasetStore::from(&store)
+            .get(&dataset_id)
+            .unwrap()
+            .commit_sha;
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 1,
+            driver: claude_driver(),
+            invalidate: false,
+        };
+        let mut events = Vec::new();
+        let outcome = scan(
+            &store,
+            &config,
+            std::slice::from_ref(&compiled),
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        let printed: Vec<&Output> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Output(TaskOutput { output, .. }) => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            printed,
+            [
+                &Output::Println(format!("stack-files Some(\"session:{session_id}\")")),
+                &Output::Println("1".into()),
+            ]
+        );
+
+        // A function whose selection fails ends the phase
+        const BROKEN: &str = r###"
+            use gage::{attach, Files};
+            pub const SCANNER = #{
+                name: "broken",
+                description: "Bad root",
+                attachments: #{ bad: #{} },
+                tasks: #{},
+            };
+            pub async fn bad() {
+                attach(Files::include(["x"]).root("/nonexistent/dir")).await?;
+            }
+        "###;
+        let (_dir2, broken) = compile_source(BROKEN);
+        let err = attach(&store, &dataset_id, &[broken.unwrap()], |_| {})
+            .await
+            .unwrap_err();
+        match err {
+            AttachError::Function {
+                scanner,
+                key,
+                message,
+            } => {
+                assert_eq!((scanner.as_str(), key.as_str()), ("broken", "bad"));
+                assert!(message.contains("/nonexistent/dir"), "{message}");
+            }
+            other => panic!("expected a function failure, got {other}"),
+        }
+        assert_eq!(
+            DatasetStore::from(&store)
+                .attachments(&dataset_id)
+                .unwrap()
+                .len(),
+            2
         );
     }
 
@@ -3434,14 +3704,15 @@ mod tests {
             };
 
             pub async fn main() {
-                let all = scan().attachments().await;
+                let all = scan().attachments().await?;
                 println!("{}", all.len());
-                let a = scan().attachment("cfg").await.unwrap();
-                println!("{} {:?}", a.name, a.files().await);
+                let a = scan().attachments().name("cfg").await?.next().unwrap();
+                println!("{} {:?}", a.name.unwrap(), a.files().await);
                 let f = a.file("settings.json").await.unwrap();
                 println!("{:?}", f.json()?.get("cleanupPeriodDays"));
                 println!("{}", a.file("missing.json").await.is_none());
-                println!("{}", scan().attachment("nope").await.is_none());
+                println!("{}", scan().attachments().name("nope").await?.len());
+                println!("{}", scan().attachments().name("c*").await?.len());
                 Ok(())
             }
         "###;
@@ -3503,7 +3774,8 @@ mod tests {
                 &Output::Println("cfg [\"settings.json\"]".into()),
                 &Output::Println("Some(365)".into()),
                 &Output::Println("true".into()),
-                &Output::Println("true".into()),
+                &Output::Println("0".into()),
+                &Output::Println("1".into()),
             ]
         );
     }

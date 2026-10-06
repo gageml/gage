@@ -34,6 +34,7 @@
 //! in `gage-scan2`.
 
 mod agent;
+mod attach;
 mod attachment;
 mod fail;
 mod io;
@@ -51,6 +52,7 @@ mod validate;
 use rune::{Context, ContextError};
 use tokio::sync::mpsc;
 
+pub use attach::{ATTACH_CTX, AttachContext, Attached};
 pub use attachment::{Attachment, AttachmentFile, Attachments};
 pub use fail::Fail;
 pub use gage_runtime::ignore::is_ignore;
@@ -157,7 +159,8 @@ impl OutputSink {
 /// library without its stdio, this crate's `print`/`println` and
 /// `log` macros, `gage::scan` and the values it returns, `gage::params`, the message
 /// and entry queries on a session, `scan().attachments()` and the
-/// values it returns, `gage::write_note`,
+/// values it returns, `gage::dataset`, `gage::attach`, `gage::Files`
+/// and the values they return, `gage::write_note`,
 /// `gage::write_issue`, `scan().issues()`, `gage::carry_forward_notes`,
 /// `gage::carry_forward_notes_named`,
 /// `gage::Mark`, `gage::watermark`, `gage::Template`, `gage::Progress`,
@@ -172,6 +175,8 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(scan::module()?)?;
     context.install(scan::types_module()?)?;
     context.install(attachment::types_module()?)?;
+    context.install(attach::module()?)?;
+    context.install(attach::types_module()?)?;
     context.install(fail::types_module()?)?;
     context.install(query::types_module()?)?;
     context.install(note::module()?)?;

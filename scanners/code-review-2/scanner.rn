@@ -28,10 +28,7 @@ pub const SCANNER = #{
                     "project-summary.stack": "Summary of a project's stack and architecture",
                 },
             },
-            // FUTURE: the attachments a task wants, per the rethink
-            // design. `gage scan` attaches them to each session while
-            // building the dataset.
-            attachments: #{ wants: ["config:", "stack-files:"] },
+            attachments: #{ wants: ["claude-config", "stack-files"] },
         },
         review: #{
             notes: #{
@@ -44,8 +41,7 @@ pub const SCANNER = #{
                     ),
                 },
             },
-            // FUTURE: attachments, as above
-            attachments: #{ wants: ["config:"] },
+            attachments: #{ wants: ["claude-config"] },
         },
     },
 };

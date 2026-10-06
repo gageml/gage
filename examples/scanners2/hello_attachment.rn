@@ -1,15 +1,24 @@
+use gage::scan;
+
 pub const SCANNER = #{
     name: "hello-attachment",
     description: "Attachment greeting",
-    tasks: #{ main: #{} },
+    attachments: #{ readme: #{ f: attach_readme } },
+    tasks: #{ main: #{ attachments: #{ wants: ["readme"] } } },
 };
 
 pub async fn main() {
-    for a in gage::scan().attachments().await {
-        println!("{}", a.name);
-        for name in a.files().await {
-            let f = a.file(name).await.unwrap();
-            println!("  {} {} bytes", name, f.bytes().len());
+    for a in scan().attachments().name("readme").await? {
+        println!("{a:?}");
+    }
+}
+
+pub async fn attach_readme() {
+    for s in dataset().attachments().await {
+        if let Some(p) = s.project {
+            attach(
+                Files::include(["README.md"]).root(p.path).name("readme").await?,
+            );
         }
     }
 }

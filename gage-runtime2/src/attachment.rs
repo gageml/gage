@@ -1,40 +1,42 @@
-//! `scan().attachments()` and `scan().attachment(name)`: the
+//! `scan().attachments()` and `session.attachments()`: the
 //! attachments the scan's dataset holds, for scanners.
 //!
-//! `scan().attachments()` is an [`AttachmentsQuery`]; awaiting it
-//! reads the scan-scoped `attachment` table and yields an
-//! [`Attachments`] iterator of [`Attachment`] values in dataset
-//! order. `scan().attachment(name)` is an
-//! [`AttachmentQuery`]; awaiting it yields `Some(Attachment)` or
-//! `None`. A name names at most one attachment, since the object id
-//! derives from it. An attachment offers `files()`, awaited to the
-//! list of file keys, and `file(key)`, awaited to
-//! `Some(AttachmentFile)` or `None`, both read from the
-//! `attachment_file` table. A file holds its bytes;
+//! `scan().attachments()` is an [`AttachmentsQuery`]. `.name(pattern)`
+//! keeps the attachments whose name matches a `*`-glob, as a task's
+//! `wants` does; `.target(object)` keeps those about one object, given
+//! as a `Session`, an id or prefix, or a Gage URL.
+//! `session.attachments()` is the query with the session as target.
+//! Awaiting the query reads the scoped `attachment` table and yields
+//! an [`Attachments`] iterator of [`Attachment`] values in dataset
+//! order. A name is a selector, not an identifier, so there is no
+//! lookup of one attachment by name.
+//!
+//! An attachment offers `files()`, awaited to the list of file keys,
+//! and `file(key)`, awaited to `Some(AttachmentFile)` or `None`, both
+//! read from the `attachment_file` table. A file holds its bytes;
 //! `bytes()` and `text()` return them, and `text()` and `json()` are
 //! fallible, returning `Error::Decode` for content that is not UTF-8
 //! or not JSON.
 
-use datafusion::arrow::array::BinaryArray;
+use datafusion::arrow::array::{Array, BinaryArray};
 use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Bytes, Formatter, Protocol, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::scan::{Scan, current, run, sql_str, string_column};
+use crate::note::name_predicate;
+use crate::scan::{Scan, Session, dataset_query, run, sql_str, string_column, target_url};
 
 pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
     m.function_meta(Scan::attachments)?;
-    m.function_meta(Scan::attachment)?;
+    m.function_meta(Session::attachments)?;
     m.ty::<AttachmentsQuery>()?;
-    m.associated_function(&Protocol::INTO_FUTURE, |_q: AttachmentsQuery| async move {
-        Ok::<_, VmError>(Attachments::new(fetch_attachments().await?))
-    })?;
-    m.ty::<AttachmentQuery>()?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentQuery| async move {
-        fetch_attachment(q).await
+    m.function_meta(AttachmentsQuery::name)?;
+    m.function_meta(AttachmentsQuery::target)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentsQuery| async move {
+        fetch_attachments(q).await
     })?;
     m.ty::<Attachment>()?;
     m.function_meta(Attachment::files)?;
@@ -71,64 +73,115 @@ impl Scan {
     /// The attachments the scan's dataset holds, read when awaited.
     #[rune::function(instance)]
     fn attachments(&self) -> AttachmentsQuery {
-        AttachmentsQuery {}
-    }
-
-    /// The attachment named `name` in the scan's dataset, read when
-    /// awaited: `Some(Attachment)` or `None`.
-    #[rune::function(instance)]
-    fn attachment(&self, name: &str) -> AttachmentQuery {
-        AttachmentQuery {
-            name: name.to_string(),
+        AttachmentsQuery {
+            name: None,
+            target: None,
         }
     }
+}
+
+impl Session {
+    /// The attachments about this session, read when awaited.
+    #[rune::function(instance)]
+    fn attachments(&self) -> AttachmentsQuery {
+        AttachmentsQuery {
+            name: None,
+            target: Some(Target::Url(format!("session:{}", self.id))),
+        }
+    }
+}
+
+/// A target filter, resolved to a URL when the query runs.
+#[derive(Debug, Clone)]
+enum Target {
+    Url(String),
+    Value(Value),
 }
 
 /// The value of `scan().attachments()`. Awaiting it runs the read.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub struct AttachmentsQuery {}
-
-/// The value of `scan().attachment(name)`. Awaiting it runs the read.
-#[derive(Any)]
-#[rune(item = ::gage)]
-pub struct AttachmentQuery {
+pub struct AttachmentsQuery {
     #[rune(skip)]
-    name: String,
+    name: Option<String>,
+    #[rune(skip)]
+    target: Option<Target>,
 }
 
-async fn fetch_attachment(q: AttachmentQuery) -> Result<Option<Attachment>, VmError> {
-    let sql = format!(
-        "SELECT id, COALESCE(name, '') FROM attachment WHERE name = '{}'",
-        sql_str(&q.name)
-    );
-    Ok(attachments(&sql).await?.into_iter().next())
+impl AttachmentsQuery {
+    /// Keep the attachments whose name matches `pattern`: `*` matches
+    /// any run of characters; a pattern without `*` is an exact name.
+    #[rune::function(instance)]
+    fn name(mut self, pattern: &str) -> Self {
+        self.name = Some(pattern.to_string());
+        self
+    }
+
+    /// Keep the attachments about `object`: a `Session`, an object id
+    /// or prefix, or a Gage URL.
+    #[rune::function(instance)]
+    fn target(mut self, object: Value) -> Self {
+        self.target = Some(Target::Value(object));
+        self
+    }
 }
 
-/// The dataset's attachments at the commits the scan links, in
-/// dataset order. Without a dataset there are none.
-async fn fetch_attachments() -> Result<Vec<Attachment>, VmError> {
-    attachments("SELECT id, COALESCE(name, '') FROM attachment").await
+/// The dataset's attachments matching the query, in dataset order.
+/// Without a dataset there are none. The inner error is a target
+/// argument that names nothing.
+async fn fetch_attachments(q: AttachmentsQuery) -> Result<Result<Attachments, Error>, VmError> {
+    let mut clauses = Vec::new();
+    if let Some(pattern) = &q.name {
+        clauses.push(format!(
+            "({})",
+            name_predicate("name", std::slice::from_ref(pattern))
+        ));
+    }
+    if let Some(target) = &q.target {
+        let url = match target {
+            Target::Url(url) => url.clone(),
+            Target::Value(value) => match target_url(value).await? {
+                Ok(url) => url,
+                Err(e) => return Ok(Err(e)),
+            },
+        };
+        clauses.push(format!("target = '{}'", sql_str(&url)));
+    }
+    let sql = if clauses.is_empty() {
+        "SELECT id, name, target, root FROM attachment".to_string()
+    } else {
+        format!(
+            "SELECT id, name, target, root FROM attachment WHERE {}",
+            clauses.join(" AND ")
+        )
+    };
+    Ok(Ok(Attachments::new(attachments(&sql).await?)))
 }
 
 async fn attachments(sql: &str) -> Result<Vec<Attachment>, VmError> {
-    let ctx = current()?;
-    let batches = run(ctx.scan_context().await?, sql).await?;
+    let batches = run(&dataset_query().await?, sql).await?;
     let mut out = Vec::new();
     for batch in &batches {
         let ids = string_column(batch, 0);
         let names = string_column(batch, 1);
+        let targets = string_column(batch, 2);
+        let roots = string_column(batch, 3);
+        let optional = |col: &datafusion::arrow::array::StringArray, i: usize| {
+            col.is_valid(i).then(|| col.value(i).to_string())
+        };
         for i in 0..batch.num_rows() {
             out.push(Attachment {
                 id: ids.value(i).to_string(),
-                name: names.value(i).to_string(),
+                name: optional(names, i),
+                target: optional(targets, i),
+                root: roots.value(i).to_string(),
             });
         }
     }
     Ok(out)
 }
 
-/// An attachment, as a scanner sees it: its id and name.
+/// An attachment, as a scanner sees it.
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct Attachment {
@@ -136,7 +189,13 @@ pub struct Attachment {
     #[rune(get)]
     pub id: String,
     #[rune(get)]
-    pub name: String,
+    pub name: Option<String>,
+    /// The object the files are about, as a Gage URL
+    #[rune(get)]
+    pub target: Option<String>,
+    /// The directory the files were selected under
+    #[rune(get)]
+    pub root: String,
 }
 
 impl Attachment {
@@ -162,8 +221,8 @@ impl Attachment {
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
-            "Attachment {{ id: {:?}, name: {:?} }}",
-            self.id, self.name
+            "Attachment {{ id: {:?}, name: {:?}, target: {:?} }}",
+            self.id, self.name, self.target
         )?;
         Ok(())
     }
@@ -178,12 +237,11 @@ pub struct AttachmentFilesQuery {
 }
 
 async fn fetch_files(q: AttachmentFilesQuery) -> Result<Vec<String>, VmError> {
-    let ctx = current()?;
     let sql = format!(
         "SELECT key FROM attachment_file WHERE attachment_id = '{}' ORDER BY key",
         sql_str(&q.attachment_id)
     );
-    let batches = run(ctx.scan_context().await?, &sql).await?;
+    let batches = run(&dataset_query().await?, &sql).await?;
     let mut out = Vec::new();
     for batch in &batches {
         let keys = string_column(batch, 0);
@@ -205,13 +263,12 @@ pub struct AttachmentFileQuery {
 }
 
 async fn fetch_file(q: AttachmentFileQuery) -> Result<Option<AttachmentFile>, VmError> {
-    let ctx = current()?;
     let sql = format!(
         "SELECT content FROM attachment_file WHERE attachment_id = '{}' AND key = '{}'",
         sql_str(&q.attachment_id),
         sql_str(&q.key)
     );
-    let batches = run(ctx.scan_context().await?, &sql).await?;
+    let batches = run(&dataset_query().await?, &sql).await?;
     let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
         return Ok(None);
     };
@@ -400,13 +457,15 @@ mod tests {
         let mut vm = vm(r#"
             pub fn check(attachments) {
                 let n = attachments.len();
-                let names = attachments.rev().map(|a| a.name).collect::<Vec>();
+                let names = attachments.rev().map(|a| a.name.unwrap()).collect::<Vec>();
                 (n, names)
             }
             "#);
         let attachment = |name: &str| Attachment {
             id: format!("id-{name}"),
-            name: name.to_string(),
+            name: Some(name.to_string()),
+            target: None,
+            root: "/r".to_string(),
         };
         let attachments = Attachments::new(vec![attachment("a"), attachment("b")]);
         let output = vm.call(["check"], (attachments,)).unwrap();

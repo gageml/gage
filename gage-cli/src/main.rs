@@ -357,7 +357,7 @@ async fn main() {
                 cmd_dataset::DatasetCommand::Delete(args) => cmd_dataset::delete(args),
             },
             Command::Attachment { command } => match command {
-                cmd_attachment::AttachmentCommand::Add(args) => cmd_attachment::add(args),
+                cmd_attachment::AttachmentCommand::Add(args) => cmd_attachment::add(args).await,
                 cmd_attachment::AttachmentCommand::List(args) => cmd_attachment::list(args).await,
                 cmd_attachment::AttachmentCommand::Show(args) => cmd_attachment::show(args),
                 cmd_attachment::AttachmentCommand::Remove(args) => cmd_attachment::remove(args),
