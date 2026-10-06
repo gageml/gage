@@ -17,7 +17,7 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisec
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
-use gage_registry::scanner::{Scanner, ScannerRegistry};
+use gage_registry::scanner::ScannerRegistry;
 use gage_runtime2::{Output, TaskOutput};
 use gage_scan2::attach::{AttachEvent, attach};
 use gage_store::{
@@ -35,6 +35,7 @@ use tabled::{
 use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, run_query};
 use crate::human::{format_elapsed_ms, format_size};
+use crate::scanner_spec;
 use crate::style::{self, IdKind, styled_id};
 use crate::target::resolve_target;
 
@@ -125,8 +126,10 @@ pub struct AttachmentAddArgs {
 
     /// Run a scanner's attachment functions against a dataset (repeatable)
     ///
-    /// Each named scanner attaches what its tasks read, preparing the
-    /// dataset for a scan by those scanners. Requires --dataset
+    /// A scanner name, or when no scanner has that name, a path: a
+    /// directory holding a scanner.rn, or a scanner file. Each scanner
+    /// attaches what its tasks read, preparing the dataset for a scan
+    /// by those scanners. Requires --dataset
     #[arg(
         short,
         long = "scanner",
@@ -255,13 +258,16 @@ async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]
         }
     };
     let registry = ScannerRegistry::load();
-    let mut compiled = Vec::with_capacity(names.len());
-    for name in names {
-        let Some(def) = registry.get_def(name) else {
-            eprintln!("gage attachment add: unknown scanner {name}");
+    let selected = match scanner_spec::resolve(&registry, names) {
+        Ok(selected) => selected,
+        Err(e) => {
+            eprintln!("gage attachment add: {e}");
             std::process::exit(1);
-        };
-        let scanner = match Scanner::from_spec(def, None, name) {
+        }
+    };
+    let mut compiled = Vec::with_capacity(selected.len());
+    for resolved in &selected {
+        let scanner = match resolved.scanner() {
             Ok(scanner) => scanner,
             Err(e) => {
                 eprintln!("gage attachment add: {e}");

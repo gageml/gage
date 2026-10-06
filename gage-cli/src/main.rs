@@ -51,6 +51,7 @@ mod json;
 mod limit;
 mod markdown;
 mod model_prompt;
+mod scanner_spec;
 mod session_select;
 mod source;
 mod style;

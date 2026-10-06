@@ -2556,6 +2556,7 @@ dependencies = [
  "rand 0.9.4",
  "serde_json",
  "tabled",
+ "tempfile",
  "textwrap",
  "tokio",
  "tokio-util",

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,9 +20,7 @@ use gage_core::config::Config;
 use gage_core::uuid::short_uuid;
 use gage_query2::{ContextBuilder, ScanScope};
 use gage_registry::driver::DriverRegistry;
-use gage_registry::scanner::{
-    Scanner, ScannerDef, ScannerRegistry, parse_scanner_file, split_scanner_spec,
-};
+use gage_registry::scanner::{Scanner, ScannerRegistry};
 use gage_runtime2::{LOG_TARGET, Output, TaskOutput};
 use gage_scan2::scan_dir::scans_dir;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
@@ -59,6 +56,7 @@ use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
 use crate::human::{format_duration, format_elapsed_ms};
+use crate::scanner_spec::{self, ResolvedSpec};
 use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::style as s;
 
@@ -175,7 +173,11 @@ enum Scan2Command {
 #[derive(Args)]
 pub struct Scan2RunArgs {
     /// Scanner to run (repeatable)
-    #[arg(short, long = "scanner", value_name = "NAME", display_order = 2)]
+    ///
+    /// A scanner name, or when no scanner has that name, a path: a
+    /// directory holding a scanner.rn, or a scanner file. A `#{...}`
+    /// suffix overrides the scanner's params
+    #[arg(short, long = "scanner", value_name = "SCANNER", display_order = 2)]
     scanners: Vec<String>,
 
     /// Run the scanners in a group (repeatable)
@@ -194,10 +196,6 @@ pub struct Scan2RunArgs {
         conflicts_with_all = SELECT_ARG_NAMES,
     )]
     dataset: Option<String>,
-
-    /// Scanner file to run (repeatable)
-    #[arg(short, long = "file", value_name = "PATH", display_order = 5)]
-    files: Vec<String>,
 
     /// Tasks to run at once
     #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 6)]
@@ -1509,24 +1507,24 @@ async fn prepare_scan_dialog(
     store: &Store,
     prep: &mut Option<ScanPrep>,
 ) -> Result<dialog::DialogResult, DialogError> {
-    // Scanner selection: -s/-g/-f, the `default` group under -y, or
-    // an interactive multi-select when the user supplied nothing.
-    let (scanner_specs, prompted) = resolve_scanner_specs(&args, registry, config)?;
-    let file_defs = parse_file_scanners(&args.files)?;
+    // Scanner selection: -s (a registry name or a path), -g, the
+    // `default` group under -y, or an interactive multi-select when
+    // the user supplied nothing.
+    // The resolved specs borrow the values, which must outlive the
+    // dataset prompt's mutable use of `args`
+    let scanner_specs = args.scanners.clone();
+    let selected = scanner_spec::resolve(registry, &scanner_specs).map_err(DialogError::Failed)?;
+    let (group_names, prompted) = resolve_group_names(&args, &selected, registry, config)?;
     let mut scanners: Vec<Scanner<'_>> = Vec::new();
-    for spec in &scanner_specs {
-        let (name, params_override) = split_scanner_spec(spec);
+    for resolved in &selected {
+        scanners.push(resolved.scanner().map_err(DialogError::Failed)?);
+    }
+    for name in &group_names {
         let def = registry
             .get_def(name)
-            .expect("resolve_scanner_specs validated the name against the registry");
-        let scanner = Scanner::from_spec(def, params_override, spec)
-            .map_err(|e| DialogError::Failed(format!("{e}")))?;
-        scanners.push(scanner);
-    }
-    for (def, spec) in file_defs.iter().zip(&args.files) {
-        let (_, params_override) = split_scanner_spec(spec);
-        let scanner = Scanner::from_spec(def, params_override, spec)
-            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+            .expect("group members come from the registry");
+        let scanner =
+            Scanner::from_spec(def, None, name).map_err(|e| DialogError::Failed(format!("{e}")))?;
         scanners.push(scanner);
     }
     // The multi-select has already displayed the user's choice;
@@ -1714,34 +1712,22 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
     }
 }
 
-/// Resolve the ordered list of registry scanner specs from `-s`,
-/// `-g`, the `-y` default, or an interactive multi-select when the
-/// user supplied no scanner input at all. `-f` paths are handled by
-/// the caller and are not part of this list. Returns `(specs,
-/// prompted)` where `prompted` is true when the selection came from
-/// the multi-select so the caller can skip its own preview.
-fn resolve_scanner_specs(
+/// The registry scanners selected by group: `-g`, the `-y` default,
+/// or an interactive multi-select when the user supplied no scanner
+/// input at all. A scanner already selected by `-s` is left out.
+/// Returns `(names, prompted)` where `prompted` is true when the
+/// selection came from the multi-select so the caller can skip its
+/// own preview.
+fn resolve_group_names(
     args: &Scan2RunArgs,
+    selected: &[ResolvedSpec<'_>],
     registry: &ScannerRegistry,
     config: &Config,
 ) -> Result<(Vec<String>, bool), DialogError> {
-    let s_bare: Vec<&str> = args
-        .scanners
+    let s_bare: Vec<&str> = selected
         .iter()
-        .map(|s| split_scanner_spec(s).0)
+        .map(|r| r.source.def().name.as_str())
         .collect();
-    for (i, name) in s_bare.iter().enumerate() {
-        if s_bare.iter().take(i).any(|n| n == name) {
-            return Err(DialogError::Failed(format!(
-                "Scanner '{name}' specified more than once"
-            )));
-        }
-    }
-    for name in &s_bare {
-        if registry.get_def(name).is_none() {
-            return Err(DialogError::Failed(format!("Unknown scanner: {name}")));
-        }
-    }
 
     let mut group_names: Vec<String> = Vec::new();
     for group in &args.groups {
@@ -1763,8 +1749,7 @@ fn resolve_scanner_specs(
         }
     }
 
-    let no_scanner_input =
-        args.scanners.is_empty() && args.groups.is_empty() && args.files.is_empty();
+    let no_scanner_input = args.scanners.is_empty() && args.groups.is_empty();
     let mut prompted = false;
     if no_scanner_input {
         if args.yes {
@@ -1794,16 +1779,12 @@ fn resolve_scanner_specs(
         }
     }
 
-    // -s wins over -g on bare-name collision.
+    // -s wins over -g on name collision.
     let group_names: Vec<String> = group_names
         .into_iter()
         .filter(|g| !s_bare.contains(&g.as_str()))
         .collect();
-
-    let mut out: Vec<String> = Vec::with_capacity(args.scanners.len() + group_names.len());
-    out.extend(args.scanners.iter().cloned());
-    out.extend(group_names);
-    Ok((out, prompted))
+    Ok((group_names, prompted))
 }
 
 /// Multi-select over enabled scanners with the
@@ -1845,24 +1826,6 @@ fn prompt_scanner_multiselect(
                 .to_string()
         })
         .collect())
-}
-
-/// Parse `-f` paths into owned `ScannerDef` values. Reports every
-/// parse failure in one `Failed` so the user sees them all at once.
-fn parse_file_scanners(files: &[String]) -> Result<Vec<ScannerDef>, DialogError> {
-    let mut out = Vec::with_capacity(files.len());
-    let mut errors: Vec<String> = Vec::new();
-    for spec in files {
-        let (path, _) = split_scanner_spec(spec);
-        match parse_scanner_file(&PathBuf::from(path)) {
-            Ok(def) => out.push(def),
-            Err(e) => errors.push(format!("{e}")),
-        }
-    }
-    if !errors.is_empty() {
-        return Err(DialogError::Failed(errors.join("\n")));
-    }
-    Ok(out)
 }
 
 fn preview_scanners(scanners: &[Scanner<'_>]) -> Result<(), DialogError> {

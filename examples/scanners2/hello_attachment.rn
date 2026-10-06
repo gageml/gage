@@ -1,4 +1,4 @@
-use gage::scan;
+use gage::{Files, attach, dataset, scan};
 
 pub const SCANNER = #{
     name: "hello-attachment",
@@ -18,7 +18,9 @@ pub async fn attach_readme() {
         if let Some(p) = s.project {
             attach(
                 Files::include(["README.md"]).root(p.path).name("readme").await?,
-            );
+            )
+            .target(s)
+            .await?;
         }
     }
 }
