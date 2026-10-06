@@ -1987,8 +1987,7 @@ fn materialize_dataset(
                 match &event {
                     AddEvent::Starting { total, .. } => {
                         if progress {
-                            bar.get_or_insert_with(|| add_progress_bar(*total))
-                                .set_message(event.to_string());
+                            bar.get_or_insert_with(|| add_progress_bar(*total));
                         }
                     }
                     AddEvent::Added { .. } => match &bar {
@@ -2020,6 +2019,7 @@ fn add_progress_bar(total: usize) -> indicatif::ProgressBar {
         indicatif::ProgressStyle::with_template("{spinner:.magenta}  {msg} {bar:30} {pos}/{len}")
             .unwrap(),
     );
+    bar.set_message("Preparing scan dataset");
     bar.enable_steady_tick(Duration::from_millis(80));
     bar
 }
