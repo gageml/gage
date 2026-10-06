@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
 use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
+use gage_claude::driver::ClaudeDriver;
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
@@ -283,7 +284,8 @@ async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]
         }
     }
     let dataset = short_uuid(&dataset_id).to_string();
-    let result = attach(store, &dataset_id, &compiled, |event| match event {
+    let driver = Arc::new(ClaudeDriver::new());
+    let result = attach(store, &dataset_id, &compiled, driver, |event| match event {
         AttachEvent::Started { .. } => {}
         AttachEvent::Output(TaskOutput { output, .. }) => match output {
             Output::Print(s) => print!("{s}"),

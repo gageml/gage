@@ -71,6 +71,18 @@ impl Driver for ClaudeDriver {
         Ok(Box::new(ClaudeSource::open(source)?))
     }
 
+    /// A native session URL is `claude:<root>/<native id>`; its
+    /// container is `claude:<root>`. A bare id is a session in the
+    /// default location, `claude:`.
+    fn open_native_source(&self, native_source: &str) -> Result<Box<dyn Source>, DriverError> {
+        let body = match split_scheme(native_source) {
+            Some((_, body)) => body,
+            None => native_source,
+        };
+        let root = body.rsplit_once('/').map_or("", |(root, _id)| root);
+        self.open_source(&format!("{NAME}:{root}"))
+    }
+
     /// Drops the `claude-` vendor prefix every Claude model name carries
     fn format_model(&self, model: &str) -> String {
         model.strip_prefix("claude-").unwrap_or(model).to_string()
@@ -742,6 +754,33 @@ mod tests {
         let source = ClaudeDriver::new().open_source(&source_for(root)).unwrap();
         let name = source.project_name(Path::new(cwd)).unwrap();
         assert_eq!(name, "-Users-alice-Code-gage");
+    }
+
+    #[test]
+    fn open_native_source_opens_the_container_of_a_session_url() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("work")).unwrap();
+        let cwd = fs::canonicalize(root.join("work")).unwrap();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        seed_session(root, &cwd.to_string_lossy(), id, "");
+        fs::write(
+            root.join(".claude.json"),
+            format!(r#"{{"projects": {{"{}": {{}}}}}}"#, cwd.display()),
+        )
+        .unwrap();
+        let driver = ClaudeDriver::new();
+        let native = driver
+            .open_source(&source_for(root))
+            .unwrap()
+            .open_native(id)
+            .unwrap();
+        let source = driver.open_native_source(native.source()).unwrap();
+        assert_eq!(source.source(), source_for(root));
+        assert_eq!(
+            source.project_path(&encode_project_dir(&cwd)).unwrap(),
+            Some(cwd)
+        );
     }
 
     #[test]

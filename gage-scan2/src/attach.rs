@@ -11,10 +11,12 @@
 
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use gage_runtime2::{
     ATTACH_CTX, AttachContext, Attached, OUTPUT_SINK, OutputSink, ScanDatasetRef, TaskOutput,
 };
+use gage_session::Driver;
 use gage_store::{DatasetStore, Store, StoreError};
 use tokio::sync::mpsc;
 
@@ -68,11 +70,13 @@ impl From<StoreError> for AttachError {
 }
 
 /// Run every attachment function of `scanners` against the dataset
-/// `dataset_id`, which is read at its current commit.
+/// `dataset_id`, which is read at its current commit. `driver`
+/// reopens native sources for `session.native()`.
 pub async fn attach(
     store: &Store,
     dataset_id: &str,
     scanners: &[CompiledScanner],
+    driver: Arc<dyn Driver>,
     mut on_event: impl FnMut(AttachEvent),
 ) -> Result<(), AttachError> {
     let record = DatasetStore::from(store).get(dataset_id)?;
@@ -92,6 +96,7 @@ pub async fn attach(
                 scanner,
                 key,
                 function,
+                Arc::clone(&driver),
                 &mut on_event,
             )
             .await?;
@@ -108,6 +113,7 @@ async fn run_one(
     scanner: &CompiledScanner,
     key: &str,
     function: &str,
+    driver: Arc<dyn Driver>,
     on_event: &mut impl FnMut(AttachEvent),
 ) -> Result<(), AttachError> {
     let (attached_tx, mut attached_rx) = mpsc::unbounded_channel();
@@ -117,6 +123,7 @@ async fn run_one(
         scanner.name.clone(),
         store_path,
         attached_tx,
+        driver,
     )?;
     let sink = OutputSink {
         scanner: scanner.name.clone(),

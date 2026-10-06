@@ -15,11 +15,13 @@ pub async fn main() {
 
 pub async fn attach_readme() {
     for s in dataset().sessions().await {
-        if let Some(project) = s.attrs().await.project {
-            attach(Files::include(["README.md"]).root(project))
-                .name("readme")
-                .target(s)
-                .await?;
+        if let Some(native) = s.native().await {
+            if let Some(dir) = native.project_dir {
+                attach(Files::include(["README.md"]).root(dir))
+                    .name("readme")
+                    .target(s)
+                    .await?;
+            }
         }
     }
 }

@@ -232,7 +232,14 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(crate::validate::sessions_unseen)?;
     m.ty::<Session>()?;
     m.function_meta(Session::attrs)?;
+    m.function_meta(Session::native)?;
     m.function_meta(Session::debug)?;
+    m.ty::<NativeQuery>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: NativeQuery| async move {
+        fetch_native(q).await
+    })?;
+    m.ty::<Native>()?;
+    m.function_meta(Native::debug)?;
     m.ty::<SessionAttrsQuery>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionAttrsQuery| async move {
         fetch_attrs(q).await
@@ -290,6 +297,19 @@ pub(crate) async fn dataset_query() -> Result<SessionContext, VmError> {
     }
     Err(VmError::panic(
         "sessions and attachments are available only inside a scan task or an attachment function",
+    ))
+}
+
+/// The driver of whichever context the caller runs under.
+pub(crate) fn driver_handle() -> Result<Arc<dyn Driver>, VmError> {
+    if let Ok(driver) = SCAN_CTX.try_with(|ctx| Arc::clone(&ctx.driver)) {
+        return Ok(driver);
+    }
+    if let Ok(driver) = crate::attach::ATTACH_CTX.try_with(|ctx| Arc::clone(&ctx.driver)) {
+        return Ok(driver);
+    }
+    Err(VmError::panic(
+        "the driver is available only inside a scan task or an attachment function",
     ))
 }
 
@@ -574,6 +594,15 @@ impl Session {
         }
     }
 
+    /// The native session this stored one was read from, when its
+    /// source is reachable on this machine: `Some(Native)` or `None`.
+    #[rune::function(instance)]
+    fn native(&self) -> NativeQuery {
+        NativeQuery {
+            id: self.id.clone(),
+        }
+    }
+
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(f, "Session {{ id: {:?} }}", self.id)?;
@@ -594,6 +623,90 @@ pub(crate) fn session_id(v: &Value) -> Result<String, VmError> {
         "expected a Session or session id string, got {}",
         v.type_info()
     )))
+}
+
+/// The value of `session.native()`. Awaiting it reopens the source.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct NativeQuery {
+    #[rune(skip)]
+    id: String,
+}
+
+/// A stored session's native counterpart, as the source on this
+/// machine presents it. A stored session has no location; this is
+/// where it came from, and it exists only where that source is.
+#[derive(Any, Clone, Debug)]
+#[rune(item = ::gage)]
+pub struct Native {
+    /// The Gage URL of the native session, as stored
+    #[rune(get)]
+    pub source: String,
+    /// The directory of the session's project, when the source records
+    /// one
+    #[rune(get)]
+    pub project_dir: Option<String>,
+}
+
+impl Native {
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(
+            f,
+            "Native {{ source: {:?}, project_dir: {:?} }}",
+            self.source, self.project_dir
+        )?;
+        Ok(())
+    }
+}
+
+/// Reopen the session's native source through the context's driver
+/// and ask it for the project directory. A source the driver cannot
+/// open here, or a session from another driver, is `None`: the native
+/// session is not on this machine.
+async fn fetch_native(q: NativeQuery) -> Result<Option<Native>, VmError> {
+    let sql = format!(
+        "SELECT driver, native_source, project FROM session WHERE id = '{}'",
+        sql_str(&q.id)
+    );
+    let batches = run(&dataset_query().await?, &sql).await?;
+    let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+        return Err(VmError::panic(format!(
+            "session {} is not a member of the dataset",
+            q.id
+        )));
+    };
+    let driver_attr = string_column(batch, 0).value(0).to_string();
+    let source_url = string_column(batch, 1).value(0).to_string();
+    let projects = string_column(batch, 2);
+    let project = projects.is_valid(0).then(|| projects.value(0).to_string());
+
+    let driver = driver_handle()?;
+    if driver_attr.split(' ').next() != Some(driver.name()) {
+        tracing::debug!(session = %q.id, driver = %driver_attr, "native: another driver's session");
+        return Ok(None);
+    }
+    let source = match driver.open_native_source(&source_url) {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::debug!(session = %q.id, source = %source_url, error = %e, "native: source not reachable");
+            return Ok(None);
+        }
+    };
+    let project_dir = match project {
+        Some(name) => match source.project_path(&name) {
+            Ok(path) => path.map(|p| p.to_string_lossy().into_owned()),
+            Err(e) => {
+                tracing::debug!(session = %q.id, project = %name, error = %e, "native: no project path");
+                None
+            }
+        },
+        None => None,
+    };
+    Ok(Some(Native {
+        source: source_url,
+        project_dir,
+    }))
 }
 
 /// The value of `session.attrs()`. Awaiting it reads the session's

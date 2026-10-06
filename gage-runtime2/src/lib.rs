@@ -58,7 +58,8 @@ pub use fail::Fail;
 pub use gage_runtime::ignore::is_ignore;
 pub use log::LOG_TARGET;
 pub use scan::{
-    SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions, render_vm_error,
+    Native, SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions,
+    render_vm_error,
 };
 
 /// The scheme term a scan records in its `runtime` attr, followed by

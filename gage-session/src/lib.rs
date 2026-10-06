@@ -38,6 +38,15 @@ pub trait Driver: Send + Sync {
     /// as long as the caller keeps it.
     fn open_source(&self, source: &str) -> Result<Box<dyn Source>, DriverError>;
 
+    /// Open the source holding the native session `native_source`
+    /// names: the container a stored session's `native_source` came
+    /// from. The default treats the value as a source URL; a driver
+    /// whose native session URLs differ from its container URLs
+    /// overrides it.
+    fn open_native_source(&self, native_source: &str) -> Result<Box<dyn Source>, DriverError> {
+        self.open_source(native_source)
+    }
+
     /// Serialize `session` into the store through `sink`. The returned
     /// string is the `content_format` value the store persists on the
     /// session object; it is opaque to the store and is handed back to

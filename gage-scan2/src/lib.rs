@@ -2758,6 +2758,8 @@ mod tests {
                 for s in dataset().sessions().await {
                     let project = s.attrs().await.project.unwrap();
                     log::info!("project {}", project);
+                    let native = s.native().await.unwrap();
+                    println!("native {:?}", native.project_dir);
                     attach(Files::include(["CLAUDE.md"]).exclude(["nope"]).root(ROOT))
                         .name("stack-files")
                         .target(s)
@@ -2781,10 +2783,16 @@ mod tests {
         std::fs::write(root.join("settings.json"), "{}").unwrap();
         std::fs::write(root.join("CLAUDE.md"), "rules").unwrap();
         let source = SCANNER.replace("ROOT", &format!("{:?}", root.display().to_string()));
-        let (dataset_id, _sha, session_id) = seeded_dataset(
+        // The session's project is a real directory the source's
+        // registry records, so `native()` resolves it
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let work = std::fs::canonicalize(&work).unwrap();
+        let (dataset_id, _sha, session_id) = seeded_dataset_for_project(
             tmp.path(),
             &store,
             r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            &work,
         );
         let (_dir, compiled) = compile_source(&source);
         let compiled = compiled.unwrap();
@@ -2796,10 +2804,19 @@ mod tests {
             ])
         );
 
+        std::fs::write(
+            tmp.path().join("claude").join(".claude.json"),
+            format!(r#"{{"projects": {{"{}": {{}}}}}}"#, work.display()),
+        )
+        .unwrap();
         let mut events = Vec::new();
-        attach(&store, &dataset_id, std::slice::from_ref(&compiled), |e| {
-            events.push(e)
-        })
+        attach(
+            &store,
+            &dataset_id,
+            std::slice::from_ref(&compiled),
+            claude_driver(),
+            |e| events.push(e),
+        )
         .await
         .unwrap();
         let attached: Vec<&Attached> = events
@@ -2834,6 +2851,14 @@ mod tests {
             )),
             "{events:?}"
         );
+        assert!(
+            events.contains(&AttachEvent::Output(TaskOutput {
+                scanner: "attacher".into(),
+                task: "stack".into(),
+                output: Output::Println(format!("native Some({:?})", work.display().to_string())),
+            })),
+            "{events:?}"
+        );
         let linked = DatasetStore::from(&store).attachments(&dataset_id).unwrap();
         assert_eq!(linked.len(), 2);
         let targeted = linked
@@ -2852,9 +2877,13 @@ mod tests {
 
         // A repeat changes nothing
         let mut again = Vec::new();
-        attach(&store, &dataset_id, std::slice::from_ref(&compiled), |e| {
-            again.push(e)
-        })
+        attach(
+            &store,
+            &dataset_id,
+            std::slice::from_ref(&compiled),
+            claude_driver(),
+            |e| again.push(e),
+        )
         .await
         .unwrap();
         let outcomes: Vec<&str> = again
@@ -2919,9 +2948,15 @@ mod tests {
             }
         "###;
         let (_dir2, broken) = compile_source(BROKEN);
-        let err = attach(&store, &dataset_id, &[broken.unwrap()], |_| {})
-            .await
-            .unwrap_err();
+        let err = attach(
+            &store,
+            &dataset_id,
+            &[broken.unwrap()],
+            claude_driver(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
         match err {
             AttachError::Function {
                 scanner,
@@ -2942,19 +2977,33 @@ mod tests {
         );
     }
 
-    /// A dataset holding one `claude` session seeded from `jsonl`.
-    /// Returns the dataset id, its commit, and the session's Gage id.
+    /// A dataset holding one `claude` session seeded from `jsonl`,
+    /// under a project directory that need not exist. Returns the
+    /// dataset id, its commit, and the session's Gage id.
     fn seeded_dataset(
         root: &std::path::Path,
         store: &Store,
         jsonl: &str,
+    ) -> (String, String, String) {
+        seeded_dataset_for_project(root, store, jsonl, std::path::Path::new("/home/alice/proj"))
+    }
+
+    /// As [`seeded_dataset`], with the session filed under
+    /// `project_dir` as Claude encodes it.
+    fn seeded_dataset_for_project(
+        root: &std::path::Path,
+        store: &Store,
+        jsonl: &str,
+        project_dir: &std::path::Path,
     ) -> (String, String, String) {
         use gage_session::Driver;
         use gage_store::SessionSpec;
 
         let claude = root.join("claude");
         let native_id = "11111111-2222-3333-4444-555555555555";
-        let dir = claude.join("projects").join("-home-alice-proj");
+        let dir = claude
+            .join("projects")
+            .join(gage_claude::session::encode_project_dir(project_dir));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
         let driver = gage_claude::driver::ClaudeDriver::new();

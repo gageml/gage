@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use datafusion::prelude::SessionContext;
 use gage_query2::{ContextBuilder, ScanScope};
 use gage_runtime::error::Error;
+use gage_session::Driver;
 use gage_store::{AttachmentLinkOutcome, AttachmentSpec, AttachmentStore, DatasetStore, Store};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
@@ -46,6 +47,9 @@ pub struct AttachContext {
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Every attachment the function writes is reported here
     pub attached: mpsc::UnboundedSender<Attached>,
+    /// The driver that reopens a session's native source for
+    /// `session.native()`
+    pub driver: Arc<dyn Driver>,
     query_store: Arc<Mutex<Store>>,
     dataset_query: Arc<OnceCell<SessionContext>>,
 }
@@ -58,12 +62,14 @@ impl AttachContext {
         scanner: String,
         store_path: &Path,
         attached: mpsc::UnboundedSender<Attached>,
+        driver: Arc<dyn Driver>,
     ) -> Result<Self, gage_store::StoreError> {
         Ok(AttachContext {
             dataset,
             scanner,
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             attached,
+            driver,
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
             dataset_query: Arc::new(OnceCell::new()),
         })
