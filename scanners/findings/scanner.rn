@@ -9,44 +9,50 @@ use gage::{
 };
 
 pub const SCANNER = #{
-    name: "finding-issues-2",
+    name: "findings",
     description: "Report issues from session findings",
     groups: ["default"],
     tasks: #{
         report: #{
             notes: #{ wants: ["*[finding]"] },
             issues: #{
-                writes: #{ "findings": "Issue derived from session findings" },
+                writes: #{ "findings": "Issue derived from finding notes" },
             },
         },
     },
 };
 
-const REPORT_KEY = ("finding-issues", "report", 1);
+const REPORT_KEY = ("findings", "report", 1);
 
 pub async fn report() {
+    // Carry forward finding notes from previous scans
     let carried = carry_forward_notes_named("*[finding]").await?;
     log::info!("carried {carried} findings");
 
+    // Get available findings
     let findings = scan().notes().name("*[finding]").unseen(REPORT_KEY).await?;
     if findings.is_empty() {
         log::info!("no unreported findings for this scan");
         return Ok(());
     }
 
-    // The agent reads every finding in the scan through Query; the
-    // prompt names the ones no scan has reported yet
-    let listed = [];
-    for n in findings {
-        let target = match n.target {
-            Some(t) => t,
-            None => "",
-        };
-        listed.push(#{ id: n.id, name: n.name, target });
-    }
+    // Construct agent prompt with findings
     let prompt = Template::new(include_str!("prompt.md.j2"))?
-        .render(#{ findings: listed })?;
+        .render(
+            #{
+                findings: findings
+                    .iter()
+                    .map(
+                        |f| #{
+                            id: f.id,
+                            name: f.name,
+                            target: f.target.unwrap_or_default(),
+                        },
+                    ),
+            },
+        )?;
 
+    // Run the agent with tools to query sessions and report issues
     let agent = call_agent(prompt)
         .name("issue-writer")
         .tools([Query::new(), IssueWrite::new().name("findings").pending()])
@@ -60,8 +66,9 @@ pub async fn report() {
             metadata: result.as_metadata(),
         },
     );
-    for n in findings {
-        watermark(Mark::note(n), REPORT_KEY).await?;
+
+    // Note our work on this set of notes to skip next time
+    for f in findings {
+        watermark(Mark::note(f), REPORT_KEY).await?;
     }
-    Ok(())
 }
