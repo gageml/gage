@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +18,7 @@ use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
-use gage_store::{DatasetStore, SessionOutcome, SessionStore, Store};
+use gage_store::{DatasetStore, SessionStore, Store};
 use gage_tui::session::Backend;
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
@@ -29,7 +30,7 @@ use tabled::{
     },
 };
 
-use crate::cmd_dataset::{AddDisplay, AddReporter};
+use crate::cmd_dataset::{AddEvent, add_native_to_dataset};
 use crate::dialog::{self, DialogError};
 use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::source;
@@ -696,10 +697,12 @@ async fn add_dialog(
             .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
         Some(args.max_size.unwrap_or(configured).bytes())
     };
-    let display = AddDisplay::for_terminal();
-    let message = match dataset_id {
+    let mut view = DialogAddView::new(io::stdout().is_terminal());
+    match dataset_id {
         Some(dataset_id) if stored => {
-            add_stored_to_dataset(&store, &dataset_id, &args.select.sessions, display)?
+            add_stored_to_dataset(&store, &dataset_id, &args.select.sessions, &mut |e| {
+                view.on(e)
+            })?
         }
         _ => {
             let selected = args
@@ -718,11 +721,60 @@ async fn add_dialog(
                 dataset_id.as_deref(),
                 &selected,
                 max_bytes,
-                display,
+                &mut |e| view.on(e),
             )?
         }
-    };
-    Ok(message.into())
+    }
+    Ok(view.finish().into())
+}
+
+/// Renders an add inside the `Add sessions` dialog: a progress bar
+/// on a terminal, one outcome line per session otherwise, and the
+/// closing line held for the outro.
+struct DialogAddView {
+    progress: bool,
+    bar: Option<cli::ProgressBar>,
+    done: String,
+}
+
+impl DialogAddView {
+    fn new(progress: bool) -> Self {
+        Self {
+            progress,
+            bar: None,
+            done: String::new(),
+        }
+    }
+
+    fn on(&mut self, event: AddEvent<'_>) {
+        match &event {
+            AddEvent::Starting { total, .. } => {
+                if self.progress {
+                    let bar = self.bar.get_or_insert_with(|| {
+                        let bar = cli::progress_bar(*total as u64);
+                        bar.start("Adding sessions");
+                        bar
+                    });
+                    bar.set_message(event.to_string());
+                }
+            }
+            AddEvent::Added { .. } => match &self.bar {
+                Some(bar) => bar.inc(1),
+                None => println!("{event}"),
+            },
+            AddEvent::Done { .. } => {
+                if let Some(bar) = self.bar.take() {
+                    bar.clear();
+                }
+                self.done = event.to_string();
+            }
+        }
+    }
+
+    /// The closing line, for the outro
+    fn finish(self) -> String {
+        self.done
+    }
 }
 
 /// True when the shared selection was given only as a positional
@@ -739,13 +791,13 @@ fn only_positional_selected(select: &SessionSelectArgs) -> bool {
 }
 
 /// Link sessions already in the store, given by Gage id or prefix, as
-/// members of `dataset_id`. Returns the closing message.
+/// members of `dataset_id`, reporting each to `on_event`.
 fn add_stored_to_dataset(
     store: &Store,
     dataset_id: &str,
     prefixes: &[String],
-    display: AddDisplay,
-) -> Result<String, DialogError> {
+    on_event: &mut dyn FnMut(AddEvent<'_>),
+) -> Result<(), DialogError> {
     let sessions = SessionStore::from(store);
 
     // Resolve every argument before writing anything, so one bad
@@ -766,37 +818,46 @@ fn add_stored_to_dataset(
     let outcomes = DatasetStore::from(store)
         .sessions_link(dataset_id, &ids)
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
-    let mut reporter = AddReporter::new(display, records.len(), Some(dataset_id));
     for (outcome, record) in outcomes.iter().zip(&records) {
-        reporter.added(&outcome.outcome, &outcome.id, &record.attrs.native_id);
+        on_event(AddEvent::Added {
+            outcome: outcome.outcome,
+            id: &outcome.id,
+            native_id: &record.attrs.native_id,
+            dataset: Some(dataset_id),
+        });
     }
-    Ok(reporter.finish())
+    on_event(AddEvent::Done {
+        placed: outcomes.len(),
+        dataset: Some(dataset_id),
+    });
+    Ok(())
 }
 
 /// Add native sessions from `source` to the store and, when
-/// `dataset_id` is given, link them as members in the same operation.
-/// `selected` holds records resolved by the shared session picker;
-/// their ids are re-checked against the opened source so a caller
-/// that walked disk directly still meets the source's own id
-/// contract. Returns the closing message.
+/// `dataset_id` is given, link them as members in the same operation,
+/// reporting each to `on_event`. `selected` holds records resolved by
+/// the shared session picker; their ids are re-checked against the
+/// opened source so a caller that walked disk directly still meets
+/// the source's own id contract.
 fn add_native(
     store: &Store,
     source: Option<String>,
     dataset_id: Option<&str>,
     selected: &[gage_claude::session::SessionInfo],
     max_bytes: Option<u64>,
-    display: AddDisplay,
-) -> Result<String, DialogError> {
+    on_event: &mut dyn FnMut(AddEvent<'_>),
+) -> Result<(), DialogError> {
     if let Some(dataset_id) = dataset_id {
-        return Ok(crate::cmd_dataset::add_native_to_dataset(
-            "gage session add",
+        add_native_to_dataset(
             store,
             dataset_id,
             source.as_deref(),
             selected,
             max_bytes,
-            display,
-        ));
+            on_event,
+        )
+        .map_err(DialogError::Failed)?;
+        return Ok(());
     }
     let registry = source::driver_registry();
     let (driver, spec) =
@@ -832,41 +893,30 @@ fn add_native(
         Some(max) => SessionStore::from(store).with_max_session_size(max),
         None => SessionStore::from(store),
     };
-    let mut reporter = AddReporter::new(display, ids.len(), None);
+    let total = ids.len();
     for (session, id) in natives.iter_mut().zip(&ids) {
-        reporter.starting(id);
+        on_event(AddEvent::Starting {
+            total,
+            native_id: id,
+        });
         let outcome = sessions
             .add(driver.as_ref(), session.as_mut())
             .map_err(|e| DialogError::Failed(format!("{id}: {e}")))?;
-        reporter.added(&outcome.outcome, &outcome.id, id);
+        on_event(AddEvent::Added {
+            outcome: outcome.outcome,
+            id: &outcome.id,
+            native_id: id,
+            dataset: None,
+        });
     }
-    let message = reporter.finish();
+    on_event(AddEvent::Done {
+        placed: total,
+        dataset: None,
+    });
     opened
         .close()
         .map_err(|e| DialogError::Failed(format!("{spec}: {e}")))?;
-    Ok(message)
-}
-
-pub(crate) fn print_add_outcome(
-    outcome: &SessionOutcome,
-    id: &str,
-    native_id: &str,
-    dataset: Option<&str>,
-) {
-    let verb = match outcome {
-        SessionOutcome::Added => "Added",
-        SessionOutcome::Updated => "Updated",
-        SessionOutcome::Unchanged => "Unchanged",
-    };
-    let id = short_uuid(id);
-    let native_id = short_uuid(native_id);
-    match dataset {
-        Some(dataset) => println!(
-            "{verb} session {id} (native {native_id}) to dataset {}",
-            short_uuid(dataset)
-        ),
-        None => println!("{verb} session {id} (native {native_id})"),
-    }
+    Ok(())
 }
 
 pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {

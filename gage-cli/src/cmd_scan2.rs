@@ -38,6 +38,7 @@ use gage_tui::scan_view::{
     TaskState,
 };
 use gage_tui::session::Backend;
+use gage_tui::text::fmt_duration;
 use tabled::{
     Table,
     settings::{
@@ -52,7 +53,7 @@ use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 
-use crate::cmd_dataset::{self, AddDisplay};
+use crate::cmd_dataset::{self, AddEvent};
 use crate::cmd_issue2::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
@@ -1064,7 +1065,7 @@ async fn drive_view(
     mut events: UnboundedReceiver<Event>,
     store: Arc<Mutex<Store>>,
     cancel: CancellationToken,
-) -> Result<(), DialogError> {
+) -> io::Result<()> {
     let Some(Event::Started { id, tasks }) = events.recv().await else {
         // The runner failed before planning; the caller reports it
         return Ok(());
@@ -1079,7 +1080,7 @@ async fn drive_view(
         let ctx = host.scoped(ScanScope::scan_dir(layout.root())).await;
         host.scan_sessions(&ctx)
             .await
-            .map_err(|e| DialogError::Failed(format!("reading the scan's sessions: {e}")))?
+            .map_err(|e| io::Error::other(format!("reading the scan's sessions: {e}")))?
     };
     let task_ids: Vec<TaskId> = tasks
         .into_iter()
@@ -1208,7 +1209,7 @@ async fn drive_view(
     // Closing the view mid-scan stops the run; after the scan
     // completes this is a no-op
     cancel.cancel();
-    view_result.map_err(|e| DialogError::Other(anyhow::anyhow!("progress view: {e}")))
+    view_result.map_err(|e| io::Error::other(format!("progress view: {e}")))
 }
 
 /// The tasks on workers and the counts the view's status snapshot
@@ -1454,10 +1455,30 @@ async fn run_scan(args: Scan2RunArgs) {
         }
     };
 
-    dialog::run_async("Scan sessions", move || {
-        run_scan_dialog(args, registry, config, store)
+    // The dialog settles the inputs and builds the dataset; the scan
+    // itself runs after it, so its output lands outside the dialog
+    let mut prep: Option<ScanPrep> = None;
+    dialog::run_async("Scan sessions", || {
+        prepare_scan_dialog(args, &registry, &config, &store, &mut prep)
     })
     .await;
+    // A declined confirmation leaves nothing to run; a failure has
+    // already exited
+    let Some(prep) = prep else {
+        return;
+    };
+    run_prepared(prep, &store).await;
+}
+
+/// Everything the dialog settled for the run.
+struct ScanPrep {
+    compiled: Vec<CompiledScanner>,
+    /// The dataset to scan, built or reused once the run starts
+    plan: DatasetPlan,
+    jobs: usize,
+    invalidate: bool,
+    /// The progress view is shown; headless otherwise
+    progress_ui: bool,
 }
 
 /// A chosen session set for the scan: an existing dataset, a new
@@ -1485,15 +1506,16 @@ enum Window {
     All,
 }
 
-async fn run_scan_dialog(
+async fn prepare_scan_dialog(
     mut args: Scan2RunArgs,
-    registry: ScannerRegistry,
-    config: Config,
-    store: Store,
+    registry: &ScannerRegistry,
+    config: &Config,
+    store: &Store,
+    prep: &mut Option<ScanPrep>,
 ) -> Result<dialog::DialogResult, DialogError> {
     // Scanner selection: -s/-g/-f, the `default` group under -y, or
     // an interactive multi-select when the user supplied nothing.
-    let (scanner_specs, prompted) = resolve_scanner_specs(&args, &registry, &config)?;
+    let (scanner_specs, prompted) = resolve_scanner_specs(&args, registry, config)?;
     let file_defs = parse_file_scanners(&args.files)?;
     let mut scanners: Vec<Scanner<'_>> = Vec::new();
     for spec in &scanner_specs {
@@ -1520,7 +1542,7 @@ async fn run_scan_dialog(
     // Session / dataset axis: either reuse, mint from a selection,
     // or none. The plan is a preview only; nothing is written until
     // after the confirmation.
-    let plan = resolve_dataset_plan(&mut args, &store).await?;
+    let plan = resolve_dataset_plan(&mut args, store).await?;
     preview_dataset(&plan)?;
 
     // Preflight: compile every selected scanner and every pulled-in
@@ -1529,7 +1551,7 @@ async fn run_scan_dialog(
     let required = if args.no_deps {
         Vec::new()
     } else {
-        registry.required_tasks(&defs, &config)
+        registry.required_tasks(&defs, config)
     };
     let mut compiled: Vec<CompiledScanner> = Vec::new();
     let mut errors = 0;
@@ -1561,16 +1583,34 @@ async fn run_scan_dialog(
         }
     }
 
-    // Dataset materialization — the one write between the dialog
-    // and the scan. The progress view and the add's progress bar go
-    // together: both are off headless.
-    let progress_ui = !args.no_progress && io::stdout().is_terminal();
-    let display = if progress_ui {
-        AddDisplay::Bar
-    } else {
-        AddDisplay::Lines
+    if let DatasetPlan::New { selected } = &plan
+        && selected.is_empty()
+    {
+        return Err(DialogError::Failed(
+            "No sessions matched the selection".to_string(),
+        ));
+    }
+    *prep = Some(ScanPrep {
+        compiled,
+        plan,
+        jobs: args.jobs,
+        invalidate: args.invalidate,
+        progress_ui: !args.no_progress && io::stdout().is_terminal(),
+    });
+    Ok("Starting scan".into())
+}
+
+/// Build the dataset, then run the prepared scan, headless or under
+/// the progress view, and print its summary line. A canceled scan or
+/// one with a failed task exits with status 1.
+async fn run_prepared(prep: ScanPrep, store: &Store) {
+    let dataset_sha = match materialize_dataset(prep.plan, store, prep.progress_ui) {
+        Ok(sha) => sha,
+        Err(e) => {
+            eprintln!("gage scan2: {e}");
+            std::process::exit(1);
+        }
     };
-    let dataset_sha = materialize_dataset(plan, &store, display)?;
 
     // Ctrl-C cancels the run; the scan applies what ran. Once tokio
     // has taken the signal, a second Ctrl-C during apply has no
@@ -1590,18 +1630,19 @@ async fn run_scan_dialog(
         scans_dir: &scans_dir(),
         gage_version: crate::VERSION,
         dataset: dataset_sha.as_deref(),
-        jobs: args.jobs,
+        jobs: prep.jobs,
         driver: Arc::new(ClaudeDriver::new()),
-        invalidate: args.invalidate,
+        invalidate: prep.invalidate,
     };
-    let result = if !progress_ui {
+    let result = if !prep.progress_ui {
         // Headless: task output and the scan's own lines go to the
-        // terminal as they happen, unprefixed; the dialog outro
-        // renders the summary line from the returned outcome.
+        // terminal as they happen, unprefixed, with a status line for
+        // the start of the scan and of each task, and each task's end
+        let mut task_starts: HashMap<String, Instant> = HashMap::new();
         gage_scan2::scan(
-            &store,
+            store,
             &scan_config,
-            &compiled,
+            &prep.compiled,
             &cancel,
             |event| match event {
                 Event::Output(TaskOutput { output, .. }) => match output {
@@ -1611,41 +1652,82 @@ async fn run_scan_dialog(
                 },
                 Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
                 Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
-                Event::Started { .. } | Event::Summary { .. } => {}
+                Event::Started { id, tasks } => {
+                    let n = tasks.len();
+                    println!(
+                        "Scan {} started: {n} {}",
+                        short_uuid(&id),
+                        plural(n, "task")
+                    );
+                }
+                Event::Summary { .. } => {}
                 Event::Warning {
                     scanner,
                     task,
                     message,
                 } => eprintln!("warning: task {scanner}:{task} {message}"),
-                Event::TaskStarted { .. } | Event::TaskFinished { .. } => {}
+                Event::TaskStarted { scanner, task } => {
+                    task_starts.insert(format!("{scanner}:{task}"), Instant::now());
+                    println!("Task {scanner}:{task} started");
+                }
+                Event::TaskFinished {
+                    scanner,
+                    task,
+                    status,
+                    ..
+                } => {
+                    let label = format!("{scanner}:{task}");
+                    match task_starts.remove(&label) {
+                        Some(started) => println!(
+                            "Task {label} {} in {}",
+                            status.as_str(),
+                            fmt_duration(started.elapsed())
+                        ),
+                        None => println!("Task {label} {}", status.as_str()),
+                    }
+                }
             },
         )
         .await
     } else {
         // The progress view reads the scan through its own store
         // handle: the runner's stays free for the tasks and the apply
-        let view_store = Store::open(&gage_store::store_path())
-            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        let view_store = match Store::open(&gage_store::store_path()) {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!("gage scan2: {e}");
+                std::process::exit(1);
+            }
+        };
         let (tx, rx) = unbounded_channel();
-        let scan_fut = gage_scan2::scan(&store, &scan_config, &compiled, &cancel, move |event| {
-            send_runner_event(&tx, event)
-        });
+        let scan_fut =
+            gage_scan2::scan(store, &scan_config, &prep.compiled, &cancel, move |event| {
+                send_runner_event(&tx, event)
+            });
         let view_fut = drive_view(rx, Arc::new(Mutex::new(view_store)), cancel.clone());
         let (result, view_result) = tokio::join!(scan_fut, view_fut);
-        view_result?;
+        if let Err(e) = view_result {
+            eprintln!("gage scan2: {e}");
+            std::process::exit(1);
+        }
         result
     };
     io::stdout().flush().unwrap();
     cancel.cancel();
     signal_task.await.unwrap();
 
-    let outcome = result.map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
-    let shown_id = styled_scan_id(&store, &outcome.id);
-    let summary = summary_line(&shown_id, &outcome.attrs);
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            eprintln!("gage scan2: {e}");
+            std::process::exit(1);
+        }
+    };
+    let shown_id = styled_scan_id(store, &outcome.id);
+    println!("{}", summary_line(&shown_id, &outcome.attrs));
     if outcome.attrs.canceled || outcome.attrs.tasks.failed > 0 {
-        return Err(DialogError::Failed(summary));
+        std::process::exit(1);
     }
-    Ok(summary.into())
 }
 
 /// Resolve the ordered list of registry scanner specs from `-s`,
@@ -1902,37 +1984,61 @@ fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
 /// Write the dataset if one needs minting, and return the commit
 /// SHA that `ScanConfig.dataset` wants. `None` plan returns `None`;
 /// `Reuse` returns its stored SHA.
+/// The commit of the dataset to scan: the reused dataset's, or that
+/// of a new dataset built from the selected sessions. The build shows
+/// a progress bar under `progress`, cleared when it completes, and
+/// prints each session's outcome line otherwise; the closing `Added
+/// N sessions` line prints either way.
 fn materialize_dataset(
     plan: DatasetPlan,
     store: &Store,
-    display: AddDisplay,
-) -> Result<Option<String>, DialogError> {
+    progress: bool,
+) -> Result<Option<String>, String> {
     match plan {
         DatasetPlan::None => Ok(None),
         DatasetPlan::Reuse { commit_sha, .. } => Ok(Some(commit_sha)),
         DatasetPlan::New { selected } => {
-            if selected.is_empty() {
-                return Err(DialogError::Failed(
-                    "No sessions matched the selection".to_string(),
-                ));
-            }
             let id = cmd_dataset::create_dataset("gage scan2", store);
-            let message = cmd_dataset::add_native_to_dataset(
-                "gage scan2",
-                store,
-                &id,
-                None,
-                &selected,
-                None,
-                display,
-            );
-            cli::log::step(message)?;
-            let record = DatasetStore::from(store)
-                .get(&id)
-                .map_err(|e| DialogError::Failed(format!("{e}")))?;
-            Ok(Some(record.commit_sha))
+            let mut bar: Option<indicatif::ProgressBar> = None;
+            cmd_dataset::add_native_to_dataset(store, &id, None, &selected, None, &mut |event| {
+                match &event {
+                    AddEvent::Starting { total, .. } => {
+                        if progress {
+                            bar.get_or_insert_with(|| add_progress_bar(*total))
+                                .set_message(event.to_string());
+                        }
+                    }
+                    AddEvent::Added { .. } => match &bar {
+                        Some(bar) => bar.inc(1),
+                        None => println!("{event}"),
+                    },
+                    AddEvent::Done { .. } => {
+                        if let Some(bar) = bar.take() {
+                            bar.finish_and_clear();
+                        }
+                        println!("{event}");
+                    }
+                }
+            })?;
+            Ok(Some(
+                DatasetStore::from(store)
+                    .get(&id)
+                    .map_err(|e| e.to_string())?
+                    .commit_sha,
+            ))
         }
     }
+}
+
+/// The dataset build's progress bar, styled like the CLI's spinner
+fn add_progress_bar(total: usize) -> indicatif::ProgressBar {
+    let bar = indicatif::ProgressBar::new(total as u64);
+    bar.set_style(
+        indicatif::ProgressStyle::with_template("{spinner:.magenta}  {msg} {bar:30} {pos}/{len}")
+            .unwrap(),
+    );
+    bar.enable_steady_tick(Duration::from_millis(80));
+    bar
 }
 
 /// The scan's short id, highlighted against the same set a scan id

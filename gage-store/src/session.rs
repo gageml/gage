@@ -128,7 +128,7 @@ pub struct SessionAddOutcome {
     pub outcome: SessionOutcome,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionOutcome {
     /// New session object created.
     Added,
