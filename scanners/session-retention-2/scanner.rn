@@ -1,21 +1,10 @@
-// Model of the `session-retention` scanner for the rethink runtime
-// (`gage-scan2` and `gage-runtime2`). The scanner names the subject;
-// the task names the action.
-//
-// The user config reaches the scan as a dataset attachment named
-// `claude-config`. The scanner's attachment function adds it when the
-// dataset is prepared with `gage attachment add -s session-retention-2
-// -d <DATASET>`; the scan reads it at the commit its dataset links.
-
 use gage::{Fail, Files, attach, scan, write_issue};
 
 pub const SCANNER = #{
     name: "session-retention-2",
     description: "Highlight unset session retention policy",
     groups: ["default"],
-    attachments: #{
-        "claude-config": #{},
-    },
+    attachments: #{ "claude-config": #{} },
     tasks: #{
         check: #{
             attachments: #{ needs: ["claude-config"] },
@@ -28,15 +17,17 @@ pub const SCANNER = #{
     },
 };
 
+const SETTINGS = ["settings.json", "settings.local.json"];
+
 pub async fn attach_claude_config() {
-    attach(Files::include(["settings.json", "settings.local.json"]).root("~/.claude"))
+    attach(Files::include(SETTINGS).root("~/.claude"))
         .name("claude-config")
         .await?;
 }
 
 pub async fn check() {
-    if let Some(days) = attached_settings().await?.get("cleanupPeriodDays") {
-        log::info!("cleanupPeriodDays set ({} days)", days);
+    if let Some(val) = cleanup_period_days().await? {
+        log::info!("cleanupPeriodDays set ({val} days)");
     } else {
         write_issue(
             "session-retention",
@@ -49,21 +40,20 @@ pub async fn check() {
     }
 }
 
-async fn attached_settings() {
-    Ok(
-        scan()
-            .attachments()
-            .name("claude-config")
-            .await?
-            .next()
-            .ok_or(Fail(
-                "attachment claude-config is not in the dataset; add it with \
-                 `gage attachment add -s session-retention-2 -d <DATASET>`",
-            ))?
-            .file("settings.json")
-            .await
-            .expect("claude-config attachment should have settings.json")
-            .json()
-            .expect("settings.json should be valid JSON"),
-    )
+async fn cleanup_period_days() {
+    let a = scan()
+        .attachments()
+        .name("claude-config")
+        .await?
+        .next()
+        .ok_or(Fail("dataset missing claude-code attachment"))?;
+    for name in SETTINGS {
+        if let Some(f) = a.file(name).await {
+            let settings = f.json().expect("should be JSON");
+            if let Some(val) = settings.get("cleanupPeriodDays") {
+                return Ok(Some(val))
+            }
+        }
+    }
+    Ok(None)
 }
