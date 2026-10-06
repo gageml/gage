@@ -44,8 +44,8 @@ use gage_core::uuid::{new_uuid, short_uuid};
 use gage_registry::scanner::{Scanner, TaskDef};
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{
-    CURRENT_RUNTIME_SCHEME, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext,
-    ScanDatasetRef, TaskOutput,
+    CURRENT_RUNTIME_SCHEME, Fail, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext,
+    ScanDatasetRef, TaskOutput, is_ignore,
 };
 use gage_scan::error::render_task_error;
 use gage_session::Driver;
@@ -931,9 +931,11 @@ fn vm_error(e: &VmError, sources: &Sources) -> String {
     gage_runtime2::render_vm_error(e, Some(sources))
 }
 
-/// Interpret a task's return value. A task returning unit or `Ok`
-/// succeeded; `Err(e)` fails with a diagnostic naming `e` and
-/// pointing at the task function.
+/// Interpret a task's return value. A task returning unit, `Ok`, or
+/// `Err(Ignore)` succeeded. `Err(Fail(msg))` is the scanner author's
+/// message to the user: the task fails with `msg` alone. Any other
+/// `Err` is a scanner defect: the task fails with a diagnostic naming
+/// the value and pointing at the task function.
 #[expect(
     clippy::disallowed_methods,
     reason = "takes the VM execution's return value; the runtime holds the only live handle"
@@ -941,7 +943,13 @@ fn vm_error(e: &VmError, sources: &Sources) -> String {
 fn task_result(value: Value, scanner: &TaskUnit, task: &str) -> Result<(), String> {
     match rune::from_value::<Result<Value, Value>>(value) {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(err)) => Err(returned_error(&render_task_error(err), scanner, task)),
+        Ok(Err(err)) if is_ignore(&err) => Ok(()),
+        Ok(Err(err)) => {
+            if let Ok(fail) = err.borrow_ref::<Fail>() {
+                return Err(format!("error: {}\n", fail.message()));
+            }
+            Err(returned_error(&render_task_error(err), scanner, task))
+        }
         // Not a Result: a task that returns unit or any other value
         Err(_) => Ok(()),
     }
@@ -1952,6 +1960,83 @@ mod tests {
         .await;
         assert_eq!(outputs(&events), [&Output::Println("go".into())]);
         assert_eq!(outcome.unwrap().attrs.tasks.completed, 1);
+    }
+
+    /// `Err(Fail(msg))` is the scanner author's message for the user:
+    /// the task fails with that message and no source excerpt.
+    #[tokio::test]
+    async fn task_returning_fail_fails_with_the_message_alone() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::Fail;
+
+            pub const SCANNER = #{
+                name: "s",
+                description: "Fails with a message",
+                tasks: #{ go: #{} },
+            };
+
+            pub fn go() {
+                Err(Fail("add the attachment"))
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("scans"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        let failure = events
+            .iter()
+            .find_map(|e| match e {
+                Event::TaskFinished {
+                    error: Some(message),
+                    ..
+                } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("the task should finish with an error");
+        assert_eq!(failure, "error: add the attachment\n");
+        assert_eq!(outcome.unwrap().attrs.tasks.failed, 1);
+    }
+
+    /// `Err(Ignore)` is an early exit with nothing to do, not a failure.
+    #[tokio::test]
+    async fn task_returning_ignore_completes() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::Ignore;
+
+            pub const SCANNER = #{
+                name: "s",
+                description: "Exits early",
+                tasks: #{ go: #{} },
+            };
+
+            pub fn go() {
+                Err(Ignore)
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("scans"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::TaskFinished { error: Some(_), .. })),
+            "{events:?}"
+        );
+        let tasks = outcome.unwrap().attrs.tasks;
+        assert_eq!((tasks.completed, tasks.failed), (1, 0));
     }
 
     /// The scan record lands in the store with one task record per

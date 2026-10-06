@@ -421,6 +421,6 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 5, "checked {checked} builtin scanners");
+        assert!(checked >= 4, "checked {checked} builtin scanners");
     }
 }

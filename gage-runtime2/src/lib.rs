@@ -35,6 +35,7 @@
 
 mod agent;
 mod attachment;
+mod fail;
 mod io;
 mod issue;
 mod log;
@@ -51,6 +52,8 @@ use rune::{Context, ContextError};
 use tokio::sync::mpsc;
 
 pub use attachment::{Attachment, AttachmentFile, Attachments};
+pub use fail::Fail;
+pub use gage_runtime::ignore::is_ignore;
 pub use log::LOG_TARGET;
 pub use scan::{
     SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions, render_vm_error,
@@ -159,6 +162,7 @@ impl OutputSink {
 /// `gage::carry_forward_notes_named`,
 /// `gage::Mark`, `gage::watermark`, `gage::Template`, `gage::Progress`,
 /// `gage::call_agent` and the values it returns, `gage::AgentRunner`,
+/// `gage::Fail`, `gage::Ignore`,
 /// and the include macros from `gage-runtime`. Every file-reading facility
 /// installed here is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
@@ -168,6 +172,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(scan::module()?)?;
     context.install(scan::types_module()?)?;
     context.install(attachment::types_module()?)?;
+    context.install(fail::types_module()?)?;
     context.install(query::types_module()?)?;
     context.install(note::module()?)?;
     context.install(note::types_module()?)?;

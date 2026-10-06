@@ -1,9 +1,27 @@
+use gage::{Fail, Ignore};
+
 pub const SCANNER = #{
     name: "errors",
     description: "Error output",
-    tasks: #{main: #{}}
+    tasks: #{ panic: #{}, ignore: #{}, fail: #{}, error: #{} },
 };
 
-pub async fn main() {
-    panic!("Oops!");
+pub async fn panic() {
+    panic!("unexpected state!");
+    println("Never reached");
+}
+
+pub async fn ignore() {
+    let _ = #{}.get("not here").ok_or(Ignore)?;
+    println("Never reached");
+}
+
+pub async fn fail() {
+    let _ = #{}.get("not here").ok_or(Fail("missing value"))?;
+    println("Never reached");
+}
+
+pub async fn error() {
+    Err("explicit error")?;
+    println("Never reached");
 }

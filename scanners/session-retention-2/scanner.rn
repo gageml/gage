@@ -7,12 +7,13 @@
 // settings.json --root ~/.claude --dataset <DATASET>`. The scan reads
 // the attachment at the commit its dataset links.
 
-use gage::{scan, write_issue};
+use gage::{Fail, scan, write_issue};
 
 pub const SCANNER = #{
     name: "session-retention-2",
     description: "Highlight unset session retention policy",
     groups: ["default"],
+    attachments: #{ wants: ["claude-code"] },
     tasks: #{
         check: #{
             issues: #{
@@ -25,32 +26,33 @@ pub const SCANNER = #{
 };
 
 pub async fn check() {
-    match configured_cleanup_period().await {
-        Some(days) => {
-            log::info!("cleanupPeriodDays set ({} days)", days);
-        }
-        None => {
-            write_issue(
-                "session-retention",
-                "Unset session retention policy",
-                include_str!("issue.md"),
-            )
-            .key("session-retention")
-            .once()
-            .await?;
-        }
+    if let Some(days) = attached_settings().await?.get("cleanupPeriodDays") {
+        log::info!("cleanupPeriodDays set ({} days)", days);
+    } else {
+        write_issue(
+            "session-retention",
+            "Unset session retention policy",
+            include_str!("issue.md"),
+        )
+        .key("session-retention")
+        .once()
+        .await?;
     }
 }
 
-async fn configured_cleanup_period() {
-    scan()
-        .attachment("claude-config")
-        .await
-        .expect("claude-config should be attached")
-        .file("settings.json")
-        .await
-        .expect("claude-config should include settings.json")
-        .json()
-        .expect("settings.json should be valid JSON")
-        .get("cleanupPeriodDays2")
+async fn attached_settings() {
+    Ok(
+        scan()
+            .attachment("claude-config")
+            .await
+            .ok_or(Fail(
+                "attachment claude-config is not in the dataset; add it with \
+                 `gage attachment add claude-config settings.json --root ~/.claude --dataset <DATASET>`",
+            ))?
+            .file("settings.json")
+            .await
+            .expect("claude-config attachment should have settings.json")
+            .json()
+            .expect("settings.json should be valid JSON"),
+    )
 }
