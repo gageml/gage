@@ -718,9 +718,9 @@ mod tests {
         write(
             "plan.json",
             r#"{"tasks":[
-                {"task":"hello:greet","selected":"explicit","after":[],"unmatched":[]},
-                {"task":"hello:fail","selected":"group:default","after":[],"unmatched":[]},
-                {"task":"hello:after","selected":"group:eval","after":[],"unmatched":[]}
+                {"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[]},
+                {"task":"hello:fail","selected":"group:default","after":[],"unmatched_note_wants":[]},
+                {"task":"hello:after","selected":"group:eval","after":[],"unmatched_note_wants":[]}
             ]}"#,
         );
         write(

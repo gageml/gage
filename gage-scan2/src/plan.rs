@@ -10,8 +10,9 @@
 //! what exists. Dependencies resolve over notes only.
 //!
 //! A cycle is a plan error, since the edges are inferred and the
-//! person cannot see them. A `wants` pattern no planned task writes
-//! is recorded on the task as unmatched and reported as a warning.
+//! person cannot see them. A `notes.wants` pattern no planned task
+//! writes is recorded on the task as an unmatched note want and
+//! reported as a warning.
 //! Task order is scanner name then task name, which is the dispatch
 //! tie-break order.
 //!
@@ -74,13 +75,13 @@ pub struct PlanTask {
     pub selected: Selected,
     /// Every edge into this task, in upstream order
     pub after: Vec<Edge>,
-    /// `wants` patterns no planned task writes
-    pub unmatched: Vec<String>,
-    /// The note names the task declares it writes, each with its
-    /// doc. The plan records them so a scan carries the docs of the
-    /// notes it holds; the `note_doc` table of the scan's scope reads
-    /// them from here.
-    pub writes: BTreeMap<String, String>,
+    /// `notes.wants` patterns no planned task writes
+    pub unmatched_note_wants: Vec<String>,
+    /// The task's `notes.writes`: each note name with its doc. The
+    /// plan records them so a scan carries the docs of the notes it
+    /// holds; the `note_doc` table of the scan's scope reads them
+    /// from here.
+    pub note_writes: BTreeMap<String, String>,
 }
 
 impl PlanTask {
@@ -164,11 +165,11 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     for (i, (scanner, def)) in defs.iter().enumerate() {
         let mut after = Vec::new();
-        let mut unmatched = Vec::new();
+        let mut unmatched_note_wants = Vec::new();
         for pattern in &def.notes.wants {
             let (matched, upstream) = matching(pattern, i);
             if !matched {
-                unmatched.push(pattern.clone());
+                unmatched_note_wants.push(pattern.clone());
             }
             for up in upstream {
                 after.push(Edge {
@@ -193,8 +194,8 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
             task: def.name.clone(),
             selected,
             after,
-            unmatched,
-            writes: def.notes.writes.clone(),
+            unmatched_note_wants,
+            note_writes: def.notes.writes.clone(),
         });
     }
 
@@ -294,8 +295,8 @@ impl Plan {
                         pattern: e.pattern.clone(),
                     })
                     .collect(),
-                unmatched: t.unmatched.clone(),
-                writes: t.writes.clone(),
+                unmatched_note_wants: t.unmatched_note_wants.clone(),
+                note_writes: t.note_writes.clone(),
             })
             .collect();
         serde_json::to_value(PlanJson { tasks }).expect("plan fields are plain data")
@@ -312,8 +313,8 @@ struct TaskJson {
     task: String,
     selected: String,
     after: Vec<EdgeJson>,
-    unmatched: Vec<String>,
-    writes: BTreeMap<String, String>,
+    unmatched_note_wants: Vec<String>,
+    note_writes: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -397,13 +398,13 @@ mod tests {
                 pattern: "finding".into(),
             }]
         );
-        assert!(read.unmatched.is_empty());
+        assert!(read.unmatched_note_wants.is_empty());
         // Scanner order, not argument order
         assert_eq!(plan.tasks[0].label(), "a:write");
     }
 
     #[test]
-    fn unmatched_wants_is_recorded_and_the_task_is_ready() {
+    fn unmatched_note_want_is_recorded_and_the_task_is_ready() {
         let a = tasks(&[("read", &["nobody-writes-this"], &[])]);
         let plan = plan(&[PlannedScanner {
             name: "a",
@@ -412,7 +413,7 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(plan.deps, [0]);
-        assert_eq!(plan.tasks[0].unmatched, ["nobody-writes-this"]);
+        assert_eq!(plan.tasks[0].unmatched_note_wants, ["nobody-writes-this"]);
     }
 
     #[test]
@@ -428,7 +429,7 @@ mod tests {
         let plan = err.unwrap();
         assert_eq!(plan.deps, [0]);
         assert!(plan.downstream[0].is_empty());
-        assert!(plan.tasks[0].unmatched.is_empty());
+        assert!(plan.tasks[0].unmatched_note_wants.is_empty());
     }
 
     #[test]
@@ -463,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_json_records_selection_edges_and_unmatched_patterns() {
+    fn plan_json_records_selection_edges_and_unmatched_note_wants() {
         let a = tasks(&[
             ("summarize", &[], &["project-summary.rules"]),
             (
@@ -496,15 +497,15 @@ mod tests {
                         "after": [
                             { "task": "a:summarize", "pattern": "project-summary.*" }
                         ],
-                        "unmatched": ["missing"],
-                        "writes": { "finding.code": "" }
+                        "unmatched_note_wants": ["missing"],
+                        "note_writes": { "finding.code": "" }
                     },
                     {
                         "task": "a:summarize",
                         "selected": "group:default",
                         "after": [],
-                        "unmatched": [],
-                        "writes": { "project-summary.rules": "" }
+                        "unmatched_note_wants": [],
+                        "note_writes": { "project-summary.rules": "" }
                     },
                     {
                         "task": "c:report",
@@ -512,8 +513,8 @@ mod tests {
                         "after": [
                             { "task": "a:review", "pattern": "finding.*" }
                         ],
-                        "unmatched": [],
-                        "writes": {}
+                        "unmatched_note_wants": [],
+                        "note_writes": {}
                     }
                 ]
             })

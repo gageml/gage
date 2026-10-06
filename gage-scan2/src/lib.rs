@@ -489,7 +489,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let mut scan_logs = self.scan_dir.scan_logs();
         let started = now_ms();
         for t in &plan.tasks {
-            for pattern in &t.unmatched {
+            for pattern in &t.unmatched_note_wants {
                 let message = format!("wants note '{pattern}' but no task writes it");
                 scan_logs.record(Level::Warn, &t.label(), &message)?;
                 (self.on_event)(Event::Warning {
@@ -4268,8 +4268,8 @@ mod tests {
                 "task": "deps:wanty",
                 "selected": "explicit",
                 "after": [{ "task": "deps:write", "pattern": "x" }],
-                "unmatched": ["nobody"],
-                "writes": { "y": "the y note" }
+                "unmatched_note_wants": ["nobody"],
+                "note_writes": { "y": "the y note" }
             })
         );
         assert_eq!(

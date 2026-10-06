@@ -1,7 +1,7 @@
 //! The `note_doc` table: one row per note name a task declares it
 //! writes, with the doc the declaration carries. The scan scope reads
-//! the rows from the scan's plan, which records each task's `writes`;
-//! the store scope builds them from the scanner registry.
+//! the rows from the scan's plan, which records each task's
+//! `note_writes`; the store scope builds them from the scanner registry.
 
 use std::sync::Arc;
 
@@ -46,8 +46,9 @@ pub fn note_doc_rows(rows: &[NoteDocRow]) -> Result<RecordBatch> {
     )?)
 }
 
-/// The rows a scan's plan declares: every `writes` entry of every
-/// task, in plan order.
+/// The rows a scan's plan declares: every `note_writes` entry of
+/// every task, in plan order. Plans written before the field was
+/// renamed record it as `writes`.
 pub fn note_doc_rows_from_plan(plan: &serde_json::Value) -> Vec<NoteDocRow> {
     let mut rows = Vec::new();
     let Some(tasks) = plan.get("tasks").and_then(|t| t.as_array()) else {
@@ -57,7 +58,11 @@ pub fn note_doc_rows_from_plan(plan: &serde_json::Value) -> Vec<NoteDocRow> {
         let Some(label) = task.get("task").and_then(|t| t.as_str()) else {
             continue;
         };
-        let Some(writes) = task.get("writes").and_then(|w| w.as_object()) else {
+        let writes = task
+            .get("note_writes")
+            .or_else(|| task.get("writes"))
+            .and_then(|w| w.as_object());
+        let Some(writes) = writes else {
             continue;
         };
         for (name, doc) in writes {
@@ -69,4 +74,29 @@ pub fn note_doc_rows_from_plan(plan: &serde_json::Value) -> Vec<NoteDocRow> {
         }
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_rows_read_note_writes_and_the_legacy_writes_key() {
+        let plan = serde_json::json!({
+            "tasks": [
+                { "task": "a:new", "note_writes": { "n": "the n note" } },
+                { "task": "b:old", "writes": { "o": "the o note" } },
+                { "task": "c:none" }
+            ]
+        });
+        let rows = note_doc_rows_from_plan(&plan);
+        let seen: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|r| (r.note_name.as_str(), r.doc.as_str(), r.written_by.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [("n", "the n note", "a:new"), ("o", "the o note", "b:old")]
+        );
+    }
 }
