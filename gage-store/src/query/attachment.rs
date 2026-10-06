@@ -32,7 +32,9 @@ pub(crate) fn attachment_schema() -> SchemaRef {
         // Identity
         Field::new("id", DataType::Utf8, false),
         // Key
-        Field::new("name", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, true),
+        // Gage URL of the object the files are about
+        Field::new("target", DataType::Utf8, true),
         // Value
         // The directory the files were selected under
         Field::new("root", DataType::Utf8, false),
@@ -72,6 +74,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     let len = attachments.len();
     let mut ids = StringBuilder::with_capacity(len, len * 26);
     let mut names = StringBuilder::new();
+    let mut targets = StringBuilder::new();
     let mut roots = StringBuilder::new();
     let mut includes = StringBuilder::new();
     let mut excludes = StringBuilder::new();
@@ -84,7 +87,8 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     let mut commits = StringBuilder::with_capacity(len, len * 40);
     for a in attachments {
         ids.append_value(&a.id);
-        names.append_value(&a.attrs.name);
+        names.append_option(a.attrs.name.as_deref());
+        targets.append_option(a.attrs.target.as_deref());
         roots.append_value(a.attrs.root.to_string_lossy());
         includes.append_value(a.attrs.includes.join(" "));
         excludes.append_value(a.attrs.excludes.join(" "));
@@ -102,6 +106,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
         vec![
             Arc::new(ids.finish()),
             Arc::new(names.finish()),
+            Arc::new(targets.finish()),
             Arc::new(roots.finish()),
             Arc::new(includes.finish()),
             Arc::new(excludes.finish()),

@@ -33,6 +33,7 @@ use crate::git::{EntryKind, git_in, run};
 use crate::index::IdMatch;
 use crate::refs::OBJECT_REFS;
 pub(crate) use crate::refs::object_ref;
+use crate::url;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
 use crate::{Store, StoreError, TagStore};
 
@@ -727,6 +728,33 @@ impl Store {
             }
         }
     }
+}
+
+/// The one scheme whose target URLs may carry a fragment
+const SESSION_SCHEME: &str = "session";
+
+/// Validate a target URL and return the tip SHA of the object it
+/// names. The body is a full id; the object must be live and of the
+/// scheme's type; a fragment is accepted for `session:` only and must
+/// be a line selection.
+pub(crate) fn resolve_target(store: &Store, raw: &str) -> Result<String, StoreError> {
+    let parsed = url::parse(raw)?;
+    match parsed.fragment {
+        Some(fragment) if parsed.scheme == SESSION_SCHEME => {
+            url::validate_line_selection(fragment)?
+        }
+        Some(_) => return Err(StoreError::BadTarget(raw.to_string())),
+        None => {}
+    }
+    let sha = store
+        .rev_parse(&object_ref(parsed.body))?
+        .ok_or_else(|| StoreError::TargetNotFound(raw.to_string()))?;
+    let target = store.read_object(&sha)?;
+    require_type(&target, &format!("gage::{}", parsed.scheme))?;
+    if target.header.is_tombstone() {
+        return Err(StoreError::ObjectDeleted(target.header.id));
+    }
+    Ok(sha)
 }
 
 /// Fail unless the object's `type` is `expected`.

@@ -66,6 +66,7 @@ pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init
 pub use attachment::{
     AttachmentAddOutcome, AttachmentAttrs, AttachmentFile, AttachmentOutcome, AttachmentQuery,
     AttachmentRecord, AttachmentRemoveOutcome, AttachmentSpec, AttachmentStore,
+    MAX_FILES as ATTACHMENT_MAX_FILES, MAX_SIZE as ATTACHMENT_MAX_SIZE,
     OBJECT_TYPE as ATTACHMENT_TYPE, attachment_object_id,
 };
 pub use dataset::{

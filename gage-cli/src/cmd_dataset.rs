@@ -578,7 +578,7 @@ pub fn show(args: DatasetShowArgs) {
         .join("\n");
     let attachments_cell = attachments
         .iter()
-        .map(|a| format!("{} {}", a.id, a.attrs.name))
+        .map(|a| format!("{} {}", a.id, a.attrs.name.as_deref().unwrap_or_default()))
         .collect::<Vec<_>>()
         .join("\n");
     let tags_cell = tags

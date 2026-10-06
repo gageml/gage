@@ -99,7 +99,7 @@ pub struct AttachmentQuery {
 
 async fn fetch_attachment(q: AttachmentQuery) -> Result<Option<Attachment>, VmError> {
     let sql = format!(
-        "SELECT id, name FROM attachment WHERE name = '{}'",
+        "SELECT id, COALESCE(name, '') FROM attachment WHERE name = '{}'",
         sql_str(&q.name)
     );
     Ok(attachments(&sql).await?.into_iter().next())
@@ -108,7 +108,7 @@ async fn fetch_attachment(q: AttachmentQuery) -> Result<Option<Attachment>, VmEr
 /// The dataset's attachments at the commits the scan links, in
 /// dataset order. Without a dataset there are none.
 async fn fetch_attachments() -> Result<Vec<Attachment>, VmError> {
-    attachments("SELECT id, name FROM attachment").await
+    attachments("SELECT id, COALESCE(name, '') FROM attachment").await
 }
 
 async fn attachments(sql: &str) -> Result<Vec<Attachment>, VmError> {

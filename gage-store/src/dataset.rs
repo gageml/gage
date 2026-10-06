@@ -112,7 +112,8 @@ pub struct DatasetMembers {
 #[derive(Debug, PartialEq, Eq)]
 pub struct DatasetAttachmentLinkOutcome {
     pub id: String,
-    pub name: String,
+    /// The attachment's name, or its short id when unnamed
+    pub label: String,
     pub outcome: AttachmentLinkOutcome,
 }
 
@@ -130,7 +131,8 @@ pub enum AttachmentLinkOutcome {
 #[derive(Debug, PartialEq, Eq)]
 pub struct DatasetAttachmentUnlinkOutcome {
     pub id: String,
-    pub name: String,
+    /// The attachment's name, or its short id when unnamed
+    pub label: String,
 }
 
 /// The current attachments of one dataset that belong to a queried
@@ -398,19 +400,20 @@ impl DatasetStore<'_> {
                 Some(_) => AttachmentLinkOutcome::Updated,
                 None => AttachmentLinkOutcome::Linked,
             };
+            let label = record.label().to_string();
             place_member(&mut linked, &mut linked_ids, &record.id, record.commit_sha);
             outcomes.push(DatasetAttachmentLinkOutcome {
                 id: record.id,
-                name: record.attrs.name,
+                label,
                 outcome,
             });
         }
-        let names: Vec<&str> = outcomes
+        let labels: Vec<&str> = outcomes
             .iter()
             .filter(|o| o.outcome != AttachmentLinkOutcome::Unchanged)
-            .map(|o| o.name.as_str())
+            .map(|o| o.label.as_str())
             .collect();
-        let message = format!("attachments: link {}", names.join(", "));
+        let message = format!("attachments: link {}", labels.join(", "));
         self.write_attachments(&dataset, linked, &message)?;
         Ok(outcomes)
     }
@@ -454,7 +457,7 @@ impl DatasetStore<'_> {
             drop.push(idx);
             outcomes.push(DatasetAttachmentUnlinkOutcome {
                 id,
-                name: record.attrs.name,
+                label: record.label().to_string(),
             });
         }
 
@@ -464,8 +467,8 @@ impl DatasetStore<'_> {
             .filter(|(idx, _)| !drop.contains(idx))
             .map(|(_, sha)| sha)
             .collect();
-        let names: Vec<&str> = outcomes.iter().map(|o| o.name.as_str()).collect();
-        let message = format!("attachments: unlink {}", names.join(", "));
+        let labels: Vec<&str> = outcomes.iter().map(|o| o.label.as_str()).collect();
+        let message = format!("attachments: unlink {}", labels.join(", "));
         self.write_attachments(&dataset, kept, &message)?;
         Ok(outcomes)
     }

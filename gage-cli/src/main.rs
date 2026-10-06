@@ -54,6 +54,7 @@ mod model_prompt;
 mod session_select;
 mod source;
 mod style;
+mod target;
 
 /// Version string baked at build time: a real semver for official release
 /// builds, otherwise `git-<hash>` for source builds. See build.rs.
@@ -155,9 +156,10 @@ enum Command {
 
     /// Manage attachments
     ///
-    /// An attachment is a named set of files added from a directory
-    /// for scanners to read, such as a Claude Code config directory.
-    /// Datasets hold attachments the way they hold sessions.
+    /// An attachment is a set of files added from a directory for
+    /// scanners to read, such as a Claude Code config directory. It
+    /// may be named, and it may target a session. Datasets hold
+    /// attachments the way they hold sessions.
     Attachment {
         #[command(subcommand)]
         command: cmd_attachment::AttachmentCommand,

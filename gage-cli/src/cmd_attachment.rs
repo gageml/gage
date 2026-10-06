@@ -1,18 +1,19 @@
-//! `gage attachment`: named file trees in the Gage store, for
-//! scanners to read.
+//! `gage attachment`: file trees in the Gage store, for scanners to
+//! read.
 //!
-//! An attachment is added from a directory and a pattern list, listed
-//! on its own or as a dataset's, shown file by file, and removed. A
-//! dataset holds attachments the way it holds sessions:
-//! `add --dataset` stores the attachment and adds it to the dataset in
-//! one step, `remove --dataset` takes it out of the dataset without
-//! touching the object.
+//! An attachment is added from a directory and a pattern list,
+//! optionally named and optionally targeting a session, listed on its
+//! own or as a dataset's, shown file by file, and removed. A dataset
+//! holds attachments the way it holds sessions: `add --dataset`
+//! stores the attachment and adds it to the dataset in one step,
+//! `remove --dataset` takes it out of the dataset without touching
+//! the object.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
-use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
@@ -32,6 +33,7 @@ use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, run_query};
 use crate::human::{format_elapsed_ms, format_size};
 use crate::style::{self, IdKind, styled_id};
+use crate::target::resolve_target;
 
 #[derive(Subcommand)]
 pub enum AttachmentCommand {
@@ -42,10 +44,12 @@ pub enum AttachmentCommand {
     /// `**/settings.json` is every file by that name, `*` and `?` do
     /// not cross `/`, and `{a,b}` and `[a-z]` are supported. Excludes
     /// use the same form, and a directory an exclude matches is not
-    /// entered. Adding under an existing name updates the attachment
-    /// when its files changed and is otherwise a no-op. With --stored,
-    /// an attachment already in the store is added to a dataset
-    /// without reading the file system.
+    /// entered. An attachment holds at most 10 MiB and 1000 files.
+    /// Adding again under the same name and target updates the
+    /// attachment when its files changed and is otherwise a no-op; an
+    /// unnamed add always creates a new attachment. With --stored, an
+    /// attachment already in the store is added to a dataset without
+    /// reading the file system.
     Add(AttachmentAddArgs),
 
     /// List attachments
@@ -65,18 +69,20 @@ pub enum AttachmentCommand {
 
 #[derive(Args)]
 pub struct AttachmentAddArgs {
-    /// Attachment name, or with --stored an attachment in the store
-    ///
-    /// A name is letters, digits, `-`, `_`, and `.`, and names the
-    /// attachment in every other command and in scanners. With
-    /// --stored, a name, ID, or ID prefix of a stored attachment
-    pub name: String,
-
     /// Files to include (path globs relative to the root)
     ///
     /// At least one is required; `**/*` selects every file
     #[arg(required_unless_present = "stored", value_name = "INCLUDE")]
     pub includes: Vec<String>,
+
+    /// Name the attachment
+    ///
+    /// Scanners select attachments by name. Adding again under the
+    /// same name and target updates the attachment; an unnamed add
+    /// always creates a new one. A name is letters, digits, `-`, `_`,
+    /// and `.`
+    #[arg(short, long, value_name = "NAME")]
+    pub name: Option<String>,
 
     /// Files to exclude (path glob relative to the root, repeatable)
     #[arg(short, long, value_name = "PATTERN")]
@@ -88,6 +94,12 @@ pub struct AttachmentAddArgs {
     #[arg(short, long, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
+    /// Object the files are about
+    ///
+    /// ID (or prefix) of any stored object, such as a session or note
+    #[arg(short, long, value_name = "OBJECT")]
+    pub target: Option<String>,
+
     /// Add the attachment to a dataset
     ///
     /// Dataset ID (or prefix). The attachment is stored and added to
@@ -97,15 +109,16 @@ pub struct AttachmentAddArgs {
 
     /// Add an attachment already in the store to a dataset
     ///
-    /// Takes the attachment from the store instead of the file
-    /// system. Requires --dataset
+    /// Attachment name, ID, or ID prefix. Takes the attachment from
+    /// the store instead of the file system. Requires --dataset
     #[arg(
         short = 'S',
         long,
+        value_name = "ATTACHMENT",
         requires = "dataset",
-        conflicts_with_all = ["includes", "root", "exclude"]
+        conflicts_with_all = ["includes", "name", "root", "exclude", "target"]
     )]
-    pub stored: bool,
+    pub stored: Option<String>,
 }
 
 #[derive(Args)]
@@ -147,13 +160,13 @@ pub fn add(args: AttachmentAddArgs) {
     let store = open_store("gage attachment add");
     let attachments = AttachmentStore::from(&store);
 
-    if args.stored {
-        let record = resolve("gage attachment add", &attachments, &args.name);
+    if let Some(stored) = args.stored.as_deref() {
+        let record = resolve("gage attachment add", &attachments, stored);
         let dataset = args
             .dataset
             .as_deref()
             .expect("clap requires --dataset with --stored");
-        add_to_dataset(&store, dataset, &record.id, &record.attrs.name);
+        add_to_dataset(&store, dataset, &record.id, record.attrs.name.as_deref());
         return;
     }
 
@@ -165,8 +178,19 @@ pub fn add(args: AttachmentAddArgs) {
             std::process::exit(1);
         }
     };
+    let target = args
+        .target
+        .as_deref()
+        .map(|input| match resolve_target(&store, input) {
+            Ok(url) => url,
+            Err(e) => {
+                eprintln!("gage attachment add: {e}");
+                std::process::exit(1);
+            }
+        });
     let spec = AttachmentSpec {
-        name: &args.name,
+        name: args.name.as_deref(),
+        target: target.as_deref(),
         root: &root,
         includes: &args.includes,
         excludes: &args.exclude,
@@ -179,38 +203,32 @@ pub fn add(args: AttachmentAddArgs) {
         }
     };
     let files = plural(added.file_count as usize, "file");
+    let shown = describe(args.name.as_deref(), &added.id);
     match added.outcome {
-        AttachmentOutcome::Added => {
-            println!(
-                "Added attachment {} ({}) with {files}",
-                args.name,
-                short_uuid(&added.id)
-            );
-        }
-        AttachmentOutcome::Updated => {
-            println!(
-                "Updated attachment {} ({}) with {files}",
-                args.name,
-                short_uuid(&added.id)
-            );
-        }
+        AttachmentOutcome::Added => println!("Added attachment {shown} with {files}"),
+        AttachmentOutcome::Updated => println!("Updated attachment {shown} with {files}"),
         AttachmentOutcome::Unchanged => {
-            println!(
-                "Attachment {} ({}) is unchanged with {files}",
-                args.name,
-                short_uuid(&added.id)
-            );
+            println!("Attachment {shown} is unchanged with {files}")
         }
     }
 
     if let Some(prefix) = args.dataset.as_deref() {
-        add_to_dataset(&store, prefix, &added.id, &args.name);
+        add_to_dataset(&store, prefix, &added.id, args.name.as_deref());
+    }
+}
+
+/// The attachment as messages show it: `name (short id)` when named,
+/// the short id alone otherwise
+fn describe(name: Option<&str>, id: &str) -> String {
+    match name {
+        Some(name) => format!("{name} ({})", short_uuid(id)),
+        None => short_uuid(id).to_string(),
     }
 }
 
 /// Add one stored attachment to a dataset and report the outcome in
 /// the shape `gage session add` uses.
-fn add_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: &str) {
+fn add_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: Option<&str>) {
     let datasets = DatasetStore::from(store);
     let dataset_id = match datasets.resolve_id(dataset_prefix) {
         Ok(id) => id,
@@ -234,8 +252,8 @@ fn add_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: &str) {
             AttachmentLinkOutcome::Unchanged => "Unchanged",
         };
         println!(
-            "{verb} attachment {name} ({}) to dataset {dataset}",
-            short_uuid(&o.id)
+            "{verb} attachment {} to dataset {dataset}",
+            describe(name, &o.id)
         );
     }
 }
@@ -274,12 +292,12 @@ pub async fn list(args: AttachmentListArgs) {
     }
     let show = args.limit.show_count(total);
     let sql = format!(
-        "SELECT a.id, a.id_prefix, a.name, a.file_count, a.size, a.root, a.modified \
+        "SELECT a.id, a.id_prefix, a.name, a.target, a.file_count, a.size, a.root, a.modified \
          FROM {from} ORDER BY {order} LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 
-    let header: Vec<String> = ["Id", "Name", "Files", "Size", "Root", "Modified"]
+    let header: Vec<String> = ["Id", "Name", "Target", "Files", "Size", "Root", "Modified"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -288,16 +306,24 @@ pub async fn list(args: AttachmentListArgs) {
         let ids = column::<StringArray>(batch, 0);
         let prefixes = column::<StringArray>(batch, 1);
         let names = column::<StringArray>(batch, 2);
-        let files = column::<Int64Array>(batch, 3);
-        let sizes = column::<Int64Array>(batch, 4);
-        let roots = column::<StringArray>(batch, 5);
-        let modifieds = column::<TimestampMillisecondArray>(batch, 6);
+        let targets = column::<StringArray>(batch, 3);
+        let files = column::<Int64Array>(batch, 4);
+        let sizes = column::<Int64Array>(batch, 5);
+        let roots = column::<StringArray>(batch, 6);
+        let modifieds = column::<TimestampMillisecondArray>(batch, 7);
         for i in 0..batch.num_rows() {
             let id = ids.value(i);
             let shown = if args.full_id { id } else { short_uuid(id) };
+            let name = if names.is_null(i) { "" } else { names.value(i) };
+            let target = if targets.is_null(i) {
+                String::new()
+            } else {
+                target_cell(targets.value(i))
+            };
             rows.push(vec![
                 styled_id(shown, prefixes.value(i), IdKind::Gage),
-                names.value(i).to_string(),
+                name.to_string(),
+                target,
                 files.value(i).to_string(),
                 format_size(sizes.value(i)),
                 shorten_home(Path::new(roots.value(i))),
@@ -309,11 +335,19 @@ pub async fn list(args: AttachmentListArgs) {
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::new(2..4), Alignment::right())
-        .modify(Columns::new(2..).not(Rows::first()), style::dim())
+        .modify(Columns::new(3..5), Alignment::right())
+        .modify(Columns::new(3..).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
     args.limit.print_summary(shown, total, "attachment");
+}
+
+/// A target URL as listings show it: the scheme and the short id
+fn target_cell(url: &str) -> String {
+    match url.split_once(':') {
+        Some((scheme, id)) => format!("{scheme}:{}", short_uuid(id)),
+        None => url.to_string(),
+    }
 }
 
 pub fn show(args: AttachmentShowArgs) {
@@ -333,7 +367,8 @@ pub fn show(args: AttachmentShowArgs) {
     };
     let attrs = [
         ("id", record.id.clone()),
-        ("name", record.attrs.name.clone()),
+        ("name", record.attrs.name.clone().unwrap_or_default()),
+        ("target", record.attrs.target.clone().unwrap_or_default()),
         ("root", shorten_home(&record.attrs.root)),
         ("includes", record.attrs.includes.join(" ")),
         ("excludes", record.attrs.excludes.join(" ")),
@@ -401,9 +436,8 @@ fn remove_from_dataset(store: &Store, dataset_prefix: &str, ids: &[String]) {
     };
     for o in &outcomes {
         println!(
-            "Removed attachment {} ({}) from dataset {}",
-            o.name,
-            short_uuid(&o.id),
+            "Removed attachment {} from dataset {}",
+            o.label,
             short_uuid(&dataset_id)
         );
     }
@@ -425,38 +459,48 @@ fn remove_from_store(store: &Store, ids: &[String]) {
                 .attachments
                 .iter()
                 .find(|r| &r.id == id)
-                .map(|r| r.attrs.name.as_str())
-                .unwrap_or_default();
+                .and_then(|r| r.attrs.name.as_deref());
             println!(
-                "Removed attachment {name} ({}) from dataset {}",
-                short_uuid(id),
+                "Removed attachment {} from dataset {}",
+                describe(name, id),
                 short_uuid(&held.dataset_id)
             );
         }
     }
     for record in &outcome.attachments {
         println!(
-            "Removed attachment {} ({})",
-            record.attrs.name,
-            short_uuid(&record.id)
+            "Removed attachment {}",
+            describe(record.attrs.name.as_deref(), &record.id)
         );
     }
 }
 
 /// The live attachment an argument names: by name first, then by id
-/// or prefix. Exits with the error when neither resolves.
+/// or prefix. A name shared by several attachments is an error that
+/// lists them. Exits with the error when nothing resolves.
 fn resolve(command: &str, attachments: &AttachmentStore<'_>, arg: &str) -> AttachmentRecord {
-    match attachments.get_by_name(arg) {
-        Ok(record) => return record,
-        Err(StoreError::ObjectDeleted(_)) => {
-            eprintln!("{command}: attachment {arg} is removed");
-            std::process::exit(1);
-        }
-        Err(StoreError::ObjectNotFound(_)) => {}
+    let named: Vec<AttachmentRecord> = match attachments
+        .query()
+        .name(arg)
+        .iter()
+        .and_then(|records| records.collect())
+    {
+        Ok(records) => records,
         Err(e) => {
             eprintln!("{command}: {e}");
             std::process::exit(1);
         }
+    };
+    if named.len() > 1 {
+        eprintln!("{command}: {arg} names {} attachments:", named.len());
+        for record in &named {
+            let target = record.attrs.target.as_deref().unwrap_or_default();
+            eprintln!("  {} {target}", record.id);
+        }
+        std::process::exit(1);
+    }
+    if let Some(record) = named.into_iter().next() {
+        return record;
     }
     match attachments.get(arg) {
         Ok(record) => record,

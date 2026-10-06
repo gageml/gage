@@ -3454,24 +3454,25 @@ mod tests {
         let attachments = AttachmentStore::from(&store);
         let datasets = DatasetStore::from(&store);
         let pats = ["settings.json".to_string()];
+        let mut ids = Vec::new();
         for name in ["cfg", "other"] {
             let added = attachments
                 .add(&AttachmentSpec {
-                    name,
+                    name: Some(name),
+                    target: None,
                     root: &root,
                     includes: &pats,
                     excludes: &[],
                 })
                 .unwrap();
             let dataset = datasets.create().unwrap();
-            datasets.attachments_link(&dataset, &[added.id]).unwrap();
+            datasets
+                .attachments_link(&dataset, &[added.id.clone()])
+                .unwrap();
+            ids.push(added.id);
         }
         // One dataset holds both; scan that one
         let dataset = datasets.create().unwrap();
-        let ids: Vec<String> = ["cfg", "other"]
-            .iter()
-            .map(|n| attachments.get_by_name(n).unwrap().id)
-            .collect();
         datasets.attachments_link(&dataset, &ids).unwrap();
         let dataset_sha = datasets.get(&dataset).unwrap().commit_sha;
 

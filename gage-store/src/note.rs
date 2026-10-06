@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
-use crate::url;
+use crate::object::{EditOutcome, Object, ObjectTree, object_ref, resolve_target};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::note";
@@ -27,8 +26,6 @@ const TEXT_VALUE_FILE: &str = "value.txt";
 const JSON_VALUE_FILE: &str = "value.json";
 const TARGET_LINK: &str = "target.link";
 const ATTRS_FILE: &str = "attrs.json";
-/// The one scheme whose URLs may carry a fragment
-const SESSION_SCHEME: &str = "session";
 
 /// Note operations over an opened store.
 pub struct NoteStore<'a> {
@@ -147,7 +144,7 @@ impl NoteStore<'_> {
     /// Create a note. Returns the new note's id.
     pub fn create(&self, input: NoteInput) -> Result<String, StoreError> {
         let target_sha = match input.target {
-            Some(url) => Some(self.resolve_target(url)?),
+            Some(url) => Some(resolve_target(self.store, url)?),
             None => None,
         };
         let attrs = NoteAttrs {
@@ -185,7 +182,7 @@ impl NoteStore<'_> {
     ) -> Result<(), StoreError> {
         let link = match input.target {
             Some(url) => {
-                let tip = self.resolve_target(url)?;
+                let tip = resolve_target(self.store, url)?;
                 Some(target_commit.map_or(tip, String::from))
             }
             None => None,
@@ -272,31 +269,6 @@ impl NoteStore<'_> {
         })
     }
 
-    /// Validate a target URL and return the tip SHA of the object it
-    /// names. The body is a full id; the object must be live and of
-    /// the scheme's type; a fragment is accepted for `session:` only
-    /// and must be a line selection.
-    fn resolve_target(&self, raw: &str) -> Result<String, StoreError> {
-        let parsed = url::parse(raw)?;
-        match parsed.fragment {
-            Some(fragment) if parsed.scheme == SESSION_SCHEME => {
-                url::validate_line_selection(fragment)?
-            }
-            Some(_) => return Err(StoreError::BadTarget(raw.to_string())),
-            None => {}
-        }
-        let sha = self
-            .store
-            .rev_parse(&object_ref(parsed.body))?
-            .ok_or_else(|| StoreError::TargetNotFound(raw.to_string()))?;
-        let target = self.store.read_object(&sha)?;
-        require_type(&target, &format!("gage::{}", parsed.scheme))?;
-        if target.header.is_tombstone() {
-            return Err(StoreError::ObjectDeleted(target.header.id));
-        }
-        Ok(sha)
-    }
-
     /// Look up one note by full id or unique prefix.
     ///
     /// Returns [`StoreError::ObjectNotFound`] when no object matches,
@@ -340,7 +312,7 @@ impl NoteStore<'_> {
         let value = edit.value.unwrap_or(current_value);
         let targets = match edit.target {
             Some(url) => {
-                let sha = self.resolve_target(url)?;
+                let sha = resolve_target(self.store, url)?;
                 attrs.target = Some(url.to_string());
                 vec![sha]
             }
