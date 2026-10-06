@@ -340,7 +340,7 @@ mod tests {
                     name.to_string(),
                     TaskDef {
                         name: name.to_string(),
-                        f: name.to_string(),
+                        call: name.to_string(),
                         attachments: Default::default(),
                         notes: TaskDepsDef {
                             wants: wants.iter().map(|s| s.to_string()).collect(),

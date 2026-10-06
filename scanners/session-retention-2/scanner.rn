@@ -14,7 +14,7 @@ pub const SCANNER = #{
     description: "Highlight unset session retention policy",
     groups: ["default"],
     attachments: #{
-        claude_config: #{ f: "attach_claude_config" },
+        "claude-config": #{},
     },
     tasks: #{
         check: #{

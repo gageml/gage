@@ -212,7 +212,7 @@ impl CompiledScanner {
             functions: self
                 .tasks
                 .iter()
-                .map(|(name, def)| (name.clone(), def.f.clone()))
+                .map(|(name, def)| (name.clone(), def.call.clone()))
                 .collect(),
         }
     }
@@ -271,11 +271,11 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
 
     let vm = Vm::new(rt.clone(), unit.clone());
     for task in def.tasks.values() {
-        if vm.lookup_function([task.f.as_str()]).is_err() {
+        if vm.lookup_function([task.call.as_str()]).is_err() {
             return Err(Error::MissingTask {
                 scanner: def.name.clone(),
                 task: task.name.clone(),
-                function: task.f.clone(),
+                function: task.call.clone(),
             });
         }
     }
@@ -2739,11 +2739,11 @@ mod tests {
                 name: "attacher",
                 description: "Attaches things",
                 attachments: #{
-                    cfg: #{ f: "attach_cfg" },
+                    cfg: #{ call: "attach_cfg" },
                     stack: #{},
                 },
                 tasks: #{
-                    check: #{ f: "run_check", attachments: #{ needs: ["claude-config"] } },
+                    check: #{ call: "run_check", attachments: #{ needs: ["claude-config"] } },
                 },
             };
 
@@ -2754,7 +2754,7 @@ mod tests {
                 println!("{} {}", a.name.unwrap(), a.outcome);
             }
 
-            pub async fn stack() {
+            pub async fn attach_stack() {
                 for s in dataset().sessions().await {
                     let project = s.attrs().await.project.unwrap();
                     log::info!("project {}", project);
@@ -2792,7 +2792,7 @@ mod tests {
             compiled.attachments,
             BTreeMap::from([
                 ("cfg".to_string(), "attach_cfg".to_string()),
-                ("stack".to_string(), "stack".to_string()),
+                ("stack".to_string(), "attach_stack".to_string()),
             ])
         );
 
@@ -2914,7 +2914,7 @@ mod tests {
                 attachments: #{ bad: #{} },
                 tasks: #{},
             };
-            pub async fn bad() {
+            pub async fn attach_bad() {
                 attach(Files::include(["x"]).root("/nonexistent/dir")).await?;
             }
         "###;

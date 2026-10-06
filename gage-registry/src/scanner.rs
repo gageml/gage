@@ -187,10 +187,10 @@ pub struct TaskAttachmentsDef {
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDef {
     pub name: String,
-    /// The function that runs the task; the task name unless `f`
-    /// names another. A string, since Rune does not evaluate a
-    /// function reference inside a `const`
-    pub f: String,
+    /// The function that runs the task: `call` when given, else the
+    /// task name with `-` as `_`. A string, since Rune does not
+    /// evaluate a function reference inside a `const`
+    pub call: String,
     pub notes: TaskDepsDef,
     pub issues: TaskDepsDef,
     pub attachments: TaskAttachmentsDef,
@@ -354,7 +354,7 @@ impl fmt::Display for ParseError {
             ParseError::AttachmentField { key } => {
                 write!(
                     f,
-                    "attachment '{key}' must be an object whose `f` is a function name string"
+                    "attachment '{key}' must be an object whose `call` is a function name string"
                 )
             }
             ParseError::IncludeStr {
@@ -965,9 +965,9 @@ impl fmt::Display for ParseScannerFileError {
 impl std::error::Error for ParseScannerFileError {}
 
 /// Parse `SCANNER.attachments`: key → function name. Each value is an
-/// object whose `f` is the function's name as a string and defaults
-/// to the key. A string, not a path: Rune does not evaluate a function
-/// reference inside a `const`.
+/// object whose `call` is the function's name as a string; absent, the
+/// function is `attach_<key>` with `-` as `_`. A string, not a path:
+/// Rune does not evaluate a function reference inside a `const`.
 fn parse_attachments(
     source: &str,
     obj: &ast::ExprObject,
@@ -983,15 +983,21 @@ fn parse_attachments(
         let ast::Expr::Object(entry) = expr else {
             return Err(ParseError::AttachmentField { key });
         };
-        let f = match object_field(source, entry, "f") {
+        let call = match object_field(source, entry, "call") {
             Some(expr) => {
                 expr_str(source, expr).ok_or(ParseError::AttachmentField { key: key.clone() })?
             }
-            None => key.clone(),
+            None => format!("attach_{}", function_name(&key)),
         };
-        attachments.insert(key, f);
+        attachments.insert(key, call);
     }
     Ok(attachments)
+}
+
+/// A key as a function name: `-` becomes `_`, since a key may be a
+/// quoted string but a function name is an identifier.
+fn function_name(key: &str) -> String {
+    key.replace('-', "_")
 }
 
 /// The expression assigned to `name` in an object literal.
@@ -1046,7 +1052,7 @@ fn parse_tasks(
             return Err(ParseError::DuplicateTask(name));
         }
 
-        let mut f = name.clone();
+        let mut call = function_name(&name);
         let mut notes = TaskDepsDef::default();
         let mut issues = TaskDepsDef::default();
         let mut attachments = TaskAttachmentsDef::default();
@@ -1059,10 +1065,10 @@ fn parse_tasks(
                 continue;
             };
             match tkey.as_str() {
-                "f" => {
-                    f = expr_str(source, texpr).ok_or(ParseError::TaskFieldType {
+                "call" => {
+                    call = expr_str(source, texpr).ok_or(ParseError::TaskFieldType {
                         task: name.clone(),
-                        field: "f",
+                        field: "call",
                     })?;
                     continue;
                 }
@@ -1090,7 +1096,7 @@ fn parse_tasks(
             name.clone(),
             TaskDef {
                 name,
-                f,
+                call,
                 notes,
                 issues,
                 attachments,
@@ -1480,20 +1486,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_attachments_and_task_functions() {
+    fn parse_attachments_and_task_calls() {
         let source = r#"
 pub const SCANNER = #{
     name: "demo",
     attachments: #{
-        claude_config: #{ f: "attach_claude_config" },
-        stack: #{},
+        "claude-config": #{ call: "attach_config" },
+        "stack-files": #{},
     },
     tasks: #{
         check: #{
-            f: "run_check",
+            call: "run_check",
             attachments: #{ needs: ["claude-config"], wants: ["stack-*"] },
         },
-        plain: #{},
+        "plain-task": #{},
     },
 };
 "#;
@@ -1501,19 +1507,16 @@ pub const SCANNER = #{
         assert_eq!(
             def.attachments,
             BTreeMap::from([
-                (
-                    "claude_config".to_string(),
-                    "attach_claude_config".to_string()
-                ),
-                ("stack".to_string(), "stack".to_string()),
+                ("claude-config".to_string(), "attach_config".to_string()),
+                ("stack-files".to_string(), "attach_stack_files".to_string()),
             ])
         );
         let check = &def.tasks["check"];
-        assert_eq!(check.f, "run_check");
+        assert_eq!(check.call, "run_check");
         assert_eq!(check.attachments.needs, ["claude-config"]);
         assert_eq!(check.attachments.wants, ["stack-*"]);
-        let plain = &def.tasks["plain"];
-        assert_eq!(plain.f, "plain");
+        let plain = &def.tasks["plain-task"];
+        assert_eq!(plain.call, "plain_task");
         assert_eq!(plain.attachments, TaskAttachmentsDef::default());
     }
 
@@ -1531,13 +1534,13 @@ pub const SCANNER = #{ name: "demo", attachments: #{ cfg: attach_cfg } };
         );
 
         let bad_f = r#"
-pub const SCANNER = #{ name: "demo", tasks: #{ main: #{ f: my_main } } };
+pub const SCANNER = #{ name: "demo", tasks: #{ main: #{ call: my_main } } };
 "#;
         let Err(err) = parse_scanner(bad_f, "demo", Path::new("/tmp/demo/scanner.rn")) else {
             panic!("bad_f parsed");
         };
         assert!(
-            matches!(&err, ParseError::TaskFieldType { task, field } if task == "main" && *field == "f"),
+            matches!(&err, ParseError::TaskFieldType { task, field } if task == "main" && *field == "call"),
             "{err}"
         );
 

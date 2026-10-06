@@ -761,7 +761,7 @@ mod tests {
                     (*name).to_string(),
                     TaskDef {
                         name: (*name).to_string(),
-                        f: (*name).to_string(),
+                        call: (*name).to_string(),
                         notes: deps(nw, nwr),
                         issues: deps(iw, iwr),
                         attachments: Default::default(),
