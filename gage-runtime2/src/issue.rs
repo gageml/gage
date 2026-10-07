@@ -47,9 +47,9 @@ use rune::runtime::{Formatter, Protocol, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
+use crate::key::encode_key;
 use crate::note::Note;
 use crate::scan::{Scan, ScanContext, current, run, sql_str, string_column};
-use crate::validate::encode_key;
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;

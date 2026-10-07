@@ -30,7 +30,7 @@ use crate::object::{LinkFile, Object};
 
 /// Bumped when the schema changes. A mismatch discards the file and
 /// rebuilds from an empty ref table.
-pub const INDEX_SCHEMA_VERSION: u32 = 3;
+pub const INDEX_SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (schema_version INTEGER NOT NULL);

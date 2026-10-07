@@ -2,8 +2,8 @@
 //! read.
 //!
 //! An attachment is added from a directory and a pattern list,
-//! optionally named and optionally targeting a session, listed on its
-//! own or as a dataset's, shown file by file, and removed. A dataset
+//! optionally named, keyed, and targeting objects, listed on its own
+//! or as a dataset's, shown file by file, and removed. A dataset
 //! holds attachments the way it holds sessions: `add --dataset`
 //! stores the attachment and adds it to the dataset in one step,
 //! `remove --dataset` takes it out of the dataset without touching
@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
-use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::array::{
+    Array, Int64Array, ListArray, StringArray, TimestampMillisecondArray,
+};
 use gage_claude::driver::ClaudeDriver;
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
@@ -50,11 +52,12 @@ pub enum AttachmentCommand {
     /// not cross `/`, and `{a,b}` and `[a-z]` are supported. Excludes
     /// use the same form, and a directory an exclude matches is not
     /// entered. An attachment holds at most 10 MiB and 1000 files.
-    /// Adding again under the same name and target updates the
-    /// attachment when its files changed and is otherwise a no-op; an
-    /// unnamed add always creates a new attachment. With --stored, an
-    /// attachment already in the store is added to a dataset without
-    /// reading the file system.
+    /// Adding again under the same key updates the attachment, with
+    /// any new targets added to it, and is a no-op when nothing
+    /// changed; a named add without --key is keyed by its name and
+    /// selection, and an unnamed add without --key always creates a
+    /// new attachment. With --stored, an attachment already in the
+    /// store is added to a dataset without reading the file system.
     Add(AttachmentAddArgs),
 
     /// List attachments
@@ -82,12 +85,18 @@ pub struct AttachmentAddArgs {
 
     /// Name the attachment
     ///
-    /// Scanners select attachments by name. Adding again under the
-    /// same name and target updates the attachment; an unnamed add
-    /// always creates a new one. A name is letters, digits, `-`, `_`,
-    /// and `.`
+    /// Scanners select attachments by name. A name is letters,
+    /// digits, `-`, `_`, and `.`
     #[arg(short, long, value_name = "NAME")]
     pub name: Option<String>,
+
+    /// Key the attachment
+    ///
+    /// A later add under the same key updates this attachment instead
+    /// of creating one. Without --key, a named add is keyed by its
+    /// name, root, and patterns
+    #[arg(short, long, value_name = "KEY")]
+    pub key: Option<String>,
 
     /// Files to exclude (path glob relative to the root, repeatable)
     #[arg(short, long, value_name = "PATTERN")]
@@ -99,11 +108,11 @@ pub struct AttachmentAddArgs {
     #[arg(short, long, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
-    /// Object the files are about
+    /// Object the files are about (repeatable)
     ///
     /// ID (or prefix) of any stored object, such as a session or note
-    #[arg(short, long, value_name = "OBJECT")]
-    pub target: Option<String>,
+    #[arg(short, long = "target", value_name = "OBJECT")]
+    pub targets: Vec<String>,
 
     /// Add the attachment to a dataset
     ///
@@ -121,7 +130,7 @@ pub struct AttachmentAddArgs {
         long,
         value_name = "ATTACHMENT",
         requires = "dataset",
-        conflicts_with_all = ["includes", "name", "root", "exclude", "target", "scanners"]
+        conflicts_with_all = ["includes", "name", "key", "root", "exclude", "targets", "scanners"]
     )]
     pub stored: Option<String>,
 
@@ -136,7 +145,7 @@ pub struct AttachmentAddArgs {
         long = "scanner",
         value_name = "SCANNER",
         requires = "dataset",
-        conflicts_with_all = ["includes", "name", "root", "exclude", "target"]
+        conflicts_with_all = ["includes", "name", "key", "root", "exclude", "targets"]
     )]
     pub scanners: Vec<String>,
 }
@@ -217,19 +226,20 @@ pub async fn add(args: AttachmentAddArgs) {
             std::process::exit(1);
         }
     };
-    let target = args
-        .target
-        .as_deref()
-        .map(|input| match resolve_target(&store, input) {
-            Ok(url) => url,
+    let mut targets = Vec::with_capacity(args.targets.len());
+    for input in &args.targets {
+        match resolve_target(&store, input) {
+            Ok(url) => targets.push(url),
             Err(e) => {
                 eprintln!("gage attachment add: {e}");
                 std::process::exit(1);
             }
-        });
+        }
+    }
     let spec = AttachmentSpec {
         name: args.name.as_deref(),
-        target: target.as_deref(),
+        key: args.key.as_deref(),
+        targets: &targets,
         root: &root,
         includes: &args.includes,
         excludes: &args.exclude,
@@ -409,12 +419,12 @@ pub async fn list(args: AttachmentListArgs) {
     }
     let show = args.limit.show_count(total);
     let sql = format!(
-        "SELECT a.id, a.id_prefix, a.name, a.target, a.file_count, a.size, a.root, a.modified \
+        "SELECT a.id, a.id_prefix, a.name, a.targets, a.file_count, a.size, a.root, a.modified \
          FROM {from} ORDER BY {order} LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 
-    let header: Vec<String> = ["Id", "Name", "Target", "Files", "Size", "Root", "Modified"]
+    let header: Vec<String> = ["Id", "Name", "Targets", "Files", "Size", "Root", "Modified"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -423,7 +433,7 @@ pub async fn list(args: AttachmentListArgs) {
         let ids = column::<StringArray>(batch, 0);
         let prefixes = column::<StringArray>(batch, 1);
         let names = column::<StringArray>(batch, 2);
-        let targets = column::<StringArray>(batch, 3);
+        let targets = column::<ListArray>(batch, 3);
         let files = column::<Int64Array>(batch, 4);
         let sizes = column::<Int64Array>(batch, 5);
         let roots = column::<StringArray>(batch, 6);
@@ -432,15 +442,10 @@ pub async fn list(args: AttachmentListArgs) {
             let id = ids.value(i);
             let shown = if args.full_id { id } else { short_uuid(id) };
             let name = if names.is_null(i) { "" } else { names.value(i) };
-            let target = if targets.is_null(i) {
-                String::new()
-            } else {
-                target_cell(targets.value(i))
-            };
             rows.push(vec![
                 styled_id(shown, prefixes.value(i), IdKind::Gage),
                 name.to_string(),
-                target,
+                targets_cell(&targets.value(i)),
                 files.value(i).to_string(),
                 format_size(sizes.value(i)),
                 shorten_home(Path::new(roots.value(i))),
@@ -459,11 +464,20 @@ pub async fn list(args: AttachmentListArgs) {
     args.limit.print_summary(shown, total, "attachment");
 }
 
-/// A target URL as listings show it: the scheme and the short id
-fn target_cell(url: &str) -> String {
-    match url.split_once(':') {
-        Some((scheme, id)) => format!("{scheme}:{}", short_uuid(id)),
-        None => url.to_string(),
+/// The targets as listings show them: none as blank, one as its
+/// scheme and short id, more as a count
+fn targets_cell(targets: &datafusion::arrow::array::ArrayRef) -> String {
+    let urls = targets
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("attachment targets hold strings");
+    match urls.len() {
+        0 => String::new(),
+        1 => match urls.value(0).split_once(':') {
+            Some((scheme, id)) => format!("{scheme}:{}", short_uuid(id)),
+            None => urls.value(0).to_string(),
+        },
+        n => format!("{n} targets"),
     }
 }
 
@@ -485,7 +499,8 @@ pub fn show(args: AttachmentShowArgs) {
     let attrs = [
         ("id", record.id.clone()),
         ("name", record.attrs.name.clone().unwrap_or_default()),
-        ("target", record.attrs.target.clone().unwrap_or_default()),
+        ("key", record.attrs.key.clone().unwrap_or_default()),
+        ("targets", record.attrs.targets.join(" ")),
         ("root", shorten_home(&record.attrs.root)),
         ("includes", record.attrs.includes.join(" ")),
         ("excludes", record.attrs.excludes.join(" ")),
@@ -611,8 +626,8 @@ fn resolve(command: &str, attachments: &AttachmentStore<'_>, arg: &str) -> Attac
     if named.len() > 1 {
         eprintln!("{command}: {arg} names {} attachments:", named.len());
         for record in &named {
-            let target = record.attrs.target.as_deref().unwrap_or_default();
-            eprintln!("  {} {target}", record.id);
+            let key = record.attrs.key.as_deref().unwrap_or_default();
+            eprintln!("  {} {key}", record.id);
         }
         std::process::exit(1);
     }

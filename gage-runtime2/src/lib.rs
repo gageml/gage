@@ -39,6 +39,7 @@ mod attachment;
 mod fail;
 mod io;
 mod issue;
+mod key;
 mod log;
 mod note;
 mod progress;

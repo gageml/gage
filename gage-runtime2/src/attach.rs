@@ -12,9 +12,15 @@
 //! [`Files`] is the selection, mirroring `gage attachment add`:
 //! `Files::include(list)` names the include patterns, `.root(path)`
 //! the directory to select under (default the current directory, `~`
-//! expanded), and `.exclude(list)` the exclude patterns. The writer's
-//! `.name(str)` and `.target(object)` are optional; a target is a
-//! `Session`, an object id or prefix, or a Gage URL.
+//! expanded), and `.exclude(list)` the exclude patterns.
+//! `files.key_part()` is the part of a key the selection contributes.
+//!
+//! The writer's `.name(str)`, `.key(key)`, `.target(object)`, and
+//! `.targets(list)` are optional. The key is the identity a later
+//! attach addresses: a named attach without one takes the name and
+//! the selection's key part. A target is a `Session`, an object id or
+//! prefix, or a Gage URL; targets given to an attachment that exists
+//! are added to those it has.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,12 +29,15 @@ use datafusion::prelude::SessionContext;
 use gage_query2::{ContextBuilder, ScanScope};
 use gage_runtime::error::Error;
 use gage_session::Driver;
-use gage_store::{AttachmentLinkOutcome, AttachmentSpec, AttachmentStore, DatasetStore, Store};
+use gage_store::{
+    AttachmentLinkOutcome, AttachmentSpec, AttachmentStore, DatasetStore, Store, selection_key_part,
+};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 use tokio::sync::{OnceCell, mpsc};
 
+use crate::key::encode_key;
 use crate::scan::{ScanDatasetRef, SessionsQuery, target_url};
 
 tokio::task_local! {
@@ -91,8 +100,8 @@ impl AttachContext {
     }
 }
 
-/// One attachment an attachment function wrote: the object, its name
-/// and target, and what the dataset link did.
+/// One attachment an attachment function wrote: the object, its name,
+/// key, and targets, and what the dataset link did.
 #[derive(Debug, Clone, PartialEq, Eq, Any)]
 #[rune(item = ::gage)]
 pub struct Attached {
@@ -100,21 +109,29 @@ pub struct Attached {
     pub id: String,
     #[rune(get)]
     pub name: Option<String>,
-    /// The target as a Gage URL
     #[rune(get)]
-    pub target: Option<String>,
+    pub key: Option<String>,
+    /// The targets given to this write, as Gage URLs
+    #[rune(skip)]
+    pub targets: Vec<String>,
     /// `added`, `updated`, or `unchanged`
     #[rune(get)]
     pub outcome: String,
 }
 
 impl Attached {
+    /// The targets given to this write, as Gage URLs.
+    #[rune::function(instance)]
+    fn targets(&self) -> Vec<String> {
+        self.targets.clone()
+    }
+
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
-            "Attached {{ id: {:?}, name: {:?}, target: {:?}, outcome: {:?} }}",
-            self.id, self.name, self.target, self.outcome
+            "Attached {{ id: {:?}, name: {:?}, key: {:?}, targets: {:?}, outcome: {:?} }}",
+            self.id, self.name, self.key, self.targets, self.outcome
         )?;
         Ok(())
     }
@@ -136,14 +153,18 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(Files::include__meta)?;
     m.function_meta(Files::exclude)?;
     m.function_meta(Files::root)?;
+    m.function_meta(Files::key_part)?;
     m.function_meta(Files::debug)?;
     m.ty::<AttachWriter>()?;
     m.function_meta(AttachWriter::name)?;
+    m.function_meta(AttachWriter::key)?;
     m.function_meta(AttachWriter::target)?;
+    m.function_meta(AttachWriter::targets__meta)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: AttachWriter| async move {
         write(w).await
     })?;
     m.ty::<Attached>()?;
+    m.function_meta(Attached::targets)?;
     m.function_meta(Attached::debug)?;
     Ok(m)
 }
@@ -159,7 +180,8 @@ fn attach(files: Ref<Files>) -> AttachWriter {
     AttachWriter {
         files: files.clone(),
         name: None,
-        target: None,
+        key: None,
+        targets: Vec::new(),
     }
 }
 
@@ -236,6 +258,28 @@ impl Files {
         self
     }
 
+    /// The part of an attachment key this selection contributes: a
+    /// stable token for the root and the patterns, for a scanner that
+    /// composes its own key. The error is a root that does not
+    /// resolve.
+    #[rune::function(instance)]
+    fn key_part(&self) -> Result<String, Error> {
+        let root = self.canonical_root()?;
+        Ok(selection_key_part(&root, &self.includes, &self.excludes))
+    }
+
+    /// The root as the store records it: `~` expanded, the current
+    /// directory when unset, canonicalized.
+    fn canonical_root(&self) -> Result<PathBuf, Error> {
+        let root = match &self.root {
+            Some(path) => expand_home(path),
+            None => std::env::current_dir()
+                .map_err(|e| Error::Args(format!("attach: current directory: {e}")))?,
+        };
+        root.canonicalize()
+            .map_err(|e| Error::Args(format!("attach: root {}: {e}", root.display())))
+    }
+
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
@@ -265,8 +309,11 @@ pub struct AttachWriter {
     files: Files,
     #[rune(skip)]
     name: Option<String>,
+    /// The key as given; encoded at the await
     #[rune(skip)]
-    target: Option<Value>,
+    key: Option<Value>,
+    #[rune(skip)]
+    targets: Vec<Value>,
 }
 
 impl AttachWriter {
@@ -277,12 +324,29 @@ impl AttachWriter {
         self
     }
 
-    /// The object the files are about: a `Session`, an object id or
-    /// prefix, or a Gage URL.
+    /// The identity a later attach addresses, in place of the default
+    /// built from the name and `files.key_part()`. A string, or a
+    /// tuple of strings and integers.
+    #[rune::function(instance)]
+    fn key(mut self, key: Value) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// An object the files are about: a `Session`, an object id or
+    /// prefix, or a Gage URL. Repeatable.
     #[rune::function(instance)]
     fn target(mut self, target: Value) -> Self {
-        self.target = Some(target);
+        self.targets.push(target);
         self
+    }
+
+    /// Objects the files are about, as a list of what `target` takes.
+    #[rune::function(keep, instance)]
+    fn targets(mut self, list: Value) -> Result<Self, VmError> {
+        let items = list.borrow_ref::<rune::runtime::Vec>()?;
+        self.targets.extend(items.iter().cloned());
+        Ok(self)
     }
 }
 
@@ -292,35 +356,26 @@ impl AttachWriter {
 /// runtime fault.
 async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
     let ctx = current()?;
-    let root = match &w.files.root {
-        Some(path) => expand_home(path),
-        None => match std::env::current_dir() {
-            Ok(dir) => dir,
-            Err(e) => {
-                return Ok(Err(Error::Args(format!("attach: current directory: {e}"))));
-            }
-        },
-    };
-    let root = match root.canonicalize() {
+    let root = match w.files.canonical_root() {
         Ok(root) => root,
-        Err(e) => {
-            return Ok(Err(Error::Args(format!(
-                "attach: root {}: {e}",
-                root.display()
-            ))));
-        }
+        Err(e) => return Ok(Err(e)),
     };
-    let target = match &w.target {
-        Some(value) => match target_url(value).await? {
-            Ok(url) => Some(url),
+    let key = match w.key.as_ref().map(encode_key).transpose() {
+        Ok(key) => key,
+        Err(e) => return Ok(Err(e)),
+    };
+    let mut targets = Vec::with_capacity(w.targets.len());
+    for value in &w.targets {
+        match target_url(value).await? {
+            Ok(url) => targets.push(url),
             Err(e) => return Ok(Err(e)),
-        },
-        None => None,
-    };
+        }
+    }
     let store = ctx.store.lock().await;
     let spec = AttachmentSpec {
         name: w.name.as_deref(),
-        target: target.as_deref(),
+        key: key.as_deref(),
+        targets: &targets,
         root: &root,
         includes: &w.files.includes,
         excludes: &w.files.excludes,
@@ -344,7 +399,8 @@ async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
     let attached = Attached {
         id: added.id,
         name: w.name,
-        target,
+        key: added.key,
+        targets,
         outcome: outcome.to_string(),
     };
     match ctx.attached.send(attached.clone()) {
@@ -371,6 +427,33 @@ fn expand_home(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_leaves_the_caller_list_readable() {
+        let session = rune::to_value(crate::scan::Session {
+            id: "s1".to_string(),
+            line_count: 0,
+            commit: String::new(),
+        })
+        .unwrap();
+        let list = rune::to_value(vec![session.clone()]).unwrap();
+        let writer = AttachWriter {
+            files: Files {
+                includes: vec!["x".into()],
+                excludes: Vec::new(),
+                root: None,
+            },
+            name: None,
+            key: None,
+            targets: Vec::new(),
+        };
+        let writer = writer.targets(list.clone()).unwrap();
+        assert_eq!(writer.targets.len(), 1);
+        let items = list.borrow_ref::<rune::runtime::Vec>().unwrap();
+        assert_eq!(items.len(), 1);
+        let s = session.borrow_ref::<crate::scan::Session>().unwrap();
+        assert_eq!(s.id, "s1");
+    }
 
     #[test]
     fn home_expands_only_a_leading_tilde() {

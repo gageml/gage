@@ -3,9 +3,10 @@
 //!
 //! `scan().attachments()` is an [`AttachmentsQuery`]. `.name(pattern)`
 //! keeps the attachments whose name matches a `*`-glob, as a task's
-//! `wants` does; `.target(object)` keeps those about one object, given
-//! as a `Session`, an id or prefix, or a Gage URL.
-//! `session.attachments()` is the query with the session as target.
+//! `wants` does; `.target(object)` keeps those with the object among
+//! their targets, given as a `Session`, an id or prefix, or a Gage
+//! URL. `session.attachments()` is the query with the session as
+//! target.
 //! Awaiting the query reads the scoped `attachment` table and yields
 //! an [`Attachments`] iterator of [`Attachment`] values in dataset
 //! order. A name is a selector, not an identifier, so there is no
@@ -18,7 +19,7 @@
 //! fallible, returning `Error::Decode` for content that is not UTF-8
 //! or not JSON.
 
-use datafusion::arrow::array::{Array, BinaryArray};
+use datafusion::arrow::array::{Array, BinaryArray, ListArray, StringArray};
 use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
 use rune::alloc::fmt::TryWrite;
@@ -117,8 +118,8 @@ impl AttachmentsQuery {
         self
     }
 
-    /// Keep the attachments about `object`: a `Session`, an object id
-    /// or prefix, or a Gage URL.
+    /// Keep the attachments with `object` among their targets: a
+    /// `Session`, an object id or prefix, or a Gage URL.
     #[rune::function(instance)]
     fn target(mut self, object: Value) -> Self {
         self.target = Some(Target::Value(object));
@@ -145,13 +146,13 @@ async fn fetch_attachments(q: AttachmentsQuery) -> Result<Result<Attachments, Er
                 Err(e) => return Ok(Err(e)),
             },
         };
-        clauses.push(format!("target = '{}'", sql_str(&url)));
+        clauses.push(format!("array_has(targets, '{}')", sql_str(&url)));
     }
     let sql = if clauses.is_empty() {
-        "SELECT id, name, target, root FROM attachment".to_string()
+        "SELECT id, name, key, targets, root FROM attachment".to_string()
     } else {
         format!(
-            "SELECT id, name, target, root FROM attachment WHERE {}",
+            "SELECT id, name, key, targets, root FROM attachment WHERE {}",
             clauses.join(" AND ")
         )
     };
@@ -164,16 +165,27 @@ async fn attachments(sql: &str) -> Result<Vec<Attachment>, VmError> {
     for batch in &batches {
         let ids = string_column(batch, 0);
         let names = string_column(batch, 1);
-        let targets = string_column(batch, 2);
-        let roots = string_column(batch, 3);
-        let optional = |col: &datafusion::arrow::array::StringArray, i: usize| {
-            col.is_valid(i).then(|| col.value(i).to_string())
-        };
+        let keys = string_column(batch, 2);
+        let targets = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("attachment targets is a list column");
+        let roots = string_column(batch, 4);
+        let optional =
+            |col: &StringArray, i: usize| col.is_valid(i).then(|| col.value(i).to_string());
         for i in 0..batch.num_rows() {
+            let row_targets = targets.value(i);
+            let row_targets = row_targets
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("attachment targets hold strings");
+            let row_targets: Vec<String> = row_targets.iter().flatten().map(String::from).collect();
             out.push(Attachment {
                 id: ids.value(i).to_string(),
                 name: optional(names, i),
-                target: optional(targets, i),
+                key: optional(keys, i),
+                targets: rune::to_value(row_targets).map_err(VmError::from)?,
                 root: roots.value(i).to_string(),
             });
         }
@@ -190,9 +202,12 @@ pub struct Attachment {
     pub id: String,
     #[rune(get)]
     pub name: Option<String>,
-    /// The object the files are about, as a Gage URL
+    /// The identity a later attach addresses
     #[rune(get)]
-    pub target: Option<String>,
+    pub key: Option<String>,
+    /// The objects the files are about, a list of Gage URLs
+    #[rune(get)]
+    pub targets: Value,
     /// The directory the files were selected under
     #[rune(get)]
     pub root: String,
@@ -221,8 +236,8 @@ impl Attachment {
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
-            "Attachment {{ id: {:?}, name: {:?}, target: {:?} }}",
-            self.id, self.name, self.target
+            "Attachment {{ id: {:?}, name: {:?}, key: {:?}, targets: {:?} }}",
+            self.id, self.name, self.key, self.targets
         )?;
         Ok(())
     }
@@ -464,7 +479,8 @@ mod tests {
         let attachment = |name: &str| Attachment {
             id: format!("id-{name}"),
             name: Some(name.to_string()),
-            target: None,
+            key: None,
+            targets: rune::to_value(Vec::<String>::new()).unwrap(),
             root: "/r".to_string(),
         };
         let attachments = Attachments::new(vec![attachment("a"), attachment("b")]);

@@ -3,22 +3,26 @@
 //!
 //! An attachment is a file tree put in the store for scanners to
 //! read: a harness config directory, a project's manifests. Content
-//! is `attrs.json` (optional name and target, root, includes,
+//! is `attrs.json` (optional name and key, targets, root, includes,
 //! excludes, file count, size), the opaque `files.d/**` subtree
 //! holding the selected files at their paths relative to the root,
-//! and, when a target is given, `target.link` naming the target
+//! and, when targets are given, `targets.link` naming each target
 //! object's commit.
 //!
 //! A name is a selector, not an identifier; any number of attachments
-//! may share one. A name together with its target identifies an
-//! attachment: the object id is derived from `(name, target)`, where
-//! an absent target reads as the store, so re-adding under the same
-//! name and target updates the same object (unchanged content writes
-//! nothing, changed content writes an edit commit). An unnamed
-//! attachment has a random id and every add creates a new object. A
-//! dataset links attachments through `attachments.link` the way it
-//! links sessions. Tree construction, commit parents, and edits are
-//! the generic object model's job; see [`crate::object`].
+//! may share one. The key is the identity a later add addresses. An
+//! add whose key names a live attachment edits that attachment:
+//! unchanged content and targets write nothing, anything else writes
+//! an edit commit. An add whose key names nothing, or that has no
+//! key, creates an attachment with a random id. A named add without
+//! a key takes the default key: the name and the selection's key
+//! part, colon-joined; see [`selection_key_part`]. Targets are the
+//! objects the files are about, any number of them. An edit unions
+//! the given targets with those already linked, and a target already
+//! linked keeps the commit it was linked at. A dataset links
+//! attachments through `attachments.link` the way it links sessions.
+//! Tree construction, commit parents, and edits are the generic
+//! object model's job; see [`crate::object`].
 //!
 //! File selection uses shell path globs, as Nushell's `glob` does:
 //! an include is a path relative to the root, `*` and `?` do not
@@ -34,15 +38,16 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use gage_core::uuid::{derive_id, new_uuid, short_uuid};
+use gage_core::uuid::{new_uuid, short_uuid};
 use serde::{Deserialize, Serialize};
+use twox_hash::XxHash3_64;
 use wax::walk::{Entry, FileIterator, GlobEntry, LinkBehavior, WalkError};
 use wax::{Glob, Program};
 
 use crate::dataset::{DatasetAttachments, DatasetStore};
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type, resolve_target};
+use crate::object::{EditOutcome, Object, ObjectTree, require_type, resolve_target};
 use crate::session::build_files_tree;
 use crate::url;
 use crate::writer::write_blob;
@@ -51,9 +56,9 @@ use crate::{Store, StoreError};
 pub const OBJECT_TYPE: &str = "gage::attachment";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from an attachment's `attrs.json`.
-pub(crate) const INDEXED_ATTRS: &[&str] = &["name"];
+pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "key"];
 const FILES_TREE: &str = "files.d";
-const TARGET_LINK: &str = "target.link";
+const TARGETS_LINK: &str = "targets.link";
 /// The most an attachment may hold
 pub const MAX_SIZE: u64 = 10 * 1024 * 1024;
 pub const MAX_FILES: usize = 1000;
@@ -76,9 +81,14 @@ pub struct AttachmentAttrs {
     /// unnamed attachment
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The object the files are about, as a Gage URL with the full id
+    /// The identity a later add addresses; absent for an attachment
+    /// no later add can address
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+    pub key: Option<String>,
+    /// The objects the files are about, as Gage URLs with full ids,
+    /// in `targets.link` order
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
     /// The directory the files were selected under, on the machine
     /// that added them. File keys are paths relative to it.
     pub root: PathBuf,
@@ -91,12 +101,16 @@ pub struct AttachmentAttrs {
     pub size: u64,
 }
 
-/// What to add: the selection and, optionally, the name and target.
+/// What to add: the selection and, optionally, the name, key, and
+/// targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentSpec<'a> {
     pub name: Option<&'a str>,
-    /// A Gage URL of a live object with the full id and no fragment
-    pub target: Option<&'a str>,
+    /// The identity. `None` with a name takes the default key; `None`
+    /// without one creates an attachment no later add can address.
+    pub key: Option<&'a str>,
+    /// Gage URLs of live objects with full ids and no fragments
+    pub targets: &'a [String],
     pub root: &'a Path,
     /// At least one is required
     pub includes: &'a [String],
@@ -107,6 +121,8 @@ pub struct AttachmentSpec<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct AttachmentAddOutcome {
     pub id: String,
+    /// The key the attachment is stored under, default filled in
+    pub key: Option<String>,
     /// Commit SHA of the resulting version. When `outcome` is
     /// [`AttachmentOutcome::Unchanged`] this is the existing commit.
     pub commit_sha: String,
@@ -154,13 +170,21 @@ pub struct AttachmentFile {
     pub size: u64,
 }
 
-/// Derive the Gage object id of a named attachment from its name and
-/// target; an absent target reads as the store.
-pub fn attachment_object_id(name: &str, target: Option<&str>) -> String {
-    derive_id(&format!(
-        "attachment\0{name}\0{}",
-        target.unwrap_or_default()
-    ))
+/// The part of the default key a selection contributes: a stable
+/// 16-hex-digit XXH3 hash of the root and the patterns. It identifies
+/// the selection, not the selected content, so the content may change
+/// under the same key.
+pub fn selection_key_part(root: &Path, includes: &[String], excludes: &[String]) -> String {
+    let mut input = root.as_os_str().as_encoded_bytes().to_vec();
+    for pattern in includes {
+        input.extend_from_slice(b"\0i");
+        input.extend_from_slice(pattern.as_bytes());
+    }
+    for pattern in excludes {
+        input.extend_from_slice(b"\0x");
+        input.extend_from_slice(pattern.as_bytes());
+    }
+    format!("{:016x}", XxHash3_64::oneshot(&input))
 }
 
 impl AttachmentRecord {
@@ -172,12 +196,14 @@ impl AttachmentRecord {
 
 impl AttachmentStore<'_> {
     /// Select the files under `spec.root` and write them as an
-    /// attachment object. A named add is idempotent: the same name
-    /// and target address the same object, and unchanged content
-    /// writes nothing. An unnamed add always creates.
+    /// attachment object. A key that names a live attachment edits
+    /// it, with the targets unioned; otherwise the add creates.
     pub fn add(&self, spec: &AttachmentSpec<'_>) -> Result<AttachmentAddOutcome, StoreError> {
         if let Some(name) = spec.name {
             validate_name(name)?;
+        }
+        if let Some(key) = spec.key {
+            validate_key(key)?;
         }
         if !spec.root.is_dir() {
             return Err(StoreError::AttachmentInput(format!(
@@ -185,16 +211,32 @@ impl AttachmentStore<'_> {
                 spec.root.display()
             )));
         }
-        let target_sha = match spec.target {
-            Some(raw) => {
-                // An attachment is about an object, not a line range
-                if url::parse(raw)?.fragment.is_some() {
-                    return Err(StoreError::BadTarget(raw.to_string()));
-                }
-                Some(resolve_target(self.store, raw)?)
-            }
+        let key = match (spec.key, spec.name) {
+            (Some(key), _) => Some(key.to_string()),
+            (None, Some(name)) => Some(format!(
+                "{name}:{}",
+                selection_key_part(spec.root, spec.includes, spec.excludes)
+            )),
+            (None, None) => None,
+        };
+        let current = match &key {
+            Some(key) => self.live_under(key)?,
             None => None,
         };
+        let mut targets = match &current {
+            Some(current) => linked_targets(current)?,
+            None => Vec::new(),
+        };
+        for raw in spec.targets {
+            if targets.iter().any(|(url, _)| url == raw) {
+                continue;
+            }
+            // An attachment is about an object, not a line range
+            if url::parse(raw)?.fragment.is_some() {
+                return Err(StoreError::BadTarget(raw.to_string()));
+            }
+            targets.push((raw.clone(), resolve_target(self.store, raw)?));
+        }
         let path = self.store.path();
 
         let selected = select_files(spec.root, spec.includes, spec.excludes)?;
@@ -222,7 +264,8 @@ impl AttachmentStore<'_> {
 
         let attrs = AttachmentAttrs {
             name: spec.name.map(String::from),
-            target: spec.target.map(String::from),
+            key,
+            targets: targets.iter().map(|(url, _)| url.clone()).collect(),
             root: spec.root.to_path_buf(),
             includes: spec.includes.to_vec(),
             excludes: spec.excludes.to_vec(),
@@ -237,69 +280,63 @@ impl AttachmentStore<'_> {
             ..ObjectTree::default()
         };
         tree.subtrees.insert(FILES_TREE.to_string(), files_tree_sha);
-        if let Some(sha) = target_sha {
-            tree.links.insert(TARGET_LINK.to_string(), vec![sha]);
+        if !targets.is_empty() {
+            tree.links.insert(
+                TARGETS_LINK.to_string(),
+                targets.into_iter().map(|(_, sha)| sha).collect(),
+            );
         }
 
-        let Some(name) = spec.name else {
+        let label = spec.name.unwrap_or("unnamed");
+        let Some(current) = current else {
             let id = new_uuid();
-            let message = format!("attachment: {}", short_uuid(&id));
+            let message = format!("attachment: {label}");
             let commit_sha =
                 self.store
                     .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
             return Ok(AttachmentAddOutcome {
                 id,
+                key: attrs.key,
                 commit_sha,
                 outcome: AttachmentOutcome::Added,
                 file_count,
             });
         };
-        let id = attachment_object_id(name, spec.target);
-        match self.store.rev_parse(&object_ref(&id))? {
-            None => {
-                let message = format!("attachment: {name}");
-                let commit_sha =
-                    self.store
-                        .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
-                Ok(AttachmentAddOutcome {
-                    id,
-                    commit_sha,
-                    outcome: AttachmentOutcome::Added,
-                    file_count,
-                })
+        let message = format!("attachment edit: {label}");
+        let id = current.header.id.clone();
+        match self.store.edit(&current, &tree, &message)? {
+            EditOutcome::Unchanged => Ok(AttachmentAddOutcome {
+                id,
+                key: attrs.key,
+                commit_sha: current.commit_sha,
+                outcome: AttachmentOutcome::Unchanged,
+                file_count,
+            }),
+            EditOutcome::Written(commit_sha) => Ok(AttachmentAddOutcome {
+                id,
+                key: attrs.key,
+                commit_sha,
+                outcome: AttachmentOutcome::Updated,
+                file_count,
+            }),
+        }
+    }
+
+    /// The live attachment under `key`, if any. Two live attachments
+    /// under one key is a store fault.
+    fn live_under(&self, key: &str) -> Result<Option<Object>, StoreError> {
+        let tips = self.query().key(key).tips()?;
+        match tips.as_slice() {
+            [] => Ok(None),
+            [tip] => {
+                let object = self.store.read_object(&tip.sha)?;
+                require_type(&object, OBJECT_TYPE)?;
+                Ok(Some(object))
             }
-            Some(sha) => {
-                let current = self.store.read_object(&sha)?;
-                require_type(&current, OBJECT_TYPE)?;
-                if current.header.is_tombstone() {
-                    // Re-add after remove: the derived id names the
-                    // same object, so a live commit supersedes the
-                    // tombstone under the object's identity
-                    let message = format!("attachment: {name}");
-                    let commit_sha = self.store.resurrect(&current, &tree, &message)?;
-                    return Ok(AttachmentAddOutcome {
-                        id,
-                        commit_sha,
-                        outcome: AttachmentOutcome::Added,
-                        file_count,
-                    });
-                }
-                let message = format!("attachment edit: {name}");
-                match self.store.edit(&current, &tree, &message)? {
-                    EditOutcome::Unchanged => Ok(AttachmentAddOutcome {
-                        id,
-                        commit_sha: current.commit_sha,
-                        outcome: AttachmentOutcome::Unchanged,
-                        file_count,
-                    }),
-                    EditOutcome::Written(commit_sha) => Ok(AttachmentAddOutcome {
-                        id,
-                        commit_sha,
-                        outcome: AttachmentOutcome::Updated,
-                        file_count,
-                    }),
-                }
-            }
+            many => Err(StoreError::Parse(format!(
+                "attachment key {key:?} names {} live attachments",
+                many.len()
+            ))),
         }
     }
 
@@ -388,6 +425,28 @@ impl AttachmentStore<'_> {
             .object_contents(&format!("{commit_sha}:{FILES_TREE}/{key}"))?
             .map(|(_, bytes)| bytes))
     }
+}
+
+/// The attachment's targets as `(url, commit)` pairs: the URLs from
+/// `attrs.json` paired by position with the commits `targets.link`
+/// names.
+fn linked_targets(object: &Object) -> Result<Vec<(String, String)>, StoreError> {
+    let attrs = decode_attrs(object)?;
+    let shas = object
+        .tree
+        .links
+        .get(TARGETS_LINK)
+        .cloned()
+        .unwrap_or_default();
+    if attrs.targets.len() != shas.len() {
+        return Err(StoreError::Parse(format!(
+            "attachment {}: {} targets in attrs.json, {} in {TARGETS_LINK}",
+            object.commit_sha,
+            attrs.targets.len(),
+            shas.len()
+        )));
+    }
+    Ok(attrs.targets.into_iter().zip(shas).collect())
 }
 
 /// The files the includes select under `root`, less the excludes, as
@@ -496,6 +555,16 @@ fn collect_files(
     Ok(())
 }
 
+/// A key is non-empty and holds no `/`, as every object key is.
+fn validate_key(key: &str) -> Result<(), StoreError> {
+    if key.is_empty() || key == "." || key == ".." || key.contains('/') {
+        return Err(StoreError::AttachmentInput(format!(
+            "key {key:?}: must be non-empty and must not contain `/`"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_name(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
         return Err(StoreError::AttachmentInput("name is empty".to_string()));
@@ -518,8 +587,8 @@ fn read_error(path: &Path, e: io::Error) -> StoreError {
     }
 }
 
-/// A selection over attachments: a name filter, an order, and a
-/// limit. `iter` reads matching attachments one at a time.
+/// A selection over attachments: name and key filters, an order, and
+/// a limit. `iter` reads matching attachments one at a time.
 pub struct AttachmentQuery<'a> {
     store: &'a Store,
     query: ObjectQuery,
@@ -529,6 +598,12 @@ impl<'a> AttachmentQuery<'a> {
     /// Select the attachments named `name`.
     pub fn name(mut self, name: &str) -> Self {
         self.query.attrs.push(("name", name.to_string()));
+        self
+    }
+
+    /// Select the attachments under `key`.
+    pub fn key(mut self, key: &str) -> Self {
+        self.query.attrs.push(("key", key.to_string()));
         self
     }
 
@@ -562,14 +637,8 @@ impl<'a> AttachmentQuery<'a> {
 }
 
 fn decode(object: Object) -> Result<AttachmentRecord, StoreError> {
-    let commit_sha = object.commit_sha.as_str();
     require_type(&object, OBJECT_TYPE)?;
-    let attrs_value = object
-        .tree
-        .attrs
-        .ok_or_else(|| StoreError::Parse(format!("attachment {commit_sha}: missing attrs.json")))?;
-    let attrs: AttachmentAttrs = serde_json::from_value(attrs_value)
-        .map_err(|e| StoreError::Parse(format!("attachment attrs {commit_sha}: {e}")))?;
+    let attrs = decode_attrs(&object)?;
     Ok(AttachmentRecord {
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
@@ -579,9 +648,20 @@ fn decode(object: Object) -> Result<AttachmentRecord, StoreError> {
     })
 }
 
+fn decode_attrs(object: &Object) -> Result<AttachmentAttrs, StoreError> {
+    let commit_sha = object.commit_sha.as_str();
+    let attrs_value =
+        object.tree.attrs.as_ref().ok_or_else(|| {
+            StoreError::Parse(format!("attachment {commit_sha}: missing attrs.json"))
+        })?;
+    serde_json::from_value(attrs_value.clone())
+        .map_err(|e| StoreError::Parse(format!("attachment attrs {commit_sha}: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::object_ref;
     use crate::test_support::open_store;
 
     fn write(path: &Path, content: &str) {
@@ -722,7 +802,8 @@ mod tests {
         let attachments = AttachmentStore::from(&store);
         let spec = AttachmentSpec {
             name: Some("claude-config"),
-            target: None,
+            key: None,
+            targets: &[],
             root: &root,
             includes: &patterns(&["settings*.json"]),
             excludes: &[],
@@ -730,12 +811,18 @@ mod tests {
         let added = attachments.add(&spec).unwrap();
         assert_eq!(added.outcome, AttachmentOutcome::Added);
         assert_eq!(added.file_count, 2);
-        assert_eq!(added.id, attachment_object_id("claude-config", None));
 
         let record = attachments.get(&added.id).unwrap();
         assert_eq!(record.commit_sha, added.commit_sha);
         assert_eq!(record.attrs.name.as_deref(), Some("claude-config"));
-        assert_eq!(record.attrs.target, None);
+        assert_eq!(
+            record.attrs.key,
+            Some(format!(
+                "claude-config:{}",
+                selection_key_part(&root, &patterns(&["settings*.json"]), &[])
+            ))
+        );
+        assert!(record.attrs.targets.is_empty());
         assert_eq!(record.attrs.root, root);
         assert_eq!(record.attrs.includes, ["settings*.json"]);
         assert!(record.attrs.excludes.is_empty());
@@ -766,7 +853,8 @@ mod tests {
         let pats = patterns(&["settings.json"]);
         let spec = AttachmentSpec {
             name: Some("cfg"),
-            target: None,
+            key: None,
+            targets: &[],
             root: &root,
             includes: &pats,
             excludes: &[],
@@ -802,7 +890,8 @@ mod tests {
             attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    target: None,
+                    key: None,
+                    targets: &[],
                     root: &root,
                     includes: &pats,
                     excludes: &[],
@@ -824,7 +913,7 @@ mod tests {
             matches!(removed, StoreError::ObjectNotFound(_)),
             "{removed}"
         );
-        let id_b = attachment_object_id("b", None);
+        let id_b = found[0].id.clone();
         let removed = attachments.remove(&[id_b.clone()]).unwrap();
         assert_eq!(removed.attachments[0].attrs.name.as_deref(), Some("b"));
         assert!(removed.datasets.is_empty());
@@ -837,14 +926,15 @@ mod tests {
         let back = attachments
             .add(&AttachmentSpec {
                 name: Some("b"),
-                target: None,
+                key: None,
+                targets: &[],
                 root: &root,
                 includes: &pats,
                 excludes: &[],
             })
             .unwrap();
         assert_eq!(back.outcome, AttachmentOutcome::Added);
-        assert_eq!(back.id, id_b);
+        assert_ne!(back.id, id_b, "a removed attachment is not re-addressed");
         assert_eq!(attachments.iter().unwrap().count(), 2);
     }
 
@@ -860,7 +950,8 @@ mod tests {
         let pats = patterns(&["settings.json"]);
         let spec = AttachmentSpec {
             name: Some("cfg"),
-            target: None,
+            key: None,
+            targets: &[],
             root: &root,
             includes: &pats,
             excludes: &[],
@@ -953,7 +1044,8 @@ mod tests {
         let added = attachments
             .add(&AttachmentSpec {
                 name: Some("cfg"),
-                target: None,
+                key: None,
+                targets: &[],
                 root: &root,
                 includes: &pats,
                 excludes: &[],
@@ -992,7 +1084,8 @@ mod tests {
             let err = attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    target: None,
+                    key: None,
+                    targets: &[],
                     root: &root,
                     includes: &patterns(&["CLAUDE.md"]),
                     excludes: &[],
@@ -1006,7 +1099,8 @@ mod tests {
         let err = attachments
             .add(&AttachmentSpec {
                 name: Some("ok"),
-                target: None,
+                key: None,
+                targets: &[],
                 root: &root.join("settings.json"),
                 includes: &patterns(&["CLAUDE.md"]),
                 excludes: &[],
@@ -1024,7 +1118,8 @@ mod tests {
         let pats = patterns(&["settings.json"]);
         let spec = AttachmentSpec {
             name: None,
-            target: None,
+            key: None,
+            targets: &[],
             root: &root,
             includes: &pats,
             excludes: &[],
@@ -1042,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn a_targeted_add_links_the_target_and_derives_its_id_from_both() {
+    fn a_targeted_add_links_the_targets_and_a_re_add_unions_them() {
         use crate::SessionStore;
         use crate::session::tests::{FakeDriver, fake};
 
@@ -1057,34 +1152,33 @@ mod tests {
         let pats = patterns(&["CLAUDE.md"]);
         let spec = AttachmentSpec {
             name: Some("stack-files"),
-            target: Some(&target),
+            key: None,
+            targets: std::slice::from_ref(&target),
             root: &root,
             includes: &pats,
             excludes: &[],
         };
         let added = attachments.add(&spec).unwrap();
-        assert_eq!(added.id, attachment_object_id("stack-files", Some(&target)));
-        assert_ne!(added.id, attachment_object_id("stack-files", None));
-
         let object = store.read_object(&added.commit_sha).unwrap();
         assert_eq!(
-            object.tree.links.get("target.link"),
+            object.tree.links.get("targets.link"),
             Some(&vec![session.commit_sha.clone()])
         );
         let parents = store.read_commit(&added.commit_sha).unwrap().parents;
         assert!(parents.contains(&session.commit_sha));
         let record = attachments.get(&added.id).unwrap();
-        assert_eq!(record.attrs.target.as_deref(), Some(target.as_str()));
+        assert_eq!(record.attrs.targets, [target.clone()]);
 
-        // The same name in the store context is a different attachment
+        // The same name and selection is the same attachment; a
+        // re-add without targets keeps the linked one
         let untargeted = attachments
             .add(&AttachmentSpec {
-                target: None,
+                targets: &[],
                 ..spec.clone()
             })
             .unwrap();
-        assert_eq!(untargeted.outcome, AttachmentOutcome::Added);
-        assert_ne!(untargeted.id, added.id);
+        assert_eq!(untargeted.outcome, AttachmentOutcome::Unchanged);
+        assert_eq!(untargeted.id, added.id);
         assert_eq!(
             attachments
                 .query()
@@ -1092,28 +1186,91 @@ mod tests {
                 .iter()
                 .unwrap()
                 .count(),
-            2
+            1
         );
 
-        // Re-adding under the same name and target is unchanged
-        assert_eq!(
-            attachments.add(&spec).unwrap().outcome,
-            AttachmentOutcome::Unchanged
-        );
-
-        // Any live object is a target
+        // A new target is unioned in; any live object is a target
         let dataset = DatasetStore::from(&store).create().unwrap();
         let dataset_url = format!("dataset:{dataset}");
         let on_dataset = attachments
             .add(&AttachmentSpec {
-                target: Some(&dataset_url),
+                targets: &[dataset_url.clone()],
                 ..spec.clone()
             })
             .unwrap();
-        assert_eq!(on_dataset.outcome, AttachmentOutcome::Added);
+        assert_eq!(on_dataset.outcome, AttachmentOutcome::Updated);
+        assert_eq!(on_dataset.id, added.id);
         let tip = store.rev_parse(&object_ref(&dataset)).unwrap().unwrap();
         let object = store.read_object(&on_dataset.commit_sha).unwrap();
-        assert_eq!(object.tree.links.get("target.link"), Some(&vec![tip]));
+        assert_eq!(
+            object.tree.links.get("targets.link"),
+            Some(&vec![session.commit_sha.clone(), tip])
+        );
+        let record = attachments.get(&added.id).unwrap();
+        assert_eq!(record.attrs.targets, [target.clone(), dataset_url]);
+
+        // Re-adding the original spec is unchanged: its target is
+        // already linked
+        assert_eq!(
+            attachments.add(&spec).unwrap().outcome,
+            AttachmentOutcome::Unchanged
+        );
+    }
+
+    #[test]
+    fn an_explicit_key_addresses_the_attachment_across_names_and_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let root = fixture_root(dir.path());
+        let attachments = AttachmentStore::from(&store);
+        let pats = patterns(&["CLAUDE.md"]);
+        let keyed = attachments
+            .add(&AttachmentSpec {
+                name: Some("a"),
+                key: Some("project:x"),
+                targets: &[],
+                root: &root,
+                includes: &pats,
+                excludes: &[],
+            })
+            .unwrap();
+        assert_eq!(keyed.outcome, AttachmentOutcome::Added);
+        let renamed = attachments
+            .add(&AttachmentSpec {
+                name: Some("b"),
+                key: Some("project:x"),
+                targets: &[],
+                root: &root.join("skills"),
+                includes: &patterns(&["**/*.md"]),
+                excludes: &[],
+            })
+            .unwrap();
+        assert_eq!(renamed.outcome, AttachmentOutcome::Updated);
+        assert_eq!(renamed.id, keyed.id);
+        let record = attachments.get(&keyed.id).unwrap();
+        assert_eq!(record.attrs.name.as_deref(), Some("b"));
+        assert_eq!(record.attrs.key.as_deref(), Some("project:x"));
+        assert_eq!(
+            attachments.query().key("project:x").tips().unwrap().len(),
+            1,
+            "the key is indexed"
+        );
+        for key in ["", "a/b", ".."] {
+            let err = attachments
+                .add(&AttachmentSpec {
+                    name: None,
+                    key: Some(key),
+                    targets: &[],
+                    root: &root,
+                    includes: &pats,
+                    excludes: &[],
+                })
+                .unwrap_err();
+            assert!(
+                matches!(err, StoreError::AttachmentInput(_)),
+                "{key:?}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1128,7 +1285,8 @@ mod tests {
             attachments
                 .add(&AttachmentSpec {
                     name: Some("cfg"),
-                    target: Some(target),
+                    key: None,
+                    targets: &[target.to_string()],
                     root: &root,
                     includes: &pats,
                     excludes: &[],
@@ -1161,7 +1319,8 @@ mod tests {
         let err = attachments
             .add(&AttachmentSpec {
                 name: None,
-                target: None,
+                key: None,
+                targets: &[],
                 root: &many,
                 includes: &patterns(&["*"]),
                 excludes: &[],
@@ -1175,7 +1334,8 @@ mod tests {
         let err = attachments
             .add(&AttachmentSpec {
                 name: None,
-                target: None,
+                key: None,
+                targets: &[],
                 root: &big,
                 includes: &patterns(&["blob"]),
                 excludes: &[],

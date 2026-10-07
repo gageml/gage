@@ -16,6 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha1 = "0.10"
+twox-hash = { workspace = true }
 flate2 = "1"
 tracing = { workspace = true }
 tempfile = { workspace = true }

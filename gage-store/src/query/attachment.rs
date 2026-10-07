@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::array::{
-    BinaryBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
+    BinaryBuilder, Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -33,8 +33,10 @@ pub(crate) fn attachment_schema() -> SchemaRef {
         Field::new("id", DataType::Utf8, false),
         // Key
         Field::new("name", DataType::Utf8, true),
-        // Gage URL of the object the files are about
-        Field::new("target", DataType::Utf8, true),
+        // The identity a later add addresses
+        Field::new("key", DataType::Utf8, true),
+        // Gage URLs of the objects the files are about
+        Field::new_list("targets", target_item(), false),
         // Value
         // The directory the files were selected under
         Field::new("root", DataType::Utf8, false),
@@ -56,6 +58,10 @@ pub(crate) fn attachment_schema() -> SchemaRef {
     ]))
 }
 
+fn target_item() -> Field {
+    Field::new("item", DataType::Utf8, true)
+}
+
 pub(crate) fn attachment_file_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("attachment_id", DataType::Utf8, false),
@@ -74,7 +80,8 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     let len = attachments.len();
     let mut ids = StringBuilder::with_capacity(len, len * 26);
     let mut names = StringBuilder::new();
-    let mut targets = StringBuilder::new();
+    let mut keys = StringBuilder::new();
+    let mut targets = ListBuilder::new(StringBuilder::new()).with_field(target_item());
     let mut roots = StringBuilder::new();
     let mut includes = StringBuilder::new();
     let mut excludes = StringBuilder::new();
@@ -88,7 +95,11 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     for a in attachments {
         ids.append_value(&a.id);
         names.append_option(a.attrs.name.as_deref());
-        targets.append_option(a.attrs.target.as_deref());
+        keys.append_option(a.attrs.key.as_deref());
+        for target in &a.attrs.targets {
+            targets.values().append_value(target);
+        }
+        targets.append(true);
         roots.append_value(a.attrs.root.to_string_lossy());
         includes.append_value(a.attrs.includes.join(" "));
         excludes.append_value(a.attrs.excludes.join(" "));
@@ -106,6 +117,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
         vec![
             Arc::new(ids.finish()),
             Arc::new(names.finish()),
+            Arc::new(keys.finish()),
             Arc::new(targets.finish()),
             Arc::new(roots.finish()),
             Arc::new(includes.finish()),

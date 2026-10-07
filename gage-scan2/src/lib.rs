@@ -2765,7 +2765,7 @@ mod tests {
             pub async fn run_check() {
                 for s in gage::scan().sessions().await {
                     for a in s.attachments().name("stack-*").await? {
-                        println!("{} {:?}", a.name.unwrap(), a.target);
+                        println!("{} {:?}", a.name.unwrap(), a.targets);
                     }
                 }
                 println!("{}", gage::scan().attachments().name("claude-config").await?.len());
@@ -2823,13 +2823,10 @@ mod tests {
             .collect();
         assert_eq!(attached.len(), 2, "{events:?}");
         assert_eq!(attached[0].name.as_deref(), Some("claude-config"));
-        assert_eq!(attached[0].target, None);
+        assert!(attached[0].targets.is_empty());
         assert_eq!(attached[0].outcome, "added");
         assert_eq!(attached[1].name.as_deref(), Some("stack-files"));
-        assert_eq!(
-            attached[1].target.as_deref(),
-            Some(format!("session:{session_id}").as_str())
-        );
+        assert_eq!(attached[1].targets, [format!("session:{session_id}")]);
         assert!(
             events.contains(&AttachEvent::Output(TaskOutput {
                 scanner: "attacher".into(),
@@ -2881,7 +2878,7 @@ mod tests {
             .find(|a| a.attrs.name.as_deref() == Some("stack-files"))
             .unwrap();
         let object = store.read_object(&targeted.commit_sha).unwrap();
-        assert!(object.tree.links.contains_key("target.link"));
+        assert!(object.tree.links.contains_key("targets.link"));
         assert_eq!(
             AttachmentStore::from(&store)
                 .files(&targeted.commit_sha)
@@ -2953,7 +2950,7 @@ mod tests {
         assert_eq!(
             printed,
             [
-                &Output::Println(format!("stack-files Some(\"session:{session_id}\")")),
+                &Output::Println(format!("stack-files [\"session:{session_id}\"]")),
                 &Output::Println("1".into()),
             ]
         );
@@ -3834,7 +3831,8 @@ mod tests {
             let added = attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    target: None,
+                    key: None,
+                    targets: &[],
                     root: &root,
                     includes: &pats,
                     excludes: &[],

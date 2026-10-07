@@ -2845,6 +2845,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "twox-hash",
  "wax",
 ]
 
