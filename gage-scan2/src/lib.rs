@@ -3290,8 +3290,8 @@ mod tests {
         assert_eq!(first.scan.as_deref(), Some(outcome.id.as_str()));
         assert_eq!(first.author, "task:notes:main");
         assert_eq!(
-            first.targets,
-            [member_sha],
+            first.target_commit,
+            Some(member_sha),
             "the note links the member commit the scan read"
         );
         assert_eq!(first.metadata, Some(serde_json::json!({"model": "m"})));

@@ -112,9 +112,9 @@ pub struct NoteFull {
     pub scan: Option<String>,
     /// The carry-forward key, from `attrs.carry_forward_key`
     pub carry_forward_key: Option<String>,
-    /// Commit SHAs from the `target.link` file, in file order. Empty
-    /// when the note has no `target.link` file.
-    pub targets: Vec<String>,
+    /// The commit `target.link` names; `None` when the note has no
+    /// target.
+    pub target_commit: Option<String>,
     pub created_ms: i64,
     pub modified_ms: i64,
 }
@@ -157,7 +157,7 @@ impl NoteStore<'_> {
             scan: None,
             carry_forward_key: input.carry_forward_key.map(String::from),
         };
-        let tree = build_tree(&attrs, &input.value, target_sha.into_iter().collect())?;
+        let tree = build_tree(&attrs, &input.value, target_sha)?;
         let id = new_uuid();
         let message = format!("note: {}", input.name);
         self.store
@@ -197,7 +197,7 @@ impl NoteStore<'_> {
             scan: Some(scan.to_string()),
             carry_forward_key: input.carry_forward_key.map(String::from),
         };
-        let tree = build_tree(&attrs, &input.value, link.into_iter().collect())?;
+        let tree = build_tree(&attrs, &input.value, link)?;
         let write = |name: &str, bytes: &[u8]| -> Result<(), StoreError> {
             fs::write(dir.join(name), bytes).map_err(|e| StoreError::Write {
                 path: dir.join(name),
@@ -231,7 +231,7 @@ impl NoteStore<'_> {
         if let Some(sha) = self.store.rev_parse(&object_ref(&record.id))? {
             return Ok((record.id, sha));
         }
-        let tree = build_tree(&record.attrs, &record.value, record.targets)?;
+        let tree = build_tree(&record.attrs, &record.value, record.target_commit)?;
         let message = format!("note: {}", record.attrs.name);
         let sha = self
             .store
@@ -263,7 +263,7 @@ impl NoteStore<'_> {
             metadata: record.attrs.metadata,
             scan: record.attrs.scan,
             carry_forward_key: record.attrs.carry_forward_key,
-            targets: record.targets,
+            target_commit: record.target_commit,
             created_ms: written_ms,
             modified_ms: written_ms,
         })
@@ -310,20 +310,15 @@ impl NoteStore<'_> {
             attrs.name = name.to_string();
         }
         let value = edit.value.unwrap_or(current_value);
-        let targets = match edit.target {
+        let target_commit = match edit.target {
             Some(url) => {
                 let sha = resolve_target(self.store, url)?;
                 attrs.target = Some(url.to_string());
-                vec![sha]
+                Some(sha)
             }
-            None => object
-                .tree
-                .links
-                .get(TARGET_LINK)
-                .cloned()
-                .unwrap_or_default(),
+            None => target_commit(&object)?,
         };
-        let tree = build_tree(&attrs, &value, targets)?;
+        let tree = build_tree(&attrs, &value, target_commit)?;
         let message = format!("note edit: {}", attrs.name);
         match self.store.edit(&object, &tree, &message)? {
             EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(object.header.id),
@@ -418,7 +413,7 @@ impl<'a> NoteQuery<'a> {
 fn build_tree(
     attrs: &NoteAttrs,
     value: &NoteValue,
-    target_shas: Vec<String>,
+    target_commit: Option<String>,
 ) -> Result<ObjectTree, StoreError> {
     let mut tree = ObjectTree {
         attrs: Some(
@@ -437,8 +432,8 @@ fn build_tree(
         }
     };
     tree.blobs.insert(file.to_string(), bytes);
-    if !target_shas.is_empty() {
-        tree.links.insert(TARGET_LINK.to_string(), target_shas);
+    if let Some(sha) = target_commit {
+        tree.links.insert(TARGET_LINK.to_string(), vec![sha]);
     }
     Ok(tree)
 }
@@ -448,7 +443,7 @@ struct NoteDir {
     id: String,
     attrs: NoteAttrs,
     value: NoteValue,
-    targets: Vec<String>,
+    target_commit: Option<String>,
 }
 
 /// Decode the files [`NoteStore::write_to_dir`] wrote under `dir`. The
@@ -490,21 +485,46 @@ fn read_note_dir(dir: &Path) -> Result<NoteDir, StoreError> {
             "note dir {id}: missing {TEXT_VALUE_FILE} or {JSON_VALUE_FILE}"
         )));
     };
-    let targets: Vec<String> = match read(TARGET_LINK)? {
-        Some(bytes) => String::from_utf8_lossy(&bytes)
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect(),
-        None => Vec::new(),
+    let target_commit = match read(TARGET_LINK)? {
+        Some(bytes) => {
+            let shas: Vec<String> = String::from_utf8_lossy(&bytes)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            Some(single_target(shas, &format!("note dir {id}"))?)
+        }
+        None => None,
     };
     Ok(NoteDir {
         id,
         attrs,
         value,
-        targets,
+        target_commit,
     })
+}
+
+/// The one commit a note's `target.link` names, or `None` when the
+/// note has no such file.
+fn target_commit(object: &Object) -> Result<Option<String>, StoreError> {
+    match object.tree.links.get(TARGET_LINK) {
+        Some(shas) => Ok(Some(single_target(
+            shas.clone(),
+            &format!("note {}", object.commit_sha),
+        )?)),
+        None => Ok(None),
+    }
+}
+
+/// A note is about one object, so its `target.link` names one commit.
+fn single_target(mut shas: Vec<String>, what: &str) -> Result<String, StoreError> {
+    match shas.len() {
+        1 => Ok(shas.remove(0)),
+        n => Err(StoreError::Parse(format!(
+            "{what} {TARGET_LINK}: expected one commit, found {n}"
+        ))),
+    }
 }
 
 fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
@@ -518,12 +538,7 @@ fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
         metadata: attrs.metadata,
         scan: attrs.scan,
         carry_forward_key: attrs.carry_forward_key,
-        targets: object
-            .tree
-            .links
-            .get(TARGET_LINK)
-            .cloned()
-            .unwrap_or_default(),
+        target_commit: target_commit(object)?,
         created_ms: marker_ms(object, "created", object.header.created_ms)?,
         modified_ms: marker_ms(object, "modified", object.header.modified_ms)?,
     })
@@ -653,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn create_writes_target_link_when_targets_given() {
+    fn create_writes_target_link_when_target_given() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
 
@@ -739,7 +754,7 @@ mod tests {
         let id = create_with_target(&store, &target).unwrap();
         let full = NoteStore::from(&store).get(&id).unwrap();
         assert_eq!(full.target.as_deref(), Some(target.as_str()));
-        assert_eq!(full.targets, vec![session_commit.clone()]);
+        assert_eq!(full.target_commit, Some(session_commit.clone()));
         let attrs = cat_file(&store, &format!("{}:attrs.json", object_ref(&id)));
         assert!(
             attrs.contains(&format!("\"target\":\"{target}\"")),
@@ -785,7 +800,7 @@ mod tests {
             full.target.as_deref(),
             Some(format!("note:{first}").as_str())
         );
-        assert_eq!(full.targets, vec![rev_parse(&store, &first)]);
+        assert_eq!(full.target_commit, Some(rev_parse(&store, &first)));
 
         // Target only: re-linked to the new object's commit
         let target = format!("session:{session_id}#3");
@@ -801,7 +816,7 @@ mod tests {
         let full = notes.get(&id).unwrap();
         assert_eq!(full.name, "summary");
         assert_eq!(full.target.as_deref(), Some(target.as_str()));
-        assert_eq!(full.targets, vec![rev_parse(&store, &session_id)]);
+        assert_eq!(full.target_commit, Some(rev_parse(&store, &session_id)));
         let commit = cat_file(&store, &rev_parse(&store, &id));
         assert!(commit.contains("\nnote edit: summary"), "{commit}");
 
@@ -962,7 +977,7 @@ mod tests {
         assert_eq!(full.name, "reply");
         assert_eq!(full.value, NoteValue::Text("hello\nworld".into()));
         assert_eq!(full.author, "user:test");
-        assert_eq!(full.targets, vec![root_commit]);
+        assert_eq!(full.target_commit, Some(root_commit));
         assert_eq!(full.created_ms, full.modified_ms);
     }
 
@@ -1320,9 +1335,9 @@ mod tests {
         assert_eq!(full.author, "task:s:t");
         assert_eq!(full.scan.as_deref(), Some("SCAN1"));
         assert_eq!(full.target.as_deref(), Some(url.as_str()));
-        assert_eq!(full.targets, [pinned.clone()]);
+        assert_eq!(full.target_commit, Some(pinned.clone()));
         assert_eq!(full.value, NoteValue::Json(serde_json::json!({"n": 1})));
-        assert_ne!(full.targets, [target_sha]);
+        assert_ne!(full.target_commit, Some(target_sha));
         assert_eq!(
             store.read_commit(&sha).unwrap().parents,
             [pinned],
