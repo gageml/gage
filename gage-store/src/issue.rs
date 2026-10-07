@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::{EntryKind, TreeEntry};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
-use crate::object::{EditOutcome, Object, ObjectTree, object_ref};
+use crate::object::{EditOutcome, FIRST_PARENT_FILE, Object, ObjectTree, object_ref};
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
@@ -48,10 +48,6 @@ const MESSAGE_FILE: &str = "message.txt";
 /// resolves them to commits and writes `evidence.link`; the ids may
 /// name notes the same scan wrote, which have no commit until apply.
 const EVIDENCE_FILE: &str = "evidence";
-/// Scan directory only: present when the tree replaces a live issue,
-/// holding the commit the writer replaced. Apply writes the tree as a
-/// new commit of that issue.
-const PARENT_FILE: &str = "parent";
 
 /// Issue operations over an opened store.
 pub struct IssueStore<'a> {
@@ -923,7 +919,7 @@ fn write_issue_dir(
         write(&dir.join(EVIDENCE_FILE), content.as_bytes())?;
     }
     if let Some(sha) = replaces {
-        write(&dir.join(PARENT_FILE), format!("{sha}\n").as_bytes())?;
+        write(&dir.join(FIRST_PARENT_FILE), format!("{sha}\n").as_bytes())?;
     }
     write(
         &change_dir.join(ATTRS_FILE),
@@ -1040,7 +1036,7 @@ fn read_issue_dir(dir: &Path) -> Result<IssueDir, StoreError> {
             .collect(),
         None => Vec::new(),
     };
-    let replaces = read_optional(&dir.join(PARENT_FILE))?
+    let replaces = read_optional(&dir.join(FIRST_PARENT_FILE))?
         .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string());
     let changes_dir = dir.join(CHANGES_DIR);
     let mut ulids: Vec<String> = match fs::read_dir(&changes_dir) {
@@ -1514,7 +1510,9 @@ mod tests {
             .write_replace_to_dir(&dir, &input, "SCAN2", &prior)
             .unwrap();
         assert_eq!(
-            fs::read_to_string(dir.join("parent")).unwrap().trim(),
+            fs::read_to_string(dir.join(FIRST_PARENT_FILE))
+                .unwrap()
+                .trim(),
             prior.commit_sha
         );
         let record = issues.read_from_dir(&dir).unwrap();

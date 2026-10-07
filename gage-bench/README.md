@@ -45,7 +45,7 @@ four phases.
 3. **Verify.** Every created id resolves to an object of its type with the
    expected tombstone state. Counts by type through the index match the expected
    counts. A sample of notes reads back with the value that was written. Every
-   ref's commit parents are fully attributed to its `parent` and link files.
+   ref's commit parents are fully attributed to its `first-parent` and link files.
    Every dataset lists the expected number of members. A failure aborts the run
    and leaves the run directory for inspection.
 4. **Reads.** Each read operation is repeated `--iterations` times: open with a

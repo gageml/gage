@@ -6,7 +6,7 @@
 //! it without reading any object. The index records the tip it last
 //! saw for every ref, so validation is the diff between that table and
 //! the live map; only refs whose tip changed are re-read, and re-reading
-//! walks the new tip's `parent` chain and link parents until a commit
+//! walks the new tip's `first-parent` chain and link parents until a commit
 //! the index already holds. Any change that reaches the repository by
 //! any path, including a store write, a fetch, or a direct
 //! `git update-ref`, moves a tip and is caught by the same diff. The
@@ -170,7 +170,7 @@ pub trait ObjectIndex: Send {
     /// `tip` is `None`.
     fn set_tip(&self, id: &str, tip: Option<&str>) -> Result<(), StoreError>;
 
-    /// Drop every commit not reachable from a tip through `parent` and
+    /// Drop every commit not reachable from a tip through `first-parent` and
     /// link edges, with its links and attributes. Returns the number
     /// of commits dropped. Runs inside the caller's transaction.
     fn prune(&self) -> Result<usize, StoreError>;
@@ -269,7 +269,7 @@ impl Store {
         }
     }
 
-    /// Index `sha` and every commit reachable from it through `parent`
+    /// Index `sha` and every commit reachable from it through `first-parent`
     /// and link files that the index does not already hold.
     fn index_from(&self, sha: &str) -> Result<(), StoreError> {
         let mut pending = vec![sha.to_string()];
@@ -278,7 +278,7 @@ impl Store {
                 continue;
             }
             let (object, links) = self.index_commit(&sha)?;
-            pending.extend(object.header.parent.iter().cloned());
+            pending.extend(object.header.first_parent.iter().cloned());
             pending.extend(links.iter().flat_map(|l| l.shas.iter().cloned()));
         }
         Ok(())

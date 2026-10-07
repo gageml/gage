@@ -575,7 +575,7 @@ async fn chains(
 }
 
 /// The commit chain of an object from `commit` back to its first
-/// commit: `commit` first, then each `parent` in turn.
+/// commit: `commit` first, then each `first-parent` in turn.
 fn chain(store: &Store, commit: &str) -> Result<Vec<String>, VmError> {
     let mut out = vec![commit.to_string()];
     let mut sha = commit.to_string();
@@ -583,7 +583,7 @@ fn chain(store: &Store, commit: &str) -> Result<Vec<String>, VmError> {
         let header = store
             .read_header(&sha)
             .map_err(|e| VmError::panic(format!("read object commit {sha}: {e}")))?;
-        match header.parent {
+        match header.first_parent {
             Some(parent) => {
                 out.push(parent.clone());
                 sha = parent;

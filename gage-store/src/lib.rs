@@ -24,7 +24,7 @@
 //!   `ls-tree`, `cat-file`, commit-object parsing. No Gage concepts.
 //! - [`writer`] --- blob, tree, and commit writing under the Gage
 //!   identity.
-//! - [`object`] --- the object model: ref layout, markers, `parent`,
+//! - [`object`] --- the object model: ref layout, markers, `first-parent`,
 //!   link files, and the one create, edit, and delete path every type
 //!   uses. Payload agnostic.
 //! - [`index`] --- the object index: the `ObjectIndex` trait, the

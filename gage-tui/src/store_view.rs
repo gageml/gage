@@ -10,7 +10,7 @@
 //! a tree's direct entries as a table, or a blob's text.
 //!
 //! The viewer knows the shape of an object tree (`type`, `id`,
-//! `created`, `modified`, optional `parent`, optional `deleted`, and
+//! `created`, `modified`, optional `first-parent`, optional `deleted`, and
 //! `*.link` files) and displays what is there. It does not parse
 //! `attrs.json` or interpret anything about a given object type beyond
 //! its name.
@@ -1037,12 +1037,12 @@ fn parents_section(store: &Store, commit: &str, width: u16) -> Vec<Line<'static>
             return lines;
         }
     };
-    if classified.parent.is_none() && classified.links.is_empty() {
+    if classified.first_parent.is_none() && classified.links.is_empty() {
         lines.push(note_line("  ", "None"));
         return lines;
     }
-    if let Some(parent) = &classified.parent {
-        lines.push(labeled_parent("parent", parent, store));
+    if let Some(first) = &classified.first_parent {
+        lines.push(labeled_parent("first parent", first, store));
     }
     for link in &classified.links {
         lines.push(labeled_parent(&link.link_file, &link.sha, store));

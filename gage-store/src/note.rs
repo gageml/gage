@@ -1102,7 +1102,7 @@ mod tests {
             .to_string();
         assert_eq!(parent, original_commit);
         assert_eq!(
-            cat_file(&store, &format!("{ref_path}:parent")),
+            cat_file(&store, &format!("{ref_path}:first-parent")),
             format!("{original_commit}\n")
         );
         assert_eq!(cat_file(&store, &format!("{ref_path}:value.txt")), "second");

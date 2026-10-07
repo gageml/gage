@@ -5,7 +5,7 @@
 //! (see [`crate::refs`]). Its tree
 //! carries the marker files `type` (`gage::<name> <version>`), `id`,
 //! `created`, `modified`, and, on a tombstone, `deleted`; an edit adds
-//! `parent` holding the previous version's SHA. Type-specific content
+//! `first-parent` holding the previous version's SHA. Type-specific content
 //! is `attrs.json`, blob-valued attribute files (`value.txt`), link
 //! files (`*.link`, one commit SHA per line), and opaque subtrees
 //! whose name ends in `.d` (`files.d/`). Gage schema walkers stop at
@@ -13,7 +13,7 @@
 //! README: Appendix: Object tree layout.
 //!
 //! The rules that make a commit well formed live here and nowhere
-//! else: the `parent` SHA is the first commit parent, every SHA in
+//! else: the `first-parent` SHA is the first commit parent, every SHA in
 //! every link file is a commit parent, a tombstone is parentless and
 //! carries only the markers, and an edit whose content matches the
 //! current commit writes nothing. Type modules (`note`, `dataset`,
@@ -68,9 +68,9 @@ pub struct ObjectHeader {
     /// UNIX time millis from `deleted`, when present. Non-none marks a
     /// tombstone commit.
     pub deleted_ms: Option<i64>,
-    /// SHA from the `parent` blob, when present. Absent for new objects
-    /// and redactions.
-    pub parent: Option<String>,
+    /// SHA from the `first-parent` blob, when present. Absent for new
+    /// objects and redactions.
+    pub first_parent: Option<String>,
 }
 
 impl ObjectHeader {
@@ -115,7 +115,19 @@ struct TreeEntryRef {
     sha: String,
 }
 
-const MARKERS: [&str; 6] = ["type", "id", "created", "modified", "deleted", "parent"];
+/// Marker blob naming the previous version's commit, which the edit
+/// commit lists as its first parent. Also the staging file name under
+/// a scan directory, which apply reads as the commit to replace.
+pub(crate) const FIRST_PARENT_FILE: &str = "first-parent";
+
+const MARKERS: [&str; 6] = [
+    "type",
+    "id",
+    "created",
+    "modified",
+    "deleted",
+    FIRST_PARENT_FILE,
+];
 
 /// Outcome of [`Store::edit`].
 #[derive(Debug, PartialEq, Eq)]
@@ -312,7 +324,7 @@ impl Store {
                 created_ms: Some(now),
                 modified_ms: Some(now),
                 deleted_ms: None,
-                parent: None,
+                first_parent: None,
             },
             tree: tree.clone(),
             entries,
@@ -322,7 +334,7 @@ impl Store {
     }
 
     /// Write a new version of `current` with `tree` as its content.
-    /// The child commit carries `parent` (the current SHA, first
+    /// The child commit carries `first-parent` (the current SHA, first
     /// commit parent), reuses `type`, `id`, and `created`, bumps
     /// `modified`, and lists every link SHA as a parent. Returns
     /// [`EditOutcome::Unchanged`] without writing when the content
@@ -350,7 +362,7 @@ impl Store {
         entries.insert("id".to_string(), current.marker("id")?);
         entries.insert("created".to_string(), current.marker("created")?);
         entries.insert("modified".to_string(), blob_entry(&modified_sha));
-        entries.insert("parent".to_string(), blob_entry(&parent_sha));
+        entries.insert(FIRST_PARENT_FILE.to_string(), blob_entry(&parent_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
 
         let links = self.link_files_for_write(tree, &tree_sha)?;
@@ -362,7 +374,7 @@ impl Store {
             header: ObjectHeader {
                 modified_ms: Some(now),
                 deleted_ms: None,
-                parent: Some(current.commit_sha.clone()),
+                first_parent: Some(current.commit_sha.clone()),
                 ..current.header.clone()
             },
             tree: tree.clone(),
@@ -395,7 +407,7 @@ impl Store {
 
     /// Delete `current` by writing a parentless tombstone: `type`,
     /// `id`, `created`, and `modified` = `deleted` = now. Content,
-    /// `parent`, and link files are dropped, so prior commits become
+    /// `first-parent`, and link files are dropped, so prior commits become
     /// unreachable from the ref. Returns the tombstone's SHA.
     pub(crate) fn delete(&self, current: &Object, message: &str) -> Result<String, StoreError> {
         if current.header.is_tombstone() {
@@ -417,7 +429,7 @@ impl Store {
             header: ObjectHeader {
                 modified_ms: Some(now),
                 deleted_ms: Some(now),
-                parent: None,
+                first_parent: None,
                 ..current.header.clone()
             },
             tree: ObjectTree::default(),
@@ -431,7 +443,7 @@ impl Store {
     /// Supersede the tombstone `current` with a parentless live commit
     /// carrying `tree` as its content. `type`, `id`, and `created` are
     /// the tombstone's entries, so the object keeps its identity;
-    /// `modified` is now; `deleted` and `parent` are absent. Prior
+    /// `modified` is now; `deleted` and `first-parent` are absent. Prior
     /// content is not restored. Applies to objects whose id is derived
     /// from external inputs, where re-adding the same input after a
     /// delete names the same object. Returns the new commit's SHA.
@@ -464,7 +476,7 @@ impl Store {
             header: ObjectHeader {
                 modified_ms: Some(now),
                 deleted_ms: None,
-                parent: None,
+                first_parent: None,
                 ..current.header.clone()
             },
             tree: tree.clone(),
@@ -550,8 +562,8 @@ impl Store {
         let created_ms = self.read_marker_ms(commit, entries, "created")?;
         let modified_ms = self.read_marker_ms(commit, entries, "modified")?;
         let deleted_ms = self.read_marker_ms(commit, entries, "deleted")?;
-        let parent = match self.read_marker(commit, entries, "parent")? {
-            Some(text) => Some(parse_sha(text.trim(), "parent blob", commit)?),
+        let first_parent = match self.read_marker(commit, entries, FIRST_PARENT_FILE)? {
+            Some(text) => Some(parse_sha(text.trim(), "first-parent blob", commit)?),
             None => None,
         };
         Ok(ObjectHeader {
@@ -561,7 +573,7 @@ impl Store {
             created_ms,
             modified_ms,
             deleted_ms,
-            parent,
+            first_parent,
         })
     }
 
@@ -667,7 +679,7 @@ impl Store {
         Ok(())
     }
 
-    /// Split a commit's parents into `parent`, link parents (attributed
+    /// Split a commit's parents into `first-parent`, link parents (attributed
     /// to their link file), and any residuals. `unattributed` and
     /// `missing` are empty in a well-formed commit; the viewer surfaces
     /// them as warnings so structural anomalies are visible.
@@ -687,7 +699,7 @@ impl Store {
         }
 
         let expected: Vec<String> = header
-            .parent
+            .first_parent
             .iter()
             .cloned()
             .chain(links.iter().map(|l| l.sha.clone()))
@@ -705,16 +717,16 @@ impl Store {
             .collect();
 
         Ok(ClassifiedParents {
-            parent: header.parent,
+            first_parent: header.first_parent,
             links,
             unattributed,
             missing,
         })
     }
 
-    /// Walk the `parent` chain from `commit`, oldest last (index 0 is
-    /// `commit` itself). Stops at the first commit whose header has no
-    /// `parent` blob. The walk terminates because every `parent` is a
+    /// Walk the `first-parent` chain from `commit`, oldest last (index 0
+    /// is `commit` itself). Stops at the first commit whose header has
+    /// no `first-parent` blob. The walk terminates because every SHA is a
     /// SHA: a cycle would need a commit whose SHA covers a blob naming
     /// a commit whose SHA covers a blob naming it back.
     pub fn walk_parent_chain(&self, commit: &str) -> Result<Vec<String>, StoreError> {
@@ -722,7 +734,7 @@ impl Store {
         let mut current = commit.to_string();
         loop {
             chain.push(current.clone());
-            match self.read_header(&current)?.parent {
+            match self.read_header(&current)?.first_parent {
                 Some(parent) => current = parent,
                 None => return Ok(chain),
             }
@@ -783,7 +795,7 @@ impl Object {
                 created_ms: None,
                 modified_ms: None,
                 deleted_ms: None,
-                parent: None,
+                first_parent: None,
             },
             tree: ObjectTree {
                 attrs: Some(attrs),
@@ -922,19 +934,19 @@ fn parse_sha(value: &str, what: &str, commit: &str) -> Result<String, StoreError
 }
 
 /// The parents of one commit, split into the previous-version parent
-/// (from the `parent` blob) and the link parents (each attributed to
+/// (from the `first-parent` blob) and the link parents (each attributed to
 /// the link file that named it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedParents {
-    /// SHA named by the `parent` blob, when present.
-    pub parent: Option<String>,
+    /// SHA named by the `first-parent` blob, when present.
+    pub first_parent: Option<String>,
     /// Link parents attributed to the link file that named them.
     pub links: Vec<LinkParent>,
     /// Commit parents that appear in the commit but do not match
-    /// `parent` or any listed link file. Empty when everything checks
+    /// `first-parent` or any listed link file. Empty when everything checks
     /// out.
     pub unattributed: Vec<String>,
-    /// SHAs named by `parent` or a link file that are not commit
+    /// SHAs named by `first-parent` or a link file that are not commit
     /// parents. Empty when everything checks out.
     pub missing: Vec<String>,
 }
@@ -997,16 +1009,21 @@ mod tests {
     }
 
     #[test]
-    fn parent_naming_a_ref_is_a_parse_error_not_a_loop() {
+    fn first_parent_naming_a_ref_is_a_parse_error_not_a_loop() {
         // Both the chain walk and the reconcile at open follow
-        // `parent`. A regression hangs, so the whole test runs on a
+        // `first-parent`. A regression hangs, so the whole test runs on a
         // thread with a bound.
         let (send, recv) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let tmp = tempfile::tempdir().unwrap();
             let (store, _fsck) = open_store(tmp.path());
             let id = note(&store, "n", None);
-            let commit = plant_blob(&store, &id, "parent", &format!("{}\n", object_ref(&id)));
+            let commit = plant_blob(
+                &store,
+                &id,
+                FIRST_PARENT_FILE,
+                &format!("{}\n", object_ref(&id)),
+            );
             let walk = store.walk_parent_chain(&commit).map_err(|e| e.to_string());
             let path = store.path().to_path_buf();
             drop(store);
@@ -1017,11 +1034,11 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("walk and open should return, not loop");
         match walk {
-            Err(e) => assert!(e.contains("parent blob"), "{e}"),
+            Err(e) => assert!(e.contains("first-parent blob"), "{e}"),
             Ok(chain) => panic!("expected a parse error, got {chain:?}"),
         }
         match open {
-            Err(e) => assert!(e.contains("parent blob"), "{e}"),
+            Err(e) => assert!(e.contains("first-parent blob"), "{e}"),
             Ok(()) => panic!("expected open to fail with a parse error"),
         }
     }
@@ -1298,13 +1315,13 @@ mod tests {
         assert_eq!(object.header.object_type, "gage::test");
         assert_eq!(object.header.version, "1");
         assert_eq!(object.header.id, "abc");
-        assert!(object.header.parent.is_none());
+        assert!(object.header.first_parent.is_none());
         assert!(!object.header.is_tombstone());
         assert_eq!(object.tree, tree);
     }
 
     #[test]
-    fn edit_writes_parent_first_then_links_and_bumps_modified() {
+    fn edit_writes_first_parent_then_links_and_bumps_modified() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let linked = note(&store, "linked", None);
@@ -1331,7 +1348,7 @@ mod tests {
             vec![first.clone(), linked_sha]
         );
         assert_eq!(
-            cat(&store, &format!("{second}:parent")),
+            cat(&store, &format!("{second}:first-parent")),
             format!("{first}\n")
         );
         assert_eq!(
@@ -1346,7 +1363,7 @@ mod tests {
         assert_eq!(store.resolve_id("abc").unwrap().1, second);
 
         let edited = store.read_object(&second).unwrap();
-        assert_eq!(edited.header.parent.as_deref(), Some(first.as_str()));
+        assert_eq!(edited.header.first_parent.as_deref(), Some(first.as_str()));
     }
 
     #[test]
@@ -1461,7 +1478,7 @@ mod tests {
         let object = store.read_object(&revived).unwrap();
         assert!(!object.header.is_tombstone());
         assert_eq!(object.header.created_ms, tombstone.header.created_ms);
-        assert_eq!(object.header.parent, None);
+        assert_eq!(object.header.first_parent, None);
         assert_eq!(object.tree, new_tree);
 
         // The revived object edits as any live object, chaining from
@@ -1471,7 +1488,7 @@ mod tests {
             EditOutcome::Unchanged => panic!("content differs"),
         };
         assert_eq!(
-            cat(&store, &format!("{edited}:parent")),
+            cat(&store, &format!("{edited}:first-parent")),
             format!("{revived}\n")
         );
     }
@@ -1650,7 +1667,10 @@ mod tests {
             .unwrap();
 
         let classified = store.classify_parents(&object_ref(&child)).unwrap();
-        assert_eq!(classified.parent.as_deref(), Some(first_child.as_str()));
+        assert_eq!(
+            classified.first_parent.as_deref(),
+            Some(first_child.as_str())
+        );
         assert_eq!(classified.links.len(), 1);
         assert_eq!(classified.links[0].link_file, "target.link");
         assert_eq!(classified.links[0].sha, root_commit);

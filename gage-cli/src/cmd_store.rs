@@ -67,9 +67,9 @@ pub enum StoreCommand {
     ///
     /// Opens an interactive view of the object refs: refs listing
     /// on the left, per-commit detail (header, parents classified as
-    /// `parent` vs link, tree, resolved link files, and the `parent`
-    /// chain) on the right. Payload agnostic --- object type names are
-    /// shown but no `attrs.json` is interpreted.
+    /// first-parent vs link, tree, resolved link files, and the
+    /// first-parent chain) on the right. Payload agnostic --- object
+    /// type names are shown but no `attrs.json` is interpreted.
     View(ViewArgs),
 }
 

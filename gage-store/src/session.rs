@@ -861,7 +861,7 @@ pub(crate) mod tests {
         assert_eq!(grown.id, first.id);
         assert_ne!(grown.commit_sha, first.commit_sha);
         assert_eq!(
-            cat(&store, &format!("{}:parent", grown.commit_sha)),
+            cat(&store, &format!("{}:first-parent", grown.commit_sha)),
             format!("{}\n", first.commit_sha)
         );
     }
@@ -987,7 +987,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(grown.outcome, SessionOutcome::Updated);
         assert_eq!(
-            cat(&store, &format!("{}:parent", grown.commit_sha)),
+            cat(&store, &format!("{}:first-parent", grown.commit_sha)),
             format!("{}\n", again.commit_sha)
         );
     }
@@ -1038,7 +1038,10 @@ pub(crate) mod tests {
         for (dataset, before, remaining) in [(&a, &a_before, vec!["s3"]), (&b, &b_before, vec![])] {
             let tip = store.rev_parse(&object_ref(dataset)).unwrap().unwrap();
             assert_ne!(&tip, before);
-            assert_eq!(cat(&store, &format!("{tip}:parent")), format!("{before}\n"));
+            assert_eq!(
+                cat(&store, &format!("{tip}:first-parent")),
+                format!("{before}\n")
+            );
             let listed: Vec<String> = datasets
                 .sessions_list(dataset)
                 .unwrap()

@@ -6,7 +6,7 @@
 //! ```text
 //! meta   (schema_version)
 //! ref    (id PRIMARY KEY, tip_sha)
-//! object (sha PRIMARY KEY, id, type, version, created, modified, deleted, parent_sha)
+//! object (sha PRIMARY KEY, id, type, version, created, modified, deleted, first_parent_sha)
 //! link   (commit_sha, link_file, ord, target_sha)
 //! attr   (commit_sha, key, value)
 //! ```
@@ -30,7 +30,7 @@ use crate::object::{LinkFile, Object};
 
 /// Bumped when the schema changes. A mismatch discards the file and
 /// rebuilds from an empty ref table.
-pub const INDEX_SCHEMA_VERSION: u32 = 2;
+pub const INDEX_SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (schema_version INTEGER NOT NULL);
@@ -43,7 +43,7 @@ CREATE TABLE object (
     created INTEGER,
     modified INTEGER,
     deleted INTEGER,
-    parent_sha TEXT
+    first_parent_sha TEXT
 );
 CREATE INDEX object_type_created ON object (type, created);
 CREATE INDEX object_type_modified ON object (type, modified);
@@ -180,7 +180,7 @@ impl ObjectIndex for SqliteIndex {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO object
-                 (sha, id, type, version, created, modified, deleted, parent_sha)
+                 (sha, id, type, version, created, modified, deleted, first_parent_sha)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     sha,
@@ -190,7 +190,7 @@ impl ObjectIndex for SqliteIndex {
                     h.created_ms,
                     h.modified_ms,
                     h.deleted_ms,
-                    h.parent
+                    h.first_parent
                 ],
             )
             .map_err(sql_err)?;
@@ -240,7 +240,7 @@ impl ObjectIndex for SqliteIndex {
     }
 
     /// Reachability is computed inside SQLite: from every tip, through
-    /// `parent_sha` and every link target, the same edges a rebuild
+    /// `first_parent_sha` and every link target, the same edges a rebuild
     /// walks. Rows for anything else are removed.
     fn prune(&self) -> Result<usize, StoreError> {
         let removed = self
@@ -249,9 +249,9 @@ impl ObjectIndex for SqliteIndex {
                 "WITH RECURSIVE reachable(sha) AS (
                      SELECT tip_sha FROM ref
                      UNION
-                     SELECT o.parent_sha FROM object o
+                     SELECT o.first_parent_sha FROM object o
                          JOIN reachable r ON o.sha = r.sha
-                         WHERE o.parent_sha IS NOT NULL
+                         WHERE o.first_parent_sha IS NOT NULL
                      UNION
                      SELECT l.target_sha FROM link l
                          JOIN reachable r ON l.commit_sha = r.sha
