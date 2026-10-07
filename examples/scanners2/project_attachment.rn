@@ -1,0 +1,43 @@
+use std::collections::HashMap;
+
+use gage::{Files, attach, dataset, scan};
+
+pub const SCANNER = #{
+    name: "session-attachment",
+    description: "Attach to sessions",
+    tasks: #{
+        readme: #{ attaches: ["README.md"] },
+        main: #{ attachments: #{ wants: ["README.md"] } },
+    },
+};
+
+pub async fn readme() {
+    for (dir, sessions) in sessions_by_project().await {
+        attach(Files::include(["README.md"]).root(dir))
+            .name("README.md")
+            .targets(sessions)
+            .await?;
+    }
+}
+
+async fn sessions_by_project() {
+    let by_project = HashMap::new();
+    for s in dataset().sessions().await {
+        if let Some(native) = s.native().await {
+            if let Some(dir) = native.project_dir {
+                if let Some(sessions) = by_project.get(dir) {
+                    sessions.push(s);
+                } else {
+                    by_project.insert(dir, [s]);
+                }
+            }
+        }
+    }
+    by_project
+}
+
+pub async fn main() {
+    for a in scan().attachments().name("README.md").await? {
+        println!("Hello {a:?}");
+    }
+}

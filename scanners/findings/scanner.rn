@@ -10,7 +10,7 @@ use gage::{
 
 pub const SCANNER = #{
     name: "findings",
-    description: "Report issues from session findings",
+    description: "Issues across findings",
     groups: ["default"],
     tasks: #{
         report: #{
@@ -25,7 +25,7 @@ pub const SCANNER = #{
 const REPORT_KEY = ("findings", "report", 1);
 
 pub async fn report() {
-    // Carry forward finding notes from previous scans
+    // Carry forward findings from previous scans
     let carried = carry_forward_notes_named("*[finding]").await?;
     log::info!("carried {carried} findings");
 

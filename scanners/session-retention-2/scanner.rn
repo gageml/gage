@@ -2,10 +2,10 @@ use gage::{Fail, Files, attach, scan, write_issue};
 
 pub const SCANNER = #{
     name: "session-retention-2",
-    description: "Highlight unset session retention policy",
+    description: "Unset session retention policy",
     groups: ["default"],
-    attachments: #{ "claude-config": #{} },
     tasks: #{
+        claude_config: #{ attaches: ["claude-config"] },
         check: #{
             attachments: #{ needs: ["claude-config"] },
             issues: #{
@@ -19,7 +19,7 @@ pub const SCANNER = #{
 
 const SETTINGS = ["settings.json", "settings.local.json"];
 
-pub async fn attach_claude_config() {
+pub async fn claude_config() {
     attach(Files::include(SETTINGS).root("~/.claude"))
         .name("claude-config")
         .await?;
@@ -46,7 +46,7 @@ async fn cleanup_period_days() {
         .name("claude-config")
         .await?
         .next()
-        .ok_or(Fail("dataset missing claude-code attachment"))?;
+        .ok_or(Fail("dataset missing claude-config attachment"))?;
     for name in SETTINGS {
         if let Some(f) = a.file(name).await {
             let settings = f.json().expect("should be JSON");

@@ -1,27 +1,22 @@
-use gage::{Files, attach, dataset, scan};
+use gage::{Files, attach, scan};
 
 pub const SCANNER = #{
     name: "hello-attachment",
     description: "Attachment greeting",
-    attachments: #{ readme: #{} },
-    tasks: #{ main: #{ attachments: #{ wants: ["readme"] } } },
+    tasks: #{
+        readme: #{ attaches: ["hello-attachment-src"] },
+        main: #{ attachments: #{ wants: ["hello-attachment-src"] } },
+    },
 };
 
-pub async fn main() {
-    for a in scan().attachments().name("readme").await? {
-        println!("{a:?}");
-    }
+pub async fn readme() {
+    attach(Files::include("hello_attachment.rn"))
+        .name("hello-attachment-src")
+        .await
 }
 
-pub async fn attach_readme() {
-    for s in dataset().sessions().await {
-        if let Some(native) = s.native().await {
-            if let Some(dir) = native.project_dir {
-                attach(Files::include(["README.md"]).root(dir))
-                    .name("readme")
-                    .target(s)
-                    .await?;
-            }
-        }
+pub async fn main() {
+    for a in scan().attachments().name("hello-attachment-src").await? {
+        println!("Hello {a:?}");
     }
 }

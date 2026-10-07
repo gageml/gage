@@ -58,14 +58,17 @@ to report "no issues found". Only use the tool to report found issues.
 In your reply, only state whether you wrote findings. Do not re-state the
 findings in your reply.
 
-{% if project %}
+{% if summaries %}
 ## Project context
 
-The session belongs to project `{{ project }}`. Summary notes for the project
-describe its rules and stack. Read them first via `mcp__gage__Query`:
+Summary notes for the session's project describe its rules and stack:
 
-`SELECT name, value FROM note WHERE target = 'project:{{ project }}' AND name LIKE 'project-summary.%'`
+{% for n in summaries %}
+### {{ n.name }}
+
+{{ n.value }}
+{% endfor %}
 
 Judge the session's code against these summaries. A rule violation finding
-must quote a rule that appears in the query results above.
+must quote a rule that appears above.
 {% endif %}

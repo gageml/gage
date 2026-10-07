@@ -15,14 +15,16 @@ use gage::{
 
 pub const SCANNER = #{
     name: "general-2",
-    description: "Scan sessions for general findings",
+    description: "General findings",
     groups: ["default"],
     tasks: #{
         review: #{
             notes: #{
-                writes: #{ "general[finding]": include_str!(
-                    "finding.md"
-                ) },
+                writes: #{
+                    "general[finding]": include_str!(
+                        "finding-note-doc.md"
+                    ),
+                },
             },
         },
     },
@@ -31,7 +33,7 @@ pub const SCANNER = #{
 const REVIEW_KEY = ("general", "review", 1);
 
 pub async fn review() {
-    let t = Template::new(include_str!("prompt.md.j2"))?;
+    let t = Template::new(include_str!("review-prompt.md.j2"))?;
 
     carry_forward_notes(REVIEW_KEY).await?;
 
