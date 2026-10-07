@@ -195,7 +195,17 @@ pub async fn add(args: AttachmentAddArgs) {
             .dataset
             .as_deref()
             .expect("clap requires --dataset with --stored");
-        add_to_dataset(&store, dataset, &record.id, record.attrs.name.as_deref());
+        let (dataset_id, linked) = link_to_dataset(&store, dataset, &record.id);
+        let verb = match linked {
+            AttachmentLinkOutcome::Linked => "Added",
+            AttachmentLinkOutcome::Updated => "Updated",
+            AttachmentLinkOutcome::Unchanged => "Unchanged",
+        };
+        println!(
+            "{verb} attachment {} to dataset {}",
+            describe(record.attrs.name.as_deref(), &record.id),
+            short_uuid(&dataset_id)
+        );
         return;
     }
 
@@ -233,16 +243,29 @@ pub async fn add(args: AttachmentAddArgs) {
     };
     let files = plural(added.file_count as usize, "file");
     let shown = describe(args.name.as_deref(), &added.id);
-    match added.outcome {
-        AttachmentOutcome::Added => println!("Added attachment {shown} with {files}"),
-        AttachmentOutcome::Updated => println!("Updated attachment {shown} with {files}"),
-        AttachmentOutcome::Unchanged => {
-            println!("Attachment {shown} is unchanged with {files}")
+    match args.dataset.as_deref() {
+        Some(prefix) => {
+            // The line reports the store write, as `gage dataset add`
+            // does; the dataset suffix names where the attachment
+            // was placed
+            let (dataset_id, _) = link_to_dataset(&store, prefix, &added.id);
+            let verb = match added.outcome {
+                AttachmentOutcome::Added => "Added",
+                AttachmentOutcome::Updated => "Updated",
+                AttachmentOutcome::Unchanged => "Unchanged",
+            };
+            println!(
+                "{verb} attachment {shown} with {files} to dataset {}",
+                short_uuid(&dataset_id)
+            );
         }
-    }
-
-    if let Some(prefix) = args.dataset.as_deref() {
-        add_to_dataset(&store, prefix, &added.id, args.name.as_deref());
+        None => match added.outcome {
+            AttachmentOutcome::Added => println!("Added attachment {shown} with {files}"),
+            AttachmentOutcome::Updated => println!("Updated attachment {shown} with {files}"),
+            AttachmentOutcome::Unchanged => {
+                println!("Attachment {shown} is unchanged with {files}")
+            }
+        },
     }
 }
 
@@ -326,36 +349,30 @@ fn describe(name: Option<&str>, id: &str) -> String {
     }
 }
 
-/// Add one stored attachment to a dataset and report the outcome in
-/// the shape `gage session add` uses.
-fn add_to_dataset(store: &Store, dataset_prefix: &str, id: &str, name: Option<&str>) {
+/// Link one stored attachment into the dataset `prefix` names and
+/// return the resolved dataset id with the link outcome. Prints
+/// `gage attachment add: <error>` and exits on failure.
+fn link_to_dataset(store: &Store, prefix: &str, id: &str) -> (String, AttachmentLinkOutcome) {
     let datasets = DatasetStore::from(store);
-    let dataset_id = match datasets.resolve_id(dataset_prefix) {
+    let dataset_id = match datasets.resolve_id(prefix) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("gage attachment add: --dataset {dataset_prefix}: {e}");
+            eprintln!("gage attachment add: --dataset {prefix}: {e}");
             std::process::exit(1);
         }
     };
-    let outcomes = match datasets.attachments_link(&dataset_id, &[id.to_string()]) {
+    let mut outcomes = match datasets.attachments_link(&dataset_id, &[id.to_string()]) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("gage attachment add: {e}");
             std::process::exit(1);
         }
     };
-    let dataset = short_uuid(&dataset_id);
-    for o in &outcomes {
-        let verb = match o.outcome {
-            AttachmentLinkOutcome::Linked => "Added",
-            AttachmentLinkOutcome::Updated => "Updated",
-            AttachmentLinkOutcome::Unchanged => "Unchanged",
-        };
-        println!(
-            "{verb} attachment {} to dataset {dataset}",
-            describe(name, &o.id)
-        );
-    }
+    let linked = outcomes
+        .pop()
+        .expect("attachments_link should yield one outcome per id")
+        .outcome;
+    (dataset_id, linked)
 }
 
 pub async fn list(args: AttachmentListArgs) {
