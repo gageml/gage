@@ -184,6 +184,15 @@ pub struct TaskAttachmentsDef {
     pub wants: Vec<String>,
 }
 
+/// What a task does: a scan task runs in a scan and reads the dataset
+/// through `scan()`; an attach task runs when a dataset is prepared,
+/// through `dataset()` and `attach()`, and never in a scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Scan,
+    Attach,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDef {
     pub name: String,
@@ -194,6 +203,20 @@ pub struct TaskDef {
     pub notes: TaskDepsDef,
     pub issues: TaskDepsDef,
     pub attachments: TaskAttachmentsDef,
+    /// The attachment names an attach task adds. Non-empty for an
+    /// attach task and empty for a scan task; the scan fields above
+    /// are empty on an attach task.
+    pub attaches: Vec<String>,
+}
+
+impl TaskDef {
+    pub fn kind(&self) -> TaskKind {
+        if self.attaches.is_empty() {
+            TaskKind::Scan
+        } else {
+            TaskKind::Attach
+        }
+    }
 }
 
 /// A defect in a scanner's `SCANNER` declaration, found while parsing
@@ -221,10 +244,6 @@ pub struct ScannerDef {
     /// specified; `-g --group` selects by any group name.
     pub groups: Vec<String>,
     pub tasks: BTreeMap<String, TaskDef>,
-    /// Attachment functions declared via `SCANNER.attachments`: key →
-    /// function name. `gage attachment add --scanner` runs each
-    /// against a dataset.
-    pub attachments: BTreeMap<String, String>,
     /// Agent defs declared via `SCANNER.agents`: fn name → description.
     /// Each names a public function returning an un-awaited `CallAgent`
     /// builder, runnable via `gage agent <scanner>::<fn>`.
@@ -745,6 +764,9 @@ impl ScannerRegistry {
         let mut issue_names: HashSet<String> = HashSet::new();
         for def in selected {
             for task in def.tasks.values() {
+                if task.kind() == TaskKind::Attach {
+                    continue;
+                }
                 note_names.extend(task.notes.writes.keys().cloned());
                 issue_names.extend(task.issues.writes.keys().cloned());
             }
@@ -762,6 +784,9 @@ impl ScannerRegistry {
             let mut changed = false;
             for def in &candidates {
                 for task in def.tasks.values() {
+                    if task.kind() == TaskKind::Attach {
+                        continue;
+                    }
                     let already = pulled
                         .get(def.name.as_str())
                         .is_some_and(|tasks| tasks.contains(&task.name));
@@ -832,7 +857,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     let mut library = false;
     let mut groups: Vec<String> = Vec::new();
     let mut tasks_obj: Option<&ast::ExprObject> = None;
-    let mut attachments_obj: Option<&ast::ExprObject> = None;
     let mut agents_obj: Option<&ast::ExprObject> = None;
     let mut problems: Vec<Problem> = Vec::new();
 
@@ -874,13 +898,11 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
                             problems.push(problem(expr, "SCANNER field 'tasks' must be an object"))
                         }
                     },
-                    Some("attachments") => match expr {
-                        ast::Expr::Object(obj) => attachments_obj = Some(obj),
-                        _ => problems.push(problem(
-                            expr,
-                            "SCANNER field 'attachments' must be an object",
-                        )),
-                    },
+                    Some("attachments") => problems.push(problem(
+                        expr,
+                        "SCANNER field 'attachments' is not supported; \
+                         declare an attach task with `attaches`",
+                    )),
                     Some("agents") => {
                         if let ast::Expr::Object(obj) = expr {
                             agents_obj = Some(obj);
@@ -901,10 +923,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         None => BTreeMap::new(),
     };
 
-    let attachments = match attachments_obj {
-        Some(obj) => parse_attachments(source, obj, &mut problems),
-        None => BTreeMap::new(),
-    };
     problems.sort_by_key(|p| p.start);
 
     let agents = match agents_obj {
@@ -920,7 +938,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         library,
         groups,
         tasks,
-        attachments,
         agents,
         problems,
         ast: file,
@@ -968,58 +985,10 @@ impl fmt::Display for ParseScannerFileError {
 
 impl std::error::Error for ParseScannerFileError {}
 
-/// Parse `SCANNER.attachments`: key → function name. Each value is an
-/// object whose `call` is the function's name as a string; absent, the
-/// function is `attach_<key>` with `-` as `_`. A string, not a path:
-/// Rune does not evaluate a function reference inside a `const`. An
-/// entry of another shape is a problem and is left out.
-fn parse_attachments(
-    source: &str,
-    obj: &ast::ExprObject,
-    problems: &mut Vec<Problem>,
-) -> BTreeMap<String, String> {
-    let mut attachments = BTreeMap::new();
-    for (field, _) in &obj.assignments {
-        let Some(key) = field_key(source, &field.key) else {
-            continue;
-        };
-        let Some((_, expr)) = &field.assign else {
-            continue;
-        };
-        let shape =
-            format!("attachment '{key}' must be an object whose `call` is a function name string");
-        let ast::Expr::Object(entry) = expr else {
-            problems.push(problem(expr, shape));
-            continue;
-        };
-        let call = match object_field(source, entry, "call") {
-            Some(call_expr) => match expr_str(source, call_expr) {
-                Some(call) => call,
-                None => {
-                    problems.push(problem(call_expr, shape));
-                    continue;
-                }
-            },
-            None => format!("attach_{}", function_name(&key)),
-        };
-        attachments.insert(key, call);
-    }
-    attachments
-}
-
 /// A key as a function name: `-` becomes `_`, since a key may be a
 /// quoted string but a function name is an identifier.
 fn function_name(key: &str) -> String {
     key.replace('-', "_")
-}
-
-/// The expression assigned to `name` in an object literal.
-fn object_field<'a>(source: &str, obj: &'a ast::ExprObject, name: &str) -> Option<&'a ast::Expr> {
-    obj.assignments.iter().find_map(|(field, _)| {
-        (field_key(source, &field.key).as_deref() == Some(name))
-            .then(|| field.assign.as_ref().map(|(_, expr)| expr))
-            .flatten()
-    })
 }
 
 /// Parse `SCANNER.agents`: fn name → description. Non-string values
@@ -1040,9 +1009,10 @@ fn parse_agents(source: &str, obj: &ast::ExprObject) -> BTreeMap<String, String>
     agents
 }
 
-/// Parse `SCANNER.tasks`. A task of the wrong shape, a duplicate, or
-/// a field of the wrong type is a problem; the task or field is left
-/// out and parsing continues.
+/// Parse `SCANNER.tasks`. A task declaring `attaches` is an attach
+/// task and declares nothing else. A task of the wrong shape, a
+/// duplicate, or a field of the wrong type is a problem; the task or
+/// field is left out and parsing continues.
 fn parse_tasks(
     source: &str,
     obj: &ast::ExprObject,
@@ -1072,6 +1042,9 @@ fn parse_tasks(
         let mut notes = TaskDepsDef::default();
         let mut issues = TaskDepsDef::default();
         let mut attachments = TaskAttachmentsDef::default();
+        let mut attaches: Option<(Vec<String>, &ast::Expr)> = None;
+        // The scan-only fields the task declares, for the attach check
+        let mut scan_fields: Vec<(&str, &ast::Expr)> = Vec::new();
 
         for (tf, _) in &task_obj.assignments {
             let Some(tkey) = field_key(source, &tf.key) else {
@@ -1085,12 +1058,20 @@ fn parse_tasks(
                     Some(c) => call = c,
                     None => problems.push(field_problem(texpr, &name, "call")),
                 },
+                "attaches" => {
+                    attaches = Some((
+                        parse_patterns(source, texpr, &name, "attaches", problems),
+                        texpr,
+                    ));
+                }
                 "attachments" => {
                     attachments = parse_task_attachments(source, texpr, &name, problems);
+                    scan_fields.push(("attachments", texpr));
                 }
                 "notes" => {
                     notes =
                         parse_task_deps(source, texpr, &name, embed_key, DepsKind::Notes, problems);
+                    scan_fields.push(("notes", texpr));
                 }
                 "issues" => {
                     issues = parse_task_deps(
@@ -1101,10 +1082,31 @@ fn parse_tasks(
                         DepsKind::Issues,
                         problems,
                     );
+                    scan_fields.push(("issues", texpr));
                 }
                 _ => {}
             }
         }
+
+        let attaches = match attaches {
+            Some((names, texpr)) if names.is_empty() => {
+                problems.push(problem(
+                    texpr,
+                    format!("attach task '{name}' must name at least one attachment"),
+                ));
+                Vec::new()
+            }
+            Some((names, _)) => {
+                for (field, fexpr) in &scan_fields {
+                    problems.push(problem(
+                        fexpr,
+                        format!("attach task '{name}' cannot declare '{field}'"),
+                    ));
+                }
+                names
+            }
+            None => Vec::new(),
+        };
 
         tasks.insert(
             name.clone(),
@@ -1114,6 +1116,7 @@ fn parse_tasks(
                 notes,
                 issues,
                 attachments,
+                attaches,
             },
         );
     }
@@ -1534,15 +1537,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_attachments_and_task_calls() {
+    fn parse_attach_tasks_and_task_calls() {
         let source = r#"
 pub const SCANNER = #{
     name: "demo",
-    attachments: #{
-        "claude-config": #{ call: "attach_config" },
-        "stack-files": #{},
-    },
     tasks: #{
+        claude_config: #{ attaches: ["claude-config"], call: "attach_config" },
+        "stack-files": #{ attaches: ["stack-files", "stack-lock"] },
         check: #{
             call: "run_check",
             attachments: #{ needs: ["claude-config"], wants: ["stack-*"] },
@@ -1552,18 +1553,22 @@ pub const SCANNER = #{
 };
 "#;
         let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
-        assert_eq!(
-            def.attachments,
-            BTreeMap::from([
-                ("claude-config".to_string(), "attach_config".to_string()),
-                ("stack-files".to_string(), "attach_stack_files".to_string()),
-            ])
-        );
+        assert!(def.problems.is_empty(), "{:?}", def.problems);
+        let cfg = &def.tasks["claude_config"];
+        assert_eq!(cfg.kind(), TaskKind::Attach);
+        assert_eq!(cfg.call, "attach_config");
+        assert_eq!(cfg.attaches, ["claude-config"]);
+        let stack = &def.tasks["stack-files"];
+        assert_eq!(stack.kind(), TaskKind::Attach);
+        assert_eq!(stack.call, "stack_files");
+        assert_eq!(stack.attaches, ["stack-files", "stack-lock"]);
         let check = &def.tasks["check"];
+        assert_eq!(check.kind(), TaskKind::Scan);
         assert_eq!(check.call, "run_check");
         assert_eq!(check.attachments.needs, ["claude-config"]);
         assert_eq!(check.attachments.wants, ["stack-*"]);
         let plain = &def.tasks["plain-task"];
+        assert_eq!(plain.kind(), TaskKind::Scan);
         assert_eq!(plain.call, "plain_task");
         assert_eq!(plain.attachments, TaskAttachmentsDef::default());
     }
@@ -1576,12 +1581,14 @@ pub const SCANNER = #{
         let source = r#"
 pub const SCANNER = #{
     name: "demo",
-    attachments: #{ cfg: attach_cfg, ok: #{} },
+    attachments: #{ cfg: attach_cfg },
     tasks: #{
         main: #{ call: my_main, attachments: #{ needs: "x" } },
         main: #{},
         plain: #{ notes: #{ writes: #{ "n": include_str!("missing.md") } } },
         text: "nope",
+        empty: #{ attaches: [] },
+        mixed: #{ attaches: ["a"], notes: #{ writes: ["n"] } },
     },
 };
 "#;
@@ -1595,23 +1602,30 @@ pub const SCANNER = #{
         assert_eq!(
             messages,
             [
-                "attachment 'cfg' must be an object whose `call` is a function name string",
+                "SCANNER field 'attachments' is not supported; \
+                 declare an attach task with `attaches`",
                 "task 'main' field 'call' has unexpected type",
                 "task 'main' field 'attachments.needs' has unexpected type",
                 "duplicate task 'main'",
                 "task 'plain' note 'n' include_str!(/tmp/demo/missing.md): \
                  No such file or directory (os error 2)",
                 "task 'text' must be an object",
+                "attach task 'empty' must name at least one attachment",
+                "attach task 'mixed' cannot declare 'notes'",
             ]
         );
         // The defective parts are left out and the rest is kept
-        assert_eq!(def.attachments.keys().collect::<Vec<_>>(), ["ok"]);
-        assert_eq!(def.tasks.keys().collect::<Vec<_>>(), ["main", "plain"]);
+        assert_eq!(
+            def.tasks.keys().collect::<Vec<_>>(),
+            ["empty", "main", "mixed", "plain"]
+        );
         assert_eq!(def.tasks["main"].call, "main");
         assert!(def.tasks["plain"].notes.writes.is_empty());
+        assert_eq!(def.tasks["empty"].kind(), TaskKind::Scan);
+        assert_eq!(def.tasks["mixed"].kind(), TaskKind::Attach);
         // Each problem labels its own span
         let p = &def.problems[0];
-        assert_eq!(&source[p.start..p.end], "attach_cfg");
+        assert_eq!(&source[p.start..p.end], "#{ cfg: attach_cfg }");
         let rendered = def.render_problems();
         assert!(rendered.contains("4 │"), "{rendered}");
         assert!(rendered.contains("duplicate task 'main'"), "{rendered}");

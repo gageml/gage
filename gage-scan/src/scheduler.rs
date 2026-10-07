@@ -765,6 +765,7 @@ mod tests {
                         notes: deps(nw, nwr),
                         issues: deps(iw, iwr),
                         attachments: Default::default(),
+                        attaches: Vec::new(),
                     },
                 )
             })

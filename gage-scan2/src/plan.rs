@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use gage_core::glob::glob_match;
-use gage_registry::scanner::TaskDef;
+use gage_registry::scanner::{TaskDef, TaskKind};
 use serde::Serialize;
 
 /// One scanner's contribution to the plan: its planned tasks and how
@@ -132,7 +132,9 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
     let mut defs: Vec<(&PlannedScanner<'_>, &TaskDef)> = Vec::new();
     for scanner in order {
         for def in scanner.tasks.values() {
-            defs.push((scanner, def));
+            if def.kind() == TaskKind::Scan {
+                defs.push((scanner, def));
+            }
         }
     }
 
@@ -342,6 +344,7 @@ mod tests {
                         name: name.to_string(),
                         call: name.to_string(),
                         attachments: Default::default(),
+                        attaches: Vec::new(),
                         notes: TaskDepsDef {
                             wants: wants.iter().map(|s| s.to_string()).collect(),
                             writes: writes

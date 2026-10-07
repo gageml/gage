@@ -1,18 +1,22 @@
-//! The attach phase: run the attachment functions of compiled
-//! scanners against a dataset, in preparation for a scan by those
-//! scanners.
+//! The attach phase: run the attach tasks of compiled scanners against
+//! a dataset, in preparation for a scan by those scanners.
 //!
-//! Each function runs under an [`AttachContext`] and an output sink,
-//! on a fresh VM, in scanner order then key order. Everything a
-//! function prints or logs and every attachment it writes reaches the
-//! caller as an [`AttachEvent`] as it happens. The first function
-//! that fails ends the phase: later functions do not run, and the
-//! attachments linked before the failure stay linked.
+//! An attach task is a task declaring `attaches`, the attachment
+//! names it adds. It runs under an [`AttachContext`] and an output
+//! sink, on a fresh VM, in scanner order then task order; a scan never
+//! runs it. Everything a task prints or logs and every attachment it
+//! writes reaches the caller as an [`AttachEvent`] as it happens. A
+//! task that writes a name it did not declare, or declares one it did
+//! not write, is reported as a warning. The first task that fails ends
+//! the phase: later tasks do not run, and the attachments linked
+//! before the failure stay linked.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
+use gage_registry::scanner::{TaskDef, TaskKind};
 use gage_runtime2::{
     ATTACH_CTX, AttachContext, Attached, OUTPUT_SINK, OutputSink, ScanDatasetRef, TaskOutput,
 };
@@ -25,13 +29,18 @@ use crate::{CompiledScanner, execute};
 /// Something the attach phase reports as it runs.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttachEvent {
-    /// An attachment function is about to run
-    Started { scanner: String, key: String },
-    /// A line the function printed or logged, with the function named
-    /// as the task
+    /// An attach task is about to run
+    Started { scanner: String, task: String },
+    /// A line the task printed or logged
     Output(TaskOutput),
-    /// An attachment the function wrote
+    /// An attachment the task wrote
     Attached { scanner: String, attached: Attached },
+    /// The task's `attaches` and what it wrote disagree
+    Warning {
+        scanner: String,
+        task: String,
+        message: String,
+    },
 }
 
 /// A failure of the attach phase.
@@ -39,11 +48,11 @@ pub enum AttachEvent {
 pub enum AttachError {
     /// The dataset could not be read or the store could not be opened
     Store(StoreError),
-    /// An attachment function returned an error or faulted; the
-    /// message is the rendered diagnostic
-    Function {
+    /// An attach task returned an error or faulted; the message is the
+    /// rendered diagnostic
+    Task {
         scanner: String,
-        key: String,
+        task: String,
         message: String,
     },
 }
@@ -52,11 +61,11 @@ impl fmt::Display for AttachError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AttachError::Store(e) => write!(f, "{e}"),
-            AttachError::Function {
+            AttachError::Task {
                 scanner,
-                key,
+                task,
                 message,
-            } => write!(f, "attachment {scanner}:{key} failed\n{message}"),
+            } => write!(f, "task {scanner}:{task} failed\n{message}"),
         }
     }
 }
@@ -69,9 +78,9 @@ impl From<StoreError> for AttachError {
     }
 }
 
-/// Run every attachment function of `scanners` against the dataset
-/// `dataset_id`, which is read at its current commit. `driver`
-/// reopens native sources for `session.native()`.
+/// Run every attach task of `scanners` against the dataset
+/// `dataset_id`, which is read at its current commit. `driver` reopens
+/// native sources for `session.native()`.
 pub async fn attach(
     store: &Store,
     dataset_id: &str,
@@ -85,17 +94,16 @@ pub async fn attach(
         commit_sha: record.commit_sha,
     };
     for scanner in scanners {
-        for (key, function) in &scanner.attachments {
+        for task in scanner.attach_tasks() {
             on_event(AttachEvent::Started {
                 scanner: scanner.name.clone(),
-                key: key.clone(),
+                task: task.name.clone(),
             });
             run_one(
                 store.path(),
                 &dataset,
                 scanner,
-                key,
-                function,
+                task,
                 Arc::clone(&driver),
                 &mut on_event,
             )
@@ -105,14 +113,21 @@ pub async fn attach(
     Ok(())
 }
 
-/// Run one attachment function, delivering its output and the
-/// attachments it writes as they arrive.
+impl CompiledScanner {
+    /// The scanner's attach tasks, in task order.
+    pub(crate) fn attach_tasks(&self) -> impl Iterator<Item = &TaskDef> {
+        self.tasks.values().filter(|t| t.kind() == TaskKind::Attach)
+    }
+}
+
+/// Run one attach task, delivering its output and the attachments it
+/// writes as they arrive, then compare what it wrote with what it
+/// declared.
 async fn run_one(
     store_path: &Path,
     dataset: &ScanDatasetRef,
     scanner: &CompiledScanner,
-    key: &str,
-    function: &str,
+    task: &TaskDef,
     driver: Arc<dyn Driver>,
     on_event: &mut impl FnMut(AttachEvent),
 ) -> Result<(), AttachError> {
@@ -127,40 +142,71 @@ async fn run_one(
     )?;
     let sink = OutputSink {
         scanner: scanner.name.clone(),
-        task: key.to_string(),
+        task: task.name.clone(),
         tx: output_tx,
     };
     let unit = scanner.task_unit();
-    let function = function.to_string();
+    let call = task.call.clone();
     let run = ATTACH_CTX.scope(
         ctx,
-        OUTPUT_SINK.scope(sink, async move { execute(&unit, &function).await }),
+        OUTPUT_SINK.scope(sink, async move { execute(&unit, &call).await }),
     );
     let mut run = std::pin::pin!(run);
+    let mut written: BTreeSet<String> = BTreeSet::new();
     let result = loop {
         tokio::select! {
             biased;
             Some(output) = output_rx.recv() => on_event(AttachEvent::Output(output)),
-            Some(attached) = attached_rx.recv() => on_event(AttachEvent::Attached {
-                scanner: scanner.name.clone(),
-                attached,
-            }),
+            Some(attached) = attached_rx.recv() => {
+                deliver_attached(&scanner.name, attached, &mut written, on_event)
+            }
             result = &mut run => break result,
         }
     };
-    // The function has returned; deliver what it sent before it did
+    // The task has returned; deliver what it sent before it did
     while let Ok(output) = output_rx.try_recv() {
         on_event(AttachEvent::Output(output));
     }
     while let Ok(attached) = attached_rx.try_recv() {
-        on_event(AttachEvent::Attached {
+        deliver_attached(&scanner.name, attached, &mut written, on_event);
+    }
+    result.map_err(|message| AttachError::Task {
+        scanner: scanner.name.clone(),
+        task: task.name.clone(),
+        message,
+    })?;
+
+    let declared: BTreeSet<&str> = task.attaches.iter().map(String::as_str).collect();
+    for name in written.iter().filter(|n| !declared.contains(n.as_str())) {
+        on_event(AttachEvent::Warning {
             scanner: scanner.name.clone(),
-            attached,
+            task: task.name.clone(),
+            message: format!("attached '{name}', which it does not declare in `attaches`"),
         });
     }
-    result.map_err(|message| AttachError::Function {
-        scanner: scanner.name.clone(),
-        key: key.to_string(),
-        message,
-    })
+    for name in declared.iter().filter(|n| !written.contains(**n)) {
+        on_event(AttachEvent::Warning {
+            scanner: scanner.name.clone(),
+            task: task.name.clone(),
+            message: format!("declares '{name}' in `attaches` but attached nothing by that name"),
+        });
+    }
+    Ok(())
+}
+
+/// Report one written attachment and record its name for the
+/// declaration check.
+fn deliver_attached(
+    scanner: &str,
+    attached: Attached,
+    written: &mut BTreeSet<String>,
+    on_event: &mut impl FnMut(AttachEvent),
+) {
+    if let Some(name) = &attached.name {
+        written.insert(name.clone());
+    }
+    on_event(AttachEvent::Attached {
+        scanner: scanner.to_string(),
+        attached,
+    });
 }

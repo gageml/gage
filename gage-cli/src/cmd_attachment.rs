@@ -125,12 +125,12 @@ pub struct AttachmentAddArgs {
     )]
     pub stored: Option<String>,
 
-    /// Run a scanner's attachment functions against a dataset (repeatable)
+    /// Run a scanner's attach tasks against a dataset (repeatable)
     ///
     /// A scanner name, or when no scanner has that name, a path: a
     /// directory holding a scanner.rn, or a scanner file. Each scanner
-    /// attaches what its tasks read, preparing the dataset for a scan
-    /// by those scanners. Requires --dataset
+    /// attaches what its scan tasks read, preparing the dataset for a
+    /// scan by those scanners. Requires --dataset
     #[arg(
         short,
         long = "scanner",
@@ -287,6 +287,11 @@ async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]
     let driver = Arc::new(ClaudeDriver::new());
     let result = attach(store, &dataset_id, &compiled, driver, |event| match event {
         AttachEvent::Started { .. } => {}
+        AttachEvent::Warning {
+            scanner,
+            task,
+            message,
+        } => eprintln!("warning: task {scanner}:{task} {message}"),
         AttachEvent::Output(TaskOutput { output, .. }) => match output {
             Output::Print(s) => print!("{s}"),
             Output::Println(s) => println!("{s}"),
