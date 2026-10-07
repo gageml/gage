@@ -1548,6 +1548,21 @@ async fn run_dialog(
         out
     };
 
+    // A defective SCANNER declaration is a full stop, as a compile
+    // failure is below
+    for scanner in &scanners {
+        if !scanner.def.problems.is_empty() {
+            cli::log::error(format!(
+                "scanner {} has an invalid SCANNER declaration\n{}",
+                scanner.def.name,
+                scanner.def.render_problems()
+            ))?;
+            return Err(DialogError::Failed(
+                "Scan not started due to scanner errors".to_string(),
+            ));
+        }
+    }
+
     // Pull in tasks that declare themselves `required_by` what the
     // selection writes. `--no-deps` skips the pull-in so only the
     // named scanners run.
@@ -2361,6 +2376,29 @@ pub(crate) fn list_scanners(registry: &ScannerRegistry) {
             eprintln!();
             eprintln!("{}", style(path.display()).yellow());
             eprintln!("{rendered}");
+        }
+    }
+
+    let invalid: Vec<&ScannerDef> = registry
+        .list()
+        .into_iter()
+        .filter(|d| !d.problems.is_empty())
+        .collect();
+    if !invalid.is_empty() {
+        println!();
+        eprintln!(
+            "{}",
+            style(format!(
+                "{} scanner(s) have an invalid SCANNER declaration:",
+                invalid.len()
+            ))
+            .red()
+            .bold()
+        );
+        for def in invalid {
+            eprintln!();
+            eprintln!("{}", style(def.path.display()).yellow());
+            eprintln!("{}", def.render_problems());
         }
     }
 }

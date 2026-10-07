@@ -196,6 +196,17 @@ pub struct TaskDef {
     pub attachments: TaskAttachmentsDef,
 }
 
+/// A defect in a scanner's `SCANNER` declaration, found while parsing
+/// it. The scanner is still registered with the defective part left
+/// out; the defect is reported when the scanner is compiled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// Byte range of the offending source
+    pub start: usize,
+    pub end: usize,
+    pub message: String,
+}
+
 pub struct ScannerDef {
     pub name: String,
     pub description: String,
@@ -218,6 +229,9 @@ pub struct ScannerDef {
     /// Each names a public function returning an un-awaited `CallAgent`
     /// builder, runnable via `gage agent <scanner>::<fn>`.
     pub agents: BTreeMap<String, String>,
+    /// Defects in the `SCANNER` declaration, in source order. A def
+    /// with problems is not fit to compile.
+    pub problems: Vec<Problem>,
     ast: ast::File,
     source: String,
     pub embed_key: String,
@@ -266,32 +280,40 @@ impl ScannerDef {
         &self.source
     }
 
+    /// The problems as one codespan report, each labelled at its
+    /// source span, for the compile error that stops the scanner.
+    pub fn render_problems(&self) -> String {
+        use codespan_reporting::diagnostic::{Diagnostic, Label};
+        use codespan_reporting::term;
+        use rune::{Source, Sources};
+
+        let mut sources = Sources::new();
+        let source_id = sources
+            .insert(Source::with_path(&self.embed_key, &self.source, &self.path).unwrap())
+            .unwrap();
+        let mut buf = rune::termcolor::Buffer::no_color();
+        for problem in &self.problems {
+            let diagnostic = Diagnostic::error()
+                .with_message(&problem.message)
+                .with_labels(vec![Label::primary(source_id, problem.start..problem.end)]);
+            term::emit_to_write_style(&mut buf, &term::Config::default(), &sources, &diagnostic)
+                .unwrap();
+        }
+        String::from_utf8(buf.into_inner()).unwrap()
+    }
+
     fn ident(&self, span: rune::ast::Span) -> &str {
         &self.source[span.start.0 as usize..span.end.0 as usize]
     }
 }
 
+/// Why a file is not a scanner at all. Defects within a scanner's
+/// declaration are [`Problem`]s on the def instead.
 #[derive(Debug)]
 pub enum ParseError {
     Syntax(rune::compile::Error),
     MissingScanner,
     MissingName,
-    DuplicateTask(String),
-    TaskFieldType {
-        task: String,
-        field: &'static str,
-    },
-    /// A `SCANNER.attachments` entry is not an object, or its `f` is
-    /// not a function name
-    AttachmentField {
-        key: String,
-    },
-    IncludeStr {
-        task: String,
-        note: String,
-        path: PathBuf,
-        message: String,
-    },
 }
 
 impl ParseError {
@@ -345,30 +367,6 @@ impl fmt::Display for ParseError {
             ParseError::Syntax(e) => write!(f, "{e}"),
             ParseError::MissingScanner => write!(f, "missing SCANNER constant"),
             ParseError::MissingName => write!(f, "SCANNER missing 'name' field"),
-            ParseError::DuplicateTask(name) => {
-                write!(f, "duplicate task '{name}'")
-            }
-            ParseError::TaskFieldType { task, field } => {
-                write!(f, "task '{task}' field '{field}' has unexpected type")
-            }
-            ParseError::AttachmentField { key } => {
-                write!(
-                    f,
-                    "attachment '{key}' must be an object whose `call` is a function name string"
-                )
-            }
-            ParseError::IncludeStr {
-                task,
-                note,
-                path,
-                message,
-            } => {
-                write!(
-                    f,
-                    "task '{task}' note '{note}' include_str!({}): {message}",
-                    path.display()
-                )
-            }
         }
     }
 }
@@ -836,6 +834,7 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     let mut tasks_obj: Option<&ast::ExprObject> = None;
     let mut attachments_obj: Option<&ast::ExprObject> = None;
     let mut agents_obj: Option<&ast::ExprObject> = None;
+    let mut problems: Vec<Problem> = Vec::new();
 
     for (item, _) in &file.items {
         let ast::Item::Const(item_const) = item else {
@@ -869,16 +868,19 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
                     Some("hidden") => hidden = expr_bool(source, expr),
                     Some("library") => library = expr_bool(source, expr),
                     Some("groups") => groups = expr_str_vec(source, expr),
-                    Some("tasks") => {
-                        if let ast::Expr::Object(obj) = expr {
-                            tasks_obj = Some(obj);
+                    Some("tasks") => match expr {
+                        ast::Expr::Object(obj) => tasks_obj = Some(obj),
+                        _ => {
+                            problems.push(problem(expr, "SCANNER field 'tasks' must be an object"))
                         }
-                    }
-                    Some("attachments") => {
-                        if let ast::Expr::Object(obj) = expr {
-                            attachments_obj = Some(obj);
-                        }
-                    }
+                    },
+                    Some("attachments") => match expr {
+                        ast::Expr::Object(obj) => attachments_obj = Some(obj),
+                        _ => problems.push(problem(
+                            expr,
+                            "SCANNER field 'attachments' must be an object",
+                        )),
+                    },
                     Some("agents") => {
                         if let ast::Expr::Object(obj) = expr {
                             agents_obj = Some(obj);
@@ -895,14 +897,15 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     }
 
     let tasks = match tasks_obj {
-        Some(obj) => parse_tasks(source, obj, embed_key)?,
+        Some(obj) => parse_tasks(source, obj, embed_key, &mut problems),
         None => BTreeMap::new(),
     };
 
     let attachments = match attachments_obj {
-        Some(obj) => parse_attachments(source, obj)?,
+        Some(obj) => parse_attachments(source, obj, &mut problems),
         None => BTreeMap::new(),
     };
+    problems.sort_by_key(|p| p.start);
 
     let agents = match agents_obj {
         Some(obj) => parse_agents(source, obj),
@@ -919,6 +922,7 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         tasks,
         attachments,
         agents,
+        problems,
         ast: file,
         source: source.to_string(),
         embed_key: embed_key.to_string(),
@@ -967,11 +971,13 @@ impl std::error::Error for ParseScannerFileError {}
 /// Parse `SCANNER.attachments`: key → function name. Each value is an
 /// object whose `call` is the function's name as a string; absent, the
 /// function is `attach_<key>` with `-` as `_`. A string, not a path:
-/// Rune does not evaluate a function reference inside a `const`.
+/// Rune does not evaluate a function reference inside a `const`. An
+/// entry of another shape is a problem and is left out.
 fn parse_attachments(
     source: &str,
     obj: &ast::ExprObject,
-) -> Result<BTreeMap<String, String>, ParseError> {
+    problems: &mut Vec<Problem>,
+) -> BTreeMap<String, String> {
     let mut attachments = BTreeMap::new();
     for (field, _) in &obj.assignments {
         let Some(key) = field_key(source, &field.key) else {
@@ -980,18 +986,25 @@ fn parse_attachments(
         let Some((_, expr)) = &field.assign else {
             continue;
         };
+        let shape =
+            format!("attachment '{key}' must be an object whose `call` is a function name string");
         let ast::Expr::Object(entry) = expr else {
-            return Err(ParseError::AttachmentField { key });
+            problems.push(problem(expr, shape));
+            continue;
         };
         let call = match object_field(source, entry, "call") {
-            Some(expr) => {
-                expr_str(source, expr).ok_or(ParseError::AttachmentField { key: key.clone() })?
-            }
+            Some(call_expr) => match expr_str(source, call_expr) {
+                Some(call) => call,
+                None => {
+                    problems.push(problem(call_expr, shape));
+                    continue;
+                }
+            },
             None => format!("attach_{}", function_name(&key)),
         };
         attachments.insert(key, call);
     }
-    Ok(attachments)
+    attachments
 }
 
 /// A key as a function name: `-` becomes `_`, since a key may be a
@@ -1027,11 +1040,15 @@ fn parse_agents(source: &str, obj: &ast::ExprObject) -> BTreeMap<String, String>
     agents
 }
 
+/// Parse `SCANNER.tasks`. A task of the wrong shape, a duplicate, or
+/// a field of the wrong type is a problem; the task or field is left
+/// out and parsing continues.
 fn parse_tasks(
     source: &str,
     obj: &ast::ExprObject,
     embed_key: &str,
-) -> Result<BTreeMap<String, TaskDef>, ParseError> {
+    problems: &mut Vec<Problem>,
+) -> BTreeMap<String, TaskDef> {
     let mut tasks: BTreeMap<String, TaskDef> = BTreeMap::new();
 
     for (field, _) in &obj.assignments {
@@ -1042,14 +1059,13 @@ fn parse_tasks(
             continue;
         };
         let ast::Expr::Object(task_obj) = expr else {
-            return Err(ParseError::TaskFieldType {
-                task: name,
-                field: "body",
-            });
+            problems.push(problem(expr, format!("task '{name}' must be an object")));
+            continue;
         };
 
         if tasks.contains_key(&name) {
-            return Err(ParseError::DuplicateTask(name));
+            problems.push(problem(expr, format!("duplicate task '{name}'")));
+            continue;
         }
 
         let mut call = function_name(&name);
@@ -1065,31 +1081,29 @@ fn parse_tasks(
                 continue;
             };
             match tkey.as_str() {
-                "call" => {
-                    call = expr_str(source, texpr).ok_or(ParseError::TaskFieldType {
-                        task: name.clone(),
-                        field: "call",
-                    })?;
-                    continue;
-                }
+                "call" => match expr_str(source, texpr) {
+                    Some(c) => call = c,
+                    None => problems.push(field_problem(texpr, &name, "call")),
+                },
                 "attachments" => {
-                    attachments = parse_task_attachments(source, texpr, &name)?;
-                    continue;
+                    attachments = parse_task_attachments(source, texpr, &name, problems);
+                }
+                "notes" => {
+                    notes =
+                        parse_task_deps(source, texpr, &name, embed_key, DepsKind::Notes, problems);
+                }
+                "issues" => {
+                    issues = parse_task_deps(
+                        source,
+                        texpr,
+                        &name,
+                        embed_key,
+                        DepsKind::Issues,
+                        problems,
+                    );
                 }
                 _ => {}
             }
-            let (dest, kind) = match tkey.as_str() {
-                "notes" => (&mut notes, DepsKind::Notes),
-                "issues" => (&mut issues, DepsKind::Issues),
-                _ => continue,
-            };
-            let ast::Expr::Object(deps_obj) = texpr else {
-                return Err(ParseError::TaskFieldType {
-                    task: name.clone(),
-                    field: kind.field(),
-                });
-            };
-            *dest = parse_task_deps(source, deps_obj, &name, embed_key, kind)?;
         }
 
         tasks.insert(
@@ -1104,7 +1118,7 @@ fn parse_tasks(
         );
     }
 
-    Ok(tasks)
+    tasks
 }
 
 /// Parse a task's `attachments: #{ needs: [...], wants: [...] }`.
@@ -1112,14 +1126,13 @@ fn parse_task_attachments(
     source: &str,
     expr: &ast::Expr,
     task: &str,
-) -> Result<TaskAttachmentsDef, ParseError> {
-    let ast::Expr::Object(obj) = expr else {
-        return Err(ParseError::TaskFieldType {
-            task: task.to_string(),
-            field: "attachments",
-        });
-    };
+    problems: &mut Vec<Problem>,
+) -> TaskAttachmentsDef {
     let mut def = TaskAttachmentsDef::default();
+    let ast::Expr::Object(obj) = expr else {
+        problems.push(field_problem(expr, task, "attachments"));
+        return def;
+    };
     for (field, _) in &obj.assignments {
         let Some(key) = field_key(source, &field.key) else {
             continue;
@@ -1128,12 +1141,16 @@ fn parse_task_attachments(
             continue;
         };
         match key.as_str() {
-            "needs" => def.needs = parse_patterns(source, expr, task, "attachments.needs")?,
-            "wants" => def.wants = parse_patterns(source, expr, task, "attachments.wants")?,
+            "needs" => {
+                def.needs = parse_patterns(source, expr, task, "attachments.needs", problems)
+            }
+            "wants" => {
+                def.wants = parse_patterns(source, expr, task, "attachments.wants", problems)
+            }
             _ => {}
         }
     }
-    Ok(def)
+    def
 }
 
 /// Which task-dependency block is being parsed; selects the field
@@ -1176,12 +1193,17 @@ impl DepsKind {
 
 fn parse_task_deps(
     source: &str,
-    obj: &ast::ExprObject,
+    expr: &ast::Expr,
     task: &str,
     embed_key: &str,
     kind: DepsKind,
-) -> Result<TaskDepsDef, ParseError> {
+    problems: &mut Vec<Problem>,
+) -> TaskDepsDef {
     let mut deps = TaskDepsDef::default();
+    let ast::Expr::Object(obj) = expr else {
+        problems.push(field_problem(expr, task, kind.field()));
+        return deps;
+    };
     for (field, _) in &obj.assignments {
         let Some(key) = field_key(source, &field.key) else {
             continue;
@@ -1191,57 +1213,58 @@ fn parse_task_deps(
         };
         match key.as_str() {
             "wants" => {
-                deps.wants = parse_patterns(source, expr, task, kind.wants_field())?;
+                deps.wants = parse_patterns(source, expr, task, kind.wants_field(), problems);
             }
             "required_by" => {
-                deps.required_by = parse_patterns(source, expr, task, kind.required_by_field())?;
+                deps.required_by =
+                    parse_patterns(source, expr, task, kind.required_by_field(), problems);
             }
             "writes" => {
                 deps.writes = match expr {
                     ast::Expr::Object(writes_obj) => {
-                        parse_notes(source, writes_obj, task, embed_key)?
+                        parse_notes(source, writes_obj, task, embed_key, problems)
                     }
                     // The list form names the items with no docs
-                    ast::Expr::Vec(_) => parse_patterns(source, expr, task, kind.writes_field())?
-                        .into_iter()
-                        .map(|name| (name, String::new()))
-                        .collect(),
+                    ast::Expr::Vec(_) => {
+                        parse_patterns(source, expr, task, kind.writes_field(), problems)
+                            .into_iter()
+                            .map(|name| (name, String::new()))
+                            .collect()
+                    }
                     _ => {
-                        return Err(ParseError::TaskFieldType {
-                            task: task.to_string(),
-                            field: kind.writes_field(),
-                        });
+                        problems.push(field_problem(expr, task, kind.writes_field()));
+                        BTreeMap::new()
                     }
                 };
             }
             _ => {}
         }
     }
-    Ok(deps)
+    deps
 }
 
-/// Parse a `*`-glob pattern list field (`wants`, `required_by`).
+/// Parse a `*`-glob pattern list field (`wants`, `required_by`). A
+/// non-list is a problem yielding no patterns; a non-string item is a
+/// problem and is left out.
 fn parse_patterns(
     source: &str,
     expr: &ast::Expr,
     task: &str,
     field: &'static str,
-) -> Result<Vec<String>, ParseError> {
+    problems: &mut Vec<Problem>,
+) -> Vec<String> {
     let ast::Expr::Vec(vec_expr) = expr else {
-        return Err(ParseError::TaskFieldType {
-            task: task.to_string(),
-            field,
-        });
+        problems.push(field_problem(expr, task, field));
+        return Vec::new();
     };
     let mut out = Vec::with_capacity(vec_expr.items.len());
     for (item_expr, _) in &vec_expr.items {
-        let s = expr_str(source, item_expr).ok_or(ParseError::TaskFieldType {
-            task: task.to_string(),
-            field,
-        })?;
-        out.push(s);
+        match expr_str(source, item_expr) {
+            Some(s) => out.push(s),
+            None => problems.push(field_problem(item_expr, task, field)),
+        }
     }
-    Ok(out)
+    out
 }
 
 fn parse_notes(
@@ -1249,7 +1272,8 @@ fn parse_notes(
     obj: &ast::ExprObject,
     task: &str,
     embed_key: &str,
-) -> Result<BTreeMap<String, String>, ParseError> {
+    problems: &mut Vec<Problem>,
+) -> BTreeMap<String, String> {
     let mut notes = BTreeMap::new();
     for (field, _) in &obj.assignments {
         let Some(key) = field_key(source, &field.key) else {
@@ -1258,25 +1282,28 @@ fn parse_notes(
         let Some((_, expr)) = &field.assign else {
             continue;
         };
-        let doc = resolve_note_doc(source, expr, task, &key, embed_key)?;
-        notes.insert(key, doc);
+        if let Some(doc) = resolve_note_doc(source, expr, task, &key, embed_key, problems) {
+            notes.insert(key, doc);
+        }
     }
-    Ok(notes)
+    notes
 }
 
 /// Resolve a `notes.writes` docstring value. Accepts a string literal or
 /// an `include_str!("relative/path")` macro call resolved against the
 /// scanner's directory (same convention as the Rune `include_str!` macro
-/// in [`runtime::macros`]).
+/// in [`runtime::macros`]). Any other value, or a file that cannot be
+/// read, is a problem and yields `None`.
 fn resolve_note_doc(
     source: &str,
     expr: &ast::Expr,
     task: &str,
     note: &str,
     embed_key: &str,
-) -> Result<String, ParseError> {
+    problems: &mut Vec<Problem>,
+) -> Option<String> {
     if let Some(s) = expr_str(source, expr) {
-        return Ok(s);
+        return Some(s);
     }
     if let ast::Expr::MacroCall(mc) = expr {
         let path_span = mc.path.span();
@@ -1290,21 +1317,42 @@ fn resolve_note_doc(
             let stripped = strip_quotes(raw);
             if stripped.len() != raw.len() {
                 let path = include_base_dir(embed_key).join(&stripped);
-                return std::fs::read_to_string(&path)
-                    .map(|s| s.trim_end().to_string())
-                    .map_err(|e| ParseError::IncludeStr {
-                        task: task.to_string(),
-                        note: note.to_string(),
-                        path,
-                        message: e.to_string(),
-                    });
+                return match std::fs::read_to_string(&path) {
+                    Ok(s) => Some(s.trim_end().to_string()),
+                    Err(e) => {
+                        problems.push(problem(
+                            expr,
+                            format!(
+                                "task '{task}' note '{note}' include_str!({}): {e}",
+                                path.display()
+                            ),
+                        ));
+                        None
+                    }
+                };
             }
         }
     }
-    Err(ParseError::TaskFieldType {
-        task: task.to_string(),
-        field: "notes.writes",
-    })
+    problems.push(field_problem(expr, task, "notes.writes"));
+    None
+}
+
+/// A problem at an expression's span.
+fn problem(expr: &ast::Expr, message: impl Into<String>) -> Problem {
+    let span = expr.span();
+    Problem {
+        start: span.start.0 as usize,
+        end: span.end.0 as usize,
+        message: message.into(),
+    }
+}
+
+/// The problem for a task field of the wrong type.
+fn field_problem(expr: &ast::Expr, task: &str, field: &str) -> Problem {
+    problem(
+        expr,
+        format!("task '{task}' field '{field}' has unexpected type"),
+    )
 }
 
 /// Directory `include_str!` paths in `notes.writes` resolve against.
@@ -1520,40 +1568,53 @@ pub const SCANNER = #{
         assert_eq!(plain.attachments, TaskAttachmentsDef::default());
     }
 
+    /// Defects in the declaration are problems on the def, all of them
+    /// reported, each at its span; the def still parses with the
+    /// defective parts left out.
     #[test]
-    fn bad_attachment_and_task_function_fields_are_errors() {
-        let bad_entry = r#"
-pub const SCANNER = #{ name: "demo", attachments: #{ cfg: attach_cfg } };
+    fn declaration_defects_are_problems_on_the_def() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    attachments: #{ cfg: attach_cfg, ok: #{} },
+    tasks: #{
+        main: #{ call: my_main, attachments: #{ needs: "x" } },
+        main: #{},
+        plain: #{ notes: #{ writes: #{ "n": include_str!("missing.md") } } },
+        text: "nope",
+    },
+};
 "#;
-        let Err(err) = parse_scanner(bad_entry, "demo", Path::new("/tmp/demo/scanner.rn")) else {
-            panic!("bad_entry parsed");
-        };
-        assert!(
-            matches!(&err, ParseError::AttachmentField { key } if key == "cfg"),
-            "{err}"
+        let def = parse_scanner(
+            source,
+            "/tmp/demo/scanner.rn",
+            Path::new("/tmp/demo/scanner.rn"),
+        )
+        .unwrap();
+        let messages: Vec<&str> = def.problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "attachment 'cfg' must be an object whose `call` is a function name string",
+                "task 'main' field 'call' has unexpected type",
+                "task 'main' field 'attachments.needs' has unexpected type",
+                "duplicate task 'main'",
+                "task 'plain' note 'n' include_str!(/tmp/demo/missing.md): \
+                 No such file or directory (os error 2)",
+                "task 'text' must be an object",
+            ]
         );
-
-        let bad_f = r#"
-pub const SCANNER = #{ name: "demo", tasks: #{ main: #{ call: my_main } } };
-"#;
-        let Err(err) = parse_scanner(bad_f, "demo", Path::new("/tmp/demo/scanner.rn")) else {
-            panic!("bad_f parsed");
-        };
-        assert!(
-            matches!(&err, ParseError::TaskFieldType { task, field } if task == "main" && *field == "call"),
-            "{err}"
-        );
-
-        let bad_needs = r#"
-pub const SCANNER = #{ name: "demo", tasks: #{ main: #{ attachments: #{ needs: "x" } } } };
-"#;
-        let Err(err) = parse_scanner(bad_needs, "demo", Path::new("/tmp/demo/scanner.rn")) else {
-            panic!("bad_needs parsed");
-        };
-        assert!(
-            matches!(&err, ParseError::TaskFieldType { task, field } if task == "main" && *field == "attachments.needs"),
-            "{err}"
-        );
+        // The defective parts are left out and the rest is kept
+        assert_eq!(def.attachments.keys().collect::<Vec<_>>(), ["ok"]);
+        assert_eq!(def.tasks.keys().collect::<Vec<_>>(), ["main", "plain"]);
+        assert_eq!(def.tasks["main"].call, "main");
+        assert!(def.tasks["plain"].notes.writes.is_empty());
+        // Each problem labels its own span
+        let p = &def.problems[0];
+        assert_eq!(&source[p.start..p.end], "attach_cfg");
+        let rendered = def.render_problems();
+        assert!(rendered.contains("4 │"), "{rendered}");
+        assert!(rendered.contains("duplicate task 'main'"), "{rendered}");
     }
 
     #[test]

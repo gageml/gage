@@ -121,6 +121,11 @@ pub enum ScanOutput {
 
 #[derive(Debug)]
 pub enum Error {
+    /// The `SCANNER` declaration has defects; `diagnostics` labels each
+    Invalid {
+        name: String,
+        diagnostics: String,
+    },
     Compile {
         name: String,
         diagnostics: String,
@@ -148,6 +153,12 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::Invalid { name, diagnostics } => {
+                write!(
+                    f,
+                    "scanner {name} has an invalid SCANNER declaration\n{diagnostics}"
+                )
+            }
             Error::Compile { name, diagnostics } => {
                 write!(f, "scanner {name} failed to compile\n{diagnostics}")
             }
@@ -223,6 +234,12 @@ impl CompiledScanner {
 /// fails here is a full stop for the caller: nothing has run yet.
 pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
     let def = scanner.def;
+    if !def.problems.is_empty() {
+        return Err(Error::Invalid {
+            name: def.name.clone(),
+            diagnostics: def.render_problems(),
+        });
+    }
     let context = gage_runtime2::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
 
@@ -2975,6 +2992,38 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// A declaration defect stops the scanner at compile with every
+    /// problem labelled, before any task runs.
+    #[test]
+    fn declaration_problems_fail_compile_with_labelled_diagnostics() {
+        const SCANNER: &str = r#"
+            pub const SCANNER = #{
+                name: "bad",
+                description: "Defective declaration",
+                tasks: #{
+                    main: #{ call: run_main },
+                    other: "nope",
+                },
+            };
+            pub fn main() {}
+        "#;
+        let (_dir, compiled) = compile_source(SCANNER);
+        let err = compiled.err().expect("the declaration has two problems");
+        let Error::Invalid { name, diagnostics } = &err else {
+            panic!("expected Error::Invalid, got {err}");
+        };
+        assert_eq!(name, "bad");
+        assert!(
+            diagnostics.contains("task 'main' field 'call' has unexpected type"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("task 'other' must be an object"),
+            "{diagnostics}"
+        );
+        assert!(diagnostics.contains("run_main"), "{diagnostics}");
     }
 
     /// A dataset holding one `claude` session seeded from `jsonl`,
