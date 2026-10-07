@@ -46,6 +46,9 @@ pub(crate) fn attachment_schema() -> SchemaRef {
         Field::new("file_count", DataType::Int64, false),
         // Total bytes across the files
         Field::new("size", DataType::Int64, false),
+        // XxHash3 of the file keys and contents; null on attachments
+        // written before the digest existed
+        Field::new("digest", DataType::Utf8, true),
         // Timestamps
         Field::new("created", timestamp(), false),
         Field::new("modified", timestamp(), false),
@@ -87,6 +90,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     let mut excludes = StringBuilder::new();
     let mut file_counts = Int64Builder::with_capacity(len);
     let mut sizes = Int64Builder::with_capacity(len);
+    let mut digests = StringBuilder::with_capacity(len, len * 16);
     let mut createds = TimestampMillisecondBuilder::with_capacity(len);
     let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
     let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
@@ -105,6 +109,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
         excludes.append_value(a.attrs.excludes.join(" "));
         file_counts.append_value(a.attrs.file_count as i64);
         sizes.append_value(a.attrs.size as i64);
+        digests.append_option(a.attrs.digest.as_deref());
         createds.append_value(marker(&a.id, "created", a.created_ms)?);
         modifieds.append_value(marker(&a.id, "modified", a.modified_ms)?);
         let n = prefix_len.get(&a.id).copied().unwrap_or(a.id.len());
@@ -124,6 +129,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
             Arc::new(excludes.finish()),
             Arc::new(file_counts.finish()),
             Arc::new(sizes.finish()),
+            Arc::new(digests.finish()),
             Arc::new(createds.finish().with_timezone("UTC")),
             Arc::new(modifieds.finish().with_timezone("UTC")),
             Arc::new(id_prefixes.finish()),

@@ -2,32 +2,42 @@
 //! and `unseen`.
 //!
 //! A watermark is the record `watermarks/<oid>/<key>` in a scan's
-//! tree, holding `<commit> <mark>`: the position the task under `key`
-//! reached on the object `oid`, at the object's commit the task read.
-//! The mark's axis is the object's: lines for a session, 0 or 1 for a
-//! whole object such as a note. A `Mark` names an object and the
-//! position its constructor derives, `line_count` for
-//! `Mark::session(s)` and 1 for `Mark::note(n)`, and
-//! `watermark(mark, key)` writes the record into the scan directory.
+//! tree, holding `<version> <mark>`: the position the task under
+//! `key` reached on the object `oid`, at the version of the object
+//! the task read. The version is the commit for a session or a note,
+//! and the content digest for an attachment, so an attachment's mark
+//! follows its files and survives a name or target edit. The mark's
+//! axis is the object's: lines for a session, 0 or 1 for a whole
+//! object such as a note or an attachment. A `Mark` names an object
+//! and the position its constructor derives, `line_count` for
+//! `Mark::session(s)` and 1 for `Mark::note(n)` and
+//! `Mark::attachment(a)`, and `watermark(mark, key)` writes the
+//! record into the scan directory.
 //!
-//! `scan().sessions().hwm(key)` and `scan().notes().hwm(key)` read
-//! every live scan's watermarks through the `scan_watermark` table
-//! and pair each object with its high-water mark under the key: the
-//! largest mark whose commit is on the object's commit chain, or 0
-//! with none. `unseen(key)` on each query is the derived form: the
+//! `scan().sessions().hwm(key)`, `scan().notes().hwm(key)`, and
+//! `scan().attachments().hwm(key)` read every live scan's watermarks
+//! through the `scan_watermark` table and pair each object with its
+//! high-water mark under the key: for a session or a note the
+//! largest mark whose commit is on the object's commit chain, for an
+//! attachment the largest mark at its current digest, or 0 with
+//! none. `unseen(key)` on each query is the derived form: the
 //! sessions with `hwm < line_count` paired with the unseen line
-//! range, and the notes with `hwm == 0`. A commit that is not on the
-//! chain, such as a later commit of the same object, is never
-//! consulted.
+//! range, and the notes and attachments with `hwm == 0`. A commit
+//! that is not on the chain, such as a later commit of the same
+//! object, is never consulted; an attachment whose files changed has
+//! a new digest and so no mark.
 //!
 //! `carry_forward_notes(key)` links into this scan every note whose
-//! carry-forward key is `key` and whose target commit is on one of
-//! the scan's sessions' chains: a writer's carry of its own prior
-//! outputs. `carry_forward_notes_named(pattern)` links the notes whose
-//! name matches `pattern` under the same chain rule, whatever key they
-//! carry: a consumer's carry of the notes it reads, so a scan that
-//! runs the consumer alone holds the findings already written for its
-//! sessions.
+//! carry-forward key is `key` and whose target is one of the scan's
+//! sessions at a commit on the session's chain, or one of the scan's
+//! attachments at a commit holding the attachment's current digest:
+//! a writer's carry of its own prior outputs. A note written against
+//! an attachment's earlier files is not carried, so a re-summary
+//! replaces it. `carry_forward_notes_named(pattern)` links the notes
+//! whose name matches `pattern` under the same rules, whatever key
+//! they carry: a consumer's carry of the notes it reads, so a scan
+//! that runs the consumer alone holds the findings already written
+//! for its sessions.
 //!
 //! A scan run with `invalidate` set reports 0 for every object and
 //! carries no notes; it still writes watermarks.
@@ -40,11 +50,14 @@ use std::path::Path;
 use datafusion::arrow::array::StringArray;
 use datafusion::arrow::array::{Array, UInt64Array};
 use gage_runtime::error::Error;
-use gage_store::Store;
+use gage_store::{AttachmentStore, Store};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
+use crate::attachment::{
+    Attachment, AttachmentsQuery, attachment_id, attachment_list, scan_attachments,
+};
 use crate::key::encode_key;
 use crate::note::{Note, NotesQuery, fetch_notes, name_predicate};
 use crate::scan::{
@@ -66,6 +79,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<Mark>()?;
     m.function_meta(Mark::session)?;
     m.function_meta(Mark::note)?;
+    m.function_meta(Mark::attachment)?;
     m.function_meta(Mark::debug)?;
     m.ty::<CarryForwardNotes>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForwardNotes| async move {
@@ -78,6 +92,10 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<NotesHwm>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesHwm| async move {
         do_notes_hwm(q).await
+    })?;
+    m.ty::<AttachmentsHwm>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentsHwm| async move {
+        do_attachments_hwm(q).await
     })?;
     m.ty::<WatermarkWrite>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: WatermarkWrite| async move {
@@ -101,6 +119,8 @@ enum MarkTarget {
     Session { id: String },
     /// The whole note: the mark is 1
     Note { id: String },
+    /// The whole attachment at its content digest: the mark is 1
+    Attachment { id: String },
 }
 
 impl Mark {
@@ -136,11 +156,23 @@ impl Mark {
         )))
     }
 
+    /// The whole attachment `a`, an `Attachment` or an attachment id
+    /// string, at its content digest.
+    #[rune::function(path = Self::attachment)]
+    fn attachment(a: Value) -> Result<Mark, VmError> {
+        Ok(Mark {
+            target: MarkTarget::Attachment {
+                id: attachment_id(&a)?,
+            },
+        })
+    }
+
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         match &self.target {
             MarkTarget::Session { id } => write!(f, "Mark {{ session: {id:?} }}")?,
             MarkTarget::Note { id, .. } => write!(f, "Mark {{ note: {id:?} }}")?,
+            MarkTarget::Attachment { id } => write!(f, "Mark {{ attachment: {id:?} }}")?,
         }
         Ok(())
     }
@@ -165,7 +197,8 @@ fn watermark(mark: Ref<Mark>, key: Value) -> WatermarkWrite {
 }
 
 /// Record the mark under `key`. A session that is not a member of
-/// the scan, or a note the scan neither wrote nor carried, is an
+/// the scan, a note the scan neither wrote nor carried, or an
+/// attachment outside the scan's dataset or without a digest, is an
 /// `Args` error. A note this scan wrote has no commit until apply, so
 /// its record is deferred through the scan directory's
 /// `note_watermarks` file; apply resolves the commit and writes the
@@ -176,7 +209,7 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
         Err(e) => return Ok(Err(e)),
     };
     let ctx = current()?;
-    let (oid, commit, mark) = match w.mark.target {
+    let (oid, version, mark) = match w.mark.target {
         MarkTarget::Session { id } => {
             let Some(member) = members(ctx.scan_context().await?, false)
                 .await?
@@ -214,13 +247,27 @@ async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
             }
             (id, commits.value(0).to_string(), 1)
         }
+        MarkTarget::Attachment { id } => {
+            let Some(attachment) = scan_attachments().await?.into_iter().find(|a| a.id == id)
+            else {
+                return Ok(Err(Error::Args(format!(
+                    "attachment {id} is not in the scan's dataset"
+                ))));
+            };
+            let Some(digest) = attachment.digest else {
+                return Ok(Err(Error::Args(format!(
+                    "attachment {id} has no content digest"
+                ))));
+            };
+            (id, digest, 1)
+        }
     };
     let dir = ctx.paths.watermarks_dir().join(&oid);
     let written = fs::create_dir_all(&dir)
-        .and_then(|()| write_atomic(&dir.join(&key), format!("{commit} {mark}\n").as_bytes()));
+        .and_then(|()| write_atomic(&dir.join(&key), format!("{version} {mark}\n").as_bytes()));
     match written {
         Ok(()) => {
-            tracing::debug!(key, oid, commit, mark, "watermark");
+            tracing::debug!(key, oid, version, mark, "watermark");
             Ok(Ok(()))
         }
         Err(e) => Err(VmError::panic(format!("watermark {oid}: {e}"))),
@@ -377,6 +424,102 @@ async fn do_notes_hwm(q: NotesHwm) -> Result<Result<Vec<Value>, Error>, VmError>
     Ok(Ok(out))
 }
 
+/// The value of `scan().attachments().hwm(key)` and `.unseen(key)`.
+/// Awaiting it reads the attachments and their watermarks.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct AttachmentsHwm {
+    #[rune(skip)]
+    query: AttachmentsQuery,
+    #[rune(skip)]
+    key: Value,
+    #[rune(skip)]
+    shape: Shape,
+}
+
+/// Pair each of the query's attachments with its high-water mark
+/// under `key`: 1 when a task under the key processed the attachment
+/// at its current content digest, 0 otherwise.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn attachments_hwm(attachments: Ref<AttachmentsQuery>, key: Value) -> AttachmentsHwm {
+    AttachmentsHwm {
+        query: attachments.clone(),
+        key,
+        shape: Shape::Hwm,
+    }
+}
+
+/// The query's attachments with a high-water mark of 0 under `key`.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn attachments_unseen(attachments: Ref<AttachmentsQuery>, key: Value) -> AttachmentsHwm {
+    AttachmentsHwm {
+        query: attachments.clone(),
+        key,
+        shape: Shape::Unseen,
+    }
+}
+
+async fn do_attachments_hwm(q: AttachmentsHwm) -> Result<Result<Vec<Value>, Error>, VmError> {
+    let key = match encode_key(&q.key) {
+        Ok(key) => key,
+        Err(e) => return Ok(Err(e)),
+    };
+    let attachments = match attachment_list(q.query).await? {
+        Ok(attachments) => attachments,
+        Err(e) => return Ok(Err(e)),
+    };
+    let ctx = current()?;
+    let marks = digest_hwm(&ctx, &key, &attachments).await?;
+    let mut out = Vec::with_capacity(attachments.len());
+    for (a, hwm) in attachments.into_iter().zip(marks) {
+        let value = match q.shape {
+            Shape::Hwm => rune::to_value((a, hwm)),
+            Shape::Unseen if hwm == 0 => rune::to_value(a),
+            Shape::Unseen => continue,
+        };
+        out.push(value.map_err(VmError::from)?);
+    }
+    Ok(Ok(out))
+}
+
+/// The high-water mark under `key` of each attachment, in order: the
+/// largest mark recorded by any live scan at the attachment's current
+/// content digest, or 0 with none. An attachment without a digest is
+/// 0.
+async fn digest_hwm(
+    ctx: &ScanContext,
+    key: &str,
+    attachments: &[Attachment],
+) -> Result<Vec<i64>, VmError> {
+    if ctx.invalidate {
+        tracing::info!(key, "hwm ignores watermarks: scan invalidates prior work");
+        return Ok(vec![0; attachments.len()]);
+    }
+    let ids: Vec<&str> = attachments
+        .iter()
+        .filter(|a| a.digest.is_some())
+        .map(|a| a.id.as_str())
+        .collect();
+    if ids.is_empty() {
+        return Ok(vec![0; attachments.len()]);
+    }
+    let marks = marks(ctx, key, &ids).await?;
+    let mut out = Vec::with_capacity(attachments.len());
+    for a in attachments {
+        let hwm = match (&a.digest, marks.get(&a.id)) {
+            (Some(digest), Some(recorded)) => recorded
+                .iter()
+                .filter(|(version, _)| version == digest)
+                .map(|(_, mark)| *mark)
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        };
+        out.push(i64::try_from(hwm).unwrap());
+    }
+    Ok(out)
+}
+
 /// The high-water mark under `key` of each object given as
 /// `(id, commit)`, in order: the largest mark recorded by any live
 /// scan at a commit on the object's chain, or 0 with none. An object
@@ -423,14 +566,14 @@ async fn hwm(
     Ok(out)
 }
 
-/// The `(commit, mark)` records under `key` per object id.
+/// The `(version, mark)` records under `key` per object id.
 async fn marks(
     ctx: &ScanContext,
     key: &str,
     ids: &[&str],
 ) -> Result<HashMap<String, Vec<(String, u64)>>, VmError> {
     let sql = format!(
-        "SELECT oid, commit, mark FROM scan_watermark \
+        "SELECT oid, version, mark FROM scan_watermark \
          WHERE key = '{}' AND oid IN ({})",
         sql_str(key),
         id_list(ids)
@@ -484,10 +627,12 @@ fn carry_forward_notes_named(pattern: &str) -> CarryForwardNotes {
 }
 
 /// Link into this scan every selected note whose target is one of the
-/// scan's sessions at a commit in that session's chain. The note
-/// commits are appended to the scan directory's carried list, which
-/// apply writes as `notes_carried.link`. Returns the number of notes
-/// newly linked; a note already carried by this scan counts zero.
+/// scan's sessions at a commit in that session's chain, or one of
+/// the scan's attachments at a commit holding its current digest.
+/// The note commits are appended to the scan directory's carried
+/// list, which apply writes as `notes_carried.link`. Returns the
+/// number of notes newly linked; a note already carried by this scan
+/// counts zero.
 async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Error>, VmError> {
     let (select, predicate) = match &q.select {
         CarrySelect::Key(key) => match encode_key(key) {
@@ -510,21 +655,28 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
         );
         return Ok(Ok(0));
     }
+    let mut commits = session_carries(&ctx, &predicate).await?;
+    commits.extend(attachment_carries(&ctx, &predicate).await?);
+    let added = append_carried(&ctx.paths.carried_notes(), &commits)?;
+    tracing::info!(select, notes = added, "carry_forward_notes");
+    Ok(Ok(i64::try_from(added).unwrap()))
+}
+
+/// The commits of the notes matching `predicate` that target one of
+/// the scan's sessions at a commit on its chain.
+async fn session_carries(ctx: &ScanContext, predicate: &str) -> Result<BTreeSet<String>, VmError> {
+    let mut commits = BTreeSet::new();
     let sessions = members(ctx.scan_context().await?, false).await?;
     if sessions.is_empty() {
-        return Ok(Ok(0));
+        return Ok(commits);
     }
     let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
-    let sql = format!(
-        "SELECT t.note_commit, t.target_id, t.target_commit \
-         FROM note n JOIN note_target_link t ON t.note_id = n.id \
-         WHERE ({predicate}) AND t.target_type = 'session' \
-           AND t.target_id IN ({})",
-        id_list(&ids)
-    );
-    let batches = run(ctx.store_context().await?, &sql).await?;
-    let chains = chains(&ctx, &sessions).await?;
-    let mut commits: BTreeSet<String> = BTreeSet::new();
+    let batches = run(
+        ctx.store_context().await?,
+        &target_links_sql(predicate, "session", &ids),
+    )
+    .await?;
+    let chains = chains(ctx, &sessions).await?;
     for batch in &batches {
         let note_commits = string_column(batch, 0);
         let target_ids = string_column(batch, 1);
@@ -538,9 +690,68 @@ async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Erro
             }
         }
     }
-    let added = append_carried(&ctx.paths.carried_notes(), &commits)?;
-    tracing::info!(select, notes = added, "carry_forward_notes");
-    Ok(Ok(i64::try_from(added).unwrap()))
+    Ok(commits)
+}
+
+/// The commits of the notes matching `predicate` that target one of
+/// the scan's attachments at a commit whose content digest is the
+/// attachment's current one.
+async fn attachment_carries(
+    ctx: &ScanContext,
+    predicate: &str,
+) -> Result<BTreeSet<String>, VmError> {
+    let mut commits = BTreeSet::new();
+    let attachments = scan_attachments().await?;
+    let digests: HashMap<&str, &str> = attachments
+        .iter()
+        .filter_map(|a| a.digest.as_deref().map(|d| (a.id.as_str(), d)))
+        .collect();
+    if digests.is_empty() {
+        return Ok(commits);
+    }
+    let ids: Vec<&str> = digests.keys().copied().collect();
+    let batches = run(
+        ctx.store_context().await?,
+        &target_links_sql(predicate, "attachment", &ids),
+    )
+    .await?;
+    let store = ctx.store.lock().await;
+    let store_attachments = AttachmentStore::from(&*store);
+    for batch in &batches {
+        let note_commits = string_column(batch, 0);
+        let target_ids = string_column(batch, 1);
+        let target_commits = string_column(batch, 2);
+        for i in 0..batch.num_rows() {
+            let current = digests
+                .get(target_ids.value(i))
+                .expect("the query selected the scan's attachment ids");
+            let linked = store_attachments
+                .at_commit(target_commits.value(i))
+                .map_err(|e| {
+                    VmError::panic(format!(
+                        "read attachment commit {}: {e}",
+                        target_commits.value(i)
+                    ))
+                })?;
+            if linked.attrs.digest.as_deref() == Some(*current) {
+                commits.insert(note_commits.value(i).to_string());
+            }
+        }
+    }
+    Ok(commits)
+}
+
+/// The `(note_commit, target_id, target_commit)` rows of the notes
+/// matching `predicate` whose target is one of `ids`, of
+/// `target_type`.
+fn target_links_sql(predicate: &str, target_type: &str, ids: &[&str]) -> String {
+    format!(
+        "SELECT t.note_commit, t.target_id, t.target_commit \
+         FROM note n JOIN note_target_link t ON t.note_id = n.id \
+         WHERE ({predicate}) AND t.target_type = '{target_type}' \
+           AND t.target_id IN ({})",
+        id_list(ids)
+    )
 }
 
 /// Append the commits not already listed to the carried list.

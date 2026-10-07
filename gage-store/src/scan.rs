@@ -183,17 +183,19 @@ pub struct AgentAttrs {
 }
 
 /// One `watermarks/<oid>/<key>` record: how far the task under `key`
-/// got on the object `oid`, at the object's commit the task read. The
-/// file holds `<commit> <mark>` on one line. The mark's axis is the
-/// object's: lines for a session, 0 or 1 for a whole object such as
-/// a note.
+/// got on the object `oid`, at the version of the object the task
+/// read. The file holds `<version> <mark>` on one line. The version
+/// is the object's commit SHA, or for an attachment its content
+/// digest, so a mark follows the files and not the commit. The
+/// mark's axis is the object's: lines for a session, 0 or 1 for a
+/// whole object such as a note or an attachment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watermark {
     /// The Gage object id
     pub oid: String,
     pub key: String,
-    /// The object's commit SHA
-    pub commit: String,
+    /// The object's commit SHA, or an attachment's content digest
+    pub version: String,
     /// The position reached
     pub mark: u64,
 }
@@ -641,8 +643,8 @@ pub fn agent_file_path(scanner: &str, task: &str, agent_id: &str, name: &str) ->
 }
 
 /// Every record under `watermarks/`, in path order. A path that is
-/// not `<oid>/<key>`, or a content that is not `<commit> <mark>`, is
-/// an error.
+/// not `<oid>/<key>`, or a content that is not `<version> <mark>`,
+/// is an error.
 fn read_watermarks(files: &dyn ScanFiles) -> Result<Vec<Watermark>, StoreError> {
     let mut paths = Vec::new();
     walk_files(files, WATERMARKS_DIR, "", &mut paths)?;
@@ -660,32 +662,33 @@ fn read_watermarks(files: &dyn ScanFiles) -> Result<Vec<Watermark>, StoreError> 
                 StoreError::Parse(format!("scan file {WATERMARKS_DIR}/{path} is missing"))
             })?;
         let content = String::from_utf8_lossy(&bytes);
-        let (commit, mark) = parse_watermark(content.trim()).ok_or_else(|| {
+        let (version, mark) = parse_watermark(content.trim()).ok_or_else(|| {
             StoreError::Parse(format!(
-                "scan file {WATERMARKS_DIR}/{path}: {:?} is not <commit> <mark>",
+                "scan file {WATERMARKS_DIR}/{path}: {:?} is not <version> <mark>",
                 content.trim()
             ))
         })?;
         out.push(Watermark {
             oid: oid.to_string(),
             key: key.to_string(),
-            commit: commit.to_string(),
+            version: version.to_string(),
             mark,
         });
     }
     Ok(out)
 }
 
-/// The `(commit, mark)` of a watermark file's content, or `None` when
-/// it is not a commit SHA followed by an integer.
+/// The `(version, mark)` of a watermark file's content, or `None`
+/// when it is not a commit SHA or a content digest followed by an
+/// integer.
 fn parse_watermark(content: &str) -> Option<(&str, u64)> {
     let mut parts = content.split_whitespace();
-    let commit = parts.next().filter(|s| is_sha(s))?;
+    let version = parts.next().filter(|s| is_sha(s) || is_digest(s))?;
     let mark = parts.next()?.parse::<u64>().ok()?;
     if parts.next().is_some() {
         return None;
     }
-    Some((commit, mark))
+    Some((version, mark))
 }
 
 /// The SHAs in the link file `name`, one per line, or `None` when
@@ -709,10 +712,18 @@ fn read_link(files: &dyn ScanFiles, name: &str) -> Result<Option<Vec<String>>, S
 
 /// True for a 40-character lowercase hex SHA, as the store writes them.
 fn is_sha(value: &str) -> bool {
-    value.len() == 40
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    value.len() == 40 && is_lower_hex(value)
+}
+
+/// An attachment content digest: 16 lowercase hex digits
+fn is_digest(value: &str) -> bool {
+    value.len() == 16 && is_lower_hex(value)
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Every file under `root`, as paths relative to it, depth first in
@@ -1724,6 +1735,7 @@ mod tests {
         let scan_dir = new_scan_dir(tmp.path());
         let session_sha = "0123456789abcdef0123456789abcdef01234567";
         let note_sha = "89abcdef0123456789abcdef0123456789abcdef";
+        let digest = "0123456789abcdef";
         write(
             &scan_dir.join("watermarks/SESSION1/s:t:1"),
             &format!("{session_sha} 120\n"),
@@ -1732,6 +1744,10 @@ mod tests {
             &scan_dir.join("watermarks/NOTE1/s:t:1"),
             &format!("{note_sha} 1\n"),
         );
+        write(
+            &scan_dir.join("watermarks/ATTACHMENT1/s:t:1"),
+            &format!("{digest} 1\n"),
+        );
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN15", &scan_dir).unwrap();
         let record = scans.get("SCAN15").unwrap();
@@ -1739,15 +1755,21 @@ mod tests {
             record.content.watermarks,
             [
                 Watermark {
+                    oid: "ATTACHMENT1".into(),
+                    key: "s:t:1".into(),
+                    version: digest.into(),
+                    mark: 1,
+                },
+                Watermark {
                     oid: "NOTE1".into(),
                     key: "s:t:1".into(),
-                    commit: note_sha.into(),
+                    version: note_sha.into(),
                     mark: 1,
                 },
                 Watermark {
                     oid: "SESSION1".into(),
                     key: "s:t:1".into(),
-                    commit: session_sha.into(),
+                    version: session_sha.into(),
                     mark: 120,
                 },
             ]
@@ -1766,18 +1788,23 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_a_watermark_without_a_sha_and_a_mark() {
+    fn create_rejects_a_watermark_without_a_version_and_a_mark() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let scan_dir = new_scan_dir(tmp.path());
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        for content in ["1234 7\n", &format!("{sha}\n"), &format!("{sha} x\n")] {
+        for content in [
+            "1234 7\n",
+            "0123456789ABCDEF 7\n",
+            &format!("{sha}\n"),
+            &format!("{sha} x\n"),
+        ] {
             write(&scan_dir.join("watermarks/SESSION1/s:t:1"), content);
             let err = ScanStore::from(&store)
                 .create("SCAN16", &scan_dir)
                 .unwrap_err();
             assert!(
-                matches!(&err, StoreError::Parse(m) if m.contains("is not <commit> <mark>")),
+                matches!(&err, StoreError::Parse(m) if m.contains("is not <version> <mark>")),
                 "{content:?}: {err}"
             );
         }

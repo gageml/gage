@@ -1,7 +1,8 @@
 //! The `scan_watermark` table: one row per `watermarks/<oid>/<key>`
 //! record across every live scan. System tier: the runtime's `hwm`
 //! reads the marks a key holds for a scan's objects and takes, per
-//! object, the highest one on the object's commit chain.
+//! object, the highest one at a version the object has: on its
+//! commit chain, or for an attachment at its content digest.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,8 +23,9 @@ fn schema() -> SchemaRef {
         // The Gage object id of the watermarked object
         utf8("oid"),
         utf8("key"),
-        // The object's commit the task read
-        utf8("commit"),
+        // The version of the object the task read: its commit, or
+        // for an attachment its content digest
+        utf8("version"),
         // The position the task reached, on the object's axis
         Field::new("mark", DataType::UInt64, false),
     ]))
@@ -43,7 +45,7 @@ impl BatchSource for Source {
         let mut scan_commits = StringBuilder::new();
         let mut oids = StringBuilder::new();
         let mut keys = StringBuilder::new();
-        let mut commits = StringBuilder::new();
+        let mut versions = StringBuilder::new();
         let mut marks = UInt64Builder::new();
         for tip in scans.query().tips().map_err(external)? {
             let record = scans.at_commit(&tip.sha).map_err(external)?;
@@ -52,7 +54,7 @@ impl BatchSource for Source {
                 scan_commits.append_value(&tip.sha);
                 oids.append_value(&w.oid);
                 keys.append_value(&w.key);
-                commits.append_value(&w.commit);
+                versions.append_value(&w.version);
                 marks.append_value(w.mark);
             }
         }
@@ -63,7 +65,7 @@ impl BatchSource for Source {
                 Arc::new(scan_commits.finish()),
                 Arc::new(oids.finish()),
                 Arc::new(keys.finish()),
-                Arc::new(commits.finish()),
+                Arc::new(versions.finish()),
                 Arc::new(marks.finish()),
             ],
         )?)

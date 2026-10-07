@@ -1037,6 +1037,7 @@ fn returned_error(value: &str, scanner: &TaskUnit, task: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::arrow::array::StringArray;
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_session::{
         AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, ContentSink, ContentSource,
@@ -3610,7 +3611,7 @@ mod tests {
             docs[0]
                 .column(i)
                 .as_any()
-                .downcast_ref::<datafusion::arrow::array::StringArray>()
+                .downcast_ref::<StringArray>()
                 .unwrap()
                 .value(0)
                 .to_string()
@@ -4376,13 +4377,13 @@ mod tests {
             gage_store::Watermark {
                 oid: session_id.clone(),
                 key: "wm:main:1".into(),
-                commit: member_sha_1.clone(),
+                version: member_sha_1.clone(),
                 mark: 1,
             },
             gage_store::Watermark {
                 oid: tagged_1.1.id.clone(),
                 key: "wm:main:1".into(),
-                commit: tagged_1.0.clone(),
+                version: tagged_1.0.clone(),
                 mark: 1,
             },
         ];
@@ -4457,7 +4458,7 @@ mod tests {
                 .cloned()
                 .expect("the scan watermarked its session")
         };
-        assert_eq!(session_mark(&third_record).commit, member_sha_2);
+        assert_eq!(session_mark(&third_record).version, member_sha_2);
         assert_eq!(session_mark(&third_record).mark, 3);
 
         let (fourth, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
@@ -4498,7 +4499,7 @@ mod tests {
         let fifth_record = scans.get(&fifth.id).unwrap();
         assert_eq!(fifth_record.content.notes.len(), 2);
         assert!(fifth_record.content.notes_carried.is_empty());
-        assert_eq!(session_mark(&fifth_record).commit, member_sha_2);
+        assert_eq!(session_mark(&fifth_record).version, member_sha_2);
         assert_eq!(session_mark(&fifth_record).mark, 3);
         let tagged_5 = fifth_record
             .content
@@ -4518,7 +4519,7 @@ mod tests {
         .build()
         .await;
         let batches = ctx
-            .sql("SELECT scan_id, commit, mark FROM scan_watermark")
+            .sql("SELECT scan_id, version, mark FROM scan_watermark")
             .await
             .unwrap()
             .collect()
@@ -4587,6 +4588,262 @@ mod tests {
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
         assert_eq!(record.content.notes_carried.len(), 1);
         assert!(record.content.notes.is_empty());
+    }
+
+    const ATTACHMENT_MARK_SCANNER: &str = r#"
+        use gage::{Mark, carry_forward_notes, scan, watermark, write_note};
+
+        pub const SCANNER = #{
+            name: "am",
+            description: "Attachment marks",
+            tasks: #{ main: #{} },
+        };
+
+        const KEY = ("am", "main", 1);
+
+        pub async fn main() {
+            let carried = carry_forward_notes(KEY).await?;
+            println!("carried {carried}");
+            for (a, hwm) in scan().attachments().names(["cfg", "other"]).hwm(KEY).await? {
+                println!("hwm {} {hwm}", a.name.unwrap());
+            }
+            for a in scan().attachments().name("cfg").unseen(KEY).await? {
+                println!("unseen {}", a.name.unwrap());
+                write_note("summary", a.digest.unwrap())
+                    .for_attachment(a)
+                    .carry_forward_key(KEY)
+                    .await?;
+                watermark(Mark::attachment(a), KEY).await?;
+            }
+            for n in scan().notes().name("summary").await? {
+                println!("note {} {}", n.target.unwrap().starts_with("attachment:"), n.value);
+            }
+            match watermark(Mark::attachment("not-in-dataset"), KEY).await {
+                Err(gage::Error::Args(m)) => println!("args: {m}"),
+                other => println!("unexpected: {other:?}"),
+            }
+            Ok(())
+        }
+    "#;
+
+    /// An attachment's mark and its notes follow the content digest.
+    /// The first scan finds the attachment unseen, writes a note
+    /// against it, and marks it at its digest; a second scan of the
+    /// same dataset finds it marked and carries the note; a
+    /// target-only edit of the attachment keeps the digest, so a scan
+    /// of the re-linked dataset still finds it marked and carries the
+    /// note; a content edit changes the digest, so the next scan
+    /// finds it unseen, carries nothing, and rewrites the note; and a
+    /// scan after that carries only the new note.
+    #[tokio::test]
+    async fn attachment_marks_and_carries_follow_the_content_digest() {
+        use gage_store::{AttachmentSpec, AttachmentStore};
+
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("claude");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), "{\"a\": 1}").unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "rules").unwrap();
+        let attachments = AttachmentStore::from(&store);
+        let datasets = DatasetStore::from(&store);
+        let cfg_pats = ["settings.json".to_string()];
+        let other_pats = ["CLAUDE.md".to_string()];
+        let cfg_spec = AttachmentSpec {
+            name: Some("cfg"),
+            key: None,
+            targets: &[],
+            root: &root,
+            includes: &cfg_pats,
+            excludes: &[],
+        };
+        let cfg = attachments.add(&cfg_spec).unwrap();
+        let other = attachments
+            .add(&AttachmentSpec {
+                name: Some("other"),
+                includes: &other_pats,
+                ..cfg_spec.clone()
+            })
+            .unwrap();
+        let dataset = datasets.create().unwrap();
+        datasets
+            .attachments_link(&dataset, &[cfg.id.clone(), other.id.clone()])
+            .unwrap();
+        let dataset_sha_1 = datasets.get(&dataset).unwrap().commit_sha;
+        let digest_1 = attachments.get(&cfg.id).unwrap().attrs.digest.unwrap();
+        let (_dir, compiled) = compile_source(ATTACHMENT_MARK_SCANNER);
+        let compiled = compiled.unwrap();
+        let args_line = "args: attachment not-in-dataset is not in the scan's dataset".to_string();
+        let key = "am:main:1";
+
+        let (first, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 0".to_string(),
+                "hwm cfg 0".to_string(),
+                "hwm other 0".to_string(),
+                "unseen cfg".to_string(),
+                format!("note true {digest_1}"),
+                args_line.clone(),
+            ]
+        );
+        let scans = ScanStore::from(&store);
+        let first_record = scans.get(&first.id).unwrap();
+        assert_eq!(first_record.content.notes.len(), 1);
+        assert_eq!(
+            first_record.content.watermarks,
+            [gage_store::Watermark {
+                oid: cfg.id.clone(),
+                key: key.into(),
+                version: digest_1.clone(),
+                mark: 1,
+            }]
+        );
+        let notes = NoteStore::from(&store);
+        let note_1 = notes.at_commit(&first_record.content.notes[0]).unwrap();
+        assert_eq!(
+            note_1.target.as_deref(),
+            Some(format!("attachment:{}", cfg.id).as_str())
+        );
+        assert_eq!(
+            note_1.target_commit.as_deref(),
+            Some(cfg.commit_sha.as_str())
+        );
+
+        let (second, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_1).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 1".to_string(),
+                "hwm cfg 1".to_string(),
+                "hwm other 0".to_string(),
+                format!("note true {digest_1}"),
+                args_line.clone(),
+            ]
+        );
+        let second_record = scans.get(&second.id).unwrap();
+        assert!(second_record.content.notes.is_empty());
+        assert!(second_record.content.watermarks.is_empty());
+        assert_eq!(
+            second_record.content.notes_carried,
+            first_record.content.notes
+        );
+
+        // A target-only edit is a new attachment commit with the same
+        // digest: still marked, note still carried
+        let target_dataset = datasets.create().unwrap();
+        let retargeted = attachments
+            .add(&AttachmentSpec {
+                targets: &[format!("dataset:{target_dataset}")],
+                ..cfg_spec.clone()
+            })
+            .unwrap();
+        assert_eq!(retargeted.outcome, gage_store::AttachmentOutcome::Updated);
+        assert_eq!(
+            attachments.get(&cfg.id).unwrap().attrs.digest.as_deref(),
+            Some(digest_1.as_str())
+        );
+        datasets
+            .attachments_link(&dataset, &[cfg.id.clone()])
+            .unwrap();
+        let dataset_sha_2 = datasets.get(&dataset).unwrap().commit_sha;
+        assert_ne!(dataset_sha_2, dataset_sha_1);
+        let (third, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_2).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 1".to_string(),
+                "hwm cfg 1".to_string(),
+                "hwm other 0".to_string(),
+                format!("note true {digest_1}"),
+                args_line.clone(),
+            ]
+        );
+        let third_record = scans.get(&third.id).unwrap();
+        assert!(third_record.content.notes.is_empty());
+        assert!(third_record.content.watermarks.is_empty());
+        assert_eq!(
+            third_record.content.notes_carried,
+            first_record.content.notes
+        );
+
+        // A content edit changes the digest: unseen again, the earlier
+        // note is not carried, and the new note replaces it
+        std::fs::write(root.join("settings.json"), "{\"a\": 2}").unwrap();
+        let edited = attachments.add(&cfg_spec).unwrap();
+        assert_eq!(edited.outcome, gage_store::AttachmentOutcome::Updated);
+        let digest_2 = attachments.get(&cfg.id).unwrap().attrs.digest.unwrap();
+        assert_ne!(digest_2, digest_1);
+        datasets
+            .attachments_link(&dataset, &[cfg.id.clone()])
+            .unwrap();
+        let dataset_sha_3 = datasets.get(&dataset).unwrap().commit_sha;
+        let (fourth, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_3).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 0".to_string(),
+                "hwm cfg 0".to_string(),
+                "hwm other 0".to_string(),
+                "unseen cfg".to_string(),
+                format!("note true {digest_2}"),
+                args_line.clone(),
+            ]
+        );
+        let fourth_record = scans.get(&fourth.id).unwrap();
+        assert_eq!(fourth_record.content.notes.len(), 1);
+        assert!(fourth_record.content.notes_carried.is_empty());
+        assert_eq!(
+            fourth_record.content.watermarks,
+            [gage_store::Watermark {
+                oid: cfg.id.clone(),
+                key: key.into(),
+                version: digest_2.clone(),
+                mark: 1,
+            }]
+        );
+
+        let (fifth, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_3).await;
+        assert_eq!(
+            printed,
+            [
+                "carried 1".to_string(),
+                "hwm cfg 1".to_string(),
+                "hwm other 0".to_string(),
+                format!("note true {digest_2}"),
+                args_line,
+            ]
+        );
+        let fifth_record = scans.get(&fifth.id).unwrap();
+        assert_eq!(
+            fifth_record.content.notes_carried, fourth_record.content.notes,
+            "only the note written at the current digest is carried"
+        );
+
+        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+            Store::open(store.path()).unwrap(),
+        ))))
+        .build()
+        .await;
+        let carried = ctx
+            .sql(&format!(
+                "SELECT note_id FROM scan_note WHERE scan_id = '{}' AND carried",
+                fifth.id
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let note_ids: Vec<String> = carried
+            .iter()
+            .flat_map(|b| {
+                let col = b.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                (0..b.num_rows()).map(move |i| col.value(i).to_string())
+            })
+            .collect();
+        let note_4 = notes.at_commit(&fourth_record.content.notes[0]).unwrap();
+        assert_eq!(note_ids, [note_4.id]);
     }
 
     /// Tasks with `wants`, one of them unmatched, behind one failing

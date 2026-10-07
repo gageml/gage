@@ -99,6 +99,11 @@ pub struct AttachmentAttrs {
     pub file_count: u64,
     /// Total bytes across the selected files
     pub size: u64,
+    /// XxHash3 over the file keys and contents in key order: the
+    /// identity of the files, unchanged by a name or target edit.
+    /// Absent on attachments written before the digest existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 /// What to add: the selection and, optionally, the name, key, and
@@ -248,9 +253,11 @@ impl AttachmentStore<'_> {
         }
         let mut entries: Vec<(String, String)> = Vec::with_capacity(selected.len());
         let mut size = 0;
+        let mut digest = ContentDigest::new();
         for (key, file) in selected {
             let bytes = fs::read(&file).map_err(|e| read_error(&file, e))?;
             size += bytes.len() as u64;
+            digest.add(&key, &bytes);
             if size > MAX_SIZE {
                 return Err(StoreError::AttachmentInput(format!(
                     "selected files exceed {} bytes; an attachment holds at most that",
@@ -271,6 +278,7 @@ impl AttachmentStore<'_> {
             excludes: spec.excludes.to_vec(),
             file_count,
             size,
+            digest: Some(digest.finish()),
         };
         let mut tree = ObjectTree {
             attrs: Some(
@@ -453,6 +461,31 @@ fn linked_targets(object: &Object) -> Result<Vec<(String, String)>, StoreError> 
 /// `(key, path)` pairs in key order. Each include is walked on its
 /// own and the results are merged, so a file two includes match is
 /// listed once.
+/// The content digest of an attachment version: XxHash3 over each
+/// file's key and content hash, in key order. Files are hashed one
+/// at a time so the input never holds a copy of the contents.
+struct ContentDigest {
+    input: Vec<u8>,
+}
+
+impl ContentDigest {
+    fn new() -> Self {
+        ContentDigest { input: Vec::new() }
+    }
+
+    fn add(&mut self, key: &str, bytes: &[u8]) {
+        self.input.extend_from_slice(key.as_bytes());
+        self.input.push(0);
+        self.input
+            .extend_from_slice(format!("{:016x}", XxHash3_64::oneshot(bytes)).as_bytes());
+        self.input.push(0);
+    }
+
+    fn finish(self) -> String {
+        format!("{:016x}", XxHash3_64::oneshot(&self.input))
+    }
+}
+
 fn select_files(
     root: &Path,
     includes: &[String],
@@ -860,6 +893,8 @@ mod tests {
             excludes: &[],
         };
         let first = attachments.add(&spec).unwrap();
+        let first_digest = attachments.get(&first.id).unwrap().attrs.digest;
+        assert_eq!(first_digest.as_ref().map(String::len), Some(16));
         let again = attachments.add(&spec).unwrap();
         assert_eq!(again.outcome, AttachmentOutcome::Unchanged);
         assert_eq!(again.commit_sha, first.commit_sha);
@@ -870,6 +905,8 @@ mod tests {
         assert_eq!(updated.id, first.id);
         assert_ne!(updated.commit_sha, first.commit_sha);
         let record = attachments.get(&first.id).unwrap();
+        assert!(record.attrs.digest.is_some());
+        assert_ne!(record.attrs.digest, first_digest);
         assert_eq!(
             attachments
                 .read_file(&record.commit_sha, "settings.json")
@@ -1168,6 +1205,8 @@ mod tests {
         assert!(parents.contains(&session.commit_sha));
         let record = attachments.get(&added.id).unwrap();
         assert_eq!(record.attrs.targets, [target.clone()]);
+        let digest = record.attrs.digest.clone();
+        assert!(digest.is_some());
 
         // The same name and selection is the same attachment; a
         // re-add without targets keeps the linked one
@@ -1208,6 +1247,8 @@ mod tests {
         );
         let record = attachments.get(&added.id).unwrap();
         assert_eq!(record.attrs.targets, [target.clone(), dataset_url]);
+        // A target edit is a new commit with the same digest
+        assert_eq!(record.attrs.digest, digest);
 
         // Re-adding the original spec is unchanged: its target is
         // already linked

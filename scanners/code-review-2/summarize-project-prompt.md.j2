@@ -1,9 +1,8 @@
-Write project summary notes for the project of session {{ session_id }}
+Write project summary notes for the project at `{{ project }}`
 
 The file contents below describe the project. Use them to write one summary
 note per section using the `mcp__gage__ProjectSummary` tool. Pass the note
-name given for the section, the session ID `{{ session_id }}`, and the summary
-as content.
+name and the attachment ID given for the section, and the summary as content.
 
 The summaries are consumed by downstream agents that review coding sessions
 for this project. Write for that reader: compact, factual, and focused on what
@@ -11,7 +10,7 @@ helps judge whether session activity fits the project.
 
 {% for section in sections %}
 {% if section.attachment == "project-rule-files" %}
-## Rules (note name `rules[project-summary]`)
+## Rules (note name `rules[project-summary]`, attachment ID `{{ section.attachment_id }}`)
 
 Summarize the project's rules in a way that is useful for judging rule
 compliance in a session. Preserve concrete requirements (naming, error
@@ -20,7 +19,7 @@ inconsistent with each other or unclear --- this is your judgement and is
 valuable to the downstream reader.
 {% endif %}
 {% if section.attachment == "project-stack-files" %}
-## Stack (note name `stack[project-summary]`)
+## Stack (note name `stack[project-summary]`, attachment ID `{{ section.attachment_id }}`)
 
 Describe the project's stack and architecture from its manifest files.
 Evaluate the stack for standardness and highlight bespoke or idiosyncratic

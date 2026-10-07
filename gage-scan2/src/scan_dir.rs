@@ -247,11 +247,17 @@ impl ScanDir {
         Ok(out)
     }
 
-    /// Write `scan/watermarks/<oid>/<key>` holding `<commit> <mark>`.
-    pub fn write_watermark(&self, oid: &str, key: &str, commit: &str, mark: u64) -> io::Result<()> {
+    /// Write `scan/watermarks/<oid>/<key>` holding `<version> <mark>`.
+    pub fn write_watermark(
+        &self,
+        oid: &str,
+        key: &str,
+        version: &str,
+        mark: u64,
+    ) -> io::Result<()> {
         let dir = self.layout.watermarks_dir().join(oid);
         fs::create_dir_all(&dir)?;
-        write_atomic(&dir.join(key), format!("{commit} {mark}\n").as_bytes())
+        write_atomic(&dir.join(key), format!("{version} {mark}\n").as_bytes())
     }
 
     pub fn set_state(&self, state: State) -> io::Result<()> {

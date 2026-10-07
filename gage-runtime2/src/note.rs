@@ -2,12 +2,13 @@
 //! and `scan().notes()`: the scan's own notes read back.
 //!
 //! The builder carries the name, the value, the target set by one of
-//! the `for_session*` methods, and the metadata. Each `for_session*`
-//! method takes the session as a `Session` or an id string and keeps
-//! the id. Awaiting the builder validates
-//! the target through the store, writes the note tree into the scan
-//! directory (`gage_store::NoteStore::write_to_dir`), and returns the
-//! [`Note`]. The runtime sets `author` to `task:<scanner>:<task>` and
+//! the `for_session*` methods or `for_attachment`, and the metadata.
+//! Each `for_session*` method takes the session as a `Session` or an
+//! id string and keeps the id; `for_attachment` takes an `Attachment`
+//! or an id string. Awaiting the builder validates the target through
+//! the store, writes the note tree into the scan directory
+//! (`gage_store::NoteStore::write_to_dir`) linked to the version of
+//! the target the scan reads, and returns the [`Note`]. The runtime sets `author` to `task:<scanner>:<task>` and
 //! `attrs.scan` to the active scan. Apply creates the object. Bad
 //! input is `Error::Args`; a failure to reach the scan directory or
 //! the store is a VM error.
@@ -36,6 +37,7 @@ use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmE
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
+use crate::attachment::{attachment_id, scan_attachments};
 use crate::key::encode_key;
 use crate::scan::{Scan, current, run, session_id, sql_str, string_column};
 
@@ -52,6 +54,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(NoteWrite::for_session_line)?;
     m.function_meta(NoteWrite::for_session_range)?;
     m.function_meta(NoteWrite::for_session_lines)?;
+    m.function_meta(NoteWrite::for_attachment)?;
     m.function_meta(NoteWrite::metadata)?;
     m.function_meta(NoteWrite::carry_forward_key)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: NoteWrite| async move {
@@ -79,13 +82,19 @@ pub struct NoteWrite {
     name: String,
     #[rune(skip)]
     value: Value,
-    /// The session target as given; rendered and validated at the await
+    /// The target as given; rendered and validated at the await
     #[rune(skip)]
-    target: Option<SessionTarget>,
+    target: Option<NoteTarget>,
     #[rune(skip)]
     metadata: Option<Value>,
     #[rune(skip)]
     carry_forward_key: Option<Value>,
+}
+
+enum NoteTarget {
+    Session(SessionTarget),
+    /// The attachment id
+    Attachment(String),
 }
 
 /// A session target before rendering: the id and the lines as the
@@ -116,20 +125,20 @@ impl NoteWrite {
     /// Target a whole session. `session` is a `Session` or an id string.
     #[rune::function(instance)]
     fn for_session(mut self, session: Value) -> Result<Self, VmError> {
-        self.target = Some(SessionTarget {
+        self.target = Some(NoteTarget::Session(SessionTarget {
             session: session_id(&session)?,
             lines: Lines::None,
-        });
+        }));
         Ok(self)
     }
 
     /// Target one line of a session.
     #[rune::function(instance)]
     fn for_session_line(mut self, session: Value, line: Value) -> Result<Self, VmError> {
-        self.target = Some(SessionTarget {
+        self.target = Some(NoteTarget::Session(SessionTarget {
             session: session_id(&session)?,
             lines: Lines::One(line),
-        });
+        }));
         Ok(self)
     }
 
@@ -141,10 +150,10 @@ impl NoteWrite {
         start: Value,
         end: Value,
     ) -> Result<Self, VmError> {
-        self.target = Some(SessionTarget {
+        self.target = Some(NoteTarget::Session(SessionTarget {
             session: session_id(&session)?,
             lines: Lines::Range(start, end),
-        });
+        }));
         Ok(self)
     }
 
@@ -153,10 +162,20 @@ impl NoteWrite {
     /// session.
     #[rune::function(instance)]
     fn for_session_lines(mut self, session: Value, lines: Value) -> Result<Self, VmError> {
-        self.target = Some(SessionTarget {
+        self.target = Some(NoteTarget::Session(SessionTarget {
             session: session_id(&session)?,
             lines: Lines::Spec(lines),
-        });
+        }));
+        Ok(self)
+    }
+
+    /// Target a whole attachment. `attachment` is an `Attachment` or
+    /// an id string. The note links the attachment at the commit the
+    /// scan reads, so a carry can compare that version's content
+    /// digest with the attachment's current one.
+    #[rune::function(instance)]
+    fn for_attachment(mut self, attachment: Value) -> Result<Self, VmError> {
+        self.target = Some(NoteTarget::Attachment(attachment_id(&attachment)?));
         Ok(self)
     }
 
@@ -231,11 +250,21 @@ async fn do_write_note(w: NoteWrite) -> Written {
         })?;
     let author = format!("task:{scanner}:{task}");
 
-    let (target, session) = match &w.target {
-        Some(t) => match render_target(t) {
-            Ok(url) => (Some(url), Some(t.session.clone())),
+    // The target URL and the target's commit as the scan reads it,
+    // which the note links in place of the tip
+    let (target, pinned) = match &w.target {
+        Some(NoteTarget::Session(t)) => match render_target(t) {
+            Ok(url) => (Some(url), ctx.member_commit(&t.session).await?),
             Err(e) => return Ok(Err(e)),
         },
+        Some(NoteTarget::Attachment(id)) => {
+            let commit = scan_attachments()
+                .await?
+                .into_iter()
+                .find(|a| a.id == *id)
+                .map(|a| a.commit);
+            (Some(format!("attachment:{id}")), commit)
+        }
         None => (None, None),
     };
     let value = match note_value(&w.value) {
@@ -249,10 +278,6 @@ async fn do_write_note(w: NoteWrite) -> Written {
     let key = match w.carry_forward_key.as_ref().map(encode_key).transpose() {
         Ok(k) => k,
         Err(e) => return Ok(Err(e)),
-    };
-    let pinned = match &session {
-        Some(id) => ctx.member_commit(id).await?,
-        None => None,
     };
 
     let id = new_uuid();
@@ -572,5 +597,35 @@ mod tests {
         )]
         let (len, second): (i64, String) = rune::from_value(output).unwrap();
         assert_eq!((len, second.as_str()), (2, "b"));
+    }
+
+    /// `for_attachment` borrows its argument, so the caller's
+    /// attachment is still readable afterwards.
+    #[test]
+    fn for_attachment_leaves_the_caller_value_readable() {
+        let mut vm = vm(r#"
+            use gage::write_note;
+
+            pub fn check(a) {
+                let w = write_note("n", "v").for_attachment(a);
+                a.id
+            }
+            "#);
+        let attachment = crate::attachment::Attachment {
+            id: "att-1".into(),
+            name: None,
+            key: None,
+            targets: rune::to_value(Vec::<String>::new()).unwrap(),
+            root: "/r".into(),
+            digest: None,
+            commit: "c".into(),
+        };
+        let output = vm.call(["check"], (attachment,)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "takes the VM execution's return value; the test holds the only live handle"
+        )]
+        let id: String = rune::from_value(output).unwrap();
+        assert_eq!(id, "att-1");
     }
 }
