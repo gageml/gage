@@ -38,6 +38,7 @@ pub mod trace;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gage_core::datetime::now_ms;
@@ -178,6 +179,9 @@ impl std::error::Error for Error {}
 /// fresh one is built per task.
 pub struct CompiledScanner {
     name: String,
+    /// The directory holding the scanner's source file; an attach
+    /// task's default file root
+    dir: PathBuf,
     /// The declared tasks by name, scan and attach alike. A scan plans
     /// the scan tasks; the attach phase runs the attach tasks
     tasks: BTreeMap<String, TaskDef>,
@@ -194,6 +198,11 @@ pub struct CompiledScanner {
 impl CompiledScanner {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The directory holding the scanner's source file.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The compiled artifacts a worker needs to run one of the
@@ -283,6 +292,7 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
 
     Ok(CompiledScanner {
         name: def.name.clone(),
+        dir: def.path.parent().map(Path::to_path_buf).unwrap_or_default(),
         tasks: def.tasks.clone(),
         selection: Selection::Explicit,
         params: scanner.params.clone(),
@@ -3785,6 +3795,72 @@ mod tests {
             1,
             "no second issue under the name"
         );
+    }
+
+    /// A selection without a root is under the scanner's directory,
+    /// and a relative root is resolved against it.
+    #[tokio::test]
+    async fn attach_root_defaults_to_the_scanner_directory() {
+        use crate::attach::{AttachEvent, attach};
+        use gage_store::AttachmentStore;
+
+        const SCANNER: &str = r###"
+            use gage::{attach, Files};
+            pub const SCANNER = #{
+                name: "self-attacher",
+                description: "Attaches its own source",
+                tasks: #{
+                    src: #{ attaches: ["src"] },
+                    sub: #{ attaches: ["sub"] },
+                },
+            };
+            pub async fn src() {
+                attach(Files::include(["scanner.rn"])).name("src").await?;
+            }
+            pub async fn sub() {
+                attach(Files::include(["*.txt"]).root("data")).name("sub").await?;
+            }
+        "###;
+        let (tmp, store) = open_store();
+        let (dir, compiled) = compile_source(SCANNER);
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::write(dir.path().join("data").join("a.txt"), "a").unwrap();
+        let dataset_id = DatasetStore::from(&store).create().unwrap();
+        let mut events = Vec::new();
+        attach(
+            &store,
+            &dataset_id,
+            &[compiled.unwrap()],
+            claude_driver(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AttachEvent::Attached { attached, .. } => Some(attached.id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2, "{events:?}");
+        let attachments = AttachmentStore::from(&store);
+        let scanner_dir = std::fs::canonicalize(dir.path()).unwrap();
+        let src = attachments.get(&ids[0]).unwrap();
+        assert_eq!(src.attrs.root, scanner_dir);
+        assert_eq!(
+            attachments
+                .files(&src.commit_sha)
+                .unwrap()
+                .iter()
+                .map(|f| f.key.as_str())
+                .collect::<Vec<_>>(),
+            ["scanner.rn"]
+        );
+        let sub = attachments.get(&ids[1]).unwrap();
+        assert_eq!(sub.attrs.root, scanner_dir.join("data"));
+        assert_eq!(sub.attrs.file_count, 1);
+        drop(tmp);
     }
 
     /// `scan().attachments()` reads the dataset's attachments at the

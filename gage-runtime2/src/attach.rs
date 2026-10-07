@@ -10,9 +10,10 @@
 //! [`Attached`] outcome. `scan()` is not available here.
 //!
 //! [`Files`] is the selection, mirroring `gage attachment add`:
-//! `Files::include(list)` names the include patterns, `.root(path)`
-//! the directory to select under (default the current directory, `~`
-//! expanded), and `.exclude(list)` the exclude patterns.
+//! `Files::include(patterns)` names the include patterns, `.root(path)`
+//! the directory to select under, and `.exclude(patterns)` the exclude
+//! patterns. Patterns are one string or a list of strings. The root defaults to the scanner's directory, a relative
+//! root is under that directory, and `~` is expanded.
 //! `files.key_part()` is the part of a key the selection contributes.
 //!
 //! The writer's `.name(str)`, `.key(key)`, `.target(object)`, and
@@ -53,6 +54,8 @@ tokio::task_local! {
 pub struct AttachContext {
     pub dataset: ScanDatasetRef,
     pub scanner: String,
+    /// The directory holding the scanner's source; the default root
+    pub scanner_dir: PathBuf,
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Every attachment the function writes is reported here
     pub attached: mpsc::UnboundedSender<Attached>,
@@ -69,6 +72,7 @@ impl AttachContext {
     pub fn new(
         dataset: ScanDatasetRef,
         scanner: String,
+        scanner_dir: PathBuf,
         store_path: &Path,
         attached: mpsc::UnboundedSender<Attached>,
         driver: Arc<dyn Driver>,
@@ -76,6 +80,7 @@ impl AttachContext {
         Ok(AttachContext {
             dataset,
             scanner,
+            scanner_dir,
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             attached,
             driver,
@@ -233,7 +238,8 @@ pub struct Files {
 }
 
 impl Files {
-    /// A selection of the files `patterns` match, relative to the root.
+    /// A selection of the files `patterns` match, relative to the
+    /// root. One pattern as a string, or a list of them.
     #[rune::function(keep, path = Self::include)]
     fn include(patterns: Value) -> Result<Files, VmError> {
         Ok(Files {
@@ -243,15 +249,16 @@ impl Files {
         })
     }
 
-    /// Leave out the files `patterns` match.
+    /// Leave out the files `patterns` match: one string, or a list.
     #[rune::function(instance)]
     fn exclude(mut self, patterns: Value) -> Result<Files, VmError> {
         self.excludes = string_list(&patterns)?;
         Ok(self)
     }
 
-    /// Select under `path` instead of the current directory. A leading
-    /// `~` is the home directory.
+    /// Select under `path` instead of the scanner's directory. A
+    /// relative path is under the scanner's directory; a leading `~`
+    /// is the home directory.
     #[rune::function(instance)]
     fn root(mut self, path: &str) -> Files {
         self.root = Some(path.to_string());
@@ -268,13 +275,18 @@ impl Files {
         Ok(selection_key_part(&root, &self.includes, &self.excludes))
     }
 
-    /// The root as the store records it: `~` expanded, the current
-    /// directory when unset, canonicalized.
+    /// The root as the store records it: `~` expanded, resolved
+    /// against the scanner's directory, canonicalized. Outside an
+    /// attachment function the base is the current directory.
     fn canonical_root(&self) -> Result<PathBuf, Error> {
-        let root = match &self.root {
-            Some(path) => expand_home(path),
-            None => std::env::current_dir()
+        let base = match ATTACH_CTX.try_with(|ctx| ctx.scanner_dir.clone()) {
+            Ok(dir) => dir,
+            Err(_outside_scope) => std::env::current_dir()
                 .map_err(|e| Error::Args(format!("attach: current directory: {e}")))?,
+        };
+        let root = match &self.root {
+            Some(path) => base.join(expand_home(path)),
+            None => base,
         };
         root.canonicalize()
             .map_err(|e| Error::Args(format!("attach: root {}: {e}", root.display())))
@@ -291,8 +303,12 @@ impl Files {
     }
 }
 
-/// The strings of a Rune list, borrowed.
+/// One string as a one-element list, or the strings of a Rune list,
+/// borrowed.
 fn string_list(v: &Value) -> Result<Vec<String>, VmError> {
+    if let Ok(s) = v.borrow_string_ref() {
+        return Ok(vec![s.to_string()]);
+    }
     let list = v.borrow_ref::<rune::runtime::Vec>()?;
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
@@ -427,6 +443,16 @@ fn expand_home(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patterns_are_one_string_or_a_list() {
+        let one = rune::to_value("a.txt").unwrap();
+        assert_eq!(string_list(&one).unwrap(), ["a.txt"]);
+        let list = rune::to_value(vec!["a".to_string(), "b".to_string()]).unwrap();
+        assert_eq!(string_list(&list).unwrap(), ["a", "b"]);
+        assert!(string_list(&rune::to_value(1i64).unwrap()).is_err());
+        assert_eq!(&*one.borrow_string_ref().unwrap(), "a.txt");
+    }
 
     #[test]
     fn targets_leaves_the_caller_list_readable() {

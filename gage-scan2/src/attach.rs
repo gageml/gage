@@ -136,6 +136,7 @@ async fn run_one(
     let ctx = AttachContext::new(
         dataset.clone(),
         scanner.name.clone(),
+        scanner.dir().to_path_buf(),
         store_path,
         attached_tx,
         driver,
