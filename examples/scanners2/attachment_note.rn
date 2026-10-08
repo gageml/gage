@@ -1,4 +1,4 @@
-use gage::scan;
+use gage::{Mark, scan, watermark, write_note};
 
 pub const SCANNER = #{
     name: "attachment-note",
@@ -6,8 +6,16 @@ pub const SCANNER = #{
     tasks: #{ main: #{} },
 };
 
+const KEY = "attachment-note-test";
+
 pub async fn main() {
-    for a in scan().attachments().await {
-        println!("{a:?}");
+    for a in scan().attachments().unseen(KEY).await? {
+        write_note(
+            "test-note",
+            format!("Nothing to see for attachment {}", a.id),
+        )
+        .target(a)
+        .await?;
+        watermark(Mark::attachment(a), KEY).await?;
     }
 }

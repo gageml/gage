@@ -3,6 +3,7 @@ use gage::{
     Input,
     Mark,
     Progress,
+    Target,
     Template,
     Tool,
     call_agent,
@@ -120,7 +121,7 @@ fn finding_tool() {
 pub async fn write_finding(inputs) {
     let lines = inputs.get("lines").unwrap_or("");
     let note = write_note("general[finding]", inputs.description)
-        .for_session_lines(inputs.session_id, lines)
+        .target(Target::session_lines(inputs.session_id, lines))
         .metadata(#{ lines })
         .carry_forward_key(REVIEW_KEY)
         .await?;

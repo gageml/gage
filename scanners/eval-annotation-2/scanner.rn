@@ -8,7 +8,7 @@
 // written against it; otherwise it follows the legacy interface as a
 // placeholder. This file is a target, not a runnable scanner.
 
-use gage::{scan, write_note};
+use gage::{Target, scan, write_note};
 // FUTURE: agents, templates, and progress are not in the rethink
 // runtime
 use gage::tools::Query;
@@ -128,10 +128,11 @@ fn open_code_tooldef() {
 // author, and `.replace_prev()` goes with it.
 pub async fn open_code(inputs, meta) {
     let write = write_note("open", inputs.text);
-    let write = match inputs.get("line") {
-        Some(line) => write.for_session_line(inputs.session, line),
-        None => write.for_session(inputs.session),
+    let target = match inputs.get("line") {
+        Some(line) => Target::session_line(inputs.session, line),
+        None => Target::session(inputs.session),
     };
+    let write = write.target(target);
     // Record the calling tool-use id; the author carries the run, not
     // the call
     let metadata = #{};

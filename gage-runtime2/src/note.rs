@@ -1,12 +1,11 @@
 //! `write_note(name, value)`: a note written to the scan directory,
 //! and `scan().notes()`: the scan's own notes read back.
 //!
-//! The builder carries the name, the value, the target set by one of
-//! the `for_session*` methods or `for_attachment`, and the metadata.
-//! Each `for_session*` method takes the session as a `Session` or an
-//! id string and keeps the id; `for_attachment` takes an `Attachment`
-//! or an id string. Awaiting the builder validates the target through
-//! the store, writes the note tree into the scan directory
+//! The builder carries the name, the value, the target set by
+//! `.target(object)`, and the metadata. The target is a `Target`, or
+//! a `Session` or an `Attachment` as a whole-object target. Awaiting
+//! the builder validates the target through the store, writes the
+//! note tree into the scan directory
 //! (`gage_store::NoteStore::write_to_dir`) linked to the version of
 //! the target the scan reads, and returns the [`Note`]. The runtime sets `author` to `task:<scanner>:<task>` and
 //! `attrs.scan` to the active scan. Apply creates the object. Bad
@@ -40,9 +39,10 @@ use rune::runtime::{Formatter, Object, Protocol, Ref, Value, Vec as RuneVec, VmE
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
-use crate::attachment::{attachment_id, scan_attachments};
+use crate::attachment::scan_attachments;
 use crate::key::encode_key;
-use crate::scan::{Scan, current, run, session_id, sql_str, string_column};
+use crate::scan::{Scan, current, run, sql_str, string_column};
+use crate::target::{Target, target_of};
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
@@ -53,11 +53,7 @@ pub(crate) fn module() -> Result<Module, ContextError> {
 pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
     m.ty::<NoteWrite>()?;
-    m.function_meta(NoteWrite::for_session)?;
-    m.function_meta(NoteWrite::for_session_line)?;
-    m.function_meta(NoteWrite::for_session_range)?;
-    m.function_meta(NoteWrite::for_session_lines)?;
-    m.function_meta(NoteWrite::for_attachment)?;
+    m.function_meta(NoteWrite::target)?;
     m.function_meta(NoteWrite::metadata)?;
     m.function_meta(NoteWrite::carry_forward_key)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: NoteWrite| async move {
@@ -93,33 +89,13 @@ pub struct NoteWrite {
     name: String,
     #[rune(skip)]
     value: Value,
-    /// The target as given; rendered and validated at the await
+    /// The target as given; resolved and validated at the await
     #[rune(skip)]
-    target: Option<NoteTarget>,
+    target: Option<Target>,
     #[rune(skip)]
     metadata: Option<Value>,
     #[rune(skip)]
     carry_forward_key: Option<Value>,
-}
-
-enum NoteTarget {
-    Session(SessionTarget),
-    /// The attachment id
-    Attachment(String),
-}
-
-/// A session target before rendering: the id and the lines as the
-/// scanner passed them.
-struct SessionTarget {
-    session: String,
-    lines: Lines,
-}
-
-enum Lines {
-    None,
-    One(Value),
-    Range(Value, Value),
-    Spec(Value),
 }
 
 fn write_note(name: &str, value: Value) -> NoteWrite {
@@ -133,60 +109,13 @@ fn write_note(name: &str, value: Value) -> NoteWrite {
 }
 
 impl NoteWrite {
-    /// Target a whole session. `session` is a `Session` or an id string.
+    /// What the note is about: a `Target`, or a `Session` or an
+    /// `Attachment` as a whole-object target. The note links the
+    /// target at the version the scan reads, so a carry can compare
+    /// that version with the current one.
     #[rune::function(instance)]
-    fn for_session(mut self, session: Value) -> Result<Self, VmError> {
-        self.target = Some(NoteTarget::Session(SessionTarget {
-            session: session_id(&session)?,
-            lines: Lines::None,
-        }));
-        Ok(self)
-    }
-
-    /// Target one line of a session.
-    #[rune::function(instance)]
-    fn for_session_line(mut self, session: Value, line: Value) -> Result<Self, VmError> {
-        self.target = Some(NoteTarget::Session(SessionTarget {
-            session: session_id(&session)?,
-            lines: Lines::One(line),
-        }));
-        Ok(self)
-    }
-
-    /// Target an inclusive line range of a session.
-    #[rune::function(instance)]
-    fn for_session_range(
-        mut self,
-        session: Value,
-        start: Value,
-        end: Value,
-    ) -> Result<Self, VmError> {
-        self.target = Some(NoteTarget::Session(SessionTarget {
-            session: session_id(&session)?,
-            lines: Lines::Range(start, end),
-        }));
-        Ok(self)
-    }
-
-    /// Target lines of a session: a list of lines, or one string in the
-    /// selection grammar. An empty list or string targets the whole
-    /// session.
-    #[rune::function(instance)]
-    fn for_session_lines(mut self, session: Value, lines: Value) -> Result<Self, VmError> {
-        self.target = Some(NoteTarget::Session(SessionTarget {
-            session: session_id(&session)?,
-            lines: Lines::Spec(lines),
-        }));
-        Ok(self)
-    }
-
-    /// Target a whole attachment. `attachment` is an `Attachment` or
-    /// an id string. The note links the attachment at the commit the
-    /// scan reads, so a carry can compare that version's content
-    /// digest with the attachment's current one.
-    #[rune::function(instance)]
-    fn for_attachment(mut self, attachment: Value) -> Result<Self, VmError> {
-        self.target = Some(NoteTarget::Attachment(attachment_id(&attachment)?));
+    fn target(mut self, object: Value) -> Result<Self, VmError> {
+        self.target = Some(target_of(&object)?);
         Ok(self)
     }
 
@@ -264,17 +193,16 @@ async fn do_write_note(w: NoteWrite) -> Written {
     // The target URL and the target's commit as the scan reads it,
     // which the note links in place of the tip
     let (target, pinned) = match &w.target {
-        Some(NoteTarget::Session(t)) => match render_target(t) {
-            Ok(url) => (Some(url), ctx.member_commit(&t.session).await?),
-            Err(e) => return Ok(Err(e)),
-        },
-        Some(NoteTarget::Attachment(id)) => {
+        Some(t @ (Target::Session(id) | Target::SessionLines(id, _))) => {
+            (Some(t.to_url()), ctx.member_commit(id).await?)
+        }
+        Some(t @ Target::Attachment(id)) => {
             let commit = scan_attachments()
                 .await?
                 .into_iter()
                 .find(|a| a.id == *id)
                 .map(|a| a.commit);
-            (Some(format!("attachment:{id}")), commit)
+            (Some(t.to_url()), commit)
         }
         None => (None, None),
     };
@@ -340,58 +268,6 @@ async fn do_write_note(w: NoteWrite) -> Written {
         created: now_ms(),
         commit: None,
     }))
-}
-
-/// The stored target URL for a session target.
-fn render_target(t: &SessionTarget) -> Result<String, Error> {
-    let fragment = match &t.lines {
-        Lines::None => String::new(),
-        Lines::One(line) => line_arg(line)?.to_string(),
-        Lines::Range(start, end) => format!("{}-{}", line_arg(start)?, line_arg(end)?),
-        Lines::Spec(spec) => lines_spec(spec)?,
-    };
-    if fragment.is_empty() {
-        Ok(format!("session:{}", t.session))
-    } else {
-        Ok(format!("session:{}#{fragment}", t.session))
-    }
-}
-
-/// A line argument: an integer, or a string holding one.
-fn line_arg(v: &Value) -> Result<u64, Error> {
-    if let Ok(n) = v.as_integer::<i64>() {
-        return u64::try_from(n)
-            .ok()
-            .filter(|n| *n >= 1)
-            .ok_or_else(|| Error::Args(format!("line must be 1 or greater, got {n}")));
-    }
-    if let Ok(s) = v.borrow_string_ref() {
-        return s
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|n| *n >= 1)
-            .ok_or_else(|| Error::Args(format!("line must be a positive integer, got {s:?}")));
-    }
-    Err(Error::Args("line must be an integer or a string".into()))
-}
-
-/// The fragment for `for_session_lines`: a list of lines joined by
-/// `,`, or a selection string as given.
-fn lines_spec(v: &Value) -> Result<String, Error> {
-    if let Ok(s) = v.borrow_string_ref() {
-        return Ok(s.trim().to_string());
-    }
-    if let Ok(list) = v.borrow_ref::<rune::runtime::Vec>() {
-        let mut parts = Vec::with_capacity(list.len());
-        for item in list.iter() {
-            parts.push(line_arg(item)?.to_string());
-        }
-        return Ok(parts.join(","));
-    }
-    Err(Error::Args(
-        "lines must be a list of lines or a selection string".into(),
-    ))
 }
 
 /// A string is stored as text, a `DateTime` as its RFC 3339 string,
@@ -688,15 +564,15 @@ mod tests {
         assert_eq!((first.as_str(), len), ("a", 2));
     }
 
-    /// `for_attachment` borrows its argument, so the caller's
-    /// attachment is still readable afterwards.
+    /// `target` borrows its argument, so the caller's attachment is
+    /// still readable afterwards.
     #[test]
-    fn for_attachment_leaves_the_caller_value_readable() {
+    fn target_leaves_the_caller_value_readable() {
         let mut vm = vm(r#"
             use gage::write_note;
 
             pub fn check(a) {
-                let w = write_note("n", "v").for_attachment(a);
+                let w = write_note("n", "v").target(a);
                 a.id
             }
             "#);

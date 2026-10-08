@@ -16,7 +16,7 @@ pub async fn main() {
     for s in scan().sessions().await {
         let attrs = s.attrs().await;
         write_note("native-size", attrs.native_size)
-            .for_session(s.id)
+            .target(s)
             .carry_forward_key(KEY)
             .await?;
     }

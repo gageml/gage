@@ -46,6 +46,7 @@ mod progress;
 mod query;
 mod scan;
 pub mod source;
+mod target;
 mod template;
 mod tool;
 mod validate;
@@ -162,7 +163,7 @@ impl OutputSink {
 /// `log` macros, `gage::scan` and the values it returns, `gage::params`, the message
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::dataset`, `gage::attach`, `gage::Files`
-/// and the values they return, `gage::write_note`,
+/// and the values they return, `gage::Target`, `gage::write_note`,
 /// `gage::write_issue`, `scan().issues()`, `gage::carry_forward_notes`,
 /// `gage::carry_forward_notes_named`,
 /// `gage::Mark`, `gage::watermark`, `gage::Template`, `gage::Progress`,
@@ -181,6 +182,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(attach::types_module()?)?;
     context.install(fail::types_module()?)?;
     context.install(query::types_module()?)?;
+    context.install(target::types_module()?)?;
     context.install(note::module()?)?;
     context.install(note::types_module()?)?;
     context.install(issue::module()?)?;

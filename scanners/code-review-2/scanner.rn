@@ -6,6 +6,7 @@ use gage::{
     Input,
     Mark,
     Progress,
+    Target,
     Template,
     Tool,
     attach,
@@ -196,7 +197,9 @@ async fn project_sections(attachments) {
             files.push(#{ path: key, text: f.text()? });
         }
         if !files.is_empty() {
-            sections.push(#{ attachment: a.name.unwrap(), attachment_id: a.id, files });
+            sections.push(
+                #{ attachment: a.name.unwrap(), attachment_id: a.id, files },
+            );
         }
     }
     Ok(sections)
@@ -232,7 +235,7 @@ pub async fn write_summary(inputs) {
         return Ok(format!("error: unknown note name `{}`", inputs.name));
     }
     let note = write_note(inputs.name, inputs.summary)
-        .for_attachment(inputs.attachment_id)
+        .target(Target::attachment(inputs.attachment_id))
         .carry_forward_key(SUMMARY_KEY)
         .await?;
     Ok(format!("Wrote summary note {}", note.id))
@@ -345,7 +348,7 @@ fn finding_tool() {
 pub async fn write_finding(inputs) {
     let lines = inputs.get("lines").unwrap_or("");
     let note = write_note("finding.code", inputs.description)
-        .for_session_lines(inputs.session_id, lines)
+        .target(Target::session_lines(inputs.session_id, lines))
         .metadata(#{ lines })
         .carry_forward_key(REVIEW_KEY)
         .await?;

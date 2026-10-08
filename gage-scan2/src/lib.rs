@@ -3194,7 +3194,7 @@ mod tests {
         use gage_store::NoteStore;
 
         const SCANNER: &str = r#"
-            use gage::{scan, write_note};
+            use gage::{Target, scan, write_note};
 
             pub const SCANNER = #{
                 name: "notes",
@@ -3205,21 +3205,21 @@ mod tests {
             pub async fn main() {
                 for s in scan().sessions().await {
                     let n = write_note("thinking.empty", true)
-                        .for_session_line(s.id, "2")
+                        .target(Target::session_line(s.id, 2))
                         .metadata(#{ model: "m" })
                         .await?;
                     println!("{} {} {:?}", n.name, n.author, n.target);
                     let n = write_note("comment", "whole")
-                        .for_session_lines(s.id, "")
+                        .target(Target::session_lines(s.id, ""))
                         .await?;
                     println!("{:?}", n.target);
                     let n = write_note("comment", "ranged")
-                        .for_session_range(s.id, 1, 3)
+                        .target(Target::session_range(s.id, 1, 3))
                         .await?;
                     println!("{:?}", n.target);
-                    let n = write_note("comment", "by-session").for_session(s).await?;
+                    let n = write_note("comment", "by-session").target(s).await?;
                     println!("{:?} {}", n.target, s.id);
-                    match write_note("bad", 1).for_session_line(s.id, 0).await {
+                    match write_note("bad", 1).target(Target::session_line(s.id, 0)).await {
                         Err(gage::Error::Args(m)) => println!("args: {m}"),
                         other => println!("unexpected: {other:?}"),
                     }
@@ -3275,7 +3275,7 @@ mod tests {
                 &Output::Println(format!("Some(\"session:{session_id}\")")),
                 &Output::Println(format!("Some(\"session:{session_id}#1-3\")")),
                 &Output::Println(format!("Some(\"session:{session_id}\") {session_id}")),
-                &Output::Println("args: line must be 1 or greater, got 0".into()),
+                &Output::Println("args: write_note target: invalid line selection: 0".into()),
                 &Output::Println("None 0".into()),
             ]
         );
@@ -3357,7 +3357,7 @@ mod tests {
         use gage_store::{IssueInput, IssueStatus, IssueStore, NoteStore};
 
         const SCANNER: &str = r###"
-            use gage::{scan, write_issue, write_note};
+            use gage::{Target, scan, write_issue, write_note};
 
             pub const SCANNER = #{
                 name: "issues",
@@ -3376,7 +3376,7 @@ mod tests {
                 let note = None;
                 for s in scan().sessions().await {
                     note = Some(write_note("finding.code", "retry loop")
-                        .for_session_line(s.id, 2)
+                        .target(Target::session_line(s.id, 2))
                         .await?);
                 }
                 let note = note.unwrap();
@@ -3632,7 +3632,7 @@ mod tests {
         use gage_store::{ChangeEvent, IssueStatus, IssueStore};
 
         const SCANNER: &str = r###"
-            use gage::{scan, write_issue, write_note};
+            use gage::{Target, scan, write_issue, write_note};
 
             pub const SCANNER = #{
                 name: "replace",
@@ -3644,7 +3644,7 @@ mod tests {
                 let note = None;
                 for s in scan().sessions().await {
                     note = Some(write_note("empty-thinking", true)
-                        .for_session_line(s.id, 1)
+                        .target(Target::session_line(s.id, 1))
                         .await?);
                 }
                 let note = note.unwrap();
@@ -4207,7 +4207,7 @@ mod tests {
     }
 
     const WATERMARK_SCANNER: &str = r#"
-        use gage::{Mark, carry_forward_notes, scan, watermark, write_note};
+        use gage::{Target, Mark, carry_forward_notes, scan, watermark, write_note};
 
         pub const SCANNER = #{
             name: "wm",
@@ -4226,10 +4226,10 @@ mod tests {
             for (s, (start, end)) in scan().sessions().unseen(KEY).await? {
                 println!("unseen {start}-{end}");
                 let note = write_note("seen", format!("{start}-{end}"))
-                    .for_session_range(s.id, start, end)
+                    .target(Target::session_range(s.id, start, end))
                     .carry_forward_key(KEY)
                     .await?;
-                write_note("untagged", "x").for_session(s.id).await?;
+                write_note("untagged", "x").target(s).await?;
                 watermark(Mark::session(s), KEY).await?;
                 watermark(Mark::note(note), KEY).await?;
             }
@@ -4610,7 +4610,7 @@ mod tests {
             for a in scan().attachments().name("cfg").unseen(KEY).await? {
                 println!("unseen {}", a.name.unwrap());
                 write_note("summary", a.digest.unwrap())
-                    .for_attachment(a)
+                    .target(a)
                     .carry_forward_key(KEY)
                     .await?;
                 watermark(Mark::attachment(a), KEY).await?;
@@ -5068,7 +5068,7 @@ mod tests {
             pub async fn a() {
                 let now = DateTime::from_millis(1_700_000_000_000);
                 for s in scan().sessions().await {
-                    write_note("a", now).for_session(s.id).await?;
+                    write_note("a", now).target(s).await?;
                 }
             }
 

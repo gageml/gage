@@ -17,7 +17,7 @@ pub async fn find() {
         let attrs = s.attrs().await;
         println!("{attrs:?}");
         if attrs.summary.line_count > 200 {
-            write_note("long-session").for_session(s).carry_forward_key(KEY).await?;
+            write_note("long-session").target(s).carry_forward_key(KEY).await?;
         }
     }
 }
