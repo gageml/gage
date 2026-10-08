@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use datafusion::arrow::array::{
     Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use gage_mcp2::{HostError, McpHost};
@@ -30,7 +31,7 @@ use gage_session::Driver;
 use gage_store::{ScanDirLayout, Store, StoreError};
 use rune::Sources;
 use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Object, Protocol, Value, VmError};
+use rune::runtime::{Formatter, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 use serde_json as json;
 use tokio::sync::OnceCell;
@@ -237,6 +238,11 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<NativeQuery>()?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NativeQuery| async move {
         fetch_native(q).await
+    })?;
+    m.function_meta(sessions_native)?;
+    m.ty::<SessionsNative>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsNative| async move {
+        fetch_sessions_native(q).await
     })?;
     m.ty::<Native>()?;
     m.function_meta(Native::debug)?;
@@ -527,10 +533,7 @@ pub(crate) fn sql_str(s: &str) -> String {
 }
 
 /// Run `sql` on a query context.
-pub(crate) async fn run(
-    df_ctx: &SessionContext,
-    sql: &str,
-) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>, VmError> {
+pub(crate) async fn run(df_ctx: &SessionContext, sql: &str) -> Result<Vec<RecordBatch>, VmError> {
     let fail = |e: datafusion::error::DataFusionError| VmError::panic(format!("{sql}: {e}"));
     df_ctx
         .sql(sql)
@@ -541,10 +544,7 @@ pub(crate) async fn run(
         .map_err(fail)
 }
 
-pub(crate) fn string_column(
-    batch: &datafusion::arrow::record_batch::RecordBatch,
-    i: usize,
-) -> &StringArray {
+pub(crate) fn string_column(batch: &RecordBatch, i: usize) -> &StringArray {
     batch
         .column(i)
         .as_any()
@@ -594,8 +594,10 @@ impl Session {
         }
     }
 
-    /// The native session this stored one was read from, when its
-    /// source is reachable on this machine: `Some(Native)` or `None`.
+    /// The native session this stored one was read from, when it
+    /// belongs to this machine's driver: `Ok(Some(Native))`,
+    /// `Ok(None)` for another driver's session, or `Err` when the
+    /// driver fails to resolve it.
     #[rune::function(instance)]
     fn native(&self) -> NativeQuery {
         NativeQuery {
@@ -660,11 +662,9 @@ impl Native {
     }
 }
 
-/// Reopen the session's native source through the context's driver
-/// and ask it for the project directory. A source the driver cannot
-/// open here, or a session from another driver, is `None`: the native
-/// session is not on this machine.
-async fn fetch_native(q: NativeQuery) -> Result<Option<Native>, VmError> {
+/// The session's row of the `session` table as [`resolve_native`]
+/// reads it. The inner error is the driver's.
+async fn fetch_native(q: NativeQuery) -> Result<Result<Option<Native>, Error>, VmError> {
     let sql = format!(
         "SELECT driver, native_source, project FROM session WHERE id = '{}'",
         sql_str(&q.id)
@@ -676,37 +676,110 @@ async fn fetch_native(q: NativeQuery) -> Result<Option<Native>, VmError> {
             q.id
         )));
     };
-    let driver_attr = string_column(batch, 0).value(0).to_string();
-    let source_url = string_column(batch, 1).value(0).to_string();
-    let projects = string_column(batch, 2);
-    let project = projects.is_valid(0).then(|| projects.value(0).to_string());
+    let row = NativeRow::from_columns(batch, 0, 0);
+    Ok(resolve_native(&*driver_handle()?, &q.id, row))
+}
 
-    let driver = driver_handle()?;
-    if driver_attr.split(' ').next() != Some(driver.name()) {
-        tracing::debug!(session = %q.id, driver = %driver_attr, "native: another driver's session");
+/// The columns of the `session` table that locate a session's
+/// native counterpart.
+struct NativeRow {
+    driver: String,
+    source: String,
+    project: Option<String>,
+}
+
+impl NativeRow {
+    /// Row `i` of `batch`, whose `driver`, `native_source`, and
+    /// `project` columns start at `first`.
+    fn from_columns(batch: &RecordBatch, first: usize, i: usize) -> NativeRow {
+        let projects = string_column(batch, first + 2);
+        NativeRow {
+            driver: string_column(batch, first).value(i).to_string(),
+            source: string_column(batch, first + 1).value(i).to_string(),
+            project: projects.is_valid(i).then(|| projects.value(i).to_string()),
+        }
+    }
+}
+
+/// Reopen the session's native source through `driver` and ask it
+/// for the project directory. A session from another driver is
+/// `None`: it is not this machine's. A source the driver cannot open
+/// or a project path it cannot read is `Error::Driver`.
+fn resolve_native(driver: &dyn Driver, id: &str, row: NativeRow) -> Result<Option<Native>, Error> {
+    if row.driver.split(' ').next() != Some(driver.name()) {
+        tracing::debug!(session = %id, driver = %row.driver, "native: another driver's session");
         return Ok(None);
     }
-    let source = match driver.open_native_source(&source_url) {
-        Ok(source) => source,
-        Err(e) => {
-            tracing::debug!(session = %q.id, source = %source_url, error = %e, "native: source not reachable");
-            return Ok(None);
-        }
-    };
-    let project_dir = match project {
-        Some(name) => match source.project_path(&name) {
-            Ok(path) => path.map(|p| p.to_string_lossy().into_owned()),
-            Err(e) => {
-                tracing::debug!(session = %q.id, project = %name, error = %e, "native: no project path");
-                None
-            }
-        },
+    let source = driver
+        .open_native_source(&row.source)
+        .map_err(|e| Error::Driver(format!("opening {}: {e}", row.source)))?;
+    let project_dir = match row.project {
+        Some(name) => source
+            .project_path(&name)
+            .map_err(|e| Error::Driver(format!("project path of {name}: {e}")))?
+            .map(|p| p.to_string_lossy().into_owned()),
         None => None,
     };
     Ok(Some(Native {
-        source: source_url,
+        source: row.source,
         project_dir,
     }))
+}
+
+/// The value of `scan().sessions().native()`. Awaiting it resolves
+/// every session.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct SessionsNative {
+    #[rune(skip)]
+    newest_first: bool,
+}
+
+/// Pair each of the query's sessions with the result of resolving
+/// its native counterpart, `Ok(Native)` or the driver's `Err`, in
+/// the order the sessions query would read them. The sessions of
+/// other drivers are dropped. The await is the list itself: one
+/// session the driver fails on is that session's entry, not the
+/// read's failure, so the scanner decides what a failed resolution
+/// costs.
+#[rune::function(instance, path = native)]
+fn sessions_native(sessions: Ref<SessionsQuery>) -> SessionsNative {
+    SessionsNative {
+        newest_first: sessions.newest_first,
+    }
+}
+
+/// The `(Session, Result<Native, Error>)` pairs of the dataset's
+/// members this machine's driver owns, read in one statement.
+async fn fetch_sessions_native(q: SessionsNative) -> Result<Vec<Value>, VmError> {
+    let sql = format!(
+        "SELECT id, locator, line_count, driver, native_source, project FROM session{}",
+        session_order(q.newest_first)
+    );
+    let batches = run(&dataset_query().await?, &sql).await?;
+    let driver = driver_handle()?;
+    let mut out = Vec::new();
+    for batch in &batches {
+        let ids = string_column(batch, 0);
+        let locators = string_column(batch, 1);
+        let lines = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("line_count is an integer column");
+        for i in 0..batch.num_rows() {
+            let line_count = lines.is_valid(i).then(|| lines.value(i));
+            let session = Session::from_row(ids.value(i), locators.value(i), line_count);
+            let row = NativeRow::from_columns(batch, 3, i);
+            let native = match resolve_native(&*driver, &session.id, row) {
+                Ok(Some(native)) => Ok(native),
+                Ok(None) => continue,
+                Err(e) => Err(e),
+            };
+            out.push(rune::to_value((session, native)).map_err(VmError::from)?);
+        }
+    }
+    Ok(out)
 }
 
 /// The value of `session.attrs()`. Awaiting it reads the session's

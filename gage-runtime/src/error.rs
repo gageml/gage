@@ -48,6 +48,11 @@ pub enum Error {
     /// Agent failure.
     #[rune(constructor)]
     Agent(#[rune(get)] AgentError),
+
+    /// A session driver failed: a native source it could not open or
+    /// a registry it could not read.
+    #[rune(constructor)]
+    Driver(#[rune(get)] String),
 }
 
 /// What went wrong with an agent. `General` carries the failures not
@@ -87,6 +92,7 @@ impl std::fmt::Display for Error {
             Error::Decode(m) => write!(f, "decode: {m}"),
             Error::Template(m) => write!(f, "template: {m}"),
             Error::Agent(e) => write!(f, "agent: {e}"),
+            Error::Driver(m) => write!(f, "driver: {m}"),
         }
     }
 }
@@ -123,6 +129,7 @@ impl std::fmt::Debug for Error {
             Error::Decode(m) => write!(f, "Decode({m:?})"),
             Error::Template(m) => write!(f, "Template({m:?})"),
             Error::Agent(e) => write!(f, "Agent({e:?})"),
+            Error::Driver(m) => write!(f, "Driver({m:?})"),
         }
     }
 }
@@ -214,6 +221,14 @@ mod tests {
         assert_eq!(
             format!("{:?}", Error::agent("spawn failed")),
             r#"Agent(General("spawn failed"))"#
+        );
+    }
+
+    #[test]
+    fn display_driver() {
+        assert_eq!(
+            Error::Driver("opening claude:/x: io: denied".into()).to_string(),
+            "driver: opening claude:/x: io: denied"
         );
     }
 

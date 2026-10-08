@@ -2764,12 +2764,15 @@ mod tests {
                 for s in dataset().sessions().await {
                     let project = s.attrs().await.project.unwrap();
                     log::info!("project {}", project);
-                    let native = s.native().await.unwrap();
+                    let native = s.native().await?.unwrap();
                     println!("native {:?}", native.project_dir);
                     attach(Files::include(["CLAUDE.md"]).exclude(["nope"]).root(ROOT))
                         .name("stack-files")
                         .target(s)
                         .await?;
+                }
+                for (s, native) in dataset().sessions().native().await {
+                    println!("natives {} {:?}", s.id, native?.project_dir);
                 }
             }
 
@@ -2859,6 +2862,17 @@ mod tests {
                 scanner: "attacher".into(),
                 task: "stack".into(),
                 output: Output::Println(format!("native Some({:?})", work.display().to_string())),
+            })),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&AttachEvent::Output(TaskOutput {
+                scanner: "attacher".into(),
+                task: "stack".into(),
+                output: Output::Println(format!(
+                    "natives {session_id} Some({:?})",
+                    work.display().to_string()
+                )),
             })),
             "{events:?}"
         );
@@ -4204,6 +4218,77 @@ mod tests {
             .unwrap();
         assert_eq!(outcomes[0].outcome, gage_store::SessionOutcome::Updated);
         datasets.get(dataset_id).unwrap().commit_sha
+    }
+
+    const NATIVE_SCANNER: &str = r#"
+        use gage::scan;
+
+        pub const SCANNER = #{
+            name: "nat",
+            description: "Native sessions",
+            tasks: #{ main: #{} },
+        };
+
+        pub async fn main() {
+            for (s, native) in scan().sessions().native().await {
+                match native {
+                    Ok(native) => println!("all {} {:?}", s.id, native.project_dir),
+                    Err(gage::Error::Driver(m)) => println!("all driver: {m}"),
+                    other => println!("unexpected: {other:?}"),
+                }
+            }
+            let s = scan().sessions().await.next().unwrap();
+            match s.native().await {
+                Ok(native) => println!("one {:?}", native.map(|n| n.project_dir)),
+                Err(gage::Error::Driver(m)) => println!("one driver: {m}"),
+                other => println!("unexpected: {other:?}"),
+            }
+            Ok(())
+        }
+    "#;
+
+    /// `sessions().native()` pairs each member with the result of
+    /// resolving its native session, and `session.native()` is that
+    /// result alone. A driver failure, here an unreadable project
+    /// registry, is `Error::Driver`: the session's entry in the
+    /// batch, the await of the single read.
+    #[tokio::test]
+    async fn native_sessions_resolve_and_surface_driver_failures() {
+        let (tmp, store) = open_store();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let work = std::fs::canonicalize(&work).unwrap();
+        let (_dataset_id, dataset_sha, session_id) =
+            seeded_dataset_for_project(tmp.path(), &store, ONE_LINE, &work);
+        let registry = tmp.path().join("claude").join(".claude.json");
+        let (_dir, compiled) = compile_source(NATIVE_SCANNER);
+        let compiled = compiled.unwrap();
+
+        std::fs::write(
+            &registry,
+            format!(r#"{{"projects": {{"{}": {{}}}}}}"#, work.display()),
+        )
+        .unwrap();
+        let (_, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha).await;
+        let dir = work.display().to_string();
+        assert_eq!(
+            printed,
+            [
+                format!("all {session_id} Some({dir:?})"),
+                format!("one Some(Some({dir:?}))"),
+            ]
+        );
+
+        std::fs::write(&registry, "not json").unwrap();
+        let (_, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha).await;
+        assert_eq!(printed.len(), 2, "{printed:?}");
+        for (line, prefix) in printed.iter().zip(["all driver: ", "one driver: "]) {
+            let rest = line
+                .strip_prefix(prefix)
+                .unwrap_or_else(|| panic!("{line:?} lacks {prefix:?}"));
+            assert!(rest.starts_with("project path of "), "{line:?}");
+            assert!(rest.contains("reading project registry"), "{line:?}");
+        }
     }
 
     const WATERMARK_SCANNER: &str = r#"

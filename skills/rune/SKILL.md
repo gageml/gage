@@ -501,7 +501,13 @@ for s in scan().sessions() {
     for msg in s.messages()
         .type(#{ assistant: "tool_use" }).await? { }         // by role+kind
     // msg.timestamp is a DateTime; msg.as_object(), msg.model(), msg.to_json()
+    // s.native().await? is Some(Native) with .source and .project_dir,
+    // None for another driver's session; Err(Error::Driver) on a
+    // driver failure
 }
+// (Session, Result<Native, Error>) pairs, another driver's sessions
+// dropped; a driver failure is that session's Err, not the read's
+for (s, native) in scan().sessions().native().await { }
 ```
 
 `DateTime` - provides date/time support
