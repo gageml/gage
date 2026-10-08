@@ -119,19 +119,14 @@ pub struct NoteFull {
     pub modified_ms: i64,
 }
 
-/// The `attrs.json` shape. Optional fields defined by the spec are held
-/// so an edit round-trip preserves them; `target` and `metadata` are
-/// written by `create`, the others by no writer today.
+/// The `attrs.json` shape. A line selection is part of the target
+/// URL's fragment, not a field of its own.
 #[derive(Deserialize, Serialize)]
 struct NoteAttrs {
     name: String,
     author: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    line: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    line_end: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metadata: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,8 +146,6 @@ impl NoteStore<'_> {
             name: input.name.to_string(),
             author: input.author.to_string(),
             target: input.target.map(String::from),
-            line: None,
-            line_end: None,
             metadata: input.metadata,
             scan: None,
             carry_forward_key: input.carry_forward_key.map(String::from),
@@ -191,8 +184,6 @@ impl NoteStore<'_> {
             name: input.name.to_string(),
             author: input.author.to_string(),
             target: input.target.map(String::from),
-            line: None,
-            line_end: None,
             metadata: input.metadata.clone(),
             scan: Some(scan.to_string()),
             carry_forward_key: input.carry_forward_key.map(String::from),
