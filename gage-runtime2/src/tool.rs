@@ -44,7 +44,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use tracing::{Instrument, Span};
 
 use crate::issue::write_issue_tool;
-use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error};
+use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error, session_id};
 use crate::{Level, OUTPUT_SINK, Output, OutputSink};
 
 /// `rmcp::model::JsonObject` as gage-mcp2 exposes it through
@@ -346,9 +346,12 @@ impl Query {
         }
     }
 
-    /// One session's lines `start` through `end`, inclusive
+    /// One session's lines `start` through `end`, inclusive, given
+    /// as `session`, a `Session` or an id string, and `(start, end)`,
+    /// the pair `sessions().unseen(key)` yields.
     #[rune::function(path = Self::with_session_range)]
-    fn with_session_range(session: Ref<Session>, start: i64, end: i64) -> Result<Query, VmError> {
+    fn with_session_range(session: Value, range: (i64, i64)) -> Result<Query, VmError> {
+        let (start, end) = range;
         if start < 1 || end < start {
             return Err(VmError::panic(format!(
                 "Query::with_session_range: lines {start}..{end} is not a range from 1"
@@ -356,7 +359,7 @@ impl Query {
         }
         Ok(Query {
             scope: QueryScope::Session {
-                id: session.id.clone(),
+                id: session_id(&session)?,
                 lines: Some((start as u64, end as u64)),
             },
         })
@@ -1011,6 +1014,15 @@ mod tests {
 
     /// The tools `main()` returns in `script`
     fn tools(script: &str) -> Vec<Tool> {
+        let mut vm = vm(script);
+        let list = vm.call(["main"], ()).unwrap();
+        let list = list.borrow_ref::<rune::runtime::Vec>().unwrap();
+        list.iter()
+            .map(|item| tool_from_value(item).unwrap())
+            .collect()
+    }
+
+    fn vm(script: &str) -> Vm {
         let context = crate::context().unwrap();
         let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
         let mut sources = Sources::new();
@@ -1021,12 +1033,7 @@ mod tests {
             .with_diagnostics(&mut diagnostics)
             .build()
             .unwrap();
-        let mut vm = Vm::new(rt, RuneArc::try_new(unit).unwrap());
-        let list = vm.call(["main"], ()).unwrap();
-        let list = list.borrow_ref::<rune::runtime::Vec>().unwrap();
-        list.iter()
-            .map(|item| tool_from_value(item).unwrap())
-            .collect()
+        Vm::new(rt, RuneArc::try_new(unit).unwrap())
     }
 
     async fn defs(tmp: &TempDir, script: &str) -> Result<Vec<CustomToolDef>, Error> {
@@ -1472,6 +1479,42 @@ mod tests {
         assert!(
             message.starts_with("tool broken failed: Missing index"),
             "{message}"
+        );
+    }
+
+    /// `Query::with_session_range` takes the session as a `Session`
+    /// or an id string and the range as the `(start, end)` pair
+    /// `unseen` yields.
+    #[test]
+    fn query_with_session_range_takes_session_or_id_and_a_range_pair() {
+        let scope = |v: &Value| match &tool_from_value(v).unwrap().kind {
+            ToolKind::Gage(GageConfig::Query(q)) => q.scope.clone(),
+            _ => panic!("expected a Query tool"),
+        };
+        let mut vm = vm(r#"
+            use gage::tools::Query;
+            pub fn main(s, range) { Query::with_session_range(s, range) }
+        "#);
+        let session = Session {
+            id: "abc".into(),
+            line_count: 9,
+            commit: "c".into(),
+        };
+        let from_session = vm.call(["main"], (session, (1i64, 9i64))).unwrap();
+        assert!(matches!(
+            scope(&from_session),
+            QueryScope::Session { ref id, lines: Some((1, 9)) } if id == "abc"
+        ));
+        let from_id = vm.call(["main"], ("abc", (2i64, 5i64))).unwrap();
+        assert!(matches!(
+            scope(&from_id),
+            QueryScope::Session { ref id, lines: Some((2, 5)) } if id == "abc"
+        ));
+        let err = vm.call(["main"], ("abc", (3i64, 2i64))).unwrap_err();
+        let rendered = render_vm_error(&err, None);
+        assert!(
+            rendered.contains("lines 3..2 is not a range from 1"),
+            "{rendered}"
         );
     }
 
