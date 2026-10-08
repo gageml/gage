@@ -15,12 +15,15 @@
 //!
 //! `scan().notes()` is a [`NotesQuery`]; awaiting it reads the notes
 //! written by this scan's tasks and the notes carried into it, and
-//! nothing else, through the scan-scoped `note` table. `.name(name)`
-//! and `.names([...])` match names exactly or by a `*` pattern. A
-//! task sees every note its upstream tasks wrote because the runner
+//! nothing else, through the scan-scoped `note` table. It takes no
+//! argument, so its await is the list itself. `.name(name)` and
+//! `.names([...])` match names exactly or by a `*` pattern and move
+//! the chain to a [`FilteredNotesQuery`], whose await is a `Result`:
+//! a pattern is a syntax, and the scanner handles a bad one. A task
+//! sees every note its upstream tasks wrote because the runner
 //! releases it only after they returned. `.hwm(key)` and
-//! `.unseen(key)` read the notes' watermarks under `key`; see
-//! `crate::validate`.
+//! `.unseen(key)` on either query read the notes' watermarks under
+//! `key`; see `crate::validate`.
 //!
 //! A `DateTime` value, as a note value or inside metadata, is stored
 //! as its RFC 3339 string.
@@ -69,7 +72,15 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(crate::validate::notes_hwm)?;
     m.function_meta(crate::validate::notes_unseen)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
-        fetch_notes(q).await
+        fetch_notes(q.select).await
+    })?;
+    m.ty::<FilteredNotesQuery>()?;
+    m.function_meta(FilteredNotesQuery::name)?;
+    m.function_meta(FilteredNotesQuery::names)?;
+    m.function_meta(crate::validate::filtered_notes_hwm)?;
+    m.function_meta(crate::validate::filtered_notes_unseen)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: FilteredNotesQuery| async move {
+        fetch_filtered_notes(q.select).await
     })?;
     Ok(m)
 }
@@ -431,51 +442,104 @@ fn json_value(v: &Value) -> Result<serde_json::Value, String> {
 }
 
 /// The value of `scan().notes()`: the scan's own notes, read when
-/// awaited.
+/// awaited. It has no argument, so its await is the list itself.
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
 pub struct NotesQuery {
-    /// Name patterns to keep, any of them; `None` keeps every note
     #[rune(skip)]
+    pub(crate) select: NotesSelect,
+}
+
+/// `scan().notes()` narrowed by name. Its await is a `Result`
+/// because a pattern is a syntax. The grammar today, `*` for any run
+/// of characters and every other character literal, admits every
+/// string, so the `Err` arm is the contract and not yet a case.
+#[derive(Any, Clone)]
+#[rune(item = ::gage)]
+pub struct FilteredNotesQuery {
+    #[rune(skip)]
+    pub(crate) select: NotesSelect,
+}
+
+/// What a notes read selects, shared by both query types.
+#[derive(Clone)]
+pub(crate) struct NotesSelect {
+    /// Name patterns to keep, any of them; `None` keeps every note
     names: Option<Vec<String>>,
 }
 
 /// The notes this scan wrote or carried, read when awaited.
 #[rune::function(instance)]
 fn notes(_scan: Ref<Scan>) -> NotesQuery {
-    NotesQuery { names: None }
+    NotesQuery {
+        select: NotesSelect { names: None },
+    }
 }
 
 impl NotesQuery {
     /// Keep the notes whose name matches `name`: an exact name, or a
     /// pattern in which `*` matches any run of characters.
     #[rune::function(instance)]
-    fn name(mut self, name: &str) -> Self {
-        self.names = Some(vec![name.to_string()]);
-        self
+    fn name(self, name: &str) -> FilteredNotesQuery {
+        FilteredNotesQuery {
+            select: NotesSelect {
+                names: Some(vec![name.to_string()]),
+            },
+        }
     }
 
     /// Keep the notes whose name matches any of `names`, each an exact
     /// name or a `*` pattern.
     #[rune::function(instance)]
+    fn names(self, names: Ref<RuneVec>) -> Result<FilteredNotesQuery, VmError> {
+        Ok(FilteredNotesQuery {
+            select: NotesSelect {
+                names: Some(patterns(&names)?),
+            },
+        })
+    }
+}
+
+impl FilteredNotesQuery {
+    /// As [`NotesQuery::name`], replacing the patterns so far.
+    #[rune::function(instance)]
+    fn name(mut self, name: &str) -> Self {
+        self.select.names = Some(vec![name.to_string()]);
+        self
+    }
+
+    /// As [`NotesQuery::names`], replacing the patterns so far.
+    #[rune::function(instance)]
     fn names(mut self, names: Ref<RuneVec>) -> Result<Self, VmError> {
-        let mut out = Vec::with_capacity(names.len());
-        for v in names.iter() {
-            let s = v
-                .borrow_string_ref()
-                .map_err(|e| VmError::panic(format!("names: expected strings: {e}")))?;
-            out.push(s.to_string());
-        }
-        self.names = Some(out);
+        self.select.names = Some(patterns(&names)?);
         Ok(self)
     }
 }
 
+/// The strings of a pattern list. A non-string element is a type
+/// error.
+pub(crate) fn patterns(names: &RuneVec) -> Result<Vec<String>, VmError> {
+    let mut out = Vec::with_capacity(names.len());
+    for v in names.iter() {
+        let s = v
+            .borrow_string_ref()
+            .map_err(|e| VmError::panic(format!("names: expected strings: {e}")))?;
+        out.push(s.to_string());
+    }
+    Ok(out)
+}
+
+/// The notes a filtered query selects; the `Err` arm is reserved for
+/// a pattern the grammar rejects.
+async fn fetch_filtered_notes(select: NotesSelect) -> Result<Result<Vec<Note>, Error>, VmError> {
+    Ok(Ok(fetch_notes(select).await?))
+}
+
 /// Read the scan's notes through the scan-scoped `note` table,
 /// filtered by name, oldest first and by id among equals.
-pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error>, VmError> {
+pub(crate) async fn fetch_notes(select: NotesSelect) -> Result<Vec<Note>, VmError> {
     let ctx = current()?;
-    let filter = match &q.names {
+    let filter = match &select.names {
         Some(patterns) => format!(" WHERE {}", name_predicate("name", patterns)),
         None => String::new(),
     };
@@ -523,7 +587,7 @@ pub(crate) async fn fetch_notes(q: NotesQuery) -> Result<Result<Vec<Note>, Error
             });
         }
     }
-    Ok(Ok(out))
+    Ok(out)
 }
 
 /// The `WHERE` clause matching `column` against name patterns: `*`
@@ -597,6 +661,31 @@ mod tests {
         )]
         let (len, second): (i64, String) = rune::from_value(output).unwrap();
         assert_eq!((len, second.as_str()), (2, "b"));
+    }
+
+    /// `names` on a filtered query borrows its list too, so both the
+    /// first and the replacing list stay readable.
+    #[test]
+    fn filtered_notes_names_leaves_the_caller_list_readable() {
+        let mut vm = vm(r#"
+            pub fn check(scan) {
+                let first = ["a"];
+                let second = ["b", "c"];
+                let query = scan.notes().names(first).names(second);
+                (first[0], second.len())
+            }
+            "#);
+        let scan = Scan {
+            id: "scan".into(),
+            dataset: None,
+        };
+        let output = vm.call(["check"], (scan,)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "takes the VM execution's return value; the test holds the only live handle"
+        )]
+        let (first, len): (String, i64) = rune::from_value(output).unwrap();
+        assert_eq!((first.as_str(), len), ("a", 2));
     }
 
     /// `for_attachment` borrows its argument, so the caller's

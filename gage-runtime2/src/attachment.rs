@@ -1,18 +1,21 @@
 //! `scan().attachments()` and `session.attachments()`: the
 //! attachments the scan's dataset holds, for scanners.
 //!
-//! `scan().attachments()` is an [`AttachmentsQuery`]. `.name(pattern)`
-//! keeps the attachments whose name matches a `*`-glob, as a task's
-//! `wants` does, and `.names([...])` those matching any of several;
-//! `.target(object)` keeps those with the object among their
-//! targets, given as a `Session`, an id or prefix, or a Gage URL.
-//! `session.attachments()` is the query with the session as target.
-//! `.hwm(key)` and `.unseen(key)` read the attachments' watermarks
-//! under `key`; see `crate::validate`.
-//! Awaiting the query reads the scoped `attachment` table and yields
-//! an [`Attachments`] iterator of [`Attachment`] values in dataset
-//! order. A name is a selector, not an identifier, so there is no
-//! lookup of one attachment by name.
+//! `scan().attachments()` is an [`AttachmentsQuery`], and
+//! `session.attachments()` the same with the session as target. It
+//! takes no argument, so its await is the [`Attachments`] iterator
+//! itself. `.name(pattern)` keeps the attachments whose name matches
+//! a `*`-glob, as a task's `wants` does, `.names([...])` those
+//! matching any of several, and `.target(object)` those with the
+//! object among their targets, given as a `Session`, an id or
+//! prefix, or a Gage URL. Each moves the chain to a
+//! [`FilteredAttachmentsQuery`], whose await is a `Result`: a
+//! pattern and a target string are syntaxes, and the scanner handles
+//! a bad one. `.hwm(key)` and `.unseen(key)` on either query read the
+//! attachments' watermarks under `key`; see `crate::validate`.
+//! A read yields [`Attachment`] values in dataset order. A name is a
+//! selector, not an identifier, so there is no lookup of one
+//! attachment by name.
 //!
 //! An attachment offers `files()`, awaited to the list of file keys,
 //! and `file(key)`, awaited to `Some(AttachmentFile)` or `None`, both
@@ -29,7 +32,7 @@ use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Bytes, Formatter, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::note::name_predicate;
+use crate::note::{name_predicate, patterns};
 use crate::scan::{Scan, Session, dataset_query, run, sql_str, string_column, target_url};
 
 pub(crate) fn types_module() -> Result<Module, ContextError> {
@@ -45,6 +48,16 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentsQuery| async move {
         fetch_attachments(q).await
     })?;
+    m.ty::<FilteredAttachmentsQuery>()?;
+    m.function_meta(FilteredAttachmentsQuery::name)?;
+    m.function_meta(FilteredAttachmentsQuery::names)?;
+    m.function_meta(FilteredAttachmentsQuery::target)?;
+    m.function_meta(crate::validate::filtered_attachments_hwm)?;
+    m.function_meta(crate::validate::filtered_attachments_unseen)?;
+    m.associated_function(
+        &Protocol::INTO_FUTURE,
+        |q: FilteredAttachmentsQuery| async move { fetch_filtered_attachments(q).await },
+    )?;
     m.ty::<Attachment>()?;
     m.function_meta(Attachment::files)?;
     m.function_meta(Attachment::file)?;
@@ -80,10 +93,7 @@ impl Scan {
     /// The attachments the scan's dataset holds, read when awaited.
     #[rune::function(instance)]
     fn attachments(&self) -> AttachmentsQuery {
-        AttachmentsQuery {
-            names: None,
-            target: None,
-        }
+        AttachmentsQuery { target_url: None }
     }
 }
 
@@ -92,10 +102,37 @@ impl Session {
     #[rune::function(instance)]
     fn attachments(&self) -> AttachmentsQuery {
         AttachmentsQuery {
-            names: None,
-            target: Some(Target::Url(format!("session:{}", self.id))),
+            target_url: Some(format!("session:{}", self.id)),
         }
     }
+}
+
+/// The value of `scan().attachments()` and `session.attachments()`.
+/// It has no argument the scanner wrote, so its await is the
+/// [`Attachments`] iterator itself.
+#[derive(Any, Clone)]
+#[rune(item = ::gage)]
+pub struct AttachmentsQuery {
+    /// The session's URL for `session.attachments()`, known at
+    /// construction and needing no lookup
+    #[rune(skip)]
+    target_url: Option<String>,
+}
+
+/// `scan().attachments()` narrowed by name or target. Its await is a
+/// `Result`: a pattern and a target string are syntaxes.
+#[derive(Any, Clone)]
+#[rune(item = ::gage)]
+pub struct FilteredAttachmentsQuery {
+    #[rune(skip)]
+    pub(crate) select: AttachmentsSelect,
+}
+
+/// What an attachments read selects, shared by both query types.
+#[derive(Clone)]
+pub(crate) struct AttachmentsSelect {
+    names: Option<Vec<String>>,
+    target: Option<Target>,
 }
 
 /// A target filter, resolved to a URL when the query runs.
@@ -105,73 +142,134 @@ enum Target {
     Value(Value),
 }
 
-/// The value of `scan().attachments()`. Awaiting it runs the read.
-#[derive(Any, Clone)]
-#[rune(item = ::gage)]
-pub struct AttachmentsQuery {
-    #[rune(skip)]
-    names: Option<Vec<String>>,
-    #[rune(skip)]
-    target: Option<Target>,
-}
-
 impl AttachmentsQuery {
+    /// The selection as a filtered query would hold it.
+    pub(crate) fn select(&self) -> AttachmentsSelect {
+        AttachmentsSelect {
+            names: None,
+            target: self.target_url.clone().map(Target::Url),
+        }
+    }
+
     /// Keep the attachments whose name matches `pattern`: `*` matches
     /// any run of characters; a pattern without `*` is an exact name.
     #[rune::function(instance)]
-    fn name(mut self, pattern: &str) -> Self {
-        self.names = Some(vec![pattern.to_string()]);
-        self
+    fn name(self, pattern: &str) -> FilteredAttachmentsQuery {
+        FilteredAttachmentsQuery {
+            select: self.select().with_name(pattern),
+        }
     }
 
-    /// Keep the attachments whose name matches any of `patterns`,
-    /// each an exact name or a `*` pattern.
+    /// Keep the attachments whose name matches any of `list`, each an
+    /// exact name or a `*` pattern.
     #[rune::function(instance)]
-    fn names(mut self, patterns: Ref<RuneVec>) -> Result<Self, VmError> {
-        let mut out = Vec::with_capacity(patterns.len());
-        for v in patterns.iter() {
-            let s = v
-                .borrow_string_ref()
-                .map_err(|e| VmError::panic(format!("names: expected strings: {e}")))?;
-            out.push(s.to_string());
-        }
-        self.names = Some(out);
-        Ok(self)
+    fn names(self, list: Ref<RuneVec>) -> Result<FilteredAttachmentsQuery, VmError> {
+        Ok(FilteredAttachmentsQuery {
+            select: self.select().with_names(&list)?,
+        })
     }
 
     /// Keep the attachments with `object` among their targets: a
     /// `Session`, an object id or prefix, or a Gage URL.
     #[rune::function(instance)]
-    fn target(mut self, object: Value) -> Self {
+    fn target(self, object: Value) -> FilteredAttachmentsQuery {
+        FilteredAttachmentsQuery {
+            select: self.select().with_target(object),
+        }
+    }
+}
+
+impl FilteredAttachmentsQuery {
+    /// As [`AttachmentsQuery::name`], replacing the patterns so far.
+    #[rune::function(instance)]
+    fn name(self, pattern: &str) -> Self {
+        FilteredAttachmentsQuery {
+            select: self.select.with_name(pattern),
+        }
+    }
+
+    /// As [`AttachmentsQuery::names`], replacing the patterns so far.
+    #[rune::function(instance)]
+    fn names(self, list: Ref<RuneVec>) -> Result<Self, VmError> {
+        Ok(FilteredAttachmentsQuery {
+            select: self.select.with_names(&list)?,
+        })
+    }
+
+    /// As [`AttachmentsQuery::target`], replacing the target so far.
+    #[rune::function(instance)]
+    fn target(self, object: Value) -> Self {
+        FilteredAttachmentsQuery {
+            select: self.select.with_target(object),
+        }
+    }
+}
+
+impl AttachmentsSelect {
+    fn with_name(mut self, pattern: &str) -> Self {
+        self.names = Some(vec![pattern.to_string()]);
+        self
+    }
+
+    fn with_names(mut self, list: &RuneVec) -> Result<Self, VmError> {
+        self.names = Some(patterns(list)?);
+        Ok(self)
+    }
+
+    fn with_target(mut self, object: Value) -> Self {
         self.target = Some(Target::Value(object));
         self
     }
 }
 
-/// The dataset's attachments matching the query, in dataset order.
-/// Without a dataset there are none. The inner error is a target
-/// argument that names nothing.
-async fn fetch_attachments(q: AttachmentsQuery) -> Result<Result<Attachments, Error>, VmError> {
-    Ok(attachment_list(q).await?.map(Attachments::new))
+/// The dataset's attachments, in dataset order. Without a dataset
+/// there are none.
+async fn fetch_attachments(q: AttachmentsQuery) -> Result<Attachments, VmError> {
+    Ok(Attachments::new(
+        attachments_matching(None, q.target_url.as_deref()).await?,
+    ))
 }
 
-/// The attachments [`fetch_attachments`] would yield, as a list.
+/// The dataset's attachments matching the filtered query. The inner
+/// error is a target argument that names nothing.
+async fn fetch_filtered_attachments(
+    q: FilteredAttachmentsQuery,
+) -> Result<Result<Attachments, Error>, VmError> {
+    Ok(attachment_list(q.select).await?.map(Attachments::new))
+}
+
+/// The attachments a selection yields, as a list. The inner error is
+/// a target argument that names nothing.
 pub(crate) async fn attachment_list(
-    q: AttachmentsQuery,
+    select: AttachmentsSelect,
 ) -> Result<Result<Vec<Attachment>, Error>, VmError> {
+    let target = match &select.target {
+        Some(Target::Url(url)) => Some(url.clone()),
+        Some(Target::Value(value)) => match target_url(value).await? {
+            Ok(url) => Some(url),
+            Err(e) => return Ok(Err(e)),
+        },
+        None => None,
+    };
+    Ok(Ok(attachments_matching(
+        select.names.as_deref(),
+        target.as_deref(),
+    )
+    .await?))
+}
+
+/// The attachments whose name matches any of `names` and whose
+/// targets include `target`, each when given.
+async fn attachments_matching(
+    names: Option<&[String]>,
+    target: Option<&str>,
+) -> Result<Vec<Attachment>, VmError> {
     let mut clauses = Vec::new();
-    if let Some(names) = &q.names {
+    if let Some(names) = names {
         clauses.push(format!("({})", name_predicate("name", names)));
     }
-    if let Some(target) = &q.target {
-        let url = match target {
-            Target::Url(url) => url.clone(),
-            Target::Value(value) => match target_url(value).await? {
-                Ok(url) => url,
-                Err(e) => return Ok(Err(e)),
-            },
-        };
-        clauses.push(format!("array_has(targets, '{}')", sql_str(&url)));
+    if let Some(url) = target {
+        clauses.push(format!("array_has(targets, '{}')", sql_str(url)));
     }
     let sql = if clauses.is_empty() {
         format!("SELECT {ATTACHMENT_COLUMNS} FROM attachment")
@@ -181,7 +279,7 @@ pub(crate) async fn attachment_list(
             clauses.join(" AND ")
         )
     };
-    Ok(Ok(attachments(&sql).await?))
+    attachments(&sql).await
 }
 
 /// Every attachment of the scan's dataset, in dataset order.
@@ -576,5 +674,30 @@ mod tests {
         )]
         let (len, second): (i64, String) = rune::from_value(output).unwrap();
         assert_eq!((len, second.as_str()), (2, "b"));
+    }
+
+    /// `names` on a filtered query borrows its list too, so both the
+    /// first and the replacing list stay readable.
+    #[test]
+    fn filtered_attachments_names_leaves_the_caller_list_readable() {
+        let mut vm = vm(r#"
+            pub fn check(scan) {
+                let first = ["a"];
+                let second = ["b", "c"];
+                let query = scan.attachments().names(first).names(second);
+                (first[0], second.len())
+            }
+            "#);
+        let scan = Scan {
+            id: "scan".into(),
+            dataset: None,
+        };
+        let output = vm.call(["check"], (scan,)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "takes the VM execution's return value; the test holds the only live handle"
+        )]
+        let (first, len): (String, i64) = rune::from_value(output).unwrap();
+        assert_eq!((first.as_str(), len), ("a", 2));
     }
 }

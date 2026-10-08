@@ -56,10 +56,11 @@ use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::attachment::{
-    Attachment, AttachmentsQuery, attachment_id, attachment_list, scan_attachments,
+    Attachment, AttachmentsQuery, AttachmentsSelect, FilteredAttachmentsQuery, attachment_id,
+    attachment_list, scan_attachments,
 };
 use crate::key::encode_key;
-use crate::note::{Note, NotesQuery, fetch_notes, name_predicate};
+use crate::note::{FilteredNotesQuery, Note, NotesQuery, NotesSelect, fetch_notes, name_predicate};
 use crate::scan::{
     ScanContext, Session, SessionsQuery, current, members, run, session_id, sql_str, string_column,
 };
@@ -368,7 +369,7 @@ async fn do_sessions_hwm(q: SessionsHwm) -> Result<Result<Vec<Value>, Error>, Vm
 #[rune(item = ::gage)]
 pub struct NotesHwm {
     #[rune(skip)]
-    query: NotesQuery,
+    select: NotesSelect,
     #[rune(skip)]
     key: Value,
     #[rune(skip)]
@@ -381,7 +382,7 @@ pub struct NotesHwm {
 #[rune::function(instance, path = hwm)]
 pub(crate) fn notes_hwm(notes: Ref<NotesQuery>, key: Value) -> NotesHwm {
     NotesHwm {
-        query: notes.clone(),
+        select: notes.select.clone(),
         key,
         shape: Shape::Hwm,
     }
@@ -391,7 +392,27 @@ pub(crate) fn notes_hwm(notes: Ref<NotesQuery>, key: Value) -> NotesHwm {
 #[rune::function(instance, path = unseen)]
 pub(crate) fn notes_unseen(notes: Ref<NotesQuery>, key: Value) -> NotesHwm {
     NotesHwm {
-        query: notes.clone(),
+        select: notes.select.clone(),
+        key,
+        shape: Shape::Unseen,
+    }
+}
+
+/// As [`notes_hwm`], on a name-filtered query.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn filtered_notes_hwm(notes: Ref<FilteredNotesQuery>, key: Value) -> NotesHwm {
+    NotesHwm {
+        select: notes.select.clone(),
+        key,
+        shape: Shape::Hwm,
+    }
+}
+
+/// As [`notes_unseen`], on a name-filtered query.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn filtered_notes_unseen(notes: Ref<FilteredNotesQuery>, key: Value) -> NotesHwm {
+    NotesHwm {
+        select: notes.select.clone(),
         key,
         shape: Shape::Unseen,
     }
@@ -402,10 +423,7 @@ async fn do_notes_hwm(q: NotesHwm) -> Result<Result<Vec<Value>, Error>, VmError>
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
-    let notes = match fetch_notes(q.query).await? {
-        Ok(notes) => notes,
-        Err(e) => return Ok(Err(e)),
-    };
+    let notes = fetch_notes(q.select).await?;
     let ctx = current()?;
     let with_commit: Vec<(&str, Option<&str>)> = notes
         .iter()
@@ -430,7 +448,7 @@ async fn do_notes_hwm(q: NotesHwm) -> Result<Result<Vec<Value>, Error>, VmError>
 #[rune(item = ::gage)]
 pub struct AttachmentsHwm {
     #[rune(skip)]
-    query: AttachmentsQuery,
+    select: AttachmentsSelect,
     #[rune(skip)]
     key: Value,
     #[rune(skip)]
@@ -443,7 +461,7 @@ pub struct AttachmentsHwm {
 #[rune::function(instance, path = hwm)]
 pub(crate) fn attachments_hwm(attachments: Ref<AttachmentsQuery>, key: Value) -> AttachmentsHwm {
     AttachmentsHwm {
-        query: attachments.clone(),
+        select: attachments.select(),
         key,
         shape: Shape::Hwm,
     }
@@ -453,7 +471,33 @@ pub(crate) fn attachments_hwm(attachments: Ref<AttachmentsQuery>, key: Value) ->
 #[rune::function(instance, path = unseen)]
 pub(crate) fn attachments_unseen(attachments: Ref<AttachmentsQuery>, key: Value) -> AttachmentsHwm {
     AttachmentsHwm {
-        query: attachments.clone(),
+        select: attachments.select(),
+        key,
+        shape: Shape::Unseen,
+    }
+}
+
+/// As [`attachments_hwm`], on a filtered query.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn filtered_attachments_hwm(
+    attachments: Ref<FilteredAttachmentsQuery>,
+    key: Value,
+) -> AttachmentsHwm {
+    AttachmentsHwm {
+        select: attachments.select.clone(),
+        key,
+        shape: Shape::Hwm,
+    }
+}
+
+/// As [`attachments_unseen`], on a filtered query.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn filtered_attachments_unseen(
+    attachments: Ref<FilteredAttachmentsQuery>,
+    key: Value,
+) -> AttachmentsHwm {
+    AttachmentsHwm {
+        select: attachments.select.clone(),
         key,
         shape: Shape::Unseen,
     }
@@ -464,7 +508,7 @@ async fn do_attachments_hwm(q: AttachmentsHwm) -> Result<Result<Vec<Value>, Erro
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
-    let attachments = match attachment_list(q.query).await? {
+    let attachments = match attachment_list(q.select).await? {
         Ok(attachments) => attachments,
         Err(e) => return Ok(Err(e)),
     };

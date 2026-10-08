@@ -3107,20 +3107,20 @@ mod tests {
 
             pub async fn main() {
                 for s in scan().sessions().await {
-                    for m in s.messages().await? {
+                    for m in s.messages().await {
                         println!("{}/{}: {}", m.type, m.subtype.unwrap_or("-"), m.text);
                     }
                     for m in s.messages().type("assistant").latest_first().await? {
                         println!("latest assistant: {}", m.text);
                     }
-                    for m in s.messages().lines(2, 3).await? {
+                    for m in s.messages().lines(2, 3).await {
                         println!("lines 2-3: {}", m.text);
                     }
-                    for m in s.messages().latest_first().limit(1).await? {
+                    for m in s.messages().latest_first().limit(1).await {
                         println!("limit 1: {}", m.text);
                     }
-                    println!("{} entries", s.entries().await?.len());
-                    println!("{} entries limit 2", s.entries().limit(2).await?.len());
+                    println!("{} entries", s.entries().await.len());
+                    println!("{} entries limit 2", s.entries().limit(2).await.len());
                     for e in s.entries().type("summary").await? {
                         println!("entry {}: {}", e.line, e.type);
                     }
@@ -3882,7 +3882,7 @@ mod tests {
             };
 
             pub async fn main() {
-                let all = scan().attachments().await?;
+                let all = scan().attachments().await;
                 println!("{}", all.len());
                 let a = scan().attachments().name("cfg").await?.next().unwrap();
                 println!("{} {:?}", a.name.unwrap(), a.files().await);

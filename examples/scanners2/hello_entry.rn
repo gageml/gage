@@ -6,7 +6,7 @@ pub const SCANNER = #{
 
 pub async fn main() {
     for s in gage::scan().sessions().await {
-        for e in s.entries().await? {
+        for e in s.entries().await {
             println!("Hello, {}:{} {}", s.id, e.line, entry_type(e), );
         }
     }

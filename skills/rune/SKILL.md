@@ -495,7 +495,7 @@ Sessions and messages:
 
 ```rune
 for s in scan().sessions() {
-    for msg in s.messages().await? {                          // all messages
+    for msg in s.messages().await {                           // all messages
     }
     for msg in s.messages().type("assistant").await? { }     // by role
     for msg in s.messages()

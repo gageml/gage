@@ -1,0 +1,13 @@
+use gage::scan;
+
+pub const SCANNER = #{
+    name: "attachment-note",
+    description: "Write attachment notes",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    for a in scan().attachments().await {
+        println!("{a:?}");
+    }
+}
