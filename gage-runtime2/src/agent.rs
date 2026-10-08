@@ -84,7 +84,7 @@ pub(crate) fn module() -> Result<Module, ContextError> {
 
     m.ty::<AgentResult>()?;
     m.function_meta(AgentResult::debug)?;
-    m.function_meta(AgentResult::as_metadata)?;
+    m.function_meta(AgentResult::metadata)?;
 
     m.ty::<Event>()?;
     m.function_meta(Event::debug)?;
@@ -755,7 +755,7 @@ impl AgentResult {
     /// The fields suited to a note's metadata. `duration` is in
     /// seconds.
     #[rune::function(instance)]
-    fn as_metadata(&self) -> Object {
+    fn metadata(&self) -> Object {
         let mut obj = Object::new();
         let mut put = |k: &str, v: rune::runtime::Value| {
             obj.insert(rune::alloc::String::try_from(k).unwrap(), v)

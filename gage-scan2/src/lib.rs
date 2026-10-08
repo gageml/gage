@@ -1682,7 +1682,7 @@ mod tests {
                 }
                 let r = agent.wait().await?;
                 println!("{} {} {} {}", r.text, r.stop_reason, r.exit_code, r.stderr.trim());
-                println!("{:?}", r.as_metadata().turns);
+                println!("{:?}", r.metadata().turns);
             }
             "#,
         );
