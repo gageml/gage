@@ -40,11 +40,6 @@ pub(crate) fn attachment_schema() -> SchemaRef {
         // Gage URLs of the objects the files are about
         Field::new_list("targets", target_item(), false),
         // Value
-        // The directory the files were selected under
-        Field::new("root", DataType::Utf8, false),
-        // The include and exclude patterns, space-joined
-        Field::new("includes", DataType::Utf8, false),
-        Field::new("excludes", DataType::Utf8, false),
         Field::new("file_count", DataType::Int64, false),
         // Total bytes across the files
         Field::new("size", DataType::Int64, false),
@@ -60,6 +55,9 @@ pub(crate) fn attachment_schema() -> SchemaRef {
         // `git:<commit sha>` of the version listed
         system(Field::new("locator", DataType::Utf8, false)),
         system(Field::new("commit", DataType::Utf8, false)),
+        // The directory the files were selected under, on the machine
+        // that added them. Writer provenance, not useful on a reader.
+        system(Field::new("root", DataType::Utf8, false)),
     ]))
 }
 
@@ -88,9 +86,6 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     let mut names = StringBuilder::new();
     let mut keys = StringBuilder::new();
     let mut targets = ListBuilder::new(StringBuilder::new()).with_field(target_item());
-    let mut roots = StringBuilder::new();
-    let mut includes = StringBuilder::new();
-    let mut excludes = StringBuilder::new();
     let mut file_counts = Int64Builder::with_capacity(len);
     let mut sizes = Int64Builder::with_capacity(len);
     let mut digests = StringBuilder::with_capacity(len, len * 16);
@@ -99,6 +94,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
     let mut locators = StringBuilder::with_capacity(len, len * 44);
     let mut commits = StringBuilder::with_capacity(len, len * 40);
+    let mut roots = StringBuilder::new();
     for a in attachments {
         ids.append_value(&a.id);
         names.append_option(a.attrs.name.as_deref());
@@ -107,9 +103,6 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
             targets.values().append_value(target);
         }
         targets.append(true);
-        roots.append_value(a.attrs.root.to_string_lossy());
-        includes.append_value(a.attrs.includes.join(" "));
-        excludes.append_value(a.attrs.excludes.join(" "));
         file_counts.append_value(a.attrs.file_count as i64);
         sizes.append_value(a.attrs.size as i64);
         digests.append_option(a.attrs.digest.as_deref());
@@ -119,6 +112,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
         id_prefixes.append_value(a.id.chars().take(n).collect::<String>());
         locators.append_value(format!("git:{}", a.commit_sha));
         commits.append_value(&a.commit_sha);
+        roots.append_value(a.attrs.root.to_string_lossy());
     }
     Ok(RecordBatch::try_new(
         attachment_schema(),
@@ -127,9 +121,6 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
             Arc::new(names.finish()),
             Arc::new(keys.finish()),
             Arc::new(targets.finish()),
-            Arc::new(roots.finish()),
-            Arc::new(includes.finish()),
-            Arc::new(excludes.finish()),
             Arc::new(file_counts.finish()),
             Arc::new(sizes.finish()),
             Arc::new(digests.finish()),
@@ -138,6 +129,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
             Arc::new(id_prefixes.finish()),
             Arc::new(locators.finish()),
             Arc::new(commits.finish()),
+            Arc::new(roots.finish()),
         ],
     )?)
 }
