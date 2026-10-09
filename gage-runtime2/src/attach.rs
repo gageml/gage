@@ -390,7 +390,7 @@ async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
     let store = ctx.store.lock().await;
     let spec = AttachmentSpec {
         name: w.name.as_deref(),
-        key: key.as_deref(),
+        natural_key: key.as_deref(),
         targets: &targets,
         root: &root,
         includes: &w.files.includes,
@@ -415,7 +415,7 @@ async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
     let attached = Attached {
         id: added.id,
         name: w.name,
-        key: added.key,
+        key: added.natural_key,
         targets,
         outcome: outcome.to_string(),
     };

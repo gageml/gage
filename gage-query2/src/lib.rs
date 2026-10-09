@@ -548,7 +548,7 @@ mod tests {
                     author: "user:t",
                     status: IssueStatus::Pending,
                     evidence: &[note_id.clone()],
-                    key: None,
+                    natural_key: None,
                 })
                 .unwrap();
             issues

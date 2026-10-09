@@ -253,7 +253,7 @@ impl Issue {
             status: full.status.as_str().to_string(),
             status_reason: full.status_reason.map(|r| r.as_str().to_string()),
             scan: full.scan,
-            key: full.key,
+            key: full.natural_key,
             evidence: rune::to_value(evidence).map_err(VmError::from)?,
             created: full.created_ms,
         })
@@ -270,7 +270,7 @@ impl Issue {
             status: record.status.as_str().to_string(),
             status_reason: None,
             scan: record.scan,
-            key: record.key,
+            key: record.natural_key,
             evidence: rune::to_value(record.evidence).map_err(VmError::from)?,
             created: record.created_ms,
         })
@@ -373,7 +373,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
         author: &author,
         status: w.status,
         evidence: &w.evidence,
-        key: key.as_deref(),
+        natural_key: key.as_deref(),
     };
     let store = ctx.store.lock().await;
     let issues = IssueStore::from(&*store);
@@ -484,13 +484,13 @@ fn prior_issue(
         let record = issues
             .read_from_dir(&dir)
             .map_err(|e| VmError::panic(format!("issue dir {}: {e}", dir.display())))?;
-        if record.key.as_deref() == Some(key) {
+        if record.natural_key.as_deref() == Some(key) {
             return Ok(Some(Prior::InDir(record.id)));
         }
     }
     let tips = issues
         .query()
-        .key(key)
+        .natural_key(key)
         .tips()
         .map_err(|e| VmError::panic(format!("write_issue: replace key {key}: {e}")))?;
     match tips.as_slice() {

@@ -144,7 +144,7 @@ impl IssueRow {
             created_ms: issue.created_ms,
             modified_ms: issue.modified_ms,
             scan: issue.scan.clone(),
-            key: issue.key.clone(),
+            key: issue.natural_key.clone(),
             id_prefix,
             commit: Some(issue.commit_sha.clone()),
         }

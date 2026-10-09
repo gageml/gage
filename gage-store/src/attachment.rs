@@ -56,7 +56,7 @@ use crate::{Store, StoreError};
 pub const OBJECT_TYPE: &str = "gage::attachment";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from an attachment's `attrs.json`.
-pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "key"];
+pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "natural_key"];
 const FILES_TREE: &str = "files.d";
 const TARGETS_LINK: &str = "targets.link";
 /// The most an attachment may hold
@@ -84,7 +84,7 @@ pub struct AttachmentAttrs {
     /// The identity a later add addresses; absent for an attachment
     /// no later add can address
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
+    pub natural_key: Option<String>,
     /// The objects the files are about, as Gage URLs with full ids,
     /// in `targets.link` order
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -111,9 +111,10 @@ pub struct AttachmentAttrs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentSpec<'a> {
     pub name: Option<&'a str>,
-    /// The identity. `None` with a name takes the default key; `None`
-    /// without one creates an attachment no later add can address.
-    pub key: Option<&'a str>,
+    /// The identity. `None` with a name takes the default natural key;
+    /// `None` without one creates an attachment no later add can
+    /// address.
+    pub natural_key: Option<&'a str>,
     /// Gage URLs of live objects with full ids and no fragments
     pub targets: &'a [String],
     pub root: &'a Path,
@@ -126,8 +127,8 @@ pub struct AttachmentSpec<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct AttachmentAddOutcome {
     pub id: String,
-    /// The key the attachment is stored under, default filled in
-    pub key: Option<String>,
+    /// The natural key the attachment is stored under, default filled in
+    pub natural_key: Option<String>,
     /// Commit SHA of the resulting version. When `outcome` is
     /// [`AttachmentOutcome::Unchanged`] this is the existing commit.
     pub commit_sha: String,
@@ -207,8 +208,8 @@ impl AttachmentStore<'_> {
         if let Some(name) = spec.name {
             validate_name(name)?;
         }
-        if let Some(key) = spec.key {
-            validate_key(key)?;
+        if let Some(key) = spec.natural_key {
+            validate_natural_key(key)?;
         }
         if !spec.root.is_dir() {
             return Err(StoreError::AttachmentInput(format!(
@@ -216,7 +217,7 @@ impl AttachmentStore<'_> {
                 spec.root.display()
             )));
         }
-        let key = match (spec.key, spec.name) {
+        let key = match (spec.natural_key, spec.name) {
             (Some(key), _) => Some(key.to_string()),
             (None, Some(name)) => Some(format!(
                 "{name}:{}",
@@ -271,7 +272,7 @@ impl AttachmentStore<'_> {
 
         let attrs = AttachmentAttrs {
             name: spec.name.map(String::from),
-            key,
+            natural_key: key,
             targets: targets.iter().map(|(url, _)| url.clone()).collect(),
             root: spec.root.to_path_buf(),
             includes: spec.includes.to_vec(),
@@ -304,7 +305,7 @@ impl AttachmentStore<'_> {
                     .create(OBJECT_TYPE, OBJECT_VERSION, &id, &tree, &message)?;
             return Ok(AttachmentAddOutcome {
                 id,
-                key: attrs.key,
+                natural_key: attrs.natural_key,
                 commit_sha,
                 outcome: AttachmentOutcome::Added,
                 file_count,
@@ -315,14 +316,14 @@ impl AttachmentStore<'_> {
         match self.store.edit(&current, &tree, &message)? {
             EditOutcome::Unchanged => Ok(AttachmentAddOutcome {
                 id,
-                key: attrs.key,
+                natural_key: attrs.natural_key,
                 commit_sha: current.commit_sha,
                 outcome: AttachmentOutcome::Unchanged,
                 file_count,
             }),
             EditOutcome::Written(commit_sha) => Ok(AttachmentAddOutcome {
                 id,
-                key: attrs.key,
+                natural_key: attrs.natural_key,
                 commit_sha,
                 outcome: AttachmentOutcome::Updated,
                 file_count,
@@ -330,10 +331,10 @@ impl AttachmentStore<'_> {
         }
     }
 
-    /// The live attachment under `key`, if any. Two live attachments
-    /// under one key is a store fault.
+    /// The live attachment under `natural_key`, if any. Two live
+    /// attachments under one key is a store fault.
     fn live_under(&self, key: &str) -> Result<Option<Object>, StoreError> {
-        let tips = self.query().key(key).tips()?;
+        let tips = self.query().natural_key(key).tips()?;
         match tips.as_slice() {
             [] => Ok(None),
             [tip] => {
@@ -342,7 +343,7 @@ impl AttachmentStore<'_> {
                 Ok(Some(object))
             }
             many => Err(StoreError::Parse(format!(
-                "attachment key {key:?} names {} live attachments",
+                "attachment natural key {key:?} names {} live attachments",
                 many.len()
             ))),
         }
@@ -588,11 +589,11 @@ fn collect_files(
     Ok(())
 }
 
-/// A key is non-empty and holds no `/`, as every object key is.
-fn validate_key(key: &str) -> Result<(), StoreError> {
+/// A natural key is non-empty and holds no `/`, as every object key is.
+fn validate_natural_key(key: &str) -> Result<(), StoreError> {
     if key.is_empty() || key == "." || key == ".." || key.contains('/') {
         return Err(StoreError::AttachmentInput(format!(
-            "key {key:?}: must be non-empty and must not contain `/`"
+            "natural key {key:?}: must be non-empty and must not contain `/`"
         )));
     }
     Ok(())
@@ -634,9 +635,9 @@ impl<'a> AttachmentQuery<'a> {
         self
     }
 
-    /// Select the attachments under `key`.
-    pub fn key(mut self, key: &str) -> Self {
-        self.query.attrs.push(("key", key.to_string()));
+    /// Select the attachments under `natural_key`.
+    pub fn natural_key(mut self, key: &str) -> Self {
+        self.query.attrs.push(("natural_key", key.to_string()));
         self
     }
 
@@ -835,7 +836,7 @@ mod tests {
         let attachments = AttachmentStore::from(&store);
         let spec = AttachmentSpec {
             name: Some("claude-config"),
-            key: None,
+            natural_key: None,
             targets: &[],
             root: &root,
             includes: &patterns(&["settings*.json"]),
@@ -849,7 +850,7 @@ mod tests {
         assert_eq!(record.commit_sha, added.commit_sha);
         assert_eq!(record.attrs.name.as_deref(), Some("claude-config"));
         assert_eq!(
-            record.attrs.key,
+            record.attrs.natural_key,
             Some(format!(
                 "claude-config:{}",
                 selection_key_part(&root, &patterns(&["settings*.json"]), &[])
@@ -886,7 +887,7 @@ mod tests {
         let pats = patterns(&["settings.json"]);
         let spec = AttachmentSpec {
             name: Some("cfg"),
-            key: None,
+            natural_key: None,
             targets: &[],
             root: &root,
             includes: &pats,
@@ -927,7 +928,7 @@ mod tests {
             attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    key: None,
+                    natural_key: None,
                     targets: &[],
                     root: &root,
                     includes: &pats,
@@ -963,7 +964,7 @@ mod tests {
         let back = attachments
             .add(&AttachmentSpec {
                 name: Some("b"),
-                key: None,
+                natural_key: None,
                 targets: &[],
                 root: &root,
                 includes: &pats,
@@ -987,7 +988,7 @@ mod tests {
         let pats = patterns(&["settings.json"]);
         let spec = AttachmentSpec {
             name: Some("cfg"),
-            key: None,
+            natural_key: None,
             targets: &[],
             root: &root,
             includes: &pats,
@@ -1081,7 +1082,7 @@ mod tests {
         let added = attachments
             .add(&AttachmentSpec {
                 name: Some("cfg"),
-                key: None,
+                natural_key: None,
                 targets: &[],
                 root: &root,
                 includes: &pats,
@@ -1121,7 +1122,7 @@ mod tests {
             let err = attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    key: None,
+                    natural_key: None,
                     targets: &[],
                     root: &root,
                     includes: &patterns(&["CLAUDE.md"]),
@@ -1136,7 +1137,7 @@ mod tests {
         let err = attachments
             .add(&AttachmentSpec {
                 name: Some("ok"),
-                key: None,
+                natural_key: None,
                 targets: &[],
                 root: &root.join("settings.json"),
                 includes: &patterns(&["CLAUDE.md"]),
@@ -1155,7 +1156,7 @@ mod tests {
         let pats = patterns(&["settings.json"]);
         let spec = AttachmentSpec {
             name: None,
-            key: None,
+            natural_key: None,
             targets: &[],
             root: &root,
             includes: &pats,
@@ -1189,7 +1190,7 @@ mod tests {
         let pats = patterns(&["CLAUDE.md"]);
         let spec = AttachmentSpec {
             name: Some("stack-files"),
-            key: None,
+            natural_key: None,
             targets: std::slice::from_ref(&target),
             root: &root,
             includes: &pats,
@@ -1268,7 +1269,7 @@ mod tests {
         let keyed = attachments
             .add(&AttachmentSpec {
                 name: Some("a"),
-                key: Some("project:x"),
+                natural_key: Some("project:x"),
                 targets: &[],
                 root: &root,
                 includes: &pats,
@@ -1279,7 +1280,7 @@ mod tests {
         let renamed = attachments
             .add(&AttachmentSpec {
                 name: Some("b"),
-                key: Some("project:x"),
+                natural_key: Some("project:x"),
                 targets: &[],
                 root: &root.join("skills"),
                 includes: &patterns(&["**/*.md"]),
@@ -1290,9 +1291,14 @@ mod tests {
         assert_eq!(renamed.id, keyed.id);
         let record = attachments.get(&keyed.id).unwrap();
         assert_eq!(record.attrs.name.as_deref(), Some("b"));
-        assert_eq!(record.attrs.key.as_deref(), Some("project:x"));
+        assert_eq!(record.attrs.natural_key.as_deref(), Some("project:x"));
         assert_eq!(
-            attachments.query().key("project:x").tips().unwrap().len(),
+            attachments
+                .query()
+                .natural_key("project:x")
+                .tips()
+                .unwrap()
+                .len(),
             1,
             "the key is indexed"
         );
@@ -1300,7 +1306,7 @@ mod tests {
             let err = attachments
                 .add(&AttachmentSpec {
                     name: None,
-                    key: Some(key),
+                    natural_key: Some(key),
                     targets: &[],
                     root: &root,
                     includes: &pats,
@@ -1326,7 +1332,7 @@ mod tests {
             attachments
                 .add(&AttachmentSpec {
                     name: Some("cfg"),
-                    key: None,
+                    natural_key: None,
                     targets: &[target.to_string()],
                     root: &root,
                     includes: &pats,
@@ -1360,7 +1366,7 @@ mod tests {
         let err = attachments
             .add(&AttachmentSpec {
                 name: None,
-                key: None,
+                natural_key: None,
                 targets: &[],
                 root: &many,
                 includes: &patterns(&["*"]),
@@ -1375,7 +1381,7 @@ mod tests {
         let err = attachments
             .add(&AttachmentSpec {
                 name: None,
-                key: None,
+                natural_key: None,
                 targets: &[],
                 root: &big,
                 includes: &patterns(&["blob"]),

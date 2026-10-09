@@ -102,7 +102,7 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
     for a in attachments {
         ids.append_value(&a.id);
         names.append_option(a.attrs.name.as_deref());
-        keys.append_option(a.attrs.key.as_deref());
+        keys.append_option(a.attrs.natural_key.as_deref());
         for target in &a.attrs.targets {
             targets.values().append_value(target);
         }

@@ -3440,7 +3440,7 @@ mod tests {
                 author: "user:t",
                 status: IssueStatus::Open,
                 evidence: &[],
-                key: None,
+                natural_key: None,
             })
             .unwrap();
 
@@ -3736,7 +3736,7 @@ mod tests {
         written.sort_by(|a, b| a.name.cmp(&b.name));
         let hidden = written[0].clone();
         assert_eq!(hidden.name, "hidden-thinking");
-        assert_eq!(hidden.key.as_deref(), Some("hidden-thinking"));
+        assert_eq!(hidden.natural_key.as_deref(), Some("hidden-thinking"));
         assert_eq!(
             hidden.description.as_deref(),
             Some("second"),
@@ -3745,7 +3745,7 @@ mod tests {
         assert_eq!(hidden.changes.len(), 1);
         assert_eq!(hidden.evidence, [record.content.notes[0].clone()]);
         let per_session = written[1].clone();
-        assert_eq!(per_session.key.as_deref(), Some("per-session:7"));
+        assert_eq!(per_session.natural_key.as_deref(), Some("per-session:7"));
 
         issues
             .set_status(&hidden.id, IssueStatus::Closed, None, "user:t", None)
@@ -3922,7 +3922,7 @@ mod tests {
             let added = attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    key: None,
+                    natural_key: None,
                     targets: &[],
                     root: &root,
                     includes: &pats,
@@ -4735,7 +4735,7 @@ mod tests {
         let other_pats = ["CLAUDE.md".to_string()];
         let cfg_spec = AttachmentSpec {
             name: Some("cfg"),
-            key: None,
+            natural_key: None,
             targets: &[],
             root: &root,
             includes: &cfg_pats,

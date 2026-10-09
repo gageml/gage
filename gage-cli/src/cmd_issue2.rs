@@ -653,7 +653,7 @@ pub fn add(args: IssueAddArgs) {
                 author: &author,
                 status,
                 evidence: &evidence,
-                key: None,
+                natural_key: None,
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Issue {} added", short_uuid(&id)).into())
