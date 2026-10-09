@@ -19,21 +19,26 @@
 //!
 //! An attachment offers `files()`, awaited to the list of file paths,
 //! and `file(path)`, awaited to `Some(AttachmentFile)` or `None`, both
-//! read from the `attachment_file` table. A file holds its bytes;
-//! `bytes()` and `text()` return them, and `text()` and `json()` are
-//! fallible, returning `Error::Decode` for content that is not UTF-8
-//! or not JSON. `digest` is the content digest of the files, the
-//! version a watermark or a note records for an attachment.
+//! read directly from the store at the attachment's linked commit,
+//! bypassing the `attachment_file` SQL projection so the raw bytes
+//! round-trip unchanged. A file holds its bytes; `bytes()` returns
+//! them, and `text()` and `json()` are fallible, returning
+//! `Error::Decode` for content that is not UTF-8 or not JSON.
+//! `digest` is the content digest of the files, the version a
+//! watermark or a note records for an attachment.
 
-use datafusion::arrow::array::{Array, BinaryArray, ListArray, StringArray};
+use datafusion::arrow::array::{Array, ListArray, StringArray};
 use gage_runtime::error::Error;
 use gage_runtime::value::json_to_value;
+use gage_store::AttachmentStore;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Bytes, Formatter, Protocol, Ref, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::note::{name_predicate, patterns};
-use crate::scan::{Scan, Session, dataset_query, run, sql_str, string_column, target_url};
+use crate::scan::{
+    Scan, Session, dataset_query, run, sql_str, store_handle, string_column, target_url,
+};
 
 pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
@@ -370,11 +375,11 @@ pub(crate) fn attachment_id(v: &Value) -> Result<String, VmError> {
 }
 
 impl Attachment {
-    /// The attachment's file keys, read when awaited.
+    /// The attachment's file paths, read when awaited.
     #[rune::function(instance)]
     fn files(&self) -> AttachmentFilesQuery {
         AttachmentFilesQuery {
-            attachment_id: self.id.clone(),
+            commit: self.commit.clone(),
         }
     }
 
@@ -383,7 +388,7 @@ impl Attachment {
     #[rune::function(instance)]
     fn file(&self, path: &str) -> AttachmentFileQuery {
         AttachmentFileQuery {
-            attachment_id: self.id.clone(),
+            commit: self.commit.clone(),
             path: path.to_string(),
         }
     }
@@ -404,53 +409,42 @@ impl Attachment {
 #[rune(item = ::gage)]
 pub struct AttachmentFilesQuery {
     #[rune(skip)]
-    attachment_id: String,
+    commit: String,
 }
 
 async fn fetch_files(q: AttachmentFilesQuery) -> Result<Vec<String>, VmError> {
-    let sql = format!(
-        "SELECT path FROM attachment_file WHERE attachment_id = '{}' ORDER BY path",
-        sql_str(&q.attachment_id)
-    );
-    let batches = run(&dataset_query().await?, &sql).await?;
-    let mut out = Vec::new();
-    for batch in &batches {
-        let paths = string_column(batch, 0);
-        for i in 0..batch.num_rows() {
-            out.push(paths.value(i).to_string());
-        }
-    }
-    Ok(out)
+    let store = store_handle()?;
+    let store = store.lock().await;
+    let attachments = AttachmentStore::from(&*store);
+    let files = attachments
+        .files(&q.commit)
+        .map_err(|e| VmError::panic(format!("attachment commit {}: {e}", q.commit)))?;
+    Ok(files.into_iter().map(|f| f.key).collect())
 }
 
-/// The value of `attachment.file(key)`.
+/// The value of `attachment.file(path)`.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct AttachmentFileQuery {
     #[rune(skip)]
-    attachment_id: String,
+    commit: String,
     #[rune(skip)]
     path: String,
 }
 
 async fn fetch_file(q: AttachmentFileQuery) -> Result<Option<AttachmentFile>, VmError> {
-    let sql = format!(
-        "SELECT content FROM attachment_file WHERE attachment_id = '{}' AND path = '{}'",
-        sql_str(&q.attachment_id),
-        sql_str(&q.path)
-    );
-    let batches = run(&dataset_query().await?, &sql).await?;
-    let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
-        return Ok(None);
-    };
-    let contents = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .expect("attachment_file content is a binary column");
-    Ok(Some(AttachmentFile {
+    let store = store_handle()?;
+    let store = store.lock().await;
+    let attachments = AttachmentStore::from(&*store);
+    let bytes = attachments.read_file(&q.commit, &q.path).map_err(|e| {
+        VmError::panic(format!(
+            "attachment commit {} path {}: {e}",
+            q.commit, q.path
+        ))
+    })?;
+    Ok(bytes.map(|bytes| AttachmentFile {
         path: q.path,
-        bytes: contents.value(0).to_vec(),
+        bytes,
     }))
 }
 

@@ -40,7 +40,7 @@ Tables:
   (scan_id, note_id, carried); scan_issue (scan_id, issue_id)
 - dataset (id); dataset_session (dataset_id, session_num, session_id)
 - attachment (id, name, root, includes, excludes, file_count, size);
-  attachment_file (attachment_id, key, size, content) - each file's bytes
+  attachment_file (attachment_id, path, size, text)
 
 Filter by `session_id` and order by `line` when reading a session. Select
 `substr(text, 1, 800)` rather than full `text` or `raw` on wide rows. When the

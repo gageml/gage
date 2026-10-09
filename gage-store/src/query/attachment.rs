@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::array::{
-    BinaryBuilder, Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder,
+    Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -73,8 +73,9 @@ pub(crate) fn attachment_file_schema() -> SchemaRef {
         // The path relative to the attachment's root, `/`-separated
         Field::new("path", DataType::Utf8, false),
         Field::new("size", DataType::Int64, false),
-        // The file's bytes
-        Field::new("content", DataType::Binary, false),
+        // The file's content as UTF-8 text, or null when the bytes are
+        // not valid UTF-8
+        Field::new("text", DataType::Utf8, true),
     ]))
 }
 
@@ -142,16 +143,17 @@ pub(crate) fn attachment_rows(attachments: &[AttachmentRecord]) -> Result<Record
 }
 
 /// The `attachment_file` batch: every file of each of `attachments`,
-/// in tree order, with its bytes.
+/// in tree order, with its content as UTF-8 text; non-UTF-8 bytes
+/// yield null.
 pub(crate) fn attachment_file_rows(
     store: &Store,
     attachments: &[AttachmentRecord],
 ) -> Result<RecordBatch> {
     let files = AttachmentStore::from(store);
     let mut attachment_ids = StringBuilder::new();
-    let mut keys = StringBuilder::new();
+    let mut paths = StringBuilder::new();
     let mut sizes = Int64Builder::new();
-    let mut contents = BinaryBuilder::new();
+    let mut texts = StringBuilder::new();
     for a in attachments {
         for file in files.files(&a.commit_sha).map_err(external)? {
             let bytes = files
@@ -164,18 +166,21 @@ pub(crate) fn attachment_file_rows(
                     )))
                 })?;
             attachment_ids.append_value(&a.id);
-            keys.append_value(&file.key);
+            paths.append_value(&file.key);
             sizes.append_value(file.size as i64);
-            contents.append_value(&bytes);
+            match String::from_utf8(bytes) {
+                Ok(s) => texts.append_value(&s),
+                Err(_) => texts.append_null(),
+            }
         }
     }
     Ok(RecordBatch::try_new(
         attachment_file_schema(),
         vec![
             Arc::new(attachment_ids.finish()),
-            Arc::new(keys.finish()),
+            Arc::new(paths.finish()),
             Arc::new(sizes.finish()),
-            Arc::new(contents.finish()),
+            Arc::new(texts.finish()),
         ],
     )?)
 }
