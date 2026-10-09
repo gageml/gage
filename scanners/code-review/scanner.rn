@@ -102,7 +102,7 @@ pub async fn project_summary() {
             #{
                 project,
                 result: result.text,
-                metadata: result.as_metadata(),
+                metadata: result.metadata(),
             },
         );
         for v in validates {
@@ -250,7 +250,7 @@ async fn findings_query() {
             #{
                 session,
                 result: result.text,
-                metadata: result.as_metadata(),
+                metadata: result.metadata(),
             },
         );
         validate(session).await?;
@@ -369,7 +369,7 @@ async fn findings_roadmap() {
             #{
                 session,
                 result: result.text,
-                metadata: result.as_metadata(),
+                metadata: result.metadata(),
             },
         );
         validate(session).await?;

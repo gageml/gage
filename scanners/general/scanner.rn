@@ -105,7 +105,7 @@ async fn findings_query() {
             #{
                 session,
                 result: result.text,
-                metadata: result.as_metadata(),
+                metadata: result.metadata(),
             },
         );
         // Ensure that valid sessions aren't re-scanned
@@ -202,7 +202,7 @@ async fn findings_roadmap() {
             #{
                 session,
                 result: result.text,
-                metadata: result.as_metadata(),
+                metadata: result.metadata(),
             },
         );
         // Ensure that valid sessions aren't re-scanned

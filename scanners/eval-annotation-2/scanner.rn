@@ -73,7 +73,7 @@ pub async fn annotate() {
             #{
                 session,
                 result: result.text,
-                metadata: result.as_metadata(),
+                metadata: result.metadata(),
             },
         );
         progress.tick();

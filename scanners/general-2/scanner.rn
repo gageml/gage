@@ -74,7 +74,7 @@ pub async fn review() {
                     #{
                         session: session_id,
                         result: result.text,
-                        metadata: result.as_metadata(),
+                        metadata: result.metadata(),
                     },
                 );
                 watermark(Mark::session(session_id), REVIEW_KEY).await?;
