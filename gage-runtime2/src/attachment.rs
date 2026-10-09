@@ -17,8 +17,8 @@
 //! selector, not an identifier, so there is no lookup of one
 //! attachment by name.
 //!
-//! An attachment offers `files()`, awaited to the list of file keys,
-//! and `file(key)`, awaited to `Some(AttachmentFile)` or `None`, both
+//! An attachment offers `files()`, awaited to the list of file paths,
+//! and `file(path)`, awaited to `Some(AttachmentFile)` or `None`, both
 //! read from the `attachment_file` table. A file holds its bytes;
 //! `bytes()` and `text()` return them, and `text()` and `json()` are
 //! fallible, returning `Error::Decode` for content that is not UTF-8
@@ -378,13 +378,13 @@ impl Attachment {
         }
     }
 
-    /// The file at `key`, read when awaited: `Some(AttachmentFile)`,
+    /// The file at `path`, read when awaited: `Some(AttachmentFile)`,
     /// or `None` when the attachment has no such file.
     #[rune::function(instance)]
-    fn file(&self, key: &str) -> AttachmentFileQuery {
+    fn file(&self, path: &str) -> AttachmentFileQuery {
         AttachmentFileQuery {
             attachment_id: self.id.clone(),
-            key: key.to_string(),
+            path: path.to_string(),
         }
     }
 
@@ -409,15 +409,15 @@ pub struct AttachmentFilesQuery {
 
 async fn fetch_files(q: AttachmentFilesQuery) -> Result<Vec<String>, VmError> {
     let sql = format!(
-        "SELECT key FROM attachment_file WHERE attachment_id = '{}' ORDER BY key",
+        "SELECT path FROM attachment_file WHERE attachment_id = '{}' ORDER BY path",
         sql_str(&q.attachment_id)
     );
     let batches = run(&dataset_query().await?, &sql).await?;
     let mut out = Vec::new();
     for batch in &batches {
-        let keys = string_column(batch, 0);
+        let paths = string_column(batch, 0);
         for i in 0..batch.num_rows() {
-            out.push(keys.value(i).to_string());
+            out.push(paths.value(i).to_string());
         }
     }
     Ok(out)
@@ -430,14 +430,14 @@ pub struct AttachmentFileQuery {
     #[rune(skip)]
     attachment_id: String,
     #[rune(skip)]
-    key: String,
+    path: String,
 }
 
 async fn fetch_file(q: AttachmentFileQuery) -> Result<Option<AttachmentFile>, VmError> {
     let sql = format!(
-        "SELECT content FROM attachment_file WHERE attachment_id = '{}' AND key = '{}'",
+        "SELECT content FROM attachment_file WHERE attachment_id = '{}' AND path = '{}'",
         sql_str(&q.attachment_id),
-        sql_str(&q.key)
+        sql_str(&q.path)
     );
     let batches = run(&dataset_query().await?, &sql).await?;
     let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
@@ -449,7 +449,7 @@ async fn fetch_file(q: AttachmentFileQuery) -> Result<Option<AttachmentFile>, Vm
         .downcast_ref::<BinaryArray>()
         .expect("attachment_file content is a binary column");
     Ok(Some(AttachmentFile {
-        key: q.key,
+        path: q.path,
         bytes: contents.value(0).to_vec(),
     }))
 }
@@ -460,7 +460,7 @@ async fn fetch_file(q: AttachmentFileQuery) -> Result<Option<AttachmentFile>, Vm
 pub struct AttachmentFile {
     /// The path relative to the attachment's root
     #[rune(get)]
-    pub key: String,
+    pub path: String,
     #[rune(skip)]
     pub bytes: Vec<u8>,
 }
@@ -475,14 +475,14 @@ impl AttachmentFile {
     #[rune::function(instance)]
     fn text(&self) -> Result<String, Error> {
         String::from_utf8(self.bytes.clone())
-            .map_err(|e| Error::Decode(format!("{}: {e}", self.key)))
+            .map_err(|e| Error::Decode(format!("{}: {e}", self.path)))
     }
 
     /// The content parsed as JSON.
     #[rune::function(instance)]
     fn json(&self) -> Result<Value, Error> {
         let parsed: serde_json::Value = serde_json::from_slice(&self.bytes)
-            .map_err(|e| Error::Decode(format!("{}: {e}", self.key)))?;
+            .map_err(|e| Error::Decode(format!("{}: {e}", self.path)))?;
         Ok(json_to_value(&parsed))
     }
 
@@ -490,8 +490,8 @@ impl AttachmentFile {
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
-            "AttachmentFile {{ key: {:?}, size: {} }}",
-            self.key,
+            "AttachmentFile {{ path: {:?}, size: {} }}",
+            self.path,
             self.bytes.len()
         )?;
         Ok(())
@@ -586,9 +586,9 @@ mod tests {
         Vm::new(rt, RuneArc::try_new(unit).unwrap())
     }
 
-    fn file(key: &str, bytes: &[u8]) -> AttachmentFile {
+    fn file(path: &str, bytes: &[u8]) -> AttachmentFile {
         AttachmentFile {
-            key: key.to_string(),
+            path: path.to_string(),
             bytes: bytes.to_vec(),
         }
     }
@@ -620,7 +620,10 @@ mod tests {
         assert_eq!(text, "{\"cleanupPeriodDays\": 90}");
         assert_eq!(len, 25);
         assert_eq!(err, "decode");
-        assert_eq!(debug, "AttachmentFile { key: \"settings.json\", size: 25 }");
+        assert_eq!(
+            debug,
+            "AttachmentFile { path: \"settings.json\", size: 25 }"
+        );
     }
 
     #[test]

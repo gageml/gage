@@ -69,7 +69,7 @@ pub(crate) fn attachment_file_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("attachment_id", DataType::Utf8, false),
         // The path relative to the attachment's root, `/`-separated
-        Field::new("key", DataType::Utf8, false),
+        Field::new("path", DataType::Utf8, false),
         Field::new("size", DataType::Int64, false),
         // The file's bytes
         Field::new("content", DataType::Binary, false),
