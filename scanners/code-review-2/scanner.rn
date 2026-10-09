@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
 use gage::{
     AgentRunner,
     Files,
@@ -24,7 +22,7 @@ pub const SCANNER = #{
     description: "Code quality and project rule violations",
     groups: ["default"],
     tasks: #{
-        project_files: #{
+        attach_project_files: #{
             attaches: ["project-rule-files", "project-stack-files"],
         },
         summarize_projects: #{
@@ -33,15 +31,12 @@ pub const SCANNER = #{
             },
             notes: #{
                 writes: #{
-                    "rules[project-summary]": "Summary of a project's rules",
-                    "stack[project-summary]": "Summary of a project's stack and architecture",
+                    "rules[project-summary]": "Summary of project code rules",
+                    "stack[project-summary]": "Summary of project stack and architecture",
                 },
             },
         },
-        review: #{
-            attachments: #{
-                wants: ["project-rule-files", "project-stack-files"],
-            },
+        scan_sessions: #{
             notes: #{
                 wants: ["rules[project-summary]", "stack[project-summary]"],
                 writes: #{
@@ -53,9 +48,6 @@ pub const SCANNER = #{
         },
     },
 };
-
-const SUMMARY_KEY = ("code-review", "summarize-projects", 1);
-const REVIEW_KEY = ("code-review", "review", 1);
 
 const RULE_FILES = [
     "CLAUDE.md",
@@ -84,10 +76,7 @@ const STACK_FILES = [
     "Makefile",
 ];
 
-const PROJECT_ATTACHMENTS = ["project-rule-files", "project-stack-files"];
-const SUMMARY_NOTES = ["rules[project-summary]", "stack[project-summary]"];
-
-pub async fn project_files() {
+pub async fn attach_project_files() {
     for (dir, sessions) in sessions_by_project().await {
         attach(Files::include(RULE_FILES).root(dir))
             .name("project-rule-files")
@@ -101,69 +90,93 @@ pub async fn project_files() {
 }
 
 async fn sessions_by_project() {
-    let by_project = HashMap::new();
-    for s in dataset().sessions().await {
-        if let Some(native) = s.native().await {
-            if let Some(dir) = native.project_dir {
-                if let Some(sessions) = by_project.get(dir) {
-                    sessions.push(s);
-                } else {
-                    by_project.insert(dir, [s]);
-                }
-            }
-        }
-    }
-    by_project
+    dataset()
+        .sessions()
+        .native()
+        .await
+        .iter()
+        .filter_map(session_project_dir)
+        .fold(#{}, acc_project_dir)
 }
 
+fn session_project_dir((s, native_result)) {
+    match native_result {
+        Ok(n) => n.project_dir.map(|dir| (s, dir)),
+        Err(e) => {
+            log::error!(
+                "error reading native session for {}: {e:?}",
+                s.id
+            );
+            None
+        }
+    }
+}
+
+fn acc_project_dir(acc, (s, project_dir)) {
+    if let Some(sessions) = acc.get(project_dir) {
+        sessions.push(s);
+    } else {
+        acc.insert(project_dir, [s]);
+    }
+    acc
+}
+
+const SUMMARIZE_PROJECTS_KEY = ("code-review", "summarize-projects", 1);
+const PROJECT_ATTACHMENTS = ["project-rule-files", "project-stack-files"];
+
 pub async fn summarize_projects() {
+    carry_forward_notes(SUMMARIZE_PROJECTS_KEY).await?;
+
+    let attachments = scan()
+        .attachments()
+        .names(PROJECT_ATTACHMENTS)
+        .unseen(SUMMARIZE_PROJECTS_KEY)
+        .await?;
+    let project_dirs = attachment_roots(attachments);
+    let progress = Progress::new(project_dirs.len());
+
+    // Create an agent to summarize each project
     let t = Template::new(include_str!(
         "summarize-project-prompt.md.j2"
     ))?;
-
-    carry_forward_notes(SUMMARY_KEY).await?;
-
-    let unseen = scan()
-        .attachments()
-        .names(PROJECT_ATTACHMENTS)
-        .unseen(SUMMARY_KEY)
-        .await?;
-    let projects = attachments_by_project(unseen);
-    let progress = Progress::new(projects.len());
     let agents = AgentRunner::new();
-
-    for (project, attachments) in projects {
-        let attachment_ids = attachments.iter().map(|a| a.id).collect::<Vec>();
+    for (project_dir, attachments) in project_dirs {
         let sections = project_sections(attachments).await?;
         if sections.is_empty() {
-            log::info!("project {}: no project files", project);
-            watermark_attachments(attachment_ids, SUMMARY_KEY).await?;
+            log::info!("project {}: no project files", project_dir);
+            for a in attachments {
+                watermark(Mark::attachment(a), SUMMARIZE_PROJECTS_KEY).await?;
+            }
             progress.tick();
             continue;
         }
-        let prompt = t.render(#{ project, sections })?;
+        let prompt = t.render(#{ project_dir, sections })?;
         agents.add(
             call_agent(prompt)
-                .name("project-summary")
+                .name("summarize-project")
                 .tool(summary_tool())
                 .model("medium"),
-            #{ project, attachment_ids },
+            #{ project_dir, attachments },
         );
     }
 
+    // Run agents
     let results = agents.start();
     while let Some(next) = results.next().await {
         match next {
-            Ok((result, #{ project, attachment_ids })) => {
+            Ok((result, #{ project_dir, attachments })) => {
                 log::info!(
                     "project-summary: {:?}",
                     #{
-                        project,
+                        project_dir,
                         result: result.text,
-                        metadata: result.as_metadata(),
+                        metadata: result.metadata(),
                     },
                 );
-                watermark_attachments(attachment_ids, SUMMARY_KEY).await?;
+                for a in attachments {
+                    watermark(Mark::attachment(a), SUMMARIZE_PROJECTS_KEY)
+                        .await?;
+                }
             }
             Err(err) => {
                 log::error!("agent error: {err:?}");
@@ -173,19 +186,20 @@ pub async fn summarize_projects() {
     }
 }
 
-/// The attachments grouped by the project directory they were
-/// selected under: one agent call per project, whatever subset of its
-/// attachments is unseen.
-fn attachments_by_project(attachments) {
-    let by_project = HashMap::new();
-    for a in attachments {
-        if let Some(list) = by_project.get(a.root) {
-            list.push(a);
-        } else {
-            by_project.insert(a.root, [a]);
-        }
-    }
-    by_project
+fn attachment_roots(attachments) {
+    attachments
+        .iter()
+        .fold(
+            #{},
+            |acc, a| {
+                if let Some(l) = acc.get(a.root) {
+                    l.push(a);
+                } else {
+                    acc.insert(a.root, [a]);
+                }
+                acc
+            },
+        )
 }
 
 async fn project_sections(attachments) {
@@ -203,13 +217,6 @@ async fn project_sections(attachments) {
         }
     }
     Ok(sections)
-}
-
-async fn watermark_attachments(attachment_ids, key) {
-    for id in attachment_ids {
-        watermark(Mark::attachment(id), key).await?;
-    }
-    Ok(())
 }
 
 fn summary_tool() {
@@ -230,58 +237,66 @@ fn summary_tool() {
         )
 }
 
+const SUMMARY_NOTES = ["rules[project-summary]", "stack[project-summary]"];
+
 pub async fn write_summary(inputs) {
     if !SUMMARY_NOTES.iter().any(|n| n == inputs.name) {
         return Ok(format!("error: unknown note name `{}`", inputs.name));
     }
     let note = write_note(inputs.name, inputs.summary)
         .target(Target::attachment(inputs.attachment_id))
-        .carry_forward_key(SUMMARY_KEY)
+        .carry_forward_key(SUMMARIZE_PROJECTS_KEY)
         .await?;
     Ok(format!("Wrote summary note {}", note.id))
 }
 
-pub async fn review() {
-    let t = Template::new(include_str!("review-prompt.md.j2"))?;
+const SCAN_SESSIONS_KEY = ("code-review", "scan-sessions", 1);
 
-    carry_forward_notes(REVIEW_KEY).await?;
+pub async fn scan_sessions() {
+    carry_forward_notes(SCAN_SESSIONS_KEY).await?;
 
-    let sessions = scan().sessions().unseen(REVIEW_KEY).await?;
+    let sessions = scan().sessions().unseen(SCAN_SESSIONS_KEY).await?;
     let progress = Progress::new(sessions.len());
+
+    // Lookup table of summary notes per attachment
+    let summary_notes = summary_notes_by_attachment().await?;
+
+    // Create an agent to scan each unskipped session
+    let t = Template::new(include_str!("scan-session-prompt.md.j2"))?;
     let agents = AgentRunner::new();
-    for (s, (start, end)) in sessions {
+    for (s, range) in sessions {
         if let Some(reason) = skip_session(s).await? {
             log::info!("skip session {}: {}", s.id, reason);
-            watermark(Mark::session(s), REVIEW_KEY).await?;
+            watermark(Mark::session(s), SCAN_SESSIONS_KEY).await?;
             progress.tick();
             continue;
         }
-        let summaries = project_summaries(s).await?;
-        let session_id = s.id;
-        let prompt = t.render(#{ session_id, summaries })?;
+        let summaries = session_summaries(s, summary_notes).await?;
+        let prompt = t.render(#{ session_id: s.id, summaries })?;
         agents.add(
             call_agent(prompt)
                 .name("code-review")
                 .tool(finding_tool())
-                .tool(Query::with_session_range(s, start, end))
+                .tool(Query::with_session_range(s, range))
                 .model("medium"),
-            #{ session_id },
+            #{ session: s },
         );
     }
 
+    // Run agents
     let results = agents.start();
     while let Some(next) = results.next().await {
         match next {
-            Ok((result, #{ session_id })) => {
+            Ok((result, #{ session })) => {
                 log::info!(
                     "code-review findings: {:?}",
                     #{
-                        session: session_id,
+                        session: session.id,
                         result: result.text,
-                        metadata: result.as_metadata(),
+                        metadata: result.metadata(),
                     },
                 );
-                watermark(Mark::session(session_id), REVIEW_KEY).await?;
+                watermark(Mark::session(session), SCAN_SESSIONS_KEY).await?;
             }
             Err(err) => {
                 log::error!("agent error: {err:?}");
@@ -291,39 +306,96 @@ pub async fn review() {
     }
 }
 
-/// The summary notes of the session's project: the notes targeting
-/// the project attachments the session is a target of. A session with
-/// no project attachments has none, and is reviewed without them.
-async fn project_summaries(s) {
-    let targets = HashSet::new();
-    for a in s.attachments().names(PROJECT_ATTACHMENTS).await? {
-        targets.insert(format!("attachment:{}", a.id));
+async fn skip_session(s) {
+    if s
+        .messages()
+        .type(#{ assistant: "tool_use", user: "tool_result" })
+        .await?
+        .iter()
+        .any(edits_files)
+    {
+        Ok(None)
+    } else {
+        Ok(Some("no file edits"))
     }
-    let out = [];
-    for n in scan().notes().names(SUMMARY_NOTES).await? {
-        if let Some(target) = n.target {
-            if targets.contains(target) {
-                out.push(#{ name: n.name, value: n.value });
-            }
-        }
-    }
-    Ok(out)
 }
 
-const FILE_EDIT_TOOLS = ["Edit", "Write", "MultiEdit"];
+fn edits_files(m) {
+    uses_edit_tool(m) || bash_edit(m)
+}
 
-async fn skip_session(s) {
-    for m in s.messages().type(#{ assistant: "tool_use" }).await? {
-        for block in m.as_object().message.content {
-            if block.type == "tool_use" && FILE_EDIT_TOOLS
-                .iter()
-                .any(|t| t == block.name)
-            {
-                return Ok(None);
+fn uses_edit_tool(m) {
+    m
+        .as_object()
+        .message
+        .content
+        .iter()
+        .any(
+            |block| {
+                block.type == "tool_use" && ["Edit", "Write", "MultiEdit"]
+                    .iter()
+                    .any(|n| n == block.name)
+            },
+        )
+}
+
+fn bash_edit(m) {
+    if let Some(result) = m.as_object().get("toolUseResult") {
+        if result is Object {
+            if let Some(diff) = result.get("bashEditDiff") {
+                return !diff.changedFiles.is_empty();
             }
         }
     }
-    Ok(Some("no file edits"))
+    false
+}
+
+async fn summary_notes_by_attachment() {
+    Ok(
+        scan()
+            .notes()
+            .names(SUMMARY_NOTES)
+            .await?
+            .iter()
+            .fold(
+                #{},
+                |acc, n| {
+                    if let Some(attachment_id) = attachment_target(n) {
+                        if let Some(l) = acc.get(attachment_id) {
+                            l.push(n);
+                        } else {
+                            acc.insert(attachment_id, [n]);
+                        }
+                    }
+                    acc
+                },
+            ),
+    )
+}
+
+fn attachment_target(note) {
+    match note.target?.split_once(":") {
+        Some(("attachment", id)) => Some(id),
+        _ => None,
+    }
+}
+
+async fn session_summaries(session, summary_notes) {
+    Ok(
+        session
+            .attachments()
+            .names(PROJECT_ATTACHMENTS)
+            .await?
+            .fold(
+                [],
+                |acc, a| {
+                    if let Some(notes) = summary_notes.get(a.id) {
+                        acc.extend(notes);
+                    }
+                    acc
+                },
+            ),
+    )
 }
 
 fn finding_tool() {
@@ -347,10 +419,10 @@ fn finding_tool() {
 
 pub async fn write_finding(inputs) {
     let lines = inputs.get("lines").unwrap_or("");
-    let note = write_note("finding.code", inputs.description)
+    let note = write_note("code-review[finding]", inputs.description)
         .target(Target::session_lines(inputs.session_id, lines))
         .metadata(#{ lines })
-        .carry_forward_key(REVIEW_KEY)
+        .carry_forward_key(SCAN_SESSIONS_KEY)
         .await?;
     Ok(format!("Wrote finding note {}", note.id))
 }
