@@ -5,8 +5,8 @@ pub const SCANNER = #{
     description: "Unset session retention policy",
     groups: ["default"],
     tasks: #{
-        claude_config: #{ attaches: ["claude-config"] },
-        check: #{
+        attach_config: #{ attaches: ["claude-config"] },
+        check_config: #{
             attachments: #{ needs: ["claude-config"] },
             issues: #{
                 writes: #{
@@ -19,13 +19,13 @@ pub const SCANNER = #{
 
 const SETTINGS = ["settings.json", "settings.local.json"];
 
-pub async fn claude_config() {
+pub async fn attach_config() {
     attach(Files::include(SETTINGS).root("~/.claude"))
         .name("claude-config")
         .await?;
 }
 
-pub async fn check() {
+pub async fn check_config() {
     if let Some(val) = cleanup_period_days().await? {
         log::info!("cleanupPeriodDays set ({val} days)");
     } else {

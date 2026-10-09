@@ -13,7 +13,7 @@ pub const SCANNER = #{
     description: "Issues across findings",
     groups: ["default"],
     tasks: #{
-        report: #{
+        review_findings: #{
             notes: #{ wants: ["*[finding]"] },
             issues: #{
                 writes: #{ "findings": "Issue derived from finding notes" },
@@ -24,12 +24,12 @@ pub const SCANNER = #{
 
 const REPORT_KEY = ("findings", "report", 1);
 
-pub async fn report() {
-    // Carry forward findings from previous scans
+pub async fn review_findings() {
+    // Carry forward finding notes from previous scans
     let carried = carry_forward_notes_named("*[finding]").await?;
     log::info!("carried {carried} findings");
 
-    // Get available findings
+    // Get all finding notes for scan
     let findings = scan().notes().name("*[finding]").unseen(REPORT_KEY).await?;
     if findings.is_empty() {
         log::info!("no unreported findings for this scan");
@@ -52,7 +52,7 @@ pub async fn report() {
             },
         )?;
 
-    // Run the agent with tools to query sessions and report issues
+    // Run agent with tools to query sessions and report issues
     let agent = call_agent(prompt)
         .name("issue-writer")
         .tools([Query::new(), IssueWrite::new().name("findings").pending()])
@@ -63,7 +63,7 @@ pub async fn report() {
         "issues: {:?}",
         #{
             result: result.text,
-            metadata: result.as_metadata(),
+            metadata: result.metadata(),
         },
     );
 

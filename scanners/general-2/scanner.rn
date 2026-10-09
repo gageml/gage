@@ -19,7 +19,7 @@ pub const SCANNER = #{
     description: "General findings",
     groups: ["default"],
     tasks: #{
-        review: #{
+        scan_sessions: #{
             notes: #{
                 writes: #{
                     "general[finding]": include_str!(
@@ -33,7 +33,7 @@ pub const SCANNER = #{
 
 const REVIEW_KEY = ("general", "review", 1);
 
-pub async fn review() {
+pub async fn scan_sessions() {
     let t = Template::new(include_str!("review-prompt.md.j2"))?;
 
     carry_forward_notes(REVIEW_KEY).await?;
@@ -58,13 +58,13 @@ pub async fn review() {
             call_agent(prompt)
                 .name("general-finding")
                 .tool(finding_tool())
-                .tool(Query::with_session_range(s, start, end))
+                .tool(Query::with_session_range(s, (start, end)))
                 .model("medium"),
             #{ session_id },
         );
     }
 
-    // Collect agent results
+    // Run agents
     let results = agents.start();
     while let Some(next) = results.next().await {
         match next {
