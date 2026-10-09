@@ -2068,9 +2068,10 @@ impl ViewState {
     }
 
     /// Read the scan's captured streams through the host: `err` (in
-    /// red), `out`, then the log records, one entry per line with a
-    /// blank line between entries. A stream the scan did not produce
-    /// is skipped; a read failure shows in its place.
+    /// red) and `out` verbatim, then the log records, one entry per
+    /// line with a blank line between entries. Streams are separated
+    /// by a blank line. A stream the scan did not produce is skipped;
+    /// a read failure shows in its place.
     fn read_log(&self) -> Vec<Line<'static>> {
         let Some(key) = &self.model.log_key else {
             return Vec::new();
@@ -2096,8 +2097,11 @@ impl ViewState {
             if content.is_empty() {
                 continue;
             }
-            for l in content.lines() {
-                if !lines.is_empty() {
+            if !lines.is_empty() {
+                lines.push(Line::raw(""));
+            }
+            for (i, l) in content.lines().enumerate() {
+                if kind == "records" && i > 0 {
                     lines.push(Line::raw(""));
                 }
                 lines.push(match kind {
