@@ -55,7 +55,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<NoteWrite>()?;
     m.function_meta(NoteWrite::target)?;
     m.function_meta(NoteWrite::metadata)?;
-    m.function_meta(NoteWrite::carry_forward_key)?;
+    m.function_meta(NoteWrite::carry_forward)?;
     m.associated_function(&Protocol::INTO_FUTURE, |w: NoteWrite| async move {
         do_write_note(w).await
     })?;
@@ -95,7 +95,7 @@ pub struct NoteWrite {
     #[rune(skip)]
     metadata: Option<Value>,
     #[rune(skip)]
-    carry_forward_key: Option<Value>,
+    carry_forward: Option<Value>,
 }
 
 fn write_note(name: &str, value: Value) -> NoteWrite {
@@ -104,7 +104,7 @@ fn write_note(name: &str, value: Value) -> NoteWrite {
         value,
         target: None,
         metadata: None,
-        carry_forward_key: None,
+        carry_forward: None,
     }
 }
 
@@ -126,13 +126,13 @@ impl NoteWrite {
         self
     }
 
-    /// Set the note's carry-forward key: a later scan's
-    /// `carry_forward_notes(key)` links it when its target session is
-    /// in that scan. A string, or a tuple of strings and integers
-    /// rendered colon-joined.
+    /// Mark the note for carry-forward under `key`: a later scan's
+    /// `carry_forward_notes(key)` links the note when its target
+    /// session is in that scan. A string, or a tuple of strings and
+    /// integers rendered colon-joined.
     #[rune::function(instance)]
-    fn carry_forward_key(mut self, key: Value) -> Self {
-        self.carry_forward_key = Some(key);
+    fn carry_forward(mut self, key: Value) -> Self {
+        self.carry_forward = Some(key);
         self
     }
 }
@@ -214,7 +214,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
         Ok(m) => m,
         Err(e) => return Ok(Err(e)),
     };
-    let key = match w.carry_forward_key.as_ref().map(encode_key).transpose() {
+    let key = match w.carry_forward.as_ref().map(encode_key).transpose() {
         Ok(k) => k,
         Err(e) => return Ok(Err(e)),
     };

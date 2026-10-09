@@ -123,7 +123,7 @@ pub async fn write_finding(inputs) {
     let note = write_note("general[finding]", inputs.description)
         .target(Target::session_lines(inputs.session_id, lines))
         .metadata(#{ lines })
-        .carry_forward_key(REVIEW_KEY)
+        .carry_forward(REVIEW_KEY)
         .await?;
     Ok(format!("Wrote finding note {}", note.id))
 }

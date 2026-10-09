@@ -245,7 +245,7 @@ pub async fn write_summary(inputs) {
     }
     let note = write_note(inputs.name, inputs.summary)
         .target(Target::attachment(inputs.attachment_id))
-        .carry_forward_key(SUMMARIZE_PROJECTS_KEY)
+        .carry_forward(SUMMARIZE_PROJECTS_KEY)
         .await?;
     Ok(format!("Wrote summary note {}", note.id))
 }
@@ -422,7 +422,7 @@ pub async fn write_finding(inputs) {
     let note = write_note("code-review[finding]", inputs.description)
         .target(Target::session_lines(inputs.session_id, lines))
         .metadata(#{ lines })
-        .carry_forward_key(SCAN_SESSIONS_KEY)
+        .carry_forward(SCAN_SESSIONS_KEY)
         .await?;
     Ok(format!("Wrote finding note {}", note.id))
 }

@@ -17,7 +17,7 @@ pub async fn main() {
         let attrs = s.attrs().await;
         write_note("native-size", attrs.native_size)
             .target(s)
-            .carry_forward_key(KEY)
+            .carry_forward(KEY)
             .await?;
     }
 }

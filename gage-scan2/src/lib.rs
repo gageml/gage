@@ -4312,7 +4312,7 @@ mod tests {
                 println!("unseen {start}-{end}");
                 let note = write_note("seen", format!("{start}-{end}"))
                     .target(Target::session_range(s.id, start, end))
-                    .carry_forward_key(KEY)
+                    .carry_forward(KEY)
                     .await?;
                 write_note("untagged", "x").target(s).await?;
                 watermark(Mark::session(s), KEY).await?;
@@ -4696,7 +4696,7 @@ mod tests {
                 println!("unseen {}", a.name.unwrap());
                 write_note("summary", a.digest.unwrap())
                     .target(a)
-                    .carry_forward_key(KEY)
+                    .carry_forward(KEY)
                     .await?;
                 watermark(Mark::attachment(a), KEY).await?;
             }
