@@ -269,6 +269,31 @@ References for the Rust rules:
   column order resulting from misalignment between the DDL and the migration
   steps is not acceptable.
 
+## Data access rules
+
+- **SQL is the read path for selection-shaped data.** CLI listings, TUI
+  listings, scanner reads, MCP tool reads, and external agent reads go through
+  `gage-query2` (DataFusion). Any multi-row read with filter, sort, project,
+  limit, or page uses the SQL interface. A second filtering or sorting
+  implementation in a caller is a defect; DataFusion pushdown is the single
+  shared implementation of these semantics.
+
+- **Direct `gage-store` calls are permitted only for these five shapes.** Any
+  direct read outside this list is a gap in the SQL surface. The fix is to add
+  the column, view, or TVF the gap implies, not to normalize the direct read.
+
+  1. Writes: create, edit, tombstone.
+  2. Reads of one object at a known commit SHA.
+  3. Prefix and alias resolution.
+  4. Commit-graph traversal (`first_parent` chain, link parents).
+  5. Opaque content reads where no column represents the bytes (e.g. the raw
+     attachment bytes that sit behind the `attachment_file.text` projection).
+
+- **System-tier columns are tagged on the field, not by name.** A schema's
+  system columns carry `gage_session::system(..)` on their `Field`. The
+  `SkipSystemCols` wrapper filters by `gage_session::is_system(field)`. A
+  name-based system list is a defect.
+
 ## TUI rules
 
 - Key-hint vocabulary for the key that exits an overlay. The term names the
