@@ -25,6 +25,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
+use gage_session::system;
 
 use super::batch::{BatchSource, BatchTable, external};
 use crate::object::Object;
@@ -77,55 +78,56 @@ impl LinkKind {
 
     fn schema(self) -> SchemaRef {
         let utf8 = |name: &str, nullable: bool| Field::new(name, DataType::Utf8, nullable);
+        let commit = |name: &str, nullable: bool| system(utf8(name, nullable));
         Arc::new(Schema::new(match self {
             LinkKind::DatasetSession => vec![
                 utf8("dataset_id", false),
-                utf8("dataset_commit", false),
+                commit("dataset_commit", false),
                 Field::new("session_num", DataType::Int64, false),
                 utf8("session_id", false),
-                utf8("session_commit", false),
+                commit("session_commit", false),
             ],
             LinkKind::DatasetAttachment => vec![
                 utf8("dataset_id", false),
-                utf8("dataset_commit", false),
+                commit("dataset_commit", false),
                 Field::new("attachment_num", DataType::Int64, false),
                 utf8("attachment_id", false),
-                utf8("attachment_commit", false),
+                commit("attachment_commit", false),
             ],
             LinkKind::ScanDataset => vec![
                 utf8("scan_id", false),
-                utf8("scan_commit", false),
+                commit("scan_commit", false),
                 utf8("dataset_id", false),
-                utf8("dataset_commit", false),
+                commit("dataset_commit", false),
             ],
             LinkKind::ScanNote => vec![
                 utf8("scan_id", false),
-                utf8("scan_commit", false),
+                commit("scan_commit", false),
                 utf8("note_id", false),
-                utf8("note_commit", false),
+                commit("note_commit", false),
                 Field::new("carried", DataType::Boolean, false),
             ],
             LinkKind::ScanIssue => vec![
                 utf8("scan_id", false),
-                utf8("scan_commit", false),
+                commit("scan_commit", false),
                 utf8("issue_id", false),
-                utf8("issue_commit", false),
+                commit("issue_commit", false),
             ],
             LinkKind::NoteTarget => vec![
                 utf8("note_id", false),
-                utf8("note_commit", false),
+                commit("note_commit", false),
                 utf8("target_id", false),
                 // The linked object's type name, e.g. `session`
                 utf8("target_type", false),
-                utf8("target_commit", false),
+                commit("target_commit", false),
                 // The line selection from the target URL, for sessions
                 utf8("lines", true),
             ],
             LinkKind::IssueEvidence => vec![
                 utf8("issue_id", false),
-                utf8("issue_commit", false),
+                commit("issue_commit", false),
                 utf8("note_id", false),
-                utf8("note_commit", false),
+                commit("note_commit", false),
             ],
         }))
     }

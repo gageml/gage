@@ -15,6 +15,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
 use gage_core::uuid::short_uuid;
+use gage_session::system;
 
 use super::batch::{BatchSource, BatchTable, external, marker, unique_prefix_lens};
 use crate::{Order, SCAN_TYPE, ScanRecord, ScanStore, Store};
@@ -42,13 +43,13 @@ pub(crate) fn scan_schema() -> SchemaRef {
         // The dataset scanned; null when the scan had none
         Field::new("dataset", DataType::Utf8, true),
         // System
-        Field::new("id_display", DataType::Utf8, false),
-        Field::new("id_prefix", DataType::Utf8, false),
+        system(Field::new("id_display", DataType::Utf8, false)),
+        system(Field::new("id_prefix", DataType::Utf8, false)),
         // Null for an active scan
-        Field::new("locator", DataType::Utf8, true),
-        Field::new("commit", DataType::Utf8, true),
+        system(Field::new("locator", DataType::Utf8, true)),
+        system(Field::new("commit", DataType::Utf8, true)),
         // The dataset commit the scan read, from `dataset.link`
-        Field::new("dataset_commit", DataType::Utf8, true),
+        system(Field::new("dataset_commit", DataType::Utf8, true)),
     ]))
 }
 

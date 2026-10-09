@@ -9,6 +9,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
 use gage_core::uuid::short_uuid;
+use gage_session::system;
 
 use super::batch::{BatchSource, BatchTable, external, marker, unique_prefix_lens};
 use crate::{DATASET_TYPE, DatasetStore, Order, Store};
@@ -28,11 +29,11 @@ pub(crate) fn dataset_schema() -> SchemaRef {
             false,
         ),
         // System
-        Field::new("id_display", DataType::Utf8, false),
-        Field::new("id_prefix", DataType::Utf8, false),
-        Field::new("locator", DataType::Utf8, false),
+        system(Field::new("id_display", DataType::Utf8, false)),
+        system(Field::new("id_prefix", DataType::Utf8, false)),
+        system(Field::new("locator", DataType::Utf8, false)),
         // The current commit, which `dataset_session_link` keys on
-        Field::new("commit", DataType::Utf8, false),
+        system(Field::new("commit", DataType::Utf8, false)),
     ]))
 }
 

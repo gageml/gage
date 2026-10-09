@@ -17,6 +17,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit}
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
+use gage_session::system;
 use serde_json::Value;
 
 use super::batch::{BatchSource, BatchTable, external};
@@ -50,7 +51,7 @@ pub(crate) fn scan_task_schema() -> SchemaRef {
         Field::new("skipped_upstream", DataType::Utf8, true),
         // System
         // Null for an active scan
-        Field::new("scan_commit", DataType::Utf8, true),
+        system(Field::new("scan_commit", DataType::Utf8, true)),
     ]))
 }
 
@@ -68,7 +69,7 @@ pub(crate) fn scan_task_agent_schema() -> SchemaRef {
         Field::new("result", DataType::Utf8, true),
         // System
         // Null for an active scan
-        Field::new("scan_commit", DataType::Utf8, true),
+        system(Field::new("scan_commit", DataType::Utf8, true)),
     ]))
 }
 

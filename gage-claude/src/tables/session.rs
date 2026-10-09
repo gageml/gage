@@ -34,6 +34,7 @@ use crate::driver::ClaudeNativeSession;
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
 use gage_session::filter;
+use gage_session::system;
 
 /// Columns whose value comes from parsing the session JSONL. Every
 /// other column is filled from the directory walk. A projection that
@@ -80,11 +81,11 @@ fn session_schema() -> SchemaRef {
         Field::new("is_empty", DataType::Boolean, false),
         // System
         // The driver's short display form of `id`
-        Field::new("id_display", DataType::Utf8, false),
+        system(Field::new("id_display", DataType::Utf8, false)),
         // The shortest prefix of `id` unique among every session in
         // the source
-        Field::new("id_prefix", DataType::Utf8, false),
-        Field::new("path", DataType::Utf8, false),
+        system(Field::new("id_prefix", DataType::Utf8, false)),
+        system(Field::new("path", DataType::Utf8, false)),
     ]))
 }
 

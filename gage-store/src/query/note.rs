@@ -36,6 +36,7 @@ use datafusion::prelude::Expr;
 use futures::stream;
 use gage_core::style::IdHighlighter;
 use gage_session::filter::{self, IdFilter};
+use gage_session::system;
 
 use crate::{NOTE_TYPE, NoteStore, NoteValue, Order, SelectedTip, Store, StoreError};
 
@@ -95,11 +96,11 @@ pub(crate) fn stored_note_schema() -> SchemaRef {
         Field::new(CARRY_FORWARD_KEY_COL, DataType::Utf8, true),
         // System
         // Shortest prefix of `id` unique among the notes listed
-        Field::new("id_prefix", DataType::Utf8, false),
+        system(Field::new("id_prefix", DataType::Utf8, false)),
         // `git:<commit sha>` of the version listed; null for a note an
         // active scan wrote, which has no commit until apply
-        Field::new("locator", DataType::Utf8, true),
-        Field::new("commit", DataType::Utf8, true),
+        system(Field::new("locator", DataType::Utf8, true)),
+        system(Field::new("commit", DataType::Utf8, true)),
     ]))
 }
 

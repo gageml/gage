@@ -14,6 +14,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit}
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
+use gage_session::system;
 
 fn timestamp() -> DataType {
     DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
@@ -48,11 +49,11 @@ pub(crate) fn issue_schema() -> SchemaRef {
         Field::new("key", DataType::Utf8, true),
         // System
         // Shortest prefix of `id` unique among the issues listed
-        Field::new("id_prefix", DataType::Utf8, false),
+        system(Field::new("id_prefix", DataType::Utf8, false)),
         // `git:<commit sha>` of the version listed; null for an issue
         // an active scan wrote, which has no commit until apply
-        Field::new("locator", DataType::Utf8, true),
-        Field::new("commit", DataType::Utf8, true),
+        system(Field::new("locator", DataType::Utf8, true)),
+        system(Field::new("commit", DataType::Utf8, true)),
     ]))
 }
 

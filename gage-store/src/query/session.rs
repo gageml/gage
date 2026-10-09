@@ -42,6 +42,7 @@ use futures::stream;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_session::filter::{self, IdFilter};
+use gage_session::system;
 
 use crate::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
 
@@ -110,11 +111,11 @@ fn stored_session_schema() -> SchemaRef {
         Field::new("line_count", DataType::Int64, true),
         // System
         // Short display form of the Gage id
-        Field::new("id_display", DataType::Utf8, false),
+        system(Field::new("id_display", DataType::Utf8, false)),
         // Shortest prefix of `id` unique among every live session
-        Field::new("id_prefix", DataType::Utf8, false),
+        system(Field::new("id_prefix", DataType::Utf8, false)),
         // `git:<commit sha>` of the version listed
-        Field::new("locator", DataType::Utf8, false),
+        system(Field::new("locator", DataType::Utf8, false)),
     ]))
 }
 

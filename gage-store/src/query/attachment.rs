@@ -19,6 +19,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
 
+use gage_session::system;
+
 use super::batch::{BatchSource, BatchTable, external, marker, unique_prefix_lens};
 use crate::{AttachmentRecord, AttachmentStore, Order, Store, StoreError};
 
@@ -54,10 +56,10 @@ pub(crate) fn attachment_schema() -> SchemaRef {
         Field::new("modified", timestamp(), false),
         // System
         // Shortest prefix of `id` unique among the attachments listed
-        Field::new("id_prefix", DataType::Utf8, false),
+        system(Field::new("id_prefix", DataType::Utf8, false)),
         // `git:<commit sha>` of the version listed
-        Field::new("locator", DataType::Utf8, false),
-        Field::new("commit", DataType::Utf8, false),
+        system(Field::new("locator", DataType::Utf8, false)),
+        system(Field::new("commit", DataType::Utf8, false)),
     ]))
 }
 

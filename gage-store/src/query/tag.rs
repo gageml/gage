@@ -9,6 +9,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
+use gage_session::system;
 
 use super::batch::{BatchSource, BatchTable, external};
 use crate::{Store, TagStore};
@@ -19,7 +20,7 @@ fn schema() -> SchemaRef {
         // The named object's id
         Field::new("id", DataType::Utf8, false),
         // System: the commit the tag ref points at
-        Field::new("commit", DataType::Utf8, false),
+        system(Field::new("commit", DataType::Utf8, false)),
     ]))
 }
 

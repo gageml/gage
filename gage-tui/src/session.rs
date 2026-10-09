@@ -17,9 +17,9 @@ use datafusion::arrow::array::{
 use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
 use gage_query2::ContextBuilder;
-use gage_query2::system_cols::is_system_col;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
+use gage_session::is_system;
 use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store, url};
 use serde_json::Value;
 
@@ -412,7 +412,7 @@ fn first_row_as_value(batch: &RecordBatch) -> Result<Value, Box<dyn Error>> {
         .fields()
         .iter()
         .enumerate()
-        .filter(|(_, f)| !is_system_col(f.name()))
+        .filter(|(_, f)| !is_system(f))
         .map(|(i, _)| i)
         .collect();
     let row = batch.slice(0, 1).project(&keep)?;

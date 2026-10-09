@@ -11,6 +11,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
+use gage_session::system;
 
 use super::batch::{BatchSource, BatchTable, external};
 use crate::{ScanStore, Store};
@@ -19,7 +20,7 @@ fn schema() -> SchemaRef {
     let utf8 = |name: &str| Field::new(name, DataType::Utf8, false);
     Arc::new(Schema::new(vec![
         utf8("scan_id"),
-        utf8("scan_commit"),
+        system(utf8("scan_commit")),
         // The Gage object id of the watermarked object
         utf8("oid"),
         utf8("key"),
