@@ -73,6 +73,8 @@ pub enum StoreError {
     Read { path: PathBuf, source: io::Error },
     /// A tag name git's ref rules reject
     TagName(String),
+    /// A key git's ref rules or the lowercase rule reject
+    KeyName(String),
     /// A tag with the name exists and names the given object
     TagExists { name: String, id: String },
     /// No tag has the given name
@@ -168,6 +170,12 @@ impl fmt::Display for StoreError {
                  (no spaces, '..', '~', '^', ':', '?', '*', '[', or '\\'; no \
                  leading '-' or '.'; no trailing '/', '.', or '.lock')"
             ),
+            StoreError::KeyName(key) => write!(
+                f,
+                "invalid key {key:?}: a key is lowercase and follows git's ref \
+                 rules (no spaces, '..', '~', '^', ':', '?', '*', '[', or '\\'; \
+                 no leading '-' or '.'; no trailing '/', '.', or '.lock')"
+            ),
             StoreError::TagExists { name, id } => {
                 write!(f, "tag {name} exists and names {id}")
             }
@@ -207,6 +215,7 @@ impl std::error::Error for StoreError {
             | StoreError::IssueStatusUnchanged { .. }
             | StoreError::AttachmentInput(_)
             | StoreError::TagName(_)
+            | StoreError::KeyName(_)
             | StoreError::TagExists { .. }
             | StoreError::TagNotFound(_) => None,
         }

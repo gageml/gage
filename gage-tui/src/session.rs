@@ -280,7 +280,7 @@ impl Backend {
             author,
             target: Some(&target),
             metadata: None,
-            carry_forward_key: None,
+            work_id: None,
         })?;
         note_from_full(notes.get(&id)?)
     }

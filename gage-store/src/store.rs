@@ -222,7 +222,7 @@ mod tests {
                     author: "user:test",
                     target: None,
                     metadata: None,
-                    carry_forward_key: None,
+                    work_id: None,
                 })
                 .unwrap();
             assert!(store.wrote.get());

@@ -47,7 +47,7 @@ use rune::runtime::{Formatter, Protocol, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
-use crate::key::encode_key;
+use crate::key::encode_ref_key;
 use crate::note::Note;
 use crate::scan::{Scan, ScanContext, current, run, sql_str, string_column};
 
@@ -253,7 +253,7 @@ impl Issue {
             status: full.status.as_str().to_string(),
             status_reason: full.status_reason.map(|r| r.as_str().to_string()),
             scan: full.scan,
-            key: full.natural_key,
+            key: full.key,
             evidence: rune::to_value(evidence).map_err(VmError::from)?,
             created: full.created_ms,
         })
@@ -270,7 +270,7 @@ impl Issue {
             status: record.status.as_str().to_string(),
             status_reason: None,
             scan: record.scan,
-            key: record.natural_key,
+            key: record.key,
             evidence: rune::to_value(record.evidence).map_err(VmError::from)?,
             created: record.created_ms,
         })
@@ -337,7 +337,7 @@ async fn do_write_issue(w: IssueWrite) -> Written {
             "write_issue: once() requires key()".into(),
         )));
     }
-    let key = match w.key.as_ref().map(encode_key).transpose() {
+    let key = match w.key.as_ref().map(encode_ref_key).transpose() {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
@@ -373,7 +373,7 @@ async fn write_issue_spec(w: IssueSpec) -> Written {
         author: &author,
         status: w.status,
         evidence: &w.evidence,
-        natural_key: key.as_deref(),
+        key: key.as_deref(),
     };
     let store = ctx.store.lock().await;
     let issues = IssueStore::from(&*store);
@@ -484,13 +484,13 @@ fn prior_issue(
         let record = issues
             .read_from_dir(&dir)
             .map_err(|e| VmError::panic(format!("issue dir {}: {e}", dir.display())))?;
-        if record.natural_key.as_deref() == Some(key) {
+        if record.key.as_deref() == Some(key) {
             return Ok(Some(Prior::InDir(record.id)));
         }
     }
     let tips = issues
         .query()
-        .natural_key(key)
+        .key(key)
         .tips()
         .map_err(|e| VmError::panic(format!("write_issue: replace key {key}: {e}")))?;
     match tips.as_slice() {

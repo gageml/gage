@@ -38,7 +38,7 @@ use crate::{Store, StoreError};
 pub const OBJECT_TYPE: &str = "gage::issue";
 const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from an issue's `attrs.json`.
-pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "status", "natural_key"];
+pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "status", "key"];
 const ATTRS_FILE: &str = "attrs.json";
 const DESCRIPTION_FILE: &str = "description.txt";
 const EVIDENCE_LINK: &str = "evidence.link";
@@ -184,9 +184,9 @@ pub struct IssueInput<'a> {
     /// must be a live note; its current commit is linked. Repeats are
     /// linked once.
     pub evidence: &'a [String],
-    /// The writer's natural key for the issue across scans. `None`
+    /// The writer's key for the issue across scans. `None`
     /// means no later write relates to this issue.
-    pub natural_key: Option<&'a str>,
+    pub key: Option<&'a str>,
 }
 
 /// One entry under `changes/`, decoded.
@@ -221,7 +221,7 @@ pub struct IssueFull {
     pub status_reason: Option<StatusReason>,
     /// The scan the issue was written during, from `attrs.scan`
     pub scan: Option<String>,
-    pub natural_key: Option<String>,
+    pub key: Option<String>,
     /// Commit SHAs from `evidence.link`, in file order
     pub evidence: Vec<String>,
     /// The change entries, oldest first
@@ -243,7 +243,7 @@ pub struct IssueDirRecord {
     pub status: IssueStatus,
     /// The writing scan's id, from `attrs.scan`
     pub scan: Option<String>,
-    pub natural_key: Option<String>,
+    pub key: Option<String>,
     /// The cited note ids, in citation order
     pub evidence: Vec<String>,
     /// The commit this write replaces, when it replaces a live issue
@@ -267,7 +267,7 @@ struct IssueAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    natural_key: Option<String>,
+    key: Option<String>,
 }
 
 /// The `changes/<ulid>/attrs.json` shape.
@@ -459,7 +459,7 @@ impl IssueStore<'_> {
             author: record.attrs.author,
             status: record.attrs.status,
             scan: record.attrs.scan,
-            natural_key: record.attrs.natural_key,
+            key: record.attrs.key,
             evidence: record.evidence,
             replaces: record.replaces,
             changes,
@@ -650,7 +650,7 @@ impl IssueStore<'_> {
             status: attrs.status,
             status_reason: attrs.status_reason,
             scan: attrs.scan,
-            natural_key: attrs.natural_key,
+            key: attrs.key,
             evidence: object
                 .tree
                 .links
@@ -755,9 +755,9 @@ impl<'a> IssueQuery<'a> {
         self
     }
 
-    /// Select issues whose `natural_key` equals `key`.
-    pub fn natural_key(mut self, key: &str) -> Self {
-        self.query.attrs.push(("natural_key", key.to_string()));
+    /// Select issues whose `key` equals `key`.
+    pub fn key(mut self, key: &str) -> Self {
+        self.query.attrs.push(("key", key.to_string()));
         self
     }
 
@@ -837,6 +837,9 @@ fn validate_input(input: &IssueInput) -> Result<(), StoreError> {
     if input.title.trim().is_empty() {
         return Err(StoreError::IssueInput("title is empty".to_string()));
     }
+    if let Some(key) = input.key {
+        crate::key::validate_key(key)?;
+    }
     Ok(())
 }
 
@@ -848,7 +851,7 @@ fn create_attrs(input: &IssueInput, scan: Option<&str>) -> IssueAttrs {
         status: input.status,
         status_reason: None,
         scan: scan.map(String::from),
-        natural_key: input.natural_key.map(String::from),
+        key: input.key.map(String::from),
     }
 }
 
@@ -1113,6 +1116,7 @@ mod tests {
     use crate::object::object_ref;
     use crate::test_support::open_store;
     use crate::{NoteInput, NoteStore, NoteValue};
+    use std::slice;
 
     fn cat_file(store: &Store, spec: &str) -> String {
         run(git_in(store.path(), ["cat-file", "-p", spec])).unwrap()
@@ -1130,7 +1134,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward_key: None,
+                work_id: None,
             })
             .unwrap()
     }
@@ -1144,7 +1148,7 @@ mod tests {
                 author: "user:test",
                 status,
                 evidence,
-                natural_key: None,
+                key: None,
             })
             .unwrap()
     }
@@ -1235,7 +1239,7 @@ mod tests {
             author: "user:test",
             status: IssueStatus::Closed,
             evidence: &[],
-            natural_key: None,
+            key: None,
         });
         assert!(matches!(closed, Err(StoreError::IssueInput(_))));
 
@@ -1246,7 +1250,7 @@ mod tests {
             author: "user:test",
             status: IssueStatus::Open,
             evidence: &["doesnotexist".to_string()],
-            natural_key: None,
+            key: None,
         });
         assert!(matches!(missing, Err(StoreError::ObjectNotFound(_))));
 
@@ -1258,8 +1262,8 @@ mod tests {
             description: None,
             author: "user:test",
             status: IssueStatus::Open,
-            evidence: &[gone.clone()],
-            natural_key: None,
+            evidence: slice::from_ref(&gone),
+            key: None,
         });
         assert!(matches!(deleted, Err(StoreError::ObjectDeleted(id)) if id == gone));
     }
@@ -1408,7 +1412,7 @@ mod tests {
             author: "task:s:t",
             status: IssueStatus::Pending,
             evidence: &["NOTELATER".to_string(), "NOTELATER".to_string()],
-            natural_key: None,
+            key: None,
         };
         let dir = tmp.path().join("issues").join("ISSUE1");
         issues
@@ -1444,7 +1448,7 @@ mod tests {
         let (id, sha) = issues.apply_from_dir(&dir).unwrap();
         assert_eq!(id, "ISSUE1");
         let full = issues.at_commit(&sha).unwrap();
-        assert_eq!(full.evidence, [note_commit.clone()]);
+        assert_eq!(full.evidence, slice::from_ref(&note_commit));
         assert_eq!(full.scan.as_deref(), Some("SCAN1"));
         assert_eq!(full.changes.len(), 1);
         assert_eq!(full.changes[0].event, ChangeEvent::Create);
@@ -1473,19 +1477,19 @@ mod tests {
                 description: Some("first"),
                 author: "task:s:report",
                 status: IssueStatus::Open,
-                evidence: &[first_note.clone()],
-                natural_key: Some("hidden-thinking"),
+                evidence: slice::from_ref(&first_note),
+                key: Some("hidden-thinking"),
             })
             .unwrap();
         issues
             .set_status(&prior_id, IssueStatus::Closed, None, "user:test", None)
             .unwrap();
         let prior = issues.get(&prior_id).unwrap();
-        assert_eq!(prior.natural_key.as_deref(), Some("hidden-thinking"));
+        assert_eq!(prior.key.as_deref(), Some("hidden-thinking"));
         assert_eq!(
             issues
                 .query()
-                .natural_key("hidden-thinking")
+                .key("hidden-thinking")
                 .tips()
                 .unwrap()
                 .iter()
@@ -1502,8 +1506,8 @@ mod tests {
             description: Some("second"),
             author: "task:s:report",
             status: IssueStatus::Open,
-            evidence: &[second_note.clone()],
-            natural_key: Some("hidden-thinking"),
+            evidence: slice::from_ref(&second_note),
+            key: Some("hidden-thinking"),
         };
         let dir = tmp.path().join("issues").join(&prior_id);
         issues
@@ -1518,7 +1522,7 @@ mod tests {
         let record = issues.read_from_dir(&dir).unwrap();
         assert_eq!(record.id, prior_id);
         assert_eq!(record.replaces.as_deref(), Some(prior.commit_sha.as_str()));
-        assert_eq!(record.natural_key.as_deref(), Some("hidden-thinking"));
+        assert_eq!(record.key.as_deref(), Some("hidden-thinking"));
 
         let (id, sha) = issues.apply_from_dir(&dir).unwrap();
         assert_eq!(id, prior_id);
@@ -1590,7 +1594,7 @@ mod tests {
                 author: "task:hidden-thinking:report",
                 status: IssueStatus::Open,
                 evidence: &[],
-                natural_key: None,
+                key: None,
             })
             .unwrap();
 

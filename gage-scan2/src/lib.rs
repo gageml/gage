@@ -1037,6 +1037,8 @@ fn returned_error(value: &str, scanner: &TaskUnit, task: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use datafusion::arrow::array::StringArray;
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_session::{
@@ -1735,7 +1737,7 @@ mod tests {
             (task.scanner.as_str(), task.task.as_str()),
             ("agentic", "main")
         );
-        assert_eq!(task.agent_sessions, [session.commit_sha.clone()]);
+        assert_eq!(task.agent_sessions, slice::from_ref(&session.commit_sha));
         assert_eq!(
             task.agents,
             [TaskAgent {
@@ -2648,7 +2650,7 @@ mod tests {
 
         assert_eq!(
             store.read_commit(&outcome.commit_sha).unwrap().parents,
-            [dataset_sha.clone()]
+            slice::from_ref(&dataset_sha)
         );
         let record = ScanStore::from(&store).get(&outcome.id).unwrap();
         assert_eq!(record.content.dataset, Some(dataset_sha));
@@ -3440,7 +3442,7 @@ mod tests {
                 author: "user:t",
                 status: IssueStatus::Open,
                 evidence: &[],
-                natural_key: None,
+                key: None,
             })
             .unwrap();
 
@@ -3489,7 +3491,7 @@ mod tests {
         assert_eq!(findings.scan.as_deref(), Some(outcome.id.as_str()));
         assert_eq!(
             findings.evidence,
-            [note_sha.clone()],
+            slice::from_ref(&note_sha),
             "the issue links the commit of the note the scan wrote"
         );
         assert_eq!(
@@ -3501,7 +3503,7 @@ mod tests {
         assert_eq!(retention.status, IssueStatus::Open);
         assert_eq!(
             retention.evidence,
-            [note_sha.clone()],
+            slice::from_ref(&note_sha),
             "a repeated citation links once"
         );
         assert_eq!(
@@ -3516,7 +3518,7 @@ mod tests {
                 &Output::Println(format!(
                     "findings pending task:issues:main [\"{note_id}\"] Some(\"## Summary\\n\\nRetries.\")"
                 )),
-                &Output::Println(format!("session-retention open 1 None")),
+                &Output::Println("session-retention open 1 None".into()),
                 &Output::Println("args: write_issue evidence: object not found: nosuchnote".into()),
                 &Output::Println(
                     "args: evidence must be a note id, a Note, or a list of either".into()
@@ -3716,7 +3718,7 @@ mod tests {
                     outputs(&events),
                     [
                         &Output::Println("true open Some(\"hidden-thinking\") 1".into()),
-                        &Output::Println("Some(\"per-session:7\")".into()),
+                        &Output::Println("Some(\"per-session/7\")".into()),
                     ]
                 );
                 outcome
@@ -3736,7 +3738,7 @@ mod tests {
         written.sort_by(|a, b| a.name.cmp(&b.name));
         let hidden = written[0].clone();
         assert_eq!(hidden.name, "hidden-thinking");
-        assert_eq!(hidden.natural_key.as_deref(), Some("hidden-thinking"));
+        assert_eq!(hidden.key.as_deref(), Some("hidden-thinking"));
         assert_eq!(
             hidden.description.as_deref(),
             Some("second"),
@@ -3745,7 +3747,7 @@ mod tests {
         assert_eq!(hidden.changes.len(), 1);
         assert_eq!(hidden.evidence, [record.content.notes[0].clone()]);
         let per_session = written[1].clone();
-        assert_eq!(per_session.natural_key.as_deref(), Some("per-session:7"));
+        assert_eq!(per_session.key.as_deref(), Some("per-session/7"));
 
         issues
             .set_status(&hidden.id, IssueStatus::Closed, None, "user:t", None)
@@ -3922,7 +3924,7 @@ mod tests {
             let added = attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    natural_key: None,
+                    key: None,
                     targets: &[],
                     root: &root,
                     includes: &pats,
@@ -3931,7 +3933,7 @@ mod tests {
                 .unwrap();
             let dataset = datasets.create().unwrap();
             datasets
-                .attachments_link(&dataset, &[added.id.clone()])
+                .attachments_link(&dataset, slice::from_ref(&added.id))
                 .unwrap();
             ids.push(added.id);
         }
@@ -4453,7 +4455,7 @@ mod tests {
             .map(|sha| (sha.clone(), notes.at_commit(sha).unwrap()))
             .find(|(_, n)| n.name == "seen")
             .expect("the scanner wrote the tagged note");
-        assert_eq!(tagged_1.1.carry_forward_key.as_deref(), Some("wm:main:1"));
+        assert_eq!(tagged_1.1.work_id.as_deref(), Some("wm:main:1"));
         assert_eq!(
             tagged_1.1.target.as_deref(),
             Some(format!("session:{session_id}#1-1").as_str())
@@ -4461,13 +4463,13 @@ mod tests {
         let mut expected = vec![
             gage_store::Watermark {
                 oid: session_id.clone(),
-                key: "wm:main:1".into(),
+                work_id: "wm:main:1".into(),
                 version: member_sha_1.clone(),
                 mark: 1,
             },
             gage_store::Watermark {
                 oid: tagged_1.1.id.clone(),
-                key: "wm:main:1".into(),
+                work_id: "wm:main:1".into(),
                 version: tagged_1.0.clone(),
                 mark: 1,
             },
@@ -4496,7 +4498,7 @@ mod tests {
         assert!(second_record.content.watermarks.is_empty());
         assert_eq!(
             second_record.content.notes_carried,
-            [tagged_1.0.clone()],
+            slice::from_ref(&tagged_1.0),
             "only the tagged note is carried"
         );
         assert!(
@@ -4527,7 +4529,10 @@ mod tests {
         );
         let third_record = scans.get(&third.id).unwrap();
         assert_eq!(third_record.content.notes.len(), 2);
-        assert_eq!(third_record.content.notes_carried, [tagged_1.0.clone()]);
+        assert_eq!(
+            third_record.content.notes_carried,
+            slice::from_ref(&tagged_1.0)
+        );
         let member_sha_2 = DatasetStore::from(&store)
             .sessions_at(&dataset_sha_2)
             .unwrap()[0]
@@ -4562,7 +4567,7 @@ mod tests {
         let fourth_record = scans.get(&fourth.id).unwrap();
         assert_eq!(
             fourth_record.content.notes_carried,
-            [tagged_1.0.clone()],
+            slice::from_ref(&tagged_1.0),
             "the third scan's note targets a descendant commit and is not carried"
         );
 
@@ -4735,7 +4740,7 @@ mod tests {
         let other_pats = ["CLAUDE.md".to_string()];
         let cfg_spec = AttachmentSpec {
             name: Some("cfg"),
-            natural_key: None,
+            key: None,
             targets: &[],
             root: &root,
             includes: &cfg_pats,
@@ -4779,7 +4784,7 @@ mod tests {
             first_record.content.watermarks,
             [gage_store::Watermark {
                 oid: cfg.id.clone(),
-                key: key.into(),
+                work_id: key.into(),
                 version: digest_1.clone(),
                 mark: 1,
             }]
@@ -4829,7 +4834,7 @@ mod tests {
             Some(digest_1.as_str())
         );
         datasets
-            .attachments_link(&dataset, &[cfg.id.clone()])
+            .attachments_link(&dataset, slice::from_ref(&cfg.id))
             .unwrap();
         let dataset_sha_2 = datasets.get(&dataset).unwrap().commit_sha;
         assert_ne!(dataset_sha_2, dataset_sha_1);
@@ -4860,7 +4865,7 @@ mod tests {
         let digest_2 = attachments.get(&cfg.id).unwrap().attrs.digest.unwrap();
         assert_ne!(digest_2, digest_1);
         datasets
-            .attachments_link(&dataset, &[cfg.id.clone()])
+            .attachments_link(&dataset, slice::from_ref(&cfg.id))
             .unwrap();
         let dataset_sha_3 = datasets.get(&dataset).unwrap().commit_sha;
         let (fourth, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha_3).await;
@@ -4882,7 +4887,7 @@ mod tests {
             fourth_record.content.watermarks,
             [gage_store::Watermark {
                 oid: cfg.id.clone(),
-                key: key.into(),
+                work_id: key.into(),
                 version: digest_2.clone(),
                 mark: 1,
             }]

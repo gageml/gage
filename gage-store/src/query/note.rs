@@ -43,18 +43,11 @@ use crate::{NOTE_TYPE, NoteStore, NoteValue, Order, SelectedTip, Store, StoreErr
 /// Columns read from the object rather than the index. A projection
 /// touching none of these never opens an object.
 const ATTRS_COLS: &[&str] = &[
-    "name",
-    "target",
-    "author",
-    "value",
-    "text",
-    "metadata",
-    "scan",
-    "carry_forward_key",
+    "name", "target", "author", "value", "text", "metadata", "scan", "work_id",
 ];
 
 const NAME_COL: &str = "name";
-const CARRY_FORWARD_KEY_COL: &str = "carry_forward_key";
+const WORK_ID_COL: &str = "work_id";
 const CREATED_COL: &str = "created";
 
 pub(crate) fn stored_note_schema() -> SchemaRef {
@@ -93,7 +86,7 @@ pub(crate) fn stored_note_schema() -> SchemaRef {
         Field::new("scan", DataType::Utf8, true),
         // The key under which a scan's carry_forward_notes links
         // the note
-        Field::new(CARRY_FORWARD_KEY_COL, DataType::Utf8, true),
+        Field::new(WORK_ID_COL, DataType::Utf8, true),
         // System
         // Shortest prefix of `id` unique among the notes listed
         system(Field::new("id_prefix", DataType::Utf8, false)),
@@ -144,9 +137,7 @@ impl TableProvider for StoredNoteTable {
         Ok(filters
             .iter()
             .map(|f| {
-                if attr_equals(f, NAME_COL).is_some()
-                    || attr_equals(f, CARRY_FORWARD_KEY_COL).is_some()
-                {
+                if attr_equals(f, NAME_COL).is_some() || attr_equals(f, WORK_ID_COL).is_some() {
                     TableProviderFilterPushDown::Exact
                 } else {
                     filter::pushdown(f, "id")
@@ -270,7 +261,7 @@ impl StoredNoteExec {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let notes = NoteStore::from(&*store);
 
-        // Name and carry_forward_key equality go to the index's attribute
+        // Name and work_id equality go to the index's attribute
         // table; every other selection happens on the returned tips
         let mut query = notes.query().order(Order::CreatedDesc);
         for name in self.filters.iter().filter_map(|f| attr_equals(f, NAME_COL)) {
@@ -279,9 +270,9 @@ impl StoredNoteExec {
         for key in self
             .filters
             .iter()
-            .filter_map(|f| attr_equals(f, CARRY_FORWARD_KEY_COL))
+            .filter_map(|f| attr_equals(f, WORK_ID_COL))
         {
-            query = query.carry_forward_key(&key);
+            query = query.work_id(&key);
         }
         let mut tips: Vec<SelectedTip> = query.tips().map_err(external)?;
         if let Some(id_filter) = IdFilter::new(&self.filters, "id")? {
@@ -306,7 +297,7 @@ impl StoredNoteExec {
         let mut createds = TimestampMillisecondBuilder::with_capacity(len);
         let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
         let mut scans = StringBuilder::new();
-        let mut carry_forward_keys = StringBuilder::new();
+        let mut work_ids = StringBuilder::new();
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
         let mut locators = StringBuilder::with_capacity(len, len * 44);
         let mut commits = StringBuilder::with_capacity(len, len * 40);
@@ -331,7 +322,7 @@ impl StoredNoteExec {
                 texts.append_null();
                 metadatas.append_null();
                 scans.append_null();
-                carry_forward_keys.append_null();
+                work_ids.append_null();
                 continue;
             }
             let note = notes.at_commit(&tip.sha).map_err(external)?;
@@ -346,7 +337,7 @@ impl StoredNoteExec {
             texts.append_option(text.map(String::as_str));
             metadatas.append_option(note.metadata.as_ref().map(|m| m.to_string()));
             scans.append_option(note.scan.as_deref());
-            carry_forward_keys.append_option(note.carry_forward_key.as_deref());
+            work_ids.append_option(note.work_id.as_deref());
         }
 
         let batch = RecordBatch::try_new(
@@ -362,7 +353,7 @@ impl StoredNoteExec {
                 Arc::new(createds.finish().with_timezone("UTC")),
                 Arc::new(modifieds.finish().with_timezone("UTC")),
                 Arc::new(scans.finish()),
-                Arc::new(carry_forward_keys.finish()),
+                Arc::new(work_ids.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),
                 Arc::new(commits.finish()),
@@ -393,7 +384,7 @@ pub(crate) fn note_rows(
     let mut createds = TimestampMillisecondBuilder::with_capacity(len);
     let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
     let mut scans = StringBuilder::new();
-    let mut carry_forward_keys = StringBuilder::new();
+    let mut work_ids = StringBuilder::new();
     let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
     let mut locators = StringBuilder::with_capacity(len, len * 44);
     let mut commits = StringBuilder::with_capacity(len, len * 40);
@@ -413,7 +404,7 @@ pub(crate) fn note_rows(
         createds.append_value(note.created_ms);
         modifieds.append_value(note.modified_ms);
         scans.append_option(note.scan.as_deref());
-        carry_forward_keys.append_option(note.carry_forward_key.as_deref());
+        work_ids.append_option(note.work_id.as_deref());
         let n = prefix_len.get(&note.id).copied().unwrap_or(note.id.len());
         id_prefixes.append_value(note.id.chars().take(n).collect::<String>());
         locators.append_option(scoped.commit.as_ref().map(|c| format!("git:{c}")));
@@ -432,7 +423,7 @@ pub(crate) fn note_rows(
             Arc::new(createds.finish().with_timezone("UTC")),
             Arc::new(modifieds.finish().with_timezone("UTC")),
             Arc::new(scans.finish()),
-            Arc::new(carry_forward_keys.finish()),
+            Arc::new(work_ids.finish()),
             Arc::new(id_prefixes.finish()),
             Arc::new(locators.finish()),
             Arc::new(commits.finish()),
@@ -565,7 +556,7 @@ mod tests {
                     author: "user:test",
                     target: None,
                     metadata: Some(serde_json::json!({"model": "m"})),
-                    carry_forward_key: None,
+                    work_id: None,
                 })
                 .unwrap();
             notes
@@ -575,7 +566,7 @@ mod tests {
                     author: "user:test",
                     target: None,
                     metadata: None,
-                    carry_forward_key: None,
+                    work_id: None,
                 })
                 .unwrap();
         }

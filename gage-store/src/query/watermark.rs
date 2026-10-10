@@ -1,4 +1,4 @@
-//! The `scan_watermark` table: one row per `watermarks/<oid>/<key>`
+//! The `scan_watermark` table: one row per `watermarks/<oid>/<work_id>`
 //! record across every live scan. System tier: the runtime's `hwm`
 //! reads the marks a key holds for a scan's objects and takes, per
 //! object, the highest one at a version the object has: on its
@@ -23,7 +23,7 @@ fn schema() -> SchemaRef {
         system(utf8("scan_commit")),
         // The Gage object id of the watermarked object
         utf8("oid"),
-        utf8("key"),
+        utf8("work_id"),
         // The version of the object the task read: its commit, or
         // for an attachment its content digest
         utf8("version"),
@@ -54,7 +54,7 @@ impl BatchSource for Source {
                 scan_ids.append_value(&tip.id);
                 scan_commits.append_value(&tip.sha);
                 oids.append_value(&w.oid);
-                keys.append_value(&w.key);
+                keys.append_value(&w.work_id);
                 versions.append_value(&w.version);
                 marks.append_value(w.mark);
             }

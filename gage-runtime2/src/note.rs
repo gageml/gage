@@ -226,7 +226,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
         author: &author,
         target: target.as_deref(),
         metadata: metadata.clone(),
-        carry_forward_key: key.as_deref(),
+        work_id: key.as_deref(),
     };
     let written = {
         let store = ctx.store.lock().await;

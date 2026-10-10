@@ -671,6 +671,7 @@ pub(crate) mod tests {
     use gage_session::{ContentSource, Driver as DriverTrait, DriverError, Source, StoredSession};
     use std::any::Any;
     use std::io::Cursor;
+    use std::slice;
     use std::time::SystemTime;
 
     /// A native session with fixed content, for exercising the writer.
@@ -877,7 +878,7 @@ pub(crate) mod tests {
         let ref_path = object_ref(&added.id);
         let created_before = cat(&store, &format!("{ref_path}:created"));
 
-        let outcome = sessions.remove(&[added.id.clone()]).unwrap();
+        let outcome = sessions.remove(slice::from_ref(&added.id)).unwrap();
         assert!(outcome.datasets.is_empty());
         let removed = &outcome.sessions[0];
         assert_eq!(removed.id, added.id);
@@ -913,12 +914,12 @@ pub(crate) mod tests {
             .add(&FakeDriver, &mut fake("gone", &[("session.jsonl", "{}\n")]))
             .unwrap();
 
-        sessions.remove(&[gone.id.clone()]).unwrap();
+        sessions.remove(slice::from_ref(&gone.id)).unwrap();
 
         let ids: Vec<String> = sessions.iter().unwrap().map(|r| r.unwrap().id).collect();
         assert_eq!(ids, vec![keep.id.clone()]);
         assert!(matches!(
-            sessions.remove(&[gone.id.clone()]).unwrap_err(),
+            sessions.remove(slice::from_ref(&gone.id)).unwrap_err(),
             StoreError::ObjectDeleted(id) if id == gone.id
         ));
         // One bad argument leaves every session untouched
@@ -945,7 +946,7 @@ pub(crate) mod tests {
             .unwrap();
         let ref_path = object_ref(&first.id);
         let created = cat(&store, &format!("{ref_path}:created"));
-        sessions.remove(&[first.id.clone()]).unwrap();
+        sessions.remove(slice::from_ref(&first.id)).unwrap();
 
         let again = sessions
             .add(
@@ -1012,7 +1013,7 @@ pub(crate) mod tests {
         datasets
             .sessions_link(&a, &[s1.id.clone(), s2.id.clone(), s3.id.clone()])
             .unwrap();
-        datasets.sessions_link(&b, &[s2.id.clone()]).unwrap();
+        datasets.sessions_link(&b, slice::from_ref(&s2.id)).unwrap();
         let a_before = store.rev_parse(&object_ref(&a)).unwrap().unwrap();
         let b_before = store.rev_parse(&object_ref(&b)).unwrap().unwrap();
 
@@ -1118,7 +1119,8 @@ pub(crate) mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let sessions = SessionStore::from(&store);
-        let cases: &[(&[(&str, &str)], &str, &str)] = &[
+        type Case<'a> = (&'a [(&'a str, &'a str)], &'a str, &'a str);
+        let cases: &[Case<'_>] = &[
             (&[("", "x")], "", "empty path"),
             (&[("/a", "x")], "/a", "leading `/`"),
             (&[("a/", "x")], "a/", "trailing `/`"),

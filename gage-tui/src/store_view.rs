@@ -1251,7 +1251,7 @@ mod tests {
                     author: "user:test",
                     target: None,
                     metadata: None,
-                    carry_forward_key: None,
+                    work_id: None,
                 })
                 .unwrap();
             last = last.max(id);
@@ -1290,7 +1290,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward_key: None,
+                work_id: None,
             })
             .unwrap();
 
@@ -1423,7 +1423,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward_key: None,
+                work_id: None,
             })
             .unwrap();
         let gone = notes
@@ -1433,7 +1433,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward_key: None,
+                work_id: None,
             })
             .unwrap();
         notes.delete(&gone).unwrap();
@@ -1667,7 +1667,7 @@ mod tests {
                         author: "user:test",
                         target: None,
                         metadata: None,
-                        carry_forward_key: None,
+                        work_id: None,
                     })
                     .unwrap()
             })

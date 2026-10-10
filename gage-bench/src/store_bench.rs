@@ -185,7 +185,7 @@ fn populate(
                     author: "user:bench",
                     target: target.as_ref().map(|(t, _)| t.as_str()),
                     metadata: None,
-                    carry_forward_key: None,
+                    work_id: None,
                 })
             })
             .map_err(|e| e.to_string())?;

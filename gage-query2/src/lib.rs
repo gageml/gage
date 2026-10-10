@@ -355,6 +355,7 @@ fn new_context(skip_system_cols: bool) -> SessionContext {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
     use std::sync::{Arc, Mutex};
 
     use datafusion::arrow::array::StringArray;
@@ -484,10 +485,7 @@ mod tests {
         );
         let note_cols = strings(&ctx, &sql.replace("'session'", "'note'")).await;
         assert_eq!(note_cols.first().map(String::as_str), Some("id"));
-        assert_eq!(
-            note_cols.last().map(String::as_str),
-            Some("carry_forward_key")
-        );
+        assert_eq!(note_cols.last().map(String::as_str), Some("work_id"));
     }
 
     /// The `_link` tables list the store's link files with both
@@ -536,7 +534,7 @@ mod tests {
                     author: "user:t",
                     target: Some(&url),
                     metadata: None,
-                    carry_forward_key: None,
+                    work_id: None,
                 })
                 .unwrap();
             let issues = IssueStore::from(&*store);
@@ -547,8 +545,8 @@ mod tests {
                     description: Some("Details"),
                     author: "user:t",
                     status: IssueStatus::Pending,
-                    evidence: &[note_id.clone()],
-                    natural_key: None,
+                    evidence: slice::from_ref(&note_id),
+                    key: None,
                 })
                 .unwrap();
             issues
@@ -567,7 +565,7 @@ mod tests {
         let ctx = ContextBuilder::new(Arc::clone(&store).into()).build().await;
         assert_eq!(
             strings(&ctx, "SELECT dataset_commit FROM dataset_session_link").await,
-            [dataset_commit.clone()]
+            slice::from_ref(&dataset_commit)
         );
         assert_eq!(
             strings(
@@ -577,7 +575,7 @@ mod tests {
                 )
             )
             .await,
-            [session_id.clone()]
+            slice::from_ref(&session_id)
         );
         assert_eq!(
             strings(&ctx, "SELECT commit FROM dataset").await,
@@ -621,7 +619,7 @@ mod tests {
                 &format!("SELECT note_id FROM issue_evidence WHERE issue_id = '{issue_id}'")
             )
             .await,
-            [note_id.clone()]
+            slice::from_ref(&note_id)
         );
         assert_eq!(
             strings(
@@ -629,7 +627,7 @@ mod tests {
                 &format!("SELECT session_id FROM session_issue WHERE issue_id = '{issue_id}'")
             )
             .await,
-            [session_id.clone()]
+            slice::from_ref(&session_id)
         );
 
         let user = ContextBuilder::new(Some(store))
@@ -644,7 +642,7 @@ mod tests {
                 )
             )
             .await,
-            [session_id.clone()]
+            slice::from_ref(&session_id)
         );
         assert_eq!(
             strings(
@@ -823,7 +821,7 @@ mod tests {
         );
         assert_eq!(
             strings(&ctx, "SELECT DISTINCT scan_commit FROM scan_task").await,
-            [commit.clone()]
+            slice::from_ref(&commit)
         );
         assert_eq!(
             strings(&ctx, "SELECT session_id FROM scan_task_agent").await,

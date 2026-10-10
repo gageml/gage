@@ -883,6 +883,7 @@ mod tests {
     use gage_session::{ContentSink, DriverError, SessionAttrs, Source, StoredSession};
     use std::any::Any;
     use std::io::{Cursor, Write as _};
+    use std::slice;
     use std::time::SystemTime;
 
     struct FakeSession {
@@ -1040,7 +1041,7 @@ mod tests {
                 author: "user:test",
                 target: None,
                 metadata: None,
-                carry_forward_key: None,
+                work_id: None,
             })
             .unwrap()
     }
@@ -1255,14 +1256,18 @@ mod tests {
         assert_eq!(listed[1].native_id, "s2");
 
         // Linking again at the same commits writes nothing
-        let again = datasets.sessions_link(&dataset, &[s1.id.clone()]).unwrap();
+        let again = datasets
+            .sessions_link(&dataset, slice::from_ref(&s1.id))
+            .unwrap();
         assert_eq!(again[0].outcome, SessionOutcome::Unchanged);
         assert_eq!(rev_parse(&store, &dataset), tip);
 
         // A grown session advances its slot to the current commit
         let grown = sessions.add(&driver, &mut fake("s1", "a\nmore\n")).unwrap();
         assert_eq!(grown.outcome, SessionOutcome::Updated);
-        let advanced = datasets.sessions_link(&dataset, &[s1.id.clone()]).unwrap();
+        let advanced = datasets
+            .sessions_link(&dataset, slice::from_ref(&s1.id))
+            .unwrap();
         assert_eq!(advanced[0].outcome, SessionOutcome::Updated);
         assert_eq!(advanced[0].session_num, 1);
         assert_ne!(rev_parse(&store, &dataset), tip);
@@ -1278,12 +1283,12 @@ mod tests {
         let datasets = DatasetStore::from(&store);
         let sessions = SessionStore::from(&store);
         let s1 = sessions.add(&FakeDriver, &mut fake("s1", "a\n")).unwrap();
-        sessions.remove(&[s1.id.clone()]).unwrap();
+        sessions.remove(slice::from_ref(&s1.id)).unwrap();
         let dataset = datasets.create().unwrap();
         let tip = rev_parse(&store, &dataset);
 
         assert!(matches!(
-            datasets.sessions_link(&dataset, &[s1.id.clone()]).unwrap_err(),
+            datasets.sessions_link(&dataset, slice::from_ref(&s1.id)).unwrap_err(),
             StoreError::ObjectDeleted(id) if id == s1.id
         ));
         assert!(matches!(
@@ -1292,7 +1297,7 @@ mod tests {
         ));
         assert!(matches!(
             datasets
-                .sessions_link(&dataset, &[dataset.clone()])
+                .sessions_link(&dataset, slice::from_ref(&dataset))
                 .unwrap_err(),
             StoreError::WrongType { .. }
         ));
@@ -1491,7 +1496,7 @@ mod tests {
         expected.sort_by(|x, y| x.dataset_id.cmp(&y.dataset_id));
         assert_eq!(found, expected);
 
-        let only_s1 = datasets.containing(&[s1.clone()]).unwrap();
+        let only_s1 = datasets.containing(slice::from_ref(&s1)).unwrap();
         assert_eq!(only_s1.len(), 1);
         assert_eq!(only_s1[0].dataset_id, a);
         assert!(

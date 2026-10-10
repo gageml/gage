@@ -238,7 +238,7 @@ pub async fn add(args: AttachmentAddArgs) {
     }
     let spec = AttachmentSpec {
         name: args.name.as_deref(),
-        natural_key: args.key.as_deref(),
+        key: args.key.as_deref(),
         targets: &targets,
         root: &root,
         includes: &args.includes,
@@ -499,7 +499,7 @@ pub fn show(args: AttachmentShowArgs) {
     let attrs = [
         ("id", record.id.clone()),
         ("name", record.attrs.name.clone().unwrap_or_default()),
-        ("key", record.attrs.natural_key.clone().unwrap_or_default()),
+        ("key", record.attrs.key.clone().unwrap_or_default()),
         ("targets", record.attrs.targets.join(" ")),
         ("root", shorten_home(&record.attrs.root)),
         ("includes", record.attrs.includes.join(" ")),
@@ -626,7 +626,7 @@ fn resolve(command: &str, attachments: &AttachmentStore<'_>, arg: &str) -> Attac
     if named.len() > 1 {
         eprintln!("{command}: {arg} names {} attachments:", named.len());
         for record in &named {
-            let key = record.attrs.natural_key.as_deref().unwrap_or_default();
+            let key = record.attrs.key.as_deref().unwrap_or_default();
             eprintln!("  {} {key}", record.id);
         }
         std::process::exit(1);

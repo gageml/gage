@@ -1093,6 +1093,10 @@ mod tests {
             "#);
         let sessions = Sessions::new(vec![session("a"), session("b"), session("c")]);
         let output = vm.call(["check"], (sessions,)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "takes the VM execution's return value; the test holds the only live handle"
+        )]
         let (n, ids): (i64, Vec<String>) = rune::from_value(output).unwrap();
         assert_eq!(n, 3);
         assert_eq!(ids, ["c", "b", "a"]);
@@ -1102,6 +1106,10 @@ mod tests {
     fn session_exposes_its_id_and_debug_form() {
         let mut vm = vm("pub fn check(s) { (s.id, format!(\"{s:?}\")) }");
         let output = vm.call(["check"], (session("a"),)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "takes the VM execution's return value; the test holds the only live handle"
+        )]
         let (id, text): (String, String) = rune::from_value(output).unwrap();
         assert_eq!(id, "a");
         assert_eq!(text, "Session { id: \"a\" }");

@@ -28,7 +28,7 @@
 //! a new digest and so no mark.
 //!
 //! `carry_forward_notes(key)` links into this scan every note whose
-//! carry-forward key is `key` and whose target is one of the scan's
+//! work id is `key` and whose target is one of the scan's
 //! sessions at a commit on the session's chain, or one of the scan's
 //! attachments at a commit holding the attachment's current digest:
 //! a writer's carry of its own prior outputs. A note written against
@@ -618,7 +618,7 @@ async fn marks(
 ) -> Result<HashMap<String, Vec<(String, u64)>>, VmError> {
     let sql = format!(
         "SELECT oid, version, mark FROM scan_watermark \
-         WHERE key = '{}' AND oid IN ({})",
+         WHERE work_id = '{}' AND oid IN ({})",
         sql_str(key),
         id_list(ids)
     );
@@ -680,10 +680,7 @@ fn carry_forward_notes_named(pattern: &str) -> CarryForwardNotes {
 async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Error>, VmError> {
     let (select, predicate) = match &q.select {
         CarrySelect::Key(key) => match encode_key(key) {
-            Ok(key) => (
-                key.clone(),
-                format!("n.carry_forward_key = '{}'", sql_str(&key)),
-            ),
+            Ok(key) => (key.clone(), format!("n.work_id = '{}'", sql_str(&key))),
             Err(e) => return Ok(Err(e)),
         },
         CarrySelect::Named(pattern) => (

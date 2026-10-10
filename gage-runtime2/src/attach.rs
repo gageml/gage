@@ -38,7 +38,7 @@ use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 use tokio::sync::{OnceCell, mpsc};
 
-use crate::key::encode_key;
+use crate::key::encode_ref_key;
 use crate::scan::{ScanDatasetRef, SessionsQuery, target_url};
 
 tokio::task_local! {
@@ -376,7 +376,7 @@ async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
         Ok(root) => root,
         Err(e) => return Ok(Err(e)),
     };
-    let key = match w.key.as_ref().map(encode_key).transpose() {
+    let key = match w.key.as_ref().map(encode_ref_key).transpose() {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
@@ -390,7 +390,7 @@ async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
     let store = ctx.store.lock().await;
     let spec = AttachmentSpec {
         name: w.name.as_deref(),
-        natural_key: key.as_deref(),
+        key: key.as_deref(),
         targets: &targets,
         root: &root,
         includes: &w.files.includes,
@@ -415,7 +415,7 @@ async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
     let attached = Attached {
         id: added.id,
         name: w.name,
-        key: added.natural_key,
+        key: added.key,
         targets,
         outcome: outcome.to_string(),
     };

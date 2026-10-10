@@ -193,7 +193,7 @@ pub struct AgentAttrs {
 pub struct Watermark {
     /// The Gage object id
     pub oid: String,
-    pub key: String,
+    pub work_id: String,
     /// The object's commit SHA, or an attachment's content digest
     pub version: String,
     /// The position reached
@@ -670,7 +670,7 @@ fn read_watermarks(files: &dyn ScanFiles) -> Result<Vec<Watermark>, StoreError> 
         })?;
         out.push(Watermark {
             oid: oid.to_string(),
-            key: key.to_string(),
+            work_id: key.to_string(),
             version: version.to_string(),
             mark,
         });
@@ -1124,6 +1124,7 @@ impl CommitFiles<'_> {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::slice;
 
     use gage_session::{
         ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
@@ -1410,7 +1411,7 @@ mod tests {
 
         let greet = &scans.get("SCANA").unwrap().content.tasks[1];
         assert_eq!(greet.task, "greet");
-        assert_eq!(greet.agent_sessions, [added.commit_sha.clone()]);
+        assert_eq!(greet.agent_sessions, slice::from_ref(&added.commit_sha));
         assert_eq!(
             greet.agents,
             [TaskAgent {
@@ -1576,7 +1577,7 @@ mod tests {
 
         assert_eq!(
             store.read_commit(&commit).unwrap().parents,
-            [dataset_sha.clone()]
+            slice::from_ref(&dataset_sha)
         );
         let record = scans.get("SCAN7").unwrap();
         assert_eq!(record.content.dataset, Some(dataset_sha));
@@ -1655,7 +1656,7 @@ mod tests {
                     author: "task:s:t",
                     target: None,
                     metadata: None,
-                    carry_forward_key: None,
+                    work_id: None,
                 })
                 .unwrap();
             shas.push(
@@ -1689,7 +1690,7 @@ mod tests {
                 author: "task:s:t",
                 status: IssueStatus::Pending,
                 evidence: &[],
-                natural_key: None,
+                key: None,
             })
             .unwrap();
         let sha = store
@@ -1700,7 +1701,10 @@ mod tests {
         write(&scan_dir.join("issues.link"), &format!("{sha}\n"));
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN12I", &scan_dir).unwrap();
-        assert_eq!(store.read_commit(&commit).unwrap().parents, [sha.clone()]);
+        assert_eq!(
+            store.read_commit(&commit).unwrap().parents,
+            slice::from_ref(&sha)
+        );
         assert_eq!(scans.get("SCAN12I").unwrap().content.issues, [sha]);
 
         let other_dir = new_scan_dir(tmp.path());
@@ -1756,19 +1760,19 @@ mod tests {
             [
                 Watermark {
                     oid: "ATTACHMENT1".into(),
-                    key: "s:t:1".into(),
+                    work_id: "s:t:1".into(),
                     version: digest.into(),
                     mark: 1,
                 },
                 Watermark {
                     oid: "NOTE1".into(),
-                    key: "s:t:1".into(),
+                    work_id: "s:t:1".into(),
                     version: note_sha.into(),
                     mark: 1,
                 },
                 Watermark {
                     oid: "SESSION1".into(),
-                    key: "s:t:1".into(),
+                    work_id: "s:t:1".into(),
                     version: session_sha.into(),
                     mark: 120,
                 },
@@ -1828,7 +1832,7 @@ mod tests {
                     author: "task:s:t",
                     target: None,
                     metadata: None,
-                    carry_forward_key: None,
+                    work_id: None,
                 })
                 .unwrap()
         };
@@ -1848,7 +1852,7 @@ mod tests {
                 author: "task:s:t",
                 status: IssueStatus::Pending,
                 evidence: &[],
-                natural_key: None,
+                key: None,
             })
             .unwrap();
         let scan_dir = new_scan_dir(tmp);

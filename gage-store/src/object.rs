@@ -1110,8 +1110,10 @@ mod tests {
         // SHA becomes a parent, and a is written once. Git sorts
         // `tasks/` before `things.link`, so the nested SHAs come first.
         let tasks = nested_link_tree(&store, &[&b, &a]);
-        let mut tree = ObjectTree::default();
-        tree.attrs = Some(json!({ "n": 1 }));
+        let mut tree = ObjectTree {
+            attrs: Some(json!({ "n": 1 })),
+            ..Default::default()
+        };
         tree.links.insert("things.link".into(), vec![a.clone()]);
         tree.subtrees.insert("tasks".to_string(), tasks);
 
@@ -1247,7 +1249,7 @@ mod tests {
                 author: "user:test",
                 target,
                 metadata: None,
-                carry_forward_key: None,
+                work_id: None,
             })
             .unwrap()
     }
@@ -1259,8 +1261,10 @@ mod tests {
         let linked = note(&store, "linked", None);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
-        let mut tree = ObjectTree::default();
-        tree.attrs = Some(json!({ "b": 1, "a": "x" }));
+        let mut tree = ObjectTree {
+            attrs: Some(json!({ "b": 1, "a": "x" })),
+            ..Default::default()
+        };
         tree.blobs.insert("body.txt".into(), b"hello\n".to_vec());
         tree.links
             .insert("things.link".into(), vec![linked_sha.clone()]);
@@ -1302,8 +1306,10 @@ mod tests {
         let linked = note(&store, "linked", None);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
-        let mut tree = ObjectTree::default();
-        tree.attrs = Some(json!({ "n": 2 }));
+        let mut tree = ObjectTree {
+            attrs: Some(json!({ "n": 2 })),
+            ..Default::default()
+        };
         tree.blobs.insert("body.txt".into(), b"hello\n".to_vec());
         tree.links.insert("things.link".into(), vec![linked_sha]);
         let sha = store
@@ -1327,8 +1333,10 @@ mod tests {
         let linked = note(&store, "linked", None);
         let linked_sha = store.resolve_id(&linked).unwrap().1;
 
-        let mut tree = ObjectTree::default();
-        tree.attrs = Some(json!({ "n": 1 }));
+        let mut tree = ObjectTree {
+            attrs: Some(json!({ "n": 1 })),
+            ..Default::default()
+        };
         tree.links
             .insert("things.link".into(), vec![linked_sha.clone()]);
         let first = store
@@ -1370,8 +1378,10 @@ mod tests {
     fn edit_with_identical_content_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let mut tree = ObjectTree::default();
-        tree.attrs = Some(json!({ "n": 1 }));
+        let mut tree = ObjectTree {
+            attrs: Some(json!({ "n": 1 })),
+            ..Default::default()
+        };
         tree.blobs.insert("body.txt".into(), b"x".to_vec());
         let first = store
             .create("gage::test", "1", "abc", &tree, "test")
@@ -1389,8 +1399,10 @@ mod tests {
     fn delete_writes_parentless_tombstone_with_markers_only() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let mut tree = ObjectTree::default();
-        tree.attrs = Some(json!({ "n": 1 }));
+        let mut tree = ObjectTree {
+            attrs: Some(json!({ "n": 1 })),
+            ..Default::default()
+        };
         tree.blobs.insert("body.txt".into(), b"x".to_vec());
         let first = store
             .create("gage::test", "1", "abc", &tree, "test")
@@ -1429,8 +1441,10 @@ mod tests {
     fn resurrect_writes_parentless_live_commit_with_tombstone_identity() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let mut tree = ObjectTree::default();
-        tree.attrs = Some(json!({ "n": 1 }));
+        let mut tree = ObjectTree {
+            attrs: Some(json!({ "n": 1 })),
+            ..Default::default()
+        };
         tree.blobs.insert("body.txt".into(), b"x".to_vec());
         let first = store
             .create("gage::test", "1", "abc", &tree, "test")
@@ -1443,8 +1457,10 @@ mod tests {
 
         let tomb = store.delete(&live, "test: delete").unwrap();
         let tombstone = store.read_object(&tomb).unwrap();
-        let mut new_tree = ObjectTree::default();
-        new_tree.attrs = Some(json!({ "n": 2 }));
+        let mut new_tree = ObjectTree {
+            attrs: Some(json!({ "n": 2 })),
+            ..Default::default()
+        };
         new_tree.blobs.insert("body.txt".into(), b"y".to_vec());
 
         let revived = store

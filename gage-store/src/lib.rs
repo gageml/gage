@@ -47,6 +47,7 @@ mod error;
 pub mod git;
 pub mod index;
 mod issue;
+pub mod key;
 mod note;
 pub mod object;
 pub mod query;
