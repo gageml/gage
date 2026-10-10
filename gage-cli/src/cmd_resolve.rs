@@ -21,7 +21,7 @@ pub struct ResolveArgs {
     /// Model for the session
     ///
     /// If omitted, the dialog prompts for a model.
-    #[arg(long)]
+    #[arg(short, long)]
     model: Option<String>,
 
     /// Skip confirmation prompt
