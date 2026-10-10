@@ -520,7 +520,7 @@ pub fn show(args: AttachmentShowArgs) {
     let header: Vec<String> = ["File", "Size"].iter().map(|s| s.to_string()).collect();
     let rows = files
         .iter()
-        .map(|f| vec![f.key.clone(), format_size(f.size as i64)]);
+        .map(|f| vec![f.path.clone(), format_size(f.size as i64)]);
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))

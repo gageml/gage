@@ -149,16 +149,16 @@ pub(crate) fn attachment_file_rows(
     for a in attachments {
         for file in files.files(&a.commit_sha).map_err(external)? {
             let bytes = files
-                .read_file(&a.commit_sha, &file.key)
+                .read_file(&a.commit_sha, &file.path)
                 .map_err(external)?
                 .ok_or_else(|| {
                     external(StoreError::Parse(format!(
                         "attachment {} lists {} but holds no such file",
-                        a.id, file.key
+                        a.id, file.path
                     )))
                 })?;
             attachment_ids.append_value(&a.id);
-            paths.append_value(&file.key);
+            paths.append_value(&file.path);
             sizes.append_value(file.size as i64);
             match String::from_utf8(bytes) {
                 Ok(s) => texts.append_value(&s),

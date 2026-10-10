@@ -419,7 +419,7 @@ async fn fetch_files(q: AttachmentFilesQuery) -> Result<Vec<String>, VmError> {
     let files = attachments
         .files(&q.commit)
         .map_err(|e| VmError::panic(format!("attachment commit {}: {e}", q.commit)))?;
-    Ok(files.into_iter().map(|f| f.key).collect())
+    Ok(files.into_iter().map(|f| f.path).collect())
 }
 
 /// The value of `attachment.file(path)`.

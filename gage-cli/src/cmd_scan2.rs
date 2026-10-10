@@ -226,7 +226,7 @@ pub struct Scan2RunArgs {
     /// Skip prompts and confirmation
     ///
     /// Fills unspecified selections with defaults: the `default`
-    /// scanner group when none of --scanner, --file, or --group is
+    /// scanner group when neither --scanner nor --group is
     /// set, and the past 30 days capped at 20 sessions when no
     /// session selection or dataset option is set.
     #[arg(short, long, display_order = 15)]

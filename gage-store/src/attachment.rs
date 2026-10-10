@@ -172,7 +172,7 @@ pub struct AttachmentRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentFile {
     /// The path relative to the root, `/`-separated
-    pub key: String,
+    pub path: String,
     pub size: u64,
 }
 
@@ -417,7 +417,7 @@ impl AttachmentStore<'_> {
             .walk_tree(&format!("{commit_sha}:{FILES_TREE}"), "", &mut |entry| {
                 if entry.kind == EntryKind::Blob {
                     out.push(AttachmentFile {
-                        key: entry.name,
+                        path: entry.name,
                         size: entry.size.unwrap_or(0),
                     });
                 }
@@ -721,8 +721,8 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    fn keys(files: &[AttachmentFile]) -> Vec<&str> {
-        files.iter().map(|f| f.key.as_str()).collect()
+    fn paths(files: &[AttachmentFile]) -> Vec<&str> {
+        files.iter().map(|f| f.path.as_str()).collect()
     }
 
     fn selected_keys(root: &Path, includes: &[&str], excludes: &[&str]) -> Vec<String> {
@@ -864,7 +864,7 @@ mod tests {
         assert_eq!(record.attrs.size, 9);
 
         let files = attachments.files(&record.commit_sha).unwrap();
-        assert_eq!(keys(&files), ["settings.json", "settings.local.json"]);
+        assert_eq!(paths(&files), ["settings.json", "settings.local.json"]);
         assert_eq!(files[0].size, 7);
         assert_eq!(
             attachments

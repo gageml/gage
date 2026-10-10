@@ -3868,7 +3868,7 @@ mod tests {
                 .files(&src.commit_sha)
                 .unwrap()
                 .iter()
-                .map(|f| f.key.as_str())
+                .map(|f| f.path.as_str())
                 .collect::<Vec<_>>(),
             ["scanner.rn"]
         );
