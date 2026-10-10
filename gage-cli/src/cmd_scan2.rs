@@ -197,6 +197,9 @@ pub struct Scan2RunArgs {
     )]
     dataset: Option<String>,
 
+    #[command(flatten)]
+    select: SessionSelectArgs,
+
     /// Tasks to run at once
     #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 6)]
     jobs: usize,
@@ -207,21 +210,6 @@ pub struct Scan2RunArgs {
     /// whose agents are all waiting for a slot shows as waiting.
     #[arg(long, value_name = "N", default_value_t = 8, display_order = 7)]
     agent_jobs: usize,
-
-    #[command(flatten)]
-    select: SessionSelectArgs,
-
-    /// Run the scan without a dataset
-    ///
-    /// No dataset is created or selected; scanners run with no
-    /// sessions to read.
-    #[arg(
-        long,
-        display_order = 12,
-        conflicts_with = "dataset",
-        conflicts_with_all = SELECT_ARG_NAMES,
-    )]
-    no_dataset: bool,
 
     /// Ignore prior work
     ///
@@ -250,6 +238,18 @@ pub struct Scan2RunArgs {
     /// Show available scanners and exit
     #[arg(long, exclusive = true, display_order = 17)]
     list_scanners: bool,
+
+    /// Run the scan without a dataset
+    ///
+    /// No dataset is created or selected; scanners run with no
+    /// sessions to read.
+    #[arg(
+        long,
+        display_order = 12,
+        conflicts_with = "dataset",
+        conflicts_with_all = SELECT_ARG_NAMES,
+    )]
+    no_dataset: bool,
 }
 
 #[derive(Args)]
