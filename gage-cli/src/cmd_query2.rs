@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use clap::Args;
 use gage_query::PrintFormat;
-use gage_query2::ContextBuilder;
-use gage_store::Store;
+use gage_query2::{ContextBuilder, ScanScope};
+use gage_store::{ScanStore, Store};
 
 #[derive(Args)]
 pub struct Query2Args {
@@ -39,6 +39,14 @@ pub struct Query2Args {
     /// locator by default. This option adds them to the schema.
     #[arg(long)]
     system: bool,
+
+    /// Query within a scan
+    ///
+    /// Scan ID (or prefix). The session tables hold the scan's
+    /// sessions at the versions it read, and the scan tables hold
+    /// only that scan's tasks, notes, and issues
+    #[arg(long, value_name = "SCAN")]
+    scan: Option<String>,
 }
 
 pub async fn main(args: Query2Args) {
@@ -49,7 +57,20 @@ pub async fn main(args: Query2Args) {
             std::process::exit(1);
         }
     };
+    let scope = match &args.scan {
+        Some(prefix) => match ScanStore::from(&store).get(prefix) {
+            Ok(record) => Some(ScanScope::stored(record.id)),
+            Err(e) => {
+                eprintln!("gage query2: --scan {prefix}: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
     let mut builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store))));
+    if let Some(scope) = scope {
+        builder = builder.scope(scope);
+    }
     if !args.system {
         builder = builder.skip_system_cols();
     }
