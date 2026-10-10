@@ -6,8 +6,7 @@ use console::{Term, style};
 use gage_claude::model::{configured_model, resolve_model};
 use gage_claude::preflight;
 use gage_claude::resolve::resolve_command;
-use gage_db::db;
-use gage_db::issue;
+use gage_store::{IssueStore, Store};
 
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::model_prompt::{self, DefaultModel};
@@ -39,20 +38,25 @@ pub fn run(args: ResolveArgs) {
 }
 
 fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
-    let conn = db::open_db().unwrap();
+    // Every argument resolves to a full id before the session starts,
+    // so the skill never sees a prefix
     let mut ids: Vec<String> = Vec::new();
-    let mut errors = 0;
-    for prefix in &args.ids {
-        match issue::get(&conn, prefix) {
-            Ok(i) => ids.push(i.id),
-            Err(e) => {
-                cli::log::error(e.to_string())?;
-                errors += 1;
+    if !args.ids.is_empty() {
+        let store = open_store("gage resolve");
+        let issues = IssueStore::from(&store);
+        let mut errors = 0;
+        for prefix in &args.ids {
+            match issues.get(prefix) {
+                Ok(issue) => ids.push(issue.id),
+                Err(e) => {
+                    cli::log::error(format!("{prefix}: {e}"))?;
+                    errors += 1;
+                }
             }
         }
-    }
-    if errors > 0 {
-        return Err(DialogError::Failed("Unknown issues".to_string()));
+        if errors > 0 {
+            return Err(DialogError::Failed("Unknown issues".to_string()));
+        }
     }
 
     preflight::check().map_err(|e| DialogError::Failed(e.to_string()))?;
@@ -99,6 +103,16 @@ fn issues_label(ids: &[String]) -> String {
         "all pending and open".to_string()
     } else {
         ids.join("\n")
+    }
+}
+
+fn open_store(command: &str) -> Store {
+    match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
