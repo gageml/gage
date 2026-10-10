@@ -159,6 +159,23 @@ impl RemoteStore<'_> {
         cmd.status().map_err(StoreError::Spawn)
     }
 
+    /// Every Gage ref of this store, objects, tags, and keys, as ref
+    /// name to commit SHA: the set `backup` sends.
+    pub fn gage_refs(&self) -> Result<BTreeMap<String, String>, StoreError> {
+        let out = run(git_in(
+            self.store.path(),
+            ["for-each-ref", "--format=%(refname) %(objectname)", ROOT],
+        ))?;
+        let mut refs = BTreeMap::new();
+        for line in out.lines() {
+            let (ref_name, sha) = line
+                .split_once(' ')
+                .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
+            refs.insert(ref_name.to_string(), sha.to_string());
+        }
+        Ok(refs)
+    }
+
     /// Fetch every Gage ref the remote `name` advertises into its
     /// remote-tracking refs, pruning the ones it no longer has. Git's
     /// output goes to the terminal as it runs.

@@ -27,6 +27,7 @@ fn install_panic_hook() {
 mod author;
 mod cmd_agent;
 mod cmd_attachment;
+mod cmd_backup;
 mod cmd_config;
 mod cmd_dataset;
 mod cmd_fetch;
@@ -229,6 +230,12 @@ enum Command {
     /// Adopts what the remote has: everything, or the named objects
     /// and what they link. Reports what could not be merged.
     Fetch(cmd_fetch::FetchArgs),
+
+    /// Back up the whole store to a remote
+    ///
+    /// Sends every object, tag, and key to a remote added with
+    /// `--backup`. Restoring is `gage fetch`.
+    Backup(cmd_backup::BackupArgs),
 
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
@@ -445,6 +452,7 @@ async fn main() {
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_push::main(args).await,
             Command::Fetch(args) => cmd_fetch::main(args),
+            Command::Backup(args) => cmd_backup::main(args),
         }
     };
     tokio::pin!(cmd);
