@@ -21,14 +21,21 @@ impl IdKind {
     /// Styled display of an ID split at its disambiguating prefix:
     /// the bright shade over `prefix`, the dark shade over `tail`
     pub fn style(self, prefix: &str, tail: &str) -> String {
-        match self {
-            IdKind::Gage => format!(
-                "{}{}",
-                style(prefix).yellow().bright(),
-                style(tail).yellow()
-            ),
-            IdKind::Native => format!("{}{}", style(prefix).cyan().bright(), style(tail).cyan()),
+        self.style_on(prefix, tail, false)
+    }
+
+    /// Same as `style`, with color gated on stderr being a terminal
+    /// when `stderr` is set, else on stdout
+    fn style_on(self, prefix: &str, tail: &str, stderr: bool) -> String {
+        let (mut head, mut rest) = match self {
+            IdKind::Gage => (style(prefix).yellow().bright(), style(tail).yellow()),
+            IdKind::Native => (style(prefix).cyan().bright(), style(tail).cyan()),
+        };
+        if stderr {
+            head = head.for_stderr();
+            rest = rest.for_stderr();
         }
+        format!("{head}{rest}")
     }
 }
 
@@ -45,6 +52,8 @@ pub struct IdHighlighter {
     /// common prefix with any query id.
     sorted_peers: Vec<String>,
     kind: IdKind,
+    /// Color is gated on stderr being a terminal instead of stdout
+    stderr: bool,
 }
 
 impl IdHighlighter {
@@ -57,7 +66,18 @@ impl IdHighlighter {
     pub fn with_kind(peers: Vec<String>, kind: IdKind) -> Self {
         let mut sorted_peers = peers;
         sorted_peers.sort_unstable();
-        Self { sorted_peers, kind }
+        Self {
+            sorted_peers,
+            kind,
+            stderr: false,
+        }
+    }
+
+    /// Gate color on stderr being a terminal, for displays written to
+    /// stderr such as error messages
+    pub fn for_stderr(mut self) -> Self {
+        self.stderr = true;
+        self
     }
 
     /// Length in characters of the shortest prefix of `id` that resolves
@@ -105,6 +125,24 @@ impl IdHighlighter {
         self.styled(id, id)
     }
 
+    /// Styled short display widened as needed to stay unique: the
+    /// 8-char short display when the unique prefix fits in it, else
+    /// the unique prefix itself. The output never ends on an ambiguous
+    /// display, so a reader can type exactly what is shown.
+    pub fn short_unique(&self, id: &str) -> String {
+        let short = short_uuid(id);
+        let unique_chars = self.unique_prefix_len(id);
+        if unique_chars <= short.chars().count() {
+            return self.styled(id, short);
+        }
+        let end = id
+            .char_indices()
+            .nth(unique_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(id.len());
+        self.styled(id, &id[..end])
+    }
+
     fn styled(&self, id: &str, display: &str) -> String {
         let split_chars = self.unique_prefix_len(id);
         let split_bytes = display
@@ -113,7 +151,7 @@ impl IdHighlighter {
             .map(|(i, _)| i)
             .unwrap_or(display.len());
         let (prefix, tail) = display.split_at(split_bytes);
-        self.kind.style(prefix, tail)
+        self.kind.style_on(prefix, tail, self.stderr)
     }
 }
 
@@ -219,6 +257,25 @@ mod tests {
         // clamped by min(display.len()) to 8 — every visible char is bright.
         let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k2h4t9bbbb".into()]);
         assert_eq!(h.short("01k2h4t9aaaa"), expected_styled("01k2h4t9", ""));
+    }
+
+    #[test]
+    fn short_unique_is_short_when_prefix_fits() {
+        console::set_colors_enabled(true);
+        let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k9m2b0bbbb".into()]);
+        assert_eq!(h.short_unique("01k2h4t9aaaa"), h.short("01k2h4t9aaaa"));
+    }
+
+    #[test]
+    fn short_unique_widens_to_unique_prefix() {
+        console::set_colors_enabled(true);
+        // Peers share the 8-char short display and two more chars; the
+        // display extends to the 11th char, all bright.
+        let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k2h4t9aabb".into()]);
+        assert_eq!(
+            h.short_unique("01k2h4t9aaaa"),
+            expected_styled("01k2h4t9aaa", "")
+        );
     }
 
     #[test]

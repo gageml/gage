@@ -5,6 +5,8 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+use gage_core::style::IdHighlighter;
+
 use crate::index::IdMatch;
 
 #[derive(Debug)]
@@ -137,13 +139,16 @@ impl fmt::Display for StoreError {
                     "ambiguous id prefix {prefix}: matches {} objects:",
                     candidates.len()
                 )?;
+                let ids = candidates.iter().map(|c| c.id.clone()).collect();
+                let highlighter = IdHighlighter::new(ids).for_stderr();
                 for c in candidates {
                     let type_name = c
                         .object_type
                         .strip_prefix("gage::")
                         .unwrap_or(&c.object_type);
                     let state = if c.deleted { " (deleted)" } else { "" };
-                    write!(f, "\n  {type_name} {}{state}", c.id)?;
+                    let id = highlighter.short_unique(&c.id);
+                    write!(f, "\n  {type_name} {id}{state}")?;
                 }
                 Ok(())
             }
