@@ -40,14 +40,15 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use gage_core::datetime::now_ms;
 use gage_core::uuid::{new_uuid, short_uuid};
 use gage_registry::scanner::{Scanner, TaskDef, TaskKind};
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
 use gage_runtime2::{
-    CURRENT_RUNTIME_SCHEME, Fail, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX, ScanContext,
-    ScanDatasetRef, TaskOutput, is_ignore,
+    AgentPoolDelta, CURRENT_RUNTIME_SCHEME, Fail, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX,
+    ScanContext, ScanDatasetRef, TaskOutput, is_ignore,
 };
 use gage_scan::error::render_task_error;
 use gage_session::Driver;
@@ -59,7 +60,7 @@ use rune::runtime::{RuntimeContext, Unit, Value, VmError};
 use rune::sync::Arc as RuneArc;
 use rune::{Diagnostics, Source, Sources, Vm};
 use serde_json as json;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -101,6 +102,15 @@ pub enum Event {
     TaskStarted {
         scanner: String,
         task: String,
+    },
+    /// The task's standing on the agent pool changed. `waiting` is
+    /// true when every agent the task has called is queued for a
+    /// permit and none holds one; the task's working time holds
+    /// still until a permit is granted again
+    TaskWaiting {
+        scanner: String,
+        task: String,
+        waiting: bool,
     },
     /// A task reached a terminal status. `error` is the rendered
     /// failure for `Failed`.
@@ -357,6 +367,9 @@ pub struct ScanConfig<'a> {
     pub dataset: Option<&'a str>,
     /// Tasks run at once. Treated as at least 1.
     pub jobs: usize,
+    /// Agents run at once across every task of the scan. Treated as
+    /// at least 1.
+    pub agent_jobs: usize,
     /// The driver that runs the scan's agents
     pub driver: Arc<dyn Driver>,
     /// Ignore prior work: every object's high-water mark is 0 and no
@@ -450,6 +463,7 @@ pub async fn scan(
         Arc::clone(&config.driver),
     )?;
     scan_ctx.invalidate = config.invalidate;
+    scan_ctx.agent_pool = Arc::new(Semaphore::new(config.agent_jobs.max(1)));
     trace::install_panic_hook();
     let scope = LogScope {
         object_dir: scan_dir.object_dir(),
@@ -517,7 +531,57 @@ struct Dispatch {
     ready: VecDeque<usize>,
     /// Running tasks by tokio task id
     running: HashMap<Id, usize>,
+    /// Agent pool standing and working stopwatch per task
+    pool: Vec<PoolState>,
     counts: TaskCounts,
+}
+
+/// A task's standing on the agent pool and its working stopwatch. The
+/// stopwatch runs from the task's start except over spells where every
+/// agent the task has called is queued for a permit and none holds
+/// one.
+#[derive(Debug, Clone, Default)]
+struct PoolState {
+    waiting: u32,
+    active: u32,
+    /// Completed working spells
+    worked: Duration,
+    /// Start of the open working spell, `None` while blocked
+    working_since: Option<Instant>,
+}
+
+impl PoolState {
+    fn blocked(&self) -> bool {
+        self.active == 0 && self.waiting > 0
+    }
+
+    /// Fold one agent's step in; true when the blocked state changed.
+    fn apply(&mut self, delta: AgentPoolDelta) -> bool {
+        let was_blocked = self.blocked();
+        match delta {
+            AgentPoolDelta::Queued => self.waiting += 1,
+            AgentPoolDelta::Acquired => {
+                self.waiting = self.waiting.saturating_sub(1);
+                self.active += 1;
+            }
+            AgentPoolDelta::Released => self.active = self.active.saturating_sub(1),
+        }
+        let blocked = self.blocked();
+        match (blocked, self.working_since) {
+            (true, Some(since)) => {
+                self.worked += since.elapsed();
+                self.working_since = None;
+            }
+            (false, None) => self.working_since = Some(Instant::now()),
+            _ => {}
+        }
+        blocked != was_blocked
+    }
+
+    /// Time worked so far, including the open spell
+    fn worked_total(&self) -> Duration {
+        self.worked + self.working_since.map(|s| s.elapsed()).unwrap_or_default()
+    }
 }
 
 impl<F: FnMut(Event)> Run<'_, F> {
@@ -556,6 +620,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
                 .filter(|i| plan.deps[*i] == 0)
                 .collect(),
             running: HashMap::new(),
+            pool: vec![PoolState::default(); plan.tasks.len()],
             counts: TaskCounts {
                 total: plan.tasks.len(),
                 ..TaskCounts::default()
@@ -670,7 +735,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
                 _ = cancel.cancelled() => break,
                 Some(joined) = running.join_next_with_id(), if !running.is_empty() => joined,
                 Some(output) = output_rx.recv() => {
-                    deliver(output, logs, &mut self.on_event)?;
+                    self.handle_output(plan, d, output, logs)?;
                     continue;
                 }
             };
@@ -690,7 +755,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
             };
             // The task has returned; deliver what it sent before its
             // record closes
-            self.drain_output(logs)?;
+            self.drain_output(plan, d, logs)?;
             let (status, error) = match result {
                 Ok(()) => (TaskStatus::Completed, None),
                 Err(message) => (TaskStatus::Failed, Some(message)),
@@ -703,7 +768,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
             tracing::info!(aborted = d.running.len(), unstarted, "scan canceled");
             running.abort_all();
             while running.join_next().await.is_some() {}
-            self.drain_output(logs)?;
+            self.drain_output(plan, d, logs)?;
             self.say(logs, ScanOutput::Err("scan canceled\n".into()))?;
             for i in 0..total {
                 if d.status[i].is_none() {
@@ -729,10 +794,11 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let t = &plan.tasks[i];
         let now = now_ms();
         d.started[i] = Some(now);
+        d.pool[i].working_since = Some(Instant::now());
         self.scan_dir.write_task(
             &t.scanner,
             &t.task,
-            &task_attrs(TaskStatus::Started, Some(now), None),
+            &task_attrs(TaskStatus::Started, Some(now), None, None),
         )?;
         (self.on_event)(Event::TaskStarted {
             scanner: t.scanner.clone(),
@@ -783,13 +849,15 @@ impl<F: FnMut(Event)> Run<'_, F> {
     ) -> Result<(), ScanError> {
         let t = &plan.tasks[i];
         let stopped = d.started[i].map(|_| now_ms());
-        let attrs = task_attrs(status, d.started[i], stopped);
+        let worked_ms = d.started[i].map(|_| d.pool[i].worked_total().as_millis() as u64);
+        let attrs = task_attrs(status, d.started[i], stopped, worked_ms);
         self.scan_dir.write_task(&t.scanner, &t.task, &attrs)?;
         tracing::info!(
             scanner = %t.scanner,
             task = %t.task,
             status = status.as_str(),
             elapsed_ms = d.started[i].zip(stopped).map(|(a, b)| b - a),
+            worked_ms,
             "task finished"
         );
         match status {
@@ -822,9 +890,46 @@ impl<F: FnMut(Event)> Run<'_, F> {
     }
 
     /// Deliver every output the tasks have sent so far.
-    fn drain_output(&mut self, logs: &mut Logs) -> Result<(), ScanError> {
+    fn drain_output(
+        &mut self,
+        plan: &Plan,
+        d: &mut Dispatch,
+        logs: &mut Logs,
+    ) -> Result<(), ScanError> {
         while let Ok(output) = self.output_rx.try_recv() {
-            deliver(output, logs, &mut self.on_event)?;
+            self.handle_output(plan, d, output, logs)?;
+        }
+        Ok(())
+    }
+
+    /// Fold an agent pool step into its task's standing, telling the
+    /// sink when the task becomes blocked or resumes. Every other
+    /// output is recorded and delivered.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "task indices are plan-internal and bounded by construction"
+    )]
+    fn handle_output(
+        &mut self,
+        plan: &Plan,
+        d: &mut Dispatch,
+        output: TaskOutput,
+        logs: &mut Logs,
+    ) -> Result<(), ScanError> {
+        let Output::AgentPool(delta) = &output.output else {
+            return deliver(output, logs, &mut self.on_event);
+        };
+        let i = plan
+            .tasks
+            .iter()
+            .position(|t| t.scanner == output.scanner && t.task == output.task)
+            .expect("every output sink names a planned task");
+        if d.pool[i].apply(*delta) {
+            (self.on_event)(Event::TaskWaiting {
+                scanner: output.scanner,
+                task: output.task,
+                waiting: d.pool[i].blocked(),
+            });
         }
         Ok(())
     }
@@ -870,12 +975,17 @@ pub fn summary_line(shown_id: &str, attrs: &ScanAttrs) -> String {
     )
 }
 
-fn task_attrs(status: TaskStatus, started: Option<i64>, stopped: Option<i64>) -> TaskAttrs {
+fn task_attrs(
+    status: TaskStatus,
+    started: Option<i64>,
+    stopped: Option<i64>,
+    worked_ms: Option<u64>,
+) -> TaskAttrs {
     TaskAttrs {
         status,
         started,
         stopped,
-        worked_ms: None,
+        worked_ms,
         skipped: None,
     }
 }
@@ -896,8 +1006,9 @@ fn deliver(
             let origin = format!("{}:{}", output.scanner, output.task);
             logs.record(*level, &origin, message)?;
         }
-        // A snapshot for a live view, not a record of the scan
-        Output::Progress { .. } => {}
+        // A snapshot for a live view, not a record of the scan. A pool
+        // step never reaches here: `handle_output` folds it
+        Output::Progress { .. } | Output::AgentPool(_) => {}
     }
     on_event(Event::Output(output));
     Ok(())
@@ -1103,6 +1214,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -1451,30 +1563,208 @@ mod tests {
             Err(DriverError::Other("read_stored not used".into()))
         }
         fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
-            let native_id = format!("native-{}", spec.prompt);
-            let outcome = AgentOutcome {
-                text: spec.prompt.clone(),
-                stop_reason: "end_turn".into(),
-                turns: 1,
-                session_id: native_id.clone(),
-                raw: String::new(),
-                ..AgentOutcome::default()
-            };
-            Ok(Box::new(ScriptedAgent {
-                events: [
-                    AgentEvent::Assistant(spec.prompt),
-                    AgentEvent::TurnEnd {
-                        outcome: Box::new(outcome),
-                        idle: true,
-                    },
-                ]
-                .into_iter()
-                .collect(),
-                native_id,
-                project: spec.project,
-                cleaned_up: Arc::clone(&self.cleaned_up),
+            Ok(Box::new(echo_agent(spec, Arc::clone(&self.cleaned_up))))
+        }
+    }
+
+    /// An agent that answers with its prompt in one turn; its
+    /// transcript's native id is `native-<prompt>`.
+    fn echo_agent(
+        spec: AgentSpec,
+        cleaned_up: Arc<std::sync::atomic::AtomicBool>,
+    ) -> ScriptedAgent {
+        let native_id = format!("native-{}", spec.prompt);
+        let outcome = AgentOutcome {
+            text: spec.prompt.clone(),
+            stop_reason: "end_turn".into(),
+            turns: 1,
+            session_id: native_id.clone(),
+            raw: String::new(),
+            ..AgentOutcome::default()
+        };
+        ScriptedAgent {
+            events: [
+                AgentEvent::Assistant(spec.prompt),
+                AgentEvent::TurnEnd {
+                    outcome: Box::new(outcome),
+                    idle: true,
+                },
+            ]
+            .into_iter()
+            .collect(),
+            native_id,
+            project: spec.project,
+            cleaned_up,
+        }
+    }
+
+    /// A driver that counts its live agents and records the most that
+    /// ran at once. Each agent yields to the scheduler before every
+    /// event so the task's other calls get to queue on the pool.
+    struct PoolDriver {
+        live: Arc<std::sync::atomic::AtomicUsize>,
+        max_live: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct PoolAgent {
+        inner: ScriptedAgent,
+        live: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for PoolAgent {
+        async fn next_event(&mut self) -> Option<AgentEvent> {
+            tokio::task::yield_now().await;
+            self.inner.next_event().await
+        }
+        async fn send(&mut self, text: &str) -> std::io::Result<()> {
+            self.inner.send(text).await
+        }
+        async fn interrupt(&mut self) -> std::io::Result<()> {
+            self.inner.interrupt().await
+        }
+        fn close_input(&mut self) {
+            self.inner.close_input()
+        }
+        async fn wait_exit(&mut self) -> std::io::Result<i32> {
+            self.inner.wait_exit().await
+        }
+        async fn kill(&mut self, grace: std::time::Duration) -> std::io::Result<()> {
+            self.inner.kill(grace).await
+        }
+        async fn take_stderr(&mut self) -> std::io::Result<Vec<u8>> {
+            self.inner.take_stderr().await
+        }
+        fn transcript(&mut self) -> Result<Option<Box<dyn NativeSession + Send>>, DriverError> {
+            self.inner.transcript()
+        }
+        fn cleanup(&mut self) -> Result<(), DriverError> {
+            self.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.cleanup()
+        }
+    }
+
+    impl Driver for PoolDriver {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        fn version(&self) -> &'static str {
+            "0.1"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            &["scripted"]
+        }
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("open_source not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            use std::io::Write as _;
+            let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
+            w.write_all(b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
+                .map_err(DriverError::Io)?;
+            Ok("scripted 1".to_string())
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used".into()))
+        }
+        fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let live = self.live.fetch_add(1, SeqCst) + 1;
+            self.max_live.fetch_max(live, SeqCst);
+            Ok(Box::new(PoolAgent {
+                inner: echo_agent(spec, Arc::new(std::sync::atomic::AtomicBool::new(false))),
+                live: Arc::clone(&self.live),
             }))
         }
+    }
+
+    /// `agent_jobs` bounds the agents running at once across the scan.
+    /// A task whose agents are all queued for a permit is reported
+    /// waiting until one is granted, and the task's recorded working
+    /// time is written.
+    #[tokio::test]
+    async fn the_agent_pool_bounds_agents_and_reports_the_task_waiting() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::{AgentRunner, call_agent};
+
+            pub const SCANNER = #{
+                name: "pooled",
+                description: "Runs agents through the pool",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let runner = AgentRunner::new();
+                for p in ["a", "b", "c"] {
+                    runner.add(call_agent(p), p);
+                }
+                let results = runner.start();
+                let done = 0;
+                while let Some(item) = results.next().await {
+                    item?;
+                    done += 1;
+                }
+                println!("{}", done);
+            }
+            "#,
+        );
+        let driver = Arc::new(PoolDriver {
+            live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            agent_jobs: 1,
+            driver: driver.clone(),
+            invalidate: false,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(outputs(&events), [&Output::Println("3".into())]);
+        assert_eq!(
+            driver.max_live.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one permit, one agent at a time"
+        );
+        // The first call holds the permit while the other two queue;
+        // each release blocks the task until the next grant
+        let waits: Vec<bool> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::TaskWaiting { waiting, .. } => Some(*waiting),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(waits, [true, false, true, false], "{events:?}");
+        let record = ScanStore::from(&store).get(&outcome.id).unwrap();
+        let attrs = &record.content.tasks[0].attrs;
+        assert!(
+            attrs.worked_ms.is_some(),
+            "a started task records its working time: {attrs:?}"
+        );
     }
 
     /// A call that declares tools is handed to the driver with the
@@ -1511,6 +1801,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            agent_jobs: 8,
             driver: driver.clone(),
             invalidate: false,
         };
@@ -1561,6 +1852,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            agent_jobs: 8,
             driver: driver.clone(),
             invalidate: false,
         };
@@ -1630,6 +1922,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            agent_jobs: 8,
             driver: Arc::new(ScriptedDriver::new()),
             invalidate: false,
         };
@@ -1697,6 +1990,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            agent_jobs: 8,
             driver,
             invalidate: false,
         };
@@ -1825,6 +2119,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            agent_jobs: 8,
             driver,
             invalidate: false,
         };
@@ -2541,6 +2836,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -2635,6 +2931,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -2692,6 +2989,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -2944,6 +3242,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -3169,6 +3468,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -3269,6 +3569,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -3453,6 +3754,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -3701,6 +4003,7 @@ mod tests {
                     gage_version: "test-version",
                     dataset: Some(&dataset_sha),
                     jobs: 1,
+                    agent_jobs: 8,
                     driver: claude_driver(),
                     invalidate: false,
                 };
@@ -3949,6 +4252,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -4024,6 +4328,7 @@ mod tests {
                     gage_version: "test-version",
                     dataset: None,
                     jobs: 1,
+                    agent_jobs: 8,
                     driver: claude_driver(),
                     invalidate: false,
                 };
@@ -4161,6 +4466,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -4379,6 +4685,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(dataset_sha),
             jobs: 1,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate,
         };
@@ -5102,6 +5409,7 @@ mod tests {
             gage_version: "test-version",
             dataset: None,
             jobs: 2,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };
@@ -5182,6 +5490,7 @@ mod tests {
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
             jobs: 2,
+            agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
         };

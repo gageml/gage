@@ -22,6 +22,11 @@
 //! queued call, and `next().await` on the result yields each
 //! `(AgentResult, ctx)` pair in completion order, then `None`. The
 //! calls run inline on the task that polls `next`.
+//!
+//! Every agent of the scan shares the scan context's agent pool.
+//! `call_agent` waits for a permit before the agent starts and holds
+//! it until the session ends, reporting each step to the task's
+//! output sink as an [`AgentPoolDelta`].
 
 use std::collections::VecDeque;
 use std::fs;
@@ -41,11 +46,12 @@ use gage_store::{AgentAttrs, SessionStore};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
+use tokio::sync::OwnedSemaphorePermit;
 use tracing::{Instrument, Span, field};
 
-use crate::OUTPUT_SINK;
 use crate::scan::{ScanContext, current};
 use crate::tool::{self, Tool, tool_from_value};
+use crate::{AgentPoolDelta, OUTPUT_SINK, Output, OutputSink};
 
 pub(crate) fn module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate("gage")?;
@@ -210,10 +216,10 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     let ctx = current().map_err(|e| Error::agent(e.to_string()))?;
     let mut spec = c.spec;
     let tools = c.tools.len();
+    let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
     let service = if c.tools.is_empty() {
         None
     } else {
-        let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
         let (tool_spec, tool_names) = tool::consume(&c.tools, &ctx, sink.as_ref()).await?;
         let host = ctx
             .mcp_host()
@@ -228,6 +234,7 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     };
     let model = spec.model.clone();
     let max_turns = spec.max_turns;
+    let permit = acquire_permit(&ctx, sink).await;
     let session = ctx
         .driver
         .run_agent(spec)
@@ -239,6 +246,7 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
         inner: Arc::new(Mutex::new(AgentInner {
             session: Some(session),
             service,
+            permit: Some(permit),
             ctx,
             event_buf: VecDeque::new(),
             stop_seen: false,
@@ -249,6 +257,48 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
             started: Instant::now(),
         })),
     })
+}
+
+/// Take a permit on the scan's agent pool. A free permit is taken at
+/// once and reported as `Acquired`; otherwise `Queued` is reported,
+/// then `Acquired` once the wait ends.
+async fn acquire_permit(ctx: &ScanContext, sink: Option<OutputSink>) -> PoolPermit {
+    let pool = Arc::clone(&ctx.agent_pool);
+    let permit = match Arc::clone(&pool).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            report_pool(sink.as_ref(), AgentPoolDelta::Queued);
+            pool.acquire_owned()
+                .await
+                .expect("agent pool is never closed")
+        }
+    };
+    report_pool(sink.as_ref(), AgentPoolDelta::Acquired);
+    PoolPermit {
+        _permit: permit,
+        sink,
+    }
+}
+
+/// Report one pool step to the task's sink. No sink means no task is
+/// listening, as when an agent starts outside a scan.
+fn report_pool(sink: Option<&OutputSink>, delta: AgentPoolDelta) {
+    if let Some(sink) = sink {
+        sink.send(Output::AgentPool(delta));
+    }
+}
+
+/// One agent's permit on the scan's agent pool. Drop returns the
+/// permit and reports `Released`.
+struct PoolPermit {
+    _permit: OwnedSemaphorePermit,
+    sink: Option<OutputSink>,
+}
+
+impl Drop for PoolPermit {
+    fn drop(&mut self) {
+        report_pool(self.sink.as_ref(), AgentPoolDelta::Released);
+    }
 }
 
 /// A running agent. State sits under one sync mutex the methods lock
@@ -272,6 +322,8 @@ struct AgentInner {
     /// The tool service registered for this session; unregistered
     /// when the session ends
     service: Option<ServiceHandle>,
+    /// The agent pool permit; returned when the session ends
+    permit: Option<PoolPermit>,
     ctx: ScanContext,
     event_buf: VecDeque<Event>,
     stop_seen: bool,
@@ -443,6 +495,7 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
 
     let mut g = inner.lock().unwrap();
     g.service = None;
+    g.permit = None;
     g.final_result = Some(AgentResult::new(
         outcome.unwrap_or_default(),
         &stop_reason,
@@ -594,7 +647,8 @@ async fn kill(this: Mut<Agent>, grace_secs: i64) -> Result<Result<(), Error>, Vm
 }
 
 /// Queued one-shot calls, each with a context value handed back with
-/// its result. The runner imposes no concurrency limit of its own.
+/// its result. The runner imposes no concurrency limit of its own;
+/// the scan's agent pool bounds its calls.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct AgentRunner {

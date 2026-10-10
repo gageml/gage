@@ -201,6 +201,13 @@ pub struct Scan2RunArgs {
     #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 6)]
     jobs: usize,
 
+    /// Agents to run at once
+    ///
+    /// Bounds the agents running across every task of the scan. A task
+    /// whose agents are all waiting for a slot shows as waiting.
+    #[arg(long, value_name = "N", default_value_t = 8, display_order = 7)]
+    agent_jobs: usize,
+
     #[command(flatten)]
     select: SessionSelectArgs,
 
@@ -1149,6 +1156,14 @@ async fn drive_view(
                     status.finish(&id);
                     send_view_event(&view_tx, status.snapshot());
                 }
+                Event::TaskWaiting {
+                    scanner,
+                    task,
+                    waiting,
+                } => {
+                    status.waiting(&TaskId { scanner, task }, waiting);
+                    send_view_event(&view_tx, status.snapshot());
+                }
                 Event::Output(TaskOutput {
                     scanner,
                     task,
@@ -1164,6 +1179,8 @@ async fn drive_view(
                     ),
                     // Log records are in the scan's `records`, shown by `l`
                     Output::Log { .. } => {}
+                    // Folded by the runner into `TaskWaiting`
+                    Output::AgentPool(_) => {}
                 },
                 Event::Scan(ScanOutput::Out(text) | ScanOutput::Err(text)) => {
                     send_view_event(&view_tx, scan_view::Event::Log(text.trim_end().to_string()));
@@ -1247,6 +1264,22 @@ impl LiveStatus {
     fn progress(&mut self, id: &TaskId, pos: u64, total: u64) {
         if let Some(task) = self.running.iter_mut().find(|r| r.id == *id) {
             task.progress = Some((pos, total));
+        }
+    }
+
+    /// The task is blocked on the agent pool, or has resumed. The
+    /// working stopwatch stops over a blocked spell.
+    fn waiting(&mut self, id: &TaskId, waiting: bool) {
+        if let Some(task) = self.running.iter_mut().find(|r| r.id == *id) {
+            task.pool_blocked = waiting;
+            match (waiting, task.working_since) {
+                (true, Some(since)) => {
+                    task.worked += since.elapsed();
+                    task.working_since = None;
+                }
+                (false, None) => task.working_since = Some(Instant::now()),
+                _ => {}
+            }
         }
     }
 
@@ -1476,6 +1509,7 @@ struct ScanPrep {
     /// The dataset to scan, built or reused once the run starts
     plan: DatasetPlan,
     jobs: usize,
+    agent_jobs: usize,
     invalidate: bool,
     /// The progress view is shown; headless otherwise
     progress_ui: bool,
@@ -1582,6 +1616,7 @@ async fn prepare_scan_dialog(
         compiled,
         plan,
         jobs: args.jobs,
+        agent_jobs: args.agent_jobs,
         invalidate: args.invalidate,
         progress_ui: !args.no_progress && io::stdout().is_terminal(),
     });
@@ -1619,6 +1654,7 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
         gage_version: crate::VERSION,
         dataset: dataset_sha.as_deref(),
         jobs: prep.jobs,
+        agent_jobs: prep.agent_jobs,
         driver: Arc::new(ClaudeDriver::new()),
         invalidate: prep.invalidate,
     };
@@ -1636,7 +1672,7 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
                 Event::Output(TaskOutput { output, .. }) => match output {
                     Output::Print(s) => print!("{s}"),
                     Output::Println(s) => println!("{s}"),
-                    Output::Log { .. } | Output::Progress { .. } => {}
+                    Output::Log { .. } | Output::Progress { .. } | Output::AgentPool(_) => {}
                 },
                 Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
                 Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
@@ -1648,7 +1684,8 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
                         plural(n, "task")
                     );
                 }
-                Event::Summary { .. } => {}
+                // A snapshot for the progress view
+                Event::TaskWaiting { .. } | Event::Summary { .. } => {}
                 Event::Warning {
                     scanner,
                     task,

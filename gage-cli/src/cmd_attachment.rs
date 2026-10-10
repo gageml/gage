@@ -329,7 +329,7 @@ async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]
             Output::Print(s) => print!("{s}"),
             Output::Println(s) => println!("{s}"),
             Output::Log { level, message } => eprintln!("{}: {message}", level.as_str()),
-            Output::Progress { .. } => {}
+            Output::Progress { .. } | Output::AgentPool(_) => {}
         },
         AttachEvent::Attached { attached, .. } => {
             let verb = match attached.outcome.as_str() {

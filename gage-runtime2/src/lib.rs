@@ -82,6 +82,23 @@ pub enum Output {
     Log { level: Level, message: String },
     /// A `Progress` snapshot: absolute position and total
     Progress { pos: u64, total: u64 },
+    /// One of the task's agents moved through the scan's agent pool
+    AgentPool(AgentPoolDelta),
+}
+
+/// One agent's step through the scan's agent pool, reported by the
+/// task that called it. A call that finds a permit free reports
+/// `Acquired` alone; a call that has to wait reports `Queued` first.
+/// Every `Acquired` is followed by one `Released`, so a consumer can
+/// count the task's agents waiting for a permit and holding one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPoolDelta {
+    /// `call_agent` is waiting for a permit
+    Queued,
+    /// The permit is held; the agent starts
+    Acquired,
+    /// The agent has ended and its permit is returned
+    Released,
 }
 
 /// A log record's level, the set the Rust `log` crate defines.

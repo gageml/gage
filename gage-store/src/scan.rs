@@ -135,8 +135,9 @@ pub struct TaskAttrs {
     /// UNIX time millis
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<i64>,
-    /// Accumulated working time, excluding agent pool waits. Written
-    /// by no writer today.
+    /// Working time in millis: the span from start to stop less the
+    /// spells where every agent the task had called was waiting on
+    /// the agent pool. Present once the task has started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worked_ms: Option<u64>,
     /// Why the task was skipped; present only for `skipped`

@@ -34,7 +34,7 @@ use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 use serde_json as json;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, Semaphore};
 
 use crate::tool::QueryScope;
 
@@ -72,6 +72,10 @@ pub struct ScanContext {
     pub sources: Option<Arc<Sources>>,
     /// The driver that runs the scan's agents
     pub driver: Arc<dyn Driver>,
+    /// Bounds the agents running at once across every task of the
+    /// scan: `call_agent` holds a permit from the agent's start to its
+    /// end. Unbounded until the orchestrator sizes it.
+    pub agent_pool: Arc<Semaphore>,
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// The scan directory: where the runtime writes during the run
     /// and the source of the scan-scoped query context
@@ -109,6 +113,7 @@ impl ScanContext {
             task: String::new(),
             sources: None,
             driver,
+            agent_pool: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             paths,
             invalidate: false,
