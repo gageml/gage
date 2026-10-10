@@ -29,6 +29,7 @@ mod cmd_agent;
 mod cmd_attachment;
 mod cmd_config;
 mod cmd_dataset;
+mod cmd_fetch;
 mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
@@ -222,6 +223,12 @@ enum Command {
     /// Sends the named objects and everything they link. The whole
     /// store is sent only by `gage backup`.
     Push(cmd_push::PushArgs),
+
+    /// Fetch objects from a remote
+    ///
+    /// Adopts what the remote has: everything, or the named objects
+    /// and what they link. Reports what could not be merged.
+    Fetch(cmd_fetch::FetchArgs),
 
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
@@ -437,6 +444,7 @@ async fn main() {
             Command::Query2(args) => cmd_query2::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_push::main(args).await,
+            Command::Fetch(args) => cmd_fetch::main(args),
         }
     };
     tokio::pin!(cmd);

@@ -25,8 +25,8 @@ pub const OBJECT_TYPE: &str = "gage::dataset";
 const OBJECT_VERSION: &str = "1";
 /// Datasets declare no indexed attributes.
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
-const SESSIONS_LINK: &str = "sessions.link";
-const ATTACHMENTS_LINK: &str = "attachments.link";
+pub(crate) const SESSIONS_LINK: &str = "sessions.link";
+pub(crate) const ATTACHMENTS_LINK: &str = "attachments.link";
 
 /// Dataset operations over an opened store.
 pub struct DatasetStore<'a> {

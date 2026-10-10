@@ -44,6 +44,7 @@ mod attachment;
 mod content;
 mod dataset;
 mod error;
+mod fetch;
 pub mod git;
 pub mod index;
 mod issue;
@@ -78,6 +79,7 @@ pub use dataset::{
     OBJECT_TYPE as DATASET_TYPE, SessionSpec,
 };
 pub use error::StoreError;
+pub use fetch::{Conflict, FetchReport, Outcome, RefOutcome, Side};
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{IdMatch, IndexCounts, IndexStatus, Order, SelectedTip};
 pub use issue::{

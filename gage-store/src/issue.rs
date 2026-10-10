@@ -28,6 +28,7 @@ use std::str::FromStr;
 use gage_core::uuid::{new_ulid, new_uuid, ulid_timestamp_ms};
 use serde::{Deserialize, Serialize};
 
+use crate::fetch::Side;
 use crate::git::{EntryKind, TreeEntry};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::key::{resolve_key, validate_key};
@@ -626,6 +627,106 @@ impl IssueStore<'_> {
         }
     }
 
+    /// The merged tree of two divergent commits of one issue, for the
+    /// fetch path. The change entries of both sides are kept (ULIDs
+    /// never collide). The status is the one both agree on, or the one
+    /// side that moved it since `base`; when both moved it to different
+    /// results, `choose` picks a side and a `status` entry by `author`
+    /// records the resolution, and without `choose` the two results are
+    /// returned as the conflict. Description and evidence are the
+    /// remote's; neither is editable.
+    pub(crate) fn merge_divergent(
+        &self,
+        local: &Object,
+        remote: &Object,
+        base: Option<&Object>,
+        choose: Option<Side>,
+        author: &str,
+        remote_name: &str,
+    ) -> Result<Result<ObjectTree, (String, String)>, StoreError> {
+        let path = self.store.path();
+        let local_attrs = decode_attrs(local)?;
+        let mut attrs = decode_attrs(remote)?;
+        let base_status = match base {
+            Some(base) => Some(status_of(&decode_attrs(base)?)),
+            None => None,
+        };
+        let ours = status_of(&local_attrs);
+        let theirs = status_of(&attrs);
+        let (chosen, resolved) = if ours == theirs || base_status == Some(ours) {
+            (theirs, None)
+        } else if base_status == Some(theirs) {
+            (ours, None)
+        } else {
+            match choose {
+                Some(Side::Ours) => (ours, Some((theirs, "ours"))),
+                Some(Side::Theirs) => (theirs, Some((ours, "theirs"))),
+                None => return Ok(Err((status_label(&ours), status_label(&theirs)))),
+            }
+        };
+
+        let mut entries: Vec<TreeEntry> = match remote.tree.subtrees.get(CHANGES_DIR) {
+            Some(sha) => self.store.read_tree(sha)?,
+            None => Vec::new(),
+        };
+        if let Some(sha) = local.tree.subtrees.get(CHANGES_DIR) {
+            for entry in self.store.read_tree(sha)? {
+                if !entries.iter().any(|e| e.name == entry.name) {
+                    entries.push(entry);
+                }
+            }
+        }
+        if let Some((from, kept)) = resolved {
+            let change = ChangeAttrs {
+                author: author.to_string(),
+                event: ChangeEvent::Status,
+                from_status: Some(from.0),
+                to_status: Some(chosen.0),
+                reason: chosen.1,
+            };
+            let json = json_line(&change, "issue change")?;
+            let message = format!("Resolved divergence with {remote_name}: kept {kept}");
+            let entry_sha = change_entry(path, &json, Some(message.as_bytes()))?;
+            entries.push(TreeEntry {
+                mode: "040000".to_string(),
+                kind: EntryKind::Tree,
+                sha: entry_sha,
+                size: None,
+                name: new_ulid(),
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let inputs: Vec<TreeInput<'_>> = entries
+            .iter()
+            .map(|e| TreeInput {
+                mode: &e.mode,
+                sha: &e.sha,
+                name: &e.name,
+            })
+            .collect();
+        let changes_sha = mktree(path, &inputs)?;
+
+        attrs.status = chosen.0;
+        attrs.status_reason = chosen.1;
+        let description = remote
+            .tree
+            .blobs
+            .get(DESCRIPTION_FILE)
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        let evidence = remote
+            .tree
+            .links
+            .get(EVIDENCE_LINK)
+            .cloned()
+            .unwrap_or_default();
+        Ok(Ok(build_tree(
+            &attrs,
+            description.as_deref(),
+            evidence,
+            changes_sha,
+        )?))
+    }
+
     /// Delete an issue by writing a parentless tombstone commit.
     /// Returns the resolved id.
     pub fn delete(&self, id_or_prefix: &str) -> Result<String, StoreError> {
@@ -1101,6 +1202,20 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
             path: path.to_path_buf(),
             source: e,
         }),
+    }
+}
+
+/// The workflow state of an issue: its status and, when closed, the
+/// reason.
+fn status_of(attrs: &IssueAttrs) -> (IssueStatus, Option<StatusReason>) {
+    (attrs.status, attrs.status_reason)
+}
+
+/// `closed/wontfix`, `open`
+fn status_label(status: &(IssueStatus, Option<StatusReason>)) -> String {
+    match status.1 {
+        Some(reason) => format!("{}/{}", status.0.as_str(), reason.as_str()),
+        None => status.0.as_str().to_string(),
     }
 }
 

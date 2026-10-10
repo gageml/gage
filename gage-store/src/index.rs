@@ -272,7 +272,7 @@ impl Store {
 
     /// Index `sha` and every commit reachable from it through `first-parent`
     /// and link files that the index does not already hold.
-    fn index_from(&self, sha: &str) -> Result<(), StoreError> {
+    pub(crate) fn index_from(&self, sha: &str) -> Result<(), StoreError> {
         let mut pending = vec![sha.to_string()];
         while let Some(sha) = pending.pop() {
             if self.index.has_commit(&sha)? {

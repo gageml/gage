@@ -159,6 +159,34 @@ impl RemoteStore<'_> {
         cmd.status().map_err(StoreError::Spawn)
     }
 
+    /// Fetch every Gage ref the remote `name` advertises into its
+    /// remote-tracking refs, pruning the ones it no longer has. Git's
+    /// output goes to the terminal as it runs.
+    pub fn fetch_all(&self, name: &str) -> Result<ExitStatus, StoreError> {
+        let mut cmd = git_in(self.store.path(), ["fetch", "--prune", name]);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        cmd.status().map_err(StoreError::Spawn)
+    }
+
+    /// Fetch the named Gage refs of the remote `name` into its
+    /// remote-tracking refs, forced.
+    pub fn fetch_refs(&self, name: &str, ref_names: &[String]) -> Result<ExitStatus, StoreError> {
+        let mut cmd = git_in(self.store.path(), ["fetch", name]);
+        for ref_name in ref_names {
+            let tracking = match ref_name.strip_prefix(ROOT) {
+                Some(rest) => format!("{}{rest}", tracking_prefix(name)),
+                None => return Err(StoreError::Parse(format!("not a Gage ref: {ref_name}"))),
+            };
+            cmd.arg(format!("+{ref_name}:{tracking}"));
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        cmd.status().map_err(StoreError::Spawn)
+    }
+
     /// Git's rule for a remote name is the ref name rule with one
     /// level allowed. A leading `-` passes it but reads as an option.
     fn validate_name(&self, name: &str) -> Result<(), StoreError> {

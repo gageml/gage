@@ -394,6 +394,83 @@ impl Store {
         Ok(EditOutcome::Written(commit_sha))
     }
 
+    /// Write `tree` as a child commit of `onto`, the remote's commit of
+    /// the same object, while the local ref holds `local_tip`: the
+    /// rebase of local work onto what a remote has, after a fetch. The
+    /// child carries `first-parent` = `onto` and `onto`'s identity
+    /// markers. Content equal to `onto`'s moves the ref to `onto` and
+    /// writes nothing. The ref write expects `local_tip`, so a
+    /// concurrent local write fails rather than being overwritten.
+    /// Returns the ref's new commit.
+    pub(crate) fn edit_onto(
+        &self,
+        onto: &Object,
+        tree: &ObjectTree,
+        message: &str,
+        local_tip: &str,
+    ) -> Result<String, StoreError> {
+        if onto.header.is_tombstone() {
+            return Err(StoreError::ObjectDeleted(onto.header.id.clone()));
+        }
+        let path = self.path();
+        let content = write_content(path, tree)?;
+        if content.shas == content_shas(&onto.entries) {
+            self.record_ref_move(onto, local_tip)?;
+            return Ok(onto.commit_sha.clone());
+        }
+        let now = now_ms();
+        let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
+        let parent_sha = write_blob(path, format!("{}\n", onto.commit_sha).as_bytes())?;
+        let mut entries = content.entries;
+        entries.insert("type".to_string(), onto.marker("type")?);
+        entries.insert("id".to_string(), onto.marker("id")?);
+        entries.insert("created".to_string(), onto.marker("created")?);
+        entries.insert("modified".to_string(), blob_entry(&modified_sha));
+        entries.insert(FIRST_PARENT_FILE.to_string(), blob_entry(&parent_sha));
+        let tree_sha = mktree(path, &tree_lines(&entries))?;
+        let key = plan_key_ref(
+            self,
+            Some(onto),
+            &onto.header.object_type,
+            &onto.header.id,
+            Some(tree),
+        )?;
+        let links = self.link_files_for_write(tree, &tree_sha)?;
+        let parents = link_parents(Some(&onto.commit_sha), &links);
+        let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
+        let commit_sha = commit_tree(path, &tree_sha, message, &parents)?;
+        let object = Object {
+            commit_sha: commit_sha.clone(),
+            header: ObjectHeader {
+                modified_ms: Some(now),
+                deleted_ms: None,
+                first_parent: Some(onto.commit_sha.clone()),
+                ..onto.header.clone()
+            },
+            tree: tree.clone(),
+            entries,
+        };
+        self.record_write(&object, &links, local_tip, key.as_ref())?;
+        Ok(commit_sha)
+    }
+
+    /// Point the object's ref at `object`, a commit already in the
+    /// repository, while the ref holds `expected_tip` (empty for a ref
+    /// that must not exist), and index it. The fetch path uses this for
+    /// every outcome that adopts a remote commit as is.
+    pub(crate) fn record_ref_move(
+        &self,
+        object: &Object,
+        expected_tip: &str,
+    ) -> Result<(), StoreError> {
+        let links = self.find_link_files(&object.commit_sha)?;
+        // Key refs are derived from the adopted objects afterwards, by
+        // the fetch loop, so none is written here
+        self.record_write(object, &links, expected_tip, None)?;
+        // The adopted commit may bring ancestors the index has not seen
+        self.in_index_transaction(|| self.index_from(&object.commit_sha))
+    }
+
     /// Delete the object `id_or_prefix` names, whatever its type, by
     /// writing a tombstone as [`Store::delete`] does. The object's
     /// content is read as the object model alone, so a type whose
