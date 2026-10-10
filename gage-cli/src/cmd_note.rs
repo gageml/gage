@@ -17,7 +17,6 @@ use tabled::{
     settings::{
         Color, Style, Width,
         object::{Cell, Columns, Object, Rows},
-        peaker::PriorityMax,
     },
 };
 
@@ -52,6 +51,10 @@ pub struct NoteListArgs {
 
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
+
+    /// Show the full note ID
+    #[arg(long)]
+    full_id: bool,
 }
 
 #[derive(Args)]
@@ -188,6 +191,7 @@ pub async fn list(args: NoteListArgs) {
         let createds = column::<TimestampMillisecondArray>(batch, 7);
         for i in 0..batch.num_rows() {
             let id = ids.value(i);
+            let shown = if args.full_id { id } else { short_uuid(id) };
             // A text note shows its text; a JSON note its compact JSON
             let raw = if texts.is_valid(i) {
                 texts.value(i)
@@ -210,7 +214,7 @@ pub async fn list(args: NoteListArgs) {
                 String::new()
             };
             rows.push(vec![
-                styled_id(short_uuid(id), prefixes.value(i), IdKind::Gage),
+                styled_id(shown, prefixes.value(i), IdKind::Gage),
                 names.value(i).to_string(),
                 value_cell(raw),
                 target,
@@ -227,7 +231,7 @@ pub async fn list(args: NoteListArgs) {
         .with(
             Width::truncate(term_width)
                 .suffix("…")
-                .priority(PriorityMax::left()),
+                .priority(style::IdAwarePriority::new(args.full_id)),
         )
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(

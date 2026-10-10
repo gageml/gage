@@ -23,7 +23,6 @@ use tabled::{
     settings::{
         Color, Style, Width,
         object::{Columns, Object, Rows},
-        peaker::PriorityMax,
     },
 };
 
@@ -86,6 +85,10 @@ pub struct IssueListArgs {
     /// Show closed issues
     #[arg(short, long)]
     closed: bool,
+
+    /// Show the full issue ID
+    #[arg(long)]
+    full_id: bool,
 }
 
 #[derive(Args)]
@@ -282,6 +285,8 @@ pub async fn list(args: IssueListArgs) {
         let scans = column::<StringArray>(batch, 6);
         let createds = column::<TimestampMillisecondArray>(batch, 7);
         for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let shown = if args.full_id { id } else { short_uuid(id) };
             let status = if reasons.is_valid(i) {
                 format!("{} ({})", statuses.value(i), reasons.value(i))
             } else {
@@ -298,7 +303,7 @@ pub async fn list(args: IssueListArgs) {
                 String::new()
             };
             rows.push(vec![
-                styled_id(short_uuid(ids.value(i)), prefixes.value(i), IdKind::Gage),
+                styled_id(shown, prefixes.value(i), IdKind::Gage),
                 names.value(i).to_string(),
                 titles.value(i).to_string(),
                 scan,
@@ -315,7 +320,7 @@ pub async fn list(args: IssueListArgs) {
         .with(
             Width::truncate(term_width)
                 .suffix("…")
-                .priority(PriorityMax::left()),
+                .priority(style::IdAwarePriority::new(args.full_id)),
         )
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(

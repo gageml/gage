@@ -129,6 +129,10 @@ pub struct DatasetRefreshArgs {
 pub struct DatasetListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
+
+    /// Show the full dataset ID
+    #[arg(long)]
+    full_id: bool,
 }
 
 #[derive(Args)]
@@ -524,8 +528,10 @@ pub async fn list(args: DatasetListArgs) {
         let sessions = column::<Int64Array>(batch, 4);
         let tags = column::<StringArray>(batch, 5);
         for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let shown = if args.full_id { id } else { short_uuid(id) };
             rows.push(vec![
-                styled_id(short_uuid(ids.value(i)), prefixes.value(i), IdKind::Gage),
+                styled_id(shown, prefixes.value(i), IdKind::Gage),
                 sessions.value(i).to_string(),
                 attachments.value(i).to_string(),
                 tags.value(i).to_string(),

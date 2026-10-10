@@ -249,6 +249,10 @@ pub struct Scan2RunArgs {
 pub struct Scan2ListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
+
+    /// Show the full scan run ID
+    #[arg(long)]
+    full_id: bool,
 }
 
 #[derive(Args)]
@@ -320,10 +324,12 @@ async fn list(args: Scan2ListArgs) {
         let sessions = column::<Int64Array>(batch, 7);
         let notes = column::<Int64Array>(batch, 8);
         for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let shown = if args.full_id { id } else { short_uuid(id) };
             let count = |arr: &Int64Array| if arr.is_valid(i) { arr.value(i) } else { 0 };
             let elapsed = stopped.value(i).saturating_sub(started.value(i)).max(0) as u64;
             rows.push(vec![
-                s::styled_id(short_uuid(ids.value(i)), prefixes.value(i), s::IdKind::Gage),
+                s::styled_id(shown, prefixes.value(i), s::IdKind::Gage),
                 tasks.value(i).to_string(),
                 count(sessions).to_string(),
                 String::new(),
