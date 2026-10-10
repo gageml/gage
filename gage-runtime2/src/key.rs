@@ -1,6 +1,6 @@
 //! The storage form of the keys a scanner gives. A work id (watermark
 //! and carry-forward) is a path component and a table value, colon
-//! joined. A ref key (issue and attachment) is projected to a ref under
+//! joined. An object key (issue and attachment) is projected to a ref under
 //! `refs/gage/1/key/<type>/`, so a tuple is `/`-joined and the store
 //! applies git's ref rules plus the lowercase rule at the write.
 
@@ -23,10 +23,10 @@ pub(crate) fn encode_key(key: &Value) -> Result<String, Error> {
     Ok(key)
 }
 
-/// A ref key in storage form: a string as given, or a tuple of strings
+/// An object key in storage form: a string as given, or a tuple of strings
 /// and integers `/`-joined. Non-empty and lowercase here; the store
 /// applies the full ref rules when it writes the object.
-pub(crate) fn encode_ref_key(key: &Value) -> Result<String, Error> {
+pub(crate) fn encode_object_key(key: &Value) -> Result<String, Error> {
     let key = match key.borrow_string_ref() {
         Ok(s) => s.to_string(),
         Err(_not_a_string) => parts(key)?.join("/"),

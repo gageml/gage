@@ -47,7 +47,7 @@ use rune::runtime::{Formatter, Protocol, Value, Vec as RuneVec, VmError};
 use rune::{Any, ContextError, Module};
 
 use crate::OUTPUT_SINK;
-use crate::key::encode_ref_key;
+use crate::key::encode_object_key;
 use crate::note::Note;
 use crate::scan::{Scan, ScanContext, current, run, sql_str, string_column};
 
@@ -337,7 +337,7 @@ async fn do_write_issue(w: IssueWrite) -> Written {
             "write_issue: once() requires key()".into(),
         )));
     }
-    let key = match w.key.as_ref().map(encode_ref_key).transpose() {
+    let key = match w.key.as_ref().map(encode_object_key).transpose() {
         Ok(key) => key,
         Err(e) => return Ok(Err(e)),
     };
