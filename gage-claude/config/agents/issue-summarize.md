@@ -3,7 +3,7 @@ name: issue-summarize
 description:
   Summarize a single open Gage issue against the user-benefit / user-pain /
   fix-ease / fix-risk rubric.
-model: sonnet
+model: claude-sonnet-4-6
 tools: mcp__plugin_gage_gage__Query
 ---
 

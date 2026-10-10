@@ -3,7 +3,7 @@ name: pending-issue-reconcile
 description:
   Judge whether a pending Gage issue re-reports a condition already described by
   an existing issue and recommend how to resolve it.
-model: sonnet
+model: claude-sonnet-4-6
 tools: mcp__plugin_gage_gage__Query
 ---
 
