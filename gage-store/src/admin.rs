@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use gage_core::config::gage_home;
 
 use crate::git::{git_cmd, git_in, run};
+use crate::remote::{Remote, RemoteStore};
 use crate::store::remove_index_file;
 use crate::{Store, StoreError};
 
@@ -147,12 +148,6 @@ pub struct StoreStatus {
     pub remotes: Vec<Remote>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Remote {
-    pub name: String,
-    pub url: String,
-}
-
 /// Before-and-after counts for a `gc` run.
 #[derive(Debug)]
 pub struct GcOutcome {
@@ -170,7 +165,7 @@ impl Store {
         let ref_names = run(git_in(path, ["for-each-ref", "--format=%(refname)"]))?;
         let refs = ref_names.lines().count() as u64;
         let ref_prefixes = compute_ref_prefixes(&ref_names);
-        let remotes = parse_remotes(&run(git_in(path, ["remote", "-v"]))?);
+        let remotes = RemoteStore::from(self).list()?;
         Ok(StoreStatus {
             path: path.to_path_buf(),
             loose_objects: counts.count,
@@ -302,21 +297,6 @@ fn compute_ref_prefixes(ref_names: &str) -> Vec<(String, u64)> {
         }
     }
     counts.into_iter().collect()
-}
-
-/// Parses `git remote -v`, keeping the fetch line of each remote.
-fn parse_remotes(output: &str) -> Vec<Remote> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let (name, rest) = line.split_once('\t')?;
-            let url = rest.strip_suffix(" (fetch)")?;
-            Some(Remote {
-                name: name.to_string(),
-                url: url.to_string(),
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -738,15 +718,5 @@ refs/heads/main\n";
     #[test]
     fn ref_prefixes_of_empty_input_is_empty() {
         assert_eq!(compute_ref_prefixes(""), Vec::<(String, u64)>::new());
-    }
-
-    #[test]
-    fn parses_remotes() {
-        let output = "origin\tgit@github.com:x/y.git (fetch)\norigin\tgit@github.com:x/y.git (push)\nbackup\t/tmp/b (fetch)\nbackup\t/tmp/b (push)\n";
-        let remotes = parse_remotes(output);
-        assert_eq!(remotes.len(), 2);
-        assert_eq!(remotes[0].name, "origin");
-        assert_eq!(remotes[0].url, "git@github.com:x/y.git");
-        assert_eq!(remotes[1].name, "backup");
     }
 }

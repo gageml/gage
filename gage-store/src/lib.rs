@@ -52,6 +52,7 @@ mod note;
 pub mod object;
 pub mod query;
 pub mod refs;
+mod remote;
 mod scan;
 pub mod scan_dir;
 mod session;
@@ -63,7 +64,7 @@ pub(crate) mod test_support;
 pub mod url;
 mod writer;
 
-pub use admin::{GcOutcome, InitOutcome, Remote, STORE_VERSION, StoreStatus, init, store_path};
+pub use admin::{GcOutcome, InitOutcome, STORE_VERSION, StoreStatus, init, store_path};
 pub use attachment::{
     AttachmentAddOutcome, AttachmentAttrs, AttachmentFile, AttachmentOutcome, AttachmentQuery,
     AttachmentRecord, AttachmentRemoveOutcome, AttachmentSpec, AttachmentStore,
@@ -96,6 +97,7 @@ pub use query::{
     scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
 };
 pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
+pub use remote::{Remote, RemoteStore, tracking_prefix};
 pub use scan::{
     AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
     ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,

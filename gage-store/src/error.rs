@@ -81,6 +81,12 @@ pub enum StoreError {
     TagExists { name: String, id: String },
     /// No tag has the given name
     TagNotFound(String),
+    /// A remote name git's remote rules reject
+    RemoteName(String),
+    /// A remote with the name exists
+    RemoteExists(String),
+    /// No remote has the given name
+    RemoteNotFound(String),
 }
 
 impl fmt::Display for StoreError {
@@ -185,6 +191,14 @@ impl fmt::Display for StoreError {
                 write!(f, "tag {name} exists and names {id}")
             }
             StoreError::TagNotFound(name) => write!(f, "tag not found: {name}"),
+            StoreError::RemoteName(name) => write!(
+                f,
+                "invalid remote name {name:?}: a remote name follows git's ref \
+                 rules (no spaces, '..', '~', '^', ':', '?', '*', '[', or '\\'; \
+                 no leading '-' or '.'; no trailing '/', '.', or '.lock')"
+            ),
+            StoreError::RemoteExists(name) => write!(f, "remote {name} exists"),
+            StoreError::RemoteNotFound(name) => write!(f, "remote not found: {name}"),
         }
     }
 }
@@ -223,7 +237,10 @@ impl std::error::Error for StoreError {
             | StoreError::KeyName(_)
             | StoreError::KeyTaken { .. }
             | StoreError::TagExists { .. }
-            | StoreError::TagNotFound(_) => None,
+            | StoreError::TagNotFound(_)
+            | StoreError::RemoteName(_)
+            | StoreError::RemoteExists(_)
+            | StoreError::RemoteNotFound(_) => None,
         }
     }
 }

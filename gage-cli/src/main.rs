@@ -36,6 +36,7 @@ mod cmd_issue2;
 mod cmd_note;
 mod cmd_query;
 mod cmd_query2;
+mod cmd_remote;
 mod cmd_resolve;
 mod cmd_scan;
 mod cmd_scan2;
@@ -193,6 +194,15 @@ enum Command {
         command: cmd_tag::TagCommand,
     },
 
+    /// Manage remotes
+    ///
+    /// A remote is a Git repository the store pushes to, fetches
+    /// from, or backs up to.
+    Remote {
+        #[command(subcommand)]
+        command: cmd_remote::RemoteCommand,
+    },
+
     /// Show Gage login, plugin, corpus, and storage status
     Status(cmd_status::StatusArgs),
 
@@ -331,6 +341,11 @@ async fn main() {
                 cmd_tag::TagCommand::Add(args) => cmd_tag::add(args),
                 cmd_tag::TagCommand::List(args) => cmd_tag::list(args),
                 cmd_tag::TagCommand::Delete(args) => cmd_tag::delete(args),
+            },
+            Command::Remote { command } => match command {
+                cmd_remote::RemoteCommand::Add(args) => cmd_remote::add(args),
+                cmd_remote::RemoteCommand::List => cmd_remote::list(),
+                cmd_remote::RemoteCommand::Delete(args) => cmd_remote::delete(args),
             },
             Command::Session {
                 source,

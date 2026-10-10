@@ -331,7 +331,10 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
     let remotes = status
         .remotes
         .iter()
-        .map(|r| format!("{} {}", r.name, r.url))
+        .map(|r| {
+            let backup = if r.backup { " (backup)" } else { "" };
+            format!("{} {}{backup}", r.name, r.url)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let mut rows: Vec<Vec<String>> = vec![
