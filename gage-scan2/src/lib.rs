@@ -40,9 +40,9 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use gage_core::datetime::now_ms;
+use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::{new_uuid, short_uuid};
 use gage_registry::scanner::{Scanner, TaskDef, TaskKind};
 use gage_runtime2::source::{SourceError, SourceFile, source_files};
@@ -549,10 +549,7 @@ struct Dispatch {
 struct PoolState {
     waiting: u32,
     active: u32,
-    /// Completed working spells
-    worked: Duration,
-    /// Start of the open working spell, `None` while blocked
-    working_since: Option<Instant>,
+    stopwatch: Stopwatch,
 }
 
 impl PoolState {
@@ -572,20 +569,8 @@ impl PoolState {
             AgentPoolDelta::Released => self.active = self.active.saturating_sub(1),
         }
         let blocked = self.blocked();
-        match (blocked, self.working_since) {
-            (true, Some(since)) => {
-                self.worked += since.elapsed();
-                self.working_since = None;
-            }
-            (false, None) => self.working_since = Some(Instant::now()),
-            _ => {}
-        }
+        self.stopwatch.set_running(!blocked);
         blocked != was_blocked
-    }
-
-    /// Time worked so far, including the open spell
-    fn worked_total(&self) -> Duration {
-        self.worked + self.working_since.map(|s| s.elapsed()).unwrap_or_default()
     }
 }
 
@@ -799,7 +784,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         let t = &plan.tasks[i];
         let now = now_ms();
         d.started[i] = Some(now);
-        d.pool[i].working_since = Some(Instant::now());
+        d.pool[i].stopwatch.resume();
         self.scan_dir.write_task(
             &t.scanner,
             &t.task,
@@ -855,7 +840,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
     ) -> Result<(), ScanError> {
         let t = &plan.tasks[i];
         let stopped = d.started[i].map(|_| now_ms());
-        let worked_ms = d.started[i].map(|_| d.pool[i].worked_total().as_millis() as u64);
+        let worked_ms = d.started[i].map(|_| d.pool[i].stopwatch.elapsed().as_millis() as u64);
         let attrs = task_attrs(status, d.started[i], stopped, worked_ms);
         self.scan_dir.write_task(&t.scanner, &t.task, &attrs)?;
         tracing::info!(

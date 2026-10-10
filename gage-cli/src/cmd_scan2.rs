@@ -17,6 +17,7 @@ use datafusion::prelude::SessionContext;
 use gage_claude::driver::ClaudeDriver;
 use gage_claude::session::SessionInfo;
 use gage_core::config::Config;
+use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::short_uuid;
 use gage_query2::{ContextBuilder, ScanScope};
 use gage_registry::driver::DriverRegistry;
@@ -664,8 +665,7 @@ impl StoreHost {
                     elapsed,
                     progress: None,
                     pool_blocked: false,
-                    worked: Duration::ZERO,
-                    working_since: None,
+                    stopwatch: Stopwatch::new(),
                 });
             }
         }
@@ -1269,8 +1269,7 @@ impl LiveStatus {
             id,
             progress: None,
             pool_blocked: false,
-            worked: Duration::ZERO,
-            working_since: Some(Instant::now()),
+            stopwatch: Stopwatch::started(),
         });
     }
 
@@ -1290,14 +1289,7 @@ impl LiveStatus {
     fn waiting(&mut self, id: &TaskId, waiting: bool) {
         if let Some(task) = self.running.iter_mut().find(|r| r.id == *id) {
             task.pool_blocked = waiting;
-            match (waiting, task.working_since) {
-                (true, Some(since)) => {
-                    task.worked += since.elapsed();
-                    task.working_since = None;
-                }
-                (false, None) => task.working_since = Some(Instant::now()),
-                _ => {}
-            }
+            task.stopwatch.set_running(!waiting);
         }
     }
 

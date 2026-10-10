@@ -23,6 +23,7 @@ use gage_claude::model::ModelMap;
 use gage_claude::preflight;
 use gage_claude::project::project_display;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
+use gage_core::stopwatch::Stopwatch;
 use gage_core::task::task_display;
 use gage_core::uuid::short_uuid;
 use gage_db::issue::{self, IssueStatus as DbIssueStatus, StatusReason as DbStatusReason};
@@ -611,8 +612,7 @@ fn load_scan_model(
                 elapsed,
                 progress: None,
                 pool_blocked: false,
-                worked: Duration::ZERO,
-                working_since: None,
+                stopwatch: Stopwatch::new(),
                 agents: Vec::new(),
             })
         })
@@ -2179,8 +2179,7 @@ fn forward_scan_event(
                     },
                     progress: t.progress,
                     pool_blocked: t.pool_blocked(),
-                    worked: t.worked,
-                    working_since: t.working_since,
+                    stopwatch: t.stopwatch.clone(),
                 })
                 .collect(),
         },

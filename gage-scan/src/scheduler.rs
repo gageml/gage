@@ -41,6 +41,7 @@ use tracing::debug;
 
 use crate::event::{ActiveTask, RunStatus, RunSummary, ScanEvent, WorkerStatus};
 use gage_core::glob::glob_match;
+use gage_core::stopwatch::Stopwatch;
 use gage_core::task::task_display;
 use gage_db::scan::{ScanError, TaskFinish, TaskMetadata, TaskStatus, finish_task, start_task};
 use gage_registry::scanner::TaskDef;
@@ -490,16 +491,7 @@ async fn run_tasks(
                                     current.agents_active = current.agents_active.saturating_sub(1);
                                 }
                             }
-                            match (current.pool_blocked(), current.working_since) {
-                                (true, Some(since)) => {
-                                    current.worked += since.elapsed();
-                                    current.working_since = None;
-                                }
-                                (false, None) => {
-                                    current.working_since = Some(std::time::Instant::now());
-                                }
-                                _ => {}
-                            }
+                            current.stopwatch.set_running(!current.pool_blocked());
                             on_event(ScanEvent::Status(status.clone()));
                         }
                     }
@@ -528,8 +520,7 @@ async fn run_tasks(
                     progress: None,
                     agents_waiting: 0,
                     agents_active: 0,
-                    worked: std::time::Duration::ZERO,
-                    working_since: Some(std::time::Instant::now()),
+                    stopwatch: Stopwatch::started(),
                 });
                 let now_ms = gage_core::datetime::now_ms();
                 {
@@ -584,7 +575,7 @@ async fn run_tasks(
                 let metadata = match task_status {
                     TaskStatus::Skipped => None,
                     _ => active.map(|a| TaskMetadata {
-                        worked_ms: a.worked_total().as_millis() as u64,
+                        worked_ms: a.stopwatch.elapsed().as_millis() as u64,
                     }),
                 };
                 {

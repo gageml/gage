@@ -4,6 +4,7 @@ pub mod datetime;
 pub mod fs;
 pub mod glob;
 pub mod path;
+pub mod stopwatch;
 pub mod style;
 pub mod task;
 pub mod text_resolve;

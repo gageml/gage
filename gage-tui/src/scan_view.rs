@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gage_claude::model::resolved_model;
 use gage_claude::resolve::resolve_command;
+use gage_core::stopwatch::Stopwatch;
 use gage_core::task::{task_display, task_name_display};
 use gage_store::{IssueStatus, StatusReason, url};
 use ratatui::buffer::Buffer;
@@ -220,22 +221,13 @@ pub struct TaskItem {
     /// The task is currently blocked on the agent pool: agents queued,
     /// none running. Renders as `waiting`.
     pub pool_blocked: bool,
-    /// Completed working spells while running, from the scheduler's
-    /// stopwatch. Excludes the open spell; see [`TaskItem::worked_total`].
-    pub worked: Duration,
-    /// Start of the open working spell; None while the task is blocked
-    /// on the agent pool (the displayed duration holds still).
-    pub working_since: Option<Instant>,
+    /// Time worked while running, mirrored from the scheduler. Holds
+    /// still while the task is blocked on the agent pool. Drives the
+    /// live duration display and becomes `elapsed` at the terminal
+    /// state.
+    pub stopwatch: Stopwatch,
     /// Agent sessions spawned by this task, in recorded order
     pub agents: Vec<AgentItem>,
-}
-
-impl TaskItem {
-    /// Time worked so far, including the open spell. Drives the live
-    /// duration display and becomes `elapsed` at the terminal state.
-    fn worked_total(&self) -> Duration {
-        self.worked + self.working_since.map(|s| s.elapsed()).unwrap_or_default()
-    }
 }
 
 /// One agent session spawned by a task.
@@ -382,8 +374,7 @@ impl ScanModel {
                 elapsed: None,
                 progress: None,
                 pool_blocked: false,
-                worked: Duration::ZERO,
-                working_since: None,
+                stopwatch: Stopwatch::new(),
                 agents: Vec::new(),
             })
             .collect();
@@ -426,8 +417,7 @@ impl ScanModel {
                         // is inferred completed.
                         TaskState::Running if entry.is_none() => {
                             item.state = TaskState::Completed;
-                            item.elapsed = Some(item.worked_total());
-                            item.working_since = None;
+                            item.elapsed = Some(item.stopwatch.stop());
                             item.progress = None;
                         }
                         _ => {}
@@ -435,8 +425,7 @@ impl ScanModel {
                     if let Some(entry) = entry {
                         item.progress = entry.progress;
                         item.pool_blocked = entry.pool_blocked;
-                        item.worked = entry.worked;
-                        item.working_since = entry.working_since;
+                        item.stopwatch = entry.stopwatch.clone();
                     } else {
                         item.pool_blocked = false;
                     }
@@ -450,8 +439,7 @@ impl ScanModel {
                     .find(|t| t.id.scanner == *scanner && t.id.task == *task)
                 {
                     item.state = TaskState::Error;
-                    item.elapsed = Some(item.worked_total());
-                    item.working_since = None;
+                    item.elapsed = Some(item.stopwatch.stop());
                 }
             }
             Event::Results {
@@ -532,10 +520,8 @@ pub struct RunningTask {
     pub progress: Option<(u64, u64)>,
     /// The task is blocked on the agent pool right now.
     pub pool_blocked: bool,
-    /// Completed working spells: time worked excluding the open spell.
-    pub worked: Duration,
-    /// Start of the open working spell; None while blocked on the pool.
-    pub working_since: Option<Instant>,
+    /// Time worked; holds still while blocked on the pool
+    pub stopwatch: Stopwatch,
 }
 
 /// Events the view consumes while a live scan runs.
@@ -2149,8 +2135,7 @@ impl ViewState {
                 if matches!(item.state, TaskState::Running | TaskState::Pending) {
                     // A pending task never ran; its duration stays blank
                     if item.state == TaskState::Running {
-                        item.elapsed = Some(item.worked_total());
-                        item.working_since = None;
+                        item.elapsed = Some(item.stopwatch.stop());
                     }
                     item.state = TaskState::Canceled;
                     item.progress = None;
@@ -3106,7 +3091,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 // the pool's attention and holds still while blocked,
                 // so queue position doesn't inflate a task's clock.
                 let time = match t.state {
-                    TaskState::Running => fmt_duration_live(t.worked_total()),
+                    TaskState::Running => fmt_duration_live(t.stopwatch.elapsed()),
                     _ => t.elapsed.map(fmt_duration).unwrap_or_default(),
                 };
                 (label, style, time)
@@ -3729,8 +3714,7 @@ mod tests {
                 elapsed: None,
                 progress: Some((5, 10)),
                 pool_blocked: false,
-                worked: Duration::ZERO,
-                working_since: None,
+                stopwatch: Stopwatch::new(),
                 agents: Vec::new(),
             }],
             sessions: Vec::new(),

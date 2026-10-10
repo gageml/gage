@@ -4,7 +4,7 @@
 //! implement an event sink. Each `Status` event is a self-contained
 //! snapshot — never reassemble state from partial deltas.
 
-use std::time::{Duration, Instant};
+use gage_core::stopwatch::Stopwatch;
 
 /// The task a worker is currently running, with any task-reported
 /// progress.
@@ -19,13 +19,9 @@ pub struct ActiveTask {
     pub agents_waiting: u64,
     /// Agents holding a pool permit (running).
     pub agents_active: u64,
-    /// Completed working spells: time spent not blocked on the agent
-    /// pool. Excludes the open spell; use [`ActiveTask::worked_total`]
-    /// for display.
-    pub worked: Duration,
-    /// Start of the open working spell; `None` while the task is
-    /// blocked on the pool.
-    pub working_since: Option<Instant>,
+    /// Time worked: runs while the task is not blocked on the agent
+    /// pool and holds still while it is.
+    pub stopwatch: Stopwatch,
 }
 
 impl ActiveTask {
@@ -33,11 +29,6 @@ impl ActiveTask {
     /// agent is waiting for a permit and none holds one.
     pub fn pool_blocked(&self) -> bool {
         self.agents_active == 0 && self.agents_waiting > 0
-    }
-
-    /// Total time worked, including the open spell.
-    pub fn worked_total(&self) -> Duration {
-        self.worked + self.working_since.map(|s| s.elapsed()).unwrap_or_default()
     }
 }
 
