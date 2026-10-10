@@ -34,6 +34,7 @@ mod cmd_init;
 mod cmd_issue;
 mod cmd_issue2;
 mod cmd_note;
+mod cmd_push;
 mod cmd_query;
 mod cmd_query2;
 mod cmd_remote;
@@ -43,7 +44,6 @@ mod cmd_scan2;
 mod cmd_session;
 mod cmd_status;
 mod cmd_store;
-mod cmd_sync;
 mod cmd_tag;
 mod cmd_test;
 mod dialog;
@@ -96,7 +96,6 @@ const GAGE_LOG_TARGETS: &[&str] = &[
     "gage_scan",
     "gage_scan2",
     "gage_scan_ui",
-    "gage_sync",
     "gage_tui",
 ];
 
@@ -218,11 +217,11 @@ enum Command {
         command: cmd_store::StoreCommand,
     },
 
-    /// Copy Gage data to remotes
-    Push(cmd_sync::PushArgs),
-
-    /// Copy Gage data from remotes
-    Pull(cmd_sync::PullArgs),
+    /// Push objects to a remote
+    ///
+    /// Sends the named objects and everything they link. The whole
+    /// store is sent only by `gage backup`.
+    Push(cmd_push::PushArgs),
 
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
@@ -437,8 +436,7 @@ async fn main() {
             Command::Query(args) => cmd_query::main(args).await,
             Command::Query2(args) => cmd_query2::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
-            Command::Push(args) => cmd_sync::push(args).await,
-            Command::Pull(args) => cmd_sync::pull(args).await,
+            Command::Push(args) => cmd_push::main(args).await,
         }
     };
     tokio::pin!(cmd);

@@ -23,6 +23,7 @@
 //! The Git primitives these operations compose from live in
 //! [`crate::git`] and [`crate::writer`].
 
+use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -509,6 +510,44 @@ impl Store {
         };
         self.record_write(&object, &links, &current.commit_sha, key.as_ref())?;
         Ok(commit_sha)
+    }
+
+    /// The objects reachable from `ids` through link files, each once,
+    /// in discovery order: the named objects first, then everything
+    /// their tips link, transitively. A link names a commit, and the
+    /// object it belongs to is taken from that commit's `id`; the
+    /// result carries the object's current tip, which may be newer
+    /// than the linked commit. A tombstoned object has no links.
+    pub fn link_closure(&self, ids: &[String]) -> Result<Vec<IdMatch>, StoreError> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = ids.iter().cloned().collect();
+        let mut out = Vec::new();
+        while let Some(id) = queue.pop_front() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let tip = self
+                .rev_parse(&object_ref(&id))?
+                .ok_or_else(|| StoreError::ObjectNotFound(id.clone()))?;
+            let header = self.read_header(&tip)?;
+            if !header.is_tombstone() {
+                for link in self.find_link_files(&tip)? {
+                    for sha in link.shas {
+                        let linked = self.read_header(&sha)?.id;
+                        if !seen.contains(&linked) {
+                            queue.push_back(linked);
+                        }
+                    }
+                }
+            }
+            out.push(IdMatch {
+                id,
+                tip_sha: tip,
+                deleted: header.is_tombstone(),
+                object_type: header.object_type,
+            });
+        }
+        Ok(out)
     }
 
     /// List every ref under the object namespace with its id and tip
@@ -1277,6 +1316,45 @@ mod tests {
                 work_id: None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn link_closure_follows_links_once_and_stops_at_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let root = note(&store, "root", None);
+        let child = note(&store, "child", Some(&format!("note:{root}")));
+        let grandchild = note(&store, "grandchild", Some(&format!("note:{child}")));
+
+        let ids: Vec<String> = store
+            .link_closure(&[grandchild.clone()])
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, [grandchild.clone(), child.clone(), root.clone()]);
+
+        // Named twice, reached twice: once in the result
+        let ids: Vec<String> = store
+            .link_closure(&[child.clone(), grandchild.clone(), root.clone()])
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, [child.clone(), grandchild.clone(), root.clone()]);
+
+        // A tombstone has no links, so the closure ends at it
+        NoteStore::from(&store).delete(&child).unwrap();
+        let closure = store.link_closure(&[grandchild.clone()]).unwrap();
+        let ids: Vec<&str> = closure.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, [grandchild.as_str(), child.as_str()]);
+        assert!(closure[1].deleted);
+        assert!(!closure[0].deleted);
+
+        assert!(matches!(
+            store.link_closure(&["nope".to_string()]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
     }
 
     #[test]

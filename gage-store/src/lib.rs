@@ -84,7 +84,7 @@ pub use issue::{
     ChangeEvent, IssueChange, IssueDirRecord, IssueFull, IssueInput, IssueQuery, IssueStatus,
     IssueStore, OBJECT_TYPE as ISSUE_TYPE, StatusReason,
 };
-pub use key::{KeyRef, KeyStore};
+pub use key::{KeyRef, KeyStore, object_key_ref};
 pub use note::{
     NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue,
     OBJECT_TYPE as NOTE_TYPE,

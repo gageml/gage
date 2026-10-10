@@ -219,6 +219,13 @@ pub(crate) fn key_of(object_type: &str, tree: &ObjectTree) -> Option<String> {
     tree.attrs.as_ref()?.get("key")?.as_str().map(String::from)
 }
 
+/// The key ref of `object`, when its type has keys and it carries
+/// one: `refs/gage/1/key/<type>/<key>`.
+pub fn object_key_ref(object: &Object) -> Option<String> {
+    let key = key_of(&object.header.object_type, &object.tree)?;
+    Some(key_ref(type_name(&object.header.object_type), &key))
+}
+
 /// The bare type name a key ref is filed under: `issue` for
 /// `gage::issue`.
 fn type_name(object_type: &str) -> &str {

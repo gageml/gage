@@ -20,7 +20,6 @@ members = [
     "gage-scan2",
     "gage-session",
     "gage-store",
-    "gage-sync",
     "gage-tui",
 ]
 resolver = "2"

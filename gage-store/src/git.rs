@@ -393,7 +393,7 @@ impl Store {
 
     /// Resolve `reference` to a full SHA. `Ok(None)` when it does not
     /// exist.
-    pub(crate) fn rev_parse(&self, reference: &str) -> Result<Option<String>, StoreError> {
+    pub fn rev_parse(&self, reference: &str) -> Result<Option<String>, StoreError> {
         Ok(self.object_info(reference)?.map(|i| i.sha))
     }
 
@@ -669,7 +669,6 @@ pub(crate) fn run(mut cmd: Command) -> Result<String, StoreError> {
 }
 
 /// Runs `cmd` with `stdin` fed on its standard input, returning stdout.
-#[cfg(test)]
 pub(crate) fn run_with_stdin(mut cmd: Command, stdin: &[u8]) -> Result<String, StoreError> {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())

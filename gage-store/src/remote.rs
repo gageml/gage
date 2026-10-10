@@ -10,8 +10,9 @@
 //! `delete` removes the stanza and the remote-tracking refs with it.
 
 use std::collections::BTreeMap;
+use std::process::{ExitStatus, Stdio};
 
-use crate::git::{git_in, run};
+use crate::git::{git_in, run, run_with_stdin};
 use crate::refs::ROOT;
 use crate::{Store, StoreError};
 
@@ -102,6 +103,60 @@ impl RemoteStore<'_> {
             .ok_or_else(|| StoreError::RemoteNotFound(name.to_string()))?;
         run(git_in(self.store.path(), ["remote", "remove", name]))?;
         Ok(remote)
+    }
+
+    /// The Gage refs the remote `name` advertises, as ref name to
+    /// commit SHA. One `git ls-remote` over `refs/gage/1/*`.
+    pub fn ls_remote(&self, name: &str) -> Result<BTreeMap<String, String>, StoreError> {
+        let pattern = format!("{ROOT}*");
+        let out = run(git_in(
+            self.store.path(),
+            ["ls-remote", "--refs", name, &pattern],
+        ))?;
+        let mut refs = BTreeMap::new();
+        for line in out.lines() {
+            let (sha, ref_name) = line
+                .split_once('\t')
+                .ok_or_else(|| StoreError::Parse(format!("ls-remote line: {line}")))?;
+            refs.insert(ref_name.to_string(), sha.to_string());
+        }
+        Ok(refs)
+    }
+
+    /// The digest the store's `pre-push` hook accepts for a push of
+    /// `ref_names`: the names sorted, one per line, hashed with
+    /// `git hash-object --stdin`.
+    pub fn approval_digest(&self, ref_names: &[String]) -> Result<String, StoreError> {
+        let mut names: Vec<&str> = ref_names.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        let input: String = names.iter().map(|n| format!("{n}\n")).collect();
+        let sha = run_with_stdin(
+            git_in(self.store.path(), ["hash-object", "--stdin"]),
+            input.as_bytes(),
+        )?;
+        Ok(sha.trim().to_string())
+    }
+
+    /// Push `ref_names` to the remote `name`, one refspec per ref and
+    /// no force, with `approval` set for the store's `pre-push` hook.
+    /// Git's output goes to the terminal as it runs. Returns git's
+    /// exit status; a rejection by either hook is a failing status
+    /// whose reason git has already printed.
+    pub fn push(
+        &self,
+        name: &str,
+        ref_names: &[String],
+        approval: &str,
+    ) -> Result<ExitStatus, StoreError> {
+        let mut cmd = git_in(self.store.path(), ["push", name]);
+        for ref_name in ref_names {
+            cmd.arg(format!("{ref_name}:{ref_name}"));
+        }
+        cmd.env("GAGE_PUSH_APPROVAL", approval)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        cmd.status().map_err(StoreError::Spawn)
     }
 
     /// Git's rule for a remote name is the ref name rule with one
@@ -243,6 +298,48 @@ mod tests {
             remotes.delete("share"),
             Err(StoreError::RemoteNotFound(n)) if n == "share"
         ));
+    }
+
+    #[test]
+    fn push_sends_approved_refs_and_ls_remote_reads_them_back() {
+        use crate::note::{NoteInput, NoteStore, NoteValue};
+        use crate::refs::OBJECT_REFS;
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _fsck) = open_store(&dir.path().join("source"));
+        let (target, _fsck2) = open_store(&dir.path().join("target"));
+        let remotes = RemoteStore::from(&source);
+        remotes
+            .add("share", target.path().to_str().unwrap(), false)
+            .unwrap();
+        let id = NoteStore::from(&source)
+            .create(NoteInput {
+                name: "comment",
+                value: NoteValue::Text("v".into()),
+                author: "user:test",
+                target: None,
+                metadata: None,
+                work_id: None,
+            })
+            .unwrap();
+        let ref_name = format!("{OBJECT_REFS}{id}");
+        let tip = source.rev_parse(&ref_name).unwrap().unwrap();
+        assert!(remotes.ls_remote("share").unwrap().is_empty());
+
+        // The hook rejects a digest for another set
+        let wrong = remotes
+            .approval_digest(&[ref_name.clone(), "refs/gage/1/tag/x".into()])
+            .unwrap();
+        let status = remotes.push("share", &[ref_name.clone()], &wrong).unwrap();
+        assert!(!status.success());
+
+        let digest = remotes.approval_digest(&[ref_name.clone()]).unwrap();
+        let status = remotes.push("share", &[ref_name.clone()], &digest).unwrap();
+        assert!(status.success());
+        assert_eq!(
+            remotes.ls_remote("share").unwrap(),
+            BTreeMap::from([(ref_name.clone(), tip.clone())])
+        );
+        assert_eq!(target.rev_parse(&ref_name).unwrap().unwrap(), tip);
     }
 
     #[test]

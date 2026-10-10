@@ -142,11 +142,6 @@ pub struct Config {
     #[serde(default)]
     pub scanners: ScannerConfig,
 
-    /// Backup destinations. Read from the user config only; `gage push`
-    /// writes to every configured remote.
-    #[serde(default, rename = "remote", skip_serializing_if = "Vec::is_empty")]
-    pub remotes: Vec<Remote>,
-
     #[serde(default)]
     pub query: QueryConfig,
 
@@ -223,62 +218,6 @@ impl Default for QueryConfig {
     }
 }
 
-/// A single backup destination.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Remote {
-    pub name: String,
-    #[serde(flatten)]
-    pub kind: RemoteKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum RemoteKind {
-    /// SSH remote. `url` is an rsync-style target, e.g.
-    /// `user@host:/path/to/dir` or `host:/path/to/dir`.
-    Ssh { url: String },
-    /// S3 (or S3-compatible) remote. `url` is `s3://bucket[/prefix]`.
-    /// Credentials and region come from the standard AWS chain.
-    S3 {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        region: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint: Option<String>,
-    },
-    /// Local directory remote. Files are copied directly. `path` may use
-    /// a leading `~` for `$HOME` and may be relative to the current
-    /// working directory.
-    Local { path: PathBuf },
-}
-
-/// Resolves a local-remote path: expands a leading `~`/`~/` to `$HOME`,
-/// then joins relative paths against the current working directory.
-pub fn resolve_local_path(p: &Path) -> io::Result<PathBuf> {
-    let expanded = expand_tilde(p);
-    if expanded.is_absolute() {
-        Ok(expanded)
-    } else {
-        Ok(env::current_dir()?.join(expanded))
-    }
-}
-
-fn expand_tilde(p: &Path) -> PathBuf {
-    let Some(s) = p.to_str() else {
-        return p.to_path_buf();
-    };
-    if s == "~" {
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
-    } else if let Some(rest) = s.strip_prefix("~/")
-        && let Some(home) = env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    p.to_path_buf()
-}
-
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ScannerConfig {
     /// When non-empty, only these scanners are enabled. Otherwise all
@@ -324,7 +263,6 @@ impl Config {
     pub fn merge_outer(&mut self, other: Config) {
         self.scanners.enable.extend(other.scanners.enable);
         self.scanners.disable.extend(other.scanners.disable);
-        self.remotes.extend(other.remotes);
     }
 
     /// True if the named scanner is enabled per this config. Entries
