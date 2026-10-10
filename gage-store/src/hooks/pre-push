@@ -1,0 +1,35 @@
+#!/bin/sh
+# Gage store pre-push hook. Git runs it in the pushing store before any
+# transfer, with the remote name and URL as arguments and one line per
+# ref to be sent on stdin: <local ref> <local sha> <remote ref> <remote
+# sha>. A push is accepted when the remote is a backup target
+# (remote.<name>.gage-backup = true) or when GAGE_PUSH_APPROVAL holds
+# the digest of the remote ref names being sent: the names one per
+# line, sorted, hashed with `git hash-object --stdin`. Gage computes
+# the same digest over the set it previewed, so a raw `git push` of a
+# different set is rejected. Written verbatim by gage-store at init;
+# edits are clobbered on the next `gage store init`.
+
+remote="$1"
+input=$(cat)
+
+# Nothing to send.
+if [ -z "$input" ]; then
+    exit 0
+fi
+
+if [ "$(git config --get "remote.$remote.gage-backup" 2>/dev/null)" = "true" ]; then
+    exit 0
+fi
+
+names=$(printf '%s\n' "$input" | while read -r _lref _lsha rref _rsha; do
+    printf '%s\n' "$rref"
+done | LC_ALL=C sort)
+digest=$(printf '%s\n' "$names" | git hash-object --stdin)
+
+if [ -n "$GAGE_PUSH_APPROVAL" ] && [ "$GAGE_PUSH_APPROVAL" = "$digest" ]; then
+    exit 0
+fi
+
+echo "gage: push to $remote is not approved; use gage push or gage backup" >&2
+exit 1

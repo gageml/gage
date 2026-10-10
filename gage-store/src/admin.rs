@@ -19,23 +19,36 @@ use crate::{Store, StoreError};
 pub const STORE_VERSION: u32 = crate::refs::GENERATION;
 
 /// Settings every store carries. `denyDeletes` and `denyNonFastForwards`
-/// cover `refs/heads/*` and are branch-scoped by git; the object refs
+/// cover `refs/heads/*` and are branch-scoped by git; the Gage refs
 /// are protected by the `update` hook installed below. `fsckObjects`
-/// verifies every object received over the wire.
-const STORE_CONFIG: [(&str, &str); 3] = [
+/// verifies every object received over the wire. `push.default`
+/// makes a `git push <remote>` with no refspec an error, and
+/// `core.hooksPath` pins the hook directory to the store's own so a
+/// user's global setting cannot redirect the hooks.
+const STORE_CONFIG: [(&str, &str); 5] = [
     ("receive.denyDeletes", "true"),
     ("receive.denyNonFastForwards", "true"),
     ("transfer.fsckObjects", "true"),
+    ("push.default", "nothing"),
+    ("core.hooksPath", "hooks"),
 ];
 
 /// Update hook script installed at `hooks/update` on init. The script
-/// enforces the ref rules for this generation's object refs and
-/// accepts every other ref, so a later generation can be pushed into
-/// a repository initialized for this one.
+/// enforces the ref rules for this generation's object, tag, and key
+/// refs and accepts every other ref, so a later generation can be
+/// pushed into a repository initialized for this one.
 pub(crate) const UPDATE_HOOK: &str = include_str!("hooks/update");
 
 /// Relative path of the update hook inside the store.
 pub(crate) const UPDATE_HOOK_PATH: &str = "hooks/update";
+
+/// Pre-push hook script installed at `hooks/pre-push` on init. The
+/// script accepts a push to a backup remote, or one whose ref set
+/// Gage approved through `GAGE_PUSH_APPROVAL`, and rejects any other.
+pub(crate) const PRE_PUSH_HOOK: &str = include_str!("hooks/pre-push");
+
+/// Relative path of the pre-push hook inside the store.
+pub(crate) const PRE_PUSH_HOOK_PATH: &str = "hooks/pre-push";
 
 /// Path to the default store: `<gage_home>/store.git`.
 pub fn store_path() -> PathBuf {
@@ -61,7 +74,7 @@ pub enum InitOutcome {
 /// Leading directories are created as needed. The empty template keeps
 /// sample hooks and `description` out of the store and ignores any
 /// `init.templateDir` in the user's Git config; the store's own
-/// `hooks/update` is written afterwards by [`write_update_hook`]. The
+/// hooks are written afterwards by [`write_hook`]. The
 /// initial branch is fixed so `HEAD` does not depend on
 /// `init.defaultBranch`.
 pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
@@ -83,7 +96,8 @@ pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
         path,
         ["config", "gage.version", &STORE_VERSION.to_string()],
     ))?;
-    write_update_hook(path)?;
+    write_hook(path, UPDATE_HOOK_PATH, UPDATE_HOOK)?;
+    write_hook(path, PRE_PUSH_HOOK_PATH, PRE_PUSH_HOOK)?;
     if existing {
         return Ok(InitOutcome::Reinitialized);
     }
@@ -91,11 +105,11 @@ pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
     Ok(InitOutcome::Created)
 }
 
-/// Writes [`UPDATE_HOOK`] to `<path>/<UPDATE_HOOK_PATH>` and marks it
-/// executable on Unix. Overwrites any existing file so a reinit
-/// restores the shipped script.
-fn write_update_hook(path: &Path) -> Result<(), StoreError> {
-    let hook = path.join(UPDATE_HOOK_PATH);
+/// Writes a hook script to `<path>/<rel>` and marks it executable on
+/// Unix. Overwrites any existing file so a reinit restores the shipped
+/// script.
+fn write_hook(path: &Path, rel: &str, content: &str) -> Result<(), StoreError> {
+    let hook = path.join(rel);
     let hook_write = |source| StoreError::Write {
         path: hook.clone(),
         source,
@@ -103,7 +117,7 @@ fn write_update_hook(path: &Path) -> Result<(), StoreError> {
     if let Some(parent) = hook.parent() {
         fs::create_dir_all(parent).map_err(hook_write)?;
     }
-    fs::write(&hook, UPDATE_HOOK).map_err(hook_write)?;
+    fs::write(&hook, content).map_err(hook_write)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -329,19 +343,26 @@ mod tests {
         assert!(config.contains("denyDeletes = true"), "{config}");
         assert!(config.contains("denyNonFastForwards = true"), "{config}");
         assert!(config.contains("fsckObjects = true"), "{config}");
+        assert!(config.contains("default = nothing"), "{config}");
+        assert!(config.contains("hooksPath = hooks"), "{config}");
         assert!(
             config.contains(&format!("version = {STORE_VERSION}")),
             "{config}"
         );
 
-        let hook = store.join(UPDATE_HOOK_PATH);
-        assert!(hook.exists(), "{}", hook.display());
-        assert_eq!(std::fs::read_to_string(&hook).unwrap(), UPDATE_HOOK);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o755, "mode {mode:o}");
+        for (rel, content) in [
+            (UPDATE_HOOK_PATH, UPDATE_HOOK),
+            (PRE_PUSH_HOOK_PATH, PRE_PUSH_HOOK),
+        ] {
+            let hook = store.join(rel);
+            assert!(hook.exists(), "{}", hook.display());
+            assert_eq!(std::fs::read_to_string(&hook).unwrap(), content);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o755, "mode {mode:o}");
+            }
         }
 
         assert_eq!(init(&store).unwrap(), InitOutcome::Reinitialized);
@@ -480,13 +501,158 @@ mod tests {
 
     /// Force-pushes `sha` from `source` to `refname` in `target`, so the
     /// client's own non-fast-forward check does not preempt the hook. An
-    /// empty `sha` pushes a deletion.
+    /// empty `sha` pushes a deletion. The push carries the approval the
+    /// source's pre-push hook requires.
     fn push(source: &Path, target: &Path, sha: &str, refname: &str) -> Result<String, StoreError> {
         let refspec = format!("+{sha}:{refname}");
-        run(git_in(
+        raw_push(
             source,
-            ["push", "--quiet", target.to_str().unwrap(), &refspec],
+            target.to_str().unwrap(),
+            &refspec,
+            Some(&approval(source, &[refname])),
+        )
+    }
+
+    /// `git push <remote> <refspec>` from `source`, with
+    /// `GAGE_PUSH_APPROVAL` set when `approval` is given.
+    fn raw_push(
+        source: &Path,
+        remote: &str,
+        refspec: &str,
+        approval: Option<&str>,
+    ) -> Result<String, StoreError> {
+        let mut cmd = git_in(source, ["push", "--quiet", remote, refspec]);
+        if let Some(digest) = approval {
+            cmd.env("GAGE_PUSH_APPROVAL", digest);
+        }
+        run(cmd)
+    }
+
+    /// The digest the pre-push hook expects for a push of `refnames`:
+    /// the names sorted, one per line, hashed with `git hash-object`.
+    fn approval(path: &Path, refnames: &[&str]) -> String {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut names: Vec<&str> = refnames.to_vec();
+        names.sort_unstable();
+        let input: String = names.iter().map(|n| format!("{n}\n")).collect();
+        let mut cmd = git_in(path, ["hash-object", "--stdin"]);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn update_hook_enforces_tag_and_key_ref_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("source.git");
+        let target_path = tmp.path().join("target.git");
+        init_for_test(&source_path);
+        init_for_test(&target_path);
+        let source = Store::open(&source_path).unwrap();
+        let notes = NoteStore::from(&source);
+        let tip = |id: &str| source.rev_parse(&object_ref(id)).unwrap().unwrap();
+
+        let a = note(&notes, "a");
+        let a_first = tip(&a);
+        notes
+            .edit(
+                &a,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
+        let a_second = tip(&a);
+        let b = note(&notes, "b");
+        let b_first = tip(&b);
+        let push = |sha: &str, refname: &str| push(&source_path, &target_path, sha, refname);
+
+        // A tag: create, advance in either direction, never delete or
+        // retarget
+        let tag = "refs/gage/1/tag/t";
+        push(&a_first, tag).unwrap();
+        push(&a_second, tag).unwrap();
+        push(&a_first, tag).unwrap();
+        assert_declined(push("", tag), "deletion");
+        assert_declined(push(&b_first, tag), "retargeted");
+
+        // A key: the same, except that a key on a tombstone is free
+        let key = "refs/gage/1/key/note/k";
+        push(&a_first, key).unwrap();
+        assert_declined(push(&b_first, key), "retargeted");
+        notes.delete(&a).unwrap();
+        let a_tomb = tip(&a);
+        push(&a_tomb, key).unwrap();
+        assert_declined(push("", key), "deletion");
+        push(&b_first, key).unwrap();
+
+        let target = Store::open(&target_path).unwrap();
+        assert_eq!(target.rev_parse(tag).unwrap().unwrap(), a_first);
+        assert_eq!(target.rev_parse(key).unwrap().unwrap(), b_first);
+    }
+
+    #[test]
+    fn pre_push_hook_requires_approval_or_a_backup_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("source.git");
+        let target_path = tmp.path().join("target.git");
+        init_for_test(&source_path);
+        init_for_test(&target_path);
+        let source = Store::open(&source_path).unwrap();
+        let notes = NoteStore::from(&source);
+        let a = note(&notes, "a");
+        let a_ref = object_ref(&a);
+        let sha = source.rev_parse(&a_ref).unwrap().unwrap();
+        let refspec = format!("{sha}:{a_ref}");
+        let url = target_path.to_str().unwrap();
+
+        let rejected = |result: Result<String, StoreError>| match result {
+            Err(StoreError::Git { stderr, .. }) => {
+                assert!(stderr.contains("not approved"), "{stderr}")
+            }
+            other => panic!("expected the pre-push hook to reject, got {other:?}"),
+        };
+        rejected(raw_push(&source_path, url, &refspec, None));
+        rejected(raw_push(&source_path, url, &refspec, Some("not-a-digest")));
+        let wrong_set = approval(&source_path, &[&a_ref, "refs/gage/1/tag/x"]);
+        rejected(raw_push(&source_path, url, &refspec, Some(&wrong_set)));
+        raw_push(
+            &source_path,
+            url,
+            &refspec,
+            Some(&approval(&source_path, &[&a_ref])),
+        )
+        .unwrap();
+
+        // A named remote flagged as a backup target needs no approval.
+        // A second object, since a ref the target already holds sends
+        // nothing and the hook sees no input.
+        let b = note(&notes, "b");
+        let b_ref = object_ref(&b);
+        let b_sha = source.rev_parse(&b_ref).unwrap().unwrap();
+        let b_refspec = format!("{b_sha}:{b_ref}");
+        run(git_in(&source_path, ["remote", "add", "offsite", url])).unwrap();
+        rejected(raw_push(&source_path, "offsite", &b_refspec, None));
+        run(git_in(
+            &source_path,
+            ["config", "remote.offsite.gage-backup", "true"],
         ))
+        .unwrap();
+        raw_push(&source_path, "offsite", &b_refspec, None).unwrap();
+
+        // Without a refspec, push.default = nothing makes the push an error
+        let err = run(git_in(&source_path, ["push", "--quiet", "offsite"])).unwrap_err();
+        assert!(matches!(err, StoreError::Git { .. }), "{err}");
     }
 
     fn assert_declined(result: Result<String, StoreError>, reason: &str) {

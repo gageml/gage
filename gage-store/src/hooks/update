@@ -1,8 +1,9 @@
 #!/bin/sh
-# Gage store update hook. Enforces the ref rules for the object refs
-# of ref generation 1, refs/gage/1/object/*. Any other ref, including
-# the object refs of a later generation, passes: the rules below are
-# this generation's conventions and may not hold for the next.
+# Gage store update hook. Enforces the ref rules of ref generation 1:
+# the closed-artifact rule for refs/gage/1/object/*, and the naming
+# rules for refs/gage/1/tag/* and refs/gage/1/key/*. Any other ref,
+# including the refs of a later generation, passes: the rules below
+# are this generation's conventions and may not hold for the next.
 # Written verbatim by gage-store at init; edits are clobbered on the
 # next `gage store init`. Uses shell builtins and git only, so the
 # receiving host needs nothing beyond git itself.
@@ -12,7 +13,9 @@ old="$2"
 new="$3"
 
 case "$refname" in
-    refs/gage/1/object/*) ;;
+    refs/gage/1/object/*) kind=object ;;
+    refs/gage/1/tag/*) kind=tag ;;
+    refs/gage/1/key/*) kind=key ;;
     *) exit 0 ;;
 esac
 
@@ -26,6 +29,24 @@ fi
 # Ref deletion.
 if [ "$new" = "$zero" ]; then
     echo "gage: deletion of $refname is prohibited" >&2
+    exit 1
+fi
+
+# Tag and key refs name an object through the `id` blob of the commit
+# they point at. An advance to another commit of the same object is
+# accepted in either direction, so a lagging ref on either side is not
+# an error. A retarget to a different object is rejected, except that
+# a key whose current target is a tombstone is free and may be claimed.
+if [ "$kind" != object ]; then
+    old_id=$(git rev-parse --verify -q "$old:id" 2>/dev/null)
+    new_id=$(git rev-parse --verify -q "$new:id" 2>/dev/null)
+    if [ -n "$old_id" ] && [ "$old_id" = "$new_id" ]; then
+        exit 0
+    fi
+    if [ "$kind" = key ] && git cat-file -e "$old:deleted" 2>/dev/null; then
+        exit 0
+    fi
+    echo "gage: $refname cannot be retargeted to a different object" >&2
     exit 1
 fi
 
