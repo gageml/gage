@@ -1,8 +1,5 @@
-use std::time::Duration;
-
 use clap::Args;
 use gage_claude::index::{LockMode, ReconcileEvent, Status};
-use indicatif::{ProgressBar, ProgressStyle};
 use tabled::{
     Table,
     settings::{Style, object::Columns},
@@ -47,7 +44,8 @@ pub async fn run(args: IndexArgs) {
     }
 
     let rebuild = args.rebuild;
-    let bar = make_progress_bar();
+    let bar = style::progress_bar(0);
+    bar.set_message("Building index");
     let bar_for_task = bar.clone();
     let result = tokio::task::spawn_blocking(move || {
         let on_event = |event: ReconcileEvent| match event {
@@ -84,20 +82,6 @@ pub async fn run(args: IndexArgs) {
             std::process::exit(1);
         }
     }
-}
-
-fn make_progress_bar() -> ProgressBar {
-    let bar = ProgressBar::new(0);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.magenta} {msg} [{elapsed_precise}] {bar:30.white/bright.black} ({pos}/{len})",
-        )
-        .unwrap()
-        .progress_chars("▬▬"),
-    );
-    bar.set_message("Building index");
-    bar.enable_steady_tick(Duration::from_millis(120));
-    bar
 }
 
 fn format_elapsed(ms: u64) -> String {

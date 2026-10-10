@@ -1,14 +1,37 @@
+use std::time::Duration;
+
+use indicatif::{ProgressBar, ProgressStyle};
 use tabled::settings::{Color, peaker::Peaker};
 
 pub use gage_core::style::{IdHighlighter, IdKind};
 
-pub fn spinner(message: &str) -> indicatif::ProgressBar {
-    let spinner = indicatif::ProgressBar::new_spinner();
-    spinner
-        .set_style(indicatif::ProgressStyle::with_template("{spinner:.magenta}  {msg}").unwrap());
+pub fn spinner(message: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(ProgressStyle::with_template("{spinner:.magenta}  {msg}").unwrap());
     spinner.set_message(message.to_string());
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    spinner.enable_steady_tick(Duration::from_millis(80));
     spinner
+}
+
+/// The determinate progress bar template after its spinner. Shared
+/// with the dialog theme, which supplies its own spinner.
+pub const PROGRESS_TEMPLATE: &str =
+    "{msg} [{elapsed_precise}] {bar:30.white/bright.black} ({pos}/{len})";
+
+/// Line-style fill and remainder characters of the progress bar
+pub const PROGRESS_CHARS: &str = "▬▬";
+
+/// An ephemeral terminal progress bar over `len` steps. The caller
+/// sets the message and clears the bar when the work ends.
+pub fn progress_bar(len: u64) -> ProgressBar {
+    let bar = ProgressBar::new(len);
+    bar.set_style(
+        ProgressStyle::with_template(&format!("{{spinner:.magenta}} {PROGRESS_TEMPLATE}"))
+            .unwrap()
+            .progress_chars(PROGRESS_CHARS),
+    );
+    bar.enable_steady_tick(Duration::from_millis(120));
+    bar
 }
 
 /// Returns `c` when colors are enabled for stdout, else an empty `Color`.

@@ -3,9 +3,19 @@ use std::io::{self, ErrorKind};
 use cliclack as cli;
 use console::{Term, style};
 
+use crate::style as s;
+
 struct GageTheme;
 
 impl cli::Theme for GageTheme {
+    fn default_progress_template(&self) -> String {
+        s::PROGRESS_TEMPLATE.to_string()
+    }
+
+    fn progress_chars(&self) -> String {
+        s::PROGRESS_CHARS.to_string()
+    }
+
     fn format_footer_with_message(&self, state: &cli::ThemeState, message: &str) -> String {
         format!(
             "{}\n",

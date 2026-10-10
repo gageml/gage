@@ -39,6 +39,7 @@ use gage_tui::scan_view::{
 };
 use gage_tui::session::Backend;
 use gage_tui::text::fmt_duration;
+use indicatif::ProgressBar;
 use tabled::{
     Table,
     settings::{
@@ -2042,7 +2043,7 @@ async fn materialize_dataset(
         DatasetPlan::Reuse { commit_sha, .. } => Ok(Some(commit_sha)),
         DatasetPlan::New { selected } => {
             let id = cmd_dataset::create_dataset("gage scan2", store);
-            let mut bar: Option<indicatif::ProgressBar> = None;
+            let mut bar: Option<ProgressBar> = None;
             cmd_dataset::add_native_to_dataset(store, &id, None, &selected, None, &mut |event| {
                 match &event {
                     AddEvent::Starting { total, .. } => {
@@ -2075,15 +2076,9 @@ async fn materialize_dataset(
     }
 }
 
-/// The dataset build's progress bar, styled like the CLI's spinner
-fn add_progress_bar(total: usize) -> indicatif::ProgressBar {
-    let bar = indicatif::ProgressBar::new(total as u64);
-    bar.set_style(
-        indicatif::ProgressStyle::with_template("{spinner:.magenta}  {msg} {bar:30} {pos}/{len}")
-            .unwrap(),
-    );
+fn add_progress_bar(total: usize) -> ProgressBar {
+    let bar = s::progress_bar(total as u64);
     bar.set_message("Preparing scan dataset");
-    bar.enable_steady_tick(Duration::from_millis(80));
     bar
 }
 

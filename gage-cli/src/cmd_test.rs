@@ -8,7 +8,6 @@ use clap::{Args, Subcommand};
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_tui::text::fmt_duration;
-use indicatif::{ProgressBar, ProgressStyle};
 use tabled::{
     Table,
     settings::{
@@ -499,16 +498,8 @@ fn cmd_run(args: RunArgs) {
         }
     }
 
-    let pb = ProgressBar::new(tests.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.magenta} {msg} [{elapsed_precise}] {bar:30.white/bright.black} ({pos}/{len})",
-        )
-        .expect("static template")
-        .progress_chars("▬▬"),
-    );
+    let pb = style::progress_bar(tests.len() as u64);
     pb.set_message("starting...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
     let started = std::time::Instant::now();
     let mut error_count: u32 = 0;
     let mut passed: u32 = 0;
