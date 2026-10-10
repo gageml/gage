@@ -90,7 +90,7 @@ pub async fn scan_sessions() {
 const SESSION_MIN_TEXT_LEN = 200;
 
 async fn skip_session(s) {
-    let messages = s.messages().limit(50).await?;
+    let messages = s.messages().limit(50).await;
     if messages.is_empty() {
         return Ok(Some("empty session"));
     }
