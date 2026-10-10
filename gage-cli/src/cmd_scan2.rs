@@ -24,6 +24,7 @@ use gage_registry::scanner::{Scanner, ScannerRegistry};
 use gage_runtime2::{LOG_TARGET, Output, TaskOutput};
 use gage_scan2::scan_dir::scans_dir;
 use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
+use gage_session::Driver;
 use gage_store::ScanDirLayout;
 use gage_store::{
     DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store,
@@ -56,6 +57,7 @@ use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
 use crate::human::{format_duration, format_elapsed_ms};
+use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
 use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::style as s;
@@ -1627,7 +1629,16 @@ async fn prepare_scan_dialog(
 /// the progress view, and print its summary line. A canceled scan or
 /// one with a failed task exits with status 1.
 async fn run_prepared(prep: ScanPrep, store: &Store) {
-    let dataset_sha = match materialize_dataset(prep.plan, store, prep.progress_ui) {
+    let driver: Arc<dyn Driver> = Arc::new(ClaudeDriver::new());
+    let dataset_sha = match materialize_dataset(
+        prep.plan,
+        store,
+        &prep.compiled,
+        Arc::clone(&driver),
+        prep.progress_ui,
+    )
+    .await
+    {
         Ok(sha) => sha,
         Err(e) => {
             eprintln!("gage scan2: {e}");
@@ -1655,7 +1666,7 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
         dataset: dataset_sha.as_deref(),
         jobs: prep.jobs,
         agent_jobs: prep.agent_jobs,
-        driver: Arc::new(ClaudeDriver::new()),
+        driver,
         invalidate: prep.invalidate,
     };
     let result = if !prep.progress_ui {
@@ -1970,17 +1981,18 @@ fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
     Ok(())
 }
 
-/// Write the dataset if one needs minting, and return the commit
-/// SHA that `ScanConfig.dataset` wants. `None` plan returns `None`;
-/// `Reuse` returns its stored SHA.
 /// The commit of the dataset to scan: the reused dataset's, or that
-/// of a new dataset built from the selected sessions. The build shows
-/// a progress bar under `progress`, cleared when it completes, and
-/// prints each session's outcome line otherwise; the closing `Added
-/// N sessions` line prints either way.
-fn materialize_dataset(
+/// of a new dataset built from the selected sessions and prepared by
+/// the attach tasks of `scanners`, so the scan links a commit that
+/// holds the attachments. The build shows a progress bar under
+/// `progress`, cleared when it completes, and prints each session's
+/// outcome line otherwise; the closing `Added N sessions` line and
+/// the attach phase's lines print either way.
+async fn materialize_dataset(
     plan: DatasetPlan,
     store: &Store,
+    scanners: &[CompiledScanner],
+    driver: Arc<dyn Driver>,
     progress: bool,
 ) -> Result<Option<String>, String> {
     match plan {
@@ -2008,6 +2020,9 @@ fn materialize_dataset(
                     }
                 }
             })?;
+            scanner_attach::attach_for_scanners(store, &id, scanners, driver)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(Some(
                 DatasetStore::from(store)
                     .get(&id)

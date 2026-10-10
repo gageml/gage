@@ -21,8 +21,6 @@ use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
-use gage_runtime2::{Output, TaskOutput};
-use gage_scan2::attach::{AttachEvent, attach};
 use gage_store::{
     AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec, AttachmentStore,
     DatasetStore, Store, StoreError,
@@ -38,6 +36,7 @@ use tabled::{
 use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, run_query};
 use crate::human::{format_elapsed_ms, format_size};
+use crate::scanner_attach::{self, describe};
 use crate::scanner_spec;
 use crate::style::{self, IdKind, styled_id};
 use crate::target::resolve_target;
@@ -279,10 +278,9 @@ pub async fn add(args: AttachmentAddArgs) {
     }
 }
 
-/// Run the attachment functions of each named scanner against the
-/// dataset, printing what the functions print and one line per
-/// attachment they write. The first failing function ends the command
-/// with exit 1; attachments linked before it stay linked.
+/// Run the attach tasks of each named scanner against the dataset.
+/// The first failing task ends the command with exit 1; attachments
+/// linked before it stay linked.
 async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]) {
     let dataset_id = match DatasetStore::from(store).resolve_id(dataset_prefix) {
         Ok(id) => id,
@@ -316,46 +314,11 @@ async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]
             }
         }
     }
-    let dataset = short_uuid(&dataset_id).to_string();
     let driver = Arc::new(ClaudeDriver::new());
-    let result = attach(store, &dataset_id, &compiled, driver, |event| match event {
-        AttachEvent::Started { .. } => {}
-        AttachEvent::Warning {
-            scanner,
-            task,
-            message,
-        } => eprintln!("warning: task {scanner}:{task} {message}"),
-        AttachEvent::Output(TaskOutput { output, .. }) => match output {
-            Output::Print(s) => print!("{s}"),
-            Output::Println(s) => println!("{s}"),
-            Output::Log { level, message } => eprintln!("{}: {message}", level.as_str()),
-            Output::Progress { .. } | Output::AgentPool(_) => {}
-        },
-        AttachEvent::Attached { attached, .. } => {
-            let verb = match attached.outcome.as_str() {
-                "added" => "Added",
-                "updated" => "Updated",
-                _ => "Unchanged",
-            };
-            println!(
-                "{verb} attachment {} to dataset {dataset}",
-                describe(attached.name.as_deref(), &attached.id)
-            );
-        }
-    })
-    .await;
-    if let Err(e) = result {
+    if let Err(e) = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled, driver).await
+    {
         eprintln!("gage attachment add: {e}");
         std::process::exit(1);
-    }
-}
-
-/// The attachment as messages show it: `name (short id)` when named,
-/// the short id alone otherwise
-fn describe(name: Option<&str>, id: &str) -> String {
-    match name {
-        Some(name) => format!("{name} ({})", short_uuid(id)),
-        None => short_uuid(id).to_string(),
     }
 }
 
