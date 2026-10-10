@@ -30,7 +30,8 @@ use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_entry, deri
 use crate::plugin;
 use crate::proc::find_claude;
 use crate::session::{
-    SESSION_RE, delete_session, encode_project_dir, is_agent_tmp_slug, projects_dir,
+    SESSION_RE, SessionInfo, SessionListBuilder, delete_session, encode_project_dir,
+    is_agent_tmp_slug, projects_dir,
 };
 use crate::session_reader::SessionReader;
 use crate::tables::{EntryTable, MessageTable, SessionTable};
@@ -336,6 +337,36 @@ impl Source for ClaudeSource {
             message: Arc::new(MessageTable::new(Arc::clone(&self.store))),
             entry: Arc::new(EntryTable::new(Arc::clone(&self.store))),
         })
+    }
+
+    fn warm_summaries(
+        &self,
+        limit: usize,
+        on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<(), DriverError> {
+        let newest = SessionListBuilder::new()
+            .root(self.store.root())
+            .limit(limit)
+            .build();
+        let uncached: Vec<&SessionInfo> = newest
+            .iter()
+            .filter(|s| self.store.session_summary(&s.id, s.mtime).is_none())
+            .collect();
+        let total = uncached.len();
+        on_progress(0, total);
+        for (done, s) in uncached.iter().enumerate() {
+            // Opening derives the summary and writes it to the cache.
+            // A session that cannot be read is skipped here and
+            // reported by the table scan, which shows it with default
+            // attributes.
+            match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, s.size, &self.root, &self.store)
+            {
+                Ok(_) => {}
+                Err(e) => tracing::warn!(session_id = %s.id, "session summary unavailable: {e}"),
+            }
+            on_progress(done + 1, total);
+        }
+        Ok(())
     }
 
     fn find_native(&self, prefix: &str) -> Result<String, NativeLookupError> {
@@ -834,6 +865,38 @@ mod tests {
         assert_eq!(driver.format_model("claude-fable-5-1"), "fable-5-1");
         assert_eq!(driver.format_model("gpt-x"), "gpt-x");
         assert_eq!(driver.format_model(""), "");
+    }
+
+    #[test]
+    fn warm_summaries_caches_the_newest_sessions_once() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let line = r#"{"type":"user","message":{"role":"user","content":"hi"}}"#;
+        seed_session(
+            root,
+            "/Users/alice/x",
+            "aaaaaaaa-1111-1111-1111-111111111111",
+            line,
+        );
+        seed_session(
+            root,
+            "/Users/alice/y",
+            "bbbbbbbb-2222-2222-2222-222222222222",
+            line,
+        );
+        let source = ClaudeDriver::new().open_source(&source_for(root)).unwrap();
+
+        let mut reported = Vec::new();
+        source
+            .warm_summaries(10, &mut |done, total| reported.push((done, total)))
+            .unwrap();
+        assert_eq!(reported, [(0, 2), (1, 2), (2, 2)]);
+
+        let mut reported = Vec::new();
+        source
+            .warm_summaries(10, &mut |done, total| reported.push((done, total)))
+            .unwrap();
+        assert_eq!(reported, [(0, 0)]);
     }
 
     fn seed_session(root: &Path, cwd: &str, id: &str, contents: &str) -> PathBuf {

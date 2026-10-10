@@ -175,6 +175,20 @@ pub trait Source: Send + Sync {
     /// Expand a typed id or prefix to exactly one native id.
     fn find_native(&self, prefix: &str) -> Result<String, NativeLookupError>;
 
+    /// Prepare the newest `limit` sessions for a listing read, so a
+    /// later `session` table query over them returns without parsing
+    /// session content. `on_progress(done, total)` reports the
+    /// sessions that need preparing: once with `done == 0`, then after
+    /// each one. The default prepares nothing, for drivers whose
+    /// listing rows are cheap to read.
+    fn warm_summaries(
+        &self,
+        _limit: usize,
+        _on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     fn open_native(&self, native_id: &str) -> Result<Box<dyn NativeSession>, DriverError>;
 
     /// Remove a native session and any content stored alongside it.

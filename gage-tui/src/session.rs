@@ -45,6 +45,9 @@ enum Kind {
 /// Width the picker gives a project name
 const PROJECT_WIDTH: usize = 24;
 
+/// Sessions the session-open picker lists
+pub const PICKER_LIMIT: usize = 200;
+
 impl Backend {
     /// Over the driver source `spec` names. Empty names the default
     /// driver's default location.

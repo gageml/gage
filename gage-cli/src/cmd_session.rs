@@ -17,10 +17,11 @@ use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
 use gage_query2::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
-use gage_session::Driver;
+use gage_session::{Driver, Source};
 use gage_store::{DatasetStore, SessionStore, Store};
-use gage_tui::session::Backend;
+use gage_tui::session::{Backend, PICKER_LIMIT};
 use gage_tui::{ViewOptions, session_view};
+use indicatif::ProgressBar;
 use tabled::{
     Table,
     grid::{config::Position, records::RecordsMut},
@@ -1193,17 +1194,38 @@ async fn view_native(
 ) -> Result<(), Box<dyn Error>> {
     let registry = source::driver_registry();
     let (driver, spec) = source::resolve_source(&registry, source)?;
+    let opened = driver.open_source(&spec)?;
     let id = match prefix {
-        Some(prefix) => {
-            let opened = driver.open_source(&spec)?;
-            let id = opened.find_native(prefix)?;
-            opened.close()?;
-            Some(id)
+        Some(prefix) => Some(opened.find_native(prefix)?),
+        None => {
+            warm_picker_sessions(opened.as_ref())?;
+            None
         }
-        None => None,
     };
+    opened.close()?;
     let backend = Backend::native(&spec).await?;
     session_view::run(backend, id.as_deref(), options).await
+}
+
+/// Prepare the picker's sessions before the TUI takes the terminal,
+/// behind a progress bar when any of them need reading.
+fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
+    let mut bar: Option<ProgressBar> = None;
+    source.warm_summaries(PICKER_LIMIT, &mut |done, total| {
+        if total == 0 {
+            return;
+        }
+        let bar = bar.get_or_insert_with(|| {
+            let bar = style::progress_bar(total as u64);
+            bar.set_message("Reading sessions");
+            bar
+        });
+        bar.set_position(done as u64);
+    })?;
+    if let Some(bar) = bar {
+        bar.finish_and_clear();
+    }
+    Ok(())
 }
 
 pub fn move_(args: SessionMoveArgs) {

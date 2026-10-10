@@ -121,7 +121,7 @@ fn draw_empty_shell(frame: &mut Frame) {
 /// Build the session-open picker from the backend's recent sessions.
 fn session_picker(backend: &Backend, current: Option<&str>) -> io::Result<Picker> {
     let items = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(backend.list_recent(200))
+        tokio::runtime::Handle::current().block_on(backend.list_recent(session::PICKER_LIMIT))
     })
     .map_err(|e| io::Error::other(e.to_string()))?;
     let (id_heading, id_style) = if backend.is_native() {
