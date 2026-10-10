@@ -596,12 +596,8 @@ mod tests {
         );
 
         assert_eq!(
-            strings(
-                &ctx,
-                "SELECT status || ' ' || status_reason || ' ' || evidence_count FROM issue"
-            )
-            .await,
-            ["closed wontfix 1"]
+            strings(&ctx, "SELECT status || ' ' || status_reason FROM issue").await,
+            ["closed wontfix"]
         );
         assert_eq!(
             strings(

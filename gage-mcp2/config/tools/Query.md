@@ -31,7 +31,7 @@ Tables:
 - note_doc (note_name, doc, written_by) - what each note kind holds and how it
   was produced, as its writer declares it
 - issue (id, name, title, description, status, status_reason, author,
-  evidence_count, created, scan, key) - the issues the scan wrote; issue_event
+  created, scan, key) - the issues the scan wrote; issue_event
   (issue_id, event_id, timestamp, author, event, from_status, to_status,
   reason, message); issue_evidence (issue_id, note_id); session_issue
   (session_id, issue_id)

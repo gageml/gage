@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use super::batch::{BatchSource, BatchTable, external, unique_prefix_lens};
 use crate::{ISSUE_TYPE, IssueChange, IssueFull, IssueStore, Order, Store};
-use datafusion::arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
+use datafusion::arrow::array::{StringBuilder, TimestampMillisecondBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
@@ -37,7 +37,6 @@ pub(crate) fn issue_schema() -> SchemaRef {
         // Gage URL of the writer
         Field::new("author", DataType::Utf8, false),
         // Notes cited, from `evidence.link`
-        Field::new("evidence_count", DataType::Int64, false),
         // Timestamps
         Field::new("created", timestamp(), false),
         Field::new("modified", timestamp(), false),
@@ -120,7 +119,6 @@ pub(crate) struct IssueRow {
     pub status: String,
     pub status_reason: Option<String>,
     pub author: String,
-    pub evidence_count: usize,
     pub created_ms: i64,
     pub modified_ms: i64,
     pub scan: Option<String>,
@@ -140,7 +138,6 @@ impl IssueRow {
             status: issue.status.as_str().to_string(),
             status_reason: issue.status_reason.map(|r| r.as_str().to_string()),
             author: issue.author.clone(),
-            evidence_count: issue.evidence.len(),
             created_ms: issue.created_ms,
             modified_ms: issue.modified_ms,
             scan: issue.scan.clone(),
@@ -161,7 +158,6 @@ pub(crate) fn issue_rows(rows: &[IssueRow]) -> Result<RecordBatch> {
     let mut statuses = StringBuilder::new();
     let mut reasons = StringBuilder::new();
     let mut authors = StringBuilder::new();
-    let mut evidence_counts = Int64Builder::with_capacity(len);
     let mut createds = TimestampMillisecondBuilder::with_capacity(len);
     let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
     let mut scans = StringBuilder::new();
@@ -177,7 +173,6 @@ pub(crate) fn issue_rows(rows: &[IssueRow]) -> Result<RecordBatch> {
         statuses.append_value(&row.status);
         reasons.append_option(row.status_reason.as_deref());
         authors.append_value(&row.author);
-        evidence_counts.append_value(row.evidence_count as i64);
         createds.append_value(row.created_ms);
         modifieds.append_value(row.modified_ms);
         scans.append_option(row.scan.as_deref());
@@ -196,7 +191,6 @@ pub(crate) fn issue_rows(rows: &[IssueRow]) -> Result<RecordBatch> {
             Arc::new(statuses.finish()),
             Arc::new(reasons.finish()),
             Arc::new(authors.finish()),
-            Arc::new(evidence_counts.finish()),
             Arc::new(createds.finish().with_timezone("UTC")),
             Arc::new(modifieds.finish().with_timezone("UTC")),
             Arc::new(scans.finish()),

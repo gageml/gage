@@ -490,7 +490,6 @@ pub fn scan_scope_tables(
                         status: i.status.clone(),
                         status_reason: i.status_reason.clone(),
                         author: i.author.clone(),
-                        evidence_count: i.evidence.len(),
                         created_ms: i.created_ms,
                         modified_ms: i.modified_ms,
                         scan: i.scan.clone(),
