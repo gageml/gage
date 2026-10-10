@@ -18,18 +18,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
+use gage_core::config::plugin_marketplace_dir;
 use gage_session::{
     AgentSession, AgentSpec, ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry,
-    NativeLookupError, NativeSession, SessionAttrs, Source, StoredSession, split_scheme,
+    GageInstallStatus, InstallReport, InstallUi, NativeLookupError, NativeSession, SessionAttrs,
+    Source, StoredSession, split_scheme,
 };
 
 use crate::home::ClaudeHome;
 use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_entry, derive_session};
+use crate::plugin;
+use crate::proc::find_claude;
 use crate::session::{
     SESSION_RE, delete_session, encode_project_dir, is_agent_tmp_slug, projects_dir,
 };
 use crate::session_reader::SessionReader;
 use crate::tables::{EntryTable, MessageTable, SessionTable};
+
+/// MCP server name under which Gage registers in `.mcp.json`.
+const MCP_SERVER_NAME: &str = "gage";
+/// Plugin identifier Claude Code uses: `<plugin>@<marketplace>`.
+const PLUGIN_ID: &str = "gage@gage";
 
 const NAME: &str = "claude";
 const SCHEMES: &[&str] = &["claude"];
@@ -129,6 +138,137 @@ impl Driver for ClaudeDriver {
     /// tokio runtime.
     fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
         Ok(Box::new(crate::agent::start(spec)?))
+    }
+
+    fn install_gage(
+        &self,
+        mcp_cmd: &[&str],
+        ui: &mut dyn InstallUi,
+    ) -> Result<InstallReport, DriverError> {
+        if mcp_cmd.is_empty() {
+            return Err(DriverError::Other(
+                "install_gage: mcp_cmd must name an executable".into(),
+            ));
+        }
+        let claude_bin = find_claude().map_err(DriverError::Io)?;
+        let marketplace = plugin_marketplace_dir();
+        let mut notes = Vec::new();
+
+        ui.step("Writing plugin files");
+        plugin::write_plugin_files_to(&marketplace).map_err(DriverError::Io)?;
+        plugin::write_marketplace_manifest_to(&marketplace).map_err(DriverError::Io)?;
+        plugin::write_mcp_json(&marketplace, mcp_cmd).map_err(DriverError::Io)?;
+        notes.push(format!("plugin materialized at {}", marketplace.display()));
+        ui.step_done();
+
+        ui.step("Registering plugin marketplace");
+        run_claude_strict(
+            &claude_bin,
+            &[
+                "plugin",
+                "marketplace",
+                "add",
+                &marketplace.to_string_lossy(),
+            ],
+        )?;
+        notes.push("marketplace 'gage' registered".into());
+        ui.step_done();
+
+        ui.step("Installing plugin");
+        // Silent uninstall first: `plugin install` on an already-
+        // installed plugin is a no-op and leaves the cached plugin.json
+        // frozen at the prior installed version. Uninstall-then-install
+        // forces Claude to re-copy from source.
+        silent_claude(&claude_bin, &["plugin", "uninstall", PLUGIN_ID]);
+        run_claude_strict(&claude_bin, &["plugin", "install", PLUGIN_ID])?;
+        notes.push(format!("plugin {PLUGIN_ID} installed"));
+        ui.step_done();
+
+        Ok(InstallReport {
+            registered_as: MCP_SERVER_NAME.to_string(),
+            notes,
+        })
+    }
+
+    fn uninstall_gage(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
+        let claude_bin = find_claude().map_err(DriverError::Io)?;
+        ui.step("Uninstalling plugin");
+        run_claude_best_effort(&claude_bin, &["plugin", "uninstall", PLUGIN_ID], ui);
+        ui.step_done();
+        ui.step("Removing marketplace");
+        run_claude_best_effort(
+            &claude_bin,
+            &["plugin", "marketplace", "remove", "gage"],
+            ui,
+        );
+        ui.step_done();
+        Ok(())
+    }
+
+    fn gage_install_status(&self) -> Result<GageInstallStatus, DriverError> {
+        if find_claude().is_err() {
+            return Ok(GageInstallStatus::NotApplicable);
+        }
+        let marketplace = plugin_marketplace_dir();
+        let mcp_file = marketplace.join(".mcp.json");
+        if !mcp_file.exists() {
+            return Ok(GageInstallStatus::NotInstalled);
+        }
+        Ok(GageInstallStatus::Installed {
+            registered_as: MCP_SERVER_NAME.to_string(),
+        })
+    }
+}
+
+/// Run `claude <args>`, inheriting stderr. Nonzero exit and spawn
+/// failures are errors.
+fn run_claude_strict(claude_bin: &Path, args: &[&str]) -> Result<(), DriverError> {
+    let output = std::process::Command::new(claude_bin)
+        .args(args)
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(DriverError::Io)?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(DriverError::Other(format!(
+            "claude {} failed: {stdout}",
+            args.join(" ")
+        )));
+    }
+    Ok(())
+}
+
+/// Run `claude <args>` and report a non-fatal failure through `ui`.
+/// Both nonzero exit and spawn failure are warnings.
+fn run_claude_best_effort(claude_bin: &Path, args: &[&str], ui: &mut dyn InstallUi) {
+    match std::process::Command::new(claude_bin)
+        .args(args)
+        .stderr(std::process::Stdio::inherit())
+        .output()
+    {
+        Ok(output) if !output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            ui.warn(&format!("claude {} failed: {stdout}", args.join(" ")));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            ui.warn(&format!("failed to run claude {}: {e}", args.join(" ")));
+        }
+    }
+}
+
+/// Run `claude <args>` discarding stdout/stderr and ignoring the exit
+/// code. Used before an install to force Claude to re-copy the plugin
+/// from source; a "not installed" error on first-time init is expected
+/// and silent.
+fn silent_claude(claude_bin: &Path, args: &[&str]) {
+    match std::process::Command::new(claude_bin)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(_) | Err(_) => {}
     }
 }
 

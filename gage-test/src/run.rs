@@ -264,8 +264,18 @@ fn run_single(
 fn install_gage_plugin(claude_bin: &Path, claude_home: &Path, run: &Path) -> io::Result<()> {
     let marketplace = storage::plugin_marketplace_dir(run);
     let gage_bin = sibling_gage_bin()?;
-    plugin::write_plugin_files_to(&marketplace, &gage_bin)?;
+    plugin::write_plugin_files_to(&marketplace)?;
     plugin::write_marketplace_manifest_to(&marketplace)?;
+    let gage_bin_str = gage_bin.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "gage binary path is not valid UTF-8: {}",
+                gage_bin.display()
+            ),
+        )
+    })?;
+    plugin::write_mcp_json(&marketplace, &[gage_bin_str, "mcp2"])?;
 
     claude_subcommand(
         claude_bin,

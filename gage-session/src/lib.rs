@@ -88,6 +88,73 @@ pub trait Driver: Send + Sync {
             self.name()
         )))
     }
+
+    /// Install Gage into this driver's harness. `mcp_cmd[0]` is the
+    /// Gage executable path; `mcp_cmd[1..]` are the arguments the
+    /// harness should launch it with. Progress is reported through
+    /// `ui`. The default is that the driver does not install Gage.
+    fn install_gage(
+        &self,
+        _mcp_cmd: &[&str],
+        _ui: &mut dyn InstallUi,
+    ) -> Result<InstallReport, DriverError> {
+        Err(DriverError::Other(format!(
+            "driver {} does not install Gage",
+            self.name()
+        )))
+    }
+
+    /// Remove Gage from this driver's harness. The default is that
+    /// the driver does not install Gage.
+    fn uninstall_gage(&self, _ui: &mut dyn InstallUi) -> Result<(), DriverError> {
+        Err(DriverError::Other(format!(
+            "driver {} does not install Gage",
+            self.name()
+        )))
+    }
+
+    /// Whether Gage is installed in this driver's harness. The
+    /// default is `NotApplicable`.
+    fn gage_install_status(&self) -> Result<GageInstallStatus, DriverError> {
+        Ok(GageInstallStatus::NotApplicable)
+    }
+}
+
+/// Progress sink for an install or uninstall. The CLI implements it
+/// with cliclack spinners; a non-interactive caller may implement it
+/// as a no-op or a log line.
+pub trait InstallUi {
+    /// Begin a step named by `label`.
+    fn step(&mut self, label: &str);
+    /// End the step most recently started with [`step`](Self::step).
+    fn step_done(&mut self);
+    /// Record a non-fatal warning.
+    fn warn(&mut self, message: &str);
+}
+
+/// Result of [`Driver::install_gage`].
+#[derive(Debug, Clone)]
+pub struct InstallReport {
+    /// The name under which the harness now knows Gage.
+    pub registered_as: String,
+    /// Human-readable per-step notes for a post-install summary.
+    pub notes: Vec<String>,
+}
+
+/// Reported by [`Driver::gage_install_status`].
+#[derive(Debug, Clone)]
+pub enum GageInstallStatus {
+    /// This driver's harness is not present on the machine, or the
+    /// driver does not install Gage.
+    NotApplicable,
+    /// The harness is present but Gage is not installed in it.
+    NotInstalled,
+    /// Gage is installed in the harness under `registered_as`.
+    Installed { registered_as: String },
+    /// Gage is installed but out of sync with this build (e.g. the
+    /// gage binary path recorded in the harness no longer matches
+    /// this binary).
+    Stale { reason: String },
 }
 
 /// A handle over one source of native sessions. Dropping the handle

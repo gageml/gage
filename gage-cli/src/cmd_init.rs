@@ -1,19 +1,16 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
 use clap::Args;
 use cliclack as cli;
-use gage_claude::plugin;
-use gage_claude::proc::find_claude;
-use gage_core::config::plugin_marketplace_dir;
 use gage_db::db::{db_path, open_db};
+use gage_session::InstallUi;
 use gage_store::{Store, StoreError};
+use indicatif::ProgressBar;
 
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::source::driver_registry;
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// Uninstall Gage from Claude Code
+    /// Uninstall Gage from the harness
     #[arg(short, long)]
     pub remove: bool,
 
@@ -31,11 +28,16 @@ pub fn run(args: InitArgs) {
 }
 
 fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
-    let claude_bin = find_claude_or_err()?;
-    let marketplace = plugin_marketplace_dir();
+    let registry = driver_registry();
+    let driver = registry
+        .default()
+        .ok_or_else(|| DialogError::Other(anyhow::anyhow!("no default driver registered")))?;
 
     cli::log::step("Gage store")?;
-    cli::log::step("Plugin\ngage (MCP server + skills)")?;
+    cli::log::step(format!(
+        "Plugin\ngage (MCP server + skills) via driver {}",
+        driver.name()
+    ))?;
 
     if !args.yes {
         let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
@@ -60,39 +62,18 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     store_result?;
 
     let gage_bin = std::env::current_exe()?;
-    plugin::write_plugin_files_to(&marketplace, &gage_bin)?;
-    plugin::write_marketplace_manifest_to(&marketplace)?;
+    let gage_bin_str = gage_bin.to_str().ok_or_else(|| {
+        DialogError::Other(anyhow::anyhow!(
+            "gage binary path is not valid UTF-8: {}",
+            gage_bin.display()
+        ))
+    })?;
 
-    run_claude(
-        "Registering plugin marketplace",
-        &claude_bin,
-        &[
-            "plugin",
-            "marketplace",
-            "add",
-            &marketplace.to_string_lossy(),
-        ],
-    )?;
-    // One spinner covers both operations: silent uninstall (forces
-    // Claude to re-copy the plugin from source on the following
-    // install; without it, `plugin install` on an already-installed
-    // plugin is a no-op and the cached plugin.json stays frozen at
-    // the originally installed version) then the install itself.
-    let spinner = crate::style::spinner("Installing plugin");
-    silent_uninstall(&claude_bin);
-    let install_result = Command::new(&claude_bin)
-        .args(["plugin", "install", "gage@gage"])
-        .stderr(std::process::Stdio::inherit())
-        .output();
-    spinner.finish_and_clear();
-    let install_output = install_result
-        .map_err(|e| DialogError::Other(anyhow::anyhow!("failed to run claude: {e}")))?;
-    if !install_output.status.success() {
-        let stdout = String::from_utf8_lossy(&install_output.stdout);
-        return Err(DialogError::Other(anyhow::anyhow!(
-            "claude plugin install gage@gage failed: {stdout}"
-        )));
-    }
+    let mut ui = SpinnerUi::default();
+    driver
+        .install_gage(&[gage_bin_str, "mcp2"], &mut ui)
+        .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
+    ui.finish();
 
     Ok(DialogResult::from("Gage is initialized"))
 }
@@ -117,9 +98,12 @@ fn init_store() -> Result<(), DialogError> {
 }
 
 fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
-    let claude_bin = find_claude_or_err()?;
+    let registry = driver_registry();
+    let driver = registry
+        .default()
+        .ok_or_else(|| DialogError::Other(anyhow::anyhow!("no default driver registered")))?;
 
-    cli::log::step("Plugin\ngage@gage")?;
+    cli::log::step(format!("Driver\n{}", driver.name()))?;
 
     if !args.yes {
         let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
@@ -128,80 +112,51 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         }
     }
 
-    run_claude_best_effort(
-        "Uninstalling plugin",
-        &claude_bin,
-        &["plugin", "uninstall", "gage@gage"],
-    )?;
-    run_claude_best_effort(
-        "Removing marketplace",
-        &claude_bin,
-        &["plugin", "marketplace", "remove", "gage"],
-    )?;
+    let mut ui = SpinnerUi::default();
+    driver
+        .uninstall_gage(&mut ui)
+        .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
+    ui.finish();
 
-    Ok(DialogResult::from("Gage removed from Claude Code"))
+    Ok(DialogResult::from(format!(
+        "Gage removed from {} harness",
+        driver.name()
+    )))
 }
 
-/// Best-effort uninstall used to force Claude to re-copy the plugin
-/// from source on the next install. Discards Claude's stdout/stderr
-/// so the expected "not installed" case on a first-time init stays
-/// silent, and swallows both a non-zero exit and a spawn failure.
-/// The following `plugin install` is the source of truth for install
-/// errors, so any noise here is not actionable.
-fn silent_uninstall(claude_bin: &Path) {
-    match Command::new(claude_bin)
-        .args(["plugin", "uninstall", "gage@gage"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(_) | Err(_) => {}
-    }
+/// `InstallUi` sink that drives a single cliclack spinner at a time:
+/// each `step` starts one, `step_done` clears it, and `warn` logs a
+/// warning line out of band.
+#[derive(Default)]
+struct SpinnerUi {
+    current: Option<ProgressBar>,
 }
 
-fn find_claude_or_err() -> Result<PathBuf, DialogError> {
-    find_claude().map_err(|e| DialogError::Other(anyhow::anyhow!("claude not found on PATH: {e}")))
-}
-
-fn run_claude(message: &str, claude_bin: &Path, args: &[&str]) -> Result<(), DialogError> {
-    let spinner = crate::style::spinner(message);
-    let output = Command::new(claude_bin)
-        .args(args)
-        .stderr(std::process::Stdio::inherit())
-        .output();
-    spinner.finish_and_clear();
-    let output =
-        output.map_err(|e| DialogError::Other(anyhow::anyhow!("failed to run claude: {e}")))?;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(DialogError::Other(anyhow::anyhow!(
-            "claude {} failed: {stdout}",
-            args.join(" ")
-        )));
-    }
-    Ok(())
-}
-
-fn run_claude_best_effort(
-    message: &str,
-    claude_bin: &Path,
-    args: &[&str],
-) -> Result<(), DialogError> {
-    let spinner = crate::style::spinner(message);
-    let output = Command::new(claude_bin)
-        .args(args)
-        .stderr(std::process::Stdio::inherit())
-        .output();
-    spinner.finish_and_clear();
-    match output {
-        Ok(o) if !o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            cli::log::warning(format!("claude {} failed: {stdout}", args.join(" ")))?;
-        }
-        Ok(_) => {}
-        Err(e) => {
-            cli::log::warning(format!("failed to run claude {}: {e}", args.join(" ")))?;
+impl SpinnerUi {
+    fn finish(&mut self) {
+        if let Some(bar) = self.current.take() {
+            bar.finish_and_clear();
         }
     }
-    Ok(())
+}
+
+impl InstallUi for SpinnerUi {
+    fn step(&mut self, label: &str) {
+        if let Some(bar) = self.current.take() {
+            bar.finish_and_clear();
+        }
+        self.current = Some(crate::style::spinner(label));
+    }
+
+    fn step_done(&mut self) {
+        if let Some(bar) = self.current.take() {
+            bar.finish_and_clear();
+        }
+    }
+
+    fn warn(&mut self, message: &str) {
+        // cliclack's `warning` writer is best-effort; a terminal write
+        // failure here is not actionable at install time.
+        drop(cli::log::warning(message));
+    }
 }

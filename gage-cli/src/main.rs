@@ -237,6 +237,9 @@ enum Command {
         #[command(subcommand)]
         command: Option<McpCommand>,
     },
+
+    /// Start the MCP server (new runtime)
+    Mcp2,
 }
 
 #[derive(Subcommand)]
@@ -294,6 +297,7 @@ async fn main() {
     }
     let _log_guard = match &cli.command {
         Command::Mcp { .. } => Some(gage_log::init("mcp").expect("init log dir")),
+        Command::Mcp2 => Some(gage_log::init("mcp2").expect("init log dir")),
         // A scan run inits its own scan-id-named log in cmd_scan; the
         // scan subcommands (list/show/view/delete) log per-process.
         Command::Scan(args) if args.command.is_some() => {
@@ -409,6 +413,14 @@ async fn main() {
                     shutdown_tx.send(()).ok();
                 }
             },
+            Command::Mcp2 => {
+                eprintln!(
+                    "gage mcp2: stdio serving is not yet implemented in gage-mcp2; \
+                     the Claude plugin is registered to call this command but the \
+                     server stub exits here"
+                );
+                std::process::exit(1);
+            }
             Command::Query(args) => cmd_query::main(args).await,
             Command::Query2(args) => cmd_query2::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
