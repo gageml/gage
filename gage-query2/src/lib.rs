@@ -47,9 +47,9 @@ use gage_query::SessionCache;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
     LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
-    attachment_table, dataset_table, issue_event_table, issue_table, link_table, note_doc_rows,
-    note_doc_schema, object_key_table, scan_scope_tables, scan_table, scan_task_agent_table,
-    scan_task_table, scan_watermark_table, tag_table,
+    attachment_table, dataset_table, issue_event_table, issue_report_fn, issue_table, link_table,
+    note_doc_rows, note_doc_schema, object_key_table, related_issue_fn, scan_scope_tables,
+    scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -149,6 +149,7 @@ impl ContextBuilder {
             .expect("register the watermark table on a fresh context");
         ctx.register_table("note_doc", registry_note_doc_table())
             .expect("register the note doc table on a fresh context");
+        register_issue_functions(&ctx, &store);
         // Views are planned over the raw providers, so they survive the
         // user-facing context hiding what they read
         for (name, sql) in VIEWS {
@@ -228,7 +229,16 @@ fn build_scan_scope(
         ctx.register_table(name, table)
             .expect("register scan tables on a fresh context");
     }
+    register_issue_functions(&ctx, &store);
     ctx
+}
+
+/// The table functions that read one issue from the store by id:
+/// `issue_report` and `related_issue`. Both scopes have them, since
+/// they read by id rather than over a scope's set.
+fn register_issue_functions(ctx: &SessionContext, store: &Arc<Mutex<Store>>) {
+    ctx.register_udtf("issue_report", issue_report_fn(Arc::clone(store)));
+    ctx.register_udtf("related_issue", related_issue_fn(Arc::clone(store)));
 }
 
 /// The `note_doc` table of the store scope: every `writes` declaration
@@ -390,6 +400,156 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// An issue with no evidence, for the issue function tests
+    fn add_issue(store: &Store, name: &str, title: &str, description: &str) -> String {
+        IssueStore::from(store)
+            .create(IssueInput {
+                name,
+                title,
+                description: Some(description),
+                author: "user:t",
+                status: IssueStatus::Pending,
+                evidence: &[],
+                key: None,
+            })
+            .unwrap()
+    }
+
+    /// `related_issue` ranks the docket by TF-IDF cosine over title
+    /// and description, leaves the subject and zero-score issues out,
+    /// discounts an issue of another name, and honors the limit.
+    #[tokio::test]
+    async fn related_issue_ranks_the_docket_against_the_subject() {
+        let (_tmp, store) = open_store();
+        let (subject, same, other_name) = {
+            let store = store.lock().unwrap();
+            let subject = add_issue(
+                &store,
+                "general",
+                "Retry loop never terminates in fetch",
+                "The fetch retry loop has no exit.",
+            );
+            let same = add_issue(
+                &store,
+                "general",
+                "Fetch retry loop runs forever",
+                "The retry loop in fetch never exits.",
+            );
+            let other_name = add_issue(
+                &store,
+                "code-review",
+                "Fetch retry loop runs forever",
+                "The retry loop in fetch never exits.",
+            );
+            add_issue(
+                &store,
+                "general",
+                "Missing parser coverage",
+                "Parser lacks tests.",
+            );
+            (subject, same, other_name)
+        };
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
+        let sql = format!(
+            "SELECT arrow_cast(related_id || ' ' || CAST(round(score, 3) AS VARCHAR), 'Utf8') \
+             FROM related_issue('{subject}')"
+        );
+        let rows = strings(&ctx, &sql).await;
+        let (first, first_score) = rows[0].split_once(' ').unwrap();
+        let (second, second_score) = rows[1].split_once(' ').unwrap();
+        assert_eq!((first, second), (same.as_str(), other_name.as_str()));
+        let (first_score, second_score): (f64, f64) =
+            (first_score.parse().unwrap(), second_score.parse().unwrap());
+        assert!(
+            (second_score - first_score * 0.8).abs() < 0.002,
+            "another name keeps 80%: {rows:?}"
+        );
+        assert_eq!(rows.len(), 2, "the parser issue shares no term: {rows:?}");
+
+        let limited = strings(
+            &ctx,
+            &format!("SELECT related_id FROM related_issue('{subject}', 1)"),
+        )
+        .await;
+        assert_eq!(limited, [same]);
+        let unknown = strings(&ctx, "SELECT related_id FROM related_issue('nope')").await;
+        assert!(unknown.is_empty());
+    }
+
+    /// `issue_report` renders the issue's fields, description,
+    /// evidence at the cited commit, and history, with a duplicate
+    /// close naming its survivor.
+    #[tokio::test]
+    async fn issue_report_renders_fields_evidence_and_history() {
+        let (_tmp, store) = open_store();
+        let (subject, survivor) = {
+            let store = store.lock().unwrap();
+            let note_id = NoteStore::from(&*store)
+                .create(NoteInput {
+                    name: "finding",
+                    value: NoteValue::Text("the evidence".into()),
+                    author: "user:t",
+                    target: None,
+                    metadata: None,
+                    work_id: None,
+                })
+                .unwrap();
+            let issues = IssueStore::from(&*store);
+            let subject = issues
+                .create(IssueInput {
+                    name: "general",
+                    title: "Retry loop never terminates",
+                    description: Some("## Summary\n\nIt spins.\n"),
+                    author: "task:general:main",
+                    status: IssueStatus::Pending,
+                    evidence: slice::from_ref(&note_id),
+                    key: None,
+                })
+                .unwrap();
+            let survivor = add_issue(&store, "general", "Retry loop spins", "Spins.");
+            issues
+                .close_duplicate(&subject, &survivor, "user:t", Some("same condition"))
+                .unwrap();
+            (subject, survivor)
+        };
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
+        let rows = strings(
+            &ctx,
+            &format!("SELECT report FROM issue_report('{subject}')"),
+        )
+        .await;
+        let report = &rows[0];
+        for expected in [
+            "**Retry loop never terminates**",
+            "- status: closed",
+            "- closed reason: duplicate",
+            "- author: task:general:main",
+            "## Summary\n\nIt spins.",
+            "## Evidence",
+            "### finding (note ID ",
+            "- value: the evidence",
+            "## History",
+            "- created pending · task:general:main",
+            &format!("- pending → closed (duplicate of {survivor}) · user:t"),
+            "  > same condition",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in:\n{report}"
+            );
+        }
+        let unknown = strings(&ctx, "SELECT report FROM issue_report('nope')").await;
+        assert!(unknown.is_empty());
+        let events = strings(
+            &ctx,
+            &format!(
+                "SELECT \"of\" FROM issue_event WHERE issue_id = '{subject}' AND event = 'status'"
+            ),
+        )
+        .await;
+        assert_eq!(events, [survivor]);
     }
 
     /// A store-backed context registers `session` and exposes it

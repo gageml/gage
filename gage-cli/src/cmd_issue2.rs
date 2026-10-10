@@ -155,6 +155,12 @@ pub struct IssueCloseArgs {
     #[arg(short, long, value_enum)]
     reason: Option<CloseReason>,
 
+    /// The surviving issue a duplicate closes against (ID or prefix)
+    ///
+    /// Requires --reason duplicate
+    #[arg(long, value_name = "ISSUE")]
+    of: Option<String>,
+
     #[command(flatten)]
     message: MessageArgs,
 
@@ -408,7 +414,7 @@ pub async fn show(args: IssueShowArgs) {
     );
     let evidence = run_query(&ctx, &evidence_sql).await;
     let events_sql = format!(
-        "SELECT event, author, timestamp, from_status, to_status, reason, message \
+        "SELECT event, author, timestamp, from_status, to_status, reason, \"of\", message \
          FROM issue_event WHERE issue_id = '{id}' ORDER BY event_id"
     );
     let events = run_query(&ctx, &events_sql).await;
@@ -479,7 +485,8 @@ pub async fn show(args: IssueShowArgs) {
         let froms = column::<StringArray>(batch, 3);
         let tos = column::<StringArray>(batch, 4);
         let reasons = column::<StringArray>(batch, 5);
-        let messages = column::<StringArray>(batch, 6);
+        let ofs = column::<StringArray>(batch, 6);
+        let messages = column::<StringArray>(batch, 7);
         for i in 0..batch.num_rows() {
             let opt = |col: &StringArray| col.is_valid(i).then(|| col.value(i).to_string());
             let label = event_label(
@@ -487,6 +494,7 @@ pub async fn show(args: IssueShowArgs) {
                 opt(froms).as_deref(),
                 opt(tos).as_deref(),
                 opt(reasons).as_deref(),
+                opt(ofs).as_deref(),
             );
             let header = style(textwrap::fill(
                 &format!(
@@ -515,20 +523,24 @@ pub async fn show(args: IssueShowArgs) {
 }
 
 /// One line naming an event: `created pending`, `pending → open`,
-/// `open → closed (wontfix)`, `comment`.
+/// `open → closed (wontfix)`, `pending → closed (duplicate of
+/// 2jc5yz17)`, `comment`.
 pub(crate) fn event_label(
     event: &str,
     from: Option<&str>,
     to: Option<&str>,
     reason: Option<&str>,
+    of: Option<&str>,
 ) -> String {
     let mut label = match (event, from, to) {
         ("create", _, Some(to)) => format!("created {to}"),
         ("status", Some(from), Some(to)) => format!("{from} → {to}"),
         (other, _, _) => other.to_string(),
     };
-    if let Some(reason) = reason {
-        label.push_str(&format!(" ({reason})"));
+    match (reason, of) {
+        (Some(reason), Some(of)) => label.push_str(&format!(" ({reason} of {})", short_uuid(of))),
+        (Some(reason), None) => label.push_str(&format!(" ({reason})")),
+        (None, _) => {}
     }
     label
 }
@@ -759,12 +771,37 @@ pub fn close(args: IssueCloseArgs) {
         }
     });
     let reason: StatusReason = args.reason.unwrap_or(CloseReason::Completed).into();
+    // A duplicate close names its survivor, and nothing else does
+    let survivor = match (reason, &args.of) {
+        (StatusReason::Duplicate, Some(of)) => match issues.get(of) {
+            Ok(survivor) => Some(survivor),
+            Err(e) => {
+                eprintln!("gage issue2 close: --of {of}: {e}");
+                std::process::exit(1);
+            }
+        },
+        (StatusReason::Duplicate, None) => {
+            eprintln!("gage issue2 close: --reason duplicate requires --of ISSUE");
+            std::process::exit(1);
+        }
+        (_, Some(_)) => {
+            eprintln!("gage issue2 close: --of applies to --reason duplicate");
+            std::process::exit(1);
+        }
+        (_, None) => None,
+    };
     let given_message = args.message.resolve("gage issue2 close");
     let count = targets.len();
 
     dialog::run("Close issues", || {
         issues_step(&targets)?;
         cli::log::step(format!("Reason\n{}", style(reason).dim()))?;
+        if let Some(survivor) = &survivor {
+            cli::log::step(format!(
+                "Duplicate of\n{}",
+                style(format!("{} {}", short_uuid(&survivor.id), survivor.title)).dim()
+            ))?;
+        }
         let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
         if !args.yes {
             let prompt = if count == 1 {
@@ -780,13 +817,19 @@ pub fn close(args: IssueCloseArgs) {
         let author = resolve_author(None);
         let mut closed = 0;
         for issue in &targets {
-            if let Err(e) = issues.set_status(
-                &issue.id,
-                IssueStatus::Closed,
-                Some(reason),
-                &author,
-                message.as_deref(),
-            ) {
+            let result = match &survivor {
+                Some(survivor) => {
+                    issues.close_duplicate(&issue.id, &survivor.id, &author, message.as_deref())
+                }
+                None => issues.set_status(
+                    &issue.id,
+                    IssueStatus::Closed,
+                    Some(reason),
+                    &author,
+                    message.as_deref(),
+                ),
+            };
+            if let Err(e) = result {
                 eprintln!("warning: failed to close {}: {e}", short_uuid(&issue.id));
             } else {
                 closed += 1;

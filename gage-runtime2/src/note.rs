@@ -182,6 +182,79 @@ impl Note {
 type Written = Result<Result<Note, Error>, VmError>;
 
 async fn do_write_note(w: NoteWrite) -> Written {
+    let NoteWrite {
+        name,
+        value,
+        target,
+        metadata,
+        carry_forward,
+    } = w;
+    let note_value = match note_value(&value) {
+        Ok(v) => v,
+        Err(e) => return Ok(Err(e)),
+    };
+    let metadata = match metadata.as_ref().map(metadata_json).transpose() {
+        Ok(m) => m,
+        Err(e) => return Ok(Err(e)),
+    };
+    let work_id = match carry_forward.as_ref().map(encode_key).transpose() {
+        Ok(k) => k,
+        Err(e) => return Ok(Err(e)),
+    };
+    let written = match write_note_spec(NoteSpec {
+        name,
+        value: note_value,
+        target,
+        metadata,
+        work_id,
+    })
+    .await?
+    {
+        Ok(written) => written,
+        Err(e) => return Ok(Err(e)),
+    };
+    let metadata = match written.metadata {
+        Some(json) => json_to_value(&json),
+        None => rune::to_value(Object::new()).map_err(VmError::from)?,
+    };
+    Ok(Ok(Note {
+        id: written.id,
+        name: written.name,
+        value,
+        author: written.author,
+        target: written.target,
+        metadata,
+        created: written.created,
+        commit: None,
+    }))
+}
+
+/// A write with its Rune-held inputs resolved to owned values, so the
+/// write is a `Send` future the MCP service can run for the
+/// `NoteWrite` tool as well as the builder's await.
+pub(crate) struct NoteSpec {
+    pub(crate) name: String,
+    pub(crate) value: NoteValue,
+    pub(crate) target: Option<Target>,
+    pub(crate) metadata: Option<serde_json::Value>,
+    pub(crate) work_id: Option<String>,
+}
+
+/// A note as written to the scan directory
+pub(crate) struct WrittenNote {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) author: String,
+    /// The target URL as stored, or `None`
+    pub(crate) target: Option<String>,
+    pub(crate) metadata: Option<serde_json::Value>,
+    pub(crate) created: i64,
+}
+
+/// Write the note under the calling task's scan context and output
+/// sink. A target the writer named wrong is `Error::Args`; a failure
+/// to reach the scan directory or the store is a VM error.
+pub(crate) async fn write_note_spec(spec: NoteSpec) -> Result<Result<WrittenNote, Error>, VmError> {
     let ctx = current()?;
     let (scanner, task) = OUTPUT_SINK
         .try_with(|sink| (sink.scanner.clone(), sink.task.clone()))
@@ -192,7 +265,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
 
     // The target URL and the target's commit as the scan reads it,
     // which the note links in place of the tip
-    let (target, pinned) = match &w.target {
+    let (target, pinned) = match &spec.target {
         Some(t @ (Target::Session(id) | Target::SessionLines(id, _))) => {
             (Some(t.to_url()), ctx.member_commit(id).await?)
         }
@@ -206,27 +279,15 @@ async fn do_write_note(w: NoteWrite) -> Written {
         }
         None => (None, None),
     };
-    let value = match note_value(&w.value) {
-        Ok(v) => v,
-        Err(e) => return Ok(Err(e)),
-    };
-    let metadata = match w.metadata.as_ref().map(metadata_json).transpose() {
-        Ok(m) => m,
-        Err(e) => return Ok(Err(e)),
-    };
-    let key = match w.carry_forward.as_ref().map(encode_key).transpose() {
-        Ok(k) => k,
-        Err(e) => return Ok(Err(e)),
-    };
 
     let id = new_uuid();
     let input = NoteInput {
-        name: &w.name,
-        value,
+        name: &spec.name,
+        value: spec.value,
         author: &author,
         target: target.as_deref(),
-        metadata: metadata.clone(),
-        work_id: key.as_deref(),
+        metadata: spec.metadata.clone(),
+        work_id: spec.work_id.as_deref(),
     };
     let written = {
         let store = ctx.store.lock().await;
@@ -240,7 +301,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
     };
     match written {
         Ok(()) => {}
-        // A target the scanner named wrong is its error; anything else
+        // A target the writer named wrong is its error; anything else
         // is the store's
         Err(
             e @ (StoreError::BadUrl(_)
@@ -252,21 +313,14 @@ async fn do_write_note(w: NoteWrite) -> Written {
         ) => return Ok(Err(Error::Args(format!("write_note target: {e}")))),
         Err(e) => return Err(VmError::panic(format!("write_note: {e}"))),
     }
-    tracing::debug!(id, name = w.name, author, target, "write_note");
-
-    let metadata = match metadata {
-        Some(json) => json_to_value(&json),
-        None => rune::to_value(Object::new()).map_err(VmError::from)?,
-    };
-    Ok(Ok(Note {
+    tracing::debug!(id, name = spec.name, author, target, "write_note");
+    Ok(Ok(WrittenNote {
         id,
-        name: w.name,
-        value: w.value,
+        name: spec.name,
         author,
         target,
-        metadata,
+        metadata: spec.metadata,
         created: now_ms(),
-        commit: None,
     }))
 }
 

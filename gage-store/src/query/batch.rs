@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
+use datafusion::common::ScalarValue;
 use datafusion::datasource::{MemTable, TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::ExecutionPlan;
@@ -73,6 +74,26 @@ impl TableProvider for BatchTable {
 
 pub(crate) fn external(e: StoreError) -> DataFusionError {
     DataFusionError::External(Box::new(e))
+}
+
+/// A table function argument given as a string literal
+pub(crate) fn string_literal(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Literal(ScalarValue::Utf8(Some(s)), _)
+        | Expr::Literal(ScalarValue::LargeUtf8(Some(s)), _)
+        | Expr::Literal(ScalarValue::Utf8View(Some(s)), _) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// A table function argument given as a non-negative integer literal
+pub(crate) fn usize_literal(e: &Expr) -> Option<usize> {
+    match e {
+        Expr::Literal(ScalarValue::Int64(Some(n)), _) => usize::try_from(*n).ok(),
+        Expr::Literal(ScalarValue::UInt64(Some(n)), _) => usize::try_from(*n).ok(),
+        Expr::Literal(ScalarValue::Int32(Some(n)), _) => usize::try_from(*n).ok(),
+        _ => None,
+    }
 }
 
 /// The length of each id's shortest unique prefix within `ids`.

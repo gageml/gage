@@ -6,12 +6,14 @@
 //! returns the [`RegisteredService`] shape a [`crate::host::McpHost`]
 //! expects.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::prelude::SessionContext;
+use gage_store::Store;
 use rmcp::ErrorData;
 use rmcp::ServiceExt;
 use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
@@ -40,6 +42,9 @@ pub struct ToolSpec {
 pub enum GageTool {
     Query(QueryConfig),
     IssueWrite(IssueWriteConfig),
+    NoteWrite(NoteWriteConfig),
+    IssueUpdate(StoreWriterConfig),
+    IssueComment(StoreWriterConfig),
 }
 
 impl GageTool {
@@ -48,7 +53,31 @@ impl GageTool {
         match self {
             GageTool::Query(_) => tools::query::NAME,
             GageTool::IssueWrite(_) => tools::issue_write::NAME,
+            GageTool::NoteWrite(_) => tools::note_write::NAME,
+            GageTool::IssueUpdate(_) => tools::issue_update::NAME,
+            GageTool::IssueComment(_) => tools::issue_comment::NAME,
         }
+    }
+}
+
+/// The data of the tools that write the store directly, as `gage
+/// mcp2` serves an interactive session: the store, and the author
+/// each write records, in the `user:<name>` form. `IssueUpdate` and
+/// `IssueComment` take it as their configuration; the store-side
+/// forms of `IssueWrite` and `NoteWrite` are built from it.
+#[derive(Clone)]
+pub struct StoreWriterConfig {
+    pub store: Arc<Mutex<Store>>,
+    pub author: String,
+}
+
+impl StoreWriterConfig {
+    /// The store, locked. A poisoned lock is taken as it is: the store
+    /// keeps no in-memory state a panic could leave half-written.
+    pub(crate) fn store(&self) -> MutexGuard<'_, Store> {
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -85,6 +114,34 @@ pub struct IssueWriteInput {
     pub evidence: Vec<String>,
 }
 
+/// The `NoteWrite` tool's data: the names the model may write, each
+/// with the doc the tool shows for it, and the callback that writes
+/// the note. The names are per configuration, so the route appends
+/// them to the tool's description, and a call naming anything else is
+/// refused before the callback runs.
+#[derive(Clone)]
+pub struct NoteWriteConfig {
+    pub names: BTreeMap<String, String>,
+    pub callback: NoteWriteCallback,
+}
+
+/// Async closure that writes one note from a parsed call.
+pub type NoteWriteCallback = Arc<
+    dyn Fn(NoteWriteInput) -> Pin<Box<dyn Future<Output = CustomToolOutcome> + Send>> + Send + Sync,
+>;
+
+/// One `NoteWrite` call, parsed. The name is one of the configured
+/// names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteWriteInput {
+    pub name: String,
+    pub value: String,
+    /// The session the note is about, as the model gave it
+    pub session_id: Option<String>,
+    /// A line selection within the session, such as `12` or `12-20`
+    pub session_lines: Option<String>,
+}
+
 /// The configuration the Gage tool handlers read through
 /// [`GageServer`]. A tool absent from the spec has no entry and no
 /// route.
@@ -92,6 +149,9 @@ pub struct IssueWriteInput {
 pub struct ToolsConfig {
     pub query: Option<QueryConfig>,
     pub issue_write: Option<IssueWriteConfig>,
+    pub note_write: Option<NoteWriteConfig>,
+    pub issue_update: Option<StoreWriterConfig>,
+    pub issue_comment: Option<StoreWriterConfig>,
 }
 
 /// One scanner-defined tool: the wire-visible definition plus the
@@ -172,6 +232,18 @@ fn build_server(spec: &ToolSpec) -> GageServer {
             GageTool::IssueWrite(c) => {
                 config.issue_write = Some(c.clone());
                 router = router.with_route((tools::issue_write::TOOL)());
+            }
+            GageTool::NoteWrite(c) => {
+                config.note_write = Some(c.clone());
+                router = router.with_route(tools::note_write::route(c));
+            }
+            GageTool::IssueUpdate(c) => {
+                config.issue_update = Some(c.clone());
+                router = router.with_route((tools::issue_update::TOOL)());
+            }
+            GageTool::IssueComment(c) => {
+                config.issue_comment = Some(c.clone());
+                router = router.with_route((tools::issue_comment::TOOL)());
             }
         }
     }

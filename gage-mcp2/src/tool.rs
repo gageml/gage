@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRoute;
-use rmcp::model::{JsonObject, Tool as ToolMeta, ToolAnnotations};
+use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta, ToolAnnotations};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -71,6 +71,17 @@ pub const fn description_byte_len(md: &str) -> usize {
 
 const fn is_ascii_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// A tool result the model reads as the call's output
+pub(crate) fn success(text: impl Into<String>) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(text.into())])
+}
+
+/// A tool result flagged as an error the model can act on, as
+/// distinct from a protocol error for a tool that is broken
+pub(crate) fn domain_error(text: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(text.into())])
 }
 
 /// Build the rmcp `Tool` metadata for an entire `.md` source.

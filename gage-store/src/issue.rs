@@ -206,6 +206,9 @@ pub struct IssueChange {
     pub to_status: Option<IssueStatus>,
     /// Set when `to_status` is `closed`
     pub reason: Option<StatusReason>,
+    /// The surviving issue a `duplicate` close names, when the close
+    /// went through [`IssueStore::close_duplicate`]
+    pub of: Option<String>,
     /// The free-form body from `message.txt`
     pub message: Option<String>,
 }
@@ -283,6 +286,8 @@ struct ChangeAttrs {
     to_status: Option<IssueStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<StatusReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    of: Option<String>,
 }
 
 impl IssueStore<'_> {
@@ -525,7 +530,9 @@ impl IssueStore<'_> {
     /// Change an issue's status, recording a `status` change entry.
     /// Closing without a reason records `completed`; a reason on any
     /// other status is an error, as is the status the issue already
-    /// has. Opening clears `status_reason`. Returns the resolved id.
+    /// has. Opening clears `status_reason`. A `duplicate` close through
+    /// this method names no survivor; [`IssueStore::close_duplicate`]
+    /// records one. Returns the resolved id.
     pub fn set_status(
         &self,
         id_or_prefix: &str,
@@ -557,6 +564,7 @@ impl IssueStore<'_> {
             from_status: Some(attrs.status),
             to_status: Some(status),
             reason,
+            of: None,
         };
         attrs.status = status;
         attrs.status_reason = reason;
@@ -565,6 +573,52 @@ impl IssueStore<'_> {
             None => format!("issue status: {status}"),
         };
         self.append_change(&object, attrs, &change, message, &commit_message)
+    }
+
+    /// Close an issue as a duplicate of `of`, recording the surviving
+    /// issue on the `status` change entry. `of` is the id or unique
+    /// prefix of a live issue other than the one closed. An issue
+    /// already closed is [`StoreError::IssueStatusUnchanged`]. Returns
+    /// the resolved id of the closed issue.
+    pub fn close_duplicate(
+        &self,
+        id_or_prefix: &str,
+        of: &str,
+        author: &str,
+        message: Option<&str>,
+    ) -> Result<String, StoreError> {
+        let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
+        let survivor = self.store.resolve_typed(of, OBJECT_TYPE)?;
+        if survivor.header.id == object.header.id {
+            return Err(StoreError::IssueInput(format!(
+                "issue {} cannot be a duplicate of itself",
+                object.header.id
+            )));
+        }
+        let mut attrs = decode_attrs(&object)?;
+        if attrs.status == IssueStatus::Closed {
+            return Err(StoreError::IssueStatusUnchanged {
+                id: object.header.id,
+                status: IssueStatus::Closed.as_str().to_string(),
+            });
+        }
+        let change = ChangeAttrs {
+            author: author.to_string(),
+            event: ChangeEvent::Status,
+            from_status: Some(attrs.status),
+            to_status: Some(IssueStatus::Closed),
+            reason: Some(StatusReason::Duplicate),
+            of: Some(survivor.header.id.clone()),
+        };
+        attrs.status = IssueStatus::Closed;
+        attrs.status_reason = Some(StatusReason::Duplicate);
+        self.append_change(
+            &object,
+            attrs,
+            &change,
+            message,
+            &format!("issue status: duplicate of {}", survivor.header.id),
+        )
     }
 
     /// Add a free comment to an issue as a `comment` change entry. An
@@ -586,6 +640,7 @@ impl IssueStore<'_> {
             from_status: None,
             to_status: None,
             reason: None,
+            of: None,
         };
         self.append_change(&object, attrs, &change, Some(message), "issue comment")
     }
@@ -683,6 +738,7 @@ impl IssueStore<'_> {
                 from_status: Some(from.0),
                 to_status: Some(chosen.0),
                 reason: chosen.1,
+                of: None,
             };
             let json = json_line(&change, "issue change")?;
             let message = format!("Resolved divergence with {remote_name}: kept {kept}");
@@ -840,6 +896,7 @@ fn decode_change(
         from_status: attrs.from_status,
         to_status: attrs.to_status,
         reason: attrs.reason,
+        of: attrs.of,
         message,
     })
 }
@@ -973,6 +1030,7 @@ fn create_change(input: &IssueInput) -> ChangeAttrs {
         from_status: None,
         to_status: Some(input.status),
         reason: None,
+        of: None,
     }
 }
 
@@ -986,6 +1044,7 @@ fn replace_change(input: &IssueInput, prev_status: IssueStatus) -> ChangeAttrs {
             from_status: None,
             to_status: None,
             reason: None,
+            of: None,
         };
     }
     ChangeAttrs {
@@ -994,6 +1053,7 @@ fn replace_change(input: &IssueInput, prev_status: IssueStatus) -> ChangeAttrs {
         from_status: Some(prev_status),
         to_status: Some(input.status),
         reason: None,
+        of: None,
     }
 }
 
@@ -1523,6 +1583,37 @@ mod tests {
         ));
         // Nothing above wrote a commit
         assert_eq!(issues.get(&id).unwrap().changes.len(), 1);
+    }
+
+    #[test]
+    fn close_duplicate_records_the_survivor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let survivor = issue(&store, IssueStatus::Open, &[]);
+        let pending = issue(&store, IssueStatus::Pending, &[]);
+        let issues = IssueStore::from(&store);
+
+        assert!(matches!(
+            issues.close_duplicate(&pending, &pending, "user:test", None),
+            Err(StoreError::IssueInput(_))
+        ));
+        issues
+            .close_duplicate(&pending, &survivor, "user:test", Some("same condition"))
+            .unwrap();
+        let full = issues.get(&pending).unwrap();
+        assert_eq!(full.status, IssueStatus::Closed);
+        assert_eq!(full.status_reason, Some(StatusReason::Duplicate));
+        let change = &full.changes[1];
+        assert_eq!(change.reason, Some(StatusReason::Duplicate));
+        assert_eq!(change.of.as_deref(), Some(survivor.as_str()));
+        assert_eq!(change.message.as_deref(), Some("same condition"));
+        // A plain close carries no survivor, and a closed issue cannot
+        // be closed again
+        assert_eq!(issues.get(&survivor).unwrap().changes[0].of, None);
+        assert!(matches!(
+            issues.close_duplicate(&pending, &survivor, "user:test", None),
+            Err(StoreError::IssueStatusUnchanged { .. })
+        ));
     }
 
     #[test]

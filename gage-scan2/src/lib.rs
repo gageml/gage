@@ -228,6 +228,11 @@ impl CompiledScanner {
                 .iter()
                 .map(|(name, def)| (name.clone(), def.call.clone()))
                 .collect(),
+            note_writes: self
+                .tasks
+                .iter()
+                .map(|(name, def)| (name.clone(), def.notes.writes.clone()))
+                .collect(),
         }
     }
 }
@@ -811,6 +816,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         ctx.scanner = t.scanner.clone();
         ctx.task = t.task.clone();
         ctx.sources = Some(Arc::clone(&unit.sources));
+        ctx.note_writes = unit.note_writes.get(&t.task).cloned().unwrap_or_default();
         let function = unit.functions[&t.task].clone();
         let exec = TaskExec {
             unit,
@@ -1024,6 +1030,9 @@ struct TaskUnit {
     params: Option<json::Value>,
     /// The function each task runs, by task name
     functions: BTreeMap<String, String>,
+    /// The note names each task declares it writes, with docs, by
+    /// task name
+    note_writes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Everything a worker needs to run one task: the scanner's

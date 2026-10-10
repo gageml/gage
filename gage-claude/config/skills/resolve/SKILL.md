@@ -50,7 +50,8 @@ input as per step 7 below.
 Use a sub-agent for each pending issue to resolve it using the steps below. Note
 that sub-agents provide recommendations and do not modify issue status. You are
 the sole writer in this phase and will resolve any conflicts across sub-agents
-before using the `IssuePendingResolve` tool to finally resolve pending issues.
+before applying the resolutions with `mcp__plugin_gage_gage__IssueUpdate` and
+`mcp__plugin_gage_gage__IssueComment`.
 
 1. Query the pending issues:
 
@@ -60,20 +61,23 @@ before using the `IssuePendingResolve` tool to finally resolve pending issues.
 
    If there are none, skip to phase 2.
 
-2. For each pending issue, retrieve its related issues:
+2. For each pending issue, retrieve its candidate duplicates. `related_issue`
+   returns the issues most similar to the subject, best first and at most
+   five, drawn from every issue in any status. It retrieves; it does not
+   judge.
 
    ```sql
    SELECT r.related_id, r.score, i.title, i.status, i.status_reason
    FROM related_issue('<issue_id>') r JOIN issue i ON i.id = r.related_id
    ```
 
-3. A pending issue with no related issues is novel by definition. Do not spawn a
+3. A pending issue with no candidates is novel by definition. Do not spawn a
    sub-agent for it.
 
-4. For each pending issue with related issues, invoke the Agent tool with
+4. For each pending issue with candidates, invoke the Agent tool with
    `subagent_type: "gage:pending-issue-reconcile"`. Pass the subject issue ID
-   and its related issue IDs in the prompt. The agent's definition contains the
-   full instructions and reply contract; the parent supplies only the IDs.
+   and its candidate issue IDs in the prompt. The agent's definition contains
+   the full instructions and reply contract; the parent supplies only the IDs.
 
 5. Adjudicate the collected recommendations:
    - Pending issues may be related to other pending issues (e.g. multiple scans
@@ -84,24 +88,32 @@ before using the `IssuePendingResolve` tool to finally resolve pending issues.
    - If two sub-agents disagree about the same pair, decide yourself using the
      available information.
    - Flatten chains: if A closes against B and B closes against open issue X,
-     both close against X. The `IssuePendingResolve` tool rejects unflattened
-     plans.
+     both close against X. A duplicate always closes against the issue that
+     stays open or closed, never against another duplicate.
 
-6. Apply the automatic batch with a single
-   `mcp__plugin_gage_gage__IssuePendingResolve` call covering every pending
-   issue except those marked for user decision: `open` resolutions for novel
-   issues and promoted survivors, `duplicate` resolutions for the rest.
+6. Apply the automatic batch, every pending issue except those marked for user
+   decision, in this order so that each survivor is in its final state before
+   a duplicate names it:
+   - Promote each novel issue and each promoted survivor: `IssueUpdate` with
+     `status=open`.
+   - Close each duplicate: `IssueUpdate` with `status=closed`,
+     `status_reason=duplicate`, and `of` set to the survivor's ID. When the
+     duplicate carries insight the survivor lacks, add it to the survivor
+     with `IssueComment`.
 
 7. If any issues are marked for user decision, present each in turn to the user
    as one batch, grouped per closed issue, with the prior close reason and the
    sub-agent rationales. For each, the user chooses one of three outcomes:
-   - Already resolved - close the pending issue as a duplicate; the closed issue
-     stays closed (`duplicate`, no `reopen`)
-   - Condition recurred - reopen the closed issue and fold the report into it
-     (`duplicate` with `reopen: true`)
-   - Stands on its own - promote the pending issue (`open`)
+   - Already resolved - close the pending issue as a duplicate of the closed
+     issue (`status=closed`, `status_reason=duplicate`, `of`); the closed
+     issue stays closed
+   - Condition recurred - reopen the closed issue (`IssueUpdate` with
+     `status=open` and a message noting the recurrence), then close the
+     pending issue as a duplicate of it, adding the report's insight to the
+     reopened issue with `IssueComment`
+   - Stands on its own - promote the pending issue (`status=open`)
 
-   Apply the final decisions with a second `IssuePendingResolve` call.
+   Apply the final decisions with the same tools.
 
 8. Briefly report what was resolved: how many issues were promoted, how many
    closed as duplicates, and against what.

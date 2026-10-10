@@ -94,9 +94,10 @@ pub use note::{
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,
-    attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_table,
-    link_table, note_doc_rows, note_doc_schema, object_key_table, scan_scope_tables, scan_table,
-    scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
+    attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
+    issue_table, link_table, note_doc_rows, note_doc_schema, object_key_table, related_issue_fn,
+    scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table,
+    tag_table,
 };
 pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use remote::{Remote, RemoteStore, tracking_prefix};

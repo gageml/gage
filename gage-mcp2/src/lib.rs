@@ -9,6 +9,7 @@
 pub mod host;
 pub mod server;
 pub mod service;
+mod store_write;
 pub mod tool;
 pub mod tools;
 
@@ -16,6 +17,6 @@ pub use host::{HostError, McpHost, ServiceHandle};
 pub use rmcp::model::ToolAnnotations;
 pub use service::{
     CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteCallback,
-    IssueWriteConfig, IssueWriteInput, QueryConfig, ToolSpec, ToolsConfig, build_mcp_service,
-    serve_stdio,
+    IssueWriteConfig, IssueWriteInput, NoteWriteCallback, NoteWriteConfig, NoteWriteInput,
+    QueryConfig, StoreWriterConfig, ToolSpec, ToolsConfig, build_mcp_service, serve_stdio,
 };

@@ -474,11 +474,36 @@ async fn run_mcp2() -> Result<(), Box<dyn std::error::Error>> {
     let store = gage_store::Store::open(&path)
         .map_err(|e| format!("open store at {}: {e}", path.display()))?;
     let store = Arc::new(Mutex::new(store));
-    let context = gage_query2::ContextBuilder::new(Some(store)).build().await;
+    let context = gage_query2::ContextBuilder::new(Some(Arc::clone(&store)))
+        .build()
+        .await;
+    let writer = gage_mcp2::StoreWriterConfig {
+        store,
+        author: author::resolve_author(None),
+    };
+    // The names an interactive session may write notes under; scanner
+    // output names stay with the scanners that declare them
+    let note_names = std::collections::BTreeMap::from([(
+        "comment".to_string(),
+        "A remark about a session or the work at hand".to_string(),
+    )]);
     let spec = gage_mcp2::ToolSpec {
-        gage: vec![gage_mcp2::GageTool::Query(gage_mcp2::QueryConfig {
-            context: Arc::new(context),
-        })],
+        gage: vec![
+            gage_mcp2::GageTool::Query(gage_mcp2::QueryConfig {
+                context: Arc::new(context),
+            }),
+            gage_mcp2::GageTool::IssueWrite(gage_mcp2::IssueWriteConfig::with_store(
+                writer.clone(),
+                "user-issue".to_string(),
+                gage_store::IssueStatus::Open,
+            )),
+            gage_mcp2::GageTool::NoteWrite(gage_mcp2::NoteWriteConfig::with_store(
+                writer.clone(),
+                note_names,
+            )),
+            gage_mcp2::GageTool::IssueUpdate(writer.clone()),
+            gage_mcp2::GageTool::IssueComment(writer),
+        ],
         custom: Vec::new(),
     };
     gage_mcp2::serve_stdio(spec).await

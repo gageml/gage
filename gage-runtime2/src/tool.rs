@@ -1,5 +1,5 @@
 //! Tools for `call_agent`: `Tool`, `Input`, and the Gage tool
-//! configurations `Query` and `IssueWrite`.
+//! configurations `Query`, `IssueWrite`, and `NoteWrite`.
 //!
 //! A `Tool` is a value with chained setters and no finalizer, of one of
 //! two kinds. A scanner-defined tool, `Tool::new(name, handler)`, takes
@@ -10,10 +10,12 @@
 //! starts: names and inputs are validated, each scanner-defined tool
 //! becomes a [`CustomToolDef`] whose callback runs the handler, and
 //! each Gage tool becomes a [`GageTool`] carrying the data it serves.
-//! `Query` carries a query context; `IssueWrite` carries a callback
-//! that writes the issue through the runtime's own write path, under
-//! the calling task's scan context and output sink as a scanner-defined
-//! handler runs.
+//! `Query` carries a query context; `IssueWrite` and `NoteWrite` carry
+//! a callback that writes the issue or note through the runtime's own
+//! write path, under the calling task's scan context and output sink
+//! as a scanner-defined handler runs. `NoteWrite` also carries the
+//! names the model may write, each with its doc: the ones the scanner
+//! gave it, or else the ones the calling task declares it writes.
 //!
 //! The handler is held as a [`SyncFunction`], the `Send + Sync` form of
 //! a Rune function, because the MCP service calls it from the host's
@@ -21,30 +23,34 @@
 //! value with no constant form; that failure is reported when the
 //! tools are consumed, not at `Tool::new`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use gage_core::uuid::short_uuid;
 use gage_mcp2::{
     CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteCallback,
-    IssueWriteConfig, IssueWriteInput, QueryConfig, ToolAnnotations, ToolSpec,
+    IssueWriteConfig, IssueWriteInput, NoteWriteCallback, NoteWriteConfig, NoteWriteInput,
+    QueryConfig, ToolAnnotations, ToolSpec,
 };
 use gage_runtime::dispatcher::ToolMeta;
 use gage_runtime::error::Error;
 use gage_runtime::value::{json_to_value, value_to_json};
-use gage_store::IssueStatus;
+use gage_store::{IssueStatus, NoteValue};
 use rmcp_json::JsonObject;
 use rune::alloc::clone::TryClone;
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{
-    Formatter, FromValue, Function, Ref, RuntimeError, SyncFunction, ToValue, Value, VmError,
+    Formatter, FromValue, Function, Object, Ref, RuntimeError, SyncFunction, ToValue, Value,
+    VmError,
 };
 use rune::{Any, ContextError, Module};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tracing::{Instrument, Span};
 
 use crate::issue::write_issue_tool;
+use crate::note::{NoteSpec, write_note_spec};
 use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error, session_id};
+use crate::target::Target;
 use crate::{Level, OUTPUT_SINK, Output, OutputSink};
 
 /// `rmcp::model::JsonObject` as gage-mcp2 exposes it through
@@ -93,6 +99,10 @@ pub(crate) fn tools_module() -> Result<Module, ContextError> {
     m.function_meta(IssueWrite::name)?;
     m.function_meta(IssueWrite::pending)?;
     m.function_meta(IssueWrite::debug)?;
+    m.ty::<NoteWrite>()?;
+    m.function_meta(NoteWrite::new)?;
+    m.function_meta(NoteWrite::names)?;
+    m.function_meta(NoteWrite::debug)?;
     Ok(m)
 }
 
@@ -115,6 +125,7 @@ enum ToolKind {
 enum GageConfig {
     Query(Query),
     IssueWrite(IssueWrite),
+    NoteWrite(NoteWrite),
 }
 
 impl GageConfig {
@@ -123,6 +134,7 @@ impl GageConfig {
         match self {
             GageConfig::Query(_) => gage_mcp2::tools::query::NAME,
             GageConfig::IssueWrite(_) => gage_mcp2::tools::issue_write::NAME,
+            GageConfig::NoteWrite(_) => gage_mcp2::tools::note_write::NAME,
         }
     }
 }
@@ -143,6 +155,14 @@ impl From<IssueWrite> for Tool {
     }
 }
 
+impl From<NoteWrite> for Tool {
+    fn from(config: NoteWrite) -> Self {
+        Tool {
+            kind: ToolKind::Gage(GageConfig::NoteWrite(config)),
+        }
+    }
+}
+
 /// The tool a `.tool()` / `.tools()` argument names: a `Tool`, or a
 /// Gage tool's configuration value, which stands for the tool
 pub(crate) fn tool_from_value(v: &Value) -> Result<Tool, VmError> {
@@ -155,8 +175,11 @@ pub(crate) fn tool_from_value(v: &Value) -> Result<Tool, VmError> {
     if let Ok(config) = v.borrow_ref::<IssueWrite>() {
         return Ok(Tool::from(config.clone()));
     }
+    if let Ok(config) = v.borrow_ref::<NoteWrite>() {
+        return Ok(Tool::from(config.clone()));
+    }
     Err(VmError::panic(format!(
-        "expected a Tool or a Gage tool such as Query or IssueWrite, got {}",
+        "expected a Tool or a Gage tool such as Query, IssueWrite, or NoteWrite, got {}",
         v.type_info()
     )))
 }
@@ -421,6 +444,57 @@ impl IssueWrite {
     }
 }
 
+/// The configuration of the Gage note-writing tool: the names the
+/// model may write, each with a doc the tool shows for it. Without
+/// `.names(..)` the tool allows the names the calling task declares
+/// it writes. The model supplies the name, the text, and the session
+/// per call.
+#[derive(Any, Clone, Debug)]
+#[rune(item = ::gage::tools)]
+pub struct NoteWrite {
+    #[rune(skip)]
+    names: Option<BTreeMap<String, String>>,
+}
+
+impl NoteWrite {
+    /// The names the calling task declares it writes
+    #[rune::function(path = Self::new)]
+    fn new() -> NoteWrite {
+        NoteWrite { names: None }
+    }
+
+    /// The allowed names, an object of name to doc string
+    #[rune::function(instance)]
+    fn names(mut self, names: Ref<Object>) -> Result<Self, VmError> {
+        if names.is_empty() {
+            return Err(VmError::panic("NoteWrite::names: the object is empty"));
+        }
+        let mut out = BTreeMap::new();
+        for (name, doc) in names.iter() {
+            let doc = doc.borrow_string_ref().map_err(|e| {
+                VmError::panic(format!(
+                    "NoteWrite::names: the doc of {name:?} is not a string: {e}"
+                ))
+            })?;
+            out.insert(name.to_string(), doc.to_string());
+        }
+        self.names = Some(out);
+        Ok(self)
+    }
+
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        match &self.names {
+            Some(names) => {
+                let names: Vec<&str> = names.keys().map(String::as_str).collect();
+                write!(f, "NoteWrite {{ names: {names:?} }}")?;
+            }
+            None => write!(f, "NoteWrite {{ names: declared }}")?,
+        }
+        Ok(())
+    }
+}
+
 /// One declared input of a tool
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
@@ -581,6 +655,22 @@ pub(crate) async fn consume(
             ToolKind::Gage(GageConfig::IssueWrite(config)) => {
                 spec.gage.push(GageTool::IssueWrite(IssueWriteConfig {
                     callback: issue_write_callback(config, ctx, sink),
+                }));
+            }
+            ToolKind::Gage(GageConfig::NoteWrite(config)) => {
+                let allowed = match &config.names {
+                    Some(names) => names.clone(),
+                    None => ctx.note_writes.clone(),
+                };
+                if allowed.is_empty() {
+                    return Err(Error::agent(
+                        "NoteWrite: the task declares no note writes; give the tool its \
+                         names with .names(#{ name: doc })",
+                    ));
+                }
+                spec.gage.push(GageTool::NoteWrite(NoteWriteConfig {
+                    names: allowed,
+                    callback: note_write_callback(ctx, sink),
                 }));
             }
         }
@@ -797,6 +887,62 @@ fn issue_write_callback(
                     issue.title,
                     cited.len()
                 ))),
+                Ok(Err(Error::Args(message))) => CustomToolOutcome::Error(message),
+                Ok(Err(e)) => CustomToolOutcome::Error(e.to_string()),
+                Err(e) => fault(tool_name, &e, log_sources.as_deref(), sink.as_ref()),
+            }
+        };
+        Box::pin(call.instrument(span))
+    })
+}
+
+/// The callback the MCP service runs for a `NoteWrite` call: write
+/// the note under the calling task's scan context and output sink, on
+/// the session the call names. A target the model named wrong is an
+/// error result the model reads; a VM error is a fault.
+fn note_write_callback(ctx: &ScanContext, sink: Option<&OutputSink>) -> NoteWriteCallback {
+    let mut ctx = ctx.clone();
+    ctx.params = None;
+    let sink = sink.cloned();
+    let parent = Span::current();
+    Arc::new(move |input: NoteWriteInput| {
+        let tool_name = gage_mcp2::tools::note_write::NAME;
+        let span = tracing::info_span!(parent: &parent, "tool", name = %tool_name);
+        let ctx = ctx.clone();
+        let sink = sink.clone();
+        let log_sources = ctx.sources.clone();
+        let call = async move {
+            let target = match (input.session_id, input.session_lines) {
+                (None, None) => None,
+                (None, Some(_)) => {
+                    return CustomToolOutcome::Error(
+                        "`session_lines` requires `session_id`".to_string(),
+                    );
+                }
+                (Some(id), None) => Some(Target::Session(id)),
+                (Some(id), Some(lines)) => Some(Target::SessionLines(id, lines)),
+            };
+            let spec = NoteSpec {
+                name: input.name,
+                value: NoteValue::Text(input.value),
+                target,
+                metadata: None,
+                work_id: None,
+            };
+            let scoped = SCAN_CTX.scope(ctx, write_note_spec(spec));
+            let written = match &sink {
+                Some(sink) => OUTPUT_SINK.scope(sink.clone(), scoped).await,
+                None => scoped.await,
+            };
+            match written {
+                Ok(Ok(note)) => CustomToolOutcome::Success(JsonValue::String(match &note.target {
+                    Some(target) => format!(
+                        "Wrote {} note {} on {target}.",
+                        note.name,
+                        short_uuid(&note.id)
+                    ),
+                    None => format!("Wrote {} note {}.", note.name, short_uuid(&note.id)),
+                })),
                 Ok(Err(Error::Args(message))) => CustomToolOutcome::Error(message),
                 Ok(Err(e)) => CustomToolOutcome::Error(e.to_string()),
                 Err(e) => fault(tool_name, &e, log_sources.as_deref(), sink.as_ref()),
@@ -1585,7 +1731,10 @@ mod tests {
             .into_iter()
             .find_map(|t| match t {
                 GageTool::IssueWrite(c) => Some(c),
-                GageTool::Query(_) => None,
+                GageTool::Query(_)
+                | GageTool::NoteWrite(_)
+                | GageTool::IssueUpdate(_)
+                | GageTool::IssueComment(_) => None,
             })
             .expect("the spec holds the IssueWrite tool");
         (config, names)
@@ -1645,6 +1794,122 @@ mod tests {
         assert_eq!(record.author, "task:demo:report");
         assert_eq!(record.scan.as_deref(), Some("scan-1"));
         assert!(record.evidence.is_empty());
+    }
+
+    /// The consumed `NoteWrite` tool's config
+    async fn note_write_tool(ctx: &ScanContext, script: &str) -> NoteWriteConfig {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = OutputSink {
+            scanner: "demo".into(),
+            task: "report".into(),
+            tx,
+        };
+        let (spec, _) = consume(&tools(script), ctx, Some(&sink)).await.unwrap();
+        spec.gage
+            .into_iter()
+            .find_map(|t| match t {
+                GageTool::NoteWrite(c) => Some(c),
+                _ => None,
+            })
+            .expect("the spec holds the NoteWrite tool")
+    }
+
+    #[tokio::test]
+    async fn a_note_write_tool_writes_a_note_under_the_task_sink() {
+        use gage_store::{NoteStore, NoteValue};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = scan_ctx(&tmp);
+        let config = note_write_tool(
+            &ctx,
+            r#"
+            use gage::tools::NoteWrite;
+            pub fn main() { [NoteWrite::new().names(#{ finding: "A finding" })] }
+            "#,
+        )
+        .await;
+        assert_eq!(
+            config.names,
+            BTreeMap::from([("finding".to_string(), "A finding".to_string())])
+        );
+        let outcome = (config.callback)(NoteWriteInput {
+            name: "finding".into(),
+            value: "it flakes".into(),
+            session_id: None,
+            session_lines: None,
+        })
+        .await;
+        let CustomToolOutcome::Success(JsonValue::String(text)) = outcome else {
+            panic!("unexpected outcome {outcome:?}");
+        };
+        assert!(text.starts_with("Wrote finding note "), "{text}");
+
+        let dirs: Vec<_> = std::fs::read_dir(ctx.paths.notes_dir())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(dirs.len(), 1);
+        let store = ctx.store.lock().await;
+        let note = NoteStore::from(&*store).read_from_dir(&dirs[0]).unwrap();
+        assert_eq!(note.name, "finding");
+        assert_eq!(note.value, NoteValue::Text("it flakes".into()));
+        assert_eq!(note.author, "task:demo:report");
+        assert_eq!(note.target, None);
+        drop(store);
+
+        // A session the dataset does not hold is the model's error
+        let outcome = (config.callback)(NoteWriteInput {
+            name: "finding".into(),
+            value: "x".into(),
+            session_id: Some("nope".into()),
+            session_lines: Some("12".into()),
+        })
+        .await;
+        assert!(
+            matches!(outcome, CustomToolOutcome::Error(_)),
+            "{outcome:?}"
+        );
+    }
+
+    /// Without `.names(..)` the tool allows the names the task
+    /// declares it writes; a task declaring none has to name them.
+    #[tokio::test]
+    async fn a_note_write_tool_defaults_to_the_task_declared_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = r#"
+            use gage::tools::NoteWrite;
+            pub fn main() { [NoteWrite::new()] }
+        "#;
+        let mut ctx = scan_ctx(&tmp);
+        let err = match consume(&tools(script), &ctx, None).await {
+            Ok(_) => panic!("expected consumption to fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("declares no note writes"), "{err}");
+        ctx.note_writes = BTreeMap::from([("summary".to_string(), "A summary".to_string())]);
+        let config = note_write_tool(&ctx, script).await;
+        assert_eq!(config.names, ctx.note_writes);
+    }
+
+    /// `names` borrows its object, so the caller's object is still
+    /// readable afterwards.
+    #[test]
+    fn note_write_names_leaves_the_caller_object_readable() {
+        let mut vm = vm(r#"
+            use gage::tools::NoteWrite;
+            pub fn check() {
+                let names = #{ finding: "A finding" };
+                let tool = NoteWrite::new().names(names);
+                (names.len(), names.finding)
+            }
+            "#);
+        let output = vm.call(["check"], ()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "takes the VM execution's return value; the test holds the only live handle"
+        )]
+        let (len, doc): (i64, String) = rune::from_value(output).unwrap();
+        assert_eq!((len, doc.as_str()), (1, "A finding"));
     }
 
     #[tokio::test]

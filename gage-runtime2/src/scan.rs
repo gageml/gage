@@ -13,6 +13,7 @@
 //! declared defaults with the scan's per-scanner overrides applied, or
 //! an empty object for a scanner that declares none.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -84,6 +85,10 @@ pub struct ScanContext {
     /// `carry_forward_notes` links nothing. Watermarks are still
     /// written, so the next scan resumes from this one.
     pub invalidate: bool,
+    /// The note names the running task declares it writes, each with
+    /// its doc, set by the orchestrator per task. The `NoteWrite`
+    /// tool's allowed names when a scanner gives it none.
+    pub note_writes: BTreeMap<String, String>,
     query_store: Arc<Mutex<Store>>,
     /// The scan-scoped query context, built on the first read
     scan_query: Arc<OnceCell<SessionContext>>,
@@ -117,6 +122,7 @@ impl ScanContext {
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             paths,
             invalidate: false,
+            note_writes: BTreeMap::new(),
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
             scan_query: Arc::new(OnceCell::new()),
             store_query: Arc::new(OnceCell::new()),

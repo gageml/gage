@@ -8,11 +8,13 @@ use gage_query::write_yaml_capped;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use serde_json::json;
 
 use crate::server::GageServer;
-use crate::tool::{MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len};
+use crate::tool::{
+    MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
+};
 
 pub const NAME: &str = "Query";
 
@@ -103,14 +105,6 @@ pub async fn execute(context: &SessionContext, sql: &str) -> Result<CallToolResu
          keyset predicate on the ordered column (e.g. `AND line > <last line \
          shown>`)."
     )))
-}
-
-fn success(text: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(text.into())])
-}
-
-fn domain_error(text: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(text.into())])
 }
 
 #[cfg(test)]

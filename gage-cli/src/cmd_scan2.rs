@@ -489,6 +489,7 @@ impl ScanHost for StoreHost {
                         c.from_status.map(IssueStatus::as_str),
                         c.to_status.map(IssueStatus::as_str),
                         c.reason.map(StatusReason::as_str),
+                        c.of.as_deref(),
                     ),
                     author: c.author.clone(),
                     timestamp: gage_core::datetime::ms_to_iso8601(c.timestamp_ms),
@@ -903,7 +904,8 @@ impl StoreHost {
         let mut events: HashMap<String, Vec<EventItem>> = HashMap::new();
         for batch in &query(
             ctx,
-            "SELECT issue_id, timestamp, author, event, from_status, to_status, reason, message \
+            "SELECT issue_id, timestamp, author, event, from_status, to_status, reason, \"of\", \
+                    message \
              FROM issue_event ORDER BY timestamp",
         )
         .await?
@@ -915,7 +917,8 @@ impl StoreHost {
             let froms = column::<StringArray>(batch, 4);
             let tos = column::<StringArray>(batch, 5);
             let reasons = column::<StringArray>(batch, 6);
-            let messages = column::<StringArray>(batch, 7);
+            let ofs = column::<StringArray>(batch, 7);
+            let messages = column::<StringArray>(batch, 8);
             for i in 0..batch.num_rows() {
                 let opt = |arr: &StringArray| arr.is_valid(i).then(|| arr.value(i).to_string());
                 events
@@ -927,6 +930,7 @@ impl StoreHost {
                             opt(froms).as_deref(),
                             opt(tos).as_deref(),
                             opt(reasons).as_deref(),
+                            opt(ofs).as_deref(),
                         ),
                         author: authors.value(i).to_string(),
                         timestamp: timestamp_display(timestamps, i),
