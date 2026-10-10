@@ -27,7 +27,8 @@ use gage_scan2::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
 use gage_session::Driver;
 use gage_store::ScanDirLayout;
 use gage_store::{
-    DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store,
+    DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store, StoreError,
+    TagStore,
 };
 use gage_tui::scan_view::{
     self, AgentItem, AgentState, EventItem, EvidenceItem, IssueItem, IssueSessionItem,
@@ -212,6 +213,17 @@ pub struct Scan2RunArgs {
     /// whose agents are all waiting for a slot shows as waiting.
     #[arg(long, value_name = "N", default_value_t = 8, display_order = 7)]
     agent_jobs: usize,
+
+    /// Tag the new scan run
+    ///
+    /// Follows git's ref naming rules. An existing tag is an error
+    /// unless --force-tag is given.
+    #[arg(short, long, value_name = "NAME", display_order = 8)]
+    tag: Option<String>,
+
+    /// Move the tag if it exists
+    #[arg(long, requires = "tag", display_order = 9)]
+    force_tag: bool,
 
     /// Ignore prior work
     ///
@@ -1513,6 +1525,9 @@ struct ScanPrep {
     jobs: usize,
     agent_jobs: usize,
     invalidate: bool,
+    /// The tag for the scan run, checked before the run starts
+    tag: Option<String>,
+    force_tag: bool,
     /// The progress view is shown; headless otherwise
     progress_ui: bool,
 }
@@ -1581,6 +1596,20 @@ async fn prepare_scan_dialog(
     let plan = resolve_dataset_plan(&mut args, store).await?;
     preview_dataset(&plan)?;
 
+    // A tag that cannot be added is reported before anything is
+    // written
+    if let Some(name) = &args.tag {
+        TagStore::from(store)
+            .check_available(name, args.force_tag)
+            .map_err(|e| match e {
+                StoreError::TagExists { .. } => {
+                    DialogError::Failed(format!("{e} (use --force-tag to move it)"))
+                }
+                e => DialogError::Failed(e.to_string()),
+            })?;
+        cli::log::step(format!("Tag\n{}", style(name).dim()))?;
+    }
+
     // Preflight: compile every selected scanner before any task runs.
     let mut compiled: Vec<CompiledScanner> = Vec::new();
     let mut errors = 0;
@@ -1620,6 +1649,8 @@ async fn prepare_scan_dialog(
         jobs: args.jobs,
         agent_jobs: args.agent_jobs,
         invalidate: args.invalidate,
+        tag: args.tag,
+        force_tag: args.force_tag,
         progress_ui: !args.no_progress && io::stdout().is_terminal(),
     });
     Ok("Starting scan".into())
@@ -1761,6 +1792,21 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
     };
     let shown_id = styled_scan_id(store, &outcome.id);
     println!("{}", summary_line(&shown_id, &outcome.attrs));
+    if let Some(name) = &prep.tag {
+        match TagStore::from(store).add(name, &outcome.id, prep.force_tag) {
+            Ok(added) => match added.previous_id {
+                Some(previous) => println!(
+                    "Moved tag {name} from {} to scan {shown_id}",
+                    short_uuid(&previous)
+                ),
+                None => println!("Tagged scan {shown_id} as {name}"),
+            },
+            Err(e) => {
+                eprintln!("gage scan2: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if outcome.attrs.canceled || outcome.attrs.tasks.failed > 0 {
         std::process::exit(1);
     }
