@@ -473,8 +473,7 @@ enum Prior {
 }
 
 /// The issue `key` names: one this scan wrote under the key, else
-/// the live issue in the store carrying it. Two live issues under one
-/// key is a store fault.
+/// the live issue in the store carrying it, read through the key ref.
 fn prior_issue(
     ctx: &ScanContext,
     issues: &IssueStore<'_>,
@@ -488,24 +487,10 @@ fn prior_issue(
             return Ok(Some(Prior::InDir(record.id)));
         }
     }
-    let tips = issues
-        .query()
-        .key(key)
-        .tips()
+    let live = issues
+        .live_under_key(key)
         .map_err(|e| VmError::panic(format!("write_issue: replace key {key}: {e}")))?;
-    match tips.as_slice() {
-        [] => Ok(None),
-        [tip] => {
-            let live = issues
-                .at_commit(&tip.sha)
-                .map_err(|e| VmError::panic(format!("write_issue: read issue {}: {e}", tip.id)))?;
-            Ok(Some(Prior::Stored(Box::new(live))))
-        }
-        many => Err(VmError::panic(format!(
-            "write_issue: replace key {key} names {} live issues",
-            many.len()
-        ))),
-    }
+    Ok(live.map(|live| Prior::Stored(Box::new(live))))
 }
 
 /// Every cited note must be one this scan wrote or a live note in

@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use serde_json::Value as JsonValue;
 
 use crate::git::{git_in, run};
+use crate::key::KeyRefUpdate;
 use crate::object::{LinkFile, Object, object_ref};
 use crate::sqlite_index::INDEX_SCHEMA_VERSION;
 use crate::store::index_path;
@@ -310,6 +311,7 @@ impl Store {
         object: &Object,
         links: &[LinkFile],
         previous_tip: &str,
+        key: Option<&KeyRefUpdate>,
     ) -> Result<(), StoreError> {
         self.wrote.set(true);
         let attrs = extract_attrs(object);
@@ -326,6 +328,19 @@ impl Store {
                     previous_tip,
                 ],
             ))?;
+            if let Some(update) = key {
+                // The expected-old-value argument makes a concurrent
+                // claim of the same key fail rather than silently win
+                run(git_in(
+                    self.path(),
+                    [
+                        "update-ref",
+                        &update.ref_name,
+                        &object.commit_sha,
+                        &update.old,
+                    ],
+                ))?;
+            }
             Ok(())
         })
     }

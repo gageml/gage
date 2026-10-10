@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::{EntryKind, TreeEntry};
 use crate::index::{ObjectQuery, Order, SelectedTip};
+use crate::key::{resolve_key, validate_key};
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
 use crate::object::{EditOutcome, FIRST_PARENT_FILE, Object, ObjectTree, object_ref};
 use crate::writer::{TreeInput, mktree, write_blob};
@@ -284,6 +285,15 @@ struct ChangeAttrs {
 }
 
 impl IssueStore<'_> {
+    /// The live issue carrying `key`, if any: one ref read through
+    /// `refs/gage/1/key/issue/<key>`.
+    pub fn live_under_key(&self, key: &str) -> Result<Option<IssueFull>, StoreError> {
+        match resolve_key(self.store, OBJECT_TYPE, key)? {
+            Some(object) => Ok(Some(self.at_commit(&object.commit_sha)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Create an issue with a `create` change entry recording its
     /// initial status. Returns the new issue's id.
     pub fn create(&self, input: IssueInput) -> Result<String, StoreError> {
@@ -838,7 +848,7 @@ fn validate_input(input: &IssueInput) -> Result<(), StoreError> {
         return Err(StoreError::IssueInput("title is empty".to_string()));
     }
     if let Some(key) = input.key {
-        crate::key::validate_key(key)?;
+        validate_key(key)?;
     }
     Ok(())
 }

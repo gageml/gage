@@ -75,6 +75,8 @@ pub enum StoreError {
     TagName(String),
     /// A key git's ref rules or the lowercase rule reject
     KeyName(String),
+    /// A live object other than the one being written carries the key
+    KeyTaken { key: String, id: String },
     /// A tag with the name exists and names the given object
     TagExists { name: String, id: String },
     /// No tag has the given name
@@ -176,6 +178,9 @@ impl fmt::Display for StoreError {
                  rules (no spaces, '..', '~', '^', ':', '?', '*', '[', or '\\'; \
                  no leading '-' or '.'; no trailing '/', '.', or '.lock')"
             ),
+            StoreError::KeyTaken { key, id } => {
+                write!(f, "key {key:?} is carried by live object {id}")
+            }
             StoreError::TagExists { name, id } => {
                 write!(f, "tag {name} exists and names {id}")
             }
@@ -216,6 +221,7 @@ impl std::error::Error for StoreError {
             | StoreError::AttachmentInput(_)
             | StoreError::TagName(_)
             | StoreError::KeyName(_)
+            | StoreError::KeyTaken { .. }
             | StoreError::TagExists { .. }
             | StoreError::TagNotFound(_) => None,
         }

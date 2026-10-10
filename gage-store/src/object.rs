@@ -31,6 +31,7 @@ use serde_json::Value as JsonValue;
 
 use crate::git::{EntryKind, git_in, run};
 use crate::index::IdMatch;
+use crate::key::plan_key_ref;
 use crate::refs::OBJECT_REFS;
 pub(crate) use crate::refs::object_ref;
 use crate::url;
@@ -311,6 +312,7 @@ impl Store {
         entries.insert("modified".to_string(), blob_entry(&stamp_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
 
+        let key = plan_key_ref(self, None, object_type, id, Some(tree))?;
         let links = self.link_files_for_write(tree, &tree_sha)?;
         let parents = link_parents(None, &links);
         let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
@@ -329,7 +331,7 @@ impl Store {
             tree: tree.clone(),
             entries,
         };
-        self.record_write(&object, &links, "")?;
+        self.record_write(&object, &links, "", key.as_ref())?;
         Ok(commit_sha)
     }
 
@@ -365,6 +367,13 @@ impl Store {
         entries.insert(FIRST_PARENT_FILE.to_string(), blob_entry(&parent_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
 
+        let key = plan_key_ref(
+            self,
+            Some(current),
+            &current.header.object_type,
+            &current.header.id,
+            Some(tree),
+        )?;
         let links = self.link_files_for_write(tree, &tree_sha)?;
         let parents = link_parents(Some(&current.commit_sha), &links);
         let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
@@ -380,7 +389,7 @@ impl Store {
             tree: tree.clone(),
             entries,
         };
-        self.record_write(&object, &links, &current.commit_sha)?;
+        self.record_write(&object, &links, &current.commit_sha, key.as_ref())?;
         Ok(EditOutcome::Written(commit_sha))
     }
 
@@ -423,6 +432,13 @@ impl Store {
         entries.insert("modified".to_string(), blob_entry(&stamp_sha));
         entries.insert("deleted".to_string(), blob_entry(&stamp_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
+        let key = plan_key_ref(
+            self,
+            Some(current),
+            &current.header.object_type,
+            &current.header.id,
+            None,
+        )?;
         let commit_sha = commit_tree(path, &tree_sha, message, &[])?;
         let object = Object {
             commit_sha: commit_sha.clone(),
@@ -435,7 +451,7 @@ impl Store {
             tree: ObjectTree::default(),
             entries,
         };
-        self.record_write(&object, &[], &current.commit_sha)?;
+        self.record_write(&object, &[], &current.commit_sha, key.as_ref())?;
         self.deleted.set(true);
         Ok(commit_sha)
     }
@@ -467,6 +483,15 @@ impl Store {
         entries.insert("modified".to_string(), blob_entry(&modified_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
 
+        // A tombstone carries no key, so the live commit claims it as
+        // a create does
+        let key = plan_key_ref(
+            self,
+            None,
+            &current.header.object_type,
+            &current.header.id,
+            Some(tree),
+        )?;
         let links = self.link_files_for_write(tree, &tree_sha)?;
         let parents = link_parents(None, &links);
         let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
@@ -482,7 +507,7 @@ impl Store {
             tree: tree.clone(),
             entries,
         };
-        self.record_write(&object, &links, &current.commit_sha)?;
+        self.record_write(&object, &links, &current.commit_sha, key.as_ref())?;
         Ok(commit_sha)
     }
 

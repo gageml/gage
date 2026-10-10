@@ -26,6 +26,10 @@ pub const OBJECT_REFS: &str = "refs/gage/1/object/";
 /// The tag refs: `refs/gage/<generation>/tag/<name>`.
 pub const TAG_REFS: &str = "refs/gage/1/tag/";
 
+/// The key refs: `refs/gage/<generation>/key/<type>/<key>`, one per
+/// live object carrying `attrs.key`.
+pub const KEY_REFS: &str = "refs/gage/1/key/";
+
 /// Full ref name of the object with the given id.
 pub(crate) fn object_ref(id: &str) -> String {
     format!("{OBJECT_REFS}{id}")
@@ -34,6 +38,12 @@ pub(crate) fn object_ref(id: &str) -> String {
 /// Full ref name of the tag with the given name.
 pub(crate) fn tag_ref(name: &str) -> String {
     format!("{TAG_REFS}{name}")
+}
+
+/// Full ref name of the key `key` of objects of the bare type name
+/// `type_name` (`issue`, `attachment`).
+pub(crate) fn key_ref(type_name: &str, key: &str) -> String {
+    format!("{KEY_REFS}{type_name}/{key}")
 }
 
 #[cfg(test)]
@@ -45,6 +55,8 @@ mod tests {
         assert_eq!(ROOT, format!("refs/gage/{GENERATION}/"));
         assert_eq!(OBJECT_REFS, format!("{ROOT}object/"));
         assert_eq!(TAG_REFS, format!("{ROOT}tag/"));
+        assert_eq!(KEY_REFS, format!("{ROOT}key/"));
+        assert_eq!(key_ref("issue", "a/b"), "refs/gage/1/key/issue/a/b");
         assert_eq!(object_ref("abc"), "refs/gage/1/object/abc");
         assert_eq!(tag_ref("a/b"), "refs/gage/1/tag/a/b");
     }

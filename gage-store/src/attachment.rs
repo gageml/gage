@@ -47,6 +47,7 @@ use wax::{Glob, Program};
 use crate::dataset::{DatasetAttachments, DatasetStore};
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order, SelectedTip};
+use crate::key::{resolve_key, validate_key};
 use crate::object::{EditOutcome, Object, ObjectTree, require_type, resolve_target};
 use crate::session::build_files_tree;
 use crate::url;
@@ -209,7 +210,7 @@ impl AttachmentStore<'_> {
             validate_name(name)?;
         }
         if let Some(key) = spec.key {
-            crate::key::validate_key(key)?;
+            validate_key(key)?;
         }
         if !spec.root.is_dir() {
             return Err(StoreError::AttachmentInput(format!(
@@ -331,21 +332,15 @@ impl AttachmentStore<'_> {
         }
     }
 
-    /// The live attachment under `key`, if any. Two live
-    /// attachments under one key is a store fault.
+    /// The live attachment under `key`, if any: one ref read through
+    /// `refs/gage/1/key/attachment/<key>`.
     fn live_under(&self, key: &str) -> Result<Option<Object>, StoreError> {
-        let tips = self.query().key(key).tips()?;
-        match tips.as_slice() {
-            [] => Ok(None),
-            [tip] => {
-                let object = self.store.read_object(&tip.sha)?;
+        match resolve_key(self.store, OBJECT_TYPE, key)? {
+            Some(object) => {
                 require_type(&object, OBJECT_TYPE)?;
                 Ok(Some(object))
             }
-            many => Err(StoreError::Parse(format!(
-                "attachment key {key:?} names {} live attachments",
-                many.len()
-            ))),
+            None => Ok(None),
         }
     }
 

@@ -83,6 +83,7 @@ pub use issue::{
     ChangeEvent, IssueChange, IssueDirRecord, IssueFull, IssueInput, IssueQuery, IssueStatus,
     IssueStore, OBJECT_TYPE as ISSUE_TYPE, StatusReason,
 };
+pub use key::{KeyRef, KeyStore};
 pub use note::{
     NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue,
     OBJECT_TYPE as NOTE_TYPE,
@@ -91,10 +92,10 @@ pub use object::SHORT_PREFIX_SET_SIZE;
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_table,
-    link_table, note_doc_rows, note_doc_schema, scan_scope_tables, scan_table,
+    link_table, note_doc_rows, note_doc_schema, object_key_table, scan_scope_tables, scan_table,
     scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
 };
-pub use refs::{GENERATION, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
+pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use scan::{
     AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
     ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,

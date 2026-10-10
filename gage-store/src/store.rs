@@ -132,7 +132,9 @@ impl Store {
     /// of every ref.
     pub fn rebuild_index(path: &Path) -> Result<Store, StoreError> {
         remove_index_file(path)?;
-        Store::open(path)
+        let store = Store::open(path)?;
+        store.rebuild_key_refs()?;
+        Ok(store)
     }
 
     pub fn path(&self) -> &Path {

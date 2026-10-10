@@ -48,8 +48,8 @@ use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
     LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
     attachment_table, dataset_table, issue_event_table, issue_table, link_table, note_doc_rows,
-    note_doc_schema, scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table,
-    scan_watermark_table, tag_table,
+    note_doc_schema, object_key_table, scan_scope_tables, scan_table, scan_task_agent_table,
+    scan_task_table, scan_watermark_table, tag_table,
 };
 
 use crate::native::{NativeTable, NativeTableFn};
@@ -135,6 +135,7 @@ impl ContextBuilder {
             ("issue", issue_table(Arc::clone(&store))),
             ("issue_event", issue_event_table(Arc::clone(&store))),
             ("tag", tag_table(Arc::clone(&store))),
+            ("object_key", object_key_table(Arc::clone(&store))),
         ];
         for (name, table) in &base {
             ctx.register_table(*name, Arc::clone(table))
