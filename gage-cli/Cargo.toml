@@ -19,6 +19,7 @@ gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-test = { path = "../gage-test" }
 gage-mcp = { path = "../gage-mcp" }
+gage-mcp2 = { path = "../gage-mcp2" }
 gage-tui = { path = "../gage-tui" }
 gage-claude = { path = "../gage-claude" }
 gage-log = { path = "../gage-log" }

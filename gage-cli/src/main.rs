@@ -414,12 +414,10 @@ async fn main() {
                 }
             },
             Command::Mcp2 => {
-                eprintln!(
-                    "gage mcp2: stdio serving is not yet implemented in gage-mcp2; \
-                     the Claude plugin is registered to call this command but the \
-                     server stub exits here"
-                );
-                std::process::exit(1);
+                if let Err(e) = run_mcp2().await {
+                    eprintln!("gage mcp2: {e}");
+                    std::process::exit(1);
+                }
             }
             Command::Query(args) => cmd_query::main(args).await,
             Command::Query2(args) => cmd_query2::main(args).await,
@@ -437,4 +435,21 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+async fn run_mcp2() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{Arc, Mutex};
+
+    let path = gage_store::store_path();
+    let store = gage_store::Store::open(&path)
+        .map_err(|e| format!("open store at {}: {e}", path.display()))?;
+    let store = Arc::new(Mutex::new(store));
+    let context = gage_query2::ContextBuilder::new(Some(store)).build().await;
+    let spec = gage_mcp2::ToolSpec {
+        gage: vec![gage_mcp2::GageTool::Query(gage_mcp2::QueryConfig {
+            context: Arc::new(context),
+        })],
+        custom: Vec::new(),
+    };
+    gage_mcp2::serve_stdio(spec).await
 }

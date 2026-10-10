@@ -13,9 +13,11 @@ use std::sync::Arc;
 
 use datafusion::prelude::SessionContext;
 use rmcp::ErrorData;
+use rmcp::ServiceExt;
 use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta, ToolAnnotations};
+use rmcp::transport::stdio;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use serde_json::Value;
@@ -123,6 +125,23 @@ pub enum CustomToolOutcome {
     Error(String),
     /// A JSON-RPC internal error carrying this text
     Fault(String),
+}
+
+/// Serve the tools `spec` declares over an MCP stdio transport,
+/// blocking until the peer disconnects. Used by `gage mcp2` to attach
+/// the Gage MCP server to a harness that spawns it as a child process
+/// (Claude Code, OpenCode, Codex, Gemini).
+pub async fn serve_stdio(spec: ToolSpec) -> Result<(), Box<dyn std::error::Error>> {
+    let server = build_server(&spec);
+    server
+        .serve(stdio())
+        .await
+        .inspect_err(|e| {
+            eprintln!("gage mcp2: serving error: {e:?}");
+        })?
+        .waiting()
+        .await?;
+    Ok(())
 }
 
 /// Construct a streamable-HTTP MCP service exposing every tool the

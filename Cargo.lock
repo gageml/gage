@@ -2536,6 +2536,7 @@ dependencies = [
  "gage-db",
  "gage-log",
  "gage-mcp",
+ "gage-mcp2",
  "gage-query",
  "gage-query2",
  "gage-registry",

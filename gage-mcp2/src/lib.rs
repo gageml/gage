@@ -17,4 +17,5 @@ pub use rmcp::model::ToolAnnotations;
 pub use service::{
     CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteCallback,
     IssueWriteConfig, IssueWriteInput, QueryConfig, ToolSpec, ToolsConfig, build_mcp_service,
+    serve_stdio,
 };
