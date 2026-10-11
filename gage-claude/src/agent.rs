@@ -52,13 +52,14 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
         .iter()
         .flat_map(|m| m.tool_names.iter())
         .map(|name| format!("{MCP_TOOL_PREFIX}{name}"))
+        .chain(spec.builtin_tools.iter().cloned())
         .collect();
     let run = prepare_run(&allowed_tools)?;
     let mut cmd = Command::new(&run.claude_bin);
     cmd.arg("-p");
     cmd.args(["--input-format", "stream-json"]);
     cmd.args(["--output-format", "stream-json"]);
-    cmd.args(["--tools", "WaitForMcpServers"]);
+    cmd.arg("--tools").arg(tools_arg(&spec.builtin_tools));
     // --print with stream-json output requires --verbose
     cmd.arg("--verbose");
     cmd.args(["--thinking-display", "summarized"]);
@@ -217,6 +218,14 @@ struct PreparedRun {
     claude_bin: PathBuf,
 }
 
+/// The `--tools` value: the MCP wait tool, which every run needs, and
+/// the built-ins the spec asks for, by their Claude Code names.
+fn tools_arg(builtin_tools: &[String]) -> String {
+    let mut tools = vec!["WaitForMcpServers".to_string()];
+    tools.extend(builtin_tools.iter().cloned());
+    tools.join(",")
+}
+
 /// The throwaway run directory: an empty cwd for the child and the
 /// seeded settings file. `allowed_tools` are the full tool names the
 /// child runs without prompting.
@@ -239,7 +248,7 @@ fn prepare_run(allowed_tools: &[String]) -> Result<PreparedRun, DriverError> {
 
 /// The one settings file the child reads: thinking summaries on, the
 /// user's theme and tui settings, and the permission allowlist naming
-/// the MCP tools served to this run.
+/// the MCP tools served to this run and the built-ins enabled for it.
 fn seed_settings(claude_home: &Path, allowed_tools: &[String]) -> io::Result<()> {
     let user_settings = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -673,6 +682,30 @@ fn int_field(v: &Json, key: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_arg_names_the_wait_tool_and_the_builtins() {
+        assert_eq!(tools_arg(&[]), "WaitForMcpServers");
+        assert_eq!(
+            tools_arg(&["Agent".to_string(), "WebSearch".to_string()]),
+            "WaitForMcpServers,Agent,WebSearch"
+        );
+    }
+
+    #[test]
+    fn seeded_settings_allow_every_named_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_settings(
+            tmp.path(),
+            &["mcp__gage__Query".to_string(), "Agent".to_string()],
+        )
+        .unwrap();
+        let settings = read_json(&tmp.path().join("settings.json")).unwrap();
+        assert_eq!(
+            settings["permissions"]["allow"],
+            serde_json::json!(["mcp__gage__Query", "Agent"])
+        );
+    }
 
     #[test]
     fn assistant_blocks_expand_one_event_each() {

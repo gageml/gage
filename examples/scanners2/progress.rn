@@ -1,0 +1,15 @@
+use gage::{Progress, scan};
+use time::{Duration, sleep};
+
+pub const SCANNER = #{
+    name: "progress",
+    description: "Task progress",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    for s in Progress::iter(scan().sessions().await) {
+        log::info!("{} messages", s.messages().await.len());
+        sleep(Duration::from_millis(500)).await;
+    }
+}

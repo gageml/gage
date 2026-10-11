@@ -1,13 +1,13 @@
-use gage::{Tool, call_agent, params};
+use gage::{Input, Tool, call_agent, params};
 
 pub const SCANNER = #{
     name: "agent-tool",
     description: "Scanner provided tool",
-    tasks: #{ main: #{} },
+    tasks: #{ simple: #{}, inputs: #{} },
     params: #{ secret: "abc" },
 };
 
-pub async fn main() {
+pub async fn simple() {
     let secret = params().secret;
     let a = call_agent("What's the secret?")
         .model("small")
@@ -15,4 +15,21 @@ pub async fn main() {
         .await?;
     let result = a.wait().await?;
     println!("{}", result.text);
+}
+
+pub async fn inputs() {
+    let a = call_agent("Greet Joe with the Greet tool")
+        .model("small")
+        .tool(
+            Tool::new("Greet", greet)
+                .input(Input::string("name").required())
+                .meta_arg(),
+        )
+        .await?;
+    let result = a.wait().await?;
+    println!("{}", result.text);
+}
+
+fn greet(inputs, meta) {
+    Ok(format!("Hello, {} (call {})", inputs.name, meta.agent_tool_use()))
 }

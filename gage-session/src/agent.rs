@@ -39,6 +39,9 @@ pub struct AgentSpec {
     /// An MCP server the harness connects to for the run, when the
     /// caller serves tools. `None` runs the agent with no tools.
     pub mcp: Option<AgentMcp>,
+    /// The harness's own tools to enable, by the harness's names for
+    /// them. Empty enables none.
+    pub builtin_tools: Vec<String>,
 }
 
 /// An MCP server to expose to the agent: its streamable-HTTP URL and

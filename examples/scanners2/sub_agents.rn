@@ -1,0 +1,18 @@
+use gage::{DateTime, Tool, call_agent, tools::Builtin};
+
+pub const SCANNER = #{
+    name: "sub-agents",
+    description: "Sub-agents sharing a scanner tool",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let a = call_agent(
+        "Use two sub-agents to each read a value with the Value tool and report both",
+    )
+    .tool(Tool::new("Value", |_| Ok(DateTime::now().to_rfc2822())))
+    .tool(Builtin::new("Agent"))
+    .await?;
+    let result = a.wait().await?;
+    println(result.text);
+}

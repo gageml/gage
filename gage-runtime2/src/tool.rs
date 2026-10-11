@@ -1,12 +1,15 @@
-//! Tools for `call_agent`: `Tool`, `Input`, and the Gage tool
-//! configurations `Query`, `IssueWrite`, and `NoteWrite`.
+//! Tools for `call_agent`: `Tool`, `Input`, the Gage tool
+//! configurations `Query`, `IssueWrite`, and `NoteWrite`, and
+//! `Builtin`, a tool of the harness itself.
 //!
 //! A `Tool` is a value with chained setters and no finalizer, of one of
-//! two kinds. A scanner-defined tool, `Tool::new(name, handler)`, takes
+//! three kinds. A scanner-defined tool, `Tool::new(name, handler)`, takes
 //! the required data, and description, inputs, annotations, and
-//! `requires_meta` chain. A Gage tool is one of the tools this runtime
+//! `meta_arg` chain. A Gage tool is one of the tools this runtime
 //! provides, declared by its typed configuration value such as `Query`,
-//! which `.tool()` accepts directly. `call_agent(..).tool(t)` consumes the tools when the agent
+//! which `.tool()` accepts directly. A built-in, `Builtin::new(name)`,
+//! is served by nothing here: its name goes to the driver on the agent
+//! spec, as the harness names the tool. `call_agent(..).tool(t)` consumes the tools when the agent
 //! starts: names and inputs are validated, each scanner-defined tool
 //! becomes a [`CustomToolDef`] whose callback runs the handler, and
 //! each Gage tool becomes a [`GageTool`] carrying the data it serves.
@@ -66,7 +69,7 @@ pub(crate) fn module() -> Result<Module, ContextError> {
     m.function_meta(Tool::description)?;
     m.function_meta(Tool::input)?;
     m.function_meta(Tool::inputs)?;
-    m.function_meta(Tool::requires_meta)?;
+    m.function_meta(Tool::meta_arg)?;
     m.function_meta(Tool::read_only)?;
     m.function_meta(Tool::idempotent)?;
     m.function_meta(Tool::additive)?;
@@ -103,6 +106,9 @@ pub(crate) fn tools_module() -> Result<Module, ContextError> {
     m.function_meta(NoteWrite::new)?;
     m.function_meta(NoteWrite::names)?;
     m.function_meta(NoteWrite::debug)?;
+    m.ty::<Builtin>()?;
+    m.function_meta(Builtin::new)?;
+    m.function_meta(Builtin::debug)?;
     Ok(m)
 }
 
@@ -118,6 +124,8 @@ pub struct Tool {
 enum ToolKind {
     Scanner(ScannerTool),
     Gage(GageConfig),
+    /// A harness tool the driver enables; nothing is served for it
+    Builtin(String),
 }
 
 /// The configuration value of one Gage tool
@@ -163,6 +171,14 @@ impl From<NoteWrite> for Tool {
     }
 }
 
+impl From<Builtin> for Tool {
+    fn from(builtin: Builtin) -> Self {
+        Tool {
+            kind: ToolKind::Builtin(builtin.name),
+        }
+    }
+}
+
 /// The tool a `.tool()` / `.tools()` argument names: a `Tool`, or a
 /// Gage tool's configuration value, which stands for the tool
 pub(crate) fn tool_from_value(v: &Value) -> Result<Tool, VmError> {
@@ -178,10 +194,31 @@ pub(crate) fn tool_from_value(v: &Value) -> Result<Tool, VmError> {
     if let Ok(config) = v.borrow_ref::<NoteWrite>() {
         return Ok(Tool::from(config.clone()));
     }
+    if let Ok(builtin) = v.borrow_ref::<Builtin>() {
+        return Ok(Tool::from(builtin.clone()));
+    }
     Err(VmError::panic(format!(
-        "expected a Tool or a Gage tool such as Query, IssueWrite, or NoteWrite, got {}",
+        "expected a Tool or a Gage tool such as Query, IssueWrite, NoteWrite, or Builtin, got {}",
         v.type_info()
     )))
+}
+
+/// The harness tools among `tools`, in declaration order without
+/// repeats. An empty name is the scanner's error.
+pub(crate) fn builtin_names(tools: &[Tool]) -> Result<Vec<String>, Error> {
+    let mut names: Vec<String> = Vec::new();
+    for tool in tools {
+        let ToolKind::Builtin(name) = &tool.kind else {
+            continue;
+        };
+        if name.trim().is_empty() {
+            return Err(Error::agent("Builtin: the tool name is empty"));
+        }
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
 }
 
 /// A scanner-defined tool
@@ -190,7 +227,7 @@ struct ScannerTool {
     name: String,
     description: Option<String>,
     inputs: Vec<Input>,
-    requires_meta: bool,
+    meta_arg: bool,
     /// `None` until an annotation method is called, so a tool with no
     /// annotations sends none
     annotations: Option<ToolAnnotations>,
@@ -216,7 +253,7 @@ impl Tool {
                 name: name.to_owned(),
                 description: None,
                 inputs: Vec::new(),
-                requires_meta: false,
+                meta_arg: false,
                 annotations: None,
                 handler,
             }),
@@ -254,9 +291,9 @@ impl Tool {
 
     /// The handler takes the request's meta as its second argument
     #[rune::function(instance)]
-    fn requires_meta(mut self) -> Self {
-        if let Some(t) = self.scanner_mut("requires_meta") {
-            t.requires_meta = true;
+    fn meta_arg(mut self) -> Self {
+        if let Some(t) = self.scanner_mut("meta_arg") {
+            t.meta_arg = true;
         }
         self
     }
@@ -303,7 +340,7 @@ impl Tool {
     fn scanner_mut(&mut self, _method: &'static str) -> Option<&mut ScannerTool> {
         match &mut self.kind {
             ToolKind::Scanner(t) => Some(t),
-            ToolKind::Gage(_) => None,
+            ToolKind::Gage(_) | ToolKind::Builtin(_) => None,
         }
     }
 
@@ -317,13 +354,14 @@ impl Tool {
         match &self.kind {
             ToolKind::Scanner(t) => write!(
                 f,
-                "Tool {{ name: {:?}, description: {:?}, inputs: {}, requires_meta: {} }}",
+                "Tool {{ name: {:?}, description: {:?}, inputs: {}, meta_arg: {} }}",
                 t.name,
                 t.description,
                 t.inputs.len(),
-                t.requires_meta
+                t.meta_arg
             )?,
             ToolKind::Gage(config) => write!(f, "Tool {{ gage: {config:?} }}")?,
+            ToolKind::Builtin(name) => write!(f, "Tool {{ builtin: {name:?} }}")?,
         }
         Ok(())
     }
@@ -495,6 +533,30 @@ impl NoteWrite {
     }
 }
 
+/// A tool of the harness itself, by the harness's name for it
+/// (`Agent`, `WebSearch`). The driver enables it for the run.
+#[derive(Any, Clone, Debug)]
+#[rune(item = ::gage::tools)]
+pub struct Builtin {
+    #[rune(skip)]
+    name: String,
+}
+
+impl Builtin {
+    #[rune::function(path = Self::new)]
+    fn new(name: Ref<str>) -> Builtin {
+        Builtin {
+            name: name.to_owned(),
+        }
+    }
+
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "Builtin {{ name: {:?} }}", self.name)?;
+        Ok(())
+    }
+}
+
 /// One declared input of a tool
 #[derive(Any, Clone)]
 #[rune(item = ::gage)]
@@ -640,6 +702,7 @@ pub(crate) async fn consume(
                 t.name.clone()
             }
             ToolKind::Gage(config) => config.name().to_string(),
+            ToolKind::Builtin(_) => continue,
         };
         if !seen.insert(name.clone()) {
             return Err(Error::agent(format!("tool '{name}' is declared twice")));
@@ -657,6 +720,7 @@ pub(crate) async fn consume(
                     callback: issue_write_callback(config, ctx, sink),
                 }));
             }
+            ToolKind::Builtin(_) => unreachable!("builtins are skipped above"),
             ToolKind::Gage(GageConfig::NoteWrite(config)) => {
                 let allowed = match &config.names {
                     Some(names) => names.clone(),
@@ -782,7 +846,7 @@ fn callback(
     ctx.params = None;
     let sink = sink.cloned();
     let declared = DeclaredInputs::new(&tool.inputs);
-    let requires_meta = tool.requires_meta;
+    let meta_arg = tool.meta_arg;
     let tool_name = tool.name.clone();
     let parent = Span::current();
     Arc::new(move |args, meta| {
@@ -801,7 +865,7 @@ fn callback(
             };
             let inputs = InputsArg(args);
             let call = async move {
-                if requires_meta {
+                if meta_arg {
                     let meta = ToolMeta::new(meta, scanner);
                     handler
                         .async_send_call::<HandlerOutcome>((inputs, meta))
@@ -1452,14 +1516,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requires_meta_passes_the_request_meta_as_the_second_argument() {
+    async fn meta_arg_passes_the_request_meta_as_the_second_argument() {
         let tmp = tempfile::tempdir().unwrap();
         let defs = defs(
             &tmp,
             r#"
             use gage::Tool;
             pub fn main() {
-                [Tool::new("who", |inputs, meta| Ok(meta.agent_tool_use())).requires_meta(),
+                [Tool::new("who", |inputs, meta| Ok(meta.agent_tool_use())).meta_arg(),
                  Tool::new("plain", |inputs| Ok("one arg"))]
             }
             "#,
@@ -1706,6 +1770,35 @@ mod tests {
             "#)
             .await,
             "agent: tool 'Query' is declared twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtins_are_named_to_the_driver_and_not_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let list = tools(
+            r#"
+            use gage::{Tool, tools::{Builtin, Query}};
+            pub fn main() {
+                [Builtin::new("Agent"), Query::new(), Builtin::new("WebSearch"),
+                 Builtin::new("Agent"), Tool::new("x", |i| Ok(1))]
+            }
+            "#,
+        );
+        assert_eq!(builtin_names(&list).unwrap(), ["Agent", "WebSearch"]);
+        let (spec, names) = consume(&list, &scan_ctx(&tmp), None).await.unwrap();
+        assert_eq!(names, ["Query", "x"]);
+        assert_eq!(spec.gage.len(), 1);
+        assert_eq!(spec.custom.len(), 1);
+        let empty = tools(
+            r#"
+            use gage::tools::Builtin;
+            pub fn main() { [Builtin::new(" ")] }
+            "#,
+        );
+        assert_eq!(
+            builtin_names(&empty).unwrap_err().to_string(),
+            "agent: Builtin: the tool name is empty"
         );
     }
 

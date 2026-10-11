@@ -1,21 +1,23 @@
-use gage::{Event, call_agent, params};
+use gage::{Event, call_agent};
 
 pub const SCANNER = #{
     name: "agent-loop",
     description: "Show agent event loop",
     tasks: #{ main: #{} },
-    params: #{ prompt: "Say hello" },
 };
 
 pub async fn main() {
-    let prompt = params().prompt;
-    let a = call_agent(prompt).model("small").await?;
+    let a = call_agent("Say 'red'").model("small").await?;
     loop {
         let event = a.poll().await?;
         println!("{event:?}");
-        if let Event::Stop(_) = event {
-            assert!(!a.running());
-            break;
+        match event {
+            Event::Assistant(text) if text.to_lowercase().contains("red") => {
+                a.send("Now say 'blue'").await?
+            }
+            Event::Assistant(_) => a.stop().await?,
+            Event::Stop(_) => break,
+            _ => {}
         }
     }
 }

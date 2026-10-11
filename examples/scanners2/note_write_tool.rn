@@ -1,0 +1,16 @@
+use gage::{call_agent, tools::NoteWrite};
+
+pub const SCANNER = #{
+    name: "gage-note-write-tool",
+    description: "NoteWrite tool use",
+    tasks: #{ main: #{ notes: #{ writes: #{ "comment": "A remark" } } } },
+};
+
+pub async fn main() {
+    let a = call_agent("Write a comment 'Hello, Joe' with the NoteWrite tool")
+        .model("small")
+        .tool(NoteWrite::new())
+        .await?;
+    let result = a.wait().await?;
+    println(result.text);
+}

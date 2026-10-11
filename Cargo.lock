@@ -2756,6 +2756,7 @@ dependencies = [
  "percent-encoding",
  "regex",
  "rune",
+ "rune-modules",
  "serde_json",
  "tempfile",
  "tokio",

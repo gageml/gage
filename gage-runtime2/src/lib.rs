@@ -177,8 +177,8 @@ impl OutputSink {
 }
 
 /// The Rune context every scanner compiles against: the standard
-/// library without its stdio, this crate's `print`/`println` and
-/// `log` macros, `gage::scan` and the values it returns, `gage::params`, the message
+/// library and the `time` and `rand` modules without their stdio,
+/// this crate's `print`/`println` and `log` macros, `gage::scan` and the values it returns, `gage::params`, the message
 /// and entry queries on a session, `scan().attachments()` and the
 /// values it returns, `gage::dataset`, `gage::attach`, `gage::Files`
 /// and the values they return, `gage::Target`, `gage::write_note`,
@@ -191,7 +191,7 @@ impl OutputSink {
 /// `gage-runtime`. Every file-reading facility installed here is
 /// enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
-    let mut context = Context::with_config(false)?;
+    let mut context = rune_modules::with_config(false)?;
     context.install(io::module()?)?;
     context.install(log::module()?)?;
     context.install(scan::module()?)?;

@@ -119,6 +119,7 @@ fn call_agent(prompt: Ref<str>) -> CallAgent {
             timeout: None,
             project: None,
             mcp: None,
+            builtin_tools: Vec::new(),
         },
         tools: Vec::new(),
     }
@@ -217,7 +218,8 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     let mut spec = c.spec;
     let tools = c.tools.len();
     let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
-    let service = if c.tools.is_empty() {
+    spec.builtin_tools = tool::builtin_names(&c.tools)?;
+    let service = if c.tools.len() == spec.builtin_tools.len() {
         None
     } else {
         let (tool_spec, tool_names) = tool::consume(&c.tools, &ctx, sink.as_ref()).await?;
