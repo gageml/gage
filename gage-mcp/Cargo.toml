@@ -8,14 +8,11 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-arrow = { workspace = true }
 bytes = "1"
 datafusion = { workspace = true }
-gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
-gage-db = { path = "../gage-db" }
 gage-query = { path = "../gage-query" }
-gage-registry = { path = "../gage-registry" }
+gage-store = { path = "../gage-store" }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "server-auto", "tokio"] }
@@ -24,19 +21,17 @@ rmcp = { version = "0.16", features = [
     "server-side-http",
     "transport-io",
     "transport-streamable-http-server",
-    "schemars",
 ] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+toml = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
-schemars = "1"
-serde = { workspace = true }
-serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-toml = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
-tokio-util = { workspace = true }
-num_cpus = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

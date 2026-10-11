@@ -156,16 +156,13 @@ mod tests {
     #[test]
     fn write_mcp_json_records_the_command() {
         let dir = tempfile::tempdir().unwrap();
-        write_mcp_json(dir.path(), &["/usr/local/bin/gage", "mcp2"]).unwrap();
+        write_mcp_json(dir.path(), &["/usr/local/bin/gage", "mcp"]).unwrap();
         let text = fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             value["mcpServers"]["gage"]["command"].as_str(),
             Some("/usr/local/bin/gage")
         );
-        assert_eq!(
-            value["mcpServers"]["gage"]["args"][0].as_str(),
-            Some("mcp2")
-        );
+        assert_eq!(value["mcpServers"]["gage"]["args"][0].as_str(), Some("mcp"));
     }
 }

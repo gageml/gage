@@ -1,26 +1,25 @@
 //! Build an HTTP MCP service from a [`ToolSpec`].
 //!
-//! The spec selects which built-in Gage tools to expose and optionally
-//! adds [`CustomToolDef`]s — externally-supplied tool definitions whose
-//! bodies are opaque async closures. Both kinds of tools surface as
-//! ordinary MCP tools to the client; the gage-mcp crate stays unaware
-//! of where custom-tool bodies come from.
-//!
-//! [`build_mcp_service`] returns the [`crate::host::RegisteredService`]
-//! shape an [`crate::host::McpHost`] expects.
+//! The spec names the Gage tools to expose, each with the data it
+//! serves, and the scanner-defined tools, each with the callback that
+//! runs it. Both kinds surface as ordinary MCP tools. [`build_mcp_service`]
+//! returns the [`RegisteredService`] shape a [`crate::host::McpHost`]
+//! expects.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use gage_db::issue::IssueStatus;
-pub use gage_query::scope::SessionScope;
+use datafusion::prelude::SessionContext;
+use gage_store::Store;
 use rmcp::ErrorData;
-use rmcp::handler::server::router::tool::ToolRoute;
+use rmcp::ServiceExt;
+use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta, ToolAnnotations};
+use rmcp::transport::stdio;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use serde_json::Value;
@@ -28,146 +27,150 @@ use tower::service_fn;
 use tower::util::BoxCloneSyncService;
 
 use crate::host::RegisteredService;
-use crate::server::{GageServer, TOOLS};
+use crate::server::GageServer;
+use crate::tools;
 
-/// One built-in Gage tool selected for a service, with its per-service
-/// configuration. The variant selects the tool; the payload configures
-/// it. Isolation is per tool and explicit — there is no ambient scan
-/// scope.
-#[derive(Clone, Debug)]
+/// What one service exposes
+#[derive(Default)]
+pub struct ToolSpec {
+    pub gage: Vec<GageTool>,
+    pub custom: Vec<CustomToolDef>,
+}
+
+/// One Gage tool with the data it serves
+#[derive(Clone)]
 pub enum GageTool {
     Query(QueryConfig),
     IssueWrite(IssueWriteConfig),
     NoteWrite(NoteWriteConfig),
-    IssueUpdate,
-    IssueComment,
-    IssuePendingResolve,
+    IssueUpdate(StoreWriterConfig),
+    IssueComment(StoreWriterConfig),
+    IssuePendingResolve(StoreWriterConfig),
 }
 
 impl GageTool {
-    /// Wire-visible tool name for this variant.
+    /// The tool's wire name
     pub fn name(&self) -> &'static str {
         match self {
-            GageTool::Query(_) => "Query",
-            GageTool::IssueWrite(_) => "IssueWrite",
-            GageTool::NoteWrite(_) => "NoteWrite",
-            GageTool::IssueUpdate => "IssueUpdate",
-            GageTool::IssueComment => "IssueComment",
-            GageTool::IssuePendingResolve => "IssuePendingResolve",
-        }
-    }
-
-    /// Tool for `name` with default (unscoped) configuration. `None`
-    /// for unknown names.
-    pub fn from_name(name: &str) -> Option<GageTool> {
-        match name {
-            "Query" => Some(GageTool::Query(QueryConfig::default())),
-            "IssueWrite" => Some(GageTool::IssueWrite(IssueWriteConfig::default())),
-            "NoteWrite" => Some(GageTool::NoteWrite(NoteWriteConfig::default())),
-            "IssueUpdate" => Some(GageTool::IssueUpdate),
-            "IssueComment" => Some(GageTool::IssueComment),
-            "IssuePendingResolve" => Some(GageTool::IssuePendingResolve),
-            _ => None,
+            GageTool::Query(_) => tools::query::NAME,
+            GageTool::IssueWrite(_) => tools::issue_write::NAME,
+            GageTool::NoteWrite(_) => tools::note_write::NAME,
+            GageTool::IssueUpdate(_) => tools::issue_update::NAME,
+            GageTool::IssueComment(_) => tools::issue_comment::NAME,
+            GageTool::IssuePendingResolve(_) => tools::issue_pending_resolve::NAME,
         }
     }
 }
 
-/// `Query` tool settings.
-#[derive(Clone, Debug, Default)]
+/// The data of the tools that write the store directly, as `gage
+/// mcp2` serves an interactive session: the store, and the author
+/// each write records, in the `user:<name>` form. `IssueUpdate` and
+/// `IssueComment` take it as their configuration; the store-side
+/// forms of `IssueWrite` and `NoteWrite` are built from it.
+#[derive(Clone)]
+pub struct StoreWriterConfig {
+    pub store: Arc<Mutex<Store>>,
+    pub author: String,
+}
+
+impl StoreWriterConfig {
+    /// The store, locked. A poisoned lock is taken as it is: the store
+    /// keeps no in-memory state a panic could leave half-written.
+    pub(crate) fn store(&self) -> MutexGuard<'_, Store> {
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The `Query` tool's data: the DataFusion context its SQL runs on
+#[derive(Clone)]
 pub struct QueryConfig {
-    /// Scope the tool's query context to this scan id
-    /// ([`gage_query::create_agent_context`]). `None` → unscoped.
-    pub scan: Option<String>,
-    /// Narrow the context to these sessions, each with an optional
-    /// line range ([`gage_query::create_agent_context_scoped`]).
-    /// Honored only when `scan` is set; `None` → every session in the
-    /// scan, unconstrained.
-    pub sessions: Option<Vec<SessionScope>>,
+    pub context: Arc<SessionContext>,
 }
 
-/// `IssueWrite` tool settings.
-#[derive(Clone, Debug)]
+/// The `IssueWrite` tool's data: the callback that writes the issue.
+/// The write path belongs to the runtime, which writes issues into the
+/// scan directory, so the tool carries the writer rather than the
+/// data; the route parses the call and hands the callback an
+/// [`IssueWriteInput`].
+#[derive(Clone)]
 pub struct IssueWriteConfig {
-    /// Name every issue is written under. The model has no name input.
-    pub name: String,
-    /// Scan to link writes to via `scan_issue`. `None` → no link.
-    pub scan: Option<String>,
-    /// Status new issues are written with. Only `Pending` and `Open`
-    /// are meaningful here.
-    pub status: IssueStatus,
+    pub callback: IssueWriteCallback,
 }
 
-impl Default for IssueWriteConfig {
-    fn default() -> Self {
-        IssueWriteConfig {
-            name: "general".to_string(),
-            scan: None,
-            status: IssueStatus::Pending,
-        }
-    }
+/// Async closure that writes one issue from a parsed call.
+pub type IssueWriteCallback = Arc<
+    dyn Fn(IssueWriteInput) -> Pin<Box<dyn Future<Output = CustomToolOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// One `IssueWrite` call, parsed
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueWriteInput {
+    pub title: String,
+    /// `None` when absent or empty
+    pub description: Option<String>,
+    /// The cited note ids, in call order
+    pub evidence: Vec<String>,
 }
 
-/// `NoteWrite` tool settings.
-#[derive(Clone, Debug)]
+/// The `NoteWrite` tool's data: the names the model may write, each
+/// with the doc the tool shows for it, and the callback that writes
+/// the note. The names are per configuration, so the route appends
+/// them to the tool's description, and a call naming anything else is
+/// refused before the callback runs.
+#[derive(Clone)]
 pub struct NoteWriteConfig {
-    /// Allowed note names, mapped to their docstrings. The model must
-    /// pass one of these as `name`; anything else is an error.
     pub names: BTreeMap<String, String>,
-    /// Scan to link writes to via `scan_note`, and the fallback note
-    /// target when the model supplies no session. `None` → no link.
-    pub scan: Option<String>,
+    pub callback: NoteWriteCallback,
 }
 
-impl Default for NoteWriteConfig {
-    fn default() -> Self {
-        NoteWriteConfig {
-            names: BTreeMap::from([("comment".to_string(), "Write a comment".to_string())]),
-            scan: None,
-        }
-    }
+/// Async closure that writes one note from a parsed call.
+pub type NoteWriteCallback = Arc<
+    dyn Fn(NoteWriteInput) -> Pin<Box<dyn Future<Output = CustomToolOutcome> + Send>> + Send + Sync,
+>;
+
+/// One `NoteWrite` call, parsed. The name is one of the configured
+/// names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteWriteInput {
+    pub name: String,
+    pub value: String,
+    /// The session the note is about, as the model gave it
+    pub session_id: Option<String>,
+    /// A line selection within the session, such as `12` or `12-20`
+    pub session_lines: Option<String>,
 }
 
-/// Per-service configuration each built-in tool handler reads through
-/// [`GageServer`]. Built from the [`ToolSpec`]'s tool list; tools not
-/// in the list keep defaults (their routes aren't installed).
-#[derive(Clone, Debug, Default)]
+/// The configuration the Gage tool handlers read through
+/// [`GageServer`]. A tool absent from the spec has no entry and no
+/// route.
+#[derive(Clone, Default)]
 pub struct ToolsConfig {
-    pub query: QueryConfig,
-    pub issue_write: IssueWriteConfig,
-    pub note_write: NoteWriteConfig,
+    pub query: Option<QueryConfig>,
+    pub issue_write: Option<IssueWriteConfig>,
+    pub note_write: Option<NoteWriteConfig>,
+    pub issue_update: Option<StoreWriterConfig>,
+    pub issue_comment: Option<StoreWriterConfig>,
+    pub issue_pending_resolve: Option<StoreWriterConfig>,
 }
 
-/// What an MCP service exposes: a subset of the built-in Gage tools
-/// (each with per-service config) plus zero or more externally-supplied
-/// tool definitions.
-#[derive(Default)]
-pub struct ToolSpec {
-    pub tools: Vec<GageTool>,
-    pub custom_tools: Vec<CustomToolDef>,
-    /// Author base for writes made through this service's built-in
-    /// tools (e.g. `agent:{scanner}`); each request appends its own
-    /// `?call={toolUseId}`. `None` for services not fronting a single
-    /// agent invocation.
-    pub author: Option<String>,
-}
-
-/// One externally-supplied MCP tool: the wire-visible metadata plus a
-/// callback that runs when the model invokes it.
+/// One scanner-defined tool: the wire-visible definition plus the
+/// callback that runs when the model calls it.
 pub struct CustomToolDef {
     pub name: String,
     /// Omitted from the wire definition when `None`
     pub description: Option<String>,
-    /// JSON Schema for the tool's input. The object form expected by
-    /// MCP — i.e. `{"type": "object", "properties": {...}, "required":
-    /// [...]}`. Pass an empty object schema for tools that take no
-    /// arguments.
+    /// JSON Schema for the tool's input, in the object form MCP expects
     pub input_schema: JsonObject,
     pub annotations: Option<ToolAnnotations>,
     pub callback: CustomToolCallback,
 }
 
 /// Async closure invoked when the model calls a [`CustomToolDef`].
-/// Receives the tool's argument object and the request's `_meta`
+/// Receives the call's `arguments` object and the request's `_meta`
 /// object as JSON values.
 pub type CustomToolCallback = Arc<
     dyn Fn(Value, Value) -> Pin<Box<dyn Future<Output = CustomToolOutcome> + Send>> + Send + Sync,
@@ -187,8 +190,25 @@ pub enum CustomToolOutcome {
     Fault(String),
 }
 
+/// Serve the tools `spec` declares over an MCP stdio transport,
+/// blocking until the peer disconnects. Used by `gage mcp2` to attach
+/// the Gage MCP server to a harness that spawns it as a child process
+/// (Claude Code, OpenCode, Codex, Gemini).
+pub async fn serve_stdio(spec: ToolSpec) -> Result<(), Box<dyn std::error::Error>> {
+    let server = build_server(&spec);
+    server
+        .serve(stdio())
+        .await
+        .inspect_err(|e| {
+            eprintln!("gage mcp2: serving error: {e:?}");
+        })?
+        .waiting()
+        .await?;
+    Ok(())
+}
+
 /// Construct a streamable-HTTP MCP service exposing every tool the
-/// spec declares. The returned service plugs into an
+/// spec declares. The returned service plugs into a
 /// [`crate::host::McpHost`] via `McpHost::register`.
 pub fn build_mcp_service(spec: ToolSpec) -> RegisteredService {
     let inner = Arc::new(StreamableHttpService::new(
@@ -204,30 +224,40 @@ pub fn build_mcp_service(spec: ToolSpec) -> RegisteredService {
 }
 
 fn build_server(spec: &ToolSpec) -> GageServer {
-    let allowed: HashSet<&str> = spec.tools.iter().map(GageTool::name).collect();
+    let mut router = ToolRouter::<GageServer>::new();
     let mut config = ToolsConfig::default();
-    for tool in &spec.tools {
+    for tool in &spec.gage {
         match tool {
-            GageTool::Query(c) => config.query = c.clone(),
-            GageTool::IssueWrite(c) => config.issue_write = c.clone(),
-            GageTool::NoteWrite(c) => config.note_write = c.clone(),
-            GageTool::IssueUpdate | GageTool::IssueComment | GageTool::IssuePendingResolve => {}
+            GageTool::Query(c) => {
+                config.query = Some(c.clone());
+                router = router.with_route((tools::query::TOOL)());
+            }
+            GageTool::IssueWrite(c) => {
+                config.issue_write = Some(c.clone());
+                router = router.with_route((tools::issue_write::TOOL)());
+            }
+            GageTool::NoteWrite(c) => {
+                config.note_write = Some(c.clone());
+                router = router.with_route(tools::note_write::route(c));
+            }
+            GageTool::IssueUpdate(c) => {
+                config.issue_update = Some(c.clone());
+                router = router.with_route((tools::issue_update::TOOL)());
+            }
+            GageTool::IssueComment(c) => {
+                config.issue_comment = Some(c.clone());
+                router = router.with_route((tools::issue_comment::TOOL)());
+            }
+            GageTool::IssuePendingResolve(c) => {
+                config.issue_pending_resolve = Some(c.clone());
+                router = router.with_route((tools::issue_pending_resolve::TOOL)());
+            }
         }
     }
-    let mut router = rmcp::handler::server::router::tool::ToolRouter::<GageServer>::new();
-    for route in TOOLS {
-        let r = route();
-        if !allowed.contains(r.attr.name.as_ref()) {
-            continue;
-        }
-        router = router.with_route(r);
-    }
-    for def in &spec.custom_tools {
+    for def in &spec.custom {
         router = router.with_route(custom_route(def));
     }
-    GageServer::with_router(router)
-        .with_author(spec.author.clone())
-        .with_tools_config(config)
+    GageServer::new(router, config)
 }
 
 fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
@@ -260,7 +290,7 @@ fn custom_route(def: &CustomToolDef) -> ToolRoute<GageServer> {
 
 /// The wire form of a callback's outcome: a success or error result
 /// the model reads, or a JSON-RPC internal error for a fault.
-fn call_result(outcome: CustomToolOutcome) -> Result<CallToolResult, ErrorData> {
+pub(crate) fn call_result(outcome: CustomToolOutcome) -> Result<CallToolResult, ErrorData> {
     match outcome {
         CustomToolOutcome::Success(out) => Ok(CallToolResult::success(vec![Content::text(
             render_output(&out),
@@ -284,47 +314,6 @@ fn render_output(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn empty_object_schema() -> JsonObject {
-        let mut o = JsonObject::new();
-        o.insert("type".into(), Value::String("object".into()));
-        o.insert("properties".into(), Value::Object(JsonObject::new()));
-        o.insert("required".into(), Value::Array(vec![]));
-        o
-    }
-
-    #[test]
-    fn builds_with_no_tools() {
-        let svc = build_mcp_service(ToolSpec::default());
-        // Constructed without panic; can't easily exercise without a
-        // wire client.
-        drop(svc);
-    }
-
-    #[test]
-    fn builds_with_gage_and_custom_tools() {
-        let spec = ToolSpec {
-            tools: vec![
-                GageTool::Query(QueryConfig {
-                    scan: Some("scan-1".into()),
-                    sessions: None,
-                }),
-                GageTool::IssueWrite(IssueWriteConfig::default()),
-            ],
-            custom_tools: vec![CustomToolDef {
-                name: "secret".into(),
-                description: Some("Returns the secret.".into()),
-                input_schema: empty_object_schema(),
-                annotations: None,
-                callback: Arc::new(|_args, _meta| {
-                    Box::pin(async { CustomToolOutcome::Success(json!("abc123")) })
-                }),
-            }],
-            author: None,
-        };
-        let svc = build_mcp_service(spec);
-        drop(svc);
-    }
 
     fn text_of(result: &CallToolResult) -> String {
         result
@@ -357,8 +346,26 @@ mod tests {
         assert_eq!(e.message, "handler broke");
     }
 
-    // End-to-end wire test deferred to step 6.4: speaking the
-    // streamable-HTTP MCP protocol by hand (initialize → session id →
-    // tools/list) without an MCP client is its own non-trivial work
-    // and will fall out for free once `call_agent` drives the path.
+    #[test]
+    fn builds_a_service_with_both_tool_kinds() {
+        let mut schema = JsonObject::new();
+        schema.insert("type".into(), Value::String("object".into()));
+        let spec = ToolSpec {
+            gage: vec![GageTool::Query(QueryConfig {
+                context: Arc::new(SessionContext::new()),
+            })],
+            custom: vec![CustomToolDef {
+                name: "secret".into(),
+                description: Some("Returns the secret.".into()),
+                input_schema: schema,
+                annotations: None,
+                callback: Arc::new(|_args, _meta| {
+                    Box::pin(async { CustomToolOutcome::Success(json!("abc123")) })
+                }),
+            }],
+        };
+        let server = build_server(&spec);
+        assert!(server.config().query.is_some());
+        drop(build_mcp_service(spec));
+    }
 }

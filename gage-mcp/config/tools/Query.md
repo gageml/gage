@@ -4,63 +4,46 @@ name = "Query"
 [parameters.sql]
 type = "string"
 required = true
-description = "SQL query to execute against Gage session data."
+description = "SQL (DataFusion dialect) to run against the session data in scope."
 
 [annotations]
 read_only_hint = true
 idempotent_hint = true
 +++
 
-Execute SQL (DataFusion dialect) against Claude Code sessions, Gage notes, and
-Gage issues.
+Run SQL (DataFusion dialect) over the sessions in scope and the notes and
+issues they hold. Results are YAML rows, capped per page; a cut page says how
+to go on.
 
 Tables:
 
-- session (id, project, path, mtime, size, title, model, message_count,
-  input_tokens, output_tokens, cache_read_input_tokens,
-  cache_creation_input_tokens, is_empty) - list of available sessions
+- session (id, project, title, model, message_count, line_count, is_empty,
+  session_type, driver, native_id, native_source, native_size)
+- entry (session_id, line, uuid, type, subtype, raw) - one row per transcript
+  line, `raw` its JSON
+- message (session_id, line, uuid, type, subtype, text, attachments, ide_tags,
+  raw) - conversation text; `type` is user, assistant, or system
+- note (id, name, author, value, text, metadata, target, scan) - notes in
+  scope; `name` is the note kind
+- session_note (session_id, note_id, lines) - notes placed on a session with
+  the line or range cited; join note to session or message here
+- note_doc (note_name, doc, written_by) - what each note kind holds, as its
+  writer declares it
+- issue (id, name, title, description, status, status_reason, author,
+  created, scan, key) - issues in scope; issue_event
+  (issue_id, event_id, timestamp, author, event, from_status, to_status,
+  reason, of, message); issue_evidence (issue_id, note_id); session_issue
+  (session_id, issue_id)
+- scan (id, started, stopped, canceled, tasks, completed, failed, skipped,
+  dataset); scan_session (scan_id, session_num, session_id); scan_note
+  (scan_id, note_id, carried); scan_issue (scan_id, issue_id)
+- dataset (id); dataset_session (dataset_id, session_num, session_id)
+- attachment (id, name, root, includes, excludes, file_count, size);
+  attachment_file (attachment_id, path, size, text)
 
-- entry (session_id, line, uuid, type, timestamp, raw) - raw JSON per line per
-  session
+Functions: issue_report('<id>') renders one issue as markdown;
+related_issue('<id>' [, n]) lists the n most similar issues, best first.
 
-- message (session_id, line, uuid, type, subtype, text, timestamp, attachments,
-  ide_tags, raw) - conversation text per session (user, assistant, system)
-
-- note (id, author, created, modified, target, name, value, metadata) - notes
-  written by scanners; `name` is the scanner output kind, `value` its payload.
-  `target` is advisory; do not parse it. To resolve a note to its session and
-  line, join through `session_note` (see below)
-
-- session_note (session_id, line, line_end, note_id) - links notes to session
-  lines; join `note` to `session` / `message` / `entry` here
-
-- scan_session (scan_id, session_id, metadata), scan_note (scan_id, note_id,
-  role), scan_issue (scan_id, issue_id, role) - a scan's sessions, notes, and
-  issues
-
-- issue (id, name, author, title, description, target, status, status_reason,
-  metadata, created, modified) - issues raised from notes; `target` is advisory,
-  as on `note`
-
-- issue_evidence (issue_id, note_id, name, timestamp, digest) - link table from
-  issues to the notes that support them
-
-- session_issue (session_id, issue_id) - links issues to the sessions they
-  apply to
-
-TVF for full-text search over message text:
-
-- message_text(query [, snippet_len]) -> (session_id, line, type, subtype,
-  score, snippet) - Tantivy query string; BM25-ordered. See the `query` skill
-  for syntax and recipes.
-
-Hints:
-
-- Users often refer to sessions by prefix ID
-- `message.text` holds a message's text in one value
-- `entry.raw` equals the session JSONL line
-
-The tool may be scoped to sessions and per-session line ranges; rows outside
-the scope do not exist from this tool's point of view.
-
----eof-123---
+Read a session by `session_id` ordered by `line`, taking
+`substr(text, 1, 800)` over full `text` or `raw` on wide rows. A
+one-session or line-range scope already narrows entry and message.

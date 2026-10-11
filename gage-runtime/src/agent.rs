@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use crate::error::{AgentError, Error};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use gage_mcp2::{ServiceHandle, build_mcp_service};
+use gage_mcp::{ServiceHandle, build_mcp_service};
 use gage_session::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
 use gage_store::{AgentAttrs, SessionStore};
 use rune::alloc::fmt::TryWrite;

@@ -18,7 +18,7 @@ issue Gage already has.
 
 Each resolution object has these fields:
 
-- `issue` (string, required) - pending issue ID
+- `issue` (string, required) - pending issue ID or unique prefix
 - `action` (string, required) - `open` promotes the issue; `duplicate`
   closes it against another issue
 - `of` (string) - the surviving issue a duplicate closes against.
@@ -29,13 +29,11 @@ Each resolution object has these fields:
   reopen it (the condition recurred). Without `reopen` a closed
   survivor stays closed (the report was already resolved).
 
-The plan is validated as a whole before anything is written, and
-applied in one transaction. A `duplicate` target must be an open
-issue, a closed issue, or a pending issue promoted in the same plan.
-Chains are rejected: if A closes against B and B also closes as a
-duplicate, resolve A against B's final target instead.
+The plan is validated as a whole before anything is written. A
+`duplicate` target must be an open issue, a closed issue, or a pending
+issue promoted in the same plan. Chains are rejected: if A closes
+against B and B also closes as a duplicate, resolve A against B's final
+target instead.
 
 A call need not dispose every pending issue; the result reports how
 many pending issues remain.
-
----eof-456---

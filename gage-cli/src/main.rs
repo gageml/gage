@@ -79,7 +79,6 @@ struct Cli {
 /// the workspace members that actually emit tracing events.
 const GAGE_LOG_TARGETS: &[&str] = &[
     gage_runtime::LOG_TARGET,
-    "gage_agent",
     "gage_claude",
     "gage_cli",
     "gage_core",
@@ -236,26 +235,7 @@ enum Command {
     Index(cmd_index::IndexArgs),
 
     /// Start the MCP server
-    Mcp {
-        #[command(subcommand)]
-        command: Option<McpCommand>,
-    },
-
-    /// Start the MCP server (new runtime)
-    Mcp2,
-}
-
-#[derive(Subcommand)]
-enum McpCommand {
-    /// Serve over stdio (default)
-    Stdio,
-
-    /// Serve over HTTP at the given bind address
-    Http {
-        /// Address to bind, e.g. `127.0.0.1:8765`
-        #[arg(short, long, default_value = "127.0.0.1:0")]
-        bind: std::net::SocketAddr,
-    },
+    Mcp,
 }
 
 fn parse_duration(s: &str) -> Result<Duration, DurationError> {
@@ -299,8 +279,7 @@ async fn main() {
         unsafe { std::env::set_var("GAGE_LOG", directive) };
     }
     let _log_guard = match &cli.command {
-        Command::Mcp { .. } => Some(gage_log::init("mcp").expect("init log dir")),
-        Command::Mcp2 => Some(gage_log::init("mcp2").expect("init log dir")),
+        Command::Mcp => Some(gage_log::init("mcp").expect("init log dir")),
         Command::Scan(_) => {
             cmd_scan::init_logging();
             None
@@ -388,33 +367,9 @@ async fn main() {
             },
             Command::Scan(args) => cmd_scan::main(args).await,
             Command::Resolve(args) => cmd_resolve::run(args),
-            Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
-                McpCommand::Stdio => {
-                    if let Err(e) = gage_mcp::serve_stdio().await {
-                        eprintln!("gage mcp: {e}");
-                        std::process::exit(1);
-                    }
-                }
-                McpCommand::Http { bind } => {
-                    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-                    let addr = match gage_mcp::host::serve_http(bind, shutdown_rx).await {
-                        Ok(addr) => addr,
-                        Err(e) => {
-                            eprintln!("gage mcp http: {e}");
-                            std::process::exit(1);
-                        }
-                    };
-                    eprintln!("gage mcp listening on http://{addr}/mcp");
-                    if let Err(e) = tokio::signal::ctrl_c().await {
-                        eprintln!("gage mcp http: install ctrl-c handler: {e}");
-                    }
-                    #[allow(clippy::unused_result_ok)]
-                    shutdown_tx.send(()).ok();
-                }
-            },
-            Command::Mcp2 => {
-                if let Err(e) = run_mcp2().await {
-                    eprintln!("gage mcp2: {e}");
+            Command::Mcp => {
+                if let Err(e) = run_mcp().await {
+                    eprintln!("gage mcp: {e}");
                     std::process::exit(1);
                 }
             }
@@ -437,7 +392,7 @@ async fn main() {
     }
 }
 
-async fn run_mcp2() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::{Arc, Mutex};
 
     let path = gage_store::store_path();
@@ -447,7 +402,7 @@ async fn run_mcp2() -> Result<(), Box<dyn std::error::Error>> {
     let context = gage_query2::ContextBuilder::new(Some(Arc::clone(&store)))
         .build()
         .await;
-    let writer = gage_mcp2::StoreWriterConfig {
+    let writer = gage_mcp::StoreWriterConfig {
         store,
         author: author::resolve_author(None),
     };
@@ -457,25 +412,25 @@ async fn run_mcp2() -> Result<(), Box<dyn std::error::Error>> {
         "comment".to_string(),
         "A remark about a session or the work at hand".to_string(),
     )]);
-    let spec = gage_mcp2::ToolSpec {
+    let spec = gage_mcp::ToolSpec {
         gage: vec![
-            gage_mcp2::GageTool::Query(gage_mcp2::QueryConfig {
+            gage_mcp::GageTool::Query(gage_mcp::QueryConfig {
                 context: Arc::new(context),
             }),
-            gage_mcp2::GageTool::IssueWrite(gage_mcp2::IssueWriteConfig::with_store(
+            gage_mcp::GageTool::IssueWrite(gage_mcp::IssueWriteConfig::with_store(
                 writer.clone(),
                 "user-issue".to_string(),
                 gage_store::IssueStatus::Open,
             )),
-            gage_mcp2::GageTool::NoteWrite(gage_mcp2::NoteWriteConfig::with_store(
+            gage_mcp::GageTool::NoteWrite(gage_mcp::NoteWriteConfig::with_store(
                 writer.clone(),
                 note_names,
             )),
-            gage_mcp2::GageTool::IssueUpdate(writer.clone()),
-            gage_mcp2::GageTool::IssueComment(writer.clone()),
-            gage_mcp2::GageTool::IssuePendingResolve(writer),
+            gage_mcp::GageTool::IssueUpdate(writer.clone()),
+            gage_mcp::GageTool::IssueComment(writer.clone()),
+            gage_mcp::GageTool::IssuePendingResolve(writer),
         ],
         custom: Vec::new(),
     };
-    gage_mcp2::serve_stdio(spec).await
+    gage_mcp::serve_stdio(spec).await
 }

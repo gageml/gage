@@ -33,7 +33,7 @@ use crate::error::Error;
 use crate::tool_meta::ToolMeta;
 use crate::value::{json_to_value, value_to_json};
 use gage_core::uuid::short_uuid;
-use gage_mcp2::{
+use gage_mcp::{
     CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteCallback,
     IssueWriteConfig, IssueWriteInput, NoteWriteCallback, NoteWriteConfig, NoteWriteInput,
     QueryConfig, ToolAnnotations, ToolSpec,
@@ -56,7 +56,7 @@ use crate::scan::{SCAN_CTX, ScanContext, Session, render_vm_error, session_id};
 use crate::target::Target;
 use crate::{Level, OUTPUT_SINK, Output, OutputSink};
 
-/// `rmcp::model::JsonObject` as gage-mcp2 exposes it through
+/// `rmcp::model::JsonObject` as gage-mcp exposes it through
 /// `CustomToolDef::input_schema`
 mod rmcp_json {
     pub type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -139,9 +139,9 @@ impl GageConfig {
     /// The tool's wire name
     fn name(&self) -> &'static str {
         match self {
-            GageConfig::Query(_) => gage_mcp2::tools::query::NAME,
-            GageConfig::IssueWrite(_) => gage_mcp2::tools::issue_write::NAME,
-            GageConfig::NoteWrite(_) => gage_mcp2::tools::note_write::NAME,
+            GageConfig::Query(_) => gage_mcp::tools::query::NAME,
+            GageConfig::IssueWrite(_) => gage_mcp::tools::issue_write::NAME,
+            GageConfig::NoteWrite(_) => gage_mcp::tools::note_write::NAME,
         }
     }
 }
@@ -925,7 +925,7 @@ fn issue_write_callback(
     let status = config.status;
     let parent = Span::current();
     Arc::new(move |input: IssueWriteInput| {
-        let tool_name = gage_mcp2::tools::issue_write::NAME;
+        let tool_name = gage_mcp::tools::issue_write::NAME;
         let span = tracing::info_span!(parent: &parent, "tool", name = %tool_name);
         let ctx = ctx.clone();
         let sink = sink.clone();
@@ -969,7 +969,7 @@ fn note_write_callback(ctx: &ScanContext, sink: Option<&OutputSink>) -> NoteWrit
     let sink = sink.cloned();
     let parent = Span::current();
     Arc::new(move |input: NoteWriteInput| {
-        let tool_name = gage_mcp2::tools::note_write::NAME;
+        let tool_name = gage_mcp::tools::note_write::NAME;
         let span = tracing::info_span!(parent: &parent, "tool", name = %tool_name);
         let ctx = ctx.clone();
         let sink = sink.clone();
@@ -1816,7 +1816,7 @@ mod tests {
         tmp: &TempDir,
         script: &str,
         sink: Option<&OutputSink>,
-    ) -> (gage_mcp2::IssueWriteConfig, Vec<String>) {
+    ) -> (gage_mcp::IssueWriteConfig, Vec<String>) {
         let (spec, names) = consume(&tools(script), &scan_ctx(tmp), sink).await.unwrap();
         let config = spec
             .gage

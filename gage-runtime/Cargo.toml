@@ -11,7 +11,7 @@ chrono = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
 gage-core = { path = "../gage-core" }
-gage-mcp2 = { path = "../gage-mcp2" }
+gage-mcp = { path = "../gage-mcp" }
 gage-query2 = { path = "../gage-query2" }
 regex = { workspace = true }
 gage-session = { path = "../gage-session" }

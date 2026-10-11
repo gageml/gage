@@ -4,7 +4,7 @@ name = "NoteWrite"
 [parameters.name]
 type = "string"
 required = true
-description = "Note name; must be one of the names this tool allows (error output lists them)"
+description = "Note name, one of the allowed values the description lists"
 
 [parameters.value]
 type = "string"
@@ -14,26 +14,23 @@ description = "Note text"
 [parameters.session_id]
 type = "string"
 required = false
-description = "Target session ID if applicable"
+description = "The session the note is about, by ID or unique prefix"
 
-[parameters.session_line]
-type = "integer"
+[parameters.session_lines]
+type = "string"
 required = false
-description = "Target session line (1-indexed) if applicable (requires session_id)"
+description = "A line or range within the session, such as 12 or 12-20. Requires session_id"
 
 [annotations]
 read_only_hint = false
 idempotent_hint = false
 +++
 
-Use to record a note about the current scan or a session.
+Use to record a note: an observation about a session, or about the
+work at hand when no session applies.
 
-`name` selects the kind of note being written. The allowed names are
-task-defined; a wrong name returns an error listing the allowed names and
-what each is for.
-
-Provide `session_id` and optionally `session_line` to attach the note to a
-specific session or line. Otherwise omit these inputs and the note attaches
-to the active scan.
-
----eof-345---
+`name` says what kind of note this is and must be one of the allowed
+values below; each value's doc says what that kind holds. Give
+`session_id`, and `session_lines` when the note is about particular
+lines, so the note is placed where it applies and later reads reach
+it from the session.

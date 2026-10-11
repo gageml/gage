@@ -148,9 +148,7 @@ impl Drop for ServiceHandle {
 
 /// Run a hyper accept loop until `shutdown` resolves. Each accepted
 /// connection is served by `dispatch_fn`, which constructs a per-
-/// request response. Shared by [`McpHost::start`] (UUID-routed
-/// dispatch) and [`serve_http`] (fixed-path dispatch) so both paths
-/// go through the same accept + serve_connection plumbing.
+/// request response.
 async fn run_accept_loop<F, Fut>(
     listener: TcpListener,
     mut shutdown: oneshot::Receiver<()>,
@@ -186,43 +184,6 @@ async fn run_accept_loop<F, Fut>(
             }
         });
     }
-}
-
-/// Run a long-lived HTTP MCP server bound to `addr`, exposing one
-/// [`GageServer`] at the fixed path `/mcp`. Returns when `shutdown`
-/// resolves (the caller wires SIGINT or whatever stop signal it has).
-///
-/// Shares the accept loop + hyper plumbing with [`McpHost`] — only
-/// the per-connection dispatch differs (here: every request is
-/// forwarded to one streamable-HTTP service, no UUID routing).
-pub async fn serve_http(
-    addr: SocketAddr,
-    shutdown: oneshot::Receiver<()>,
-) -> Result<SocketAddr, HostError> {
-    use rmcp::transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
-    };
-
-    let listener = TcpListener::bind(addr).await.map_err(HostError::Bind)?;
-    let bound = listener.local_addr().map_err(HostError::Bind)?;
-
-    let svc = Arc::new(StreamableHttpService::new(
-        || Ok(crate::GageServer::new()),
-        LocalSessionManager::default().into(),
-        Default::default(),
-    ));
-
-    let serve_svc = Arc::clone(&svc);
-    let dispatch_fn = move |req: Request<Incoming>| {
-        let svc = Arc::clone(&serve_svc);
-        async move { Ok(svc.handle(req).await) }
-    };
-
-    tokio::spawn(async move {
-        run_accept_loop(listener, shutdown, dispatch_fn).await;
-    });
-
-    Ok(bound)
 }
 
 /// Top-level request handler: parse the first path segment as a UUID,

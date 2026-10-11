@@ -71,7 +71,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
 
     let mut ui = SpinnerUi::default();
     driver
-        .install_gage(&[gage_bin_str, "mcp2"], &mut ui)
+        .install_gage(&[gage_bin_str, "mcp"], &mut ui)
         .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
     ui.finish();
 

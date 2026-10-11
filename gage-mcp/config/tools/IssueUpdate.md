@@ -4,39 +4,44 @@ name = "IssueUpdate"
 [parameters.issue_id]
 type = "string"
 required = true
-description = "Issue ID (from list or detail)"
+description = "Issue ID or unique prefix"
 
 [parameters.status]
 type = "string"
-required = false
-description = "One of: open, closed, pending"
+required = true
+description = "The new status: open or closed"
 
 [parameters.status_reason]
 type = "string"
 required = false
-description = "One of: completed, skipped, duplicate. Only meaningful when status = closed; ignored otherwise"
+description = "Why the issue is closed: completed, wontfix, or duplicate. Closing only; default completed"
+
+[parameters.of]
+type = "string"
+required = false
+description = "The surviving issue's ID when status_reason is duplicate. Required then, not allowed otherwise"
 
 [parameters.message]
 type = "string"
 required = false
-description = "Optional message recorded with the status event"
+description = "A message recorded with the status change"
 
 [annotations]
 read_only_hint = false
 idempotent_hint = false
 +++
 
-Use to update an issue. Currently only status is supported. Additional
-fields (title, description, etc.) may be added later.
+Use to open or close an issue. The change is recorded as a status
+event in the issue's history, with your message when given.
 
-Set `status` to `open`, `closed`, or `pending`. When closing, use
-`status_reason` to say why: `completed` if a fix was applied or action
-taken, `skipped` if intentionally not addressed, `duplicate` if it
-duplicates another issue. `status_reason` is ignored when `status` is
-`open` or `pending`.
+`status=open` promotes a pending issue or reopens a closed one.
+`status=closed` closes a pending or open issue, and `status_reason`
+says why: `completed` when the condition was fixed or acted on,
+`wontfix` when it will not be addressed, `duplicate` when another
+issue already describes the condition. A duplicate close names the
+surviving issue in `of`, so the link between the two is data rather
+than prose; record any insight the survivor lacks on the survivor
+with `IssueComment`.
 
-`message` is recorded on the status event for the log. To add a
-comment without changing status, use `IssueComment` instead — a call
-with no `status` is a no-op.
-
----eof-567---
+An issue already in the requested status is refused. To comment
+without changing status, use `IssueComment`.

@@ -1,61 +1,102 @@
+//! `IssueComment`: add a comment to an issue in the store.
+
 use std::future::Future;
 use std::pin::Pin;
 
-use gage_db::db::open_db;
-use gage_db::issue;
-use rmcp::{
-    ErrorData as McpError, RoleServer, handler::server::router::tool::ToolRoute, model::JsonObject,
-    service::RequestContext,
-};
+use gage_core::uuid::short_uuid;
+use gage_store::IssueStore;
+use rmcp::ErrorData as McpError;
+use rmcp::handler::server::router::tool::ToolRoute;
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{CallToolResult, JsonObject};
 
 use crate::server::GageServer;
-use crate::tool::{ToolDef, agent_author, build_tool_meta};
+use crate::service::StoreWriterConfig;
+use crate::tool::{
+    MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
+};
+use crate::tools::issue_update::required_string;
+
+pub const NAME: &str = "IssueComment";
 
 pub const TOOL: ToolDef = route;
 
 const MD: &str = include_str!("../../config/tools/IssueComment.md");
+const _: () = assert!(
+    description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
+    "IssueComment description exceeds Claude Code's 2048-byte cap",
+);
 
 fn route() -> ToolRoute<GageServer> {
-    ToolRoute::new(build_tool_meta(MD), call)
+    ToolRoute::new_dyn(
+        build_tool_meta(MD),
+        |ctx: ToolCallContext<'_, GageServer>| Box::pin(handle(ctx)),
+    )
 }
 
-fn call(
-    server: &GageServer,
-    ctx: RequestContext<RoleServer>,
-    params: JsonObject,
-) -> Pin<Box<dyn Future<Output = Result<String, McpError>> + Send + '_>> {
-    let author = agent_author(server, &ctx);
-    Box::pin(handle(params, author))
+fn handle(
+    ctx: ToolCallContext<'_, GageServer>,
+) -> Pin<Box<dyn Future<Output = Result<CallToolResult, McpError>> + Send + '_>> {
+    Box::pin(async move {
+        let params = ctx.arguments.unwrap_or_default();
+        let Some(config) = &ctx.service.config().issue_comment else {
+            return Err(McpError::internal_error(
+                "IssueComment tool is routed but not configured",
+                None,
+            ));
+        };
+        execute(config, params)
+    })
 }
 
-async fn handle(params: JsonObject, author: String) -> Result<String, McpError> {
-    let issue_id = req_string(&params, "issue_id")?;
-    let comment = req_string(&params, "comment")?;
-
-    let conn = open_db().unwrap();
-    let issue = issue::get(&conn, &issue_id).map_err(|e| match e {
-        issue::IssueError::NotFound(_) | issue::IssueError::Ambiguous(_, _) => {
-            McpError::invalid_params(e.to_string(), None)
-        }
-        issue::IssueError::Db(_) | issue::IssueError::InvalidSessionId(_) => {
-            McpError::internal_error(e.to_string(), None)
-        }
-    })?;
-
-    issue::comment(&conn, &issue.id, &author, &comment)
-        .map_err(|e| McpError::internal_error(format!("comment on issue: {e}"), None))?;
-
-    Ok(format!(
-        "Added comment to issue {} ({}).",
-        gage_core::uuid::short_uuid(&issue.id),
-        issue.title
-    ))
+/// Parse the call and write the comment. A call that violates the
+/// declared parameters is an invalid-params error; an unknown issue is
+/// a result the model reads.
+pub fn execute(config: &StoreWriterConfig, params: JsonObject) -> Result<CallToolResult, McpError> {
+    let issue_id = required_string(&params, "issue_id")?;
+    let comment = required_string(&params, "comment")?;
+    let store = config.store();
+    let issues = IssueStore::from(&*store);
+    let issue = match issues.get(&issue_id) {
+        Ok(issue) => issue,
+        Err(e) => return Ok(domain_error(e.to_string())),
+    };
+    match issues.comment(&issue.id, &config.author, &comment) {
+        Ok(_) => Ok(success(format!(
+            "Commented on issue {} ({}).",
+            short_uuid(&issue.id),
+            issue.title
+        ))),
+        Err(e) => Ok(domain_error(e.to_string())),
+    }
 }
 
-fn req_string(params: &JsonObject, key: &str) -> Result<String, McpError> {
-    params
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| McpError::invalid_params(format!("missing or non-string `{key}`"), None))
+#[cfg(test)]
+mod tests {
+    use gage_store::IssueStatus;
+    use serde_json::json;
+
+    use super::*;
+    use crate::tools::store_test::{config, issue, object, text_of};
+
+    #[test]
+    fn records_a_comment_event_with_the_configured_author() {
+        let (_tmp, config) = config();
+        let id = issue(&config, "Something", IssueStatus::Open);
+        let r = execute(&config, object(json!({"issue_id": id, "comment": "noted"}))).unwrap();
+        assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+        let store = config.store.lock().unwrap();
+        let full = IssueStore::from(&*store).get(&id).unwrap();
+        assert_eq!(full.changes[1].message.as_deref(), Some("noted"));
+        assert_eq!(full.changes[1].author, "user:t");
+    }
+
+    #[test]
+    fn a_missing_comment_is_invalid_params_and_an_unknown_issue_a_refusal() {
+        let (_tmp, config) = config();
+        let id = issue(&config, "Something", IssueStatus::Open);
+        assert!(execute(&config, object(json!({"issue_id": id, "comment": "  "}))).is_err());
+        let r = execute(&config, object(json!({"issue_id": "nope", "comment": "x"}))).unwrap();
+        assert_eq!(r.is_error, Some(true));
+    }
 }

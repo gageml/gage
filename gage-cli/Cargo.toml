@@ -11,14 +11,12 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 chrono = { workspace = true }
-gage-agent = { path = "../gage-agent" }
 cliclack = "0.3"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 datafusion = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
 gage-mcp = { path = "../gage-mcp" }
-gage-mcp2 = { path = "../gage-mcp2" }
 gage-tui = { path = "../gage-tui" }
 gage-claude = { path = "../gage-claude" }
 gage-log = { path = "../gage-log" }

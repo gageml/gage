@@ -159,10 +159,10 @@ impl SessionListBuilder {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
 
-            // Skip gage-agent's own in-flight sessions. Their cwd
-            // lives under `~/.gage/tmp/<run_id>/cwd`, encoded here as
-            // a slug containing `--gage-tmp-`. The persistent copy is
-            // hardlinked under `~/.gage/claude/<name>/`.
+            // Skip the runtime's own in-flight agent sessions. Their
+            // cwd lives under `~/.gage/tmp/<run_id>/cwd`, encoded here
+            // as a slug containing `--gage-tmp-`. The persistent copy
+            // is hardlinked under `~/.gage/claude/<name>/`.
             if is_agent_tmp_slug(&dir_name) {
                 continue;
             }
@@ -383,12 +383,12 @@ pub fn delete_session(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether a project slug belongs to a gage-agent in-flight session.
-/// gage-agent runs claude with cwd `~/.gage/tmp/<run_id>/cwd`, which
+/// Whether a project slug belongs to an in-flight agent session. The
+/// runtime runs claude with cwd `~/.gage/tmp/<run_id>/cwd`, which
 /// Claude Code encodes to a slug containing `--gage-tmp-` (the double
 /// dash comes from the `/.` between `<home>` and `.gage`). The live
 /// files under that slug are hardlinked into `~/.gage/claude/<name>/`
-/// and are the responsibility of gage-agent alone; general enumerators
+/// and are the responsibility of the run alone; general enumerators
 /// hide them.
 pub fn is_agent_tmp_slug(slug: &str) -> bool {
     slug.contains("--gage-tmp-")
