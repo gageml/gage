@@ -33,35 +33,40 @@ pub struct StatusArgs {
 pub fn run(args: StatusArgs) {
     let spinner = crate::style::spinner("Reading status...");
     let mut out = String::new();
-    write_login(&mut out);
+    let mut problems = Vec::new();
+    write_login(&mut out, &mut problems);
     out.push('\n');
-    write_plugin(&mut out);
+    write_plugin(&mut out, &mut problems);
     out.push('\n');
     write_counts(&mut out);
     out.push('\n');
     write_storage(&mut out, args.verbose);
+    if !problems.is_empty() {
+        out.push('\n');
+        write_problems(&mut out, &problems);
+    }
     spinner.finish_and_clear();
     print!("{out}");
 }
 
-fn write_login(out: &mut String) {
+fn write_login(out: &mut String, problems: &mut Vec<String>) {
     w(out, format!("{}", style("Login").bold()));
     match preflight::auth_status() {
         Ok(s) if s.logged_in => write_login_ok(out, &s),
-        Ok(_) => w(
-            out,
-            format!(
-                "  {} not logged in — run `claude` and complete /login",
-                cross(),
-            ),
-        ),
-        Err(e) => w(out, format!("  {} {}", cross(), pretty_error(&e))),
+        Ok(_) => {
+            w(out, "  not logged in".to_string());
+            problems.push("Not logged in - run `claude` and complete /login".to_string());
+        }
+        Err(e) => {
+            w(out, "  unavailable".to_string());
+            problems.push(format!("Login status unavailable: {}", pretty_error(&e)));
+        }
     }
 }
 
 fn write_login_ok(out: &mut String, s: &AuthStatus) {
     let identity = s.email.as_deref().unwrap_or("unknown account");
-    w(out, format!("  {} logged in as {}", check(), identity));
+    w(out, format!("  logged in as {identity}"));
     let mut detail = Vec::new();
     if let Some(sub) = &s.subscription_type {
         detail.push(format!("plan {sub}"));
@@ -80,40 +85,33 @@ fn write_login_ok(out: &mut String, s: &AuthStatus) {
     }
 }
 
-fn write_plugin(out: &mut String) {
+fn write_plugin(out: &mut String, problems: &mut Vec<String>) {
     w(out, format!("{}", style("Plugin").bold()));
     match preflight::installed_plugin() {
-        Ok(None) => w(
-            out,
-            format!("  {} gage plugin not installed — run `gage init`", cross(),),
-        ),
-        Ok(Some(p)) => write_plugin_entry(out, &p),
-        Err(e) => w(out, format!("  {} {}", cross(), pretty_error(&e))),
+        Ok(None) => {
+            w(out, "  not installed".to_string());
+            problems.push("Gage plugin not installed - run `gage init`".to_string());
+        }
+        Ok(Some(p)) => write_plugin_entry(out, problems, &p),
+        Err(e) => {
+            w(out, "  unavailable".to_string());
+            problems.push(format!("Plugin status unavailable: {}", pretty_error(&e)));
+        }
     }
 }
 
-fn write_plugin_entry(out: &mut String, p: &InstalledPlugin) {
+fn write_plugin_entry(out: &mut String, problems: &mut Vec<String>, p: &InstalledPlugin) {
     let expected = preflight::EXPECTED_VERSION;
-    if p.version == expected {
-        let disabled = if p.enabled { "" } else { " (disabled)" };
-        w(
-            out,
-            format!("  {} {} v{}{}", check(), p.id, p.version, disabled),
-        );
-    } else {
-        w(
-            out,
-            format!(
-                "  {} {} v{} installed, this gage expects v{} — run `gage init`",
-                cross(),
-                p.id,
-                p.version,
-                expected,
-            ),
-        );
-    }
+    let disabled = if p.enabled { "" } else { " (disabled)" };
+    w(out, format!("  {} v{}{}", p.id, p.version, disabled));
     if let Some(path) = &p.install_path {
         w(out, format!("    {}", style(path).dim()));
+    }
+    if p.version != expected {
+        problems.push(format!(
+            "Gage plugin v{} installed, this gage expects v{} - run `gage init`",
+            p.version, expected,
+        ));
     }
 }
 
@@ -210,19 +208,17 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
+fn write_problems(out: &mut String, problems: &[String]) {
+    for problem in problems {
+        w(out, format!("- {}", style(problem).red()));
+    }
+}
+
 /// Append `line` and a newline to `out`. Writing to a `String` cannot
 /// fail; the tiny helper trims the noise from the writeln! + must_use
 /// dance without discarding a fallible operation.
 fn w(out: &mut String, line: String) {
     writeln!(out, "{line}").expect("String write is infallible");
-}
-
-fn check() -> console::StyledObject<&'static str> {
-    style("✓").green()
-}
-
-fn cross() -> console::StyledObject<&'static str> {
-    style("✗").red()
 }
 
 fn pretty_error(e: &PreflightError) -> String {
