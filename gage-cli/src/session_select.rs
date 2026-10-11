@@ -45,7 +45,6 @@ pub struct SessionSelectArgs {
         long,
         value_name = "N",
         conflicts_with_all = ["all", "sample"],
-        display_order = 6,
     )]
     pub limit: Option<usize>,
 
@@ -53,38 +52,26 @@ pub struct SessionSelectArgs {
     ///
     /// Samples from sessions modified in the past 30 days, or the
     /// window given with --days or --today.
-    #[arg(
-        short = 'r',
-        long,
-        value_name = "N",
-        conflicts_with = "all",
-        display_order = 7
-    )]
+    #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     pub sample: Option<usize>,
 
     /// Select sessions modified in the past N days
-    #[arg(long, value_name = "N", conflicts_with = "all", display_order = 8)]
+    #[arg(long, value_name = "N", conflicts_with = "all")]
     pub days: Option<u32>,
 
     /// Select sessions modified since midnight local time
-    #[arg(long, conflicts_with_all = ["days", "all"], display_order = 9)]
+    #[arg(long, conflicts_with_all = ["days", "all"])]
     pub today: bool,
 
     /// Select every available session
-    #[arg(short, long, display_order = 10)]
+    #[arg(short, long)]
     pub all: bool,
 
     /// Limit sessions to a project
     ///
     /// PROJECT is a project directory path (absolute, relative, or
     /// ~-prefixed) or a project slug as shown by 'gage session list'.
-    #[arg(
-        short,
-        long,
-        value_name = "PROJECT",
-        allow_hyphen_values = true,
-        display_order = 11
-    )]
+    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
 }
 

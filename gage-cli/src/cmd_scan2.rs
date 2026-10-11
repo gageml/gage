@@ -182,11 +182,11 @@ pub struct Scan2RunArgs {
     /// A scanner name, or when no scanner has that name, a path: a
     /// directory holding a scanner.rn, or a scanner file. A `#{...}`
     /// suffix overrides the scanner's params
-    #[arg(short, long = "scanner", value_name = "SCANNER", display_order = 2)]
+    #[arg(short, long = "scanner", value_name = "SCANNER")]
     scanners: Vec<String>,
 
     /// Run the scanners in a group (repeatable)
-    #[arg(short, long = "group", value_name = "NAME", display_order = 3)]
+    #[arg(short, long = "group", value_name = "NAME")]
     groups: Vec<String>,
 
     /// Dataset to scan (ID or prefix)
@@ -197,7 +197,6 @@ pub struct Scan2RunArgs {
         short,
         long,
         value_name = "DATASET",
-        display_order = 4,
         conflicts_with_all = SELECT_ARG_NAMES,
     )]
     dataset: Option<String>,
@@ -206,32 +205,43 @@ pub struct Scan2RunArgs {
     select: SessionSelectArgs,
 
     /// Tasks to run at once
-    #[arg(short, long, value_name = "N", default_value_t = 10, display_order = 6)]
+    #[arg(short, long, value_name = "N", default_value_t = 10)]
     jobs: usize,
 
     /// Agents to run at once
     ///
     /// Bounds the agents running across every task of the scan. A task
     /// whose agents are all waiting for a slot shows as waiting.
-    #[arg(long, value_name = "N", default_value_t = 8, display_order = 7)]
+    #[arg(long, value_name = "N", default_value_t = 8)]
     agent_jobs: usize,
 
     /// Tag the new scan run
     ///
     /// Follows git's ref naming rules. An existing tag is an error
     /// unless --force-tag is given.
-    #[arg(short, long, value_name = "NAME", display_order = 8)]
+    #[arg(short, long, value_name = "NAME")]
     tag: Option<String>,
 
     /// Move the tag if it exists
-    #[arg(long, requires = "tag", display_order = 9)]
+    #[arg(long, requires = "tag")]
     force_tag: bool,
+
+    /// Run the scan without a dataset
+    ///
+    /// No dataset is created or selected; scanners run with no
+    /// sessions to read.
+    #[arg(
+        long,
+        conflicts_with = "dataset",
+        conflicts_with_all = SELECT_ARG_NAMES,
+    )]
+    no_dataset: bool,
 
     /// Ignore prior work
     ///
     /// Every session is scanned in full regardless of earlier scans,
     /// and no notes from earlier scans are carried forward.
-    #[arg(long, display_order = 14)]
+    #[arg(long)]
     invalidate: bool,
 
     /// Skip prompts and confirmation
@@ -240,7 +250,7 @@ pub struct Scan2RunArgs {
     /// scanner group when neither --scanner nor --group is
     /// set, and the past 30 days capped at 20 sessions when no
     /// session selection or dataset option is set.
-    #[arg(short, long, display_order = 15)]
+    #[arg(short, long)]
     yes: bool,
 
     /// Don't show progress
@@ -248,24 +258,12 @@ pub struct Scan2RunArgs {
     /// Task output and the scan's own lines print as they happen
     /// instead of the progress view. This is the output when stdout
     /// is not a terminal.
-    #[arg(long, display_order = 16)]
+    #[arg(long)]
     no_progress: bool,
 
     /// Show available scanners and exit
-    #[arg(long, exclusive = true, display_order = 17)]
+    #[arg(long, exclusive = true)]
     list_scanners: bool,
-
-    /// Run the scan without a dataset
-    ///
-    /// No dataset is created or selected; scanners run with no
-    /// sessions to read.
-    #[arg(
-        long,
-        display_order = 12,
-        conflicts_with = "dataset",
-        conflicts_with_all = SELECT_ARG_NAMES,
-    )]
-    no_dataset: bool,
 }
 
 #[derive(Args)]

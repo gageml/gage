@@ -72,6 +72,7 @@ pub enum SessionCommand {
 }
 
 #[derive(Args)]
+#[command(next_display_order = 3)]
 pub struct SessionListArgs {
     #[command(flatten)]
     pub limit: crate::limit::LimitArgs,
@@ -101,6 +102,7 @@ pub struct SessionListArgs {
 }
 
 #[derive(Args)]
+#[command(next_display_order = 3)]
 #[command(group = ArgGroup::new("session_add_select")
     .required(true)
     .multiple(true)
@@ -111,7 +113,7 @@ pub struct SessionAddArgs {
     /// Dataset ID (or prefix). Native sessions are added to the store
     /// and linked in one step; with --stored, sessions already in the
     /// store are linked
-    #[arg(short, long, value_name = "DATASET", display_order = 3)]
+    #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
 
     /// Maximum stored size per session
@@ -119,13 +121,13 @@ pub struct SessionAddArgs {
     /// Overrides the configured default. Accepts a byte count or a
     /// unit suffix, such as 256MB or 1GB. A session whose stored files
     /// exceed this is refused.
-    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size, display_order = 4)]
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
     pub max_size: Option<ByteSize>,
 
     /// Add regardless of size
     ///
     /// Stores the session even when it exceeds the size limit.
-    #[arg(long, display_order = 5)]
+    #[arg(long)]
     pub force: bool,
 
     #[command(flatten)]
@@ -137,6 +139,7 @@ pub(crate) fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
 }
 
 #[derive(Args)]
+#[command(next_display_order = 3)]
 pub struct SessionRemoveArgs {
     /// Stored session IDs (or prefixes)
     #[arg(required = true)]
@@ -150,6 +153,7 @@ pub struct SessionRemoveArgs {
 }
 
 #[derive(Args)]
+#[command(next_display_order = 3)]
 pub struct SessionMoveArgs {
     /// Session ID (or prefix)
     pub session: String,
@@ -163,6 +167,7 @@ pub struct SessionMoveArgs {
 }
 
 #[derive(Args)]
+#[command(next_display_order = 3)]
 pub struct SessionViewArgs {
     /// Session ID (or prefix)
     pub session: Option<String>,
@@ -177,6 +182,7 @@ pub struct SessionViewArgs {
 }
 
 #[derive(Args)]
+#[command(next_display_order = 3)]
 pub struct SessionDeleteArgs {
     /// Session IDs (or prefix)
     #[arg(conflicts_with = "empty")]

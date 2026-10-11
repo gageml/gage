@@ -65,14 +65,14 @@ pub struct DatasetAddArgs {
     /// A driver scheme selects the driver (`claude:<path>`); a value
     /// with no scheme goes to the default driver (`<path>`). Defaults
     /// to the default driver's default location.
-    #[arg(short, long, value_name = "SOURCE", display_order = 1)]
+    #[arg(short, long, value_name = "SOURCE")]
     pub source: Option<String>,
 
     /// Tag the new dataset
     ///
     /// Follows git's ref naming rules. An existing tag is an error
     /// unless --force-tag is given.
-    #[arg(short, long, value_name = "NAME", display_order = 2)]
+    #[arg(short, long, value_name = "NAME")]
     pub tag: Option<String>,
 
     /// Maximum stored size per session
@@ -80,17 +80,17 @@ pub struct DatasetAddArgs {
     /// Overrides the configured default. Accepts a byte count or a
     /// unit suffix, such as 256MB or 1GB. A session whose stored files
     /// exceed this is refused.
-    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size, display_order = 4)]
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
     pub max_size: Option<ByteSize>,
 
     /// Add regardless of size
     ///
     /// Stores the session even when it exceeds the size limit.
-    #[arg(long, display_order = 5)]
+    #[arg(long)]
     pub force: bool,
 
     /// Move the tag if it exists
-    #[arg(long, requires = "tag", display_order = 6)]
+    #[arg(long, requires = "tag")]
     pub force_tag: bool,
 
     #[command(flatten)]
@@ -107,7 +107,7 @@ pub struct DatasetRefreshArgs {
     /// A driver scheme selects the driver (`claude:<path>`); a value
     /// with no scheme goes to the default driver (`<path>`). Defaults
     /// to the default driver's default location.
-    #[arg(short, long, value_name = "SOURCE", display_order = 1)]
+    #[arg(short, long, value_name = "SOURCE")]
     pub source: Option<String>,
 
     /// Maximum stored size per session
@@ -115,13 +115,13 @@ pub struct DatasetRefreshArgs {
     /// Overrides the configured default. Accepts a byte count or a
     /// unit suffix, such as 256MB or 1GB. A session whose stored files
     /// exceed this is refused.
-    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size, display_order = 4)]
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
     pub max_size: Option<ByteSize>,
 
     /// Add regardless of size
     ///
     /// Stores the session even when it exceeds the size limit.
-    #[arg(long, display_order = 5)]
+    #[arg(long)]
     pub force: bool,
 }
 
