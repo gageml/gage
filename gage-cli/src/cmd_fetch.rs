@@ -1,26 +1,37 @@
 //! `gage fetch`: adopt what a remote has.
 //!
-//! With no objects named, every Gage ref the remote advertises is
-//! fetched into its remote-tracking refs and decided; with objects
-//! named, those objects and everything they link. A divergence the
-//! type can merge is merged; one it cannot is reported as a conflict
-//! and left, and `--ours` or `--theirs` on a later run of the named
-//! objects resolves it.
+//! The source is a configured remote or a bare Git URL or path. With
+//! no objects named, every Gage ref the source advertises is fetched
+//! into its tracking refs and decided; with objects named, those
+//! objects and everything they link. A divergence the type can merge
+//! is merged; one it cannot is reported as a conflict and left, and
+//! `--ours` or `--theirs` on a later run of the named objects resolves
+//! it.
+//!
+//! A URL is fetched into a transient namespace that is deleted before
+//! the command exits, so the store keeps no record of the URL. The
+//! namespace is deleted on the error path too; a run that ends another
+//! way leaves one behind, and the next URL fetch clears it.
 
 use std::collections::{BTreeMap, HashSet};
 
 use clap::Args;
 use gage_core::uuid::short_uuid;
 use gage_store::{
-    Conflict, FetchReport, OBJECT_REFS, Outcome, RemoteStore, Side, Store, StoreError, TAG_REFS,
+    Conflict, FetchReport, FetchSource, OBJECT_REFS, Outcome, RemoteStore, Side, Store, StoreError,
+    TAG_REFS,
 };
 
 use crate::author::resolve_author;
 
 #[derive(Args)]
 pub struct FetchArgs {
-    /// Remote to fetch from
-    remote: String,
+    /// Remote or URL to fetch from
+    ///
+    /// A remote name from `gage remote add`, or any Git URL or path.
+    /// A URL is fetched without adding a remote, and nothing of it
+    /// stays in the store
+    repository: String,
 
     /// Objects to fetch
     ///
@@ -43,61 +54,89 @@ pub fn main(args: FetchArgs) {
         Ok(store) => store,
         Err(e) => fail(&e),
     };
-    let remote = args.remote.clone();
     let remotes = RemoteStore::from(&store);
-    match remotes.list() {
-        Ok(known) if known.iter().any(|r| r.name == remote) => {}
-        Ok(_) => fail(&StoreError::RemoteNotFound(format!(
-            "{remote} (add one with gage remote add)"
-        ))),
+    let source = match remotes.list() {
+        Ok(known) if known.iter().any(|r| r.name == args.repository) => {
+            FetchSource::from_remote(&args.repository)
+        }
+        Ok(_) => FetchSource::from_url(&args.repository),
         Err(e) => fail(&e),
-    }
+    };
     let choose = match (args.ours, args.theirs) {
         (true, _) => Some(Side::Ours),
         (_, true) => Some(Side::Theirs),
         _ => None,
     };
 
-    let only: Option<HashSet<String>> = if args.objects.is_empty() {
-        match remotes.fetch_all(&remote) {
-            Ok(status) if status.success() => {}
-            Ok(_) => fail(&format!("git fetch {remote} failed")),
-            Err(e) => fail(&e),
-        }
-        None
-    } else {
-        let advertised = match remotes.ls_remote(&remote) {
-            Ok(advertised) => advertised,
-            Err(e) => fail(&e),
-        };
-        let named = resolve_remote_objects(&args.objects, &advertised);
-        match fetch_closure(&store, &remote, &named, &advertised) {
-            Ok(fetched) => Some(fetched),
-            Err(e) => fail(&e),
-        }
-    };
-
-    let author = resolve_author(None);
-    let report = match store.apply_fetched(&remote, only.as_ref(), &author, choose) {
+    if source.is_transient()
+        && let Err(e) = remotes.clear_transient()
+    {
+        fail(&e);
+    }
+    let result = fetch(&store, &source, &args.objects, choose);
+    let discarded = remotes.discard(&source);
+    let report = match result {
         Ok(report) => report,
-        Err(e) => fail(&e),
+        Err(message) => {
+            for line in message.lines() {
+                eprintln!("gage fetch: {line}");
+            }
+            if let Err(e) = discarded {
+                eprintln!("gage fetch: {e}");
+            }
+            std::process::exit(1);
+        }
     };
-    print_report(&remote, &report);
+    print_report(source.name(), &report);
+    if let Err(e) = discarded {
+        fail(&e);
+    }
     if report.conflicts().next().is_some() {
         std::process::exit(1);
     }
 }
 
+/// Fetch into the tracking prefix of `source` and decide the local
+/// refs. An error is the lines to print, without the command prefix.
+fn fetch(
+    store: &Store,
+    source: &FetchSource,
+    objects: &[String],
+    choose: Option<Side>,
+) -> Result<FetchReport, String> {
+    let remotes = RemoteStore::from(store);
+    let only: Option<HashSet<String>> = if objects.is_empty() {
+        let status = remotes.fetch_all(source).map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("git fetch {} failed", source.name()));
+        }
+        None
+    } else {
+        let advertised = remotes
+            .ls_remote(source.repository())
+            .map_err(|e| e.to_string())?;
+        let named = resolve_remote_objects(objects, &advertised)?;
+        let fetched =
+            fetch_closure(store, source, &named, &advertised).map_err(|e| e.to_string())?;
+        Some(fetched)
+    };
+    let author = resolve_author(None);
+    store
+        .apply_fetched(source, only.as_ref(), &author, choose)
+        .map_err(|e| e.to_string())
+}
+
 /// Each argument against the remote's advertised refs: an exact tag
 /// name, else an id or a prefix unique among the remote's objects.
 /// Returns the real ref names. Every argument is resolved before
-/// anything is fetched.
+/// anything is fetched; the error carries one line per argument that
+/// did not resolve.
 fn resolve_remote_objects(
     objects: &[String],
     advertised: &BTreeMap<String, String>,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let mut refs = Vec::with_capacity(objects.len());
-    let mut errors = 0;
+    let mut errors: Vec<String> = Vec::new();
     for object in objects {
         let tag = format!("{TAG_REFS}{object}");
         if advertised.contains_key(&tag) {
@@ -113,28 +152,25 @@ fn resolve_remote_objects(
             .collect();
         match matches.as_slice() {
             [one] => refs.push((*one).clone()),
-            [] => {
-                eprintln!("gage fetch: {object}: not found on the remote");
-                errors += 1;
-            }
+            [] => errors.push(format!("{object}: not found on the remote")),
             many => {
                 let ids: Vec<String> = many
                     .iter()
                     .filter_map(|r| r.strip_prefix(OBJECT_REFS))
                     .map(|id| short_uuid(id).to_string())
                     .collect();
-                eprintln!(
-                    "gage fetch: {object}: ambiguous on the remote ({})",
+                errors.push(format!(
+                    "{object}: ambiguous on the remote ({})",
                     ids.join(", ")
-                );
-                errors += 1;
+                ));
             }
         }
     }
-    if errors > 0 {
-        std::process::exit(1);
+    if errors.is_empty() {
+        Ok(refs)
+    } else {
+        Err(errors.join("\n"))
     }
-    refs
 }
 
 /// Fetch `named` and, round by round, the object refs of everything
@@ -142,7 +178,7 @@ fn resolve_remote_objects(
 /// every real ref name fetched.
 fn fetch_closure(
     store: &Store,
-    remote: &str,
+    source: &FetchSource,
     named: &[String],
     advertised: &BTreeMap<String, String>,
 ) -> Result<HashSet<String>, StoreError> {
@@ -150,11 +186,14 @@ fn fetch_closure(
     let mut fetched: HashSet<String> = HashSet::new();
     let mut pending: Vec<String> = named.to_vec();
     while !pending.is_empty() {
-        let status = remotes.fetch_refs(remote, &pending)?;
+        let status = remotes.fetch_refs(source, &pending)?;
         if !status.success() {
-            return Err(StoreError::Parse(format!("git fetch {remote} failed")));
+            return Err(StoreError::Parse(format!(
+                "git fetch {} failed",
+                source.name()
+            )));
         }
-        let tracked = store.tracking_refs(remote)?;
+        let tracked = store.tracking_refs(source)?;
         let mut next: Vec<String> = Vec::new();
         for ref_name in pending.drain(..) {
             fetched.insert(ref_name.clone());
@@ -187,7 +226,7 @@ fn fetch_closure(
 }
 
 /// One line per conflict, then a count per outcome.
-fn print_report(remote: &str, report: &FetchReport) {
+fn print_report(source: &str, report: &FetchReport) {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for outcome in &report.outcomes {
         let label = match &outcome.outcome {
@@ -232,16 +271,16 @@ fn print_report(remote: &str, report: &FetchReport) {
         *counts.entry(label).or_insert(0) += 1;
     }
     if counts.is_empty() {
-        println!("Nothing to fetch from {remote}");
+        println!("Nothing to fetch from {source}");
         return;
     }
     let parts: Vec<String> = counts
         .iter()
         .map(|(label, n)| format!("{n} {label}"))
         .collect();
-    println!("Fetched from {remote}: {}", parts.join(", "));
+    println!("Fetched from {source}: {}", parts.join(", "));
     if report.conflicts().next().is_some() {
-        println!("Resolve a conflict with: gage fetch {remote} <OBJECT>... --ours | --theirs");
+        println!("Resolve a conflict with: gage fetch {source} <OBJECT>... --ours | --theirs");
     }
 }
 

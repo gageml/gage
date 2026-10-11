@@ -3,11 +3,12 @@
 //! Git applies Gage's ref rules on push, through the receiving
 //! store's `update` hook, and none of them on fetch. So a fetch is two
 //! steps. One forced `git fetch` writes what the remote has under its
-//! remote-tracking refs, the real layout with `refs/gage/` replaced by
-//! `refs/remotes/<name>/gage/`, where nothing carries a rule. Then
-//! [`Store::apply_fetched`] decides per tracked ref what the local ref
-//! becomes, with the `update` hook's rules in Rust plus the merges a
-//! hook cannot do, and reports what it did.
+//! tracking prefix, the real layout with `refs/gage/` replaced by
+//! `refs/remotes/<name>/gage/` for a configured remote or by a
+//! transient `refs/gage-fetch/<run>/` for a bare URL, where nothing
+//! carries a rule. Then [`Store::apply_fetched`] decides per tracked
+//! ref what the local ref becomes, with the `update` hook's rules in
+//! Rust plus the merges a hook cannot do, and reports what it did.
 //!
 //! Object refs are decided first, then the key refs of the adopted
 //! objects are derived from their `attrs.key` (the remote's key refs
@@ -32,7 +33,7 @@ use crate::issue::{IssueStore, OBJECT_TYPE as ISSUE_TYPE};
 use crate::key::plan_key_ref;
 use crate::object::{Object, ObjectTree};
 use crate::refs::{OBJECT_REFS, TAG_REFS};
-use crate::remote::tracking_prefix;
+use crate::remote::FetchSource;
 use crate::session::OBJECT_TYPE as SESSION_TYPE;
 use crate::{Store, StoreError};
 
@@ -112,20 +113,20 @@ impl FetchReport {
 }
 
 impl Store {
-    /// Decide and write the local refs from the remote-tracking refs
-    /// of `remote`: every tracked object and tag ref, or only those
-    /// whose real ref name is in `only`. `author` signs any resolution
-    /// entry a merge writes; `choose` resolves divergences that would
+    /// Decide and write the local refs from the tracking refs of
+    /// `source`: every tracked object and tag ref, or only those whose
+    /// real ref name is in `only`. `author` signs any resolution entry
+    /// a merge writes; `choose` resolves divergences that would
     /// otherwise be conflicts. The index is brought up to date with
     /// every adopted commit.
     pub fn apply_fetched(
         &self,
-        remote: &str,
+        source: &FetchSource,
         only: Option<&HashSet<String>>,
         author: &str,
         choose: Option<Side>,
     ) -> Result<FetchReport, StoreError> {
-        let tracked = self.tracking_refs(remote)?;
+        let tracked = self.tracking_refs(source)?;
         let selected = |name: &str| only.is_none_or(|set| set.contains(name));
         let mut report = FetchReport::default();
 
@@ -134,7 +135,7 @@ impl Store {
             if !ref_name.starts_with(OBJECT_REFS) || !selected(ref_name) {
                 continue;
             }
-            let outcome = self.apply_object(ref_name, remote_sha, remote, author, choose)?;
+            let outcome = self.apply_object(ref_name, remote_sha, source.name(), author, choose)?;
             if matches!(
                 outcome.outcome,
                 Outcome::Created
@@ -165,20 +166,23 @@ impl Store {
         Ok(report)
     }
 
-    /// The remote-tracking refs of `remote`, keyed by the real ref
-    /// name they mirror.
-    pub fn tracking_refs(&self, remote: &str) -> Result<BTreeMap<String, String>, StoreError> {
-        let prefix = tracking_prefix(remote);
+    /// The tracking refs of `source`, keyed by the real ref name they
+    /// mirror.
+    pub fn tracking_refs(
+        &self,
+        source: &FetchSource,
+    ) -> Result<BTreeMap<String, String>, StoreError> {
+        let prefix = source.tracking();
         let out = run(git_in(
             self.path(),
-            ["for-each-ref", "--format=%(refname) %(objectname)", &prefix],
+            ["for-each-ref", "--format=%(refname) %(objectname)", prefix],
         ))?;
         let mut refs = BTreeMap::new();
         for line in out.lines() {
             let (tracking, sha) = line
                 .split_once(' ')
                 .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
-            let rest = tracking.strip_prefix(&prefix).ok_or_else(|| {
+            let rest = tracking.strip_prefix(prefix).ok_or_else(|| {
                 StoreError::Parse(format!("tracking ref outside prefix: {tracking}"))
             })?;
             refs.insert(format!("{}{rest}", crate::refs::ROOT), sha.to_string());
@@ -649,11 +653,19 @@ mod tests {
     }
 
     fn fetch(store: &Store, name: &str, choose: Option<Side>) -> FetchReport {
-        let status = RemoteStore::from(store).fetch_all(name).unwrap();
+        apply(store, &FetchSource::from_remote(name), choose)
+    }
+
+    fn apply(store: &Store, source: &FetchSource, choose: Option<Side>) -> FetchReport {
+        let status = RemoteStore::from(store).fetch_all(source).unwrap();
         assert!(status.success());
         store
-            .apply_fetched(name, None, "user:resolver", choose)
+            .apply_fetched(source, None, "user:resolver", choose)
             .unwrap()
+    }
+
+    fn url(store: &Store) -> String {
+        store.path().to_str().unwrap().to_string()
     }
 
     fn outcome<'a>(report: &'a FetchReport, id: &str) -> &'a Outcome {
@@ -681,6 +693,51 @@ mod tests {
 
         edit_note(&b, &n, "v3");
         assert_eq!(outcome(&fetch(&b, "a", None), &n), &Outcome::Ahead);
+    }
+
+    #[test]
+    fn url_fetch_writes_a_transient_namespace_and_discard_removes_it() {
+        let (_dir, a, b) = pair();
+        let n = note(&a, "n");
+        let source = FetchSource::from_url(&url(&a));
+        let remotes = RemoteStore::from(&b);
+        let report = apply(&b, &source, None);
+        assert_eq!(outcome(&report, &n), &Outcome::Created);
+        assert_eq!(tip(&b, &n), tip(&a, &n));
+        assert_eq!(b.tracking_refs(&source).unwrap().len(), 1);
+        assert_eq!(remotes.list().unwrap().len(), 1, "no remote is added");
+
+        assert_eq!(remotes.discard(&source).unwrap(), 1);
+        assert!(b.tracking_refs(&source).unwrap().is_empty());
+        assert_eq!(remotes.discard(&source).unwrap(), 0);
+        assert_eq!(remotes.discard(&FetchSource::from_remote("a")).unwrap(), 0);
+    }
+
+    #[test]
+    fn url_fetch_conflicts_resolve_on_a_later_run() {
+        let (_dir, a, b) = pair();
+        let n = note(&a, "n");
+        apply(&b, &FetchSource::from_url(&url(&a)), None);
+        edit_note(&a, &n, "theirs");
+        edit_note(&b, &n, "ours");
+        let report = apply(&b, &FetchSource::from_url(&url(&a)), None);
+        assert_eq!(outcome(&report, &n), &Outcome::Conflict(Conflict::Object));
+
+        let report = apply(&b, &FetchSource::from_url(&url(&a)), Some(Side::Theirs));
+        assert_eq!(outcome(&report, &n), &Outcome::Resolved(Side::Theirs));
+        assert_eq!(tip(&b, &n), tip(&a, &n));
+    }
+
+    #[test]
+    fn clear_transient_removes_what_an_earlier_run_left() {
+        let (_dir, a, b) = pair();
+        note(&a, "n");
+        let stale = FetchSource::from_url(&url(&a));
+        apply(&b, &stale, None);
+        let remotes = RemoteStore::from(&b);
+        assert_eq!(remotes.clear_transient().unwrap(), 1);
+        assert!(b.tracking_refs(&stale).unwrap().is_empty());
+        assert_eq!(remotes.clear_transient().unwrap(), 0);
     }
 
     #[test]

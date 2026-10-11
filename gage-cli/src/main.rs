@@ -226,7 +226,7 @@ enum Command {
     /// store is sent only by `gage backup`.
     Push(cmd_push::PushArgs),
 
-    /// Fetch objects from a remote
+    /// Fetch objects from a remote or URL
     ///
     /// Adopts what the remote has: everything, or the named objects
     /// and what they link. Reports what could not be merged.
