@@ -50,8 +50,7 @@ input as per step 7 below.
 Use a sub-agent for each pending issue to resolve it using the steps below. Note
 that sub-agents provide recommendations and do not modify issue status. You are
 the sole writer in this phase and will resolve any conflicts across sub-agents
-before applying the resolutions with `mcp__plugin_gage_gage__IssueUpdate` and
-`mcp__plugin_gage_gage__IssueComment`.
+before applying the resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
 
 1. Query the pending issues:
 
@@ -92,28 +91,30 @@ before applying the resolutions with `mcp__plugin_gage_gage__IssueUpdate` and
      stays open or closed, never against another duplicate.
 
 6. Apply the automatic batch, every pending issue except those marked for user
-   decision, in this order so that each survivor is in its final state before
-   a duplicate names it:
-   - Promote each novel issue and each promoted survivor: `IssueUpdate` with
-     `status=open`.
-   - Close each duplicate: `IssueUpdate` with `status=closed`,
-     `status_reason=duplicate`, and `of` set to the survivor's ID. When the
-     duplicate carries insight the survivor lacks, add it to the survivor
-     with `IssueComment`.
+   decision, in one `IssuePendingResolve` call. The tool takes a `resolutions`
+   array with one object per pending issue; it validates the whole plan before
+   writing, and orders the writes so each survivor is in its final state before
+   a duplicate names it. Each object:
+   - A novel issue or a promoted survivor: `{issue, action: "open"}`.
+   - A duplicate: `{issue, action: "duplicate", of}` with `of` set to the
+     survivor's ID. When the duplicate carries insight the survivor lacks, add
+     a `comment` field; it is recorded on the survivor.
+
+   The plan must name each pending issue at most once, and a duplicate's `of`
+   must be a survivor the plan promotes or an issue already open or closed.
+   Flatten any chain (step 5) before building the plan, or the tool rejects it.
 
 7. If any issues are marked for user decision, present each in turn to the user
    as one batch, grouped per closed issue, with the prior close reason and the
    sub-agent rationales. For each, the user chooses one of three outcomes:
-   - Already resolved - close the pending issue as a duplicate of the closed
-     issue (`status=closed`, `status_reason=duplicate`, `of`); the closed
-     issue stays closed
-   - Condition recurred - reopen the closed issue (`IssueUpdate` with
-     `status=open` and a message noting the recurrence), then close the
-     pending issue as a duplicate of it, adding the report's insight to the
-     reopened issue with `IssueComment`
-   - Stands on its own - promote the pending issue (`status=open`)
+   - Already resolved - `{issue, action: "duplicate", of}` against the closed
+     issue; the closed issue stays closed
+   - Condition recurred - `{issue, action: "duplicate", of, reopen: true}`
+     against the closed issue, with a `comment` carrying the report's insight;
+     `reopen` returns the survivor to open before the close
+   - Stands on its own - `{issue, action: "open"}`
 
-   Apply the final decisions with the same tools.
+   Apply the final decisions in a second `IssuePendingResolve` call.
 
 8. Briefly report what was resolved: how many issues were promoted, how many
    closed as duplicates, and against what.

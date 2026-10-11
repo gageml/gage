@@ -45,6 +45,7 @@ pub enum GageTool {
     NoteWrite(NoteWriteConfig),
     IssueUpdate(StoreWriterConfig),
     IssueComment(StoreWriterConfig),
+    IssuePendingResolve(StoreWriterConfig),
 }
 
 impl GageTool {
@@ -56,6 +57,7 @@ impl GageTool {
             GageTool::NoteWrite(_) => tools::note_write::NAME,
             GageTool::IssueUpdate(_) => tools::issue_update::NAME,
             GageTool::IssueComment(_) => tools::issue_comment::NAME,
+            GageTool::IssuePendingResolve(_) => tools::issue_pending_resolve::NAME,
         }
     }
 }
@@ -152,6 +154,7 @@ pub struct ToolsConfig {
     pub note_write: Option<NoteWriteConfig>,
     pub issue_update: Option<StoreWriterConfig>,
     pub issue_comment: Option<StoreWriterConfig>,
+    pub issue_pending_resolve: Option<StoreWriterConfig>,
 }
 
 /// One scanner-defined tool: the wire-visible definition plus the
@@ -244,6 +247,10 @@ fn build_server(spec: &ToolSpec) -> GageServer {
             GageTool::IssueComment(c) => {
                 config.issue_comment = Some(c.clone());
                 router = router.with_route((tools::issue_comment::TOOL)());
+            }
+            GageTool::IssuePendingResolve(c) => {
+                config.issue_pending_resolve = Some(c.clone());
+                router = router.with_route((tools::issue_pending_resolve::TOOL)());
             }
         }
     }

@@ -502,7 +502,8 @@ async fn run_mcp2() -> Result<(), Box<dyn std::error::Error>> {
                 note_names,
             )),
             gage_mcp2::GageTool::IssueUpdate(writer.clone()),
-            gage_mcp2::GageTool::IssueComment(writer),
+            gage_mcp2::GageTool::IssueComment(writer.clone()),
+            gage_mcp2::GageTool::IssuePendingResolve(writer),
         ],
         custom: Vec::new(),
     };
