@@ -219,7 +219,7 @@ pub struct Scan2RunArgs {
     ///
     /// Follows git's ref naming rules. An existing tag is an error
     /// unless --force-tag is given.
-    #[arg(short, long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME")]
     tag: Option<String>,
 
     /// Move the tag if it exists

@@ -72,7 +72,7 @@ pub struct DatasetAddArgs {
     ///
     /// Follows git's ref naming rules. An existing tag is an error
     /// unless --force-tag is given.
-    #[arg(short, long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME")]
     pub tag: Option<String>,
 
     /// Maximum stored size per session
