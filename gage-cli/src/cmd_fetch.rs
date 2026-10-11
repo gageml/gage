@@ -55,11 +55,8 @@ pub fn main(args: FetchArgs) {
         Err(e) => fail(&e),
     };
     let remotes = RemoteStore::from(&store);
-    let source = match remotes.list() {
-        Ok(known) if known.iter().any(|r| r.name == args.repository) => {
-            FetchSource::from_remote(&args.repository)
-        }
-        Ok(_) => FetchSource::from_url(&args.repository),
+    let source = match remotes.resolve(&args.repository) {
+        Ok(repository) => FetchSource::from(repository),
         Err(e) => fail(&e),
     };
     let choose = match (args.ours, args.theirs) {
@@ -87,7 +84,7 @@ pub fn main(args: FetchArgs) {
             std::process::exit(1);
         }
     };
-    print_report(source.name(), &report);
+    print_report(source.repository().name(), &report);
     if let Err(e) = discarded {
         fail(&e);
     }
@@ -108,7 +105,7 @@ fn fetch(
     let only: Option<HashSet<String>> = if objects.is_empty() {
         let status = remotes.fetch_all(source).map_err(|e| e.to_string())?;
         if !status.success() {
-            return Err(format!("git fetch {} failed", source.name()));
+            return Err(format!("git fetch {} failed", source.repository().name()));
         }
         None
     } else {
@@ -190,7 +187,7 @@ fn fetch_closure(
         if !status.success() {
             return Err(StoreError::Parse(format!(
                 "git fetch {} failed",
-                source.name()
+                source.repository().name()
             )));
         }
         let tracked = store.tracking_refs(source)?;

@@ -12,8 +12,9 @@
 //! A fetch does not need a remote. A bare Git URL or path is fetched
 //! with the refspec given on the command line, as git itself allows,
 //! into a transient namespace under `refs/gage-fetch/` that the
-//! command deletes before it exits. [`FetchSource`] names either kind
-//! of source and the prefix its refs land under.
+//! command deletes before it exits. [`Repository`] names either kind
+//! for push, fetch, and backup alike; [`FetchSource`] adds the prefix
+//! a fetch's refs land under.
 
 use std::collections::BTreeMap;
 use std::process::{ExitStatus, Stdio};
@@ -49,62 +50,50 @@ pub fn tracking_prefix(name: &str) -> String {
     format!("refs/remotes/{name}/gage/1/")
 }
 
-/// The root of the transient namespaces a URL fetch writes under:
-/// `refs/gage-fetch/<run>/1/`. Nothing under it outlives the command
-/// that wrote it.
-pub const TRANSIENT_ROOT: &str = "refs/gage-fetch/";
-
-/// Where a fetch reads from and where it writes what it finds. A
-/// configured remote writes under its remote-tracking prefix. A bare
-/// URL has no configuration, so it writes under a transient namespace
-/// that the command deletes when it ends.
+/// A repository the store talks to: a configured remote by name, or
+/// a bare Git URL or path with no configuration. Push, fetch, and
+/// backup take either.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FetchSource {
-    repository: String,
+pub struct Repository {
+    spec: String,
     name: String,
-    tracking: String,
+    remote: bool,
 }
 
-impl FetchSource {
+impl Repository {
     /// The configured remote `name`.
-    pub fn from_remote(name: &str) -> FetchSource {
-        FetchSource {
-            repository: name.to_string(),
+    pub fn from_remote(name: &str) -> Repository {
+        Repository {
+            spec: name.to_string(),
             name: name.to_string(),
-            tracking: tracking_prefix(name),
+            remote: true,
         }
     }
 
-    /// A Git URL or path with no configuration. Each call names a new
-    /// transient namespace.
-    pub fn from_url(url: &str) -> FetchSource {
-        FetchSource {
-            repository: url.to_string(),
+    /// A Git URL or path with no configuration.
+    pub fn from_url(url: &str) -> Repository {
+        Repository {
+            spec: url.to_string(),
             name: redact_password(url),
-            tracking: format!("{TRANSIENT_ROOT}{}/{GENERATION}/", new_uuid()),
+            remote: false,
         }
     }
 
     /// What git is given: the remote name or the URL.
-    pub fn repository(&self) -> &str {
-        &self.repository
+    pub fn spec(&self) -> &str {
+        &self.spec
     }
 
-    /// The source as a report and a merge entry name it: the remote
-    /// name, or the URL with any password removed. A merge entry is
-    /// object content and travels to every other store.
+    /// The repository as a report and a merge entry name it: the
+    /// remote name, or the URL with any password removed. A merge
+    /// entry is object content and travels to every other store.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The prefix fetched refs are written under, ending in `/`.
-    pub fn tracking(&self) -> &str {
-        &self.tracking
-    }
-
-    /// True when the tracking prefix is a transient namespace.
-    pub fn is_transient(&self) -> bool {
-        self.tracking.starts_with(TRANSIENT_ROOT)
+    /// True for a configured remote.
+    pub fn is_remote(&self) -> bool {
+        self.remote
     }
 }
 
@@ -121,6 +110,52 @@ fn redact_password(url: &str) -> String {
     };
     let user = userinfo.split_once(':').map_or(userinfo, |(user, _)| user);
     format!("{scheme}://{user}@{host}{path}")
+}
+
+/// The root of the transient namespaces a URL fetch writes under:
+/// `refs/gage-fetch/<run>/1/`. Nothing under it outlives the command
+/// that wrote it.
+pub const TRANSIENT_ROOT: &str = "refs/gage-fetch/";
+
+/// A repository to fetch from and the prefix its refs are written
+/// under: the remote-tracking prefix of a configured remote, or a
+/// transient namespace for a URL that the command deletes when it
+/// ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchSource {
+    repository: Repository,
+    tracking: String,
+}
+
+impl From<Repository> for FetchSource {
+    /// A URL names a new transient namespace on each conversion.
+    fn from(repository: Repository) -> FetchSource {
+        let tracking = if repository.is_remote() {
+            tracking_prefix(repository.name())
+        } else {
+            format!("{TRANSIENT_ROOT}{}/{GENERATION}/", new_uuid())
+        };
+        FetchSource {
+            repository,
+            tracking,
+        }
+    }
+}
+
+impl FetchSource {
+    pub fn repository(&self) -> &Repository {
+        &self.repository
+    }
+
+    /// The prefix fetched refs are written under, ending in `/`.
+    pub fn tracking(&self) -> &str {
+        &self.tracking
+    }
+
+    /// True when the tracking prefix is a transient namespace.
+    pub fn is_transient(&self) -> bool {
+        self.tracking.starts_with(TRANSIENT_ROOT)
+    }
 }
 
 impl RemoteStore<'_> {
@@ -175,6 +210,16 @@ impl RemoteStore<'_> {
         Ok(parse_remote_config(&output))
     }
 
+    /// `arg` as the configured remote of that name when one exists,
+    /// else as a URL or path: git's own rule for a repository argument.
+    pub fn resolve(&self, arg: &str) -> Result<Repository, StoreError> {
+        if self.list()?.iter().any(|r| r.name == arg) {
+            Ok(Repository::from_remote(arg))
+        } else {
+            Ok(Repository::from_url(arg))
+        }
+    }
+
     /// Remove the remote `name`, its config, and its remote-tracking
     /// refs. A name no remote has is [`StoreError::RemoteNotFound`].
     pub fn delete(&self, name: &str) -> Result<Remote, StoreError> {
@@ -187,14 +232,16 @@ impl RemoteStore<'_> {
         Ok(remote)
     }
 
-    /// The Gage refs `repository`, a remote name or a URL, advertises,
-    /// as ref name to commit SHA. One `git ls-remote` over
-    /// `refs/gage/1/*`.
-    pub fn ls_remote(&self, repository: &str) -> Result<BTreeMap<String, String>, StoreError> {
+    /// The Gage refs `repository` advertises, as ref name to commit
+    /// SHA. One `git ls-remote` over `refs/gage/1/*`.
+    pub fn ls_remote(
+        &self,
+        repository: &Repository,
+    ) -> Result<BTreeMap<String, String>, StoreError> {
         let pattern = format!("{ROOT}*");
         let out = run(git_in(
             self.store.path(),
-            ["ls-remote", "--refs", repository, &pattern],
+            ["ls-remote", "--refs", repository.spec(), &pattern],
         ))?;
         let mut refs = BTreeMap::new();
         for line in out.lines() {
@@ -220,18 +267,18 @@ impl RemoteStore<'_> {
         Ok(sha.trim().to_string())
     }
 
-    /// Push `ref_names` to the remote `name`, one refspec per ref and
-    /// no force, with `approval` set for the store's `pre-push` hook.
+    /// Push `ref_names` to `repository`, one refspec per ref and no
+    /// force, with `approval` set for the store's `pre-push` hook.
     /// Git's output goes to the terminal as it runs. Returns git's
     /// exit status; a rejection by either hook is a failing status
     /// whose reason git has already printed.
     pub fn push(
         &self,
-        name: &str,
+        repository: &Repository,
         ref_names: &[String],
         approval: &str,
     ) -> Result<ExitStatus, StoreError> {
-        let mut cmd = git_in(self.store.path(), ["push", name]);
+        let mut cmd = git_in(self.store.path(), ["push", repository.spec()]);
         for ref_name in ref_names {
             cmd.arg(format!("{ref_name}:{ref_name}"));
         }
@@ -268,7 +315,7 @@ impl RemoteStore<'_> {
         let refspec = format!("+{ROOT}*:{}*", source.tracking());
         let mut cmd = git_in(
             self.store.path(),
-            ["fetch", "--prune", source.repository(), &refspec],
+            ["fetch", "--prune", source.repository().spec(), &refspec],
         );
         cmd.stdin(Stdio::null())
             .stdout(Stdio::inherit())
@@ -283,7 +330,7 @@ impl RemoteStore<'_> {
         source: &FetchSource,
         ref_names: &[String],
     ) -> Result<ExitStatus, StoreError> {
-        let mut cmd = git_in(self.store.path(), ["fetch", source.repository()]);
+        let mut cmd = git_in(self.store.path(), ["fetch", source.repository().spec()]);
         for ref_name in ref_names {
             let tracking = match ref_name.strip_prefix(ROOT) {
                 Some(rest) => format!("{}{rest}", source.tracking()),
@@ -497,30 +544,56 @@ mod tests {
             .unwrap();
         let ref_name = format!("{OBJECT_REFS}{id}");
         let tip = source.rev_parse(&ref_name).unwrap().unwrap();
-        assert!(remotes.ls_remote("share").unwrap().is_empty());
+        let share = remotes.resolve("share").unwrap();
+        assert!(share.is_remote());
+        assert!(remotes.ls_remote(&share).unwrap().is_empty());
 
         // The hook rejects a digest for another set
         let wrong = remotes
             .approval_digest(&[ref_name.clone(), "refs/gage/1/tag/x".into()])
             .unwrap();
-        let status = remotes.push("share", &[ref_name.clone()], &wrong).unwrap();
+        let status = remotes.push(&share, &[ref_name.clone()], &wrong).unwrap();
         assert!(!status.success());
 
         let digest = remotes.approval_digest(&[ref_name.clone()]).unwrap();
-        let status = remotes.push("share", &[ref_name.clone()], &digest).unwrap();
+        let status = remotes.push(&share, &[ref_name.clone()], &digest).unwrap();
         assert!(status.success());
         assert_eq!(
-            remotes.ls_remote("share").unwrap(),
+            remotes.ls_remote(&share).unwrap(),
             BTreeMap::from([(ref_name.clone(), tip.clone())])
         );
         assert_eq!(target.rev_parse(&ref_name).unwrap().unwrap(), tip);
+
+        // The same push to the target's path, with no remote configured
+        let url = remotes.resolve(target.path().to_str().unwrap()).unwrap();
+        assert!(!url.is_remote());
+        let second = NoteStore::from(&source)
+            .create(NoteInput {
+                name: "comment",
+                value: NoteValue::Text("w".into()),
+                author: "user:test",
+                target: None,
+                metadata: None,
+                work_id: None,
+            })
+            .unwrap();
+        let second_ref = format!("{OBJECT_REFS}{second}");
+        let status = remotes.push(&url, &[second_ref.clone()], &wrong).unwrap();
+        assert!(!status.success(), "a URL push still needs the digest");
+        let digest = remotes.approval_digest(&[second_ref.clone()]).unwrap();
+        let status = remotes.push(&url, &[second_ref.clone()], &digest).unwrap();
+        assert!(status.success());
+        assert_eq!(remotes.ls_remote(&url).unwrap().len(), 2);
+        assert_eq!(remotes.list().unwrap().len(), 1, "no remote is added");
     }
 
     #[test]
-    fn url_source_redacts_the_password_and_names_a_valid_transient_prefix() {
-        let source = FetchSource::from_url("https://me:s3cret@host/x.git");
-        assert_eq!(source.repository(), "https://me:s3cret@host/x.git");
-        assert_eq!(source.name(), "https://me@host/x.git");
+    fn url_repository_redacts_the_password_and_names_a_valid_transient_prefix() {
+        let url = Repository::from_url("https://me:s3cret@host/x.git");
+        assert_eq!(url.spec(), "https://me:s3cret@host/x.git");
+        assert_eq!(url.name(), "https://me@host/x.git");
+        assert!(!url.is_remote());
+        let source = FetchSource::from(url);
         assert!(source.is_transient());
         for plain in [
             "git@host:x.git",
@@ -530,19 +603,20 @@ mod tests {
             "ssh://git@host:22/x.git",
             "https://host",
         ] {
-            assert_eq!(FetchSource::from_url(plain).name(), plain);
+            assert_eq!(Repository::from_url(plain).name(), plain);
         }
         assert_ne!(
-            FetchSource::from_url("/x").tracking(),
-            FetchSource::from_url("/x").tracking()
+            FetchSource::from(Repository::from_url("/x")).tracking(),
+            FetchSource::from(Repository::from_url("/x")).tracking()
         );
         let dir = tempfile::tempdir().unwrap();
         let ref_name = format!("{}object/x", source.tracking());
         run(git_in(dir.path(), ["check-ref-format", &ref_name])).unwrap();
 
-        let remote = FetchSource::from_remote("share");
-        assert_eq!(remote.repository(), "share");
-        assert_eq!(remote.name(), "share");
+        let remote = FetchSource::from(Repository::from_remote("share"));
+        assert_eq!(remote.repository().spec(), "share");
+        assert_eq!(remote.repository().name(), "share");
+        assert!(remote.repository().is_remote());
         assert_eq!(remote.tracking(), "refs/remotes/share/gage/1/");
         assert!(!remote.is_transient());
     }

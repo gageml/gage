@@ -6,7 +6,9 @@
 //! agent sessions. Nothing the user did not name is sent, and nothing
 //! named is sent without the preview and confirmation. The push
 //! carries the approval digest the store's `pre-push` hook checks, so
-//! the set that leaves is the set that was shown.
+//! the set that leaves is the set that was shown. The destination is
+//! a configured remote or a bare Git URL or path; a push writes
+//! nothing local either way.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -24,8 +26,10 @@ use crate::dialog::{self, DialogError};
 
 #[derive(Args)]
 pub struct PushArgs {
-    /// Remote to push to
-    remote: String,
+    /// Remote or URL to push to
+    ///
+    /// A remote name from `gage remote add`, or any Git URL or path
+    repository: String,
 
     /// Objects to push
     ///
@@ -55,10 +59,11 @@ pub async fn main(args: PushArgs) {
         Ok(store) => store,
         Err(e) => fail(&e),
     };
-    let remote = args.remote.clone();
-    if let Err(e) = check_remote(&store, &remote) {
-        fail(&e);
-    }
+    let repository = match RemoteStore::from(&store).resolve(&args.repository) {
+        Ok(repository) => repository,
+        Err(e) => fail(&e),
+    };
+    let remote = repository.name();
 
     // Resolve every argument before anything else, so one bad
     // argument leaves nothing half done
@@ -99,7 +104,7 @@ pub async fn main(args: PushArgs) {
     };
     let on_remote = {
         let store = store.lock().unwrap();
-        match RemoteStore::from(&*store).ls_remote(&remote) {
+        match RemoteStore::from(&*store).ls_remote(&repository) {
             Ok(on_remote) => on_remote,
             Err(e) => fail(&e),
         }
@@ -131,7 +136,7 @@ pub async fn main(args: PushArgs) {
             .approval_digest(&send_names)
             .map_err(|e| DialogError::Other(e.into()))?;
         let status = remotes
-            .push(&remote, &send_names, &approval)
+            .push(&repository, &send_names, &approval)
             .map_err(|e| DialogError::Other(e.into()))?;
         if !status.success() {
             return Err(DialogError::Failed(format!(
@@ -140,19 +145,6 @@ pub async fn main(args: PushArgs) {
         }
         Ok(format!("Pushed {} refs to {remote}", send_names.len()).into())
     });
-}
-
-/// The remote must be configured; the error names the command that
-/// adds one.
-fn check_remote(store: &Store, name: &str) -> Result<(), StoreError> {
-    let known = RemoteStore::from(store).list()?;
-    if known.iter().any(|r| r.name == name) {
-        Ok(())
-    } else {
-        Err(StoreError::RemoteNotFound(format!(
-            "{name} (add one with gage remote add)"
-        )))
-    }
 }
 
 /// The named objects and everything they link, transitively.

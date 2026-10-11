@@ -100,7 +100,7 @@ pub use query::{
     tag_table,
 };
 pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
-pub use remote::{FetchSource, Remote, RemoteStore, tracking_prefix};
+pub use remote::{FetchSource, Remote, RemoteStore, Repository, tracking_prefix};
 pub use scan::{
     AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
     ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,

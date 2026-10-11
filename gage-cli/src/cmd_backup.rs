@@ -1,23 +1,25 @@
 //! `gage backup`: send the whole store to a backup remote.
 //!
-//! Every object, tag, and key ref goes. The remote must carry the
-//! backup flag, which is the user's statement that it may hold
-//! everything; the store's `pre-push` hook accepts the push on that
-//! flag alone, so no approval digest is involved.
+//! Every object, tag, and key ref goes. A configured remote must carry
+//! the backup flag, which is the user's standing statement that it may
+//! hold everything; the store's `pre-push` hook accepts the push on
+//! that flag alone. A bare Git URL or path carries no flag, so the
+//! confirmation that names it is the statement, and the push carries
+//! the approval digest of the whole set as `gage push` does.
 
 use clap::Args;
 use cliclack as cli;
-use gage_store::{KEY_REFS, OBJECT_REFS, RemoteStore, Store, StoreError, TAG_REFS};
+use gage_store::{KEY_REFS, OBJECT_REFS, RemoteStore, Repository, Store, TAG_REFS};
 
 use crate::dialog::{self, DialogError};
 
 #[derive(Args)]
 pub struct BackupArgs {
-    /// Backup remote to send the store to
+    /// Backup remote or URL to send the store to
     ///
-    /// A remote added with `gage remote add --backup`. Optional when
-    /// exactly one backup remote exists
-    remote: Option<String>,
+    /// A remote added with `gage remote add --backup`, or any Git URL
+    /// or path. Optional when exactly one backup remote exists
+    repository: Option<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -39,30 +41,31 @@ pub fn main(args: BackupArgs) {
         .filter(|r| r.backup)
         .map(|r| r.name.as_str())
         .collect();
-    let remote = match &args.remote {
-        Some(name) => match known.iter().find(|r| &r.name == name) {
-            Some(found) if found.backup => name.clone(),
+    let repository = match &args.repository {
+        Some(arg) => match known.iter().find(|r| &r.name == arg) {
+            Some(found) if found.backup => Repository::from_remote(arg),
             Some(_) => fail(&format!(
-                "remote {name} is not a backup target; add one with gage remote add --backup"
+                "remote {arg} is not a backup target; add one with gage remote add --backup"
             )),
-            None => fail(&StoreError::RemoteNotFound(format!(
-                "{name} (add one with gage remote add --backup)"
-            ))),
+            None => Repository::from_url(arg),
         },
         None => match backups.as_slice() {
-            [one] => (*one).to_string(),
-            [] => fail(&"a backup remote is required; add one with gage remote add --backup"),
+            [one] => Repository::from_remote(one),
+            [] => {
+                fail(&"a backup remote or URL is required; add one with gage remote add --backup")
+            }
             many => fail(&format!(
                 "a remote argument is required; one of: {}",
                 many.join(", ")
             )),
         },
     };
+    let remote = repository.name();
     let refs = match remotes.gage_refs() {
         Ok(refs) => refs,
         Err(e) => fail(&e),
     };
-    let on_remote = match remotes.ls_remote(&remote) {
+    let on_remote = match remotes.ls_remote(&repository) {
         Ok(on_remote) => on_remote,
         Err(e) => fail(&e),
     };
@@ -92,8 +95,11 @@ pub fn main(args: BackupArgs) {
                 return Err(DialogError::Canceled);
             }
         }
+        let approval = remotes
+            .approval_digest(&send)
+            .map_err(|e| DialogError::Other(e.into()))?;
         let status = remotes
-            .push(&remote, &send, "")
+            .push(&repository, &send, &approval)
             .map_err(|e| DialogError::Other(e.into()))?;
         if !status.success() {
             return Err(DialogError::Failed(format!(

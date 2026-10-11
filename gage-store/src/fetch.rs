@@ -135,7 +135,13 @@ impl Store {
             if !ref_name.starts_with(OBJECT_REFS) || !selected(ref_name) {
                 continue;
             }
-            let outcome = self.apply_object(ref_name, remote_sha, source.name(), author, choose)?;
+            let outcome = self.apply_object(
+                ref_name,
+                remote_sha,
+                source.repository().name(),
+                author,
+                choose,
+            )?;
             if matches!(
                 outcome.outcome,
                 Outcome::Created
@@ -588,7 +594,7 @@ mod tests {
     use crate::issue::{IssueInput, IssueStatus, StatusReason};
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::refs::object_ref;
-    use crate::remote::RemoteStore;
+    use crate::remote::{RemoteStore, Repository};
     use crate::test_support::open_store;
     use crate::{DatasetStore, TagStore};
 
@@ -653,7 +659,11 @@ mod tests {
     }
 
     fn fetch(store: &Store, name: &str, choose: Option<Side>) -> FetchReport {
-        apply(store, &FetchSource::from_remote(name), choose)
+        apply(
+            store,
+            &FetchSource::from(Repository::from_remote(name)),
+            choose,
+        )
     }
 
     fn apply(store: &Store, source: &FetchSource, choose: Option<Side>) -> FetchReport {
@@ -664,8 +674,8 @@ mod tests {
             .unwrap()
     }
 
-    fn url(store: &Store) -> String {
-        store.path().to_str().unwrap().to_string()
+    fn url(store: &Store) -> FetchSource {
+        FetchSource::from(Repository::from_url(store.path().to_str().unwrap()))
     }
 
     fn outcome<'a>(report: &'a FetchReport, id: &str) -> &'a Outcome {
@@ -699,7 +709,7 @@ mod tests {
     fn url_fetch_writes_a_transient_namespace_and_discard_removes_it() {
         let (_dir, a, b) = pair();
         let n = note(&a, "n");
-        let source = FetchSource::from_url(&url(&a));
+        let source = url(&a);
         let remotes = RemoteStore::from(&b);
         let report = apply(&b, &source, None);
         assert_eq!(outcome(&report, &n), &Outcome::Created);
@@ -710,20 +720,21 @@ mod tests {
         assert_eq!(remotes.discard(&source).unwrap(), 1);
         assert!(b.tracking_refs(&source).unwrap().is_empty());
         assert_eq!(remotes.discard(&source).unwrap(), 0);
-        assert_eq!(remotes.discard(&FetchSource::from_remote("a")).unwrap(), 0);
+        let named = FetchSource::from(Repository::from_remote("a"));
+        assert_eq!(remotes.discard(&named).unwrap(), 0);
     }
 
     #[test]
     fn url_fetch_conflicts_resolve_on_a_later_run() {
         let (_dir, a, b) = pair();
         let n = note(&a, "n");
-        apply(&b, &FetchSource::from_url(&url(&a)), None);
+        apply(&b, &url(&a), None);
         edit_note(&a, &n, "theirs");
         edit_note(&b, &n, "ours");
-        let report = apply(&b, &FetchSource::from_url(&url(&a)), None);
+        let report = apply(&b, &url(&a), None);
         assert_eq!(outcome(&report, &n), &Outcome::Conflict(Conflict::Object));
 
-        let report = apply(&b, &FetchSource::from_url(&url(&a)), Some(Side::Theirs));
+        let report = apply(&b, &url(&a), Some(Side::Theirs));
         assert_eq!(outcome(&report, &n), &Outcome::Resolved(Side::Theirs));
         assert_eq!(tip(&b, &n), tip(&a, &n));
     }
@@ -732,7 +743,7 @@ mod tests {
     fn clear_transient_removes_what_an_earlier_run_left() {
         let (_dir, a, b) = pair();
         note(&a, "n");
-        let stale = FetchSource::from_url(&url(&a));
+        let stale = url(&a);
         apply(&b, &stale, None);
         let remotes = RemoteStore::from(&b);
         assert_eq!(remotes.clear_transient().unwrap(), 1);
