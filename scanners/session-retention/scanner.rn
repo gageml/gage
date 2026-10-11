@@ -1,7 +1,7 @@
 use gage::{Fail, Files, attach, scan, write_issue};
 
 pub const SCANNER = #{
-    name: "session-retention-2",
+    name: "session-retention",
     description: "Unset session retention policy",
     groups: ["default"],
     tasks: #{

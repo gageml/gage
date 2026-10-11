@@ -15,7 +15,7 @@ use gage::tools::Query;
 use gage::{AgentRunner, Progress, Template, call_agent};
 
 pub const SCANNER = #{
-    name: "eval-annotation-2",
+    name: "eval-annotation",
     description: "Annotate sessions with open codes for error analysis",
     hidden: true,
     groups: ["eval"],

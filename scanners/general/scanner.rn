@@ -15,7 +15,7 @@ use gage::{
 };
 
 pub const SCANNER = #{
-    name: "general-2",
+    name: "general",
     description: "General findings",
     groups: ["default"],
     tasks: #{
