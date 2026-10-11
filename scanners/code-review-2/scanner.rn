@@ -78,15 +78,22 @@ const STACK_FILES = [
 
 pub async fn attach_project_files() {
     for (dir, sessions) in sessions_by_project().await {
-        attach(Files::include(RULE_FILES).root(dir))
-            .name("project-rule-files")
-            .targets(sessions)
-            .await?;
-        attach(Files::include(STACK_FILES).root(dir))
-            .name("project-stack-files")
-            .targets(sessions)
-            .await?;
+        match attach_project(dir, sessions).await {
+            Ok(()) => {}
+            Err(e) => log::warn!("skip project {dir}: {e:?}"),
+        }
     }
+}
+
+async fn attach_project(dir, sessions) {
+    attach(Files::include(RULE_FILES).root(dir))
+        .name("project-rule-files")
+        .targets(sessions)
+        .await?;
+    attach(Files::include(STACK_FILES).root(dir))
+        .name("project-stack-files")
+        .targets(sessions)
+        .await?;
 }
 
 async fn sessions_by_project() {
