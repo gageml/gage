@@ -1,21 +1,23 @@
-use gage::call_agent;
+use gage::{Event, call_agent};
 
 pub const SCANNER = #{
     name: "agent-loop",
-    description: "Demonstrate non-interactive agent loop",
-    tasks: #{ agent_loop: #{} },
+    description: "Show agent event loop",
+    tasks: #{ main: #{} },
 };
 
-/// Prints agent loop events
-pub async fn agent_loop() {
-    let agent = call_agent("I need this done ASAP").model("medium").await?;
-    while agent.running() {
-        match agent.poll().await? {
-            event => {
-                println!("## agent-loop # {event:?}");
+pub async fn main() {
+    let a = call_agent("Say 'red'").model("small").await?;
+    loop {
+        let event = a.poll().await?;
+        println!("{event:?}");
+        match event {
+            Event::Assistant(text) if text.to_lowercase().contains("red") => {
+                a.send("Now say 'blue'").await?
             }
+            Event::Assistant(_) => a.stop().await?,
+            Event::Stop(_) => break,
+            _ => {}
         }
     }
-    let out = agent.result();
-    println!("## agent-loop # {out:?}");
 }
