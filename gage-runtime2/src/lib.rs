@@ -36,6 +36,7 @@
 mod agent;
 mod attach;
 mod attachment;
+mod compress;
 mod fail;
 mod io;
 mod issue;
@@ -185,9 +186,10 @@ impl OutputSink {
 /// `gage::carry_forward_notes_named`,
 /// `gage::Mark`, `gage::watermark`, `gage::Template`, `gage::Progress`,
 /// `gage::call_agent` and the values it returns, `gage::AgentRunner`,
-/// `gage::Fail`, `gage::Ignore`,
-/// and the include macros from `gage-runtime`. Every file-reading facility
-/// installed here is enumerated by [`source::source_files`].
+/// `gage::Fail`, `gage::Ignore`, `session.compress(..)`, and the
+/// `stats` and `json` modules and the include macros from
+/// `gage-runtime`. Every file-reading facility installed here is
+/// enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
     let mut context = Context::with_config(false)?;
     context.install(io::module()?)?;
@@ -199,6 +201,7 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(attach::types_module()?)?;
     context.install(fail::types_module()?)?;
     context.install(query::types_module()?)?;
+    context.install(compress::types_module()?)?;
     context.install(target::types_module()?)?;
     context.install(note::module()?)?;
     context.install(note::types_module()?)?;
@@ -211,6 +214,8 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(agent::module()?)?;
     context.install(tool::module()?)?;
     context.install(tool::tools_module()?)?;
+    context.install(gage_runtime::stats_module()?)?;
+    context.install(gage_runtime::json_module()?)?;
     context.install(gage_runtime::macros_module()?)?;
     Ok(context)
 }

@@ -298,7 +298,7 @@ fn where_clause(clauses: &[String]) -> String {
 
 /// Run `sql` on the scan's query context. The SQL is the runtime's,
 /// so a failure is a VM error.
-async fn run(
+pub(crate) async fn run(
     sql: &str,
     params: Vec<ScalarValue>,
 ) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>, VmError> {

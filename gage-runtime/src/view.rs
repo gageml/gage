@@ -30,6 +30,7 @@
 use std::collections::BTreeMap;
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ScalarValue;
 use rune::runtime::{Protocol, Ref, Value};
 use rune::{Any, ContextError, Module};
@@ -90,11 +91,24 @@ fn compress(session: Ref<Session>, budget: Value, rules: Value) -> SessionCompre
 }
 
 async fn do_session_compress(q: SessionCompress) -> super::Result<String> {
-    let budget = parse_budget(&q.budget)?;
-    let rules = parse_rules(&q.rules)?;
-    let mut rows = fetch_rows(&q.session_id, q.lines).await?;
+    let rows = fetch_rows(&q.session_id, q.lines).await?;
+    compress_rows(&q.session_id, rows, &q.budget, &q.rules)
+}
+
+/// Render `rows` as a compressed session: the `budget` and `rules`
+/// values as a scanner passes them, parsed here, with tool results
+/// linked to their calls before the render. The rows are one
+/// session's messages in line order.
+pub fn compress_rows(
+    session_id: &str,
+    mut rows: Vec<MessageRow>,
+    budget: &Value,
+    rules: &Value,
+) -> super::Result<String> {
+    let budget = parse_budget(budget)?;
+    let rules = parse_rules(rules)?;
     link_tool_calls(&mut rows);
-    build_compressed(&q.session_id, &rows, budget, &rules)
+    build_compressed(session_id, &rows, budget, &rules)
 }
 
 enum Budget {
@@ -679,7 +693,7 @@ fn keep_spans(text: &[char], alloc: usize, parts: &[Part]) -> Vec<(usize, usize)
     merged
 }
 
-pub(crate) struct MessageRow {
+pub struct MessageRow {
     pub line: u64,
     pub type_: String,
     pub subtype: Option<String>,
@@ -773,9 +787,13 @@ async fn fetch_rows(session_id: &str, lines: Option<(u64, u64)>) -> super::Resul
         .with_param_values(params)
         .map_err(|e| Error::Db(e.to_string()))?;
     let batches = df.collect().await.map_err(|e| Error::Db(e.to_string()))?;
+    Ok(rows_from_batches(&batches))
+}
 
+/// The rows of a `SELECT * FROM message` result, in batch order.
+pub fn rows_from_batches(batches: &[RecordBatch]) -> Vec<MessageRow> {
     let mut rows = Vec::new();
-    for batch in &batches {
+    for batch in batches {
         if batch.num_rows() == 0 {
             continue;
         }
@@ -801,7 +819,7 @@ async fn fetch_rows(session_id: &str, lines: Option<(u64, u64)>) -> super::Resul
             });
         }
     }
-    Ok(rows)
+    rows
 }
 
 fn opt_str(arr: &StringArray, i: usize) -> Option<String> {

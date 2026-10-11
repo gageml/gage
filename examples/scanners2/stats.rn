@@ -1,0 +1,50 @@
+use gage::scan;
+
+pub const SCANNER = #{
+    name: "stats",
+    description: "Stats API",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let message_counts = [];
+    for s in scan().sessions().await {
+        message_counts.push(s.messages().await.len());
+    }
+    let sessions = stats::count(message_counts);
+    let total = stats::sum(message_counts).to::<i64>();
+    let min = stats::min(message_counts)
+        .map(|v| v.to::<i64>())
+        .unwrap_or("none");
+    let max = stats::max(message_counts)
+        .map(|v| v.to::<i64>())
+        .unwrap_or("none");
+    let mean = stats::mean(message_counts)
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or("none");
+    let median = stats::median(message_counts)
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or("none");
+    let stddev = stats::stddev(message_counts)
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or("none");
+    let sample_stddev = stats::sample_stddev(message_counts)
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or("none");
+    let p90 = stats::percentile(message_counts, 90.0)
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or("none");
+
+    print!(
+        "session count:                            {sessions}\n\
+         message count total:                      {total}\n\
+         message count min:                        {min}\n\
+         message count max:                        {max}\n\
+         message count mean:                       {mean}\n\
+         message count median:                     {median}\n\
+         message count standard deviation:         {stddev}\n\
+         message count sample standard deviation:  {sample_stddev}\n\
+         message count p90:                        {p90}\n\
+         "
+    );
+}

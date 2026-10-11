@@ -1,0 +1,52 @@
+use gage::scan;
+
+pub const SCANNER = #{
+    name: "session-compress",
+    description: "Compress a session",
+    tasks: #{ whole: #{}, range: #{} },
+};
+
+const RULES = #{
+    "user.text": #{ min: 200, max: 400, weight: 5 },
+    "assistant.text": #{ min: 120, max: 200, weight: 3 },
+    "assistant.thinking": #{
+        min: 100,
+        max: 160,
+        weight: 2,
+        priority: ["start", "end"],
+    },
+    "assistant.tool_use": #{ min: 120, max: 160, weight: 2 },
+    "user.tool_result[error]": #{ min: 300, max: 400, weight: 6 },
+    "user.tool_result": #{ header: true },
+};
+
+const BUDGET = 2000;
+
+pub async fn whole() {
+    for s in scan().sessions().await {
+        let text = match s.compress(BUDGET, RULES).await {
+            Ok(text) => {
+                println!("== {} ({} lines)", s.id, s.line_count);
+                println(text);
+            }
+            Err(e) => log::warn!("{e:?}"),
+        };
+    }
+}
+
+pub async fn range() {
+    for s in scan().sessions().await {
+        let end = if s.line_count < 20 {
+            s.line_count
+        } else {
+            20
+        };
+        match s.compress("unlimited", RULES).lines(1, end).await {
+            Ok(text) => {
+                println!("== {} lines 1-{}", s.id, end);
+                println(text);
+            }
+            Err(e) => log::warn!("{e:?}"),
+        }
+    }
+}

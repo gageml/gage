@@ -1,0 +1,14 @@
+pub const SCANNER = #{
+    name: "json",
+    description: "JSON API",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let s = json::to_string(#{ name: "Joe", colleagues: ["Mike"] }).unwrap();
+    println(s);
+    let data = json::parse(s).unwrap();
+    println!("{data:?}");
+    data.colleagues.push("Robert");
+    println(json::to_string_pretty(data).unwrap());
+}
