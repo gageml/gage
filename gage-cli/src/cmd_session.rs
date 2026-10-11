@@ -19,7 +19,7 @@ use gage_query2::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source};
 use gage_store::{DatasetStore, SessionStore, Store};
-use gage_tui::session::{Backend, PICKER_LIMIT};
+use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
 use indicatif::ProgressBar;
 use tabled::{
@@ -1211,12 +1211,12 @@ async fn view_native(
 /// behind a progress bar when any of them need reading.
 fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
     let mut bar: Option<ProgressBar> = None;
-    source.warm_summaries(PICKER_LIMIT, &mut |done, total| {
+    source.warm_summaries(picker_page_size(), &mut |done, total| {
         if total == 0 {
             return;
         }
         let bar = bar.get_or_insert_with(|| {
-            let bar = style::progress_bar(total as u64);
+            let bar = style::progress_bar_plain(total as u64);
             bar.set_message("Reading sessions");
             bar
         });

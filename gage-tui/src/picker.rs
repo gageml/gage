@@ -4,7 +4,11 @@
 //! host-defined columns; the picker resolves each column's display
 //! width (fixed, content-fit, or fill) and ellipsizes overlong cells.
 //! Hosts supply the columns and row cells and act on the returned
-//! action. Used by the session, scan, and test-run open dialogs.
+//! action. A host that pages its rows gets a `LoadMore` action as the
+//! selection nears the loaded end and appends the next page. Used by
+//! the session, scan, and test-run open dialogs.
+
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
@@ -15,6 +19,7 @@ use ratatui::widgets::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::dialog;
 use crate::item_table::scrollbar;
 use crate::styles;
 use crate::text::ellipsize;
@@ -26,7 +31,23 @@ pub(crate) struct Picker {
     table: TableState,
     /// Visible rows, recorded at draw for paging keys
     viewport: u16,
+    /// Set when the host pages the rows
+    paging: Option<Paging>,
 }
+
+struct Paging {
+    /// Rows beyond the loaded ones exist
+    has_more: bool,
+    /// When the outstanding `LoadMore` went out; None once its page
+    /// is appended
+    loading_since: Option<Instant>,
+    /// Shown in a dialog over the list while a page loads
+    loading_message: &'static str,
+}
+
+/// How long a page load runs before its dialog shows, so a fast page
+/// does not flash one
+const LOADING_DIALOG_DELAY: Duration = Duration::from_millis(100);
 
 pub(crate) struct PickColumn {
     heading: &'static str,
@@ -90,6 +111,8 @@ pub(crate) enum PickerAction {
     None,
     Close,
     Open(String),
+    /// The host fetches the next page and appends it
+    LoadMore,
 }
 
 const COLUMN_SPACING: u16 = 2;
@@ -113,7 +136,40 @@ impl Picker {
             items,
             table,
             viewport: 0,
+            paging: None,
         }
+    }
+
+    /// Page the rows: `has_more` says whether rows beyond `items`
+    /// exist. The picker asks for them with [`PickerAction::LoadMore`]
+    /// once the selection comes within a screen of the loaded end, and
+    /// shows `loading_message` in a dialog once the load has run for
+    /// a moment, until the page is appended.
+    pub fn with_paging(mut self, has_more: bool, loading_message: &'static str) -> Self {
+        self.paging = Some(Paging {
+            has_more,
+            loading_since: None,
+            loading_message,
+        });
+        self
+    }
+
+    /// Append the page a `LoadMore` asked for. `has_more` says whether
+    /// another page follows.
+    pub fn append(&mut self, items: Vec<PickItem>, has_more: bool) {
+        if self.table.selected().is_none() && !items.is_empty() {
+            self.table.select(Some(0));
+        }
+        self.items.extend(items);
+        if let Some(paging) = &mut self.paging {
+            paging.has_more = has_more;
+            paging.loading_since = None;
+        }
+    }
+
+    /// Rows loaded so far; the offset of the next page
+    pub fn loaded(&self) -> usize {
+        self.items.len()
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> PickerAction {
@@ -126,30 +182,47 @@ impl Picker {
             },
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Right => {
                 self.select_by(1);
-                PickerAction::None
+                self.after_move()
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Left => {
                 self.select_by(-1);
-                PickerAction::None
+                self.after_move()
             }
             KeyCode::PageDown => {
                 self.select_by(page);
-                PickerAction::None
+                self.after_move()
             }
             KeyCode::PageUp => {
                 self.select_by(-page);
-                PickerAction::None
+                self.after_move()
             }
             KeyCode::Char('g') | KeyCode::Home => {
                 self.table.select((!self.items.is_empty()).then_some(0));
-                PickerAction::None
+                self.after_move()
             }
             KeyCode::Char('G') | KeyCode::End => {
                 self.table.select(self.items.len().checked_sub(1));
-                PickerAction::None
+                self.after_move()
             }
             _ => PickerAction::None,
         }
+    }
+
+    /// Ask for the next page when fewer than one screen of loaded rows
+    /// remains below the selection.
+    fn after_move(&mut self) -> PickerAction {
+        let Some(paging) = &mut self.paging else {
+            return PickerAction::None;
+        };
+        if !paging.has_more || paging.loading_since.is_some() {
+            return PickerAction::None;
+        }
+        let selected = self.table.selected().unwrap_or(0);
+        if selected + usize::from(self.viewport) < self.items.len() {
+            return PickerAction::None;
+        }
+        paging.loading_since = Some(Instant::now());
+        PickerAction::LoadMore
     }
 
     fn select_by(&mut self, delta: isize) {
@@ -244,6 +317,13 @@ impl Picker {
         )))
         .alignment(Alignment::Center);
         frame.render_widget(hint, hint_area);
+
+        if let Some(paging) = &self.paging
+            && let Some(since) = paging.loading_since
+            && since.elapsed() >= LOADING_DIALOG_DELAY
+        {
+            dialog::draw_message(frame, paging.loading_message, "");
+        }
     }
 
     /// Column display widths for the given table width. Fixed and fit

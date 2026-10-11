@@ -21,16 +21,19 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::is_system;
 use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store, url};
+use ratatui::crossterm::terminal;
 use serde_json::Value;
 
 use crate::doc::{Document, Entry, Note, Session};
 
+#[derive(Clone)]
 pub struct Backend {
     ctx: SessionContext,
     kind: Kind,
-    registry: DriverRegistry,
+    registry: Arc<DriverRegistry>,
 }
 
+#[derive(Clone)]
 enum Kind {
     /// A driver source: sessions are native and carry no notes
     Native {
@@ -45,8 +48,27 @@ enum Kind {
 /// Width the picker gives a project name
 const PROJECT_WIDTH: usize = 24;
 
-/// Sessions the session-open picker lists
-pub const PICKER_LIMIT: usize = 200;
+/// Fewest sessions a picker page holds
+const PICKER_PAGE_MIN: usize = 50;
+
+/// Sessions per page of the session-open picker for the current
+/// terminal. The floor applies when the terminal size is unavailable,
+/// as when stdout is not a terminal.
+pub fn picker_page_size() -> usize {
+    match terminal::size() {
+        Ok((_cols, rows)) => page_size_for_rows(rows),
+        Err(_) => PICKER_PAGE_MIN,
+    }
+}
+
+/// Two screens of picker rows, never fewer than the floor. The picker
+/// frame takes ten of the terminal's lines: a two-line margin above
+/// and below, two borders, one line of padding, the header, a gap,
+/// and the key hint.
+fn page_size_for_rows(rows: u16) -> usize {
+    let visible = usize::from(rows.saturating_sub(10));
+    (visible * 2).max(PICKER_PAGE_MIN)
+}
 
 impl Backend {
     /// Over the driver source `spec` names. Empty names the default
@@ -62,7 +84,7 @@ impl Backend {
                 spec: spec.to_string(),
                 driver,
             },
-            registry,
+            registry: Arc::new(registry),
         })
     }
 
@@ -76,7 +98,7 @@ impl Backend {
         Backend {
             ctx: ContextBuilder::new(Some(Arc::clone(&store))).build().await,
             kind: Kind::Stored { store },
-            registry: DriverRegistry::builtin(),
+            registry: Arc::new(DriverRegistry::builtin()),
         }
     }
 
@@ -205,15 +227,20 @@ impl Backend {
         Ok(notes)
     }
 
-    /// Recent sessions, newest first, for the session-open picker.
-    pub async fn list_recent(&self, limit: usize) -> Result<Vec<SessionListItem>, Box<dyn Error>> {
+    /// One page of recent sessions, newest first, for the session-open
+    /// picker: `limit` rows starting `offset` rows in.
+    pub async fn list_recent(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<SessionListItem>, Box<dyn Error>> {
         let (time_col, driver_col) = match self.kind {
             Kind::Native { .. } => ("mtime", "'' AS driver"),
             Kind::Stored { .. } => ("modified", "driver"),
         };
         let sql = format!(
             "SELECT id, id_display, project, title, {time_col}, {driver_col} \
-             FROM {} ORDER BY {time_col} DESC LIMIT {limit}",
+             FROM {} ORDER BY {time_col} DESC LIMIT {limit} OFFSET {offset}",
             self.session_rel()
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
@@ -509,6 +536,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn page_size_is_two_screens_with_a_floor() {
+        assert_eq!(page_size_for_rows(24), 50);
+        assert_eq!(page_size_for_rows(35), 50);
+        assert_eq!(page_size_for_rows(36), 52);
+        assert_eq!(page_size_for_rows(60), 100);
+        assert_eq!(page_size_for_rows(0), 50);
+    }
+
+    #[test]
     fn target_lines_reads_the_first_range() {
         assert_eq!(target_lines("session:abc").unwrap(), (None, None));
         assert_eq!(target_lines("session:abc#12").unwrap(), (Some(12), None));
@@ -568,7 +604,7 @@ pub(crate) mod tests {
         assert_eq!(doc.notes.len(), 1);
         assert_eq!(doc.notes[0].text(), "revised");
 
-        let recent = backend.list_recent(10).await.unwrap();
+        let recent = backend.list_recent(10, 0).await.unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, f.session_id);
     }
@@ -593,7 +629,7 @@ pub(crate) mod tests {
                 .is_err()
         );
 
-        let recent = backend.list_recent(10).await.unwrap();
+        let recent = backend.list_recent(10, 0).await.unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, f.native_id);
         // The driver shows a project it cannot resolve by its stored name

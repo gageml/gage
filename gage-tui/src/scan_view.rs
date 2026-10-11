@@ -636,7 +636,7 @@ fn standalone_scan_pick(
             && key.kind == KeyEventKind::Press
         {
             match picker.handle_key(key.code) {
-                PickerAction::None => {}
+                PickerAction::None | PickerAction::LoadMore => {}
                 PickerAction::Close => return Ok(None),
                 PickerAction::Open(id) => return host.load(&id).map(Some),
             }
@@ -1279,7 +1279,7 @@ impl ViewState {
             _ => return,
         };
         match action {
-            PickerAction::None => {}
+            PickerAction::None | PickerAction::LoadMore => {}
             PickerAction::Close => self.dialog = Dialog::None,
             PickerAction::Open(id) => {
                 self.dialog = Dialog::None;

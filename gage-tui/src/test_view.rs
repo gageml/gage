@@ -147,7 +147,7 @@ fn pick_over_shell(
             && key.kind == KeyEventKind::Press
         {
             match picker.handle_key(key.code) {
-                PickerAction::None => {}
+                PickerAction::None | PickerAction::LoadMore => {}
                 PickerAction::Close => return Ok(None),
                 PickerAction::Open(id) => return Ok(Some(id)),
             }
@@ -518,7 +518,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent) -> Option<ExitAction> {
     match &mut state.dialog {
         Dialog::OpenRun(picker) => {
             match picker.handle_key(key.code) {
-                PickerAction::None => {}
+                PickerAction::None | PickerAction::LoadMore => {}
                 PickerAction::Close => state.dialog = Dialog::None,
                 PickerAction::Open(id) => {
                     state.dialog = Dialog::None;

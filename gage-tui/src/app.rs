@@ -9,6 +9,8 @@
 
 use std::collections::HashSet;
 use std::io;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gage_store::NoteValue;
 use ratatui::DefaultTerminal;
@@ -50,8 +52,10 @@ pub fn run(
     };
     let mut state = AppState::new(doc, options, DocSource::Backend, backend.supports_notes());
     loop {
+        poll_pages(&mut state)?;
         terminal.draw(|frame| draw(frame, &mut state))?;
-        if let Event::Key(key) = event::read()?
+        if event::poll(EVENT_POLL)?
+            && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
             && handle_key(&mut state, key, backend)? == KeyOutcome::Close
         {
@@ -66,22 +70,101 @@ fn standalone_pick(
     terminal: &mut DefaultTerminal,
     backend: &Backend,
 ) -> io::Result<Option<Document>> {
-    let mut picker = session_picker(backend, None)?;
+    let (mut picker, loader) = open_session_picker(backend, None)?;
     loop {
+        loader.poll(&mut picker)?;
         terminal.draw(|frame| {
             draw_empty_shell(frame);
             picker.draw(frame);
         })?;
-        if let Event::Key(key) = event::read()?
+        if event::poll(EVENT_POLL)?
+            && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
             match picker.handle_key(key.code) {
                 PickerAction::None => {}
                 PickerAction::Close => return Ok(None),
                 PickerAction::Open(id) => return load_doc_blocking(&id, backend).map(Some),
+                PickerAction::LoadMore => loader.start(picker.loaded()),
             }
         }
     }
+}
+
+/// How long an event loop waits for a key before it checks for a
+/// landed picker page
+const EVENT_POLL: Duration = Duration::from_millis(50);
+
+/// The session-open picker with its first page loaded, and the loader
+/// that fetches the pages after it.
+fn open_session_picker(
+    backend: &Backend,
+    current: Option<&str>,
+) -> io::Result<(Picker, PageLoader)> {
+    let page_size = session::picker_page_size();
+    let items = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(backend.list_recent(page_size, 0))
+    })
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    let has_more = items.len() == page_size;
+    let picker = session_picker(backend, pick_items(backend, items), current)
+        .with_paging(has_more, "Reading sessions...");
+    Ok((picker, PageLoader::new(backend.clone(), page_size)))
+}
+
+/// Fetches picker pages on the runtime. The event loop polls between
+/// key events and appends a page once it lands.
+pub(crate) struct PageLoader {
+    backend: Backend,
+    page_size: usize,
+    /// Where the page in flight lands
+    slot: Arc<Mutex<Option<io::Result<Vec<PickItem>>>>>,
+}
+
+impl PageLoader {
+    fn new(backend: Backend, page_size: usize) -> Self {
+        Self {
+            backend,
+            page_size,
+            slot: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Fetch the page starting at `offset`.
+    fn start(&self, offset: usize) {
+        let backend = self.backend.clone();
+        let slot = Arc::clone(&self.slot);
+        let page_size = self.page_size;
+        tokio::spawn(async move {
+            let page = backend
+                .list_recent(page_size, offset)
+                .await
+                .map(|items| pick_items(&backend, items))
+                .map_err(|e| io::Error::other(e.to_string()));
+            *slot.lock().unwrap() = Some(page);
+        });
+    }
+
+    /// Append the landed page, if any, to `picker`.
+    fn poll(&self, picker: &mut Picker) -> io::Result<()> {
+        let landed = self.slot.lock().unwrap().take();
+        if let Some(page) = landed {
+            let items = page?;
+            let has_more = items.len() == self.page_size;
+            picker.append(items, has_more);
+        }
+        Ok(())
+    }
+}
+
+/// Append any landed picker page while the open dialog is up. Called
+/// by every loop that drives the view, so a page lands without a key
+/// press in the view's own loop and on the next key in a host's.
+pub(crate) fn poll_pages(state: &mut AppState) -> io::Result<()> {
+    if let Dialog::OpenSession { picker, loader } = &mut state.dialog {
+        loader.poll(picker)?;
+    }
+    Ok(())
 }
 
 /// The app frame with no session open: empty panels behind the
@@ -118,18 +201,30 @@ fn draw_empty_shell(frame: &mut Frame) {
     );
 }
 
-/// Build the session-open picker from the backend's recent sessions.
-fn session_picker(backend: &Backend, current: Option<&str>) -> io::Result<Picker> {
-    let items = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(backend.list_recent(session::PICKER_LIMIT))
-    })
-    .map_err(|e| io::Error::other(e.to_string()))?;
-    let (id_heading, id_style) = if backend.is_native() {
-        ("Native Id", styles::Text::native_id())
+/// The session-open picker over `items`, its first page.
+fn session_picker(backend: &Backend, items: Vec<PickItem>, current: Option<&str>) -> Picker {
+    let id_heading = if backend.is_native() {
+        "Native Id"
     } else {
-        ("Id", styles::Text::id())
+        "Id"
     };
-    let items: Vec<PickItem> = items
+    let columns = vec![
+        PickColumn::new(id_heading, 9),
+        PickColumn::fit("Project", 24),
+        PickColumn::fill("Title"),
+        PickColumn::right("Modified", 8),
+    ];
+    Picker::new("Open session", columns, items, current)
+}
+
+/// Picker rows for one page of sessions.
+fn pick_items(backend: &Backend, items: Vec<session::SessionListItem>) -> Vec<PickItem> {
+    let id_style = if backend.is_native() {
+        styles::Text::native_id()
+    } else {
+        styles::Text::id()
+    };
+    items
         .into_iter()
         .map(|item| PickItem {
             cells: vec![
@@ -140,14 +235,7 @@ fn session_picker(backend: &Backend, current: Option<&str>) -> io::Result<Picker
             ],
             id: item.id,
         })
-        .collect();
-    let columns = vec![
-        PickColumn::new(id_heading, 9),
-        PickColumn::fit("Project", 24),
-        PickColumn::fill("Title"),
-        PickColumn::right("Modified", 8),
-    ];
-    Ok(Picker::new("Open session", columns, items, current))
+        .collect()
 }
 
 /// Load a session document from the sync event loop.
@@ -176,6 +264,7 @@ pub(crate) fn handle_key(
     key: KeyEvent,
     backend: &Backend,
 ) -> io::Result<KeyOutcome> {
+    poll_pages(state)?;
     match &mut state.dialog {
         Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
             handle_note_dialog(state, key, backend)?;
@@ -189,7 +278,7 @@ pub(crate) fn handle_key(
             handle_confirm_delete(state, key.code, backend)?;
             return Ok(KeyOutcome::Consumed);
         }
-        Dialog::OpenSession(picker) => {
+        Dialog::OpenSession { picker, loader } => {
             match picker.handle_key(key.code) {
                 PickerAction::None => {}
                 PickerAction::Close => state.dialog = Dialog::None,
@@ -200,6 +289,7 @@ pub(crate) fn handle_key(
                         state.replace_doc(doc);
                     }
                 }
+                PickerAction::LoadMore => loader.start(picker.loaded()),
             }
             return Ok(KeyOutcome::Consumed);
         }
@@ -329,8 +419,8 @@ pub(crate) fn handle_key(
             KeyOutcome::Consumed
         }
         KeyCode::Char('o') => {
-            state.dialog =
-                Dialog::OpenSession(session_picker(backend, Some(&state.doc.session.id))?);
+            let (picker, loader) = open_session_picker(backend, Some(&state.doc.session.id))?;
+            state.dialog = Dialog::OpenSession { picker, loader };
             KeyOutcome::Consumed
         }
         KeyCode::Char('e') if state.notes_writable => {
@@ -413,8 +503,11 @@ enum Dialog {
     ConfirmDelete {
         note_id: String,
     },
-    /// Session-open picker (`o`)
-    OpenSession(Picker),
+    /// Session-open picker (`o`) and the loader for its later pages
+    OpenSession {
+        picker: Picker,
+        loader: PageLoader,
+    },
     /// View-options toggles (`v`)
     Options,
     /// Notice that `n` has nothing to write to over a native source
@@ -1517,7 +1610,7 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, detail: bool, turns: bool
         Dialog::ConfirmDelete { .. } => {
             draw_confirm(frame, "Delete this note? This cannot be undone.")
         }
-        Dialog::OpenSession(picker) => picker.draw(frame),
+        Dialog::OpenSession { picker, .. } => picker.draw(frame),
     }
 }
 

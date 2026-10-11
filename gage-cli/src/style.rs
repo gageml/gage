@@ -24,9 +24,19 @@ pub const PROGRESS_CHARS: &str = "▬▬";
 /// An ephemeral terminal progress bar over `len` steps. The caller
 /// sets the message and clears the bar when the work ends.
 pub fn progress_bar(len: u64) -> ProgressBar {
+    bar_with_template(len, &format!("{{spinner:.magenta}} {PROGRESS_TEMPLATE}"))
+}
+
+/// The same bar with only the message and the bar: no elapsed time
+/// and no count, for a wait too short to measure.
+pub fn progress_bar_plain(len: u64) -> ProgressBar {
+    bar_with_template(len, "{spinner:.magenta} {msg} {bar:30.white/bright.black}")
+}
+
+fn bar_with_template(len: u64, template: &str) -> ProgressBar {
     let bar = ProgressBar::new(len);
     bar.set_style(
-        ProgressStyle::with_template(&format!("{{spinner:.magenta}} {PROGRESS_TEMPLATE}"))
+        ProgressStyle::with_template(template)
             .unwrap()
             .progress_chars(PROGRESS_CHARS),
     );

@@ -187,7 +187,9 @@ fn draw_chrome(
 ) -> Rect {
     let frame_area = frame.area();
     let width = (text_width.max(hint.width() as u16) + 6).min(frame_area.width.saturating_sub(2));
-    let height = (content_height + 5).min(frame_area.height.saturating_sub(2));
+    // An empty hint takes no row: the border closes the dialog
+    let hint_rows = u16::from(!hint.is_empty());
+    let height = (content_height + 4 + hint_rows).min(frame_area.height.saturating_sub(2));
     let area = Rect {
         x: frame_area.x + (frame_area.width.saturating_sub(width)) / 2,
         y: frame_area.y + (frame_area.height.saturating_sub(height)) / 2,
@@ -199,7 +201,7 @@ fn draw_chrome(
     // short so the hint sits on the surface below it.
     frame.render_widget(Block::new().style(styles::Dialog::surface()), area);
     let [border_area, hint_row] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(hint_rows)]).areas(area);
     let mut block = Block::bordered();
     if let Some(title) = title {
         block = block.title(Span::styled(title.to_string(), styles::Dialog::dim()));
@@ -212,9 +214,55 @@ fn draw_chrome(
         Constraint::Length(1),
     ])
     .areas(inner);
-    frame.render_widget(
-        Paragraph::new(Span::styled(hint.to_string(), styles::Dialog::dim())).centered(),
-        hint_row,
-    );
+    if hint_rows > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(hint.to_string(), styles::Dialog::dim())).centered(),
+            hint_row,
+        );
+    }
     content
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    /// Rows of the screen that belong to the dialog surface, top to
+    /// bottom, trimmed of the blank screen around them
+    fn dialog_rows(hint: &str) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| draw_message(frame, "Reading sessions...", hint))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn message_without_a_hint_ends_at_its_border() {
+        let rows = dialog_rows("");
+        assert_eq!(rows.len(), 5, "{rows:#?}");
+        assert!(rows[2].contains("Reading sessions..."));
+        assert!(rows[4].starts_with('└'), "{rows:#?}");
+    }
+
+    #[test]
+    fn message_with_a_hint_keeps_the_hint_row() {
+        let rows = dialog_rows("Enter dismiss");
+        assert_eq!(rows.len(), 6, "{rows:#?}");
+        assert!(rows[4].starts_with('└'), "{rows:#?}");
+        assert_eq!(rows[5], "Enter dismiss");
+    }
 }
