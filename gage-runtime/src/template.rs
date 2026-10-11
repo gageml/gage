@@ -1,110 +1,105 @@
+//! `Template`: a Jinja template compiled once and rendered from Rune
+//! objects.
+//!
+//! `Template::new(source)` compiles the source and reports a syntax
+//! error as `gage::Error::Template`. `render(ctx)` renders the
+//! compiled template with a Rune object as its variables; a render
+//! error (an unknown filter or function, an operation on incompatible
+//! values) is the same error type. Undefined variables render empty
+//! and test false. Neither function performs I/O, so neither is
+//! async. The environment is empty: no built-in filters, tests, or
+//! globals. Context serialization is [`crate::ser`]'s.
+
+use crate::error::Error;
+use crate::ser::SerObject;
 use minijinja::Environment;
-use rune::runtime::{Object, Ref, Value};
+use rune::runtime::{Object, Ref};
 use rune::{Any, ContextError, Module};
-use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
-use super::error::Error;
-use super::query::{Entry, Message};
-
-pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function("render_template", |template: String, context: Object| {
-        do_render(&template, context)
-    })
-    .build()?;
-
+pub(crate) fn module() -> Result<Module, ContextError> {
+    let mut m = Module::with_crate("gage")?;
     m.ty::<Template>()?;
     m.function_meta(Template::new)?;
     m.function_meta(render)?;
-    Ok(())
+    Ok(m)
 }
 
-fn do_render(template: &str, context: Object) -> super::Result<String> {
-    let env = Environment::empty();
-    let rendered = env.render_str(template, SerObject(&context))?;
-    Ok(rendered)
-}
+const NAME: &str = "template";
 
-/// Pre-validated Jinja-style template source. `new` parses the source
-/// to surface syntax errors early; `render` substitutes a Rune object
-/// context using minijinja.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct Template {
+    /// Holds the one compiled template under `NAME`
     #[rune(skip)]
-    source: String,
+    env: Environment<'static>,
 }
 
 impl Template {
     #[rune::function(path = Self::new)]
-    async fn new(source: String) -> super::Result<Self> {
-        let env = Environment::empty();
-        env.template_from_str(&source)?;
-        Ok(Template { source })
+    fn new(source: String) -> Result<Self, Error> {
+        Self::compile(source)
+    }
+
+    fn compile(source: String) -> Result<Self, Error> {
+        let mut env = Environment::empty();
+        env.add_template_owned(NAME, source)?;
+        Ok(Template { env })
+    }
+
+    fn render(&self, context: &Object) -> Result<String, Error> {
+        let template = self
+            .env
+            .get_template(NAME)
+            .expect("the template is added at construction");
+        Ok(template.render(SerObject(context))?)
     }
 }
 
 #[rune::function(instance)]
-async fn render(this: Ref<Template>, context: Object) -> super::Result<String> {
-    do_render(&this.source, context)
+fn render(this: Ref<Template>, context: Object) -> Result<String, Error> {
+    this.render(&context)
 }
 
-impl From<minijinja::Error> for Error {
-    fn from(e: minijinja::Error) -> Self {
-        Error::Template(e.to_string())
+#[cfg(test)]
+mod tests {
+    use rune::runtime::Value;
+
+    use super::*;
+
+    fn object(pairs: &[(&str, Value)]) -> Object {
+        let mut obj = Object::new();
+        for (k, v) in pairs {
+            obj.insert(rune::alloc::String::try_from(*k).unwrap(), v.clone())
+                .unwrap();
+        }
+        obj
     }
-}
 
-/// A Rune object as a serde map, for template contexts.
-pub struct SerObject<'a>(pub &'a Object);
-
-impl Serialize for SerObject<'_> {
-    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        let mut map = ser.serialize_map(Some(self.0.len()))?;
-        for (k, v) in self.0.iter() {
-            map.serialize_entry(k.as_str(), &SerValue(v))?;
-        }
-        map.end()
+    #[test]
+    fn compile_rejects_a_syntax_error() {
+        let err = Template::compile("{% if".to_string()).err().unwrap();
+        assert!(matches!(err, Error::Template(_)), "{err:?}");
     }
-}
 
-struct SerValue<'a>(&'a Value);
+    #[test]
+    fn renders_the_compiled_template_repeatedly() {
+        let t =
+            Template::compile("Hi {{ name }}{% if extra %} ({{ extra }}){% endif %}".to_string())
+                .unwrap();
+        let name = rune::to_value("Ann").unwrap();
+        let extra = rune::to_value("more").unwrap();
+        let first = t.render(&object(&[("name", name.clone())])).unwrap();
+        let second = t
+            .render(&object(&[("name", name), ("extra", extra)]))
+            .unwrap();
+        assert_eq!(first, "Hi Ann");
+        assert_eq!(second, "Hi Ann (more)");
+    }
 
-impl Serialize for SerValue<'_> {
-    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        if self.0.into_unit().is_ok() {
-            return ser.serialize_none();
-        }
-        if let Ok(s) = self.0.borrow_string_ref() {
-            return ser.serialize_str(&s);
-        }
-        if let Ok(i) = self.0.as_integer::<i64>() {
-            return ser.serialize_i64(i);
-        }
-        if let Ok(f) = self.0.as_float() {
-            return ser.serialize_f64(f);
-        }
-        if let Ok(b) = self.0.as_bool() {
-            return ser.serialize_bool(b);
-        }
-        if let Ok(msg) = self.0.borrow_ref::<Message>() {
-            return SerObject(&msg.inner).serialize(ser);
-        }
-        if let Ok(entry) = self.0.borrow_ref::<Entry>() {
-            return SerObject(&entry.inner).serialize(ser);
-        }
-        if let Ok(vec) = self.0.borrow_ref::<rune::runtime::Vec>() {
-            let mut seq = ser.serialize_seq(Some(vec.len()))?;
-            for item in vec.iter() {
-                seq.serialize_element(&SerValue(item))?;
-            }
-            return seq.end();
-        }
-        if let Ok(obj) = self.0.borrow_ref::<Object>() {
-            return SerObject(&obj).serialize(ser);
-        }
-        if let Ok(Some(inner)) = self.0.borrow_ref::<Option<Value>>().as_deref() {
-            return SerValue(inner).serialize(ser);
-        }
-        ser.serialize_none()
+    #[test]
+    fn render_reports_an_unknown_filter() {
+        let t = Template::compile("{{ name | upper }}".to_string()).unwrap();
+        let err = t.render(&object(&[])).err().unwrap();
+        assert!(matches!(err, Error::Template(_)), "{err:?}");
     }
 }

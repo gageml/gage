@@ -244,10 +244,6 @@ pub struct ScannerDef {
     /// specified; `-g --group` selects by any group name.
     pub groups: Vec<String>,
     pub tasks: BTreeMap<String, TaskDef>,
-    /// Agent defs declared via `SCANNER.agents`: fn name → description.
-    /// Each names a public function returning an un-awaited `CallAgent`
-    /// builder, runnable via `gage agent <scanner>::<fn>`.
-    pub agents: BTreeMap<String, String>,
     /// Defects in the `SCANNER` declaration, in source order. A def
     /// with problems is not fit to compile.
     pub problems: Vec<Problem>,
@@ -857,7 +853,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     let mut library = false;
     let mut groups: Vec<String> = Vec::new();
     let mut tasks_obj: Option<&ast::ExprObject> = None;
-    let mut agents_obj: Option<&ast::ExprObject> = None;
     let mut problems: Vec<Problem> = Vec::new();
 
     for (item, _) in &file.items {
@@ -903,11 +898,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
                         "SCANNER field 'attachments' is not supported; \
                          declare an attach task with `attaches`",
                     )),
-                    Some("agents") => {
-                        if let ast::Expr::Object(obj) = expr {
-                            agents_obj = Some(obj);
-                        }
-                    }
                     _ => {}
                 }
             }
@@ -925,11 +915,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
 
     problems.sort_by_key(|p| p.start);
 
-    let agents = match agents_obj {
-        Some(obj) => parse_agents(source, obj),
-        None => BTreeMap::new(),
-    };
-
     Ok(ScannerDef {
         name: scanner_name.ok_or(ParseError::MissingName)?,
         description: description.unwrap_or_default(),
@@ -938,7 +923,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         library,
         groups,
         tasks,
-        agents,
         problems,
         ast: file,
         source: source.to_string(),
@@ -989,24 +973,6 @@ impl std::error::Error for ParseScannerFileError {}
 /// quoted string but a function name is an identifier.
 fn function_name(key: &str) -> String {
     key.replace('-', "_")
-}
-
-/// Parse `SCANNER.agents`: fn name → description. Non-string values
-/// are skipped.
-fn parse_agents(source: &str, obj: &ast::ExprObject) -> BTreeMap<String, String> {
-    let mut agents = BTreeMap::new();
-    for (field, _) in &obj.assignments {
-        let Some(key) = field_key(source, &field.key) else {
-            continue;
-        };
-        let Some((_, expr)) = &field.assign else {
-            continue;
-        };
-        if let Some(description) = expr_str(source, expr) {
-            agents.insert(key, description);
-        }
-    }
-    agents
 }
 
 /// Parse `SCANNER.tasks`. A task declaring `attaches` is an attach
@@ -1629,18 +1595,6 @@ pub const SCANNER = #{
         let rendered = def.render_problems();
         assert!(rendered.contains("4 │"), "{rendered}");
         assert!(rendered.contains("duplicate task 'main'"), "{rendered}");
-    }
-
-    #[test]
-    fn parse_agents_field() {
-        let source = r#"
-pub const SCANNER = #{
-    name: "demo",
-    agents: #{ agent: "Says hello" },
-};
-"#;
-        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
-        assert_eq!(def.agents.get("agent").unwrap(), "Says hello");
     }
 
     #[test]

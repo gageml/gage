@@ -7,10 +7,6 @@
 //! instead, so diagnostics, go-to-definition, and completion match what
 //! scanners actually run against.
 //!
-//! Two runtimes exist while the schema rethink is built: `--runtime 2`
-//! (the default) serves the context `gage scan2` compiles against, and
-//! `--runtime legacy` serves the first generation's (`gage scan`).
-//!
 //! The VS Code Rune extension probes the binary with `--version` and
 //! then launches it as `gage-lsp language-server`, the stock server's
 //! subcommand; both forms are accepted.
@@ -43,28 +39,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// The context the arguments select: `--runtime 2` or `--runtime legacy`,
-/// defaulting to `2`. The stock server's `language-server` subcommand
-/// is accepted and ignored. Any other argument is an error.
+/// The context: the one scanners compile against. The stock server's
+/// `language-server` subcommand is accepted and ignored. Any other
+/// argument is an error.
 fn context_for(args: impl Iterator<Item = String>) -> Result<Context> {
-    let mut runtime = None;
-    let mut args = args.peekable();
-    while let Some(arg) = args.next() {
+    for arg in args {
         match arg.as_str() {
             "language-server" => {}
-            "--runtime" => match args.next() {
-                Some(value) => runtime = Some(value),
-                None => bail!("--runtime requires a value: 2 or legacy"),
-            },
-            other => bail!(
-                "unexpected argument {other:?}; \
-                 usage: gage-lsp [language-server] [--runtime 2|legacy]"
-            ),
+            other => bail!("unexpected argument {other:?}; usage: gage-lsp [language-server]"),
         }
     }
-    match runtime.as_deref().unwrap_or("2") {
-        "2" => Ok(gage_runtime2::context()?),
-        "legacy" => Ok(gage_scan::lsp_context()?),
-        other => bail!("unknown runtime {other:?}: expected 2 or legacy"),
-    }
+    Ok(gage_runtime::context()?)
 }

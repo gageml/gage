@@ -8,7 +8,6 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_db::note;
-use gage_db::target::NoteTarget;
 use gage_query2::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{NOTE_TYPE, NoteEdit, NoteInput, NoteStore, NoteValue, Store, url};
@@ -553,26 +552,6 @@ pub(crate) fn format_value(value: &note::NoteValue) -> String {
     }
 }
 
-/// One-line display form of a note value: bare strings unquoted,
-/// other JSON compact, flattened and truncated for table cells.
-pub(crate) fn format_value_cell(value: &note::NoteValue) -> String {
-    let raw = format_value(value);
-    let flattened: String = raw
-        .split(['\n', '\r'])
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if flattened.len() > 400 {
-        let mut end = 400;
-        while !flattened.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &flattened[..end])
-    } else {
-        flattened
-    }
-}
-
 pub fn edit(args: NoteEditArgs) {
     if args.yes && args.text.is_none() && args.name.is_none() && args.target.is_none() {
         eprintln!("gage note edit: --yes requires TEXT, --name, or --target");
@@ -728,22 +707,4 @@ pub fn delete(args: NoteDeleteArgs) {
         let plural = if deleted == 1 { "note" } else { "notes" };
         Ok(format!("Deleted {deleted} {plural}").into())
     });
-}
-
-/// Glyph-prefixed short display form of a note target: ids reduced to
-/// their 8-char short form. Shared with the scan view's notes table.
-pub(crate) fn target_label(target: &NoteTarget) -> String {
-    let (glyph, s) = match target {
-        NoteTarget::Session(t) => ("▪", t.to_uri()),
-        NoteTarget::Scan(t) => ("≡", short_uuid(&t.scan_id).to_string()),
-        NoteTarget::Project(t) => ("⊡", t.to_shortened_path()),
-    };
-    // Session uris open with a 36-char uuid, optionally followed by a
-    // line ref; keep the short id plus the suffix
-    let shortened = if s.len() >= 36 {
-        format!("{}{}", &s[..8], &s[36..])
-    } else {
-        s
-    };
-    format!("{glyph} {shortened}")
 }

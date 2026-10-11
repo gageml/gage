@@ -7,25 +7,23 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-async-trait = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
-gage-agent = { path = "../gage-agent" }
-gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
-gage-db = { path = "../gage-db" }
-gage-mcp = { path = "../gage-mcp" }
-gage-query = { path = "../gage-query" }
-gage-registry = { path = "../gage-registry" }
+gage-mcp2 = { path = "../gage-mcp2" }
+gage-query2 = { path = "../gage-query2" }
+regex = { workspace = true }
+gage-session = { path = "../gage-session" }
 minijinja = "2"
-rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
-rune-modules = { git = "https://github.com/gar1t/rune.git", branch = "gage", features = ["time", "rand", "thread_rng"] }
+gage-store = { path = "../gage-store" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
+percent-encoding = { workspace = true }
+rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
+rune-modules = { git = "https://github.com/gar1t/rune.git", branch = "gage", features = ["time", "rand", "thread_rng"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -7,36 +7,30 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-chrono = { workspace = true }
 codespan-reporting = "0.13.1"
-gage-agent = { path = "../gage-agent" }
-gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
-gage-db = { path = "../gage-db" }
-gage-query = { path = "../gage-query" }
 gage-registry = { path = "../gage-registry" }
-gage-mcp = { path = "../gage-mcp" }
 gage-runtime = { path = "../gage-runtime" }
-num_cpus = { workspace = true }
-petgraph = "0.6"
-rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
-rune-modules = { git = "https://github.com/gar1t/rune.git", branch = "gage", features = ["time", "rand", "thread_rng"] }
+gage-session = { path = "../gage-session" }
+gage-store = { path = "../gage-store" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 libtest-mimic = "0.8"
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+datafusion = { workspace = true }
+gage-claude = { path = "../gage-claude" }
+gage-query2 = { path = "../gage-query2" }
+tempfile = { workspace = true }
 
 [[test]]
 name = "rune"
-harness = false
-
-[[bench]]
-name = "vm_lifecycle"
 harness = false
 
 [lints]

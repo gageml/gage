@@ -1,14 +1,14 @@
 //! The attach phase as the CLI runs it: the attach tasks of compiled
 //! scanners against a dataset, with each outcome printed as it
 //! happens. Shared by `gage attachment add --scanner` and the dataset
-//! `gage scan2` builds for a run.
+//! `gage scan` builds for a run.
 
 use std::sync::Arc;
 
 use gage_core::uuid::short_uuid;
-use gage_runtime2::{Output, TaskOutput};
-use gage_scan2::CompiledScanner;
-use gage_scan2::attach::{AttachError, AttachEvent, attach};
+use gage_runtime::{Output, TaskOutput};
+use gage_scan::CompiledScanner;
+use gage_scan::attach::{AttachError, AttachEvent, attach};
 use gage_session::Driver;
 use gage_store::Store;
 

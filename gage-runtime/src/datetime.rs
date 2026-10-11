@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::time::SystemTime;
 
 use chrono::{DateTime as ChronoDateTime, Datelike, Duration as ChronoDuration, Timelike, Utc};
 use rune::alloc::fmt::TryWrite;
@@ -20,10 +19,6 @@ impl rune::alloc::prelude::TryClone for DateTime {
 }
 
 impl DateTime {
-    pub(crate) fn from_system_time(t: SystemTime) -> Self {
-        DateTime { inner: t.into() }
-    }
-
     #[rune::function(keep, path = Self::from_millis)]
     pub fn from_millis(ms: i64) -> Self {
         let inner = ChronoDateTime::from_timestamp_millis(ms)

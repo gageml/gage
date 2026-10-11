@@ -17,7 +17,6 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 datafusion = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-db = { path = "../gage-db" }
-gage-test = { path = "../gage-test" }
 gage-mcp = { path = "../gage-mcp" }
 gage-mcp2 = { path = "../gage-mcp2" }
 gage-tui = { path = "../gage-tui" }
@@ -36,9 +35,8 @@ serde_json = "1"
 gage-query = { path = "../gage-query" }
 gage-query2 = { path = "../gage-query2" }
 gage-registry = { path = "../gage-registry" }
+gage-runtime = { path = "../gage-runtime" }
 gage-scan = { path = "../gage-scan" }
-gage-runtime2 = { path = "../gage-runtime2" }
-gage-scan2 = { path = "../gage-scan2" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 indicatif = "0.18"

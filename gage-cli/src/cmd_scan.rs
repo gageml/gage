@@ -1,14 +1,45 @@
 use std::collections::HashMap;
-use std::fmt;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::error::Error;
+use std::fmt::{self, Write as _};
+use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
-use console::{Term, style};
+use console::style;
+use datafusion::arrow::array::{
+    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
+};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::prelude::SessionContext;
+use gage_claude::driver::ClaudeDriver;
+use gage_claude::session::SessionInfo;
+use gage_core::config::Config;
+use gage_core::stopwatch::Stopwatch;
+use gage_core::uuid::short_uuid;
+use gage_query2::{ContextBuilder, ScanScope};
+use gage_registry::driver::DriverRegistry;
+use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, scanner_source};
+use gage_runtime::{LOG_TARGET, Output, TaskOutput};
+use gage_scan::scan_dir::scans_dir;
+use gage_scan::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
+use gage_session::Driver;
+use gage_store::ScanDirLayout;
+use gage_store::{
+    DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store, StoreError,
+    TagStore,
+};
+use gage_tui::scan_view::{
+    self, AgentItem, AgentState, EventItem, EvidenceItem, IssueItem, IssueSessionItem,
+    IssueStatusUpdate, NoteItem, RunningTask, ScanCost, ScanHost, ScanLogs, ScanModel, ScanPickRow,
+    ScanSetup, SessionCounts, SessionEntry, SessionItem, TaskAgent, TaskCost, TaskId, TaskItem,
+    TaskState,
+};
+use gage_tui::session::Backend;
+use gage_tui::text::fmt_duration;
+use indicatif::ProgressBar;
 use tabled::{
     Table,
     settings::{
@@ -17,65 +48,223 @@ use tabled::{
         peaker::Priority,
     },
 };
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio_util::sync::CancellationToken;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::FormatFields;
+use tracing_subscriber::fmt::format::Writer;
 
-use gage_claude::home::ClaudeHome;
-use gage_claude::model::ModelMap;
-use gage_claude::preflight;
-use gage_claude::project::project_display;
-use gage_claude::session::{self, SessionInfo, SessionListBuilder};
-use gage_core::stopwatch::Stopwatch;
-use gage_core::task::task_display;
-use gage_core::uuid::short_uuid;
-use gage_db::issue::{self, IssueStatus as DbIssueStatus, StatusReason as DbStatusReason};
-use gage_db::{db, scan};
-use gage_query::ScanSessionContext;
-use gage_registry::scanner::{
-    Scanner, ScannerDef, ScannerRegistry, display_path, parse_scanner_file, scanner_source,
-    split_scanner_spec,
-};
-use gage_store::{IssueStatus, StatusReason};
-use gage_tui::scan_view::{IssueStatusUpdate, ScanHost, ScanLogs, ScanPickRow};
-use gage_tui::session::Backend;
-use rand::seq::SliceRandom;
-
-use crate::dialog::{self, DialogError, DialogResult};
-use crate::model_prompt;
-use crate::session_select;
+use crate::cmd_dataset::{self, AddEvent};
+use crate::cmd_issue2::event_label;
+use crate::cmd_note::{count_rows, target_cell, value_cell};
+use crate::cmd_session::{column, run_query};
+use crate::dialog::{self, DialogError};
+use crate::human::{format_duration, format_elapsed_ms};
+use crate::scanner_attach;
+use crate::scanner_spec::{self, ResolvedSpec};
+use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
 use crate::style as s;
 
-const DEFAULT_AGENT_JOBS: usize = 8;
+/// Install the `tracing` subscriber for a scan: warnings and above to
+/// stderr, and the records layer into the active scan's directory at
+/// `info` and above for the Gage crates. `GAGE_LOG` (set by `--log`)
+/// overrides both. A scanner's own `log` records reach stderr through
+/// a second layer that renders their target as
+/// `scanner::<scanner>::<task>`, the scanner code's counterpart of a
+/// crate's module path.
+pub fn init_logging() {
+    use tracing_subscriber::filter::{FilterExt, filter_fn};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer, fmt};
+
+    let stderr_filter =
+        || EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let stderr = fmt::layer()
+        .with_writer(io::stderr)
+        .without_time()
+        .with_filter(stderr_filter().and(filter_fn(|meta| meta.target() != LOG_TARGET)));
+    let scanner_stderr = fmt::layer()
+        .with_writer(io::stderr)
+        .without_time()
+        .with_target(false)
+        .fmt_fields(ScannerFields)
+        .with_filter(stderr_filter().and(filter_fn(|meta| meta.target() == LOG_TARGET)));
+    let records =
+        gage_scan::trace::layer().with_filter(EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(
+            |_| EnvFilter::new("warn,gage_store=info,gage_scan=info,gage_runtime=info"),
+        ));
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(scanner_stderr)
+        .with(records)
+        .init();
+}
+
+/// Field formatter for a scanner's `log` events: the `scanner` and
+/// `task` fields become the target, `scanner::<scanner>::<task>:`,
+/// styled as the default formatter styles a target, followed by the
+/// message and any other fields as `key=value`.
+struct ScannerFields;
+
+impl<'w> FormatFields<'w> for ScannerFields {
+    fn format_fields<R: RecordFields>(&self, mut writer: Writer<'w>, fields: R) -> fmt::Result {
+        let mut v = ScannerFieldsVisitor::default();
+        fields.record(&mut v);
+        let target = format!("{LOG_TARGET}::{}::{}", v.scanner, v.task);
+        if writer.has_ansi_escapes() {
+            write!(writer, "\x1b[2m{target}\x1b[0m\x1b[2m:\x1b[0m")?;
+        } else {
+            write!(writer, "{target}:")?;
+        }
+        write!(writer, " {}", v.message)?;
+        if !v.rest.is_empty() {
+            write!(writer, " {}", v.rest)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ScannerFieldsVisitor {
+    scanner: String,
+    task: String,
+    message: String,
+    rest: String,
+}
+
+impl Visit for ScannerFieldsVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        match field.name() {
+            "scanner" => self.scanner = format!("{value:?}"),
+            "task" => self.task = format!("{value:?}"),
+            "message" => self.message = format!("{value:?}"),
+            name => {
+                if !self.rest.is_empty() {
+                    self.rest.push(' ');
+                }
+                write!(self.rest, "{name}={value:?}").unwrap();
+            }
+        }
+    }
+}
 
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct ScanArgs {
     #[command(subcommand)]
-    pub command: Option<ScanCommand>,
+    command: Option<ScanCommand>,
 
     #[command(flatten)]
-    pub run_args: ScanRunArgs,
+    run_args: ScanRunArgs,
 }
 
 #[derive(Subcommand)]
-pub enum ScanCommand {
+enum ScanCommand {
     /// List scan runs
     List(ScanListArgs),
-
-    /// View a scan run in the scan TUI
-    View(ScanViewArgs),
-
-    /// Delete scan runs and associated notes
-    Delete(ScanDeleteArgs),
-
-    /// Invalidate task validation state
+    /// View a scan run
     ///
-    /// Invalidated tasks are re-run on the next applicable scan.
-    Invalidate(ScanInvalidateArgs),
+    /// Opens the scan's tasks, sessions, issues, and notes. Without a
+    /// scan the view opens with a picker.
+    View(ScanViewArgs),
+    /// Delete scan runs
+    ///
+    /// Deletes each scan run and the notes and issues it wrote. Notes
+    /// carried from earlier scan runs are kept.
+    Delete(ScanDeleteArgs),
 }
 
 #[derive(Args)]
-pub struct ScanViewArgs {
-    /// Scan ID (or prefix)
-    scan_id: Option<String>,
+pub struct ScanRunArgs {
+    /// Scanner to run (repeatable)
+    ///
+    /// A scanner name, or when no scanner has that name, a path: a
+    /// directory holding a scanner.rn, or a scanner file. A `#{...}`
+    /// suffix overrides the scanner's params
+    #[arg(short, long = "scanner", value_name = "SCANNER")]
+    scanners: Vec<String>,
+
+    /// Run the scanners in a group (repeatable)
+    #[arg(short, long = "group", value_name = "NAME")]
+    groups: Vec<String>,
+
+    /// Dataset to scan (ID or prefix)
+    ///
+    /// Runs the scan against an existing dataset instead of creating
+    /// one from the session-selection options.
+    #[arg(
+        short,
+        long,
+        value_name = "DATASET",
+        conflicts_with_all = SELECT_ARG_NAMES,
+    )]
+    dataset: Option<String>,
+
+    #[command(flatten)]
+    select: SessionSelectArgs,
+
+    /// Tasks to run at once
+    #[arg(short, long, value_name = "N", default_value_t = 10)]
+    jobs: usize,
+
+    /// Agents to run at once
+    ///
+    /// Bounds the agents running across every task of the scan. A task
+    /// whose agents are all waiting for a slot shows as waiting.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    agent_jobs: usize,
+
+    /// Tag the new scan run
+    ///
+    /// Follows git's ref naming rules. An existing tag is an error
+    /// unless --force-tag is given.
+    #[arg(long, value_name = "NAME")]
+    tag: Option<String>,
+
+    /// Move the tag if it exists
+    #[arg(long, requires = "tag")]
+    force_tag: bool,
+
+    /// Run the scan without a dataset
+    ///
+    /// No dataset is created or selected; scanners run with no
+    /// sessions to read.
+    #[arg(
+        long,
+        conflicts_with = "dataset",
+        conflicts_with_all = SELECT_ARG_NAMES,
+    )]
+    no_dataset: bool,
+
+    /// Ignore prior work
+    ///
+    /// Every session is scanned in full regardless of earlier scans,
+    /// and no notes from earlier scans are carried forward.
+    #[arg(long)]
+    invalidate: bool,
+
+    /// Skip prompts and confirmation
+    ///
+    /// Fills unspecified selections with defaults: the `default`
+    /// scanner group when neither --scanner nor --group is
+    /// set, and the past 30 days capped at 20 sessions when no
+    /// session selection or dataset option is set.
+    #[arg(short, long)]
+    yes: bool,
+
+    /// Don't show progress
+    ///
+    /// Task output and the scan's own lines print as they happen
+    /// instead of the progress view. This is the output when stdout
+    /// is not a terminal.
+    #[arg(long)]
+    no_progress: bool,
+
+    /// Show available scanners and exit
+    #[arg(long, exclusive = true)]
+    list_scanners: bool,
 }
 
 #[derive(Args)]
@@ -83,14 +272,21 @@ pub struct ScanListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
-    /// Show the full scan ID, never truncating it
+    /// Show the full scan run ID
     #[arg(long)]
     full_id: bool,
 }
 
 #[derive(Args)]
+pub struct ScanViewArgs {
+    /// Scan run ID (or prefix)
+    scan: Option<String>,
+}
+
+#[derive(Args)]
 pub struct ScanDeleteArgs {
-    /// Scan run IDs (or prefix)
+    /// Scan run IDs (or prefixes)
+    #[arg(required = true)]
     ids: Vec<String>,
 
     /// Skip confirmation prompt
@@ -98,169 +294,38 @@ pub struct ScanDeleteArgs {
     yes: bool,
 }
 
-#[derive(Args)]
-#[command(group = clap::ArgGroup::new("target").required(true).multiple(true))]
-pub struct ScanInvalidateArgs {
-    /// Invalidate tasks for a session (ID or prefix, repeatable)
-    #[arg(short, long = "session", value_name = "ID", group = "target")]
-    sessions: Vec<String>,
-
-    /// Invalidate tasks for a note (ID or prefix, repeatable)
-    #[arg(short, long = "note", value_name = "ID", group = "target")]
-    notes: Vec<String>,
-
-    /// Invalidate tasks by name (or prefix, repeatable)
-    #[arg(short, long = "task", value_name = "NAME", group = "target")]
-    tasks: Vec<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct ScanRunArgs {
-    /// Session IDs to scan (or prefix)
-    #[arg(value_name = "SESSION", conflicts_with_all = ["limit", "days", "today", "all", "sample", "project"])]
-    sessions: Vec<String>,
-
-    /// Limit sessions to a project
-    ///
-    /// PROJECT is a project directory path (absolute, relative, or
-    /// ~-prefixed) or a project slug as shown by 'gage session list'.
-    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true, conflicts_with_all = ["rerun"])]
-    project: Option<String>,
-
-    /// Scanner to run (repeatable)
-    #[arg(short, long = "scanner", value_name = "NAME")]
-    scanners: Vec<String>,
-
-    /// Run the scanners in a group (repeatable)
-    #[arg(short, long = "group", value_name = "NAME")]
-    groups: Vec<String>,
-
-    /// Scanner file to run (repeatable)
-    #[arg(short = 'f', long = "file", value_name = "PATH")]
-    files: Vec<String>,
-
-    /// Scan the latest N sessions
-    ///
-    /// Combines with --days or --today to cap the sessions selected
-    /// from the window.
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "sample"])]
-    limit: Option<usize>,
-
-    /// Scan N sessions selected at random
-    ///
-    /// Samples from sessions modified in the past 30 days, or the
-    /// window given with --days or --today.
-    #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
-    sample: Option<usize>,
-
-    /// Scan sessions from past N days
-    #[arg(short, long, value_name = "N", conflicts_with = "all")]
-    days: Option<u32>,
-
-    /// Scan sessions from today
-    ///
-    /// Selects sessions modified since midnight local time.
-    #[arg(short, long, conflicts_with_all = ["days", "all"])]
-    today: bool,
-
-    /// Scan all sessions
-    #[arg(short, long)]
-    all: bool,
-
-    /// Re-run a scan's scanners on its sessions
-    ///
-    /// SCAN is a scan ID or prefix. Use 'gage scan list' to show scan
-    /// runs.
-    #[arg(
-        long,
-        value_name = "SCAN",
-        conflicts_with_all = ["sessions", "scanners", "files", "limit", "days", "today", "all", "sample"]
-    )]
-    rerun: Option<String>,
-
-    /// Label for the scan run
-    #[arg(short, long, value_name = "LABEL")]
-    label: Option<String>,
-
-    /// Model for scan agents (repeatable)
-    ///
-    /// MODEL sets the model for every size alias a scanner may
-    /// request (small, medium, large). SIZE=MODEL sets one size.
-    /// Later values override earlier ones.
-    #[arg(short, long = "model", value_name = "[SIZE=]MODEL")]
-    models: Vec<String>,
-
-    /// Invalidate prior results before scanning
-    ///
-    /// Tasks re-run instead of reusing prior results. Applies to the
-    /// sessions and scanners selected for this scan.
-    #[arg(short, long)]
-    invalidate: bool,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-
-    /// Maximum concurrent tasks (defaults to number of CPUs)
-    #[arg(short, long, value_name = "N")]
-    jobs: Option<usize>,
-
-    /// Maximum concurrent agents (default 8)
-    #[arg(long, value_name = "N")]
-    agent_jobs: Option<usize>,
-
-    /// Don't show progress
-    #[arg(long)]
-    no_progress: bool,
-
-    /// Show available scanners and exit
-    #[arg(long)]
-    list_scanners: bool,
-
-    /// Run only the scanners named, without pulling in required_by dependents
-    #[arg(long)]
-    no_deps: bool,
-}
-
-pub async fn run(args: ScanArgs) {
+pub async fn main(args: ScanArgs) {
     match args.command {
-        Some(ScanCommand::List(a)) => list(a),
+        Some(ScanCommand::List(a)) => list(a).await,
         Some(ScanCommand::View(a)) => view(a).await,
         Some(ScanCommand::Delete(a)) => delete(a),
-        Some(ScanCommand::Invalidate(a)) => invalidate(a),
         None => run_scan(args.run_args).await,
     }
 }
 
-fn list(args: ScanListArgs) {
-    let conn = db::open_db().unwrap();
-    let runs = match scan::all(&conn) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let total = runs.len();
+async fn list(args: ScanListArgs) {
+    let store = open_store("gage scan list");
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
+    let total = count_rows(&ctx, "SELECT COUNT(*) FROM scan").await;
     if total == 0 {
         println!("No scan runs found");
         return;
     }
-
     let show = args.limit.show_count(total);
-
-    let highlighter = s::IdHighlighter::new(match scan::all_ids(&conn) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    });
+    // Sessions and Notes are counts over the relation views
+    let sql = format!(
+        "SELECT s.id, s.id_prefix, s.tasks, s.failed, s.canceled, s.started, s.stopped, \
+                ss.n, sn.n \
+         FROM scan s \
+         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_session GROUP BY scan_id) ss \
+              ON ss.scan_id = s.id \
+         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_note GROUP BY scan_id) sn \
+              ON sn.scan_id = s.id \
+         ORDER BY s.modified DESC LIMIT {show}"
+    );
+    let batches = run_query(&ctx, &sql).await;
 
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
@@ -269,17 +334,43 @@ fn list(args: ScanListArgs) {
     .iter()
     .map(|s| s.to_string())
     .collect();
-
-    let mut rows: Vec<Vec<String>> = Vec::with_capacity(show);
-    for run in runs.iter().take(show) {
-        match list_row(&conn, run, &highlighter, args.full_id) {
-            Ok(row) => rows.push(row),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in &batches {
+        let ids = column::<StringArray>(batch, 0);
+        let prefixes = column::<StringArray>(batch, 1);
+        let tasks = column::<Int64Array>(batch, 2);
+        let failed = column::<Int64Array>(batch, 3);
+        let canceled = column::<BooleanArray>(batch, 4);
+        let started = column::<TimestampMillisecondArray>(batch, 5);
+        let stopped = column::<TimestampMillisecondArray>(batch, 6);
+        let sessions = column::<Int64Array>(batch, 7);
+        let notes = column::<Int64Array>(batch, 8);
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let shown = if args.full_id { id } else { short_uuid(id) };
+            let count = |arr: &Int64Array| if arr.is_valid(i) { arr.value(i) } else { 0 };
+            let elapsed = stopped.value(i).saturating_sub(started.value(i)).max(0) as u64;
+            rows.push(vec![
+                s::styled_id(shown, prefixes.value(i), s::IdKind::Gage),
+                tasks.value(i).to_string(),
+                count(sessions).to_string(),
+                String::new(),
+                count(notes).to_string(),
+                failed.value(i).to_string(),
+                String::new(),
+                if canceled.value(i) {
+                    "canceled"
+                } else {
+                    "completed"
+                }
+                .to_string(),
+                format_duration(Duration::from_millis(elapsed)),
+                String::new(),
+                format_elapsed_ms(started.value(i)),
+            ]);
         }
     }
+    let shown = rows.len();
 
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
@@ -296,238 +387,116 @@ fn list(args: ScanListArgs) {
         .to_string();
     println!("{table}");
 
-    args.limit.print_summary(show, total, "scan run");
-}
-
-fn list_row(
-    conn: &gage_db::rusqlite::Connection,
-    run: &scan::Scan,
-    highlighter: &s::IdHighlighter,
-    full_id: bool,
-) -> anyhow::Result<Vec<String>> {
-    let tasks = scan::tasks_for_scan(conn, &run.id)?;
-    let errors = tasks
-        .iter()
-        .filter(|t| t.status == scan::TaskStatus::Failed)
-        .count();
-    let sessions = scan::session_ids_for_scan(conn, &run.id)?.len();
-    let notes = scan::note_ids_for_scan(conn, &run.id)?.len();
-    let issues = scan::issue_ids_for_scan(conn, &run.id)?.len();
-    let cost = format_cost(scan::cost_for_scan(conn, &run.id)?);
-    let metadata = run.parse_metadata()?;
-    // A Running payload whose process is gone is a run that died;
-    // absent metadata (a run predating the running marker) reads the
-    // same. Both render as incomplete.
-    let status = match &metadata {
-        Some(scan::ScanMetadata::Scan(s)) if s.canceled => "canceled",
-        Some(scan::ScanMetadata::Running(r)) if scan_process_alive(r.pid, run.created) => "running",
-        Some(scan::ScanMetadata::Running(_)) | None => "incomplete",
-        Some(_) => "completed",
-    };
-    let duration = metadata
-        .and_then(|m| m.elapsed_ms())
-        .map(|ms| crate::human::format_duration(Duration::from_millis(ms)))
-        .unwrap_or_default();
-    let id_display = if full_id {
-        highlighter.full(&run.id)
-    } else {
-        highlighter.short(&run.id)
-    };
-    Ok(vec![
-        id_display,
-        tasks.len().to_string(),
-        sessions.to_string(),
-        issues.to_string(),
-        notes.to_string(),
-        errors.to_string(),
-        cost,
-        status.to_string(),
-        duration,
-        run.label.clone().unwrap_or_default(),
-        crate::human::format_elapsed_ms(run.created),
-    ])
-}
-
-/// USD cost as `$X.XX`, with a trailing `+` when any agent's cost is
-/// unrecorded (the total understates true spend). Empty when the scan
-/// has no recorded agents.
-fn format_cost(cost: scan::ScanCost) -> String {
-    if cost.total_usd == 0.0 && !cost.incomplete {
-        return String::new();
-    }
-    let suffix = if cost.incomplete { "+" } else { "" };
-    format!("${:.2}{suffix}", cost.total_usd)
-}
-
-/// Whether `pid` is alive and is the process that recorded it in the
-/// scan's Running metadata. Existence alone is not identity — a pid
-/// can be recycled. A recycled holder necessarily started after the
-/// original process died, and the original started before the scan
-/// row was created; so a process whose start postdates `created_ms`
-/// is disqualified. Unreadable process data reads as not running.
-fn scan_process_alive(pid: u32, created_ms: i64) -> bool {
-    // btime and the tick conversion each truncate to whole seconds;
-    // the slack keeps a genuine process from reading as started just
-    // after its own scan row
-    const SLACK_SECS: i64 = 2;
-    match process_start_epoch(pid) {
-        Some(start_secs) => start_secs <= created_ms / 1000 + SLACK_SECS,
-        None => false,
-    }
-}
-
-/// A process's start time in epoch seconds: the boot time (`btime` in
-/// `/proc/stat`) plus its start offset (field 22 of `/proc/{pid}/stat`,
-/// in clock ticks since boot). None when the process is gone or its
-/// stat data cannot be read.
-fn process_start_epoch(pid: u32) -> Option<i64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // comm (field 2) may contain spaces; fields resume after its
-    // closing paren with state (field 3), putting starttime (field 22)
-    // at offset 19
-    let after_comm = stat.rsplit(')').next()?;
-    let ticks: i64 = after_comm.split_whitespace().nth(19)?.parse().ok()?;
-    let btime: i64 = std::fs::read_to_string("/proc/stat")
-        .ok()?
-        .lines()
-        .find_map(|l| l.strip_prefix("btime "))
-        .and_then(|v| v.trim().parse().ok())?;
-    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if ticks_per_sec <= 0 {
-        return None;
-    }
-    Some(btime + ticks / ticks_per_sec)
-}
-
-/// Scan-run summary from `scan.metadata`. None when the run never
-/// completed or is an agent run.
-fn scan_summary(run: &scan::Scan) -> anyhow::Result<Option<scan::ScanSummary>> {
-    Ok(match run.parse_metadata()? {
-        Some(scan::ScanMetadata::Scan(s)) => Some(s),
-        Some(scan::ScanMetadata::Agent(_) | scan::ScanMetadata::Running(_)) | None => None,
-    })
+    args.limit.print_summary(shown, total, "scan run");
 }
 
 async fn view(args: ScanViewArgs) {
+    let store = Arc::new(Mutex::new(open_store("gage scan view")));
+    let host = Arc::new(StoreHost {
+        store,
+        registry: DriverRegistry::builtin(),
+        live: None,
+    });
     // No scan arg: the view opens with its scan picker dialog.
-    let model = match args.scan_id {
-        Some(id) => {
-            let conn = db::open_db().unwrap();
-            match load_scan_model(&conn, &id) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    eprintln!("gage scan view: {e}");
-                    std::process::exit(1);
-                }
+    let model = match args.scan.as_deref() {
+        Some(prefix) => match host.load_model(prefix).await {
+            Ok(model) => Some(model),
+            Err(e) => {
+                eprintln!("gage scan view: {e}");
+                std::process::exit(1);
             }
-        }
+        },
         None => None,
     };
-    if let Err(e) = gage_tui::scan_view::view(model, Arc::new(LegacyHost)).await {
+    if let Err(e) = scan_view::view(model, host).await {
         eprintln!("gage scan view: {e}");
         std::process::exit(1);
     }
 }
 
-/// The scan view's host over the legacy database and the default
-/// native source. A fresh connection per call keeps the view free of
-/// a long-lived handle it rarely needs.
-struct LegacyHost;
+/// The scan view's host over the store. `live` names the scan
+/// directory of the scan being shown while it runs; the logs come
+/// from there until the scan is applied and the directory removed.
+struct StoreHost {
+    store: Arc<Mutex<Store>>,
+    registry: DriverRegistry,
+    live: Option<ScanDirLayout>,
+}
 
-impl ScanHost for LegacyHost {
+impl ScanHost for StoreHost {
     fn list_scans(&self) -> io::Result<Vec<ScanPickRow>> {
-        let conn = db::open_db().map_err(io::Error::other)?;
-        let mut scans = scan::all(&conn).map_err(io::Error::other)?;
-        let counts = scan::counts_by_scan(&conn).map_err(io::Error::other)?;
-        scans.sort_by_key(|s| std::cmp::Reverse(s.created));
-        Ok(scans
-            .into_iter()
-            .map(|run| {
-                let metadata = run.parse_metadata();
-                let status = match &metadata {
-                    Ok(Some(scan::ScanMetadata::Scan(s))) if s.canceled => "canceled",
-                    Ok(Some(scan::ScanMetadata::Scan(_) | scan::ScanMetadata::Agent(_))) => {
-                        "completed"
-                    }
-                    Ok(Some(scan::ScanMetadata::Running(_))) => "running",
-                    // NULL metadata (a run that died before summarizing)
-                    // and unparseable metadata read the same: incomplete.
-                    Ok(None) | Err(_) => "incomplete",
-                };
-                let duration = match metadata {
-                    Ok(Some(m)) => m.elapsed_ms().map(Duration::from_millis),
-                    Ok(None) | Err(_) => None,
-                };
-                let count = counts.get(&run.id).copied().unwrap_or_default();
-                ScanPickRow {
-                    id_display: short_uuid(&run.id).to_string(),
-                    tasks: count.tasks as usize,
-                    sessions: count.sessions as usize,
-                    issues: count.issues as usize,
-                    notes: count.notes as usize,
-                    status,
-                    duration,
-                    label: run.label.unwrap_or_default(),
-                    created_ms: run.created,
-                    id: run.id,
-                }
-            })
-            .collect())
+        block_on(self.list_rows()).map_err(|e| io::Error::other(e.to_string()))
     }
 
-    fn load(&self, scan_id: &str) -> io::Result<gage_tui::scan_view::ScanModel> {
-        let conn = db::open_db().map_err(io::Error::other)?;
-        load_scan_model(&conn, scan_id).map_err(io::Error::other)
+    fn load(&self, scan_id: &str) -> io::Result<ScanModel> {
+        block_on(self.load_model(scan_id)).map_err(|e| io::Error::other(e.to_string()))
     }
 
     fn session_backend(&self) -> io::Result<Backend> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(Backend::native(""))
-        })
-        .map_err(|e| io::Error::other(e.to_string()))
+        Ok(block_on(Backend::shared(Arc::clone(&self.store))))
     }
 
-    /// The captured streams beside the `.out` file: `.err`, `.out`,
-    /// and `.log`. The files are created lazily, so an absent one
-    /// means the scan produced nothing on that stream.
     fn read_logs(&self, log_key: &str) -> io::Result<ScanLogs> {
-        let out_path = ScanStreams::out_path(log_key);
-        let read = |ext: &str| match std::fs::read_to_string(out_path.with_extension(ext)) {
-            Ok(content) => Ok(Some(content)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
+        if let Some(dir) = &self.live
+            && dir.root().exists()
+        {
+            let logs_dir = dir.object_dir().join("logs");
+            let read = |name: &str| match std::fs::read_to_string(logs_dir.join(name)) {
+                Ok(content) => Ok(Some(content)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            };
+            return Ok(ScanLogs {
+                err: read("err")?,
+                out: read("out")?,
+                records: read("records")?,
+            });
+        }
+        let store = self.lock();
+        let scans = ScanStore::from(&*store);
+        let commit = scans.get(log_key).map_err(io::Error::other)?.commit_sha;
+        let read = |name: &str| {
+            scans
+                .scan_log(&commit, name)
+                .map(|bytes| bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
+                .map_err(io::Error::other)
         };
         Ok(ScanLogs {
             err: read("err")?,
             out: read("out")?,
-            records: read("log")?,
+            records: read("records")?,
         })
     }
 
     fn issue_status(&self, issue_id: &str) -> Result<IssueStatusUpdate, String> {
-        let conn = db::open_db().map_err(|e| e.to_string())?;
-        let issue = issue::get(&conn, issue_id).map_err(|e| e.to_string())?;
-        let events = issue::issue_events_for(&conn, issue_id)
-            .map_err(|e| e.to_string())?
-            .iter()
-            .map(|ev| gage_tui::scan_view::EventItem {
-                kind: ev.event.to_label(),
-                author: ev.author.clone(),
-                timestamp: gage_core::datetime::ms_to_iso8601(ev.timestamp),
-                message: ev.event.message().map(str::to_string),
-            })
-            .collect();
+        let store = self.lock();
+        let issue = IssueStore::from(&*store)
+            .get(issue_id)
+            .map_err(|e| e.to_string())?;
+        let (status, status_cell) = status_cells(
+            issue.status.as_str(),
+            issue.status_reason.map(StatusReason::as_str),
+        );
         Ok(IssueStatusUpdate {
-            status: match issue.status_reason {
-                Some(r) => format!("{} ({})", issue.status.as_str(), r.as_str()),
-                None => issue.status.as_str().to_string(),
-            },
-            status_cell: match issue.status_reason {
-                Some(r) => r.as_str().to_string(),
-                None => issue.status.as_str().to_string(),
-            },
-            closed: issue.status == DbIssueStatus::Closed,
-            events,
+            status,
+            status_cell,
+            closed: issue.status == IssueStatus::Closed,
+            events: issue
+                .changes
+                .iter()
+                .map(|c| EventItem {
+                    kind: event_label(
+                        c.event.as_str(),
+                        c.from_status.map(IssueStatus::as_str),
+                        c.to_status.map(IssueStatus::as_str),
+                        c.reason.map(StatusReason::as_str),
+                        c.of.as_deref(),
+                    ),
+                    author: c.author.clone(),
+                    timestamp: gage_core::datetime::ms_to_iso8601(c.timestamp_ms),
+                    message: c.message.clone(),
+                })
+                .collect(),
         })
     }
 
@@ -539,538 +508,917 @@ impl ScanHost for LegacyHost {
         author: &str,
         message: Option<&str>,
     ) -> Result<(), String> {
-        let conn = db::open_db().map_err(|e| e.to_string())?;
-        let status = match status {
-            IssueStatus::Pending => DbIssueStatus::Pending,
-            IssueStatus::Open => DbIssueStatus::Open,
-            IssueStatus::Closed => DbIssueStatus::Closed,
-        };
-        let reason = reason.map(|r| match r {
-            StatusReason::Completed => DbStatusReason::Completed,
-            StatusReason::WontFix => DbStatusReason::WontFix,
-            StatusReason::Duplicate => DbStatusReason::Duplicate,
-        });
-        issue::set_status(&conn, issue_id, status, reason, author, message)
+        let store = self.lock();
+        IssueStore::from(&*store)
+            .set_status(issue_id, status, reason, author, message)
+            .map(|_| ())
             .map_err(|e| e.to_string())
     }
 
     fn add_issue_comment(&self, issue_id: &str, author: &str, message: &str) -> Result<(), String> {
-        let conn = db::open_db().map_err(|e| e.to_string())?;
-        issue::comment(&conn, issue_id, author, message).map_err(|e| e.to_string())
+        let store = self.lock();
+        IssueStore::from(&*store)
+            .comment(issue_id, author, message)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 
-/// Assemble a [`ScanModel`] for a completed scan from the db: tasks
-/// from `scan_task`, the run summary from `scan.metadata`, and
-/// sessions/notes/issues from the scan's edge tables. A scan that
-/// never completed has no summary metadata; the header shows no
-/// progress and non-terminal tasks render in their last known state.
-fn load_scan_model(
-    conn: &gage_db::rusqlite::Connection,
-    prefix: &str,
-) -> anyhow::Result<gage_tui::scan_view::ScanModel> {
-    use gage_tui::scan_view::{ScanModel, SessionItem, TaskId, TaskItem, TaskState};
+/// Run a future from the view's synchronous event loop, which lives
+/// on a multi-threaded runtime.
+fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+}
 
-    let run = scan::get_scan(conn, prefix)?;
-    let summary = scan_summary(&run)?;
-
-    let mut agent_times = AgentTimes::default();
-    let mut session_displays = SessionDisplays::default();
-    let results = load_scan_results(conn, &run.id, &mut agent_times, &mut session_displays)?;
-
-    let mut tasks: Vec<TaskItem> = scan::tasks_for_scan(conn, &run.id)?
-        .into_iter()
-        .map(|t| {
-            // Recorded worked time when the row has it; wall clock
-            // from the row's timestamps for rows predating the field
-            // (and canceled rows, which record no metadata).
-            let elapsed = match t.parse_metadata()? {
-                Some(m) => Some(Duration::from_millis(m.worked_ms)),
-                None => match (t.started, t.stopped) {
-                    (Some(a), Some(b)) => Some(Duration::from_millis(b.saturating_sub(a) as u64)),
-                    _ => None,
-                },
-            };
-            anyhow::Ok(TaskItem {
-                cost: results
-                    .task_costs
-                    .iter()
-                    .find(|tc| tc.id.scanner == t.scanner_name && tc.id.task == t.task_name)
-                    .map(|tc| tc.cost),
-                id: TaskId {
-                    scanner: t.scanner_name,
-                    task: t.task_name,
-                },
-                state: match t.status {
-                    scan::TaskStatus::Pending => TaskState::Pending,
-                    scan::TaskStatus::Started => TaskState::Running,
-                    scan::TaskStatus::Completed => TaskState::Completed,
-                    scan::TaskStatus::Failed => TaskState::Error,
-                    scan::TaskStatus::Skipped => TaskState::Skipped,
-                    scan::TaskStatus::Canceled => TaskState::Canceled,
-                },
-                elapsed,
-                progress: None,
-                pool_blocked: false,
-                stopwatch: Stopwatch::new(),
-                agents: Vec::new(),
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    for ta in &results.agents {
-        if let Some(item) = tasks.iter_mut().find(|t| t.id == ta.task) {
-            item.agents.push(ta.agent.clone());
-        }
+impl StoreHost {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-    let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
 
-    let counts: HashMap<&str, (usize, usize)> = results
-        .sessions
-        .iter()
-        .map(|c| (c.id.as_str(), (c.notes, c.issues)))
-        .collect();
-
-    let rows = scan::scan_session_rows(conn, &run.id)?;
-    // Scans read the default source until `gage scan` takes a source
-    let source = crate::source::open_source_or_exit("gage scan", "");
-    let store = crate::source::index_store_or_exit("gage scan", source.as_ref());
-    let paths: HashMap<String, PathBuf> = session::ls_sessions().into_iter().collect();
-    let mut sessions: Vec<SessionItem> = rows
-        .into_iter()
-        .map(|row| {
-            let id = row.session_id;
-            let title = stat_session(&paths, &id)
-                .map(|info| session_title(&store, &info))
-                .unwrap_or_else(|| "(unavailable)".to_string());
-            let (notes, issues) = counts.get(id.as_str()).copied().unwrap_or((0, 0));
-            SessionItem {
-                notes,
-                issues,
-                path: paths.get(&id).cloned(),
-                id,
-                title,
+    /// Every live scan, newest first, with its counts.
+    async fn list_rows(&self) -> Result<Vec<ScanPickRow>, Box<dyn Error>> {
+        let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
+            .build()
+            .await;
+        let sql = "SELECT s.id, s.id_display, s.tasks, s.canceled, s.started, s.stopped, \
+                          s.created, ss.n, si.n, sn.n \
+                   FROM scan s \
+                   LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_session GROUP BY scan_id) ss \
+                        ON ss.scan_id = s.id \
+                   LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_issue GROUP BY scan_id) si \
+                        ON si.scan_id = s.id \
+                   LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_note GROUP BY scan_id) sn \
+                        ON sn.scan_id = s.id \
+                   ORDER BY s.modified DESC";
+        let mut rows = Vec::new();
+        for batch in &query(&ctx, sql).await? {
+            let ids = column::<StringArray>(batch, 0);
+            let displays = column::<StringArray>(batch, 1);
+            let tasks = column::<Int64Array>(batch, 2);
+            let canceled = column::<BooleanArray>(batch, 3);
+            let started = column::<TimestampMillisecondArray>(batch, 4);
+            let stopped = column::<TimestampMillisecondArray>(batch, 5);
+            let created = column::<TimestampMillisecondArray>(batch, 6);
+            let sessions = column::<Int64Array>(batch, 7);
+            let issues = column::<Int64Array>(batch, 8);
+            let notes = column::<Int64Array>(batch, 9);
+            for i in 0..batch.num_rows() {
+                let count = |arr: &Int64Array| {
+                    if arr.is_valid(i) {
+                        arr.value(i) as usize
+                    } else {
+                        0
+                    }
+                };
+                rows.push(ScanPickRow {
+                    id: ids.value(i).to_string(),
+                    id_display: displays.value(i).to_string(),
+                    tasks: tasks.value(i) as usize,
+                    sessions: count(sessions),
+                    issues: count(issues),
+                    notes: count(notes),
+                    status: if canceled.value(i) {
+                        "canceled"
+                    } else {
+                        "completed"
+                    },
+                    duration: elapsed(started, stopped, i),
+                    label: String::new(),
+                    created_ms: created.value(i),
+                });
             }
-        })
-        .collect();
-    sessions.sort_by(|a, b| {
-        b.issues
-            .cmp(&a.issues)
-            .then_with(|| b.notes.cmp(&a.notes))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-
-    Ok(ScanModel {
-        scan_id: short_uuid(&run.id).to_string(),
-        label: run.label.clone(),
-        log_key: Some(run.id.clone()),
-        total: summary.as_ref().map(|s| s.total).unwrap_or(0),
-        progress: summary
-            .as_ref()
-            .map(|s| s.completed + s.failed + s.skipped)
-            .unwrap_or(0),
-        notes: results.notes,
-        issues: results.issues,
-        cost: results.cost,
-        errors,
-        finished: true,
-        elapsed: run
-            .parse_metadata()?
-            .and_then(|m| m.elapsed_ms())
-            .map(Duration::from_millis),
-        tasks,
-        sessions,
-    })
-}
-
-/// One reconcile pass for the live view: load the scan's results from
-/// the db as a Results event, or a Log event when the read fails.
-fn reconcile_results(
-    db: &Arc<Mutex<gage_db::rusqlite::Connection>>,
-    scan_id: &str,
-    agent_times: &Mutex<AgentTimes>,
-    session_displays: &Mutex<SessionDisplays>,
-) -> gage_tui::scan_view::Event {
-    let results = {
-        let conn = db.lock().unwrap();
-        let mut times = agent_times.lock().unwrap();
-        let mut displays = session_displays.lock().unwrap();
-        load_scan_results(&conn, scan_id, &mut times, &mut displays)
-    };
-    match results {
-        Ok(r) => gage_tui::scan_view::Event::Results {
-            notes: r.notes,
-            issues: r.issues,
-            sessions: r.sessions,
-            cost: r.cost,
-            task_costs: r.task_costs,
-            agents: r.agents,
-        },
-        Err(e) => gage_tui::scan_view::Event::Log(format!("results refresh failed: {e}")),
-    }
-}
-
-/// Notes, issues, per-session counts, and agent sessions recorded for
-/// a scan — shared between the historical loader and the live view's
-/// reconcile poll.
-struct ScanResults {
-    notes: Vec<gage_tui::scan_view::NoteItem>,
-    issues: Vec<gage_tui::scan_view::IssueItem>,
-    sessions: Vec<gage_tui::scan_view::SessionCounts>,
-    cost: Option<gage_tui::scan_view::ScanCost>,
-    task_costs: Vec<gage_tui::scan_view::TaskCost>,
-    agents: Vec<gage_tui::scan_view::TaskAgent>,
-}
-
-fn load_scan_results(
-    conn: &gage_db::rusqlite::Connection,
-    scan_id: &str,
-    agent_times: &mut AgentTimes,
-    session_displays: &mut SessionDisplays,
-) -> anyhow::Result<ScanResults> {
-    use gage_tui::scan_view::{EventItem, EvidenceItem, IssueItem, NoteItem, SessionCounts};
-    use std::collections::{HashMap, HashSet};
-
-    let notes = gage_db::note::find(
-        conn,
-        &gage_db::note::NoteFilters {
-            scan: Some(scan_id.to_string()),
-            ..Default::default()
-        },
-    )?;
-    let issue_ids: HashSet<String> = scan::issue_ids_for_scan(conn, scan_id)?
-        .into_iter()
-        .collect();
-    let issues: Vec<gage_db::issue::Issue> = gage_db::issue::find(
-        conn,
-        &gage_db::issue::IssueFilters {
-            status: gage_db::issue::IssueStatusFilter::Any,
-            ..Default::default()
-        },
-    )?
-    .into_iter()
-    .filter(|i| issue_ids.contains(&i.id))
-    .collect();
-
-    let mut counts: HashMap<String, (usize, usize)> = HashMap::new();
-    for note in &notes {
-        if let gage_db::target::NoteTarget::Session(t) = &note.target {
-            counts.entry(t.session_id.clone()).or_default().0 += 1;
         }
+        Ok(rows)
     }
-    // An issue attributes to every session it is linked to. The links
-    // are recorded at write time from the writer's explicit sessions
-    // and the sessions its evidence notes target.
-    for issue in &issues {
-        for session_id in gage_db::issue::issue_sessions(conn, &issue.id)? {
-            counts.entry(session_id).or_default().1 += 1;
+
+    /// The model of a stored scan, read through the scan's own scope:
+    /// every table holds that scan's objects.
+    async fn load_model(&self, prefix: &str) -> Result<ScanModel, Box<dyn Error>> {
+        let id = {
+            let store = self.lock();
+            ScanStore::from(&*store).get(prefix)?.id
+        };
+        let ctx = self.scoped(ScanScope::stored(&id)).await;
+
+        let (scan_elapsed, counts) = {
+            let sql = "SELECT started, stopped, tasks, completed, failed, skipped FROM scan";
+            let batches = query(&ctx, sql).await?;
+            let batch = batches
+                .iter()
+                .find(|b| b.num_rows() > 0)
+                .ok_or("scan row is missing")?;
+            let started = column::<TimestampMillisecondArray>(batch, 0);
+            let stopped = column::<TimestampMillisecondArray>(batch, 1);
+            let n = |idx: usize| column::<Int64Array>(batch, idx).value(0) as usize;
+            (elapsed(started, stopped, 0), (n(2), n(3) + n(4) + n(5)))
+        };
+
+        let results = self.load_results(&ctx).await?;
+        let mut agents: HashMap<TaskId, Vec<AgentItem>> = HashMap::new();
+        for ta in results.agents {
+            agents.entry(ta.task).or_default().push(ta.agent);
         }
-    }
-
-    let mut issue_items: Vec<IssueItem> = Vec::with_capacity(issues.len());
-    for i in &issues {
-        let evidence = gage_db::issue::related_notes(conn, &i.id)?
-            .iter()
-            .map(|n| EvidenceItem {
-                id: n.id.clone(),
-                name: n.name.clone(),
-                target: n.target.to_uri(),
-                value: crate::cmd_note::format_value(&n.value),
-            })
-            .collect();
-        let events = gage_db::issue::issue_events_for(conn, &i.id)?
-            .iter()
-            .map(|ev| EventItem {
-                kind: ev.event.to_label(),
-                author: ev.author.clone(),
-                timestamp: gage_core::datetime::ms_to_iso8601(ev.timestamp),
-                message: ev.event.message().map(str::to_string),
-            })
-            .collect();
-        issue_items.push(IssueItem {
-            id: i.id.clone(),
-            name: i.name.clone(),
-            title: i.title.lines().next().unwrap_or("").to_string(),
-            status: match i.status_reason {
-                Some(r) => format!("{} ({})", i.status.as_str(), r.as_str()),
-                None => i.status.as_str().to_string(),
-            },
-            status_cell: match i.status_reason {
-                Some(r) => r.as_str().to_string(),
-                None => i.status.as_str().to_string(),
-            },
-            closed: i.status == gage_db::issue::IssueStatus::Closed,
-            author: i.author.clone(),
-            created: gage_core::datetime::ms_to_iso8601(i.created),
-            description: i.description.clone(),
-            sessions: issue_session_items(conn, &i.id, session_displays)?,
-            evidence,
-            events,
-        });
-    }
-
-    let cost = scan::cost_for_scan(conn, scan_id)?;
-    let cost =
-        (cost.total_usd != 0.0 || cost.incomplete).then_some(gage_tui::scan_view::ScanCost {
-            usd: cost.total_usd,
-            incomplete: cost.incomplete,
-        });
-    let task_costs = scan::costs_for_tasks(conn, scan_id)?
-        .into_iter()
-        .map(|tc| gage_tui::scan_view::TaskCost {
-            id: gage_tui::scan_view::TaskId {
-                scanner: tc.scanner_name,
-                task: tc.task_name,
-            },
-            cost: gage_tui::scan_view::ScanCost {
-                usd: tc.cost.total_usd,
-                incomplete: tc.cost.incomplete,
-            },
-        })
-        .collect();
-
-    let agents = scan::agents_for_scan(conn, scan_id)?
-        .iter()
-        .map(|row| agent_item(row, agent_times))
-        .collect();
-
-    Ok(ScanResults {
-        cost,
-        task_costs,
-        agents,
-        issues: issue_items,
-        notes: notes
-            .iter()
-            .map(|n| NoteItem {
-                id: n.id.clone(),
-                name: n.name.clone(),
-                value: crate::cmd_note::format_value_cell(&n.value),
-                value_full: crate::cmd_note::format_value(&n.value),
-                target: n.target.to_uri(),
-                target_cell: crate::cmd_note::target_label(&n.target),
-                author: n.author.clone(),
-                created: gage_core::datetime::ms_to_iso8601(n.created),
-                metadata: n.metadata.clone(),
-            })
-            .collect(),
-        sessions: counts
+        let task_costs: HashMap<TaskId, ScanCost> = results
+            .task_costs
             .into_iter()
-            .map(|(id, (notes, issues))| SessionCounts { id, notes, issues })
-            .collect(),
-    })
-}
+            .map(|tc| (tc.id, tc.cost))
+            .collect();
 
-/// Resolve an issue's linked sessions for display: project path and
-/// session title per link, from the cache.
-fn issue_session_items(
-    conn: &gage_db::rusqlite::Connection,
-    issue_id: &str,
-    displays: &mut SessionDisplays,
-) -> anyhow::Result<Vec<gage_tui::scan_view::IssueSessionItem>> {
-    let mut items = Vec::new();
-    for id in gage_db::issue::issue_sessions(conn, issue_id)? {
-        let display = displays.resolve(&id);
-        items.push(gage_tui::scan_view::IssueSessionItem {
-            id,
-            project: display.project,
-            title: display.title,
+        let mut tasks = Vec::new();
+        for batch in &query(
+            &ctx,
+            "SELECT scanner, task, status, started, stopped, worked_ms \
+             FROM scan_task ORDER BY num",
+        )
+        .await?
+        {
+            let scanners = column::<StringArray>(batch, 0);
+            let names = column::<StringArray>(batch, 1);
+            let statuses = column::<StringArray>(batch, 2);
+            let started = column::<TimestampMillisecondArray>(batch, 3);
+            let stopped = column::<TimestampMillisecondArray>(batch, 4);
+            let worked = column::<Int64Array>(batch, 5);
+            for i in 0..batch.num_rows() {
+                let id = TaskId {
+                    scanner: scanners.value(i).to_string(),
+                    task: names.value(i).to_string(),
+                };
+                let elapsed = if worked.is_valid(i) {
+                    Some(Duration::from_millis(worked.value(i).max(0) as u64))
+                } else {
+                    elapsed(started, stopped, i)
+                };
+                tasks.push(TaskItem {
+                    cost: task_costs.get(&id).copied(),
+                    agents: agents.remove(&id).unwrap_or_default(),
+                    state: match statuses.value(i) {
+                        "pending" => TaskState::Pending,
+                        "started" => TaskState::Running,
+                        "completed" => TaskState::Completed,
+                        "failed" => TaskState::Error,
+                        "skipped" => TaskState::Skipped,
+                        _ => TaskState::Canceled,
+                    },
+                    id,
+                    elapsed,
+                    progress: None,
+                    pool_blocked: false,
+                    stopwatch: Stopwatch::new(),
+                });
+            }
+        }
+        let errors = tasks.iter().filter(|t| t.state == TaskState::Error).count();
+
+        let counts_by_session: HashMap<String, (usize, usize)> = results
+            .sessions
+            .into_iter()
+            .map(|c| (c.id, (c.notes, c.issues)))
+            .collect();
+        let mut sessions: Vec<SessionItem> = self
+            .scan_sessions(&ctx)
+            .await?
+            .into_iter()
+            .map(|entry| {
+                let (notes, issues) = counts_by_session.get(&entry.id).copied().unwrap_or((0, 0));
+                SessionItem {
+                    id: entry.id,
+                    title: entry.title,
+                    path: None,
+                    notes,
+                    issues,
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| {
+            b.issues
+                .cmp(&a.issues)
+                .then_with(|| b.notes.cmp(&a.notes))
+                .then_with(|| a.id.cmp(&b.id))
         });
+
+        Ok(ScanModel {
+            scan_id: short_uuid(&id).to_string(),
+            label: None,
+            log_key: Some(id),
+            total: counts.0,
+            progress: counts.1,
+            notes: results.notes,
+            issues: results.issues,
+            cost: results.cost,
+            errors,
+            finished: true,
+            elapsed: scan_elapsed,
+            tasks,
+            sessions,
+        })
     }
-    Ok(items)
-}
 
-/// Session display fields per linked session, cached across reconcile
-/// ticks like [`AgentTimes`] — titles and project paths do not change
-/// while a view is open, so each session resolves once.
-#[derive(Default)]
-pub struct SessionDisplays {
-    map: HashMap<String, SessionDisplay>,
-    /// Session walk from the last unknown id; sessions can appear
-    /// while a scan runs, so an id missing from it refreshes the walk
-    paths: HashMap<String, PathBuf>,
-    /// Resolved project display per encoded directory name
-    projects: HashMap<String, String>,
-}
+    /// A context over one scan's objects, active or stored.
+    async fn scoped(&self, scope: ScanScope) -> SessionContext {
+        ContextBuilder::new(Some(Arc::clone(&self.store)))
+            .scope(scope)
+            .build()
+            .await
+    }
 
-#[derive(Clone)]
-pub struct SessionDisplay {
-    pub project: String,
-    pub title: String,
-}
-
-impl SessionDisplays {
-    /// A session's display fields. Both fall back to a placeholder
-    /// when the session is not on disk.
-    pub fn resolve(&mut self, id: &str) -> SessionDisplay {
-        if let Some(display) = self.map.get(id) {
-            return display.clone();
+    /// The scan's sessions in member order, with titles.
+    async fn scan_sessions(
+        &self,
+        ctx: &SessionContext,
+    ) -> Result<Vec<SessionEntry>, Box<dyn Error>> {
+        let mut sessions = Vec::new();
+        for batch in &query(
+            ctx,
+            "SELECT m.session_id, s.title FROM scan_session m \
+             JOIN session s ON s.id = m.session_id ORDER BY m.session_num",
+        )
+        .await?
+        {
+            let ids = column::<StringArray>(batch, 0);
+            let titles = column::<StringArray>(batch, 1);
+            for i in 0..batch.num_rows() {
+                sessions.push(SessionEntry {
+                    id: ids.value(i).to_string(),
+                    title: string_or_empty(titles, i),
+                    path: None,
+                });
+            }
         }
-        if !self.paths.contains_key(id) {
-            self.paths = session::ls_sessions().into_iter().collect();
+        Ok(sessions)
+    }
+
+    /// Notes, issues, per-session counts, agents, and costs of the
+    /// scan `ctx` is scoped to: the stored loader's results and the
+    /// live view's refresh. Agent session time bounds come from the
+    /// store scope, since agent sessions are not dataset members.
+    async fn load_results(&self, ctx: &SessionContext) -> Result<ScanResults, Box<dyn Error>> {
+        let mut agents = Vec::new();
+        let mut task_costs: HashMap<TaskId, (f64, bool)> = HashMap::new();
+        let mut agent_ids = Vec::new();
+        for batch in &query(
+            ctx,
+            "SELECT scanner, task, session_id, exit_code, result FROM scan_task_agent",
+        )
+        .await?
+        {
+            let scanners = column::<StringArray>(batch, 0);
+            let tasks = column::<StringArray>(batch, 1);
+            let sessions = column::<StringArray>(batch, 2);
+            let exit_codes = column::<Int64Array>(batch, 3);
+            let results = column::<StringArray>(batch, 4);
+            for i in 0..batch.num_rows() {
+                let task = TaskId {
+                    scanner: scanners.value(i).to_string(),
+                    task: tasks.value(i).to_string(),
+                };
+                let agent = agent_item(
+                    sessions.value(i),
+                    exit_codes.value(i),
+                    results.is_valid(i).then(|| results.value(i)),
+                );
+                let cost = task_costs.entry(task.clone()).or_insert((0.0, false));
+                match agent.cost {
+                    Some(usd) => cost.0 += usd,
+                    None => cost.1 = true,
+                }
+                agent_ids.push(agent.session_id.clone());
+                agents.push(TaskAgent { task, agent });
+            }
         }
-        let display = match stat_session(&self.paths, id) {
-            Some(info) => {
-                let encoded = info.project_name().into_owned();
-                let home = ClaudeHome::from_env().ok();
-                let project = self
-                    .projects
-                    .entry(encoded)
-                    .or_insert_with_key(|encoded| project_display(home.as_ref(), encoded))
-                    .clone();
-                let source = crate::source::open_source_or_exit("gage scan", "");
-                let store = crate::source::index_store_or_exit("gage scan", source.as_ref());
-                SessionDisplay {
-                    project,
-                    title: session_title(&store, &info),
+        let times = self.agent_times(&agent_ids).await?;
+        for ta in &mut agents {
+            if let Some((started_ms, ended_ms)) = times.get(&ta.agent.session_id) {
+                ta.agent.started_ms = Some(*started_ms);
+                ta.agent.ended_ms = Some(*ended_ms);
+            }
+        }
+        let cost = {
+            let usd: f64 = task_costs.values().map(|(usd, _)| usd).sum();
+            let incomplete = task_costs.values().any(|(_, incomplete)| *incomplete);
+            (usd != 0.0 || incomplete).then_some(ScanCost { usd, incomplete })
+        };
+        let task_costs = task_costs
+            .into_iter()
+            .map(|(id, (usd, incomplete))| TaskCost {
+                id,
+                cost: ScanCost { usd, incomplete },
+            })
+            .collect();
+
+        let mut notes = Vec::new();
+        let mut note_sessions: HashMap<String, usize> = HashMap::new();
+        for batch in &query(
+            ctx,
+            "SELECT id, name, value, text, author, target, metadata, created \
+             FROM note ORDER BY created",
+        )
+        .await?
+        {
+            let ids = column::<StringArray>(batch, 0);
+            let names = column::<StringArray>(batch, 1);
+            let values = column::<StringArray>(batch, 2);
+            let texts = column::<StringArray>(batch, 3);
+            let authors = column::<StringArray>(batch, 4);
+            let targets = column::<StringArray>(batch, 5);
+            let metadatas = column::<StringArray>(batch, 6);
+            let createds = column::<TimestampMillisecondArray>(batch, 7);
+            for i in 0..batch.num_rows() {
+                let value_full = note_value(values, texts, i);
+                let target = string_or_empty(targets, i);
+                if let Some(session) = target_session(&target) {
+                    *note_sessions.entry(session).or_default() += 1;
+                }
+                notes.push(NoteItem {
+                    id: ids.value(i).to_string(),
+                    name: names.value(i).to_string(),
+                    value: value_cell(&value_full),
+                    value_full,
+                    target_cell: target_cell(&target),
+                    target,
+                    author: authors.value(i).to_string(),
+                    created: timestamp_display(createds, i),
+                    metadata: metadatas
+                        .is_valid(i)
+                        .then(|| metadatas.value(i).to_string()),
+                });
+            }
+        }
+
+        let mut evidence: HashMap<String, Vec<EvidenceItem>> = HashMap::new();
+        for batch in &query(
+            ctx,
+            "SELECT e.issue_id, n.id, n.name, n.target, n.value, n.text \
+             FROM issue_evidence e JOIN note n ON n.id = e.note_id",
+        )
+        .await?
+        {
+            let issues = column::<StringArray>(batch, 0);
+            let ids = column::<StringArray>(batch, 1);
+            let names = column::<StringArray>(batch, 2);
+            let targets = column::<StringArray>(batch, 3);
+            let values = column::<StringArray>(batch, 4);
+            let texts = column::<StringArray>(batch, 5);
+            for i in 0..batch.num_rows() {
+                evidence
+                    .entry(issues.value(i).to_string())
+                    .or_default()
+                    .push(EvidenceItem {
+                        id: ids.value(i).to_string(),
+                        name: names.value(i).to_string(),
+                        target: string_or_empty(targets, i),
+                        value: note_value(values, texts, i),
+                    });
+            }
+        }
+
+        let mut issue_sessions: HashMap<String, Vec<IssueSessionItem>> = HashMap::new();
+        let mut session_issues: HashMap<String, usize> = HashMap::new();
+        for batch in &query(
+            ctx,
+            "SELECT i.issue_id, i.session_id, s.project, s.driver, s.title \
+             FROM session_issue i JOIN session s ON s.id = i.session_id",
+        )
+        .await?
+        {
+            let issues = column::<StringArray>(batch, 0);
+            let sessions = column::<StringArray>(batch, 1);
+            let projects = column::<StringArray>(batch, 2);
+            let drivers = column::<StringArray>(batch, 3);
+            let titles = column::<StringArray>(batch, 4);
+            for i in 0..batch.num_rows() {
+                let session = sessions.value(i).to_string();
+                *session_issues.entry(session.clone()).or_default() += 1;
+                issue_sessions
+                    .entry(issues.value(i).to_string())
+                    .or_default()
+                    .push(IssueSessionItem {
+                        project: self.project_display(drivers.value(i), projects, i),
+                        title: string_or_empty(titles, i),
+                        id: session,
+                    });
+            }
+        }
+
+        let mut events: HashMap<String, Vec<EventItem>> = HashMap::new();
+        for batch in &query(
+            ctx,
+            "SELECT issue_id, timestamp, author, event, from_status, to_status, reason, \"of\", \
+                    message \
+             FROM issue_event ORDER BY timestamp",
+        )
+        .await?
+        {
+            let issues = column::<StringArray>(batch, 0);
+            let timestamps = column::<TimestampMillisecondArray>(batch, 1);
+            let authors = column::<StringArray>(batch, 2);
+            let kinds = column::<StringArray>(batch, 3);
+            let froms = column::<StringArray>(batch, 4);
+            let tos = column::<StringArray>(batch, 5);
+            let reasons = column::<StringArray>(batch, 6);
+            let ofs = column::<StringArray>(batch, 7);
+            let messages = column::<StringArray>(batch, 8);
+            for i in 0..batch.num_rows() {
+                let opt = |arr: &StringArray| arr.is_valid(i).then(|| arr.value(i).to_string());
+                events
+                    .entry(issues.value(i).to_string())
+                    .or_default()
+                    .push(EventItem {
+                        kind: event_label(
+                            kinds.value(i),
+                            opt(froms).as_deref(),
+                            opt(tos).as_deref(),
+                            opt(reasons).as_deref(),
+                            opt(ofs).as_deref(),
+                        ),
+                        author: authors.value(i).to_string(),
+                        timestamp: timestamp_display(timestamps, i),
+                        message: opt(messages),
+                    });
+            }
+        }
+
+        let mut issues = Vec::new();
+        for batch in &query(
+            ctx,
+            "SELECT id, name, title, description, status, status_reason, author, created \
+             FROM issue ORDER BY created",
+        )
+        .await?
+        {
+            let ids = column::<StringArray>(batch, 0);
+            let names = column::<StringArray>(batch, 1);
+            let titles = column::<StringArray>(batch, 2);
+            let descriptions = column::<StringArray>(batch, 3);
+            let statuses = column::<StringArray>(batch, 4);
+            let reasons = column::<StringArray>(batch, 5);
+            let authors = column::<StringArray>(batch, 6);
+            let createds = column::<TimestampMillisecondArray>(batch, 7);
+            for i in 0..batch.num_rows() {
+                let id = ids.value(i).to_string();
+                let (status, status_cell) = status_cells(
+                    statuses.value(i),
+                    reasons.is_valid(i).then(|| reasons.value(i)),
+                );
+                issues.push(IssueItem {
+                    name: names.value(i).to_string(),
+                    title: titles.value(i).lines().next().unwrap_or("").to_string(),
+                    status,
+                    status_cell,
+                    closed: statuses.value(i) == IssueStatus::Closed.as_str(),
+                    author: authors.value(i).to_string(),
+                    created: timestamp_display(createds, i),
+                    description: descriptions
+                        .is_valid(i)
+                        .then(|| descriptions.value(i).to_string()),
+                    sessions: issue_sessions.remove(&id).unwrap_or_default(),
+                    evidence: evidence.remove(&id).unwrap_or_default(),
+                    events: events.remove(&id).unwrap_or_default(),
+                    id,
+                });
+            }
+        }
+
+        let mut session_ids: Vec<&String> =
+            note_sessions.keys().chain(session_issues.keys()).collect();
+        session_ids.sort();
+        session_ids.dedup();
+        let sessions = session_ids
+            .into_iter()
+            .map(|id| SessionCounts {
+                id: id.clone(),
+                notes: note_sessions.get(id).copied().unwrap_or(0),
+                issues: session_issues.get(id).copied().unwrap_or(0),
+            })
+            .collect();
+
+        Ok(ScanResults {
+            notes,
+            issues,
+            sessions,
+            cost,
+            task_costs,
+            agents,
+        })
+    }
+
+    /// First and last message timestamps per agent session, from the
+    /// store scope.
+    async fn agent_times(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, (i64, i64)>, Box<dyn Error>> {
+        let mut times = HashMap::new();
+        if ids.is_empty() {
+            return Ok(times);
+        }
+        let ctx = ContextBuilder::new(Some(Arc::clone(&self.store)))
+            .build()
+            .await;
+        let in_list = ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT session_id, MIN(timestamp), MAX(timestamp) FROM message \
+             WHERE session_id IN ({in_list}) GROUP BY session_id"
+        );
+        for batch in &query(&ctx, &sql).await? {
+            let sessions = column::<StringArray>(batch, 0);
+            let firsts = column::<TimestampMillisecondArray>(batch, 1);
+            let lasts = column::<TimestampMillisecondArray>(batch, 2);
+            for i in 0..batch.num_rows() {
+                if firsts.is_valid(i) && lasts.is_valid(i) {
+                    times.insert(
+                        sessions.value(i).to_string(),
+                        (firsts.value(i), lasts.value(i)),
+                    );
                 }
             }
-            None => SessionDisplay {
-                project: "(unavailable)".to_string(),
-                title: "(unavailable)".to_string(),
-            },
-        };
-        self.map.insert(id.to_string(), display.clone());
-        display
+        }
+        Ok(times)
+    }
+
+    /// A session's project as its driver displays it; the stored
+    /// name when the driver is unknown.
+    fn project_display(&self, driver: &str, projects: &StringArray, i: usize) -> String {
+        if !projects.is_valid(i) {
+            return String::new();
+        }
+        let name = driver.split_once(' ').map_or(driver, |(name, _)| name);
+        match self.registry.for_name(name) {
+            Some(driver) => driver.format_project(projects.value(i), 60),
+            None => projects.value(i).to_string(),
+        }
     }
 }
 
-/// Adapt a `task_agent` row to the scan view's agent entry: state and
-/// cost from the recorded terminal result, session path from the gage
-/// archive, and time bounds from the session JSONL via the cache.
-fn agent_item(row: &scan::TaskAgent, times: &mut AgentTimes) -> gage_tui::scan_view::TaskAgent {
-    use gage_tui::scan_view::{AgentItem, AgentState, TaskId};
+/// Notes, issues, per-session counts, agents, and costs of a scan,
+/// as the stored loader and the live refresh read them.
+struct ScanResults {
+    notes: Vec<NoteItem>,
+    issues: Vec<IssueItem>,
+    sessions: Vec<SessionCounts>,
+    cost: Option<ScanCost>,
+    task_costs: Vec<TaskCost>,
+    agents: Vec<TaskAgent>,
+}
 
-    let result = row.result.as_deref().and_then(|raw| {
-        match serde_json::from_str::<serde_json::Value>(raw) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(session_id = %row.session_id, "unparseable agent result: {e}");
-                None
+impl ScanResults {
+    fn into_event(self) -> scan_view::Event {
+        scan_view::Event::Results {
+            notes: self.notes,
+            issues: self.issues,
+            sessions: self.sessions,
+            cost: self.cost,
+            task_costs: self.task_costs,
+            agents: self.agents,
+        }
+    }
+}
+
+/// Show the progress view over a running scan. Runner events arrive
+/// on `events`; the first, `Started`, names the scan and its tasks
+/// and is what the view's model is built from. Task starts, stops,
+/// and progress become status snapshots; task output becomes log
+/// lines; notes, issues, and agents are re-read from the scan
+/// directory once a second and from the store once the scan is
+/// applied. Closing the view mid-scan cancels the run.
+async fn drive_view(
+    mut events: UnboundedReceiver<Event>,
+    store: Arc<Mutex<Store>>,
+    cancel: CancellationToken,
+) -> io::Result<()> {
+    let Some(Event::Started { id, tasks }) = events.recv().await else {
+        // The runner failed before planning; the caller reports it
+        return Ok(());
+    };
+    let layout = ScanDirLayout::new(scans_dir().join(&id));
+    let host = Arc::new(StoreHost {
+        store,
+        registry: DriverRegistry::builtin(),
+        live: Some(layout.clone()),
+    });
+    let sessions = {
+        let ctx = host.scoped(ScanScope::scan_dir(layout.root())).await;
+        host.scan_sessions(&ctx)
+            .await
+            .map_err(|e| io::Error::other(format!("reading the scan's sessions: {e}")))?
+    };
+    let task_ids: Vec<TaskId> = tasks
+        .into_iter()
+        .map(|(scanner, task)| TaskId { scanner, task })
+        .collect();
+    let mut model = ScanModel::new(ScanSetup {
+        tasks: task_ids,
+        sessions,
+    });
+    model.scan_id = short_uuid(&id).to_string();
+    model.log_key = Some(id.clone());
+
+    let (view_tx, view_rx) = unbounded_channel();
+    let done = Arc::new(AtomicBool::new(false));
+    let poll = tokio::spawn({
+        let host = Arc::clone(&host);
+        let tx = view_tx.clone();
+        let done = Arc::clone(&done);
+        let root = layout.root().to_path_buf();
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                let ctx = host.scoped(ScanScope::scan_dir(&root)).await;
+                let event = match host.load_results(&ctx).await {
+                    Ok(results) => results.into_event(),
+                    Err(e) => scan_view::Event::Log(format!("results refresh failed: {e}")),
+                };
+                send_view_event(&tx, event);
             }
         }
     });
-    let state = match (&result, row.exit_code) {
-        (Some(r), _) => {
-            let is_error = r
-                .get("is_error")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            if is_error {
+
+    let total = model.total;
+    let forward_host = Arc::clone(&host);
+    let forward = async {
+        let mut status = LiveStatus::new(total);
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Started { .. } => {}
+                Event::TaskStarted { scanner, task } => {
+                    status.start(TaskId { scanner, task });
+                    send_view_event(&view_tx, status.snapshot());
+                }
+                Event::TaskFinished {
+                    scanner,
+                    task,
+                    status: task_status,
+                    error,
+                } => {
+                    let id = TaskId { scanner, task };
+                    if task_status == gage_store::TaskStatus::Failed {
+                        send_view_event(
+                            &view_tx,
+                            scan_view::Event::Failed {
+                                scanner: id.scanner.clone(),
+                                task: id.task.clone(),
+                                message: error.unwrap_or_default(),
+                            },
+                        );
+                    }
+                    status.finish(&id);
+                    send_view_event(&view_tx, status.snapshot());
+                }
+                Event::TaskWaiting {
+                    scanner,
+                    task,
+                    waiting,
+                } => {
+                    status.waiting(&TaskId { scanner, task }, waiting);
+                    send_view_event(&view_tx, status.snapshot());
+                }
+                Event::Output(TaskOutput {
+                    scanner,
+                    task,
+                    output,
+                }) => match output {
+                    Output::Progress { pos, total } => {
+                        status.progress(&TaskId { scanner, task }, pos, total);
+                        send_view_event(&view_tx, status.snapshot());
+                    }
+                    Output::Print(text) | Output::Println(text) => send_view_event(
+                        &view_tx,
+                        scan_view::Event::Log(format!("{scanner}:{task}: {text}")),
+                    ),
+                    // Log records are in the scan's `records`, shown by `l`
+                    Output::Log { .. } => {}
+                    // Folded by the runner into `TaskWaiting`
+                    Output::AgentPool(_) => {}
+                },
+                Event::Scan(ScanOutput::Out(text) | ScanOutput::Err(text)) => {
+                    send_view_event(&view_tx, scan_view::Event::Log(text.trim_end().to_string()));
+                }
+                Event::Warning {
+                    scanner,
+                    task,
+                    message,
+                } => send_view_event(
+                    &view_tx,
+                    scan_view::Event::Warning {
+                        scanner,
+                        task,
+                        message,
+                    },
+                ),
+                // Every task is terminal; the apply that follows moves
+                // the scan directory into the store, so the poll stops
+                // reading it
+                Event::Summary { .. } => done.store(true, Ordering::Relaxed),
+            }
+        }
+        // The runner returned: the scan is applied, or it failed. One
+        // final read from the store makes the view current.
+        done.store(true, Ordering::Relaxed);
+        poll.abort();
+        if let Err(e) = poll.await
+            && !e.is_cancelled()
+        {
+            panic!("results poll joined cleanly: {e}");
+        }
+        let ctx = forward_host.scoped(ScanScope::stored(&id)).await;
+        let event = match forward_host.load_results(&ctx).await {
+            Ok(results) => results.into_event(),
+            Err(e) => scan_view::Event::Log(format!("results refresh failed: {e}")),
+        };
+        send_view_event(&view_tx, event);
+        send_view_event(&view_tx, scan_view::Event::Finished);
+    };
+    let run_cancel = cancel.clone();
+    let view = scan_view::run(model, view_rx, move || run_cancel.cancel(), host);
+    let ((), view_result) = tokio::join!(forward, view);
+    // Closing the view mid-scan stops the run; after the scan
+    // completes this is a no-op
+    cancel.cancel();
+    view_result.map_err(|e| io::Error::other(format!("progress view: {e}")))
+}
+
+/// The tasks on workers and the counts the view's status snapshot
+/// carries, kept in step with the runner's events.
+struct LiveStatus {
+    total: usize,
+    finished: usize,
+    running: Vec<RunningTask>,
+}
+
+impl LiveStatus {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            finished: 0,
+            running: Vec::new(),
+        }
+    }
+
+    fn start(&mut self, id: TaskId) {
+        self.running.push(RunningTask {
+            id,
+            progress: None,
+            pool_blocked: false,
+            stopwatch: Stopwatch::started(),
+        });
+    }
+
+    fn finish(&mut self, id: &TaskId) {
+        self.running.retain(|r| r.id != *id);
+        self.finished += 1;
+    }
+
+    fn progress(&mut self, id: &TaskId, pos: u64, total: u64) {
+        if let Some(task) = self.running.iter_mut().find(|r| r.id == *id) {
+            task.progress = Some((pos, total));
+        }
+    }
+
+    /// The task is blocked on the agent pool, or has resumed. The
+    /// working stopwatch stops over a blocked spell.
+    fn waiting(&mut self, id: &TaskId, waiting: bool) {
+        if let Some(task) = self.running.iter_mut().find(|r| r.id == *id) {
+            task.pool_blocked = waiting;
+            task.stopwatch.set_running(!waiting);
+        }
+    }
+
+    fn snapshot(&self) -> scan_view::Event {
+        scan_view::Event::Status {
+            total: self.total,
+            progress: self.finished,
+            running: self.running.clone(),
+        }
+    }
+}
+
+/// Deliver a runner event to the view bridge. A send fails only once
+/// the bridge has dropped its receiver, which happens after the view
+/// has closed; an event then has no reader.
+fn send_runner_event(tx: &UnboundedSender<Event>, event: Event) {
+    if tx.send(event).is_err() {}
+}
+
+/// Deliver an event to the view. A send fails only once the view has
+/// closed its receiver, after which an event has no reader.
+fn send_view_event(tx: &UnboundedSender<scan_view::Event>, event: scan_view::Event) {
+    if tx.send(event).is_err() {}
+}
+
+/// An agent's view entry from its record: state and cost from the
+/// harness result, error from the exit code when there is no result.
+fn agent_item(session_id: &str, exit_code: i64, result: Option<&str>) -> AgentItem {
+    let result = result.and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(session_id, "unparseable agent result: {e}");
+            None
+        }
+    });
+    let state = match &result {
+        Some(r) => {
+            if r.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
                 AgentState::Error
             } else {
                 AgentState::Done
             }
         }
-        (None, Some(_)) => AgentState::Error,
-        (None, None) => AgentState::Running,
+        None if exit_code == 0 => AgentState::Done,
+        None => AgentState::Error,
     };
-    let cost = result
-        .as_ref()
-        .and_then(|r| r.get("total_cost_usd"))
-        .and_then(serde_json::Value::as_f64);
-    let path = gage_claude::session::find_agent_session(&row.session_id);
-    let terminal = state != AgentState::Running;
-    let (started_ms, ended_ms) = times.resolve(&row.session_id, path.as_deref(), terminal);
-    gage_tui::scan_view::TaskAgent {
-        task: TaskId {
-            scanner: row.scanner_name.clone(),
-            task: row.task_name.clone(),
-        },
-        agent: AgentItem {
-            session_id: row.session_id.clone(),
-            path,
-            state,
-            cost,
-            started_ms,
-            ended_ms,
-        },
+    AgentItem {
+        session_id: session_id.to_string(),
+        path: None,
+        state,
+        cost: result
+            .as_ref()
+            .and_then(|r| r.get("total_cost_usd"))
+            .and_then(serde_json::Value::as_f64),
+        started_ms: None,
+        ended_ms: None,
     }
 }
 
-/// Session time bounds per agent, cached across reconcile ticks so a
-/// tick does not re-walk every agent JSONL. The start is read once at
-/// discovery; the end is read once more after the agent's row records
-/// a terminal outcome, and is only reported once final — a running
-/// agent's duration is measured against now, not its last write.
-#[derive(Default)]
-struct AgentTimes {
-    map: HashMap<String, AgentTimesEntry>,
-}
-
-struct AgentTimesEntry {
-    started_ms: Option<i64>,
-    ended_ms: Option<i64>,
-    /// The bounds were read after the terminal outcome was recorded,
-    /// so `ended_ms` is final.
-    terminal_read: bool,
-}
-
-impl AgentTimes {
-    fn resolve(
-        &mut self,
-        session_id: &str,
-        path: Option<&Path>,
-        terminal: bool,
-    ) -> (Option<i64>, Option<i64>) {
-        if let Some(e) = self.map.get(session_id)
-            && e.started_ms.is_some()
-            && (e.terminal_read || !terminal)
-        {
-            return (e.started_ms, e.ended_ms.filter(|_| e.terminal_read));
-        }
-        let Some(path) = path else {
-            return (None, None);
-        };
-        match gage_claude::stats::compute_session_stats(path) {
-            Ok(stats) => {
-                self.map.insert(
-                    session_id.to_string(),
-                    AgentTimesEntry {
-                        started_ms: stats.started_ms,
-                        ended_ms: stats.ended_ms,
-                        terminal_read: terminal,
-                    },
-                );
-                (stats.started_ms, stats.ended_ms.filter(|_| terminal))
-            }
-            Err(e) => {
-                tracing::warn!(session_id, "agent session stats unavailable: {e}");
-                (None, None)
-            }
-        }
+/// Status display strings: the long form `closed (completed)` and
+/// the table cell, which is the reason when there is one.
+fn status_cells(status: &str, reason: Option<&str>) -> (String, String) {
+    match reason {
+        Some(r) => (format!("{status} ({r})"), r.to_string()),
+        None => (status.to_string(), status.to_string()),
     }
 }
 
-/// Locate and stat a session file for title resolution. None when the
-/// session no longer exists on disk — expected for old scans.
-fn stat_session(paths: &HashMap<String, PathBuf>, id: &str) -> Option<SessionInfo> {
-    let src = paths.get(id)?;
-    let meta = std::fs::metadata(src).ok()?;
-    Some(SessionInfo {
-        id: id.to_string(),
-        src: src.clone(),
-        mtime: meta.modified().unwrap(),
-        size: meta.len(),
+/// A note's value text: the text value, or the JSON value pretty
+/// printed.
+fn note_value(values: &StringArray, texts: &StringArray, i: usize) -> String {
+    if texts.is_valid(i) {
+        return texts.value(i).to_string();
+    }
+    match serde_json::from_str::<serde_json::Value>(values.value(i)) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap(),
+        Err(_) => values.value(i).to_string(),
+    }
+}
+
+/// The session id a `session:` target URL names
+fn target_session(target: &str) -> Option<String> {
+    let parsed = gage_store::url::parse(target).ok()?;
+    (parsed.scheme == "session").then(|| parsed.body.to_string())
+}
+
+fn elapsed(
+    started: &TimestampMillisecondArray,
+    stopped: &TimestampMillisecondArray,
+    i: usize,
+) -> Option<Duration> {
+    (started.is_valid(i) && stopped.is_valid(i)).then(|| {
+        Duration::from_millis(stopped.value(i).saturating_sub(started.value(i)).max(0) as u64)
     })
 }
 
-fn delete(args: ScanDeleteArgs) {
-    if args.ids.is_empty() {
-        eprintln!(
-            "gage scan delete: provide one or more scan run IDs\n\n\
-             Use 'gage scan list' to show scan runs"
-        );
-        std::process::exit(1);
+fn timestamp_display(col: &TimestampMillisecondArray, i: usize) -> String {
+    if col.is_valid(i) {
+        gage_core::datetime::ms_to_iso8601(col.value(i))
+    } else {
+        String::new()
     }
+}
 
-    let conn = db::open_db().unwrap();
+fn string_or_empty(col: &StringArray, i: usize) -> String {
+    if col.is_valid(i) {
+        col.value(i).to_string()
+    } else {
+        String::new()
+    }
+}
 
-    let mut runs: Vec<scan::Scan> = Vec::new();
+async fn query(ctx: &SessionContext, sql: &str) -> Result<Vec<RecordBatch>, Box<dyn Error>> {
+    Ok(ctx.sql(sql).await?.collect().await?)
+}
+
+fn delete(args: ScanDeleteArgs) {
+    let store = open_store("gage scan delete");
+    let scans = ScanStore::from(&store);
+
+    // Resolve every argument before writing anything, so one bad
+    // argument leaves the store untouched
+    let mut ids: Vec<String> = Vec::with_capacity(args.ids.len());
     let mut errors = 0;
     for prefix in &args.ids {
-        match scan::get_scan(&conn, prefix) {
-            Ok(r) => runs.push(r),
+        match scans.get(prefix) {
+            Ok(record) => ids.push(record.id),
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("gage scan delete: {e}");
                 errors += 1;
             }
         }
@@ -1079,15 +1427,16 @@ fn delete(args: ScanDeleteArgs) {
         std::process::exit(1);
     }
 
-    let run_count = runs.len();
-
+    let count = ids.len();
     dialog::run("Delete scan runs", || {
-        let run_plural = if run_count == 1 { "run" } else { "runs" };
-        cli::log::remark(format!("{run_count} {run_plural}"))?;
+        cli::log::remark(format!("{count} {}", plural(count, "scan run")))?;
 
         if !args.yes {
-            let prompt =
-                format!("Permanently delete {run_count} scan {run_plural}? This cannot be undone.");
+            let prompt = format!(
+                "Permanently delete {count} {} and associated notes/issues? \
+                 This cannot be undone.",
+                plural(count, "scan run")
+            );
             let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
@@ -1095,688 +1444,238 @@ fn delete(args: ScanDeleteArgs) {
         }
 
         let mut deleted = 0;
-        for run in &runs {
-            if let Err(e) = scan::delete_scan(&conn, &run.id) {
-                eprintln!("warning: failed to delete {}: {e}", short_uuid(&run.id));
-            } else {
-                deleted += 1;
-                remove_scan_logs(&run.id);
+        let mut notes = 0;
+        let mut issues = 0;
+        for id in &ids {
+            match scans.delete_cascade(id) {
+                Ok(d) => {
+                    deleted += 1;
+                    notes += d.notes.len();
+                    issues += d.issues.len();
+                }
+                Err(e) => eprintln!("warning: failed to delete {}: {e}", short_uuid(id)),
             }
         }
 
-        let plural = if deleted == 1 {
-            "scan run"
-        } else {
-            "scan runs"
-        };
-        Ok(DialogResult::from(format!("Deleted {deleted} {plural}")))
-    });
-}
-
-fn invalidate(args: ScanInvalidateArgs) {
-    let conn = db::open_db().unwrap();
-    dialog::run("Invalidate scan tasks", || {
-        let selectors = [
-            ("Sessions", like_filter("ref", "session:", &args.sessions)),
-            ("Notes", like_filter("ref", "note:", &args.notes)),
-            ("Tasks", like_filter("key", "", &args.tasks)),
-        ];
-
-        let mut counts = String::new();
-        let mut clauses: Vec<String> = Vec::new();
-        let mut patterns: Vec<String> = Vec::new();
-        for (label, selector) in selectors {
-            let Some((clause, pats)) = selector else {
-                continue;
-            };
-            let n = count_matching_tasks(&conn, &clause, &pats)?;
-            counts.push_str(&format!("\n{}", style(format!("{label}: {n}")).dim()));
-            clauses.push(clause);
-            patterns.extend(pats);
-        }
-        cli::log::remark(format!("Matching tasks{counts}"))?;
-
-        let clause = clauses.join(" OR ");
-        let count = count_matching_tasks(&conn, &clause, &patterns)?;
-        if count == 0 {
-            return Ok(DialogResult::from("No matching tasks"));
-        }
-
-        if !args.yes {
-            let prompt = format!("You are about to invalidate {count} tasks. Continue?");
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-
-        let n = conn
-            .execute(
-                &format!("DELETE FROM task_validate WHERE {clause}"),
-                gage_db::rusqlite::params_from_iter(&patterns),
-            )
-            .context("deleting task validation rows")?;
-        Ok(DialogResult::from(format!("{n} tasks invalidated")))
-    });
-}
-
-/// LIKE clause and patterns prefix-matching `column` against each id,
-/// or None when no ids were given for this selector.
-fn like_filter(column: &str, prefix: &str, ids: &[String]) -> Option<(String, Vec<String>)> {
-    if ids.is_empty() {
-        return None;
-    }
-    let clause: Vec<String> = ids.iter().map(|_| format!("{column} LIKE ?")).collect();
-    let patterns = ids.iter().map(|id| format!("{prefix}{id}%")).collect();
-    Some((format!("({})", clause.join(" OR ")), patterns))
-}
-
-fn count_matching_tasks(
-    conn: &gage_db::rusqlite::Connection,
-    clause: &str,
-    patterns: &[String],
-) -> Result<usize, DialogError> {
-    let count: usize = conn
-        .query_row(
-            &format!("SELECT count(*) FROM task_validate WHERE {clause}"),
-            gage_db::rusqlite::params_from_iter(patterns),
-            |row| row.get(0),
+        Ok(format!(
+            "Deleted {deleted} {}, {notes} {}, {issues} {}",
+            plural(deleted, "scan run"),
+            plural(notes, "note"),
+            plural(issues, "issue")
         )
-        .context("counting task validation rows")?;
-    Ok(count)
+        .into())
+    });
 }
 
-async fn run_scan(mut args: ScanRunArgs) {
-    let registry = ScannerRegistry::load();
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
+    }
+}
 
+async fn run_scan(args: ScanRunArgs) {
     if args.list_scanners {
-        list_scanners(&registry);
+        list_scanners(&ScannerRegistry::load());
         return;
     }
 
-    // Validate --model up front so a malformed value fails before any
-    // dialog work; the map itself is rebuilt inside the dialog after
-    // the Model step, which may append a selection to args.models.
-    if let Err(e) = ModelMap::from_args(&args.models) {
-        eprintln!("gage scan: {e}");
-        std::process::exit(1);
-    }
-
-    // --rerun expands into the explicit scanner and session lists, then
-    // flows through the normal run path below.
-    if let Some(prefix) = &args.rerun {
-        let conn = db::open_db().unwrap();
-        match rerun_args(&conn, prefix) {
-            Ok((scanners, sessions)) => {
-                args.scanners = scanners;
-                args.sessions = sessions;
-            }
-            Err(e) => {
-                eprintln!("gage scan: {e}");
-                std::process::exit(1);
-            }
+    let registry = ScannerRegistry::load();
+    let store = open_store("gage scan");
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("gage scan: reading cwd: {e}");
+            std::process::exit(1);
         }
+    };
+    let config = match gage_core::config::load_merged(&cwd) {
+        Ok((config, _)) => config,
+        Err(e) => {
+            eprintln!("gage scan: reading config: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // The dialog settles the inputs and builds the dataset; the scan
+    // itself runs after it, so its output lands outside the dialog
+    let mut prep: Option<ScanPrep> = None;
+    dialog::run_async("Scan sessions", || {
+        prepare_scan_dialog(args, &registry, &config, &store, &mut prep)
+    })
+    .await;
+    // A declined confirmation leaves nothing to run; a failure has
+    // already exited
+    let Some(prep) = prep else {
+        return;
+    };
+    run_prepared(prep, &store).await;
+}
+
+/// Everything the dialog settled for the run.
+struct ScanPrep {
+    compiled: Vec<CompiledScanner>,
+    /// The dataset to scan, built or reused once the run starts
+    plan: DatasetPlan,
+    jobs: usize,
+    agent_jobs: usize,
+    invalidate: bool,
+    /// The tag for the scan run, checked before the run starts
+    tag: Option<String>,
+    force_tag: bool,
+    /// The progress view is shown; headless otherwise
+    progress_ui: bool,
+}
+
+/// A chosen session set for the scan: an existing dataset, a new
+/// dataset to be built from the resolved native sessions, or none.
+/// `Reuse` and `None` carry everything needed to preview the plan;
+/// `New` carries the sessions resolved from `SessionSelectArgs`
+/// before any dataset is written.
+enum DatasetPlan {
+    Reuse {
+        id: String,
+        commit_sha: String,
+        session_count: usize,
+    },
+    New {
+        selected: Vec<SessionInfo>,
+    },
+    None,
+}
+
+/// Session-axis window prompt choices.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Window {
+    Today,
+    Days(u32),
+    All,
+}
+
+async fn prepare_scan_dialog(
+    mut args: ScanRunArgs,
+    registry: &ScannerRegistry,
+    config: &Config,
+    store: &Store,
+    prep: &mut Option<ScanPrep>,
+) -> Result<dialog::DialogResult, DialogError> {
+    // Scanner selection: -s (a registry name or a path), -g, the
+    // `default` group under -y, or an interactive multi-select when
+    // the user supplied nothing.
+    // The resolved specs borrow the values, which must outlive the
+    // dataset prompt's mutable use of `args`
+    let scanner_specs = args.scanners.clone();
+    let selected = scanner_spec::resolve(registry, &scanner_specs).map_err(DialogError::Failed)?;
+    let (group_names, prompted) = resolve_group_names(&args, &selected, registry, config)?;
+    let mut scanners: Vec<Scanner<'_>> = Vec::new();
+    for resolved in &selected {
+        scanners.push(resolved.scanner().map_err(DialogError::Failed)?);
+    }
+    for name in &group_names {
+        let def = registry
+            .get_def(name)
+            .expect("group members come from the registry");
+        let scanner =
+            Scanner::from_spec(def, None, name).map_err(|e| DialogError::Failed(format!("{e}")))?;
+        scanners.push(scanner);
+    }
+    // The multi-select has already displayed the user's choice;
+    // the preview is for pinned/defaulted selections only.
+    if !prompted {
+        preview_scanners(&scanners)?;
     }
 
-    // Parse `-f` files into owned ScannerDefs held outside the
-    // registry. Each def's declared name is replaced with a composite
-    // `{name}[{display_path}]` so ad-hoc references never collide with
-    // registry scanners at selection time. The composite name is
-    // appended to the explicit scanner list; any `#{...}` params
-    // override suffix on the path is split off first and re-appended.
-    let mut ad_hoc: Vec<ScannerDef> = Vec::new();
-    let mut file_specs: Vec<String> = Vec::new();
+    // Session / dataset axis: either reuse, mint from a selection,
+    // or none. The plan is a preview only; nothing is written until
+    // after the confirmation.
+    let plan = resolve_dataset_plan(&mut args, store).await?;
+    preview_dataset(&plan)?;
+
+    // A tag that cannot be added is reported before anything is
+    // written
+    if let Some(name) = &args.tag {
+        TagStore::from(store)
+            .check_available(name, args.force_tag)
+            .map_err(|e| match e {
+                StoreError::TagExists { .. } => {
+                    DialogError::Failed(format!("{e} (use --force-tag to move it)"))
+                }
+                e => DialogError::Failed(e.to_string()),
+            })?;
+        cli::log::step(format!("Tag\n{}", style(name).dim()))?;
+    }
+
+    // Preflight: compile every selected scanner before any task runs.
+    let mut compiled: Vec<CompiledScanner> = Vec::new();
     let mut errors = 0;
-    for raw in &args.files {
-        let (path_str, override_suffix) = match raw.find("#{") {
-            Some(pos) => (&raw[..pos], &raw[pos..]),
-            None => (raw.as_str(), ""),
-        };
-        match parse_scanner_file(Path::new(path_str)) {
-            Ok(mut def) => {
-                let display = display_path(&def.path, &def.name);
-                let composite = format!("{}[{}]", def.name, display);
-                def.name = composite.clone();
-                let spec = format!("{composite}{override_suffix}");
-                // Same file given twice canonicalizes to one composite
-                // name; each distinct config override still runs once.
-                if !ad_hoc.iter().any(|d| d.name == composite) {
-                    ad_hoc.push(def);
-                }
-                if !file_specs.contains(&spec) {
-                    file_specs.push(spec);
-                }
-            }
+    for result in scanners.iter().map(gage_scan::compile) {
+        match result {
+            Ok(c) => compiled.push(c),
             Err(e) => {
-                eprintln!("error: {e}");
+                cli::log::error(format!("{e}"))?;
                 errors += 1;
             }
         }
     }
     if errors > 0 {
-        std::process::exit(1);
-    }
-    args.scanners.extend(file_specs);
-
-    let explicit_sessions: Option<Vec<(String, PathBuf)>> = if args.sessions.is_empty() {
-        None
-    } else {
-        let mut resolved = Vec::new();
-        let mut errors = 0;
-        for prefix in &args.sessions {
-            match session::one_session(prefix) {
-                Ok(s) => resolved.push((s.id, s.src)),
-                Err(e) => {
-                    eprintln!("{e}");
-                    errors += 1;
-                }
-            }
-        }
-        if errors > 0 {
-            std::process::exit(1);
-        }
-        Some(resolved)
-    };
-
-    // The scan id is minted here — before the runner — so the log
-    // files and the db rows share one key from the start.
-    let scan_id = gage_core::uuid::new_uuid();
-    let _log_guard = match gage_log::init_named("scan", &scan_id, "warn,gage_runtime=info") {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("error initializing scan log: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    dialog::run_async("Scan sessions", || {
-        run_dialog(args, registry, ad_hoc, explicit_sessions, scan_id)
-    })
-    .await;
-}
-
-/// Resolve a prior scan into the scanner names and session IDs to run
-/// again. Session paths are re-resolved downstream, so sessions that no
-/// longer exist on disk fail there with the standard message.
-fn rerun_args(
-    conn: &gage_db::rusqlite::Connection,
-    prefix: &str,
-) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let run = scan::get_scan(conn, prefix)?;
-    let scanners = scan::scanner_names_for_scan(conn, &run.id)?;
-    if scanners.is_empty() {
-        anyhow::bail!("scan {} has no scanners", short_uuid(&run.id));
-    }
-    let sessions = scan::session_ids_for_scan(conn, &run.id)?;
-    if sessions.is_empty() {
-        anyhow::bail!("scan {} has no sessions", short_uuid(&run.id));
-    }
-    Ok((scanners, sessions))
-}
-
-/// Capture files for the scan's output streams:
-/// `~/.gage/log/scan/{scan_id}.out` (scanner stdout) and `.err`
-/// (warnings and task failures). Creation failure disables capture
-/// for the run; the scan itself proceeds.
-struct ScanStreams {
-    out: Option<std::fs::File>,
-    err: Option<std::fs::File>,
-}
-
-impl ScanStreams {
-    fn with_scan(scan_id: &str) -> Self {
-        let dir = gage_log::role_dir("scan");
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::warn!("creating scan log dir {}: {e}", dir.display());
-            return Self {
-                out: None,
-                err: None,
-            };
-        }
-        let open = |ext: &str| {
-            let path = dir.join(format!("{scan_id}.{ext}"));
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-            {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    tracing::warn!("opening {}: {e}", path.display());
-                    None
-                }
-            }
-        };
-        Self {
-            out: open("out"),
-            err: open("err"),
-        }
+        return Err(DialogError::Failed(
+            "Scan not started due to scanner errors".to_string(),
+        ));
     }
 
-    fn out(&mut self, s: &str) {
-        write_stream(&mut self.out, s);
-    }
-
-    fn out_line(&mut self, s: &str) {
-        write_stream(&mut self.out, s);
-        write_stream(&mut self.out, "\n");
-    }
-
-    fn err_line(&mut self, s: &str) {
-        write_stream(&mut self.err, s);
-        write_stream(&mut self.err, "\n");
-    }
-
-    /// Path of the `.out` capture, for the scan view's log dialog.
-    fn out_path(scan_id: &str) -> PathBuf {
-        gage_log::role_dir("scan").join(format!("{scan_id}.out"))
-    }
-}
-
-fn write_stream(file: &mut Option<std::fs::File>, s: &str) {
-    use std::io::Write;
-    if let Some(f) = file
-        && let Err(e) = f.write_all(s.as_bytes())
-    {
-        // Disable capture after a write failure rather than logging
-        // once per line
-        tracing::warn!("scan stream write failed, disabling capture: {e}");
-        *file = None;
-    }
-}
-
-async fn run_dialog(
-    mut args: ScanRunArgs,
-    registry: ScannerRegistry,
-    ad_hoc: Vec<ScannerDef>,
-    explicit_sessions: Option<Vec<(String, PathBuf)>>,
-    scan_id: String,
-) -> Result<DialogResult, DialogError> {
-    // Resolve a bare scanner name against the registry first, then
-    // fall back to the ad-hoc `-f` defs held on this invocation.
-    let resolve = |name: &str| -> Option<&ScannerDef> {
-        registry
-            .get_def(name)
-            .or_else(|| ad_hoc.iter().find(|d| d.name == name))
-    };
-    let is_known_here =
-        |name: &str| -> bool { registry.is_known(name) || ad_hoc.iter().any(|d| d.name == name) };
-    // Scanner selection — default set excludes disabled scanners.
-    // Explicit `-s name` (handled below) still runs disabled scanners.
-    let cwd = std::env::current_dir().context("reading current working directory")?;
-    let (config, _) = gage_core::config::load_merged(&cwd)
-        .with_context(|| format!("loading merged config from {}", cwd.display()))?;
-    let defs = registry.list_enabled(&config);
-    let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    names.sort();
-
-    // `-g` expands to the group's enabled members, unioned with `-s`
-    let mut group_names: Vec<String> = Vec::new();
-    for group in &args.groups {
-        let members: Vec<&str> = registry
-            .group_members(group)
-            .into_iter()
-            .filter(|d| config.is_scanner_enabled(&d.name))
-            .map(|d| d.name.as_str())
-            .collect();
-        if members.is_empty() {
-            cli::log::error(format!("No scanners for group '{group}'"))?;
-            return Err(DialogError::Canceled);
-        }
-        for name in members {
-            if !group_names.iter().any(|n| n == name) {
-                group_names.push(name.to_string());
-            }
-        }
-    }
-
-    let selected_names: Vec<String> =
-        if args.scanners.is_empty() && group_names.is_empty() && !args.yes {
-            // No selection args: pick interactively — `default` group
-            // members pre-selected
-            let default_names: Vec<usize> = names
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| {
-                    registry
-                        .group_members("default")
-                        .iter()
-                        .any(|d| d.name == **n)
-                })
-                .map(|(i, _)| i)
-                .collect();
-            let mut prompt = cli::multiselect("Scanners").initial_values(default_names);
-            for (i, name) in names.iter().enumerate() {
-                let hint = registry
-                    .get_def(name)
-                    .map(|d| d.description.lines().next().unwrap_or("").to_string())
-                    .unwrap_or_default();
-                prompt = prompt.item(i, (*name).to_string(), hint);
-            }
-            let indices: Vec<usize> = prompt.interact()?;
-            indices
-                .iter()
-                .map(|&i| {
-                    names
-                        .get(i)
-                        .expect("selected holds positions in names")
-                        .to_string()
-                })
-                .collect()
-        } else if args.scanners.is_empty() && group_names.is_empty() {
-            // `-y` with no selection args: the `default` group
-            names
-                .iter()
-                .filter(|n| {
-                    registry
-                        .group_members("default")
-                        .iter()
-                        .any(|d| d.name == **n)
-                })
-                .map(|n| n.to_string())
-                .collect()
-        } else {
-            for name in &args.scanners {
-                let bare = name.split("#{").next().unwrap();
-                // Library scanners are not selectable — same error as an
-                // unknown name
-                if !is_known_here(bare) || registry.is_library(bare) {
-                    cli::log::error(format!("Unknown scanner: {bare}"))?;
-                    return Err(DialogError::Canceled);
-                }
-            }
-            // Reject the same scanner given twice under -s. Bare-name
-            // compare so `foo` and `foo#{...}` collide.
-            let mut seen: Vec<&str> = Vec::new();
-            for name in &args.scanners {
-                let bare = name.split("#{").next().unwrap();
-                if seen.contains(&bare) {
-                    cli::log::error(format!("Scanner '{bare}' specified more than once"))?;
-                    return Err(DialogError::Canceled);
-                }
-                seen.push(bare);
-            }
-            // -s wins over -g on the same bare name: drop the group
-            // entry so the -s spec (possibly with a config override)
-            // applies, avoiding a duplicate (scanner, task) pair.
-            let explicit_bare: Vec<&str> = args
-                .scanners
-                .iter()
-                .map(|n| n.split("#{").next().unwrap())
-                .collect();
-            let mut out: Vec<String> = group_names
-                .into_iter()
-                .filter(|g| {
-                    let gb = g.split("#{").next().unwrap();
-                    !explicit_bare.contains(&gb)
-                })
-                .collect();
-            for name in &args.scanners {
-                out.push(name.clone());
-            }
-            out
-        };
-
-    if !args.scanners.is_empty() || !args.groups.is_empty() || args.yes {
-        let display: Vec<&str> = selected_names
-            .iter()
-            .map(|n| n.split("#{").next().unwrap())
-            .collect();
-        let scanner_lines: String = display
-            .iter()
-            .map(|n| format!("\n{}", style(n).dim()))
-            .collect();
-        cli::log::step(format!("Scanners{scanner_lines}"))?;
-    }
-
-    let mut scanners: Vec<Scanner<'_>> = {
-        let mut out = Vec::new();
-        for spec in &selected_names {
-            let (name, params_override) = split_scanner_spec(spec);
-            let Some(def) = resolve(name) else {
-                cli::log::error(format!("Unknown scanner: {name}"))?;
-                return Err(DialogError::Canceled);
-            };
-            match Scanner::from_spec(def, params_override, spec) {
-                Ok(s) => out.push(s),
-                Err(e) => {
-                    cli::log::error(format!("{e}"))?;
-                    return Err(DialogError::Canceled);
-                }
-            }
-        }
-        out
-    };
-
-    // A defective SCANNER declaration is a full stop, as a compile
-    // failure is below
-    for scanner in &scanners {
-        if !scanner.def.problems.is_empty() {
-            cli::log::error(format!(
-                "scanner {} has an invalid SCANNER declaration\n{}",
-                scanner.def.name,
-                scanner.def.render_problems()
-            ))?;
-            return Err(DialogError::Failed(
-                "Scan not started due to scanner errors".to_string(),
-            ));
-        }
-    }
-
-    // Pull in tasks that declare themselves `required_by` what the
-    // selection writes. `--no-deps` skips the pull-in so only the
-    // named scanners run.
-    if !args.no_deps {
-        let required = {
-            let selected_defs: Vec<_> = scanners.iter().map(|s| s.def).collect();
-            registry.required_tasks(&selected_defs, &config)
-        };
-        for (def, tasks) in required {
-            scanners.push(Scanner::with_tasks(def, tasks));
-        }
-    }
-
-    // Compile all scanners up front. A scanner that does not compile
-    // (or declares a task with no matching function) is a full stop:
-    // the error is shown here and the scan never starts — no scan
-    // record, no UI.
-    let db = Arc::new(Mutex::new(db::open_db().unwrap()));
-    let slots = match gage_scan::runner::compile_scanners(&scanners, db.clone()) {
-        Ok(slots) => slots,
-        Err(e) => {
-            cli::log::error(format!("{e}"))?;
-            return Err(DialogError::Failed(
-                "Scan not started due to scanner errors".to_string(),
-            ));
-        }
-    };
-
-    // Session selection
-    let sessions = if let Some(resolved) = explicit_sessions {
-        let mut session_lines: String = resolved
-            .iter()
-            .take(5)
-            .map(|(id, _)| format!("\n{}", style(id).dim()))
-            .collect();
-        let more = resolved.len().saturating_sub(5);
-        if more > 0 {
-            let label = format!("{more} more session{}", if more == 1 { "" } else { "s" });
-            session_lines.push_str(&format!("\n{}", style(label).dim().italic()));
-        }
-        cli::log::step(format!("Sessions{session_lines}"))?;
-        resolved
-    } else {
-        // Each selection axis — timeframe and session cap — resolves
-        // independently: an option pins its axis (shown as a step), a
-        // missing axis is prompted for, and -y falls back to the
-        // defaults (last 30 days, up to 20 sessions, or unbounded when
-        // the other axis was pinned), also shown as steps.
-        let window_given = args.all || args.today || args.days.is_some();
-        let pinned_window = if args.all {
-            Some(Window::All)
-        } else if args.today {
-            Some(Window::Today)
-        } else {
-            args.days.map(Window::Days)
-        };
-        let window = if let Some(w) = pinned_window {
-            selection_step("Timeframe", window_display(w))?;
-            w
-        } else if !args.yes {
-            // --limit alone means all time, so it moves the prompt's
-            // starting choice; --sample keeps its documented 30-day
-            // default window
-            let initial = if args.limit.is_some() {
-                Window::All
-            } else {
-                Window::Days(30)
-            };
-            prompt_window(initial)?
-        } else {
-            let w = if args.limit.is_some() {
-                Window::All
-            } else {
-                Window::Days(30)
-            };
-            selection_step("Timeframe", window_display(w))?;
-            w
-        };
-        let limit = if args.all {
-            selection_step("Session limit", "All available")?;
-            None
-        } else if let Some(n) = args.sample {
-            selection_step("Session limit", format!("{n} sampled"))?;
-            None
-        } else if let Some(n) = args.limit {
-            selection_step("Session limit", n)?;
-            Some(n)
-        } else if !args.yes {
-            // A pinned timeframe alone means no cap, so it moves the
-            // prompt's starting choice
-            let initial = if window_given { None } else { Some(20) };
-            prompt_limit(initial)?
-        } else {
-            let v = if window_given { None } else { Some(20) };
-            match v {
-                Some(n) => selection_step("Session limit", n)?,
-                None => selection_step("Session limit", "All available")?,
-            }
-            v
-        };
-        let since = match window {
-            Window::All => None,
-            Window::Today => Some(session_select::since_local_midnight()),
-            Window::Days(d) => Some(Duration::from_secs(u64::from(d) * 86_400)),
-        };
-
-        let project = match &args.project {
-            Some(p) => {
-                let projects = session_select::known_projects("gage scan")
-                    .await
-                    .context("querying session projects")?;
-                let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-                match session_select::resolve_project(p, &home, &cwd, &projects) {
-                    Some(slug) => Some(slug),
-                    None => {
-                        cli::log::error(format!("No sessions for project '{p}'"))?;
-                        return Err(DialogError::Failed("Nothing to scan".to_string()));
-                    }
-                }
-            }
-            None => None,
-        };
-
-        if let Some(slug) = &project {
-            selection_step("Project", session_select::project_slug_display(slug))?;
-        }
-
-        let mut builder = SessionListBuilder::new();
-        if let Some(slug) = &project {
-            builder = builder.project_slug(slug.clone());
-        }
-        if let Some(d) = since {
-            builder = builder.since(d);
-        }
-        if let Some(n) = limit {
-            builder = builder.limit(n);
-        }
-        let mut sessions: Vec<(String, PathBuf)> =
-            builder.build().into_iter().map(|s| (s.id, s.src)).collect();
-        if let Some(n) = args.sample {
-            sessions.shuffle(&mut rand::rng());
-            sessions.truncate(n);
-        }
-        sessions
-    };
-
-    // Model selection. If --model was passed, honor it verbatim and
-    // show the list as a step. Otherwise prompt for a bare model
-    // (added as a plain [SIZE=]-less entry to args.models), or under
-    // -y leave args.models empty so each scanner resolves its own
-    // per-size-tier default. Selecting "Default" in the prompt has
-    // the same effect.
-    if args.models.is_empty() {
-        if args.yes {
-            selection_step("Model", "Default")?;
-        } else if let Some(selected) = model_prompt::prompt_model_for_scan()? {
-            args.models.push(selected);
-        } else {
-            selection_step("Model", "Default")?;
-        }
-    } else {
-        let lines: String = args
-            .models
-            .iter()
-            .map(|m| format!("\n{}", style(m).dim()))
-            .collect();
-        cli::log::step(format!("Model{lines}"))?;
-    }
-    let model_map = ModelMap::from_args(&args.models)
-        .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
-
-    preflight::check().map_err(|e| DialogError::Failed(e.to_string()))?;
-
-    // Confirmation
+    // Confirmation.
     if !args.yes {
-        let n = sessions.len();
-        let plural = if n == 1 { "" } else { "s" };
-        cli::log::info(dialog::wrap_text(
-            &Term::stdout(),
-            &format!(
-                "You are about to scan {n} session{plural}. Standard token usage \
-                 applies for the selected model."
-            ),
-        ))?;
         let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
         if !confirmed {
             return Err(DialogError::Canceled);
         }
     }
 
-    // Run
-    let started = std::time::Instant::now();
-    let jobs = args.jobs.unwrap_or_else(num_cpus::get).max(1);
-    let agent_jobs = args.agent_jobs.unwrap_or(DEFAULT_AGENT_JOBS).max(1);
+    if let DatasetPlan::New { selected } = &plan
+        && selected.is_empty()
+    {
+        return Err(DialogError::Failed(
+            "No sessions matched the selection".to_string(),
+        ));
+    }
+    *prep = Some(ScanPrep {
+        compiled,
+        plan,
+        jobs: args.jobs,
+        agent_jobs: args.agent_jobs,
+        invalidate: args.invalidate,
+        tag: args.tag,
+        force_tag: args.force_tag,
+        progress_ui: !args.no_progress && io::stdout().is_terminal(),
+    });
+    Ok("Starting scan".into())
+}
 
-    // Enrich (id, path) → SessionInfo for the DataFusion-side context
-    // built next.
-    let selected: Arc<[SessionInfo]> = {
-        let mut out: Vec<SessionInfo> = Vec::with_capacity(sessions.len());
-        for (id, src) in sessions {
-            let meta = std::fs::metadata(&src)
-                .with_context(|| format!("stat session file {}", src.display()))?;
-            let mtime = meta.modified().unwrap();
-            out.push(SessionInfo {
-                id,
-                src,
-                mtime,
-                size: meta.len(),
-            });
+/// Build the dataset, then run the prepared scan, headless or under
+/// the progress view, and print its summary line. A canceled scan or
+/// one with a failed task exits with status 1.
+async fn run_prepared(prep: ScanPrep, store: &Store) {
+    let driver: Arc<dyn Driver> = Arc::new(ClaudeDriver::new());
+    let dataset_sha = match materialize_dataset(
+        prep.plan,
+        store,
+        &prep.compiled,
+        Arc::clone(&driver),
+        prep.progress_ui,
+    )
+    .await
+    {
+        Ok(sha) => sha,
+        Err(e) => {
+            eprintln!("gage scan: {e}");
+            std::process::exit(1);
         }
-        Arc::from(out.into_boxed_slice())
     };
-    let scan_ctx = Arc::new(ScanSessionContext::new(&selected));
 
+    // Ctrl-C cancels the run; the scan applies what ran. Once tokio
+    // has taken the signal, a second Ctrl-C during apply has no
+    // effect.
     let cancel = crate::panic_token().child_token();
     let signal_task = {
         let cancel = cancel.clone();
@@ -1788,515 +1687,421 @@ async fn run_dialog(
         })
     };
 
-    // Notes and issues are no longer tied to a scan, so "what this scan
-    // produced" is derived by diffing before/after: a note count for the
-    // summary, and the set of issue ids so the new issues can be listed.
-    // This assumes Gage controls DB access and no concurrent scan runs —
-    // anything added out-of-band during the scan would be miscounted.
-    let (notes_before, issue_ids_before) = {
-        let conn = db.lock().unwrap();
-        (
-            gage_db::note::count(&conn).unwrap_or(0),
-            all_issue_ids(&conn),
-        )
+    let scan_config = ScanConfig {
+        scans_dir: &scans_dir(),
+        gage_version: crate::VERSION,
+        dataset: dataset_sha.as_deref(),
+        jobs: prep.jobs,
+        agent_jobs: prep.agent_jobs,
+        driver,
+        invalidate: prep.invalidate,
     };
-
-    let mut streams = ScanStreams::with_scan(&scan_id);
-    let result = if args.no_progress {
-        // Headless: no TUI, scanner output and diagnostics stream to
-        // the terminal
-        gage_scan::runner::run(
-            db.clone(),
-            scan_id,
-            args.label.clone(),
-            scanners,
-            slots,
-            selected,
-            scan_ctx,
-            jobs,
-            agent_jobs,
-            model_map,
-            args.invalidate,
-            cancel.clone(),
-            |event| {
-                capture_event(&mut streams, &event);
-                use std::io::Write;
-                match &event {
-                    gage_scan::event::ScanEvent::Print { s } => {
-                        io::stdout()
-                            .write_all(s.as_bytes())
-                            .expect("write to stdout");
+    let result = if !prep.progress_ui {
+        // Headless: task output and the scan's own lines go to the
+        // terminal as they happen, unprefixed, with a status line for
+        // the start of the scan and of each task, and each task's end
+        let mut task_starts: HashMap<String, Instant> = HashMap::new();
+        gage_scan::scan(
+            store,
+            &scan_config,
+            &prep.compiled,
+            &cancel,
+            |event| match event {
+                Event::Output(TaskOutput { output, .. }) => match output {
+                    Output::Print(s) => print!("{s}"),
+                    Output::Println(s) => println!("{s}"),
+                    Output::Log { .. } | Output::Progress { .. } | Output::AgentPool(_) => {}
+                },
+                Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
+                Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
+                Event::Started { id, tasks } => {
+                    let n = tasks.len();
+                    println!(
+                        "Scan {} started: {n} {}",
+                        short_uuid(&id),
+                        plural(n, "task")
+                    );
+                }
+                // A snapshot for the progress view
+                Event::TaskWaiting { .. } | Event::Summary { .. } => {}
+                Event::Warning {
+                    scanner,
+                    task,
+                    message,
+                } => eprintln!("warning: task {scanner}:{task} {message}"),
+                Event::TaskStarted { scanner, task } => {
+                    task_starts.insert(format!("{scanner}:{task}"), Instant::now());
+                    println!("Task {scanner}:{task} started");
+                }
+                Event::TaskFinished {
+                    scanner,
+                    task,
+                    status,
+                    ..
+                } => {
+                    let label = format!("{scanner}:{task}");
+                    match task_starts.remove(&label) {
+                        Some(started) => println!(
+                            "Task {label} {} in {}",
+                            status.as_str(),
+                            fmt_duration(started.elapsed())
+                        ),
+                        None => println!("Task {label} {}", status.as_str()),
                     }
-                    gage_scan::event::ScanEvent::Println { s } => {
-                        println!("{s}");
-                    }
-                    gage_scan::event::ScanEvent::TaskFailed {
-                        scanner,
-                        task,
-                        message,
-                    } => {
-                        eprintln!("error: {}", task_display(scanner, task));
-                        for line in message.lines() {
-                            eprintln!("{line}");
-                        }
-                    }
-                    gage_scan::event::ScanEvent::Warning {
-                        scanner,
-                        task,
-                        message,
-                    } => {
-                        eprintln!("warning: {}: {message}", task_display(scanner, task));
-                    }
-                    gage_scan::event::ScanEvent::Status(_) => {}
                 }
             },
         )
         .await
     } else {
-        run_scan_tui(
-            db.clone(),
-            scan_id,
-            args.label.clone(),
-            scanners,
-            slots,
-            selected,
-            scan_ctx,
-            jobs,
-            agent_jobs,
-            model_map,
-            args.invalidate,
-            cancel.clone(),
-            streams,
-        )
-        .await
-    };
-    let elapsed = started.elapsed();
-
-    cancel.cancel();
-    if let Err(e) = signal_task.await
-        && !e.is_cancelled()
-    {
-        panic!("signal task joined cleanly: {e}");
-    }
-
-    match result {
-        Ok(summary) => {
-            let skipped_suffix = if summary.skipped > 0 {
-                format!(", {} skipped", summary.skipped)
-            } else {
-                String::new()
-            };
-            let new_notes = {
-                let conn = db.lock().unwrap();
-                let new_issues = new_issues_since(&conn, &issue_ids_before);
-                render_issues_remark(&new_issues)?;
-                gage_db::note::count(&conn)
-                    .unwrap_or(notes_before)
-                    .saturating_sub(notes_before)
-            };
-            Ok(DialogResult::from(format!(
-                "{} tasks in {}{skipped_suffix}, {new_notes} new notes (scan {})",
-                summary.completed,
-                crate::human::format_duration(elapsed),
-                summary.scan_id,
-            )))
+        // The progress view reads the scan through its own store
+        // handle: the runner's stays free for the tasks and the apply
+        let view_store = match Store::open(&gage_store::store_path()) {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!("gage scan: {e}");
+                std::process::exit(1);
+            }
+        };
+        let (tx, rx) = unbounded_channel();
+        let scan_fut =
+            gage_scan::scan(store, &scan_config, &prep.compiled, &cancel, move |event| {
+                send_runner_event(&tx, event)
+            });
+        let view_fut = drive_view(rx, Arc::new(Mutex::new(view_store)), cancel.clone());
+        let (result, view_result) = tokio::join!(scan_fut, view_fut);
+        if let Err(e) = view_result {
+            eprintln!("gage scan: {e}");
+            std::process::exit(1);
         }
-        Err(gage_scan::runner::RunError::Emitted) => Err(DialogError::Failed(
-            "Scan completed with errors, see above for details".to_string(),
-        )),
-        Err(gage_scan::runner::RunError::Canceled) => Err(DialogError::Canceled),
-        Err(e) => Err(DialogError::Other(
-            anyhow::anyhow!("{e}").context("scan runner"),
-        )),
+        result
+    };
+    io::stdout().flush().unwrap();
+    cancel.cancel();
+    signal_task.await.unwrap();
+
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            eprintln!("gage scan: {e}");
+            std::process::exit(1);
+        }
+    };
+    let shown_id = styled_scan_id(store, &outcome.id);
+    println!("{}", summary_line(&shown_id, &outcome.attrs));
+    if let Some(name) = &prep.tag {
+        match TagStore::from(store).add(name, &outcome.id, prep.force_tag) {
+            Ok(added) => match added.previous_id {
+                Some(previous) => println!(
+                    "Moved tag {name} from {} to scan {shown_id}",
+                    short_uuid(&previous)
+                ),
+                None => println!("Tagged scan {shown_id} as {name}"),
+            },
+            Err(e) => {
+                eprintln!("gage scan: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if outcome.attrs.canceled || outcome.attrs.tasks.failed > 0 {
+        std::process::exit(1);
     }
 }
 
-/// Encoded project slugs recorded in the session corpus.
-/// Session-selection timeframe, resolved from options or the
-/// Timeframe prompt.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Window {
-    Today,
-    Days(u32),
-    All,
-}
+/// The registry scanners selected by group: `-g`, the `-y` default,
+/// or an interactive multi-select when the user supplied no scanner
+/// input at all. A scanner already selected by `-s` is left out.
+/// Returns `(names, prompted)` where `prompted` is true when the
+/// selection came from the multi-select so the caller can skip its
+/// own preview.
+fn resolve_group_names(
+    args: &ScanRunArgs,
+    selected: &[ResolvedSpec<'_>],
+    registry: &ScannerRegistry,
+    config: &Config,
+) -> Result<(Vec<String>, bool), DialogError> {
+    let s_bare: Vec<&str> = selected
+        .iter()
+        .map(|r| r.source.def().name.as_str())
+        .collect();
 
-/// Prints a completed-step line for a selection axis whose value was
-/// pinned by an option or resolved to a default, mirroring how an
-/// answered prompt renders.
-fn selection_step(title: &str, value: impl fmt::Display) -> io::Result<()> {
-    cli::log::step(format!("{title}\n{}", style(value).dim()))
-}
-
-fn window_display(window: Window) -> String {
-    match window {
-        Window::Today => "Today".to_string(),
-        Window::Days(d) => format!("{d} day{}", if d == 1 { "" } else { "s" }),
-        Window::All => "All available".to_string(),
+    let mut group_names: Vec<String> = Vec::new();
+    for group in &args.groups {
+        let members: Vec<&str> = registry
+            .group_members(group)
+            .into_iter()
+            .filter(|d| config.is_scanner_enabled(&d.name))
+            .map(|d| d.name.as_str())
+            .collect();
+        if members.is_empty() {
+            return Err(DialogError::Failed(format!(
+                "No scanners for group '{group}'"
+            )));
+        }
+        for name in members {
+            if !group_names.iter().any(|n| n == name) {
+                group_names.push(name.to_string());
+            }
+        }
     }
+
+    let no_scanner_input = args.scanners.is_empty() && args.groups.is_empty();
+    let mut prompted = false;
+    if no_scanner_input {
+        if args.yes {
+            let members: Vec<&str> = registry
+                .group_members("default")
+                .into_iter()
+                .filter(|d| config.is_scanner_enabled(&d.name))
+                .map(|d| d.name.as_str())
+                .collect();
+            if members.is_empty() {
+                return Err(DialogError::Failed(
+                    "No scanners in the default group".to_string(),
+                ));
+            }
+            for name in members {
+                group_names.push(name.to_string());
+            }
+        } else {
+            let selected = prompt_scanner_multiselect(registry, config)?;
+            if selected.is_empty() {
+                return Err(DialogError::Failed("No scanners selected".to_string()));
+            }
+            for name in selected {
+                group_names.push(name);
+            }
+            prompted = true;
+        }
+    }
+
+    // -s wins over -g on name collision.
+    let group_names: Vec<String> = group_names
+        .into_iter()
+        .filter(|g| !s_bare.contains(&g.as_str()))
+        .collect();
+    Ok((group_names, prompted))
 }
 
-fn prompt_window(initial: Window) -> io::Result<Window> {
-    cli::select("Timeframe")
+/// Multi-select over enabled scanners with the
+/// `default` group pre-selected. The hint shown for each item is
+/// the first line of the scanner's description.
+fn prompt_scanner_multiselect(
+    registry: &ScannerRegistry,
+    config: &Config,
+) -> Result<Vec<String>, DialogError> {
+    let defs = registry.list_enabled(config);
+    let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    names.sort();
+    let default_indices: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            registry
+                .group_members("default")
+                .iter()
+                .any(|d| d.name == **n)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let mut prompt = cli::multiselect("Scanners").initial_values(default_indices);
+    for (i, name) in names.iter().enumerate() {
+        let hint = registry
+            .get_def(name)
+            .map(|d| d.description.lines().next().unwrap_or("").to_string())
+            .unwrap_or_default();
+        prompt = prompt.item(i, (*name).to_string(), hint);
+    }
+    let indices: Vec<usize> = prompt.interact()?;
+    Ok(indices
+        .into_iter()
+        .map(|i| {
+            names
+                .get(i)
+                .expect("selected index points into names")
+                .to_string()
+        })
+        .collect())
+}
+
+fn preview_scanners(scanners: &[Scanner<'_>]) -> Result<(), DialogError> {
+    let lines: String = scanners
+        .iter()
+        .map(|s| format!("\n{}", style(&s.def.name).dim()))
+        .collect();
+    cli::log::step(format!("Scanners{lines}"))?;
+    Ok(())
+}
+
+/// Decide what the scan's dataset will be. Reuses `--dataset`,
+/// honors `--no-dataset`, otherwise prompts the session axis under
+/// an empty-and-not-`-y` call and runs `SessionSelectArgs::resolve`
+/// for the final native-session list.
+async fn resolve_dataset_plan(
+    args: &mut ScanRunArgs,
+    store: &Store,
+) -> Result<DatasetPlan, DialogError> {
+    if args.no_dataset {
+        return Ok(DatasetPlan::None);
+    }
+    if let Some(prefix) = args.dataset.as_deref() {
+        let record = DatasetStore::from(store)
+            .get(prefix)
+            .map_err(|e| DialogError::Failed(format!("--dataset {prefix}: {e}")))?;
+        let members = DatasetStore::from(store)
+            .sessions_list(&record.id)
+            .map_err(|e| DialogError::Failed(format!("--dataset {prefix}: {e}")))?;
+        return Ok(DatasetPlan::Reuse {
+            id: record.id,
+            commit_sha: record.commit_sha,
+            session_count: members.len(),
+        });
+    }
+
+    if args.select.is_empty() && !args.yes {
+        prompt_session_axis(&mut args.select)?;
+    }
+    let selected = args
+        .select
+        .resolve("gage scan")
+        .await
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    Ok(DatasetPlan::New { selected })
+}
+
+fn prompt_session_axis(select: &mut SessionSelectArgs) -> Result<(), DialogError> {
+    let window = cli::select("Timeframe")
         .item(Window::Today, "Today", "")
         .item(Window::Days(7), "This week", "")
         .item(Window::Days(30), "30 days", "")
         .item(Window::All, "All available", "")
-        .initial_value(initial)
-        .interact()
-}
-
-fn prompt_limit(initial: Option<usize>) -> io::Result<Option<usize>> {
-    cli::select("Session limit")
-        .item(Some(20), "20", "")
-        .item(Some(50), "50", "")
-        .item(Some(100), "100", "")
+        .initial_value(Window::Days(30))
+        .interact()?;
+    match window {
+        Window::Today => select.today = true,
+        Window::Days(n) => select.days = Some(n),
+        Window::All => {
+            // "All available" implies no session cap; the limit
+            // prompt is skipped.
+            select.all = true;
+            return Ok(());
+        }
+    }
+    let limit = cli::select("Session limit")
+        .item(Some(20_usize), "20", "")
+        .item(Some(50_usize), "50", "")
+        .item(Some(100_usize), "100", "")
         .item(None, "All available", "")
-        .initial_value(initial)
-        .interact()
-}
-
-/// Run the scan under the full-screen scan view. The runner and the
-/// view run concurrently in this task: runner events are adapted onto
-/// a channel the view consumes. The view lingers after the scan
-/// finishes; closing it mid-scan cancels the run.
-#[allow(clippy::too_many_arguments)]
-async fn run_scan_tui(
-    db: Arc<Mutex<gage_db::rusqlite::Connection>>,
-    scan_id: String,
-    label: Option<String>,
-    scanners: Vec<Scanner<'_>>,
-    slots: Vec<gage_scan::ScannerSlot>,
-    selected: Arc<[SessionInfo]>,
-    scan_ctx: Arc<ScanSessionContext>,
-    jobs: usize,
-    agent_jobs: usize,
-    model_map: ModelMap,
-    invalidate: bool,
-    cancel: tokio_util::sync::CancellationToken,
-    mut streams: ScanStreams,
-) -> Result<gage_scan::event::RunSummary, gage_scan::runner::RunError> {
-    use gage_tui::scan_view::{self, ScanSetup, SessionEntry, TaskId};
-
-    let setup = ScanSetup {
-        tasks: scanners
-            .iter()
-            .flat_map(|s| {
-                let mut names: Vec<String> = s.def.tasks.keys().cloned().collect();
-                names.sort();
-                let scanner = s.def.name.clone();
-                names.into_iter().map(move |task| TaskId {
-                    scanner: scanner.clone(),
-                    task,
-                })
-            })
-            .collect(),
-        sessions: {
-            let source = crate::source::open_source_or_exit("gage scan", "");
-            let store = crate::source::index_store_or_exit("gage scan", source.as_ref());
-            selected
-                .iter()
-                .map(|s| SessionEntry {
-                    id: s.id.clone(),
-                    title: session_title(&store, s),
-                    path: Some(s.src.clone()),
-                })
-                .collect()
-        },
-    };
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-
-    // Set when the runner returns; the reconcile poll exits on its
-    // next tick without re-polling — the finish handler has already
-    // sent the final reconcile.
-    let scan_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    // Agent session time bounds, cached across reconcile passes
-    let agent_times = Arc::new(Mutex::new(AgentTimes::default()));
-    let session_displays = Arc::new(Mutex::new(SessionDisplays::default()));
-
-    // Reconcile notes/issues from the db once a second while the scan
-    // runs — the same read the historical loader uses.
-    let results_poll = {
-        let tx = tx.clone();
-        let db = db.clone();
-        let cancel = cancel.clone();
-        let scan_id = scan_id.clone();
-        let scan_done = Arc::clone(&scan_done);
-        let agent_times = Arc::clone(&agent_times);
-        let session_displays = Arc::clone(&session_displays);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tick.tick() => {
-                        if scan_done.load(std::sync::atomic::Ordering::Relaxed) {
-                            break;
-                        }
-                        if tx
-                            .send(reconcile_results(&db, &scan_id, &agent_times, &session_displays))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-        })
-    };
-
-    let mut print_buf = String::new();
-    let event_tx = tx.clone();
-    let model_label = label.clone();
-    let scan_fut = async {
-        let result = gage_scan::runner::run(
-            db.clone(),
-            scan_id.clone(),
-            label,
-            scanners,
-            slots,
-            selected,
-            scan_ctx,
-            jobs,
-            agent_jobs,
-            model_map,
-            invalidate,
-            cancel.clone(),
-            |event| {
-                capture_event(&mut streams, &event);
-                forward_scan_event(event, &event_tx, &mut print_buf);
-            },
-        )
-        .await;
-        // Finish handling: stop the poll, send one final reconcile so
-        // the UI is current, then announce completion.
-        scan_done.store(true, std::sync::atomic::Ordering::Relaxed);
-        send_view_event(
-            &event_tx,
-            reconcile_results(&db, &scan_id, &agent_times, &session_displays),
-        );
-        send_view_event(&event_tx, scan_view::Event::Finished);
-        result
-    };
-
-    let mut model = scan_view::ScanModel::new(setup);
-    model.scan_id = short_uuid(&scan_id).to_string();
-    model.label = model_label;
-    model.log_key = Some(scan_id.clone());
-    let ui_cancel = cancel.clone();
-    let run_cancel = cancel.clone();
-    let ui_fut = async move {
-        // The in-view cancel request cancels the run; the view stays up
-        // and closes its Canceling dialog on the runner's Finished event.
-        let result =
-            scan_view::run(model, rx, move || run_cancel.cancel(), Arc::new(LegacyHost)).await;
-        // Closing the view mid-scan stops the run; after the scan
-        // completes this is a no-op.
-        ui_cancel.cancel();
-        result
-    };
-
-    let (scan_result, ui_result) = tokio::join!(scan_fut, ui_fut);
-    if let Err(e) = results_poll.await
-        && !e.is_cancelled()
-    {
-        panic!("results poll joined cleanly: {e}");
-    }
-    ui_result?;
-    scan_result
-}
-
-/// Resolve a session's display title the same way the `session` query
-/// table does: summary cache first, deriving (and re-caching) on a
-/// miss. Falls back to the project name when the session has no title.
-fn session_title(store: &gage_claude::index::IndexStore, s: &SessionInfo) -> String {
-    let title = match store.session_summary(&s.id, s.mtime) {
-        Some(summary) => summary.title,
-        None => match gage_claude::index::derive_session(&s.id, &s.src) {
-            Ok(d) => {
-                if let Err(e) = store.put_session_summary(&s.id, &d.summary) {
-                    tracing::warn!(session_id = %s.id, "failed to write summary cache: {e}");
-                }
-                d.summary.title
-            }
-            Err(e) => {
-                tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
-                None
-            }
-        },
-    };
-    title.unwrap_or_else(|| s.project_name().into_owned())
-}
-
-/// Tee a runner event into the scan's capture streams.
-fn capture_event(streams: &mut ScanStreams, event: &gage_scan::event::ScanEvent) {
-    use gage_scan::event::ScanEvent;
-    match event {
-        ScanEvent::Print { s } => streams.out(s),
-        ScanEvent::Println { s } => streams.out_line(s),
-        ScanEvent::Warning {
-            scanner,
-            task,
-            message,
-        } => streams.err_line(&format!(
-            "warning: {}: {message}",
-            task_display(scanner, task)
-        )),
-        ScanEvent::TaskFailed {
-            scanner,
-            task,
-            message,
-        } => {
-            streams.err_line(&format!("error: {}", task_display(scanner, task)));
-            streams.err_line(message);
-        }
-        ScanEvent::Status(_) => {}
-    }
-}
-
-fn forward_scan_event(
-    event: gage_scan::event::ScanEvent,
-    tx: &tokio::sync::mpsc::UnboundedSender<gage_tui::scan_view::Event>,
-    print_buf: &mut String,
-) {
-    use gage_scan::event::ScanEvent;
-    use gage_tui::scan_view::{Event, RunningTask, TaskId};
-
-    let ev = match event {
-        ScanEvent::Status(s) => Event::Status {
-            total: s.total,
-            progress: s.progress,
-            running: s
-                .workers
-                .iter()
-                .filter_map(|w| w.current.as_ref())
-                .map(|t| RunningTask {
-                    id: TaskId {
-                        scanner: t.scanner.clone(),
-                        task: t.task.clone(),
-                    },
-                    progress: t.progress,
-                    pool_blocked: t.pool_blocked(),
-                    stopwatch: t.stopwatch.clone(),
-                })
-                .collect(),
-        },
-        ScanEvent::Print { s } => {
-            print_buf.push_str(&s);
-            while let Some(i) = print_buf.find('\n') {
-                let line: String = print_buf.drain(..=i).collect();
-                send_view_event(tx, Event::Log(line.trim_end_matches('\n').to_string()));
-            }
-            return;
-        }
-        ScanEvent::Println { s } => Event::Log(s),
-        ScanEvent::TaskFailed {
-            scanner,
-            task,
-            message,
-        } => Event::Failed {
-            scanner,
-            task,
-            message,
-        },
-        ScanEvent::Warning {
-            scanner,
-            task,
-            message,
-        } => Event::Warning {
-            scanner,
-            task,
-            message,
-        },
-    };
-    send_view_event(tx, ev);
-}
-
-/// A send failure means the view exited and dropped the receiver; the
-/// run is being cancelled and there is nowhere left to report to.
-fn send_view_event(
-    tx: &tokio::sync::mpsc::UnboundedSender<gage_tui::scan_view::Event>,
-    ev: gage_tui::scan_view::Event,
-) {
-    if tx.send(ev).is_err() {}
-}
-
-/// Remove a deleted scan's log files (all streams, compressed or not).
-/// Absent files are the normal case for scans predating log capture.
-fn remove_scan_logs(scan_id: &str) {
-    let dir = gage_log::role_dir("scan");
-    for ext in ["log", "out", "err"] {
-        for name in [format!("{scan_id}.{ext}"), format!("{scan_id}.{ext}.gz")] {
-            match std::fs::remove_file(dir.join(&name)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => eprintln!("warning: failed to remove log {name}: {e}"),
-            }
-        }
-    }
-}
-
-fn all_issue_ids(conn: &gage_db::rusqlite::Connection) -> std::collections::HashSet<String> {
-    let filters = gage_db::issue::IssueFilters {
-        status: gage_db::issue::IssueStatusFilter::Any,
-        ..Default::default()
-    };
-    gage_db::issue::find(conn, &filters)
-        .map(|issues| issues.into_iter().map(|i| i.id).collect())
-        .unwrap_or_default()
-}
-
-fn new_issues_since(
-    conn: &gage_db::rusqlite::Connection,
-    before: &std::collections::HashSet<String>,
-) -> Vec<gage_db::issue::Issue> {
-    let filters = gage_db::issue::IssueFilters {
-        status: gage_db::issue::IssueStatusFilter::Any,
-        ..Default::default()
-    };
-    gage_db::issue::find(conn, &filters)
-        .map(|issues| {
-            issues
-                .into_iter()
-                .filter(|i| !before.contains(&i.id))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn render_issues_remark(issues: &[gage_db::issue::Issue]) -> Result<(), DialogError> {
-    if issues.is_empty() {
-        cli::log::remark(style("No issues reported").italic().to_string())?;
-        return Ok(());
-    }
-
-    let mut lines = String::new();
-    for issue in issues {
-        let title = issue.title.lines().next().unwrap_or("").trim();
-        lines.push('\n');
-        lines.push_str(&format!(
-            "{} - {}",
-            style(short_uuid(&issue.id)).yellow(),
-            truncate(title, 77)
-        ));
-    }
-    cli::log::remark(format!(
-        "Issues\n{lines}\n\n{}",
-        style("Run 'gage issue list' for details").italic().dim()
-    ))?;
+        .initial_value(Some(20_usize))
+        .interact()?;
+    select.limit = limit;
     Ok(())
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
+fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
+    match plan {
+        DatasetPlan::Reuse {
+            id, session_count, ..
+        } => {
+            let line = format!(
+                "dataset {} ({} {})",
+                short_uuid(id),
+                session_count,
+                plural(*session_count, "session"),
+            );
+            cli::log::step(format!("Dataset\n{}", style(line).dim()))?;
+        }
+        DatasetPlan::New { selected } => {
+            let n = selected.len();
+            let line = format!("{n} {}", plural(n, "session"));
+            cli::log::step(format!("Sessions\n{}", style(line).dim()))?;
+        }
+        DatasetPlan::None => {
+            cli::log::step(format!("Dataset\n{}", style("none").dim()))?;
+        }
     }
-    let take = max.saturating_sub(1);
-    let mut out: String = s.chars().take(take).collect();
-    out.push('…');
-    out
+    Ok(())
+}
+
+/// The commit of the dataset to scan: the reused dataset's, or that
+/// of a new dataset built from the selected sessions and prepared by
+/// the attach tasks of `scanners`, so the scan links a commit that
+/// holds the attachments. The build shows a progress bar under
+/// `progress`, cleared when it completes, and prints each session's
+/// outcome line otherwise; the closing `Added N sessions` line and
+/// the attach phase's lines print either way.
+async fn materialize_dataset(
+    plan: DatasetPlan,
+    store: &Store,
+    scanners: &[CompiledScanner],
+    driver: Arc<dyn Driver>,
+    progress: bool,
+) -> Result<Option<String>, String> {
+    match plan {
+        DatasetPlan::None => Ok(None),
+        DatasetPlan::Reuse { commit_sha, .. } => Ok(Some(commit_sha)),
+        DatasetPlan::New { selected } => {
+            let id = cmd_dataset::create_dataset("gage scan", store);
+            let mut bar: Option<ProgressBar> = None;
+            cmd_dataset::add_native_to_dataset(store, &id, None, &selected, None, &mut |event| {
+                match &event {
+                    AddEvent::Starting { total, .. } => {
+                        if progress {
+                            bar.get_or_insert_with(|| add_progress_bar(*total));
+                        }
+                    }
+                    AddEvent::Added { .. } => match &bar {
+                        Some(bar) => bar.inc(1),
+                        None => println!("{event}"),
+                    },
+                    AddEvent::Done { .. } => {
+                        if let Some(bar) = bar.take() {
+                            bar.finish_and_clear();
+                        }
+                        println!("{event}");
+                    }
+                }
+            })?;
+            scanner_attach::attach_for_scanners(store, &id, scanners, driver)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Some(
+                DatasetStore::from(store)
+                    .get(&id)
+                    .map_err(|e| e.to_string())?
+                    .commit_sha,
+            ))
+        }
+    }
+}
+
+fn add_progress_bar(total: usize) -> ProgressBar {
+    let bar = s::progress_bar(total as u64);
+    bar.set_message("Preparing scan dataset");
+    bar
+}
+
+/// The scan's short id, highlighted against the same set a scan id
+/// argument resolves against. When that set cannot be read the id is
+/// shown plain and the failure goes to stderr.
+fn styled_scan_id(store: &Store, id: &str) -> String {
+    match store.short_prefix_ids(Some(SCAN_TYPE)) {
+        Ok(peers) => s::IdHighlighter::new(peers).short(id),
+        Err(e) => {
+            eprintln!("warning: reading scan ids: {e}");
+            short_uuid(id).to_string()
+        }
+    }
+}
+
+fn open_store(command: &str) -> Store {
+    match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) fn list_scanners(registry: &ScannerRegistry) {

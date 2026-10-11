@@ -2,7 +2,7 @@ use rune::alloc;
 use rune::runtime::{Object, Value, Vec as RuneVec};
 use serde_json as json;
 
-use super::json::Null;
+use crate::json::Null;
 
 pub(crate) fn json_to_object(val: &json::Value) -> Object {
     let mut obj = Object::new();

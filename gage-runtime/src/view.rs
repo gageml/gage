@@ -31,69 +31,18 @@ use std::collections::BTreeMap;
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::ScalarValue;
-use rune::runtime::{Protocol, Ref, Value};
-use rune::{Any, ContextError, Module};
+use rune::runtime::Value;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as Json;
 
 use crate::error::Error;
-use crate::scan::Session;
-use crate::state::current_scan_ctx;
 
 /// Chars per token used to convert a token budget to a working char
 /// count. From the token ratio experiments in the roadmap-scan design
 /// doc: the dense end of realistic session content. May be exposed to
 /// configuration later.
 const CHARS_PER_TOKEN: f64 = 2.2;
-
-pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function_meta(compress)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionCompress| async move {
-        do_session_compress(q).await
-    })?;
-
-    Ok(())
-}
-
-pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
-    m.ty::<SessionCompress>()?;
-    Ok(())
-}
-
-#[derive(Any)]
-#[rune(item = ::gage)]
-pub struct SessionCompress {
-    #[rune(skip)]
-    session_id: String,
-    #[rune(skip)]
-    lines: Option<(u64, u64)>,
-    #[rune(skip)]
-    budget: Value,
-    #[rune(skip)]
-    rules: Value,
-}
-
-/// Render the session as a compressed session for an agent prompt:
-/// every message under its `[L<line> …]` header with its text cut per
-/// the matching rule, sized to fit the token budget. Truncation
-/// markers carry the omitted char counts so the agent can judge what
-/// to retrieve in full.
-#[rune::function(instance)]
-fn compress(session: Ref<Session>, budget: Value, rules: Value) -> SessionCompress {
-    SessionCompress {
-        session_id: session.id.clone(),
-        lines: session.range.map(|r| (r.start, r.end)),
-        budget,
-        rules,
-    }
-}
-
-async fn do_session_compress(q: SessionCompress) -> super::Result<String> {
-    let rows = fetch_rows(&q.session_id, q.lines).await?;
-    compress_rows(&q.session_id, rows, &q.budget, &q.rules)
-}
 
 /// Render `rows` as a compressed session: the `budget` and `rules`
 /// values as a scanner passes them, parsed here, with tool results
@@ -104,7 +53,7 @@ pub fn compress_rows(
     mut rows: Vec<MessageRow>,
     budget: &Value,
     rules: &Value,
-) -> super::Result<String> {
+) -> Result<String, Error> {
     let budget = parse_budget(budget)?;
     let rules = parse_rules(rules)?;
     link_tool_calls(&mut rows);
@@ -117,7 +66,7 @@ enum Budget {
     Unlimited,
 }
 
-fn parse_budget(v: &Value) -> super::Result<Budget> {
+fn parse_budget(v: &Value) -> Result<Budget, Error> {
     let json = serde_json::to_value(v)
         .map_err(|e| Error::Args(format!("`budget` could not be read: {e}")))?;
     match json {
@@ -206,7 +155,7 @@ struct RuleAttrs {
     order: Option<i64>,
 }
 
-fn parse_rules(v: &Value) -> super::Result<Vec<Rule>> {
+fn parse_rules(v: &Value) -> Result<Vec<Rule>, Error> {
     let entries: BTreeMap<String, RuleAttrs> = parse_json(v, "rules")?;
     entries
         .into_iter()
@@ -214,7 +163,7 @@ fn parse_rules(v: &Value) -> super::Result<Vec<Rule>> {
         .collect()
 }
 
-fn parse_rule(sel: &str, attrs: RuleAttrs) -> super::Result<Rule> {
+fn parse_rule(sel: &str, attrs: RuleAttrs) -> Result<Rule, Error> {
     let selector = parse_selector(sel)?;
     let order = attrs.order.unwrap_or(0);
     if attrs.header == Some(true) {
@@ -243,7 +192,7 @@ fn parse_rule(sel: &str, attrs: RuleAttrs) -> super::Result<Rule> {
 /// A header renders whole or not at all, so the sizing attributes
 /// have nothing to act on and naming one is a category error rather
 /// than a knob to configure.
-fn header_rule(sel: &str, selector: Selector, order: i64, attrs: RuleAttrs) -> super::Result<Rule> {
+fn header_rule(sel: &str, selector: Selector, order: i64, attrs: RuleAttrs) -> Result<Rule, Error> {
     let sizing = [
         ("min", attrs.min.is_some()),
         ("max", attrs.max.is_some()),
@@ -267,7 +216,7 @@ fn header_rule(sel: &str, selector: Selector, order: i64, attrs: RuleAttrs) -> s
     })
 }
 
-fn parse_selector(sel: &str) -> super::Result<Selector> {
+fn parse_selector(sel: &str) -> Result<Selector, Error> {
     let (base, quals) = match sel.split_once('[') {
         Some((base, rest)) => {
             let inner = rest
@@ -308,7 +257,7 @@ fn parse_selector(sel: &str) -> super::Result<Selector> {
     })
 }
 
-fn parse_parts(sel: &str, priority: Option<Vec<String>>) -> super::Result<Vec<Part>> {
+fn parse_parts(sel: &str, priority: Option<Vec<String>>) -> Result<Vec<Part>, Error> {
     let Some(names) = priority else {
         return Ok(vec![Part::Start]);
     };
@@ -331,7 +280,7 @@ fn parse_parts(sel: &str, priority: Option<Vec<String>>) -> super::Result<Vec<Pa
         .collect()
 }
 
-fn parse_json<T: DeserializeOwned>(v: &Value, what: &str) -> super::Result<T> {
+fn parse_json<T: DeserializeOwned>(v: &Value, what: &str) -> Result<T, Error> {
     let json = serde_json::to_value(v)
         .map_err(|e| Error::Args(format!("`{what}` could not be read: {e}")))?;
     serde_json::from_value(json).map_err(|e| Error::Args(format!("invalid `{what}`: {e}")))
@@ -369,7 +318,7 @@ fn build_compressed(
     rows: &[MessageRow],
     budget: Budget,
     rules: &[Rule],
-) -> super::Result<String> {
+) -> Result<String, Error> {
     // Drop messages no rule matches; carry the matched rule index
     let mut msgs: Vec<Msg> = rows
         .iter()
@@ -422,7 +371,7 @@ fn fit_to_budget(
     msgs: &mut [Msg],
     rules: &[Rule],
     budget: usize,
-) -> super::Result<()> {
+) -> Result<(), Error> {
     let sep_total = msgs.len().saturating_sub(1) * 2; // "\n\n" joins
 
     // Demote messages (lowest rule weight first; tie: later document
@@ -760,34 +709,6 @@ fn content_blocks(row: &MessageRow) -> Option<Vec<Json>> {
         Some(Json::Array(blocks)) => Some(blocks.clone()),
         _ => None,
     }
-}
-
-async fn fetch_rows(session_id: &str, lines: Option<(u64, u64)>) -> super::Result<Vec<MessageRow>> {
-    let ctx = current_scan_ctx();
-    let df_ctx = &ctx.run.scan_ctx;
-
-    let mut params: Vec<ScalarValue> = vec![ScalarValue::Utf8(Some(session_id.to_string()))];
-    let mut clauses = vec!["session_id = $1".to_string()];
-    if let Some((start, end)) = lines {
-        params.push(ScalarValue::Int64(Some(start as i64)));
-        clauses.push(format!("line >= ${}", params.len()));
-        params.push(ScalarValue::Int64(Some(end as i64)));
-        clauses.push(format!("line <= ${}", params.len()));
-    }
-    let sql = format!(
-        "SELECT * FROM message WHERE {} ORDER BY line",
-        clauses.join(" AND ")
-    );
-
-    let df = df_ctx
-        .sql(&sql)
-        .await
-        .map_err(|e| Error::Db(e.to_string()))?;
-    let df = df
-        .with_param_values(params)
-        .map_err(|e| Error::Db(e.to_string()))?;
-    let batches = df.collect().await.map_err(|e| Error::Db(e.to_string()))?;
-    Ok(rows_from_batches(&batches))
 }
 
 /// The rows of a `SELECT * FROM message` result, in batch order.
@@ -1364,41 +1285,5 @@ mod tests {
         let text: Vec<char> = "日本語のテキスト".chars().collect();
         let out = render_body(&text, 3, &[Part::Start]);
         assert_eq!(out, "日本語… [+5 chars]");
-    }
-
-    #[test]
-    fn compress_builder_leaves_caller_values_readable() {
-        use crate::datetime::DateTime;
-        use crate::scan::Range;
-        use std::path::PathBuf;
-
-        let session = Session {
-            id: "11111111-1111-1111-1111-111111111111".to_string(),
-            modified: DateTime::from_millis(0),
-            src: PathBuf::from("/tmp/session.jsonl"),
-            range: Some(Range { start: 3, end: 9 }),
-        };
-        let sv = rune::to_value(session).unwrap();
-        let budget = rune::to_value(1000_i64).unwrap();
-        let rules_json = serde_json::json!({ "user.text": { "max": 500 } });
-        let rules = crate::value::json_to_value(&rules_json);
-
-        let q = SessionCompress {
-            session_id: sv.borrow_ref::<Session>().unwrap().id.clone(),
-            lines: Some((3, 9)),
-            budget: budget.clone(),
-            rules: rules.clone(),
-        };
-        assert!(matches!(
-            parse_budget(&q.budget).unwrap(),
-            Budget::Chars(2200)
-        ));
-        assert_eq!(parse_rules(&q.rules).unwrap().len(), 1);
-
-        // The caller's values are reads, not takes: all stay readable
-        let s = sv.borrow_ref::<Session>().unwrap();
-        assert_eq!(s.id, "11111111-1111-1111-1111-111111111111");
-        assert!(matches!(parse_budget(&budget).unwrap(), Budget::Chars(_)));
-        assert_eq!(parse_rules(&rules).unwrap().len(), 1);
     }
 }

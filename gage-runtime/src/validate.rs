@@ -1,660 +1,853 @@
-//! Task-run memoization: `split_valid` / `split_valid_range` /
-//! `files_valid` / `carry_forward_notes`.
+//! Work reuse: `carry_forward_notes`, `Mark`, `watermark`, `hwm`,
+//! and `unseen`.
 //!
-//! Partitions a scan's sessions or notes by validation state recorded
-//! in `task_validate` so scanners can skip work already done under the
-//! same key, adopt the notes a prior scan produced, and record
-//! validation state when the work completes.
+//! A watermark is the record `watermarks/<oid>/<key>` in a scan's
+//! tree, holding `<version> <mark>`: the position the task under
+//! `key` reached on the object `oid`, at the version of the object
+//! the task read. The version is the commit for a session or a note,
+//! and the content digest for an attachment, so an attachment's mark
+//! follows its files and survives a name or target edit. The mark's
+//! axis is the object's: lines for a session, 0 or 1 for a whole
+//! object such as a note or an attachment. A `Mark` names an object
+//! and the position its constructor derives, `line_count` for
+//! `Mark::session(s)` and 1 for `Mark::note(n)` and
+//! `Mark::attachment(a)`, and `watermark(mark, key)` writes the
+//! record into the scan directory.
+//!
+//! `scan().sessions().hwm(key)`, `scan().notes().hwm(key)`, and
+//! `scan().attachments().hwm(key)` read every live scan's watermarks
+//! through the `scan_watermark` table and pair each object with its
+//! high-water mark under the key: for a session or a note the
+//! largest mark whose commit is on the object's commit chain, for an
+//! attachment the largest mark at its current digest, or 0 with
+//! none. `unseen(key)` on each query is the derived form: the
+//! sessions with `hwm < line_count` paired with the unseen line
+//! range, and the notes and attachments with `hwm == 0`. A commit
+//! that is not on the chain, such as a later commit of the same
+//! object, is never consulted; an attachment whose files changed has
+//! a new digest and so no mark.
+//!
+//! `carry_forward_notes(key)` links into this scan every note whose
+//! work id is `key` and whose target is one of the scan's
+//! sessions at a commit on the session's chain, or one of the scan's
+//! attachments at a commit holding the attachment's current digest:
+//! a writer's carry of its own prior outputs. A note written against
+//! an attachment's earlier files is not carried, so a re-summary
+//! replaces it. `carry_forward_notes_named(pattern)` links the notes
+//! whose name matches `pattern` under the same rules, whatever key
+//! they carry: a consumer's carry of the notes it reads, so a scan
+//! that runs the consumer alone holds the findings already written
+//! for its sessions.
+//!
+//! A scan run with `invalidate` set reports 0 for every object and
+//! carries no notes; it still writes watermarks.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 
-use gage_db::note;
-use gage_db::scan::{ScanLinkRole, insert_scan_note};
-use gage_db::target::NoteTarget;
-use gage_db::task_validate::{self, note_ref, project_ref, session_ref};
-use rune::runtime::{Function, Protocol, Ref, Value, Vec as RuneVec};
+use crate::error::Error;
+use datafusion::arrow::array::StringArray;
+use datafusion::arrow::array::{Array, UInt64Array};
+use gage_store::{AttachmentStore, Store};
+use rune::alloc::fmt::TryWrite;
+use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
 
-use crate::config::{Config, Project};
-use crate::db::{Note, NotesQuery, fetch_notes, target_from_value};
-use crate::error::Error;
-use crate::scan::{Range, Session, Sessions};
-use crate::state::current_scan_ctx;
+use crate::attachment::{
+    Attachment, AttachmentsQuery, AttachmentsSelect, FilteredAttachmentsQuery, attachment_id,
+    attachment_list, scan_attachments,
+};
+use crate::key::encode_key;
+use crate::note::{FilteredNotesQuery, Note, NotesQuery, NotesSelect, fetch_notes, name_predicate};
+use crate::scan::{
+    ScanContext, Session, SessionsQuery, current, members, run, session_id, sql_str, string_column,
+};
 
-pub(crate) fn register(m: &mut Module) -> Result<(), ContextError> {
-    m.function_meta(sessions_split_valid)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsSplitValid| async move {
-        do_sessions_split_valid(q)
-    })?;
-
-    m.function_meta(sessions_split_valid_range)?;
-    m.associated_function(
-        &Protocol::INTO_FUTURE,
-        |q: SessionsSplitValidRange| async move { do_sessions_split_valid_range(q) },
-    )?;
-
-    m.function_meta(notes_split_valid)?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: NotesSplitValid| async move {
-        do_notes_split_valid(q)
-    })?;
-
-    m.function("files_valid", FilesValid::new).build()?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: FilesValid| async move {
-        do_files_valid(q)
-    })?;
-
-    m.function("carry_forward_notes", CarryForward::new)
+pub(crate) fn module() -> Result<Module, ContextError> {
+    let mut m = Module::with_crate("gage")?;
+    m.function("carry_forward_notes", carry_forward_notes)
         .build()?;
-    m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForward| async move {
-        do_carry_forward(q)
+    m.function("carry_forward_notes_named", carry_forward_notes_named)
+        .build()?;
+    m.function("watermark", watermark).build()?;
+    Ok(m)
+}
+
+pub(crate) fn types_module() -> Result<Module, ContextError> {
+    let mut m = Module::new();
+    m.ty::<Mark>()?;
+    m.function_meta(Mark::session)?;
+    m.function_meta(Mark::note)?;
+    m.function_meta(Mark::attachment)?;
+    m.function_meta(Mark::debug)?;
+    m.ty::<CarryForwardNotes>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForwardNotes| async move {
+        do_carry_forward_notes(q).await
     })?;
-    Ok(())
+    m.ty::<SessionsHwm>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsHwm| async move {
+        do_sessions_hwm(q).await
+    })?;
+    m.ty::<NotesHwm>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: NotesHwm| async move {
+        do_notes_hwm(q).await
+    })?;
+    m.ty::<AttachmentsHwm>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentsHwm| async move {
+        do_attachments_hwm(q).await
+    })?;
+    m.ty::<WatermarkWrite>()?;
+    m.associated_function(&Protocol::INTO_FUTURE, |w: WatermarkWrite| async move {
+        do_watermark(w).await
+    })?;
+    Ok(m)
 }
 
-pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
-    m.ty::<SessionsSplitValid>()?;
-    m.ty::<SessionsSplitValidRange>()?;
-    m.ty::<NotesSplitValid>()?;
-    m.ty::<FilesValid>()?;
-    m.ty::<CarryForward>()?;
-    Ok(())
+/// An object and the position a task reached on it, for `watermark`.
+#[derive(Any, Clone)]
+#[rune(item = ::gage)]
+pub struct Mark {
+    #[rune(skip)]
+    target: MarkTarget,
 }
 
-/// Builder returned by `sessions.split_valid(key)`. The partition runs
-/// when the value is awaited.
+#[derive(Clone)]
+enum MarkTarget {
+    /// The whole session at the commit the scan reads: the mark is
+    /// its `line_count`
+    Session { id: String },
+    /// The whole note: the mark is 1
+    Note { id: String },
+    /// The whole attachment at its content digest: the mark is 1
+    Attachment { id: String },
+}
+
+impl Mark {
+    /// The whole session `s`, a `Session` or a session id string, at
+    /// the commit the scan reads.
+    #[rune::function(path = Self::session)]
+    fn session(s: Value) -> Result<Mark, VmError> {
+        Ok(Mark {
+            target: MarkTarget::Session {
+                id: session_id(&s)?,
+            },
+        })
+    }
+
+    /// The whole note `n`, a `Note` or a note id string.
+    #[rune::function(path = Self::note)]
+    fn note(n: Value) -> Result<Mark, VmError> {
+        if let Ok(note) = n.borrow_ref::<Note>() {
+            return Ok(Mark {
+                target: MarkTarget::Note {
+                    id: note.id.clone(),
+                },
+            });
+        }
+        if let Ok(id) = n.borrow_string_ref() {
+            return Ok(Mark {
+                target: MarkTarget::Note { id: id.to_string() },
+            });
+        }
+        Err(VmError::panic(format!(
+            "expected a Note or note id string, got {}",
+            n.type_info()
+        )))
+    }
+
+    /// The whole attachment `a`, an `Attachment` or an attachment id
+    /// string, at its content digest.
+    #[rune::function(path = Self::attachment)]
+    fn attachment(a: Value) -> Result<Mark, VmError> {
+        Ok(Mark {
+            target: MarkTarget::Attachment {
+                id: attachment_id(&a)?,
+            },
+        })
+    }
+
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        match &self.target {
+            MarkTarget::Session { id } => write!(f, "Mark {{ session: {id:?} }}")?,
+            MarkTarget::Note { id, .. } => write!(f, "Mark {{ note: {id:?} }}")?,
+            MarkTarget::Attachment { id } => write!(f, "Mark {{ attachment: {id:?} }}")?,
+        }
+        Ok(())
+    }
+}
+
+/// The value of `watermark(mark, key)`. Awaiting it writes the
+/// record.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub(crate) struct SessionsSplitValid {
+pub struct WatermarkWrite {
     #[rune(skip)]
-    sessions: Vec<Session>,
+    mark: Mark,
     #[rune(skip)]
     key: Value,
 }
 
-#[rune::function(instance, path = split_valid)]
-fn sessions_split_valid(sessions: Ref<Sessions>, key: Value) -> SessionsSplitValid {
-    SessionsSplitValid {
-        sessions: sessions.remaining(),
+fn watermark(mark: Ref<Mark>, key: Value) -> WatermarkWrite {
+    WatermarkWrite {
+        mark: mark.clone(),
         key,
     }
 }
 
-/// Render a task validation key — a tuple/vec of strings and integers —
-/// as its colon-joined form, e.g. `("s", "findings", 1)` →
-/// `"s:findings:1"`.
-/// Render a validation key, a tuple or list of strings and integers,
-/// as its colon-joined storage form.
-pub fn key_string(key: &Value) -> Result<String, Error> {
-    let json = crate::value::value_to_json(key)
-        .map_err(|e| Error::Args(format!("validation key could not be serialized: {e}")))?;
-    let parts = match json {
-        serde_json::Value::Array(items) => items,
-        _ => return Err(Error::Args("validation key must be a tuple or vec".into())),
+/// Record the mark under `key`. A session that is not a member of
+/// the scan, a note the scan neither wrote nor carried, or an
+/// attachment outside the scan's dataset or without a digest, is an
+/// `Args` error. A note this scan wrote has no commit until apply, so
+/// its record is deferred through the scan directory's
+/// `note_watermarks` file; apply resolves the commit and writes the
+/// record.
+async fn do_watermark(w: WatermarkWrite) -> Result<Result<(), Error>, VmError> {
+    let key = match encode_key(&w.key) {
+        Ok(key) => key,
+        Err(e) => return Ok(Err(e)),
     };
-    let mut out = Vec::with_capacity(parts.len());
-    for p in parts {
-        match p {
-            serde_json::Value::String(s) => out.push(s),
-            serde_json::Value::Number(n) => out.push(n.to_string()),
-            other => {
-                return Err(Error::Args(format!(
-                    "validation key elements must be strings or integers, got {other}"
-                )));
-            }
-        }
-    }
-    if out.is_empty() {
-        return Err(Error::Args("validation key must not be empty".into()));
-    }
-    Ok(out.join(":"))
-}
-
-/// Partition sessions by recorded size validator. Returns
-/// `(prev, new, validate)`: `prev` are sessions whose recorded size
-/// matches (already processed), `new` need scanning, and `validate` is
-/// a function of one session (or session id) that records the session's
-/// size under the key — called by the scanner when that session's work
-/// has completed.
-fn do_sessions_split_valid(
-    q: SessionsSplitValid,
-) -> crate::Result<(Vec<Session>, Vec<Session>, Function)> {
-    let key = key_string(&q.key)?;
-    let (prev, new, entries, _) = split_by_size(q.sessions, &key)?;
-    let validate = size_validate_fn(key, entries);
-    Ok((prev, new, validate))
-}
-
-/// Partition `sessions` by comparing each one's size at selection
-/// against its recorded size under `key`. Returns the valid and stale
-/// partitions, the stale sessions' sizes for `validate`
-/// (session id -> size string), and the stale sessions' recorded
-/// sizes where one exists (session id -> recorded size).
-type SizeSplit = (
-    Vec<Session>,
-    Vec<Session>,
-    HashMap<String, String>,
-    HashMap<String, u64>,
-);
-
-fn split_by_size(sessions: Vec<Session>, key: &str) -> crate::Result<SizeSplit> {
-    let ctx = current_scan_ctx();
-    let sizes: HashMap<&str, u64> = ctx
-        .run
-        .selected
-        .iter()
-        .map(|s| (s.id.as_str(), s.size))
-        .collect();
-
-    let mut prev = Vec::new();
-    let mut new = Vec::new();
-    // session id -> size at selection, for `validate`
-    let mut entries: HashMap<String, String> = HashMap::new();
-    let mut recorded_sizes: HashMap<String, u64> = HashMap::new();
-    let db = ctx.db.lock().unwrap();
-    for s in sessions {
-        let size = *sizes
-            .get(s.id.as_str())
-            .ok_or_else(|| Error::Args(format!("session {} not in scan selection", s.id)))?;
-        if ctx.run.invalidate {
-            // Deleted rather than bypassed: an interrupted run must
-            // not leave the old row to validate a later scan
-            task_validate::delete(&db, key, &session_ref(&s.id))
-                .map_err(|e| Error::Db(e.to_string()))?;
-            entries.insert(s.id.clone(), size.to_string());
-            new.push(s);
-            continue;
-        }
-        let recorded = task_validate::value(&db, key, &session_ref(&s.id))
-            .map_err(|e| Error::Db(e.to_string()))?;
-        if recorded.as_deref() == Some(size.to_string().as_str()) {
-            prev.push(s);
-        } else {
-            if let Some(r) = recorded.and_then(|v| v.parse::<u64>().ok()) {
-                recorded_sizes.insert(s.id.clone(), r);
-            }
-            entries.insert(s.id.clone(), size.to_string());
-            new.push(s);
-        }
-    }
-    Ok((prev, new, entries, recorded_sizes))
-}
-
-/// The deferred validate for the size validator: called with a session
-/// (or session id) split as stale, records its size at selection.
-fn size_validate_fn(key: String, entries: HashMap<String, String>) -> Function {
-    Function::new(move |session: Value| {
-        let key = key.clone();
-        let entries = entries.clone();
-        async move {
-            let id = session_id(&session)?;
-            let size = entries
-                .get(&id)
-                .ok_or_else(|| Error::Args(format!("session {id} was not split as new")))?;
-            let ctx = current_scan_ctx();
-            let db = ctx.db.lock().unwrap();
-            task_validate::put(&db, &key, &session_ref(&id), Some(size))
-                .map_err(|e| Error::Db(e.to_string()))
-        }
-    })
-    .unwrap()
-}
-
-/// Builder returned by `sessions.split_valid_range(key)`. The
-/// partition runs when the value is awaited.
-#[derive(Any)]
-#[rune(item = ::gage)]
-pub(crate) struct SessionsSplitValidRange {
-    #[rune(skip)]
-    sessions: Vec<Session>,
-    #[rune(skip)]
-    key: Value,
-}
-
-#[rune::function(instance, path = split_valid_range)]
-fn sessions_split_valid_range(sessions: Ref<Sessions>, key: Value) -> SessionsSplitValidRange {
-    SessionsSplitValidRange {
-        sessions: sessions.remaining(),
-        key,
-    }
-}
-
-/// Partition sessions by recorded size, exactly as `split_valid` does,
-/// and give each grown stale session its unseen line range. Returns
-/// `(prev, new, validate)` over plain `Session` values: sessions in
-/// `prev` and unseen sessions in `new` have `range: None`; a grown
-/// session in `new` has `Some(Range)` spanning its unscanned lines.
-fn do_sessions_split_valid_range(
-    q: SessionsSplitValidRange,
-) -> crate::Result<(Vec<Session>, Vec<Session>, Function)> {
-    let key = key_string(&q.key)?;
-    let (prev, mut new, entries, recorded_sizes) = split_by_size(q.sessions, &key)?;
-
-    for s in &mut new {
-        let Some(&recorded) = recorded_sizes.get(&s.id) else {
-            continue;
-        };
-        let Some(size) = entries.get(&s.id).and_then(|v| v.parse::<u64>().ok()) else {
-            continue;
-        };
-        if recorded >= size {
-            // Not grown (shrunk or replaced): re-scan whole
-            continue;
-        }
-        s.range = derive_range(&s.src, recorded, size)?.map(|(start, end)| Range { start, end });
-    }
-
-    let validate = size_validate_fn(key, entries);
-    Ok((prev, new, validate))
-}
-
-/// The unseen line range of a session that grew from `recorded` to
-/// `size` bytes. Session files are append-only JSONL, one entry per
-/// newline-terminated line: the newline count over the first
-/// `recorded` bytes is the validated line count, and the count over
-/// the first `size` bytes is the current line count (a trailing
-/// partial line counts as a line). Returns inclusive 1-based bounds,
-/// or `None` when the file no longer supports a sane derivation.
-fn derive_range(path: &Path, recorded: u64, size: u64) -> crate::Result<Option<(u64, u64)>> {
-    use std::io::Read;
-
-    let file = std::fs::File::open(path)
-        .map_err(|e| Error::Config(format!("read session {}: {e}", path.display())))?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut buf = [0u8; 64 * 1024];
-    let mut pos: u64 = 0;
-    let mut validated_lines: u64 = 0;
-    let mut lines: u64 = 0;
-    let mut last_newline_end: u64 = 0;
-    while pos < size {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| Error::Config(format!("read session {}: {e}", path.display())))?;
-        if n == 0 {
-            break;
-        }
-        // Count only up to the size at selection; content appended
-        // since is next scan's business
-        let used = usize::try_from((size - pos).min(n as u64)).unwrap();
-        for (i, b) in buf.iter().take(used).enumerate() {
-            if *b == b'\n' {
-                lines += 1;
-                let end = pos + i as u64 + 1;
-                last_newline_end = end;
-                if end <= recorded {
-                    validated_lines += 1;
-                }
-            }
-        }
-        pos += used as u64;
-    }
-    // A trailing partial line is a line
-    let current_lines = if pos > last_newline_end {
-        lines + 1
-    } else {
-        lines
-    };
-    let start = validated_lines + 1;
-    if current_lines < start {
-        return Ok(None);
-    }
-    Ok(Some((start, current_lines)))
-}
-
-/// A `Session` or a session id string.
-fn session_id(v: &Value) -> crate::Result<String> {
-    if let Ok(s) = v.borrow_ref::<Session>() {
-        return Ok(s.id.clone());
-    }
-    v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
-        Error::Args(format!(
-            "expected a Session or session id string, got {}: {e}",
-            v.type_info()
-        ))
-    })
-}
-
-/// Builder returned by `notes_query.split_valid(key)`. The partition
-/// runs when the value is awaited.
-#[derive(Any)]
-#[rune(item = ::gage)]
-pub(crate) struct NotesSplitValid {
-    #[rune(skip)]
-    query: NotesQuery,
-    #[rune(skip)]
-    key: Value,
-}
-
-#[rune::function(instance, path = split_valid)]
-fn notes_split_valid(query: NotesQuery, key: Value) -> NotesSplitValid {
-    NotesSplitValid { query, key }
-}
-
-/// Partition the query's notes by membership under the key. Returns
-/// `(prev, new, validate)`: `prev` were recorded by a prior
-/// `validate()` call, `new` have never been recorded, and `validate`
-/// is a no-argument function that records the `new` notes — called by
-/// the scanner when the work consuming them has completed.
-fn do_notes_split_valid(q: NotesSplitValid) -> crate::Result<(Vec<Note>, Vec<Note>, Function)> {
-    let key = key_string(&q.key)?;
-    let ctx = current_scan_ctx();
-    let notes = fetch_notes(q.query)?;
-
-    let refs: Vec<String> = notes.iter().map(|n| note_ref(&n.id)).collect();
-    let existing: HashSet<String> = {
-        let db = ctx.db.lock().unwrap();
-        if ctx.run.invalidate {
-            for r in &refs {
-                task_validate::delete(&db, &key, r).map_err(|e| Error::Db(e.to_string()))?;
-            }
-            HashSet::new()
-        } else {
-            task_validate::existing_refs(&db, &key, &refs)
-                .map_err(|e| Error::Db(e.to_string()))?
+    let ctx = current()?;
+    let (oid, version, mark) = match w.mark.target {
+        MarkTarget::Session { id } => {
+            let Some(member) = members(ctx.scan_context().await?, false)
+                .await?
                 .into_iter()
-                .collect()
+                .find(|s| s.id == id)
+            else {
+                return Ok(Err(Error::Args(format!(
+                    "session {id} is not a member of the scan"
+                ))));
+            };
+            let mark = u64::try_from(member.line_count).unwrap();
+            (id, member.commit, mark)
+        }
+        MarkTarget::Note { id } => {
+            // The scan's `note` table holds the notes it wrote, with no
+            // commit yet, and the notes it carried, with theirs
+            let sql = format!("SELECT commit FROM note WHERE id = '{}'", sql_str(&id));
+            let batches = run(ctx.scan_context().await?, &sql).await?;
+            let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+                return Ok(Err(Error::Args(format!(
+                    "note {id} was neither written nor carried by the scan"
+                ))));
+            };
+            let commits = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("note commit is a string column");
+            if !commits.is_valid(0) {
+                let line = format!("{id} {key} 1\n");
+                append(&ctx.paths.note_watermarks(), &line)
+                    .map_err(|e| VmError::panic(format!("note watermarks: {e}")))?;
+                tracing::debug!(key, note = id, "watermark deferred to apply");
+                return Ok(Ok(()));
+            }
+            (id, commits.value(0).to_string(), 1)
+        }
+        MarkTarget::Attachment { id } => {
+            let Some(attachment) = scan_attachments().await?.into_iter().find(|a| a.id == id)
+            else {
+                return Ok(Err(Error::Args(format!(
+                    "attachment {id} is not in the scan's dataset"
+                ))));
+            };
+            let Some(digest) = attachment.digest else {
+                return Ok(Err(Error::Args(format!(
+                    "attachment {id} has no content digest"
+                ))));
+            };
+            (id, digest, 1)
         }
     };
-
-    let mut prev = Vec::new();
-    let mut new = Vec::new();
-    let mut new_refs = Vec::new();
-    for note in notes {
-        let r = note_ref(&note.id);
-        if existing.contains(&r) {
-            prev.push(note);
-        } else {
-            new_refs.push(r);
-            new.push(note);
+    let dir = ctx.paths.watermarks_dir().join(&oid);
+    let written = fs::create_dir_all(&dir)
+        .and_then(|()| write_atomic(&dir.join(&key), format!("{version} {mark}\n").as_bytes()));
+    match written {
+        Ok(()) => {
+            tracing::debug!(key, oid, version, mark, "watermark");
+            Ok(Ok(()))
         }
+        Err(e) => Err(VmError::panic(format!("watermark {oid}: {e}"))),
     }
-
-    let validate = Function::new(move || {
-        let key = key.clone();
-        let new_refs = new_refs.clone();
-        async move {
-            let ctx = current_scan_ctx();
-            let db = ctx.db.lock().unwrap();
-            for r in &new_refs {
-                task_validate::put(&db, &key, r, None).map_err(|e| Error::Db(e.to_string()))?;
-            }
-            Ok::<(), Error>(())
-        }
-    })
-    .unwrap();
-
-    Ok((prev, new, validate))
 }
 
-/// Builder returned by `files_valid(key, project, files)`. The check
-/// runs when the value is awaited.
+fn append(path: &Path, line: &str) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())
+}
+
+/// Write `bytes` to a sibling temp file and rename it over `path`,
+/// the scan directory's convention for whole files.
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)
+}
+
+/// The value of `scan().sessions().hwm(key)` and `.unseen(key)`.
+/// Awaiting it reads the watermarks.
 #[derive(Any)]
 #[rune(item = ::gage)]
-pub(crate) struct FilesValid {
+pub struct SessionsHwm {
     #[rune(skip)]
     key: Value,
     #[rune(skip)]
-    project: Value,
+    newest_first: bool,
     #[rune(skip)]
-    files: Value,
+    shape: Shape,
 }
 
-impl FilesValid {
-    fn new(key: Value, project: Value, files: Value) -> Self {
-        Self {
-            key,
-            project,
-            files,
-        }
+/// What a watermark read yields per object
+#[derive(Clone, Copy)]
+enum Shape {
+    /// Every object with its high-water mark
+    Hwm,
+    /// The objects with work above the mark
+    Unseen,
+}
+
+/// Pair each of the scan's sessions with its high-water mark under
+/// `key`, in the order the sessions query would read them.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn sessions_hwm(sessions: Ref<SessionsQuery>, key: Value) -> SessionsHwm {
+    SessionsHwm {
+        key,
+        newest_first: sessions.newest_first,
+        shape: Shape::Hwm,
     }
 }
 
-/// Check a project's file set against the digest recorded under the
-/// key. Returns `(valid, validate)`: `valid` is true when the recorded
-/// digest matches the current file set, and `validate` is a
-/// no-argument function that records the current digest — called by
-/// the scanner when the work consuming the files has completed.
-fn do_files_valid(q: FilesValid) -> crate::Result<(bool, Function)> {
-    let key = key_string(&q.key)?;
-    let ref_ = project_ref(&project_path(&q.project)?);
-    let digest = files_digest(&config_paths(&q.files)?)?;
+/// The scan's sessions with lines above their high-water mark under
+/// `key`, each paired with `(start, end)`, the inclusive unseen line
+/// range, in the order the sessions query would read them.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn sessions_unseen(sessions: Ref<SessionsQuery>, key: Value) -> SessionsHwm {
+    SessionsHwm {
+        key,
+        newest_first: sessions.newest_first,
+        shape: Shape::Unseen,
+    }
+}
 
-    let ctx = current_scan_ctx();
-    let valid = {
-        let db = ctx.db.lock().unwrap();
-        if ctx.run.invalidate {
-            task_validate::delete(&db, &key, &ref_).map_err(|e| Error::Db(e.to_string()))?;
-            false
-        } else {
-            task_validate::value(&db, &key, &ref_)
-                .map_err(|e| Error::Db(e.to_string()))?
-                .as_deref()
-                == Some(digest.as_str())
-        }
+async fn do_sessions_hwm(q: SessionsHwm) -> Result<Result<Vec<Value>, Error>, VmError> {
+    let key = match encode_key(&q.key) {
+        Ok(key) => key,
+        Err(e) => return Ok(Err(e)),
     };
-
-    let validate = Function::new(move || {
-        let key = key.clone();
-        let ref_ = ref_.clone();
-        let digest = digest.clone();
-        async move {
-            let ctx = current_scan_ctx();
-            let db = ctx.db.lock().unwrap();
-            task_validate::put(&db, &key, &ref_, Some(&digest))
-                .map_err(|e| Error::Db(e.to_string()))
-        }
-    })
-    .unwrap();
-
-    Ok((valid, validate))
-}
-
-/// A `Project` or a project path string.
-fn project_path(v: &Value) -> crate::Result<String> {
-    if let Ok(p) = v.borrow_ref::<Project>() {
-        return Ok(p.path.to_string_lossy().into_owned());
+    let ctx = current()?;
+    let sessions = members(ctx.scan_context().await?, q.newest_first).await?;
+    let with_commit: Vec<(&str, Option<&str>)> = sessions
+        .iter()
+        .map(|s| (s.id.as_str(), Some(s.commit.as_str())))
+        .collect();
+    let marks = hwm(&ctx, &key, &with_commit).await?;
+    let mut out = Vec::with_capacity(sessions.len());
+    for (s, hwm) in sessions.into_iter().zip(marks) {
+        let value = match q.shape {
+            Shape::Hwm => rune::to_value((s, hwm)),
+            Shape::Unseen if hwm < s.line_count => {
+                let range = (hwm + 1, s.line_count);
+                rune::to_value((s, range))
+            }
+            Shape::Unseen => continue,
+        };
+        out.push(value.map_err(VmError::from)?);
     }
-    v.borrow_string_ref().map(|s| s.to_string()).map_err(|e| {
-        Error::Args(format!(
-            "expected a Project or project path string, got {}: {e}",
-            v.type_info()
-        ))
-    })
+    Ok(Ok(out))
 }
 
-/// Paths of a list of `Config` rows. Borrows the list — a take would
-/// gut the caller's value, which scanners reuse after the call.
-fn config_paths(v: &Value) -> crate::Result<Vec<PathBuf>> {
-    let items = v
-        .borrow_ref::<RuneVec>()
-        .map_err(|e| Error::Args(format!("'files' must be a list of Config rows: {e}")))?;
-    let mut out = Vec::with_capacity(items.len());
-    for item in items.iter() {
-        let c = item
-            .borrow_ref::<Config>()
-            .map_err(|e| Error::Args(format!("'files' entries must be Config rows: {e}")))?;
-        out.push(c.path.clone());
+/// The value of `scan().notes().hwm(key)` and `.unseen(key)`.
+/// Awaiting it reads the notes and their watermarks.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct NotesHwm {
+    #[rune(skip)]
+    select: NotesSelect,
+    #[rune(skip)]
+    key: Value,
+    #[rune(skip)]
+    shape: Shape,
+}
+
+/// Pair each of the query's notes with its high-water mark under
+/// `key`: 1 when a task under the key processed the note at its
+/// commit, 0 otherwise.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn notes_hwm(notes: Ref<NotesQuery>, key: Value) -> NotesHwm {
+    NotesHwm {
+        select: notes.select.clone(),
+        key,
+        shape: Shape::Hwm,
+    }
+}
+
+/// The query's notes with a high-water mark of 0 under `key`.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn notes_unseen(notes: Ref<NotesQuery>, key: Value) -> NotesHwm {
+    NotesHwm {
+        select: notes.select.clone(),
+        key,
+        shape: Shape::Unseen,
+    }
+}
+
+/// As [`notes_hwm`], on a name-filtered query.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn filtered_notes_hwm(notes: Ref<FilteredNotesQuery>, key: Value) -> NotesHwm {
+    NotesHwm {
+        select: notes.select.clone(),
+        key,
+        shape: Shape::Hwm,
+    }
+}
+
+/// As [`notes_unseen`], on a name-filtered query.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn filtered_notes_unseen(notes: Ref<FilteredNotesQuery>, key: Value) -> NotesHwm {
+    NotesHwm {
+        select: notes.select.clone(),
+        key,
+        shape: Shape::Unseen,
+    }
+}
+
+async fn do_notes_hwm(q: NotesHwm) -> Result<Result<Vec<Value>, Error>, VmError> {
+    let key = match encode_key(&q.key) {
+        Ok(key) => key,
+        Err(e) => return Ok(Err(e)),
+    };
+    let notes = fetch_notes(q.select).await?;
+    let ctx = current()?;
+    let with_commit: Vec<(&str, Option<&str>)> = notes
+        .iter()
+        .map(|n| (n.id.as_str(), n.commit.as_deref()))
+        .collect();
+    let marks = hwm(&ctx, &key, &with_commit).await?;
+    let mut out = Vec::with_capacity(notes.len());
+    for (n, hwm) in notes.into_iter().zip(marks) {
+        let value = match q.shape {
+            Shape::Hwm => rune::to_value((n, hwm)),
+            Shape::Unseen if hwm == 0 => rune::to_value(n),
+            Shape::Unseen => continue,
+        };
+        out.push(value.map_err(VmError::from)?);
+    }
+    Ok(Ok(out))
+}
+
+/// The value of `scan().attachments().hwm(key)` and `.unseen(key)`.
+/// Awaiting it reads the attachments and their watermarks.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct AttachmentsHwm {
+    #[rune(skip)]
+    select: AttachmentsSelect,
+    #[rune(skip)]
+    key: Value,
+    #[rune(skip)]
+    shape: Shape,
+}
+
+/// Pair each of the query's attachments with its high-water mark
+/// under `key`: 1 when a task under the key processed the attachment
+/// at its current content digest, 0 otherwise.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn attachments_hwm(attachments: Ref<AttachmentsQuery>, key: Value) -> AttachmentsHwm {
+    AttachmentsHwm {
+        select: attachments.select(),
+        key,
+        shape: Shape::Hwm,
+    }
+}
+
+/// The query's attachments with a high-water mark of 0 under `key`.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn attachments_unseen(attachments: Ref<AttachmentsQuery>, key: Value) -> AttachmentsHwm {
+    AttachmentsHwm {
+        select: attachments.select(),
+        key,
+        shape: Shape::Unseen,
+    }
+}
+
+/// As [`attachments_hwm`], on a filtered query.
+#[rune::function(instance, path = hwm)]
+pub(crate) fn filtered_attachments_hwm(
+    attachments: Ref<FilteredAttachmentsQuery>,
+    key: Value,
+) -> AttachmentsHwm {
+    AttachmentsHwm {
+        select: attachments.select.clone(),
+        key,
+        shape: Shape::Hwm,
+    }
+}
+
+/// As [`attachments_unseen`], on a filtered query.
+#[rune::function(instance, path = unseen)]
+pub(crate) fn filtered_attachments_unseen(
+    attachments: Ref<FilteredAttachmentsQuery>,
+    key: Value,
+) -> AttachmentsHwm {
+    AttachmentsHwm {
+        select: attachments.select.clone(),
+        key,
+        shape: Shape::Unseen,
+    }
+}
+
+async fn do_attachments_hwm(q: AttachmentsHwm) -> Result<Result<Vec<Value>, Error>, VmError> {
+    let key = match encode_key(&q.key) {
+        Ok(key) => key,
+        Err(e) => return Ok(Err(e)),
+    };
+    let attachments = match attachment_list(q.select).await? {
+        Ok(attachments) => attachments,
+        Err(e) => return Ok(Err(e)),
+    };
+    let ctx = current()?;
+    let marks = digest_hwm(&ctx, &key, &attachments).await?;
+    let mut out = Vec::with_capacity(attachments.len());
+    for (a, hwm) in attachments.into_iter().zip(marks) {
+        let value = match q.shape {
+            Shape::Hwm => rune::to_value((a, hwm)),
+            Shape::Unseen if hwm == 0 => rune::to_value(a),
+            Shape::Unseen => continue,
+        };
+        out.push(value.map_err(VmError::from)?);
+    }
+    Ok(Ok(out))
+}
+
+/// The high-water mark under `key` of each attachment, in order: the
+/// largest mark recorded by any live scan at the attachment's current
+/// content digest, or 0 with none. An attachment without a digest is
+/// 0.
+async fn digest_hwm(
+    ctx: &ScanContext,
+    key: &str,
+    attachments: &[Attachment],
+) -> Result<Vec<i64>, VmError> {
+    if ctx.invalidate {
+        tracing::info!(key, "hwm ignores watermarks: scan invalidates prior work");
+        return Ok(vec![0; attachments.len()]);
+    }
+    let ids: Vec<&str> = attachments
+        .iter()
+        .filter(|a| a.digest.is_some())
+        .map(|a| a.id.as_str())
+        .collect();
+    if ids.is_empty() {
+        return Ok(vec![0; attachments.len()]);
+    }
+    let marks = marks(ctx, key, &ids).await?;
+    let mut out = Vec::with_capacity(attachments.len());
+    for a in attachments {
+        let hwm = match (&a.digest, marks.get(&a.id)) {
+            (Some(digest), Some(recorded)) => recorded
+                .iter()
+                .filter(|(version, _)| version == digest)
+                .map(|(_, mark)| *mark)
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        };
+        out.push(i64::try_from(hwm).unwrap());
     }
     Ok(out)
 }
 
-/// Deterministic digest over the file set: sorted `(path, content)`
-/// pairs folded through the std hasher. Any file addition, deletion,
-/// or content change produces a different digest. The std hasher is
-/// not guaranteed stable across Rust releases; a hasher change costs
-/// one redundant re-run per project, not correctness.
-fn files_digest(paths: &[PathBuf]) -> crate::Result<String> {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut sorted: Vec<&PathBuf> = paths.iter().collect();
-    sorted.sort();
-    let mut h = DefaultHasher::new();
-    for p in sorted {
-        p.hash(&mut h);
-        let content =
-            std::fs::read(p).map_err(|e| Error::Config(format!("read {}: {e}", p.display())))?;
-        content.hash(&mut h);
+/// The high-water mark under `key` of each object given as
+/// `(id, commit)`, in order: the largest mark recorded by any live
+/// scan at a commit on the object's chain, or 0 with none. An object
+/// with no commit, such as a note this scan wrote, is 0.
+async fn hwm(
+    ctx: &ScanContext,
+    key: &str,
+    objects: &[(&str, Option<&str>)],
+) -> Result<Vec<i64>, VmError> {
+    if ctx.invalidate {
+        tracing::info!(key, "hwm ignores watermarks: scan invalidates prior work");
+        return Ok(vec![0; objects.len()]);
     }
-    Ok(format!("{:016x}", h.finish()))
-}
-
-/// Builder returned by `carry_forward_notes(targets, names)`. The link
-/// runs when the value is awaited.
-#[derive(Any)]
-#[rune(item = ::gage)]
-pub(crate) struct CarryForward {
-    #[rune(skip)]
-    targets: Value,
-    #[rune(skip)]
-    names: Value,
-}
-
-impl CarryForward {
-    fn new(targets: Value, names: Value) -> Self {
-        Self { targets, names }
+    let ids: Vec<&str> = objects
+        .iter()
+        .filter(|(_, commit)| commit.is_some())
+        .map(|(id, _)| *id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(vec![0; objects.len()]);
     }
-}
-
-/// Link each target's prior notes matching `names` (exactly) into the
-/// current scan's `scan_note` rows, making them visible to downstream
-/// tasks as if written by this scan. Returns the number of notes
-/// linked.
-fn do_carry_forward(q: CarryForward) -> crate::Result<i64> {
-    let items = q
-        .targets
-        .borrow_ref::<RuneVec>()
-        .map_err(|e| Error::Args(format!("'targets' must be a list: {e}")))?;
-    let mut anchors = Vec::with_capacity(items.len());
-    for item in items.iter() {
-        anchors.push(anchor(item)?);
-    }
-
-    let items = q
-        .names
-        .borrow_ref::<RuneVec>()
-        .map_err(|e| Error::Args(format!("'names' must be a list: {e}")))?;
-    let mut names = Vec::with_capacity(items.len());
-    for item in items.iter() {
-        let name = item
-            .borrow_string_ref()
-            .map_err(|e| Error::Args(format!("'names' entries must be strings: {e}")))?;
-        names.push(name.to_string());
-    }
-
-    let ctx = current_scan_ctx();
-    let db = ctx.db.lock().unwrap();
-    let mut count = 0i64;
-    for a in &anchors {
-        for name in &names {
-            let ids = match a {
-                Anchor::Session(id) => note::ids_for_session_by_name(&db, id, name),
-                Anchor::Project(path) => note::ids_for_project_by_name(&db, path, name),
+    let marks = marks(ctx, key, &ids).await?;
+    let store = ctx.store.lock().await;
+    let mut out = Vec::with_capacity(objects.len());
+    for (id, commit) in objects {
+        let Some(commit) = commit else {
+            out.push(0);
+            continue;
+        };
+        let hwm = match marks.get(*id) {
+            Some(recorded) => {
+                let chain: HashSet<String> = chain(&store, commit)?.into_iter().collect();
+                recorded
+                    .iter()
+                    .filter(|(sha, _)| chain.contains(sha))
+                    .map(|(_, mark)| *mark)
+                    .max()
+                    .unwrap_or(0)
             }
-            .map_err(|e| Error::Db(e.to_string()))?;
-            for id in &ids {
-                insert_scan_note(&db, &ctx.run.scan_id, id, ScanLinkRole::Carried)
-                    .map_err(|e| Error::Db(e.to_string()))?;
-            }
-            count += i64::try_from(ids.len()).unwrap();
+            None => 0,
+        };
+        out.push(i64::try_from(hwm).unwrap());
+    }
+    Ok(out)
+}
+
+/// The `(version, mark)` records under `key` per object id.
+async fn marks(
+    ctx: &ScanContext,
+    key: &str,
+    ids: &[&str],
+) -> Result<HashMap<String, Vec<(String, u64)>>, VmError> {
+    let sql = format!(
+        "SELECT oid, version, mark FROM scan_watermark \
+         WHERE work_id = '{}' AND oid IN ({})",
+        sql_str(key),
+        id_list(ids)
+    );
+    let batches = run(ctx.store_context().await?, &sql).await?;
+    let mut out: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+    for batch in &batches {
+        let oids = string_column(batch, 0);
+        let commits = string_column(batch, 1);
+        let marks = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("mark is an unsigned integer column");
+        for i in 0..batch.num_rows() {
+            out.entry(oids.value(i).to_string())
+                .or_default()
+                .push((commits.value(i).to_string(), marks.value(i)));
         }
     }
-    Ok(count)
+    Ok(out)
 }
 
-/// What a carry-forward entry anchors to: the session or project a
-/// prior note targets.
-enum Anchor {
-    Session(String),
-    Project(String),
+/// The value of `carry_forward_notes(key)` and
+/// `carry_forward_notes_named(pattern)`. Awaiting it links the notes.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct CarryForwardNotes {
+    #[rune(skip)]
+    select: CarrySelect,
 }
 
-/// A `Session`, a `Project`, or a target object (`#{ session: id }` /
-/// `#{ project: path }`), the same target shape `write_note` accepts.
-fn anchor(v: &Value) -> crate::Result<Anchor> {
-    if let Ok(s) = v.borrow_ref::<Session>() {
-        return Ok(Anchor::Session(s.id.clone()));
-    }
-    if let Ok(p) = v.borrow_ref::<Project>() {
-        return Ok(Anchor::Project(p.path.to_string_lossy().into_owned()));
-    }
-    let target = target_from_value(v).map_err(|e| {
-        Error::Args(format!(
-            "expected a Session, Project, or target object: {e}"
-        ))
-    })?;
-    match target {
-        NoteTarget::Session(t) if t.line.is_some() => Err(Error::Args(
-            "carry-forward session target does not accept 'line'".into(),
-        )),
-        NoteTarget::Session(t) => Ok(Anchor::Session(t.session_id)),
-        NoteTarget::Project(t) => Ok(Anchor::Project(t.project_path)),
-        NoteTarget::Scan(_) => Err(Error::Args(
-            "carry-forward target must be a session or project".into(),
-        )),
+/// Which prior notes a carry links.
+enum CarrySelect {
+    /// The notes carrying this key, as given
+    Key(Value),
+    /// The notes whose name matches, `*` a wildcard
+    Named(String),
+}
+
+fn carry_forward_notes(key: Value) -> CarryForwardNotes {
+    CarryForwardNotes {
+        select: CarrySelect::Key(key),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::derive_range;
-    use std::io::Write;
-
-    fn session_file(content: &[u8]) -> tempfile::NamedTempFile {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(content).unwrap();
-        f
+fn carry_forward_notes_named(pattern: &str) -> CarryForwardNotes {
+    CarryForwardNotes {
+        select: CarrySelect::Named(pattern.to_string()),
     }
+}
 
-    #[test]
-    fn grown_by_whole_lines() {
-        // Two validated lines, one appended
-        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
-        let recorded = 16; // through the second newline
-        let size = 24;
-        assert_eq!(
-            derive_range(f.path(), recorded, size).unwrap(),
-            Some((3, 3))
+/// Link into this scan every selected note whose target is one of the
+/// scan's sessions at a commit in that session's chain, or one of
+/// the scan's attachments at a commit holding its current digest.
+/// The note commits are appended to the scan directory's carried
+/// list, which apply writes as `notes_carried.link`. Returns the
+/// number of notes newly linked; a note already carried by this scan
+/// counts zero.
+async fn do_carry_forward_notes(q: CarryForwardNotes) -> Result<Result<i64, Error>, VmError> {
+    let (select, predicate) = match &q.select {
+        CarrySelect::Key(key) => match encode_key(key) {
+            Ok(key) => (key.clone(), format!("n.work_id = '{}'", sql_str(&key))),
+            Err(e) => return Ok(Err(e)),
+        },
+        CarrySelect::Named(pattern) => (
+            pattern.clone(),
+            name_predicate("n.name", std::slice::from_ref(pattern)),
+        ),
+    };
+    let ctx = current()?;
+    if ctx.invalidate {
+        tracing::info!(
+            select,
+            "carry_forward_notes skipped: scan invalidates prior work"
         );
+        return Ok(Ok(0));
     }
+    let mut commits = session_carries(&ctx, &predicate).await?;
+    commits.extend(attachment_carries(&ctx, &predicate).await?);
+    let added = append_carried(&ctx.paths.carried_notes(), &commits)?;
+    tracing::info!(select, notes = added, "carry_forward_notes");
+    Ok(Ok(i64::try_from(added).unwrap()))
+}
 
-    #[test]
-    fn trailing_partial_line_counts() {
-        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\"");
-        let recorded = 16;
-        let size = 20;
-        assert_eq!(
-            derive_range(f.path(), recorded, size).unwrap(),
-            Some((3, 3))
-        );
+/// The commits of the notes matching `predicate` that target one of
+/// the scan's sessions at a commit on its chain.
+async fn session_carries(ctx: &ScanContext, predicate: &str) -> Result<BTreeSet<String>, VmError> {
+    let mut commits = BTreeSet::new();
+    let sessions = members(ctx.scan_context().await?, false).await?;
+    if sessions.is_empty() {
+        return Ok(commits);
     }
+    let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    let batches = run(
+        ctx.store_context().await?,
+        &target_links_sql(predicate, "session", &ids),
+    )
+    .await?;
+    let chains = chains(ctx, &sessions).await?;
+    for batch in &batches {
+        let note_commits = string_column(batch, 0);
+        let target_ids = string_column(batch, 1);
+        let target_commits = string_column(batch, 2);
+        for i in 0..batch.num_rows() {
+            let in_chain = chains
+                .get(target_ids.value(i))
+                .is_some_and(|chain| chain.contains(target_commits.value(i)));
+            if in_chain {
+                commits.insert(note_commits.value(i).to_string());
+            }
+        }
+    }
+    Ok(commits)
+}
 
-    #[test]
-    fn recorded_bisecting_a_line_reincludes_it() {
-        // Validation caught line 2 mid-append: only line 1 counts as
-        // validated, so line 2 is re-scanned
-        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
-        let recorded = 12; // inside the second line
-        let size = 24;
-        assert_eq!(
-            derive_range(f.path(), recorded, size).unwrap(),
-            Some((2, 3))
-        );
+/// The commits of the notes matching `predicate` that target one of
+/// the scan's attachments at a commit whose content digest is the
+/// attachment's current one.
+async fn attachment_carries(
+    ctx: &ScanContext,
+    predicate: &str,
+) -> Result<BTreeSet<String>, VmError> {
+    let mut commits = BTreeSet::new();
+    let attachments = scan_attachments().await?;
+    let digests: HashMap<&str, &str> = attachments
+        .iter()
+        .filter_map(|a| a.digest.as_deref().map(|d| (a.id.as_str(), d)))
+        .collect();
+    if digests.is_empty() {
+        return Ok(commits);
     }
+    let ids: Vec<&str> = digests.keys().copied().collect();
+    let batches = run(
+        ctx.store_context().await?,
+        &target_links_sql(predicate, "attachment", &ids),
+    )
+    .await?;
+    let store = ctx.store.lock().await;
+    let store_attachments = AttachmentStore::from(&*store);
+    for batch in &batches {
+        let note_commits = string_column(batch, 0);
+        let target_ids = string_column(batch, 1);
+        let target_commits = string_column(batch, 2);
+        for i in 0..batch.num_rows() {
+            let current = digests
+                .get(target_ids.value(i))
+                .expect("the query selected the scan's attachment ids");
+            let linked = store_attachments
+                .at_commit(target_commits.value(i))
+                .map_err(|e| {
+                    VmError::panic(format!(
+                        "read attachment commit {}: {e}",
+                        target_commits.value(i)
+                    ))
+                })?;
+            if linked.attrs.digest.as_deref() == Some(*current) {
+                commits.insert(note_commits.value(i).to_string());
+            }
+        }
+    }
+    Ok(commits)
+}
 
-    #[test]
-    fn file_shorter_than_recorded_is_not_ranged() {
-        let f = session_file(b"{\"a\":1}\n");
-        assert_eq!(derive_range(f.path(), 16, 24).unwrap(), None);
-    }
+/// The `(note_commit, target_id, target_commit)` rows of the notes
+/// matching `predicate` whose target is one of `ids`, of
+/// `target_type`.
+fn target_links_sql(predicate: &str, target_type: &str, ids: &[&str]) -> String {
+    format!(
+        "SELECT t.note_commit, t.target_id, t.target_commit \
+         FROM note n JOIN note_target_link t ON t.note_id = n.id \
+         WHERE ({predicate}) AND t.target_type = '{target_type}' \
+           AND t.target_id IN ({})",
+        id_list(ids)
+    )
+}
 
-    #[test]
-    fn size_caps_the_count() {
-        // Lines appended after selection (beyond `size`) are excluded
-        let f = session_file(b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n{\"d\":4}\n");
-        let recorded = 8;
-        let size = 16; // selection saw two lines
-        assert_eq!(
-            derive_range(f.path(), recorded, size).unwrap(),
-            Some((2, 2))
-        );
+/// Append the commits not already listed to the carried list.
+/// Returns how many were appended.
+fn append_carried(path: &Path, commits: &BTreeSet<String>) -> Result<usize, VmError> {
+    let already: BTreeSet<String> = match fs::read_to_string(path) {
+        Ok(text) => text.lines().map(String::from).collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(e) => return Err(VmError::panic(format!("carried notes: {e}"))),
+    };
+    let new: Vec<&String> = commits.iter().filter(|c| !already.contains(*c)).collect();
+    if new.is_empty() {
+        return Ok(0);
     }
+    let lines: String = new.iter().map(|c| format!("{c}\n")).collect();
+    append(path, &lines).map_err(|e| VmError::panic(format!("carried notes: {e}")))?;
+    Ok(new.len())
+}
+
+/// The commit chain of each session, as a set, keyed by session id.
+async fn chains(
+    ctx: &ScanContext,
+    sessions: &[Session],
+) -> Result<HashMap<String, HashSet<String>>, VmError> {
+    let store = ctx.store.lock().await;
+    let mut out = HashMap::with_capacity(sessions.len());
+    for s in sessions {
+        let chain: HashSet<String> = chain(&store, &s.commit)?.into_iter().collect();
+        out.insert(s.id.clone(), chain);
+    }
+    Ok(out)
+}
+
+/// The commit chain of an object from `commit` back to its first
+/// commit: `commit` first, then each `first-parent` in turn.
+fn chain(store: &Store, commit: &str) -> Result<Vec<String>, VmError> {
+    let mut out = vec![commit.to_string()];
+    let mut sha = commit.to_string();
+    loop {
+        let header = store
+            .read_header(&sha)
+            .map_err(|e| VmError::panic(format!("read object commit {sha}: {e}")))?;
+        match header.first_parent {
+            Some(parent) => {
+                out.push(parent.clone());
+                sha = parent;
+            }
+            None => return Ok(out),
+        }
+    }
+}
+
+fn id_list(ids: &[&str]) -> String {
+    ids.iter()
+        .map(|id| format!("'{}'", sql_str(id)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

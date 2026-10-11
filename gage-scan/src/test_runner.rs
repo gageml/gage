@@ -3,23 +3,16 @@
 //! `tests/rune.rs` (a libtest-mimic harness) collects the tests with
 //! [`collect_tests`] and runs each with [`run_test`].
 
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use gage_claude::session::SessionInfo;
+use gage_registry::scanner::{extract_scanners, scanners_dir};
 use rune::alloc::prelude::TryToOwned;
 use rune::runtime::Vm;
 use rune::sync::Arc as RuneArc;
 use rune::termcolor::NoColor;
 use rune::{Diagnostics, Source, Sources};
-
-use gage_query::ScanSessionContext;
-
-use gage_registry::scanner::{extract_scanners, scanners_dir};
-use gage_runtime as runtime;
-use gage_runtime::state::{RunContext, SCAN_CTX, ScanContext};
 
 pub enum TestOutcome {
     Pass,
@@ -42,8 +35,6 @@ struct RuneTest {
     rt: RuneArc<rune::runtime::RuntimeContext>,
     unit: RuneArc<rune::Unit>,
     hash: rune::Hash,
-    module_name: String,
-    item: rune::ItemBuf,
     file: Arc<FileSource>,
 }
 
@@ -60,21 +51,12 @@ struct FileSource {
 /// Extract the scanner bundle and compile every `.rn` file, returning
 /// a case per `#[test]` function. A file that fails to compile yields
 /// a single `<module>::build` case carrying its diagnostics; warnings
-/// on a successful build go to stderr. A directory holding a
-/// `SKIP-TESTS` file is left out, with everything under it.
+/// on a successful build go to stderr.
 pub fn collect_tests() -> io::Result<Vec<TestCase>> {
     extract_scanners().unwrap();
     let dir = scanners_dir();
 
-    let mut context = rune_modules::with_config(false).unwrap();
-    context.install(runtime::io_module().unwrap()).unwrap();
-    context.install(runtime::types_module().unwrap()).unwrap();
-    context.install(runtime::macros_module().unwrap()).unwrap();
-    context.install(runtime::gage_module().unwrap()).unwrap();
-    context.install(runtime::tools_module().unwrap()).unwrap();
-    context.install(runtime::log_module().unwrap()).unwrap();
-    context.install(runtime::stats_module().unwrap()).unwrap();
-    context.install(runtime::json_module().unwrap()).unwrap();
+    let context = gage_runtime::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
 
     let mut cases = Vec::new();
@@ -127,8 +109,6 @@ pub fn collect_tests() -> io::Result<Vec<TestCase>> {
                     rt: rt.clone(),
                     unit: unit.clone(),
                     hash,
-                    module_name: module_name.clone(),
-                    item,
                     file: file.clone(),
                 })),
             });
@@ -157,60 +137,17 @@ fn render_diagnostics(diagnostics: &Diagnostics, sources: &Sources) -> String {
     String::from_utf8(writer.into_inner()).unwrap()
 }
 
-/// Run one collected case under a stub scan context.
+/// Run one collected case. A test runs outside any scan context, so
+/// `scan()` and the writes are unavailable to it; a test is for the
+/// scanner's own functions.
 pub async fn run_test(case: TestCase) -> TestOutcome {
     let name = case.name;
     let test = match case.kind {
         CaseKind::BuildError { report } => return TestOutcome::Fail(report),
         CaseKind::Test(test) => test,
     };
-
-    let stub_selected: Arc<[SessionInfo]> = Arc::from(Vec::<SessionInfo>::new().into_boxed_slice());
-    let stub_run = Arc::new(RunContext {
-        scan_id: "test".to_string(),
-        selected: stub_selected.clone(),
-        projects: HashMap::new(),
-        scan_ctx: Arc::new(ScanSessionContext::new(&stub_selected)),
-        mcp_host: None,
-        dispatcher: std::sync::OnceLock::new(),
-        agent_pool: Arc::new(tokio::sync::Semaphore::new(1)),
-        model_map: Default::default(),
-        invalidate: false,
-        agent_fault: std::sync::OnceLock::new(),
-        model_contexts: Default::default(),
-    });
-    let stub_db = Arc::new(Mutex::new(gage_db::db::open_db_in_memory().unwrap()));
-    // Seed the stub scan row so note/issue writes that link to the
-    // current scan satisfy the scan_note/scan_issue FKs.
-    stub_db
-        .lock()
-        .unwrap()
-        .execute("INSERT INTO scan (id, created) VALUES ('test', 0)", [])
-        .unwrap();
-    let (stub_tx, _stub_rx) = tokio::sync::mpsc::unbounded_channel();
-
     let mut vm = Vm::new(test.rt.clone(), test.unit.clone());
-    // Tests don't exercise call_agent custom-tool dispatch, so a stub
-    // empty Sources is fine.
-    let stub_sources = Arc::new(Sources::new());
-    let ctx = Arc::new(ScanContext {
-        scanner_name: test.module_name.clone(),
-        task_name: test.item.to_string(),
-        params: None,
-        run: stub_run,
-        db: stub_db,
-        runtime_tx: stub_tx,
-        rt: test.rt.clone(),
-        unit: test.unit.clone(),
-        sources: stub_sources,
-        task_fault: Mutex::new(None),
-    });
-    let hash = test.hash;
-    let result = SCAN_CTX
-        .scope(ctx, async move {
-            vm.execute(hash, ()).unwrap().async_complete().await
-        })
-        .await;
+    let result = vm.execute(test.hash, ()).unwrap().async_complete().await;
     match result {
         Err(e) => {
             let raw = e.to_string();
@@ -280,9 +217,6 @@ fn walk_rn_files(dir: &std::path::Path) -> Vec<PathBuf> {
     result
 }
 
-/// A file marking a scanner directory whose tests are skipped
-const SKIP_TESTS_SENTINEL: &str = "SKIP-TESTS";
-
 fn walk_rn_files_rec(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -291,9 +225,6 @@ fn walk_rn_files_rec(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if path.join(SKIP_TESTS_SENTINEL).is_file() {
-                continue;
-            }
             walk_rn_files_rec(&path, result);
         } else if path.extension().is_some_and(|ext| ext == "rn") {
             result.push(path);

@@ -1172,7 +1172,7 @@ mod tests {
         );
         write(
             &scan.join("logs/records"),
-            "2026-09-24T15:04:05.000Z INFO gage_scan2: scan started\n2026-09-24T15:04:05.123Z INFO hello:greet: started\n",
+            "2026-09-24T15:04:05.000Z INFO gage_scan: scan started\n2026-09-24T15:04:05.123Z INFO hello:greet: started\n",
         );
         scan
     }

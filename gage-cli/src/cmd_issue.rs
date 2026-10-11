@@ -1,5 +1,11 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use clap::{Args, Subcommand};
 use cliclack as cli;
+use gage_claude::home::ClaudeHome;
+use gage_claude::project::project_display;
+use gage_claude::session::{self, SessionInfo};
 use gage_core::text_resolve::TextResolver;
 use gage_core::uuid::short_uuid;
 use gage_db::db;
@@ -247,7 +253,7 @@ pub fn show(args: IssueShowArgs) {
             std::process::exit(1);
         }
     };
-    let mut displays = crate::cmd_scan::SessionDisplays::default();
+    let mut displays = SessionDisplays::default();
     let session_displays: Vec<_> = session_ids
         .iter()
         .map(|id| (id.as_str(), displays.resolve(id)))
@@ -834,4 +840,88 @@ fn issue_text_resolver(issue: &Issue) -> TextResolver {
         },
         None => r.with_scheme("scanner", ScannerScheme::absolute_only()),
     }
+}
+
+/// Session display fields per linked session, cached so each session
+/// resolves once.
+#[derive(Default)]
+pub struct SessionDisplays {
+    map: HashMap<String, SessionDisplay>,
+    /// Session walk from the last unknown id; sessions can appear
+    /// while a scan runs, so an id missing from it refreshes the walk
+    paths: HashMap<String, PathBuf>,
+    /// Resolved project display per encoded directory name
+    projects: HashMap<String, String>,
+}
+
+#[derive(Clone)]
+pub struct SessionDisplay {
+    pub project: String,
+    pub title: String,
+}
+
+impl SessionDisplays {
+    /// A session's display fields. Both fall back to a placeholder
+    /// when the session is not on disk.
+    pub fn resolve(&mut self, id: &str) -> SessionDisplay {
+        if let Some(display) = self.map.get(id) {
+            return display.clone();
+        }
+        if !self.paths.contains_key(id) {
+            self.paths = session::ls_sessions().into_iter().collect();
+        }
+        let display = match stat_session(&self.paths, id) {
+            Some(info) => {
+                let encoded = info.project_name().into_owned();
+                let home = ClaudeHome::from_env().ok();
+                let project = self
+                    .projects
+                    .entry(encoded)
+                    .or_insert_with_key(|encoded| project_display(home.as_ref(), encoded))
+                    .clone();
+                let source = crate::source::open_source_or_exit("gage issue", "");
+                let store = crate::source::index_store_or_exit("gage issue", source.as_ref());
+                SessionDisplay {
+                    project,
+                    title: session_title(&store, &info),
+                }
+            }
+            None => SessionDisplay {
+                project: "(unavailable)".to_string(),
+                title: "(unavailable)".to_string(),
+            },
+        };
+        self.map.insert(id.to_string(), display.clone());
+        display
+    }
+}
+
+fn stat_session(paths: &HashMap<String, PathBuf>, id: &str) -> Option<SessionInfo> {
+    let src = paths.get(id)?;
+    let meta = std::fs::metadata(src).ok()?;
+    Some(SessionInfo {
+        id: id.to_string(),
+        src: src.clone(),
+        mtime: meta.modified().unwrap(),
+        size: meta.len(),
+    })
+}
+
+fn session_title(store: &gage_claude::index::IndexStore, s: &SessionInfo) -> String {
+    let title = match store.session_summary(&s.id, s.mtime) {
+        Some(summary) => summary.title,
+        None => match gage_claude::index::derive_session(&s.id, &s.src) {
+            Ok(d) => {
+                if let Err(e) = store.put_session_summary(&s.id, &d.summary) {
+                    tracing::warn!(session_id = %s.id, "failed to write summary cache: {e}");
+                }
+                d.summary.title
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
+                None
+            }
+        },
+    };
+    title.unwrap_or_else(|| s.project_name().into_owned())
 }

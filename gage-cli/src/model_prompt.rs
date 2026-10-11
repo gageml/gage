@@ -1,4 +1,4 @@
-//! Shared "Model" prompt used by scan and resolve dialogs.
+//! The "Model" prompt of the resolve dialog.
 
 use cliclack as cli;
 
@@ -11,32 +11,6 @@ use crate::dialog::DialogError;
 pub struct DefaultModel {
     pub model: String,
     pub note: &'static str,
-}
-
-/// Prompt for a scan model. A plain "Default" entry sits at the top
-/// and is preselected; selecting it returns `None`, signaling that no
-/// model should be passed and each scanner should use its own
-/// per-size-tier default.
-pub fn prompt_model_for_scan() -> Result<Option<String>, DialogError> {
-    let mut select = cli::select("Model");
-    select = select.item(DEFAULT.into(), "Default", "specified by scanners");
-    for (value, label, hint) in scan_items() {
-        select = select.item(value.into(), label, hint);
-    }
-    let model = select
-        .item(CUSTOM.into(), "Other", "enter a model name")
-        .initial_value(DEFAULT.into())
-        .interact()?;
-    if model == DEFAULT {
-        return Ok(None);
-    }
-    if model == CUSTOM {
-        let custom: String = cli::input("Model")
-            .placeholder("e.g. claude-sonnet-4-6")
-            .interact()?;
-        return Ok(Some(custom));
-    }
-    Ok(Some(model))
 }
 
 /// Prompt for a `claude --model` value, ordered from best to worst.
@@ -68,11 +42,6 @@ pub fn prompt_model_ranked(default: Option<DefaultModel>) -> Result<String, Dial
     Ok(model)
 }
 
-fn scan_items() -> [(&'static str, &'static str, &'static str); 6] {
-    let (sonnet, opus, opusplan, sonnet_1m, opus_1m, fable) = model_entries();
-    [sonnet, opus, opusplan, sonnet_1m, opus_1m, fable]
-}
-
 fn ranked_items() -> [(&'static str, &'static str, &'static str); 6] {
     let (sonnet, opus, opusplan, sonnet_1m, opus_1m, fable) = model_entries();
     [fable, opus_1m, opus, opusplan, sonnet_1m, sonnet]
@@ -95,6 +64,5 @@ fn model_entries() -> (Entry, Entry, Entry, Entry, Entry, Entry) {
     )
 }
 
-/// Select sentinels for the model prompts.
+/// Select sentinel for the custom entry of the model prompt.
 const CUSTOM: &str = "\0custom";
-const DEFAULT: &str = "\0default";

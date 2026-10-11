@@ -1765,7 +1765,7 @@ dependencies = [
  "itertools",
  "parking_lot",
  "paste",
- "petgraph 0.8.3",
+ "petgraph",
  "recursive",
  "tokio",
 ]
@@ -2530,12 +2530,10 @@ dependencies = [
  "gage-query",
  "gage-query2",
  "gage-registry",
- "gage-runtime2",
+ "gage-runtime",
  "gage-scan",
- "gage-scan2",
  "gage-session",
  "gage-store",
- "gage-test",
  "gage-tui",
  "humantime",
  "indicatif",
@@ -2597,8 +2595,7 @@ version = "0.2.0-dev"
 dependencies = [
  "anyhow",
  "gage-log",
- "gage-runtime2",
- "gage-scan",
+ "gage-runtime",
  "rune",
  "tokio",
 ]
@@ -2718,38 +2715,12 @@ dependencies = [
 name = "gage-runtime"
 version = "0.2.0-dev"
 dependencies = [
- "async-trait",
  "chrono",
- "datafusion",
- "futures",
- "gage-agent",
- "gage-claude",
- "gage-core",
- "gage-db",
- "gage-mcp",
- "gage-query",
- "gage-registry",
- "minijinja",
- "rune",
- "rune-modules",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "gage-runtime2"
-version = "0.2.0-dev"
-dependencies = [
  "datafusion",
  "futures",
  "gage-core",
  "gage-mcp2",
  "gage-query2",
- "gage-runtime",
  "gage-session",
  "gage-store",
  "minijinja",
@@ -2757,6 +2728,7 @@ dependencies = [
  "regex",
  "rune",
  "rune-modules",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2767,32 +2739,6 @@ dependencies = [
 name = "gage-scan"
 version = "0.2.0-dev"
 dependencies = [
- "chrono",
- "codespan-reporting",
- "gage-agent",
- "gage-claude",
- "gage-core",
- "gage-db",
- "gage-mcp",
- "gage-query",
- "gage-registry",
- "gage-runtime",
- "libtest-mimic",
- "num_cpus",
- "petgraph 0.6.5",
- "rune",
- "rune-modules",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "gage-scan2"
-version = "0.2.0-dev"
-dependencies = [
  "async-trait",
  "codespan-reporting",
  "datafusion",
@@ -2800,10 +2746,10 @@ dependencies = [
  "gage-core",
  "gage-query2",
  "gage-registry",
- "gage-runtime2",
- "gage-scan",
+ "gage-runtime",
  "gage-session",
  "gage-store",
+ "libtest-mimic",
  "rune",
  "serde",
  "serde_json",
@@ -2841,26 +2787,6 @@ dependencies = [
  "tracing",
  "twox-hash",
  "wax",
-]
-
-[[package]]
-name = "gage-test"
-version = "0.2.0-dev"
-dependencies = [
- "chrono",
- "gage-agent",
- "gage-claude",
- "gage-core",
- "gage-db",
- "minijinja",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "toml 0.8.23",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -4441,16 +4367,6 @@ checksum = "89815c69d36021a140146f26659a81d6c2afa33d216d736dd4be5381a7362220"
 dependencies = [
  "pest",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "petgraph"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
-dependencies = [
- "fixedbitset 0.4.2",
- "indexmap",
 ]
 
 [[package]]

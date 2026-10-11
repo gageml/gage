@@ -4,16 +4,11 @@
 //! successful run.
 
 use rune::runtime::Value;
-use rune::{Any, ContextError, Module, TypeHash};
+use rune::{Any, TypeHash};
 
 #[derive(Any, Clone, Debug)]
 #[rune(item = ::gage, constructor)]
 pub struct Ignore;
-
-pub(crate) fn register_types(m: &mut Module) -> Result<(), ContextError> {
-    m.ty::<Ignore>()?;
-    Ok(())
-}
 
 /// True when a task's `Err` value is the `Ignore` sentinel, an early
 /// exit that should not count as a failure.

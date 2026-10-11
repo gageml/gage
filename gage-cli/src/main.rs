@@ -25,7 +25,6 @@ fn install_panic_hook() {
 }
 
 mod author;
-mod cmd_agent;
 mod cmd_attachment;
 mod cmd_backup;
 mod cmd_config;
@@ -42,12 +41,10 @@ mod cmd_query2;
 mod cmd_remote;
 mod cmd_resolve;
 mod cmd_scan;
-mod cmd_scan2;
 mod cmd_session;
 mod cmd_status;
 mod cmd_store;
 mod cmd_tag;
-mod cmd_test;
 mod dialog;
 mod human;
 mod json;
@@ -81,13 +78,12 @@ struct Cli {
 /// `LOG_TARGET` for a scanner's own `log` records. Keep in sync with
 /// the workspace members that actually emit tracing events.
 const GAGE_LOG_TARGETS: &[&str] = &[
-    gage_runtime2::LOG_TARGET,
+    gage_runtime::LOG_TARGET,
     "gage_agent",
     "gage_claude",
     "gage_cli",
     "gage_core",
     "gage_db",
-    "gage_test",
     "gage_index",
     "gage_log",
     "gage_lsp",
@@ -95,9 +91,7 @@ const GAGE_LOG_TARGETS: &[&str] = &[
     "gage_query",
     "gage_registry",
     "gage_runtime",
-    "gage_runtime2",
     "gage_scan",
-    "gage_scan2",
     "gage_scan_ui",
     "gage_tui",
 ];
@@ -108,13 +102,7 @@ enum Command {
     Init(cmd_init::InitArgs),
 
     /// Run scanners on sessions
-    ///
-    /// With no session selection options, scans sessions from the
-    /// last 30 days, up to 20.
-    Scan(Box<cmd_scan::ScanArgs>),
-
-    /// Run scanners (new runtime)
-    Scan2(cmd_scan2::Scan2Args),
+    Scan(cmd_scan::ScanArgs),
 
     /// Resolve issues in a Claude Code session
     ///
@@ -247,15 +235,6 @@ enum Command {
     /// Update the Gage index
     Index(cmd_index::IndexArgs),
 
-    /// Run a scanner agent
-    Agent(cmd_agent::AgentArgs),
-
-    /// Run and view tests
-    Test {
-        #[command(subcommand)]
-        command: cmd_test::TestCommand,
-    },
-
     /// Start the MCP server
     Mcp {
         #[command(subcommand)]
@@ -322,14 +301,8 @@ async fn main() {
     let _log_guard = match &cli.command {
         Command::Mcp { .. } => Some(gage_log::init("mcp").expect("init log dir")),
         Command::Mcp2 => Some(gage_log::init("mcp2").expect("init log dir")),
-        // A scan run inits its own scan-id-named log in cmd_scan; the
-        // scan subcommands (list/show/view/delete) log per-process.
-        Command::Scan(args) if args.command.is_some() => {
-            Some(gage_log::init("scan").expect("init log dir"))
-        }
-        Command::Scan(_) => None,
-        Command::Scan2(_) => {
-            cmd_scan2::init_logging();
+        Command::Scan(_) => {
+            cmd_scan::init_logging();
             None
         }
         _ => {
@@ -339,7 +312,6 @@ async fn main() {
     };
     let cmd = async {
         match cli.command {
-            Command::Agent(args) => cmd_agent::run(args).await,
             Command::Config { command } => cmd_config::run(command),
             Command::Store { command } => cmd_store::run(command),
             Command::Init(args) => cmd_init::run(args),
@@ -414,9 +386,7 @@ async fn main() {
                 cmd_issue::IssueCommand::Open(args) => cmd_issue::open(args),
                 cmd_issue::IssueCommand::Comment(args) => cmd_issue::comment(args),
             },
-            Command::Test { command } => cmd_test::run(command).await,
-            Command::Scan(args) => cmd_scan::run(*args).await,
-            Command::Scan2(args) => cmd_scan2::main(args).await,
+            Command::Scan(args) => cmd_scan::main(args).await,
             Command::Resolve(args) => cmd_resolve::run(args),
             Command::Mcp { command } => match command.unwrap_or(McpCommand::Stdio) {
                 McpCommand::Stdio => {

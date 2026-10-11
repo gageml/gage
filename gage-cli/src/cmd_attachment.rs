@@ -306,7 +306,7 @@ async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]
                 std::process::exit(1);
             }
         };
-        match gage_scan2::compile(&scanner) {
+        match gage_scan::compile(&scanner) {
             Ok(c) => compiled.push(c),
             Err(e) => {
                 eprintln!("gage attachment add: {e}");

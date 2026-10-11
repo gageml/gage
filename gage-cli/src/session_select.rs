@@ -3,10 +3,8 @@
 //! flattens into a subcommand's clap struct; `resolve` turns the
 //! parsed values into a concrete list of native session records.
 //!
-//! The same struct is used by `session add` and, in follow-up work,
-//! by `dataset add` and `scan2`. `scan` keeps its own args struct
-//! while its interactive dialog remains, and reuses the helpers in
-//! this module for project resolution and the today-window cutoff.
+//! The same struct is used by `session add`, `dataset add`, and
+//! `scan`.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -275,14 +273,6 @@ pub(crate) fn resolve_project(
     let canonical = resolved.canonicalize().unwrap_or(resolved);
     let slug = session::encode_project_dir(&canonical);
     projects.contains(&slug).then_some(slug)
-}
-
-/// The slug with the home prefix stripped — the form that
-/// `gage session list` shows.
-pub(crate) fn project_slug_display(slug: &str) -> String {
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    let prefix = format!("{}-", session::encode_project_dir(Path::new(&home)));
-    slug.strip_prefix(&prefix).unwrap_or(slug).to_string()
 }
 
 /// Elapsed time since midnight local time.
