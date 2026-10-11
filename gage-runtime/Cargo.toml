@@ -12,7 +12,7 @@ datafusion = { workspace = true }
 futures = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-mcp = { path = "../gage-mcp" }
-gage-query2 = { path = "../gage-query2" }
+gage-query = { path = "../gage-query" }
 regex = { workspace = true }
 gage-session = { path = "../gage-session" }
 minijinja = "2"

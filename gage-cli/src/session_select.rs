@@ -13,9 +13,8 @@ use std::time::Duration;
 
 use clap::Args;
 use gage_claude::session::{self, SessionInfo, SessionListBuilder};
+use gage_query::ContextBuilder;
 use rand::seq::SliceRandom;
-
-use crate::source;
 
 /// Names of the arg fields on this struct, in the order the shared
 /// help layout shows them. Callers that need to enforce "at least
@@ -127,10 +126,8 @@ impl SessionSelectArgs {
     /// filter axes populate a `SessionListBuilder`; a missing window
     /// defaults to the past 30 days, and a missing limit defaults to
     /// 20 unless a window or `--project` was pinned (in which case
-    /// the full filtered set is returned). `cmd_label` is used only
-    /// for error prefixes on any project-corpus query that runs to
-    /// resolve `--project`.
-    pub async fn resolve(&self, cmd_label: &str) -> Result<Vec<SessionInfo>, SessionSelectError> {
+    /// the full filtered set is returned).
+    pub async fn resolve(&self) -> Result<Vec<SessionInfo>, SessionSelectError> {
         if !self.sessions.is_empty() {
             let mut out = Vec::with_capacity(self.sessions.len());
             let mut errors = Vec::new();
@@ -148,7 +145,7 @@ impl SessionSelectArgs {
 
         let project_slug = match &self.project {
             Some(p) => {
-                let projects = known_projects(cmd_label)
+                let projects = known_projects()
                     .await
                     .map_err(|e| SessionSelectError::Setup(e.to_string()))?;
                 let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -205,13 +202,12 @@ impl SessionSelectArgs {
 /// Every distinct `project` slug recorded in the session corpus.
 /// The empty source is used, matching how `scan` and `session list`
 /// discover the default source.
-pub(crate) async fn known_projects(cmd_label: &str) -> anyhow::Result<HashSet<String>> {
+pub(crate) async fn known_projects() -> anyhow::Result<HashSet<String>> {
     use datafusion::arrow::array::{Array, StringArray};
 
-    let source = source::open_source_or_exit(cmd_label, "");
-    let ctx = gage_query::create_context(source.as_ref()).await?;
+    let ctx = ContextBuilder::new(None).build().await;
     let batches = ctx
-        .sql("SELECT DISTINCT project FROM session")
+        .sql("SELECT DISTINCT project FROM native_session('')")
         .await?
         .collect()
         .await?;

@@ -273,7 +273,7 @@ References for the Rust rules:
 
 - **SQL is the read path for selection-shaped data.** CLI listings, TUI
   listings, scanner reads, MCP tool reads, and external agent reads go through
-  `gage-query2` (DataFusion). Any multi-row read with filter, sort, project,
+  `gage-query` (DataFusion). Any multi-row read with filter, sort, project,
   limit, or page uses the SQL interface. A second filtering or sorting
   implementation in a caller is a defect; DataFusion pushdown is the single
   shared implementation of these semantics.

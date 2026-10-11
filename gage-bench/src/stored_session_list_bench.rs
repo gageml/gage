@@ -11,8 +11,7 @@
 //! 3. **Warm scenario.** Reopen the store against the built index and
 //!    run each measured query `iterations` times.
 //!
-//! Every scenario measures the same three queries as the
-//! `claude-session-list` bench, against the store:
+//! Every scenario measures three queries against the store:
 //!
 //! - `count` — `SELECT COUNT(*) FROM session`. Served by the index.
 //! - `list_light` — `SELECT id, mtime FROM session ORDER BY mtime DESC
@@ -25,15 +24,19 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use gage_query2::ContextBuilder;
+use arrow::array::{Array, Int64Array};
+use arrow::record_batch::RecordBatch;
+use datafusion::error::DataFusionError;
+use datafusion::prelude::SessionContext;
+use gage_query::ContextBuilder;
 use gage_store::{INDEX_FILE, SessionStore, Store};
 use indicatif::ProgressBar;
 use serde::Serialize;
 
-use crate::measure::{Size, Timings};
+use crate::measure::{Count, Size, Timings};
 use crate::report::{self, Results};
-use crate::session_list_bench::{RowCounts, dir_size, emit_row_counts, first_int64, time_query};
 use crate::synth::{Generator, SyntheticDriver, SyntheticSession};
 
 pub const BENCH_NAME: &str = "stored-session-list";
@@ -164,7 +167,7 @@ fn populate(
 fn run_queries(
     scenario: &str,
     rt: &tokio::runtime::Runtime,
-    ctx: &datafusion::prelude::SessionContext,
+    ctx: &SessionContext,
     limit: usize,
     timings: &mut Timings,
 ) -> Result<RowCounts, String> {
@@ -205,4 +208,77 @@ fn run_queries(
         list_light_rows,
         list_full_rows,
     })
+}
+
+/// Row counts one iteration observed. Same numbers every iteration
+/// on the same corpus; recorded once per scenario, not per iteration.
+#[derive(Default)]
+struct RowCounts {
+    count_total: u64,
+    list_light_rows: u64,
+    list_full_rows: u64,
+}
+
+fn emit_row_counts(scenario: &str, rows: &RowCounts, counts: &mut Vec<Count>) {
+    counts.push(Count {
+        name: format!("{scenario}.count.total"),
+        value: rows.count_total,
+    });
+    counts.push(Count {
+        name: format!("{scenario}.list_light.rows"),
+        value: rows.list_light_rows,
+    });
+    counts.push(Count {
+        name: format!("{scenario}.list_full.rows"),
+        value: rows.list_full_rows,
+    });
+}
+
+fn time_query(
+    name: &str,
+    rt: &tokio::runtime::Runtime,
+    ctx: &SessionContext,
+    sql: &str,
+    timings: &mut Timings,
+) -> Result<Vec<RecordBatch>, String> {
+    let ctx = ctx.clone();
+    let sql = sql.to_string();
+    let start = Instant::now();
+    let batches = rt
+        .block_on(async move { execute(&ctx, &sql).await })
+        .map_err(|e| e.to_string())?;
+    timings.record(name, start.elapsed().as_secs_f64() * 1000.0);
+    Ok(batches)
+}
+
+async fn execute(ctx: &SessionContext, sql: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let df = ctx.sql(sql).await?;
+    df.collect().await
+}
+
+fn first_int64(batches: &[RecordBatch]) -> Option<i64> {
+    let batch = batches.first()?;
+    let array = batch.column(0).as_any().downcast_ref::<Int64Array>()?;
+    if array.is_empty() {
+        None
+    } else {
+        Some(array.value(0))
+    }
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total = total.saturating_add(dir_size(&path));
+        } else if let Ok(meta) = entry.metadata() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
 }

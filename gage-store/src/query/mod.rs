@@ -1,7 +1,7 @@
 //! DataFusion table providers bound to the Gage store: one per
 //! object type the query surface exposes, and one per link file. The
 //! store owns these because it knows the layout and plans every read;
-//! gage-query2 names and registers them.
+//! gage-query names and registers them.
 //!
 //! Two kinds of provider. `session` and `note` plan their reads
 //! against the index and open objects only for projected columns.

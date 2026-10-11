@@ -4,7 +4,7 @@
 //! source ([`source`]). Task orchestration lives in `gage-scan`.
 //!
 //! The scanner-facing surface is built on `gage-store`,
-//! `gage-session`, and `gage-query2`: a session is a store object
+//! `gage-session`, and `gage-query`: a session is a store object
 //! read through its driver, and the task context is the store and
 //! the dataset commit.
 

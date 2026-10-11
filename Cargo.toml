@@ -9,7 +9,6 @@ members = [
     "gage-lsp",
     "gage-mcp",
     "gage-query",
-    "gage-query2",
     "gage-registry",
     "gage-runtime",
     "gage-scan",
@@ -62,9 +61,6 @@ toml = "0.8"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5"] }
 twox-hash = { version = "2", default-features = false, features = ["xxhash3_64"] }
-
-[patch.crates-io]
-datafusion-table-providers = { git = "https://github.com/gar1t/datafusion-table-providers", branch = "gar1t-dev-v0.10.1" }
 
 [workspace.lints.clippy]
 let_underscore_must_use = "warn"

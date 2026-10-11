@@ -27,7 +27,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use gage_mcp::{HostError, McpHost};
-use gage_query2::{ContextBuilder, ScanScope};
+use gage_query::{ContextBuilder, ScanScope};
 use gage_session::Driver;
 use gage_store::{ScanDirLayout, Store, StoreError};
 use rune::Sources;

@@ -15,7 +15,7 @@ use gage_claude::home::claude_home;
 use gage_claude::session::{encode_project_dir, one_session};
 use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
-use gage_query2::ContextBuilder;
+use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source};
 use gage_store::{DatasetStore, SessionStore, Store};
@@ -714,7 +714,7 @@ async fn add_dialog(
         _ => {
             let selected = args
                 .select
-                .resolve("gage session add")
+                .resolve()
                 .await
                 .map_err(|e| DialogError::Failed(format!("{e}")))?;
             if selected.is_empty() {

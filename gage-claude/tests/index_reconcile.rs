@@ -4,12 +4,9 @@ use std::path::{Path, PathBuf};
 
 use gage_claude::index::{IndexStore, LockMode};
 
-/// The gage-query session fixtures, shared across crates.
+/// The claude session fixtures
 fn fixture_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("gage-query")
-        .join("testdata")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
 }
 
 /// Copy the fixtures into a temp root so tests can mutate the corpus.

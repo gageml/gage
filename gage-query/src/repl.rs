@@ -11,8 +11,16 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::print_format::PrintFormat;
-use crate::slow_log;
-use crate::tables::TvfInfo;
+
+/// Static descriptor for a table-valued function surfaced in the repl
+/// by `\df`. `schema` is the function's fixed result columns, or `None`
+/// when the columns depend on the arguments (as `native_session`'s do
+/// on the source's driver).
+pub struct TvfInfo {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub schema: Option<SchemaRef>,
+}
 
 pub async fn exec_command(
     ctx: &SessionContext,
@@ -36,13 +44,8 @@ async fn exec_with_stats(
     format: PrintFormat,
 ) -> Result<QueryStats, Box<dyn std::error::Error>> {
     let start = Instant::now();
-    let result = run_query(ctx, sql, format).await;
+    let (rows, batches, plan) = run_query(ctx, sql, format).await?;
     let elapsed = start.elapsed();
-    match &result {
-        Ok((rows, _, _, exec)) => slow_log::record(sql, *exec, Some(*rows), None),
-        Err(e) => slow_log::record(sql, elapsed, None, Some(&e.to_string())),
-    }
-    let (rows, batches, plan, _) = result?;
     Ok(QueryStats {
         elapsed,
         rows,
@@ -51,20 +54,15 @@ async fn exec_with_stats(
     })
 }
 
-type QueryOutput = (usize, usize, Arc<dyn ExecutionPlan>, Duration);
+type QueryOutput = (usize, usize, Arc<dyn ExecutionPlan>);
 
 async fn run_query(
     ctx: &SessionContext,
     sql: &str,
     format: PrintFormat,
 ) -> Result<QueryOutput, Box<dyn std::error::Error>> {
-    // Time planning and stream-drain only. `print_batch` renders to the
-    // terminal and is excluded so the slow log measures execution, not
-    // output formatting.
-    let exec_start = Instant::now();
     let plan = ctx.sql(sql).await?.create_physical_plan().await?;
     let mut stream = execute_stream(Arc::clone(&plan), ctx.task_ctx())?;
-    let mut exec = exec_start.elapsed();
     let mut rows = 0usize;
     let mut batches = 0usize;
     // Buffered formats (Table, Json) need every row before they can
@@ -73,11 +71,7 @@ async fn run_query(
     // batch as it arrives.
     if format.is_buffered() {
         let mut collected: Vec<datafusion::arrow::record_batch::RecordBatch> = Vec::new();
-        loop {
-            let next_start = Instant::now();
-            let next = stream.next().await;
-            exec += next_start.elapsed();
-            let Some(batch) = next else { break };
+        while let Some(batch) = stream.next().await {
             let batch = batch?;
             if batch.num_rows() == 0 {
                 continue;
@@ -89,11 +83,7 @@ async fn run_query(
         format.print_batches(&collected)?;
     } else {
         let mut is_first = true;
-        loop {
-            let next_start = Instant::now();
-            let next = stream.next().await;
-            exec += next_start.elapsed();
-            let Some(batch) = next else { break };
+        while let Some(batch) = stream.next().await {
             let batch = batch?;
             if batch.num_rows() == 0 {
                 continue;
@@ -104,12 +94,11 @@ async fn run_query(
             is_first = false;
         }
     }
-    Ok((rows, batches, plan, exec))
+    Ok((rows, batches, plan))
 }
 
 pub async fn run_repl(
     ctx: &SessionContext,
-    index_store: Option<Arc<gage_claude::index::IndexStore>>,
     functions: Vec<TvfInfo>,
     mut format: PrintFormat,
     quiet: bool,
@@ -134,7 +123,6 @@ pub async fn run_repl(
         format: &mut format,
         timing,
         stats,
-        index_store,
         functions,
     };
     let mut buf = String::new();
@@ -195,7 +183,6 @@ struct ReplState<'a> {
     format: &'a mut PrintFormat,
     timing: bool,
     stats: bool,
-    index_store: Option<Arc<gage_claude::index::IndexStore>>,
     /// The table functions this context exposes, for `\df`. Each caller
     /// supplies its own set; the repl advertises no function the
     /// context does not register.
@@ -268,25 +255,12 @@ async fn handle_backslash(
         }
         "\\timing" => state.timing = parse_toggle(arg, state.timing, "Timing"),
         "\\stats" => state.stats = parse_toggle(arg, state.stats, "Stats"),
-        "\\index" => match &state.index_store {
-            // The diagnostic for "why didn't my search find X" —
-            // one-directional index staleness is otherwise invisible.
-            Some(store) => {
-                let store = store.clone();
-                match tokio::task::spawn_blocking(move || store.status()).await {
-                    Ok(status) => println!("{status}"),
-                    Err(e) => eprintln!("Error: {e}"),
-                }
-            }
-            None => eprintln!("No index store configured for this session"),
-        },
         "\\?" | "\\help" => {
             println!("\\d              List tables");
             println!("\\d <table>      Show table schema");
             println!("\\df             List table-valued functions");
             println!("\\df <function>  Show TVF signature and result columns");
             println!("\\format <fmt>   Set output format (table, csv, json, ndjson, yaml)");
-            println!("\\index          Show derived store / text index status");
             println!("\\timing [on|off]  Toggle query wall-clock time");
             println!("\\stats [on|off]   Toggle per-operator plan metrics");
             println!("\\q              Quit");

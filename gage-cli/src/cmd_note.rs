@@ -8,7 +8,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_db::note;
-use gage_query2::ContextBuilder;
+use gage_query::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{NOTE_TYPE, NoteEdit, NoteInput, NoteStore, NoteValue, Store, url};
 use tabled::{

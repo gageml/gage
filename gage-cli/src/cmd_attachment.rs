@@ -19,7 +19,7 @@ use datafusion::arrow::array::{
 use gage_claude::driver::ClaudeDriver;
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
-use gage_query2::ContextBuilder;
+use gage_query::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
     AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec, AttachmentStore,

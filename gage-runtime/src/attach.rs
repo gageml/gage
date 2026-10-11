@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::Error;
 use datafusion::prelude::SessionContext;
-use gage_query2::{ContextBuilder, ScanScope};
+use gage_query::{ContextBuilder, ScanScope};
 use gage_session::Driver;
 use gage_store::{
     AttachmentLinkOutcome, AttachmentSpec, AttachmentStore, DatasetStore, Store, selection_key_part,

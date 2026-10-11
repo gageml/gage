@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use clap::Args;
 use cliclack as cli;
 use datafusion::arrow::array::StringArray;
-use gage_query2::ContextBuilder;
+use gage_query::ContextBuilder;
 use gage_store::{
     IdMatch, OBJECT_REFS, RemoteStore, Store, StoreError, TAG_REFS, TagStore, object_key_ref,
 };

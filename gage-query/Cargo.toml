@@ -3,29 +3,25 @@ name = "gage-query"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 arrow = { workspace = true, features = ["prettyprint"] }
 async-trait = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
-datafusion-functions-json = "0.52"
-datafusion-table-providers = { version = "0.10.1", features = ["sqlite"] }
-chrono = { workspace = true }
 futures = { workspace = true }
-gage-core = { path = "../gage-core" }
-gage-db = { path = "../gage-db" }
 gage-claude = { path = "../gage-claude" }
-gage-session = { path = "../gage-session" }
+gage-core = { path = "../gage-core" }
 gage-registry = { path = "../gage-registry" }
-rusqlite = { version = "0.37", features = ["bundled"] }
+gage-session = { path = "../gage-session" }
+gage-store = { path = "../gage-store" }
 rustyline = { workspace = true }
-serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
-tracing = { workspace = true }
 
 [dev-dependencies]
-serial_test = "3"
+tokio = { workspace = true, features = ["rt", "macros"] }
 tempfile = { workspace = true }
 
 [lints]

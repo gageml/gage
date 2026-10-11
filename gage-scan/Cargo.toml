@@ -26,7 +26,7 @@ async-trait = { workspace = true }
 libtest-mimic = "0.8"
 datafusion = { workspace = true }
 gage-claude = { path = "../gage-claude" }
-gage-query2 = { path = "../gage-query2" }
+gage-query = { path = "../gage-query" }
 tempfile = { workspace = true }
 
 [[test]]

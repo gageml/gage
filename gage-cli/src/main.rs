@@ -37,7 +37,6 @@ mod cmd_issue2;
 mod cmd_note;
 mod cmd_push;
 mod cmd_query;
-mod cmd_query2;
 mod cmd_remote;
 mod cmd_resolve;
 mod cmd_scan;
@@ -228,9 +227,6 @@ enum Command {
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
 
-    /// Query stored sessions with SQL (new runtime)
-    Query2(cmd_query2::Query2Args),
-
     /// Update the Gage index
     Index(cmd_index::IndexArgs),
 
@@ -374,7 +370,6 @@ async fn main() {
                 }
             }
             Command::Query(args) => cmd_query::main(args).await,
-            Command::Query2(args) => cmd_query2::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_push::main(args).await,
             Command::Fetch(args) => cmd_fetch::main(args),
@@ -399,7 +394,7 @@ async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
     let store = gage_store::Store::open(&path)
         .map_err(|e| format!("open store at {}: {e}", path.display()))?;
     let store = Arc::new(Mutex::new(store));
-    let context = gage_query2::ContextBuilder::new(Some(Arc::clone(&store)))
+    let context = gage_query::ContextBuilder::new(Some(Arc::clone(&store)))
         .build()
         .await;
     let writer = gage_mcp::StoreWriterConfig {

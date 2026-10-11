@@ -143,9 +143,6 @@ pub struct Config {
     pub scanners: ScannerConfig,
 
     #[serde(default)]
-    pub query: QueryConfig,
-
-    #[serde(default)]
     pub issues: IssuesConfig,
 
     #[serde(default)]
@@ -191,29 +188,6 @@ impl Default for IssuesConfig {
     fn default() -> Self {
         Self {
             related_threshold: default_related_threshold(),
-        }
-    }
-}
-
-/// Query-tool settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryConfig {
-    /// Queries whose wall-clock time meets or exceeds this many
-    /// milliseconds are written to `<gage_home>/log/slow.jsonl`. Failed
-    /// queries are logged regardless of duration. A value of `0` disables
-    /// the slow query log.
-    #[serde(default = "default_slow_log_ms")]
-    pub slow_log_ms: u64,
-}
-
-fn default_slow_log_ms() -> u64 {
-    1000
-}
-
-impl Default for QueryConfig {
-    fn default() -> Self {
-        Self {
-            slow_log_ms: default_slow_log_ms(),
         }
     }
 }

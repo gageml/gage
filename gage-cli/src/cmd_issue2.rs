@@ -14,7 +14,7 @@ use cliclack as cli;
 use console::style;
 use datafusion::arrow::array::{Array, StringArray, TimestampMillisecondArray};
 use gage_core::uuid::short_uuid;
-use gage_query2::ContextBuilder;
+use gage_query::ContextBuilder;
 use gage_store::{
     ISSUE_TYPE, IssueFull, IssueInput, IssueStatus, IssueStore, NOTE_TYPE, StatusReason, Store,
 };

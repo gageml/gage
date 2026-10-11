@@ -1,286 +1,249 @@
-//! Per-agent read scope: every query against a scoped DataFusion
-//! context resolves to rows linked to a single `scan_id` via the
-//! `scan_session` / `scan_note` / `scan_issue` edge tables.
+//! What a context is scoped to, and how session rows are reached.
 //!
-//! [`ScopedTable`] wraps a [`TableProvider`] and prepends an
-//! `id IN (…)` expression to the filter list on every `scan()`
-//! before delegating to the inner provider. For disk-backed
-//! providers (`session` / `entry` / `message`) the inner provider's
-//! `IdFilter` consumes the expression against its cached listing —
-//! no SQL. For sqlite-backed providers the inner provider unparses
-//! the expression into `WHERE id IN (?, ?, …)` bound parameters,
-//! sized under `SQLITE_LIMIT_VARIABLE_NUMBER` (32k+ on modern
-//! builds).
+//! A context has store scope or scan scope. Store scope is every
+//! live object in the store. Scan scope, a [`ScanScope`], is one
+//! scan's objects: its dataset's sessions at the commits the scan
+//! links, the notes it wrote or carried, the issues it wrote, and the
+//! relations among them. The scan is an active one, named by its scan
+//! directory, or a stored one, named by id; the tables read either
+//! source on each query.
 //!
-//! `scan_session` is fixed for the run and its id set is resolved
-//! once at [`Scope`] construction. `scan_note` and `scan_issue` grow
-//! as the agent writes; their id sets are resolved per query.
+//! The core knows the store's layout, so it resolves the session set
+//! and plans every read. The driver that wrote a session is the only
+//! party that can read its opaque bytes, so each session's rows come
+//! from [`Driver::read_stored`] on that driver, normalized into
+//! [`gage_session::Entry`] values the core turns into a batch.
 
-use std::any::Any;
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::catalog::Session;
-use datafusion::common::{Column, ScalarValue};
-use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::{DataFusionError, Result as DfResult};
-use datafusion::logical_expr::expr::InList;
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::error::{DataFusionError, Result};
+use datafusion::prelude::Expr;
+use gage_registry::driver::DriverRegistry;
+use gage_session::Driver;
+use gage_session::filter::IdFilter;
+use gage_store::{
+    Order, ScanDirLayout, ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
+};
 
-/// Which `scan_xxx` edge a [`Scope`] reads. Each variant points at one
-/// table whose `scan_id` column is the predicate and whose paired
-/// column carries the ids we keep.
-#[derive(Clone, Copy, Debug)]
-pub enum ScopeEdge {
-    /// `scan_session(scan_id, session_id)` — the `session` / `entry` /
-    /// `message` providers all key off `session_id`.
-    Session,
-    /// `scan_note(scan_id, note_id)` — `note` and `session_note`.
-    Note,
-    /// `scan_issue(scan_id, issue_id)` — `issue` and `issue_evidence`.
-    Issue,
+/// One scan's objects, as a context is scoped to them.
+#[derive(Debug, Clone)]
+pub struct ScanScope {
+    source: ScanSource,
+    /// Narrow the sessions to this one member
+    session: Option<String>,
 }
 
-/// One session an agent context is narrowed to, with an optional
-/// inclusive line range. `lines: None` means the whole session.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionScope {
-    pub session_id: String,
-    pub lines: Option<(i64, i64)>,
-}
-
-/// The set of ids visible to one agent run. Cheap to clone. The
-/// `scan_session` set is loaded once at construction; `scan_note` and
-/// `scan_issue` sets are loaded per query.
-#[derive(Clone, Debug)]
-pub struct Scope {
-    scan_id: String,
-    edge: ScopeEdge,
-    session_ids: Option<Arc<[String]>>,
-    /// Per-session inclusive line bounds for [`ScopeEdge::Session`]
-    /// scopes narrowed to explicit sessions. Sessions absent from the
-    /// map are unconstrained.
-    ranges: Arc<HashMap<String, (i64, i64)>>,
-}
-
-impl Scope {
-    /// Build a scope for `scan_id` on `edge`. For [`ScopeEdge::Session`]
-    /// this loads the fixed session id set now.
-    pub fn resolve(scan_id: impl Into<String>, edge: ScopeEdge) -> DfResult<Self> {
-        Self::resolve_sessions(scan_id, edge, None)
+impl ScanScope {
+    /// The scope of an active scan, from its scan directory.
+    pub fn scan_dir(root: impl AsRef<Path>) -> Self {
+        Self {
+            source: ScanSource::ScanDir(ScanDirLayout::new(root.as_ref())),
+            session: None,
+        }
     }
 
-    /// Build a scope for `scan_id` on `edge`, narrowed to `sessions`
-    /// when given. Only [`ScopeEdge::Session`] scopes consume the
-    /// narrowing: the session id set becomes the given sessions and
-    /// their line bounds populate the range map.
-    pub fn resolve_sessions(
-        scan_id: impl Into<String>,
-        edge: ScopeEdge,
-        sessions: Option<&[SessionScope]>,
-    ) -> DfResult<Self> {
-        let scan_id = scan_id.into();
-        let mut ranges = HashMap::new();
-        let session_ids = match edge {
-            ScopeEdge::Session => match sessions {
-                Some(list) => {
-                    let ids: Vec<String> = list.iter().map(|s| s.session_id.clone()).collect();
-                    for s in list {
-                        if let Some(bounds) = s.lines {
-                            ranges.insert(s.session_id.clone(), bounds);
-                        }
-                    }
-                    Some(Arc::from(ids))
-                }
-                None => {
-                    let conn = gage_db::db::open_db().map_err(external)?;
-                    let ids =
-                        gage_db::scan::session_ids_for_scan(&conn, &scan_id).map_err(external)?;
-                    Some(Arc::from(ids))
-                }
-            },
-            ScopeEdge::Note | ScopeEdge::Issue => None,
+    /// The scope of a stored scan.
+    pub fn stored(scan_id: impl Into<String>) -> Self {
+        Self {
+            source: ScanSource::Stored(scan_id.into()),
+            session: None,
+        }
+    }
+
+    /// A dataset alone, at `commit_sha`: the session tables serve its
+    /// members and attachments and the scan tables are empty.
+    pub fn dataset(commit_sha: impl Into<String>) -> Self {
+        Self {
+            source: ScanSource::Dataset(commit_sha.into()),
+            session: None,
+        }
+    }
+
+    /// Narrow `session`, `entry`, and `message` to the one member
+    /// `session_id`. Every other table stays the whole scan's.
+    pub fn session(mut self, session_id: impl Into<String>) -> Self {
+        self.session = Some(session_id.into());
+        self
+    }
+
+    pub(crate) fn source(&self) -> &ScanSource {
+        &self.source
+    }
+
+    /// The scope's sessions at the commits the scan links, in member
+    /// order, narrowed when a session was named. A named session
+    /// that is not a member is an error.
+    pub(crate) fn members(&self, store: &Store) -> Result<Vec<StoredSessionRef>> {
+        let mut members = self
+            .source
+            .members(store)?
+            .into_iter()
+            .map(StoredSessionRef::from_record)
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(id) = &self.session {
+            members.retain(|m| m.id == *id);
+            if members.is_empty() {
+                return Err(DataFusionError::Plan(format!(
+                    "session {id} is not a member of the scan"
+                )));
+            }
+        }
+        Ok(members)
+    }
+}
+
+use crate::rows::{RowCache, derive_batch};
+
+/// One stored session version selected for a scan
+#[derive(Debug, Clone)]
+pub struct StoredSessionRef {
+    /// Gage object id; the value the rows carry as `session_id`
+    pub id: String,
+    /// Commit of the version read; the row cache key
+    pub commit: String,
+    /// The version's `created` and `modified` markers, UNIX millis
+    pub created_ms: i64,
+    pub modified_ms: i64,
+    pub native_id: String,
+    pub content_format: String,
+    pub driver_name: String,
+}
+
+impl StoredSessionRef {
+    /// The reference to a session record at the commit it was read.
+    /// A record without its markers is a malformed object.
+    pub fn from_record(record: SessionRecord) -> Result<Self> {
+        let marker = |name: &str, value: Option<i64>| {
+            value.ok_or_else(|| {
+                external(StoreError::Parse(format!(
+                    "session {}: missing {name} marker",
+                    record.id
+                )))
+            })
         };
-        Ok(Self {
-            scan_id,
-            edge,
-            session_ids,
-            ranges: Arc::new(ranges),
+        Ok(StoredSessionRef {
+            created_ms: marker("created", record.created_ms)?,
+            modified_ms: marker("modified", record.modified_ms)?,
+            id: record.id,
+            commit: record.commit_sha,
+            native_id: record.attrs.native_id,
+            content_format: record.attrs.content_format,
+            driver_name: record.driver_name,
         })
     }
 
-    /// Whether `session_id` is in scope. Valid only for
-    /// [`ScopeEdge::Session`].
-    pub fn contains_session(&self, session_id: &str) -> bool {
-        self.session_ids().iter().any(|id| id == session_id)
-    }
-
-    /// The inclusive line bounds `session_id` is constrained to, or
-    /// `None` when the session is unconstrained.
-    pub fn session_lines(&self, session_id: &str) -> Option<(i64, i64)> {
-        self.ranges.get(session_id).copied()
-    }
-
-    pub fn edge(&self) -> ScopeEdge {
-        self.edge
-    }
-
-    /// The in-scope session id set. Valid only for [`ScopeEdge::Session`].
-    pub fn session_ids(&self) -> &[String] {
-        self.session_ids
-            .as_deref()
-            .expect("session_ids requires ScopeEdge::Session")
-    }
-
-    /// Load the in-scope note or issue id set from the matching
-    /// `scan_xxx` table. Not valid for [`ScopeEdge::Session`] — use
-    /// [`Scope::session_ids`].
-    pub fn load_ids(&self) -> DfResult<Vec<String>> {
-        let conn = gage_db::db::open_db().map_err(external)?;
-        match self.edge {
-            ScopeEdge::Session => unreachable!("use session_ids() for ScopeEdge::Session"),
-            ScopeEdge::Note => {
-                gage_db::scan::note_ids_for_scan(&conn, &self.scan_id).map_err(external)
-            }
-            ScopeEdge::Issue => {
-                gage_db::scan::issue_ids_for_scan(&conn, &self.scan_id).map_err(external)
-            }
+    /// The version as the `session` table takes it.
+    fn as_version(&self) -> SelectedTip {
+        SelectedTip {
+            id: self.id.clone(),
+            sha: self.commit.clone(),
+            created_ms: Some(self.created_ms),
+            modified_ms: Some(self.modified_ms),
         }
     }
 }
 
-/// Build `<col> IN (<id1>, <id2>, …)` over Utf8 literals.
-fn in_list_expr(col: Expr, ids: &[String]) -> Expr {
-    let list = ids
-        .iter()
-        .map(|id| Expr::Literal(ScalarValue::Utf8(Some(id.clone())), None))
-        .collect();
-    Expr::InList(InList::new(Box::new(col), list, false))
+/// The sessions the row tables serve: every live session at its tip
+/// in store scope, or the fixed versions of a scan scope's members.
+pub struct SessionSet {
+    store: Arc<Mutex<Store>>,
+    drivers: DriverRegistry,
+    fixed: Option<Vec<StoredSessionRef>>,
 }
 
-fn external<E: std::error::Error + Send + Sync + 'static>(e: E) -> DataFusionError {
-    DataFusionError::External(Box::new(e))
-}
-
-/// Wrap a disk-backed [`TableProvider`] with a scope filter. The
-/// inner provider's `IdFilter`-driven pushdown handles the prepended
-/// `InList` expression as if a caller had written it. When the scope
-/// carries line ranges and the table has a line column (`line_col`),
-/// a per-session line-bound expression is prepended as well; the
-/// inner provider applies it row-exactly (`RowFilter`).
-pub struct ScopedTable {
-    inner: Arc<dyn TableProvider>,
-    id_col: &'static str,
-    line_col: Option<&'static str>,
-    scope: Scope,
-}
-
-impl ScopedTable {
-    pub fn new(inner: Arc<dyn TableProvider>, id_col: &'static str, scope: Scope) -> Self {
+impl SessionSet {
+    /// Every live session at its tip.
+    pub(crate) fn all(store: Arc<Mutex<Store>>) -> Self {
         Self {
-            inner,
-            id_col,
-            line_col: None,
-            scope,
+            store,
+            drivers: DriverRegistry::builtin(),
+            fixed: None,
         }
     }
 
-    /// Declare the table's line column so the scope's line ranges
-    /// apply. Only meaningful for [`ScopeEdge::Session`] scopes over
-    /// tables with per-line rows (`entry`, `message`).
-    pub fn with_line_col(mut self, line_col: &'static str) -> Self {
-        self.line_col = Some(line_col);
-        self
-    }
-
-    /// The per-session range constraint: rows are visible when their
-    /// session is unconstrained, or their line falls inside the
-    /// session's bounds. `None` when no session is constrained.
-    fn range_expr(&self, ids: &[String]) -> Option<Expr> {
-        let line_col = self.line_col?;
-        if self.scope.ranges.is_empty() {
-            return None;
+    /// Exactly `sessions`, each at the version it names.
+    pub(crate) fn fixed(store: Arc<Mutex<Store>>, sessions: Vec<StoredSessionRef>) -> Self {
+        Self {
+            store,
+            drivers: DriverRegistry::builtin(),
+            fixed: Some(sessions),
         }
-        let id_col = || Expr::Column(Column::new_unqualified(self.id_col));
-        let unranged: Vec<String> = ids
-            .iter()
-            .filter(|id| !self.scope.ranges.contains_key(*id))
-            .cloned()
-            .collect();
-        let mut arms: Vec<Expr> = Vec::new();
-        if !unranged.is_empty() {
-            arms.push(in_list_expr(id_col(), &unranged));
-        }
-        // Sorted for a deterministic expression shape
-        let mut ranged: Vec<(&String, &(i64, i64))> = self.scope.ranges.iter().collect();
-        ranged.sort_by_key(|(id, _)| id.as_str());
-        for (id, (start, end)) in ranged {
-            let sid_eq = id_col().eq(Expr::Literal(ScalarValue::Utf8(Some(id.clone())), None));
-            let line = || Expr::Column(Column::new_unqualified(line_col));
-            let lower = line().gt_eq(Expr::Literal(ScalarValue::Int64(Some(*start)), None));
-            let upper = line().lt_eq(Expr::Literal(ScalarValue::Int64(Some(*end)), None));
-            arms.push(sid_eq.and(lower).and(upper));
-        }
-        arms.into_iter().reduce(Expr::or)
-    }
-}
-
-impl fmt::Debug for ScopedTable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ScopedTable")
-            .field("id_col", &self.id_col)
-            .field("scope", &self.scope)
-            .finish()
-    }
-}
-
-#[async_trait]
-impl TableProvider for ScopedTable {
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.inner.schema()
+    /// The versions of a fixed set, in order; `None` store-wide.
+    pub(crate) fn fixed_versions(&self) -> Option<Vec<SelectedTip>> {
+        self.fixed
+            .as_ref()
+            .map(|refs| refs.iter().map(StoredSessionRef::as_version).collect())
     }
 
-    fn table_type(&self) -> TableType {
-        self.inner.table_type()
-    }
-
-    fn supports_filters_pushdown(
-        &self,
-        filters: &[&Expr],
-    ) -> DfResult<Vec<TableProviderFilterPushDown>> {
-        self.inner.supports_filters_pushdown(filters)
-    }
-
-    async fn scan(
-        &self,
-        state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let owned;
-        let ids: &[String] = match self.scope.edge() {
-            ScopeEdge::Session => self.scope.session_ids(),
-            ScopeEdge::Note | ScopeEdge::Issue => {
-                owned = self.scope.load_ids()?;
-                &owned
+    /// The set's sessions, narrowed by the `session_id` predicates in
+    /// `filters`. A store-wide set lists every live session newest
+    /// modified first; a fixed set keeps its own order.
+    pub(crate) fn sessions(&self, filters: &[Expr]) -> Result<Vec<StoredSessionRef>> {
+        if let Some(fixed) = &self.fixed {
+            let mut sessions = fixed.clone();
+            if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
+                sessions = id_filter.retain(sessions, |s| s.id.as_str())?;
             }
-        };
-        let scope_filter = in_list_expr(Expr::Column(Column::new_unqualified(self.id_col)), ids);
-        let mut combined = Vec::with_capacity(filters.len() + 2);
-        combined.push(scope_filter);
-        if let Some(ranges) = self.range_expr(ids) {
-            combined.push(ranges);
+            return Ok(sessions);
         }
-        combined.extend_from_slice(filters);
-        self.inner.scan(state, projection, &combined, limit).await
+        let store = self.lock();
+        let sessions = SessionStore::from(&*store);
+        let mut tips = sessions
+            .query()
+            .order(Order::ModifiedDesc)
+            .tips()
+            .map_err(external)?;
+        if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
+            tips = id_filter.retain(tips, |t| t.id.as_str())?;
+        }
+        tips.into_iter()
+            .map(|tip| {
+                let record = sessions.at_commit(&tip.sha).map_err(external)?;
+                StoredSessionRef::from_record(record)
+            })
+            .collect()
     }
+
+    /// The derived batch of `session`, read through its driver on
+    /// first use and served from `cache` after.
+    pub(crate) fn rows(
+        &self,
+        session: &StoredSessionRef,
+        cache: &RowCache,
+    ) -> Result<Arc<RecordBatch>> {
+        if let Some(batch) = cache.get(&session.commit) {
+            return Ok(batch);
+        }
+        let driver = self.driver(&session.driver_name)?;
+        let content = {
+            let store = self.lock();
+            SessionStore::from(&*store).content(&session.commit)
+        };
+        let mut stored = driver
+            .read_stored(session.native_id.clone(), &session.content_format, content)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let batch = Arc::new(derive_batch(&session.id, stored.entries())?);
+        cache.insert(&session.commit, Arc::clone(&batch));
+        Ok(batch)
+    }
+
+    fn driver(&self, name: &str) -> Result<Arc<dyn Driver>> {
+        self.drivers.for_name(name).ok_or_else(|| {
+            DataFusionError::Execution(format!("no driver named {name:?} is registered"))
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn external(e: StoreError) -> DataFusionError {
+    DataFusionError::External(Box::new(e))
 }

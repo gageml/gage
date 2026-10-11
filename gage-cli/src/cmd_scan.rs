@@ -19,7 +19,7 @@ use gage_claude::session::SessionInfo;
 use gage_core::config::Config;
 use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::short_uuid;
-use gage_query2::{ContextBuilder, ScanScope};
+use gage_query::{ContextBuilder, ScanScope};
 use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, scanner_source};
 use gage_runtime::{LOG_TARGET, Output, TaskOutput};
@@ -1963,7 +1963,7 @@ async fn resolve_dataset_plan(
     }
     let selected = args
         .select
-        .resolve("gage scan")
+        .resolve()
         .await
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
     Ok(DatasetPlan::New { selected })

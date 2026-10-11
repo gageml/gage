@@ -1,5 +1,5 @@
 //! The scan facility, paired with `gage-runtime` and built on
-//! `gage-store`, `gage-session`, and `gage-query2`.
+//! `gage-store`, `gage-session`, and `gage-query`.
 //!
 //! This crate owns task orchestration: it compiles scanners against
 //! the `gage-runtime` context, plans their tasks as one DAG (see
@@ -3607,7 +3607,7 @@ mod tests {
         );
 
         // The scan and its relations are queryable through the tables
-        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
             Store::open(store.path()).unwrap(),
         ))))
         .build()
@@ -3820,7 +3820,7 @@ mod tests {
         );
 
         // The scan's issues and their evidence are queryable
-        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
             Store::open(store.path()).unwrap(),
         ))))
         .build()
@@ -3863,10 +3863,10 @@ mod tests {
 
         // The stored scan's scope serves the same tables over that scan
         // alone: the prior issue is outside it
-        let scoped = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+        let scoped = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
             Store::open(store.path()).unwrap(),
         ))))
-        .scope(gage_query2::ScanScope::stored(outcome.id.clone()))
+        .scope(gage_query::ScanScope::stored(outcome.id.clone()))
         .build()
         .await;
         let count = |sql: &'static str| {
@@ -4891,7 +4891,7 @@ mod tests {
             Some(format!("session:{session_id}#1-3").as_str())
         );
 
-        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
             Store::open(store.path()).unwrap(),
         ))))
         .build()
@@ -5198,7 +5198,7 @@ mod tests {
             "only the note written at the current digest is carried"
         );
 
-        let ctx = gage_query2::ContextBuilder::new(Some(Arc::new(Mutex::new(
+        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
             Store::open(store.path()).unwrap(),
         ))))
         .build()

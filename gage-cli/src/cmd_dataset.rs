@@ -7,7 +7,7 @@ use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArra
 use gage_core::config::{ByteSize, Config};
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
-use gage_query2::ContextBuilder;
+use gage_query::ContextBuilder;
 use gage_store::{
     AddStep, DatasetSessionAddOutcome, DatasetStore, SessionOutcome, SessionSpec, Store,
     StoreError, TagStore,
@@ -315,7 +315,7 @@ pub(crate) async fn populate_dataset(
     select: &SessionSelectArgs,
     max_bytes: Option<u64>,
 ) {
-    let selected = match select.resolve(command).await {
+    let selected = match select.resolve().await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{command}: {e}");

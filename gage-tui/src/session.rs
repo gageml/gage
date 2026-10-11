@@ -1,6 +1,6 @@
 //! Where the session viewer reads sessions and writes notes.
 //!
-//! A [`Backend`] is a gage-query2 context over a native source or
+//! A [`Backend`] is a gage-query context over a native source or
 //! over the store. Session and entry rows come from the context's
 //! `session` and `entry` relations in either case; the native
 //! relations are the `native_session(src)` and `native_entry(src)`
@@ -16,7 +16,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
-use gage_query2::ContextBuilder;
+use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::is_system;
