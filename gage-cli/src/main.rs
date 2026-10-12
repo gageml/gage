@@ -325,7 +325,6 @@ async fn main() {
                 cmd_session::SessionCommand::View(args) => {
                     cmd_session::view(source, stored, args).await
                 }
-                cmd_session::SessionCommand::Move(args) => cmd_session::move_(args),
             },
             Command::Dataset { command } => match command {
                 cmd_dataset::DatasetCommand::Add(args) => cmd_dataset::add(args).await,

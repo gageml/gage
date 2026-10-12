@@ -52,20 +52,6 @@ If you omit the ID, Gage lets you pick from a list.
 View options: `turns` shows model turns in the outline. `detail` shows all
 entries. The default hides low-signal entries.
 
-## session move
-
-Move a session to a different project directory.
-
-```cli
-gage session move [OPTIONS] <SESSION> <DIR>
-```
-
-The destination project directory must exist.
-
-| Option      | Description              |
-| ----------- | ------------------------ |
-| `-y, --yes` | Skip confirmation prompt |
-
 ## session delete
 
 Delete sessions.
