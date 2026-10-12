@@ -1254,8 +1254,8 @@ mod tests {
     use datafusion::arrow::array::StringArray;
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_session::{
-        AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, ContentSink, ContentSource,
-        DriverError, NativeSession, SessionAttrs, Source, StoredSession,
+        AgentEvent, AgentMcp, AgentSession, AgentSpec, ContentSink, ContentSource, DriverError,
+        NativeSession, SessionAttrs, Source, StoredSession, TurnResult,
     };
     use gage_store::DatasetStore;
     use tempfile::TempDir;
@@ -1609,20 +1609,20 @@ mod tests {
             assert_eq!(spec.prompt, "hello");
             assert_eq!(spec.model.as_deref(), Some("medium"));
             *self.mcp_seen.lock().unwrap() = spec.mcp.clone();
-            let outcome = AgentOutcome {
+            let result = TurnResult {
                 text: "hello there".into(),
                 stop_reason: "end_turn".into(),
                 turns: 1,
                 session_id: "native-1".into(),
                 raw: r#"{"type":"result","result":"hello there"}"#.into(),
-                ..AgentOutcome::default()
+                ..TurnResult::default()
             };
             Ok(Box::new(ScriptedAgent {
                 events: [
                     AgentEvent::System(r#"{"subtype":"init"}"#.into()),
                     AgentEvent::Assistant("hello there".into()),
                     AgentEvent::TurnEnd {
-                        outcome: Box::new(outcome),
+                        result: Box::new(result),
                         idle: true,
                     },
                 ]
@@ -1686,19 +1686,19 @@ mod tests {
         cleaned_up: Arc<std::sync::atomic::AtomicBool>,
     ) -> ScriptedAgent {
         let native_id = format!("native-{}", spec.prompt);
-        let outcome = AgentOutcome {
+        let result = TurnResult {
             text: spec.prompt.clone(),
             stop_reason: "end_turn".into(),
             turns: 1,
             session_id: native_id.clone(),
             raw: String::new(),
-            ..AgentOutcome::default()
+            ..TurnResult::default()
         };
         ScriptedAgent {
             events: [
                 AgentEvent::Assistant(spec.prompt),
                 AgentEvent::TurnEnd {
-                    outcome: Box::new(outcome),
+                    result: Box::new(result),
                     idle: true,
                 },
             ]
@@ -2153,7 +2153,14 @@ mod tests {
             task.agents,
             [TaskAgent {
                 id: session_id.clone(),
-                attrs: AgentAttrs { exit_code: 0 },
+                attrs: AgentAttrs {
+                    exit_code: 0,
+                    is_error: false,
+                    stop_reason: "end_turn".into(),
+                    turns: 1,
+                    duration_ms: 0,
+                    cost_usd: Some(0.0),
+                },
             }]
         );
         assert_eq!(

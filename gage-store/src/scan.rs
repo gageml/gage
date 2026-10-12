@@ -140,7 +140,7 @@ pub struct TaskAttrs {
 }
 
 /// One task of a scan, decoded from `tasks/<scanner>/<task>/`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScanTask {
     pub scanner: String,
     pub task: String,
@@ -154,18 +154,36 @@ pub struct ScanTask {
 
 /// One agent a task ran, decoded from `agents/<id>/`. `stderr` and
 /// `result` are read through [`ScanStore::agent_file`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TaskAgent {
     /// The agent session's object id
     pub id: String,
     pub attrs: AgentAttrs,
 }
 
-/// An agent's `attrs.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// An agent's `attrs.json`: the session-level result the runtime
+/// records when the agent ends. Fields after `exit_code` default when
+/// absent, as in records an earlier runtime wrote.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentAttrs {
     /// The harness process's exit code; -1 when it was signaled
     pub exit_code: i64,
+    /// The harness reported the session as an error, or exited
+    /// nonzero without a result
+    #[serde(default)]
+    pub is_error: bool,
+    /// The last turn's stop reason; `eof` when the harness closed its
+    /// output without one
+    #[serde(default)]
+    pub stop_reason: String,
+    #[serde(default)]
+    pub turns: i64,
+    #[serde(default)]
+    pub duration_ms: i64,
+    /// Spend in USD as the harness reported it; absent when the
+    /// harness reported no result
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// One `watermarks/<oid>/<key>` record: how far the task under `key`
@@ -187,7 +205,7 @@ pub struct Watermark {
 }
 
 /// A scan's content, decoded from either location.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScanContent {
     pub attrs: ScanAttrs,
     /// The commit SHA of the scanned dataset, from `dataset.link`.
@@ -220,7 +238,7 @@ pub struct ScanContent {
 }
 
 /// A scan read from the store: its content plus the object markers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScanRecord {
     pub id: String,
     pub commit_sha: String,
@@ -1402,7 +1420,16 @@ mod tests {
             greet.agents,
             [TaskAgent {
                 id: added.id.clone(),
-                attrs: AgentAttrs { exit_code: 0 },
+                // An earlier runtime's record: every field after
+                // the exit code defaults
+                attrs: AgentAttrs {
+                    exit_code: 0,
+                    is_error: false,
+                    stop_reason: String::new(),
+                    turns: 0,
+                    duration_ms: 0,
+                    cost_usd: None,
+                },
             }]
         );
         assert_eq!(

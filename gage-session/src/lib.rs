@@ -21,7 +21,7 @@ pub mod filter;
 pub mod status;
 pub mod system_col;
 
-pub use agent::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
+pub use agent::{AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, TurnResult};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 

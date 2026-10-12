@@ -24,8 +24,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use gage_core::config::gage_home;
 use gage_session::{
-    AgentEvent, AgentOutcome, AgentSession, AgentSpec, Driver, DriverError, NativeSession,
-    SystemPrompt,
+    AgentEvent, AgentSession, AgentSpec, Driver, DriverError, NativeSession, SystemPrompt,
+    TurnResult,
 };
 use serde_json::Value as Json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -408,12 +408,12 @@ impl ClaudeAgent {
             StreamMessage::Assistant(v) => expand_assistant(&v, &mut self.buffer),
             StreamMessage::User(v) => expand_user(&v, &mut self.buffer),
             StreamMessage::Result(v) => {
-                let outcome = outcome_of(&v);
-                if self.session_id.is_none() && !outcome.session_id.is_empty() {
-                    self.session_id = Some(outcome.session_id.clone());
+                let result = turn_result_of(&v);
+                if self.session_id.is_none() && !result.session_id.is_empty() {
+                    self.session_id = Some(result.session_id.clone());
                 }
                 self.buffer.push_back(AgentEvent::TurnEnd {
-                    outcome: Box::new(outcome),
+                    result: Box::new(result),
                     idle: self.pending_tasks.is_empty(),
                 });
             }
@@ -644,9 +644,9 @@ fn tool_result_output(block: &Json) -> String {
 
 /// The outcome carried by a `result` message. Absent fields are
 /// empty or zero.
-fn outcome_of(v: &Json) -> AgentOutcome {
+fn turn_result_of(v: &Json) -> TurnResult {
     let json_field = |k: &str| v.get(k).map(Json::to_string).unwrap_or_default();
-    AgentOutcome {
+    TurnResult {
         text: str_field(v, "result"),
         is_error: v.get("is_error").and_then(Json::as_bool).unwrap_or(false),
         stop_reason: v
@@ -753,20 +753,20 @@ mod tests {
     }
 
     #[test]
-    fn result_message_fills_the_outcome() {
+    fn result_message_fills_the_turn_result() {
         let v: Json = serde_json::json!({
             "type": "result", "result": "done", "is_error": false, "stop_reason": "end_turn",
             "num_turns": 3, "duration_ms": 1200, "duration_api_ms": 900, "total_cost_usd": 0.02,
             "usage": { "input_tokens": 5 }, "session_id": "S", "uuid": "U",
         });
-        let o = outcome_of(&v);
+        let o = turn_result_of(&v);
         assert_eq!(o.text, "done");
         assert_eq!(o.turns, 3);
         assert_eq!(o.cost_usd, 0.02);
         assert_eq!(o.usage, r#"{"input_tokens":5}"#);
         assert_eq!(o.session_id, "S");
         assert!(o.raw.contains("\"uuid\":\"U\""));
-        let missing = outcome_of(&serde_json::json!({ "type": "result" }));
+        let missing = turn_result_of(&serde_json::json!({ "type": "result" }));
         assert_eq!(missing.stop_reason, "end_turn");
         assert_eq!(missing.text, "");
     }

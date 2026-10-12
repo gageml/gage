@@ -10,7 +10,7 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use console::style;
 use datafusion::arrow::array::{
-    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
+    Array, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
@@ -819,15 +819,15 @@ impl StoreHost {
         let mut agent_ids = Vec::new();
         for batch in &query(
             ctx,
-            "SELECT scanner, task, session_id, exit_code, result FROM scan_task_agent",
+            "SELECT scanner, task, session_id, is_error, cost_usd FROM scan_task_agent",
         )
         .await?
         {
             let scanners = column::<StringArray>(batch, 0);
             let tasks = column::<StringArray>(batch, 1);
             let sessions = column::<StringArray>(batch, 2);
-            let exit_codes = column::<Int64Array>(batch, 3);
-            let results = column::<StringArray>(batch, 4);
+            let is_errors = column::<BooleanArray>(batch, 3);
+            let costs = column::<Float64Array>(batch, 4);
             for i in 0..batch.num_rows() {
                 let task = TaskId {
                     scanner: scanners.value(i).to_string(),
@@ -835,8 +835,8 @@ impl StoreHost {
                 };
                 let agent = agent_item(
                     sessions.value(i),
-                    exit_codes.value(i),
-                    results.is_valid(i).then(|| results.value(i)),
+                    is_errors.value(i),
+                    costs.is_valid(i).then(|| costs.value(i)),
                 );
                 let cost = task_costs.entry(task.clone()).or_insert((0.0, false));
                 match agent.cost {
@@ -1375,35 +1375,17 @@ fn send_view_event(tx: &UnboundedSender<scan_view::Event>, event: scan_view::Eve
     if tx.send(event).is_err() {}
 }
 
-/// An agent's view entry from its record: state and cost from the
-/// harness result, error from the exit code when there is no result.
-fn agent_item(session_id: &str, exit_code: i64, result: Option<&str>) -> AgentItem {
-    let result = result.and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            tracing::warn!(session_id, "unparseable agent result: {e}");
-            None
-        }
-    });
-    let state = match &result {
-        Some(r) => {
-            if r.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
-                AgentState::Error
-            } else {
-                AgentState::Done
-            }
-        }
-        None if exit_code == 0 => AgentState::Done,
-        None => AgentState::Error,
-    };
+/// An agent's view entry from its record.
+fn agent_item(session_id: &str, is_error: bool, cost: Option<f64>) -> AgentItem {
     AgentItem {
         session_id: session_id.to_string(),
         path: None,
-        state,
-        cost: result
-            .as_ref()
-            .and_then(|r| r.get("total_cost_usd"))
-            .and_then(serde_json::Value::as_f64),
+        state: if is_error {
+            AgentState::Error
+        } else {
+            AgentState::Done
+        },
+        cost,
         started_ms: None,
         ended_ms: None,
     }

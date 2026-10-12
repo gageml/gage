@@ -893,7 +893,7 @@ mod tests {
         write("tasks/hello/after/attrs.json", r#"{"status":"canceled"}"#);
         write(
             "tasks/hello/greet/agents/AGENT1/attrs.json",
-            r#"{"exit_code":0}"#,
+            r#"{"exit_code":0,"is_error":false,"stop_reason":"end_turn","turns":2,"duration_ms":1500,"cost_usd":0.5}"#,
         );
         write("tasks/hello/greet/agents/AGENT1/stderr", "");
         write(
@@ -942,6 +942,15 @@ mod tests {
             )
             .await,
             [r#"{"is_error":false,"total_cost_usd":0.5}"#]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT stop_reason FROM scan_task_agent \
+                 WHERE NOT is_error AND turns = 2 AND cost_usd = 0.5"
+            )
+            .await,
+            ["end_turn"]
         );
     }
 

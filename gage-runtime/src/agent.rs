@@ -41,7 +41,7 @@ use crate::error::{AgentError, Error};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use gage_mcp::{ServiceHandle, build_mcp_service};
-use gage_session::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
+use gage_session::{AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, TurnResult};
 use gage_store::{AgentAttrs, SessionStore};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
@@ -253,7 +253,7 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
             event_buf: VecDeque::new(),
             stop_seen: false,
             stop_reason: String::new(),
-            last_outcome: None,
+            last_turn: None,
             final_result: None,
             span,
             started: Instant::now(),
@@ -332,7 +332,7 @@ struct AgentInner {
     /// The last turn's stop reason, `eof` when the harness closed its
     /// output without one
     stop_reason: String,
-    last_outcome: Option<AgentOutcome>,
+    last_turn: Option<TurnResult>,
     final_result: Option<AgentResult>,
     /// The `agent` span every method runs under
     span: Span,
@@ -414,11 +414,11 @@ async fn do_poll(inner: Inner) -> Result<Event, Error> {
             let mut g = inner.lock().unwrap();
             g.session = Some(session);
             match next {
-                Some(AgentEvent::TurnEnd { outcome, idle }) => {
-                    g.stop_reason = outcome.stop_reason.clone();
+                Some(AgentEvent::TurnEnd { result, idle }) => {
+                    g.stop_reason = result.stop_reason.clone();
                     g.event_buf
-                        .push_back(Event::TurnEnd(outcome.stop_reason.clone()));
-                    g.last_outcome = Some(*outcome);
+                        .push_back(Event::TurnEnd(result.stop_reason.clone()));
+                    g.last_turn = Some(*result);
                     idle
                 }
                 Some(ev) => {
@@ -474,11 +474,11 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
         .map_err(|e| Error::agent(format!("agent.stop: stderr: {e}")))?;
     let stderr = String::from_utf8_lossy(&stderr).into_owned();
 
-    let (ctx, outcome, stop_reason, started) = {
+    let (ctx, last_turn, stop_reason, started) = {
         let g = inner.lock().unwrap();
         (
             g.ctx.clone(),
-            g.last_outcome.clone(),
+            g.last_turn.clone(),
             g.stop_reason.clone(),
             g.started,
         )
@@ -489,7 +489,14 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
         elapsed_ms = started.elapsed().as_millis(),
         "agent stopped"
     );
-    store_transcript(&ctx, session.as_mut(), exit_code, &stderr, outcome.as_ref()).await?;
+    let raw = last_turn.as_ref().map(|t| t.raw.clone());
+    let result = AgentResult::new(
+        last_turn.unwrap_or_default(),
+        &stop_reason,
+        exit_code,
+        stderr,
+    );
+    store_transcript(&ctx, session.as_mut(), &result, raw.as_deref()).await?;
     if let Err(e) = session.cleanup() {
         tracing::warn!(error = %e, "agent cleanup");
     }
@@ -498,12 +505,7 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
     let mut g = inner.lock().unwrap();
     g.service = None;
     g.permit = None;
-    g.final_result = Some(AgentResult::new(
-        outcome.unwrap_or_default(),
-        &stop_reason,
-        exit_code,
-        stderr,
-    ));
+    g.final_result = Some(result);
     g.stop_seen = true;
     g.event_buf.push_back(Event::Stop(stop_reason));
     Ok(())
@@ -514,9 +516,8 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
 async fn store_transcript(
     ctx: &ScanContext,
     session: &mut dyn AgentSession,
-    exit_code: i32,
-    stderr: &str,
-    outcome: Option<&AgentOutcome>,
+    result: &AgentResult,
+    raw: Option<&str>,
 ) -> Result<(), Error> {
     let store = ctx.store.lock().await;
     let Some(mut native) = session
@@ -543,33 +544,39 @@ async fn store_transcript(
         &ctx.paths.tasks_dir().join(&ctx.scanner).join(&ctx.task),
         &added.id,
         &added.commit_sha,
-        exit_code,
-        stderr,
-        outcome,
+        result,
+        raw,
     )
     .map_err(|e| Error::agent(format!("writing agent record: {e}")))
 }
 
 /// `agents/<id>/{attrs.json, stderr, result}` under the task's
 /// directory, and the session's commit appended to `agents.link`.
+/// `attrs.json` carries the session-level result; `result` is the
+/// harness's last turn message verbatim, absent when the harness
+/// reported none, in which case a nonzero exit is the error.
 fn write_agent_record(
     task_dir: &Path,
     id: &str,
     commit_sha: &str,
-    exit_code: i32,
-    stderr: &str,
-    outcome: Option<&AgentOutcome>,
+    result: &AgentResult,
+    raw: Option<&str>,
 ) -> io::Result<()> {
     let dir = task_dir.join("agents").join(id);
     fs::create_dir_all(&dir)?;
     let attrs = serde_json::to_vec_pretty(&AgentAttrs {
-        exit_code: i64::from(exit_code),
+        exit_code: result.exit_code,
+        is_error: result.is_error || (raw.is_none() && result.exit_code != 0),
+        stop_reason: result.stop_reason.clone(),
+        turns: result.turns,
+        duration_ms: result.duration_ms,
+        cost_usd: raw.map(|_| result.cost_usd),
     })
     .map_err(io::Error::other)?;
     fs::write(dir.join("attrs.json"), attrs)?;
-    fs::write(dir.join("stderr"), stderr)?;
-    if let Some(outcome) = outcome {
-        fs::write(dir.join("result"), &outcome.raw)?;
+    fs::write(dir.join("stderr"), &result.stderr)?;
+    if let Some(raw) = raw {
+        fs::write(dir.join("result"), raw)?;
     }
     let mut link = fs::OpenOptions::new()
         .create(true)
@@ -764,7 +771,7 @@ pub struct AgentResult {
 }
 
 impl AgentResult {
-    fn new(o: AgentOutcome, fallback_stop_reason: &str, exit_code: i32, stderr: String) -> Self {
+    fn new(o: TurnResult, fallback_stop_reason: &str, exit_code: i32, stderr: String) -> Self {
         let stop_reason = if o.stop_reason.is_empty() {
             fallback_stop_reason.to_string()
         } else {
@@ -889,7 +896,7 @@ impl From<AgentEvent> for Event {
             AgentEvent::ToolUse { name, input } => Event::ToolUse { name, input },
             AgentEvent::ToolResult { id, output } => Event::ToolResult { id, output },
             AgentEvent::System(s) => Event::System(s),
-            AgentEvent::TurnEnd { outcome, .. } => Event::TurnEnd(outcome.stop_reason),
+            AgentEvent::TurnEnd { result, .. } => Event::TurnEnd(result.stop_reason),
             AgentEvent::Other(s) => Event::Other(s),
             AgentEvent::ParseError(s) => Event::ParseError(s),
         }

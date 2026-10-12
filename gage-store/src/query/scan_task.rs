@@ -12,7 +12,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use datafusion::arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
+use datafusion::arrow::array::{
+    BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
@@ -58,6 +60,16 @@ pub(crate) fn scan_task_agent_schema() -> SchemaRef {
         Field::new("session_id", DataType::Utf8, false),
         // The harness process's exit code; -1 when it was signaled
         Field::new("exit_code", DataType::Int64, false),
+        // The harness reported the session as an error, or exited
+        // nonzero without a result
+        Field::new("is_error", DataType::Boolean, false),
+        // The last turn's stop reason; `eof` when the harness closed
+        // its output without one
+        Field::new("stop_reason", DataType::Utf8, false),
+        Field::new("turns", DataType::Int64, false),
+        Field::new("duration_ms", DataType::Int64, false),
+        // Spend in USD; null when the harness reported no result
+        Field::new("cost_usd", DataType::Float64, true),
         // The harness's result message verbatim; null when the agent
         // produced none
         Field::new("result", DataType::Utf8, true),
@@ -88,6 +100,11 @@ pub(crate) struct ScanTaskAgentRow {
     pub task: String,
     pub session_id: String,
     pub exit_code: i64,
+    pub is_error: bool,
+    pub stop_reason: String,
+    pub turns: i64,
+    pub duration_ms: i64,
+    pub cost_usd: Option<f64>,
     pub result: Option<String>,
     pub scan_commit: Option<String>,
 }
@@ -168,6 +185,11 @@ pub(crate) fn agent_rows_of(
                 task: t.task.clone(),
                 session_id: a.id.clone(),
                 exit_code: a.attrs.exit_code,
+                is_error: a.attrs.is_error,
+                stop_reason: a.attrs.stop_reason.clone(),
+                turns: a.attrs.turns,
+                duration_ms: a.attrs.duration_ms,
+                cost_usd: a.attrs.cost_usd,
                 result,
                 scan_commit: scan_commit.map(String::from),
             });
@@ -226,6 +248,11 @@ pub(crate) fn scan_task_agent_rows(rows: &[ScanTaskAgentRow]) -> Result<RecordBa
     let mut tasks = StringBuilder::new();
     let mut sessions = StringBuilder::with_capacity(len, len * 26);
     let mut exit_codes = Int64Builder::with_capacity(len);
+    let mut is_errors = BooleanBuilder::with_capacity(len);
+    let mut stop_reasons = StringBuilder::new();
+    let mut turns = Int64Builder::with_capacity(len);
+    let mut durations = Int64Builder::with_capacity(len);
+    let mut costs = Float64Builder::with_capacity(len);
     let mut results = StringBuilder::new();
     let mut commits = StringBuilder::new();
     for row in rows {
@@ -234,6 +261,11 @@ pub(crate) fn scan_task_agent_rows(rows: &[ScanTaskAgentRow]) -> Result<RecordBa
         tasks.append_value(&row.task);
         sessions.append_value(&row.session_id);
         exit_codes.append_value(row.exit_code);
+        is_errors.append_value(row.is_error);
+        stop_reasons.append_value(&row.stop_reason);
+        turns.append_value(row.turns);
+        durations.append_value(row.duration_ms);
+        costs.append_option(row.cost_usd);
         results.append_option(row.result.as_deref());
         commits.append_option(row.scan_commit.as_deref());
     }
@@ -245,6 +277,11 @@ pub(crate) fn scan_task_agent_rows(rows: &[ScanTaskAgentRow]) -> Result<RecordBa
             Arc::new(tasks.finish()),
             Arc::new(sessions.finish()),
             Arc::new(exit_codes.finish()),
+            Arc::new(is_errors.finish()),
+            Arc::new(stop_reasons.finish()),
+            Arc::new(turns.finish()),
+            Arc::new(durations.finish()),
+            Arc::new(costs.finish()),
             Arc::new(results.finish()),
             Arc::new(commits.finish()),
         ],

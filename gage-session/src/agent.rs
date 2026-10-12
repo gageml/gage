@@ -88,7 +88,7 @@ pub enum AgentEvent {
     /// the harness has no background work outstanding, so this turn
     /// end is the session's natural end.
     TurnEnd {
-        outcome: Box<AgentOutcome>,
+        result: Box<TurnResult>,
         idle: bool,
     },
     /// A harness message of a kind not modeled here, JSON-encoded
@@ -98,9 +98,11 @@ pub enum AgentEvent {
 }
 
 /// What a turn produced, as the harness reports it. Fields the harness
-/// does not report are empty or zero.
+/// does not report are empty or zero. Counters are session totals as
+/// of the turn, not per-turn increments, so the last turn's result
+/// stands for the session.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct AgentOutcome {
+pub struct TurnResult {
     /// The final assistant text
     pub text: String,
     pub is_error: bool,
