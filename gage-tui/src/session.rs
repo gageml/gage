@@ -149,7 +149,7 @@ impl Backend {
 
     async fn load_entries(&self, session_id: &str) -> Result<Vec<Entry>, Box<dyn Error>> {
         let sql = format!(
-            "SELECT line, raw FROM {} WHERE session_id = '{}' ORDER BY line",
+            "SELECT line, uuid, raw FROM {} WHERE session_id = '{}' ORDER BY line",
             self.entry_rel(),
             sql_str(session_id)
         );
@@ -157,7 +157,8 @@ impl Backend {
         let mut entries = Vec::new();
         for batch in &batches {
             let lines = column::<Int64Array>(batch, 0);
-            let raws = column::<StringArray>(batch, 1);
+            let uuids = column::<StringArray>(batch, 1);
+            let raws = column::<StringArray>(batch, 2);
             for i in 0..batch.num_rows() {
                 // A driver that supplies no raw row leaves the entry
                 // with nothing to render; it still holds its line
@@ -167,7 +168,8 @@ impl Backend {
                     serde_json::from_str(raws.value(i))?
                 };
                 let line = u32::try_from(lines.value(i)).unwrap_or(0);
-                entries.push(Entry { line, value });
+                let uuid = uuids.is_valid(i).then(|| uuids.value(i).to_string());
+                entries.push(Entry { line, uuid, value });
             }
         }
         Ok(entries)
@@ -381,7 +383,8 @@ pub fn load_from_path(session_id: &str, path: &Path) -> Result<Document, Box<dyn
     let mut entries = Vec::new();
     for item in gage_claude::session_reader::SessionReader::open(path)? {
         let (line, value) = item?;
-        entries.push(Entry { line, value });
+        let uuid = value.get("uuid").and_then(Value::as_str).map(String::from);
+        entries.push(Entry { line, uuid, value });
     }
     let session = Session {
         id: session_id.to_string(),

@@ -34,7 +34,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::error::{AgentError, Error};
@@ -219,10 +219,12 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     let tools = c.tools.len();
     let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
     spec.builtin_tools = tool::builtin_names(&c.tools)?;
+    let tool_uses: tool::ToolUseSlot = Arc::new(OnceLock::new());
     let service = if c.tools.len() == spec.builtin_tools.len() {
         None
     } else {
-        let (tool_spec, tool_names) = tool::consume(&c.tools, &ctx, sink.as_ref()).await?;
+        let (tool_spec, tool_names) =
+            tool::consume(&c.tools, &ctx, sink.as_ref(), &tool_uses).await?;
         let host = ctx
             .mcp_host()
             .await
@@ -241,6 +243,10 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
         .driver
         .start_agent(spec)
         .map_err(|e| Error::agent(format!("call_agent: {e}")))?;
+    tool_uses
+        .set(session.tool_use_entries())
+        .ok()
+        .expect("the tool-use slot is fresh for each agent");
     tracing::info!(tools, "agent started");
     Ok(Agent {
         model,

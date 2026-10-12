@@ -133,11 +133,11 @@ pub async fn open_code(inputs, meta) {
         None => Target::session(inputs.session),
     };
     let write = write.target(target);
-    // Record the calling tool-use id; the author carries the run, not
-    // the call
+    // Record the calling entry; the author carries the run, not the
+    // call
     let metadata = #{};
-    if let Some(call) = meta.get("claudecode/toolUseId") {
-        metadata.insert("call", call);
+    if let Some(entry) = meta.tool_use_entry() {
+        metadata.insert("tool_use_entry", entry);
     }
     let note = write.metadata(metadata).await?;
     Ok(format!("Wrote open code note {}", note.id))

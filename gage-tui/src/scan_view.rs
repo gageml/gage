@@ -1341,10 +1341,10 @@ impl ViewState {
             Dialog::Issue { issue } => (issue.author.clone(), "issue"),
             _ => return,
         };
-        let Some(call_id) = author_call_id(&author) else {
+        let Some(entry_uuid) = author_tool_use_entry(&author) else {
             return;
         };
-        let hit = self.find_tool_use_entry(call_id);
+        let hit = self.find_tool_use_entry(entry_uuid);
         let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
         self.dialog = match hit {
             Some(hit) => {
@@ -1369,12 +1369,12 @@ impl ViewState {
         };
     }
 
-    /// Search the scan's agent sessions for the entry making tool-use
-    /// call `call_id`. Agent JSONL files are text-scanned first so only
-    /// candidate sessions are parsed; a file that cannot be read falls
-    /// through to the full document load, which surfaces the error.
-    /// Load errors go to the scan log and the search continues.
-    fn find_tool_use_entry(&mut self, call_id: &str) -> Option<ToolUseHit> {
+    /// Search the scan's agent sessions for the `tool_use` entry with
+    /// uuid `entry_uuid`. Agent JSONL files are text-scanned first so
+    /// only candidate sessions are parsed; a file that cannot be read
+    /// falls through to the full document load, which surfaces the
+    /// error. Load errors go to the scan log and the search continues.
+    fn find_tool_use_entry(&mut self, entry_uuid: &str) -> Option<ToolUseHit> {
         let items: Vec<SessionItem> = self
             .model
             .tasks
@@ -1384,20 +1384,20 @@ impl ViewState {
         let backend = match self.host.session_backend() {
             Ok(backend) => backend,
             Err(e) => {
-                self.push_log(format!("Find tool use {call_id}: {e}"));
+                self.push_log(format!("Find tool use {entry_uuid}: {e}"));
                 return None;
             }
         };
         for item in items {
             if let Some(path) = &item.path
                 && let Ok(text) = std::fs::read_to_string(path)
-                && !text.contains(call_id)
+                && !text.contains(entry_uuid)
             {
                 continue;
             }
             match load_session_doc(&item, &backend) {
                 Ok((doc, source)) => {
-                    if let Some(entry_index) = tool_use_entry_index(&doc, call_id) {
+                    if let Some(entry_index) = tool_use_entry_index(&doc, entry_uuid) {
                         return Some(ToolUseHit {
                             item,
                             doc,
@@ -2338,28 +2338,18 @@ struct ToolUseHit {
     backend: Backend,
 }
 
-/// The tool-use call id embedded in an author of the form
-/// `{name}?call=toolu_{rest}`.
-fn author_call_id(author: &str) -> Option<&str> {
-    let (_, call) = author.split_once("?call=")?;
-    call.starts_with("toolu_").then_some(call)
+/// The uuid of the `tool_use` entry embedded in an author of the form
+/// `{name}?entry={uuid}`.
+fn author_tool_use_entry(author: &str) -> Option<&str> {
+    let (_, entry) = author.split_once("?entry=")?;
+    (!entry.is_empty()).then_some(entry)
 }
 
-/// Index of the entry whose message content holds the tool_use block
-/// with id `call_id`.
-fn tool_use_entry_index(doc: &Document, call_id: &str) -> Option<usize> {
-    use serde_json::Value;
-    doc.entries.iter().position(|e| {
-        e.message()
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-            .is_some_and(|blocks| {
-                blocks.iter().any(|b| {
-                    b.get("type").and_then(Value::as_str) == Some("tool_use")
-                        && b.get("id").and_then(Value::as_str) == Some(call_id)
-                })
-            })
-    })
+/// Index of the entry with uuid `entry_uuid`.
+fn tool_use_entry_index(doc: &Document, entry_uuid: &str) -> Option<usize> {
+    doc.entries
+        .iter()
+        .position(|e| e.uuid.as_deref() == Some(entry_uuid))
 }
 
 /// The session target parsed from a note's target URL, when it is
@@ -3503,7 +3493,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
         }
         Dialog::Note { note } => {
             let mut items = vec![("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
-            if author_call_id(&note.author).is_some() {
+            if author_tool_use_entry(&note.author).is_some() {
                 items.push(("A", "author"));
             }
             if session_target(&note.target).is_some() {
@@ -3513,7 +3503,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
         }
         Dialog::Issue { issue } => {
             let mut items = vec![("q", "close"), ("↑/↓", "scroll"), ("[/]", "prev/next")];
-            if author_call_id(&issue.author).is_some() {
+            if author_tool_use_entry(&issue.author).is_some() {
                 items.push(("A", "author"));
             }
             if issue_session_target(issue).is_some() {

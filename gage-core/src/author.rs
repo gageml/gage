@@ -11,9 +11,9 @@
 //!   for model-driven writers.
 //! - `identity` names the principal within the scheme: a username, a
 //!   scanner name, a client name.
-//! - Attributes qualify the acting occurrence, e.g. `call` (the
-//!   tool-use id of the writing call), `scan` (the scan run an
-//!   annotator acted in), `ver` (a client version).
+//! - Attributes qualify the acting occurrence, e.g. `entry` (the
+//!   transcript entry that made the writing call), `scan` (the scan
+//!   run an annotator acted in), `ver` (a client version).
 //!
 //! Attribute values are URL percent-encoded, and attributes are sorted
 //! lexicographically by name, so equal qualifications compare equal as

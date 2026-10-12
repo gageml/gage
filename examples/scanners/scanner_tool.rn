@@ -31,5 +31,5 @@ pub async fn inputs() {
 }
 
 fn greet(inputs, meta) {
-    Ok(format!("Hello, {} (call {})", inputs.name, meta.agent_tool_use()))
+    Ok(format!("Hello, {} (entry {})", inputs.name, meta.agent_tool_use()))
 }

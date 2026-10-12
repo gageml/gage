@@ -11,8 +11,8 @@ use crate::value::json_to_value;
 /// The second argument to a Rune tool fn: the MCP request's `_meta`
 /// object, read-only, with standard object semantics (`meta[key]`,
 /// `get`, `keys`, `values`, `len`, `contains_key`, iteration over
-/// `(key, value)` pairs). `agent_tool_use()` derives the author of the
-/// call from the wire data itself.
+/// `(key, value)` pairs), plus the `tool_use` entry the driver
+/// resolved the call to, when its harness identifies callers.
 #[derive(Any)]
 #[rune(item = ::gage)]
 pub struct ToolMeta {
@@ -20,17 +20,16 @@ pub struct ToolMeta {
     entries: serde_json::Map<String, JsonValue>,
     #[rune(skip)]
     scanner_name: String,
+    #[rune(skip)]
+    tool_use_entry: Option<String>,
 }
-
-/// `_meta` key carrying the calling tool-use block id — the id of the
-/// `tool_use` entry in the agent's session transcript that made this
-/// call.
-const TOOL_USE_ID_KEY: &str = "claudecode/toolUseId";
 
 impl ToolMeta {
     /// Wrap a request's `_meta` value. Anything but a JSON object
     /// (including absent meta, passed as `Null`) wraps as empty.
-    pub fn new(meta: JsonValue, scanner_name: String) -> Self {
+    /// `tool_use_entry` is the uuid of the transcript entry that made
+    /// the call, as the driver resolved it.
+    pub fn new(meta: JsonValue, scanner_name: String, tool_use_entry: Option<String>) -> Self {
         let entries = match meta {
             JsonValue::Object(m) => m,
             _ => serde_json::Map::new(),
@@ -38,25 +37,33 @@ impl ToolMeta {
         ToolMeta {
             entries,
             scanner_name,
+            tool_use_entry,
         }
     }
 
-    /// Author of this tool call: `agent:{scanner}?call={toolUseId}`,
-    /// per the convention in [`gage_core::author`]. The author is the
-    /// authoring call — the tool-use id ties the written item to the
-    /// exact transcript entry that wrote it. Errors when the client
-    /// sent no tool-use id.
+    /// The uuid of the `tool_use` entry in the agent's transcript that
+    /// made this call, when the harness identifies callers.
+    #[rune::function(instance)]
+    fn tool_use_entry(&self) -> Option<String> {
+        self.tool_use_entry.clone()
+    }
+
+    /// Author of this tool call: `agent:{scanner}?entry={uuid}`, per
+    /// the convention in [`gage_core::author`]. The author is the
+    /// authoring call — the entry uuid ties the written item to the
+    /// exact transcript entry that wrote it. Errors when the harness
+    /// did not identify the calling entry.
     #[rune::function(instance)]
     fn agent_tool_use(&self) -> Result<String, VmError> {
-        match self.entries.get(TOOL_USE_ID_KEY).and_then(|v| v.as_str()) {
-            Some(id) => Ok(gage_core::author::compose(
+        match &self.tool_use_entry {
+            Some(uuid) => Ok(gage_core::author::compose(
                 "agent",
                 &self.scanner_name,
-                &[("call", id)],
+                &[("entry", uuid)],
             )),
-            None => Err(VmError::panic(format!(
-                "meta has no `{TOOL_USE_ID_KEY}`; cannot derive an author"
-            ))),
+            None => Err(VmError::panic(
+                "the calling entry is not identified; cannot derive an author",
+            )),
         }
     }
 
@@ -140,6 +147,7 @@ impl ToolMetaIter {
 pub fn register(m: &mut Module) -> Result<(), ContextError> {
     m.ty::<ToolMeta>()?;
     m.function_meta(ToolMeta::agent_tool_use)?;
+    m.function_meta(ToolMeta::tool_use_entry)?;
     m.function_meta(ToolMeta::index_get)?;
     m.function_meta(ToolMeta::get)?;
     m.function_meta(ToolMeta::contains_key)?;

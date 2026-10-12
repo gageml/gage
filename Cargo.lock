@@ -2358,6 +2358,7 @@ version = "0.2.0-dev"
 dependencies = [
  "async-trait",
  "datafusion",
+ "serde_json",
 ]
 
 [[package]]

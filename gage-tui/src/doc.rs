@@ -99,6 +99,8 @@ impl Session {
 
 pub struct Entry {
     pub line: u32,
+    /// The harness's id for the entry, from the `entry` table
+    pub uuid: Option<String>,
     pub value: Value,
 }
 

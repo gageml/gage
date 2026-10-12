@@ -13,19 +13,20 @@
 //! stdin on the first read, send, or interrupt, so the child is
 //! observed in a "running with one turn queued" state from the start.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use gage_core::config::gage_home;
 use gage_session::{
     AgentEvent, AgentSession, AgentSpec, Driver, DriverError, NativeSession, SystemPrompt,
-    TurnResult,
+    ToolUseEntries, TurnResult,
 };
 use serde_json::Value as Json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -105,12 +106,14 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
     let stdout = child.stdout.take();
     let stderr = spawn_reader(child.stderr.take());
     let (tx, events) = mpsc::unbounded_channel();
-    let stdout_task = stdout.map(|out| tokio::spawn(read_stream(out, tx)));
+    let tool_uses = Arc::new(ToolUseIndex::default());
+    let stdout_task = stdout.map(|out| tokio::spawn(read_stream(out, tx, Arc::clone(&tool_uses))));
     Ok(ClaudeAgent {
         child,
         stdin,
         events,
         stdout_task,
+        tool_uses,
         stderr,
         run_dir: run.run_dir,
         live_projects,
@@ -124,8 +127,14 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
 }
 
 /// Parse each stdout line and send it on; stop at EOF or when the
-/// receiver is gone.
-async fn read_stream(out: tokio::process::ChildStdout, tx: mpsc::UnboundedSender<StreamMessage>) {
+/// receiver is gone. Every assistant message is indexed here, as it
+/// is read, so a tool call reaching the MCP server finds its
+/// `tool_use` entry before anyone has polled for the event.
+async fn read_stream(
+    out: tokio::process::ChildStdout,
+    tx: mpsc::UnboundedSender<StreamMessage>,
+    tool_uses: Arc<ToolUseIndex>,
+) {
     let mut lines = BufReader::new(out).lines();
     let mut n = 0u64;
     loop {
@@ -137,6 +146,9 @@ async fn read_stream(out: tokio::process::ChildStdout, tx: mpsc::UnboundedSender
                 n += 1;
                 let msg = parse_stream_message(&line);
                 tracing::debug!(seq = n, kind = msg.kind(), line = %line, "stream-json line");
+                if let StreamMessage::Assistant(v) = &msg {
+                    tool_uses.record(v);
+                }
                 if tx.send(msg).is_err() {
                     tracing::debug!(seq = n, "stream-json receiver gone");
                     return;
@@ -328,6 +340,42 @@ fn parse_stream_message(line: &str) -> StreamMessage {
     }
 }
 
+/// `_meta` key under which Claude Code sends the id of the `tool_use`
+/// block that made an MCP request
+const TOOL_USE_ID_KEY: &str = "claudecode/toolUseId";
+
+/// `tool_use` block id to the uuid of the assistant message that
+/// carried it, for every block the child has emitted. The stream
+/// message's uuid is the transcript entry's uuid.
+#[derive(Default)]
+struct ToolUseIndex(Mutex<HashMap<String, String>>);
+
+impl ToolUseIndex {
+    fn record(&self, message: &Json) {
+        let Some(uuid) = message.get("uuid").and_then(Json::as_str) else {
+            return;
+        };
+        let Some(blocks) = message.pointer("/message/content").and_then(Json::as_array) else {
+            return;
+        };
+        let mut map = self.0.lock().expect("tool-use index lock");
+        for block in blocks {
+            if block.get("type").and_then(Json::as_str) == Some("tool_use")
+                && let Some(id) = block.get("id").and_then(Json::as_str)
+            {
+                map.insert(id.to_string(), uuid.to_string());
+            }
+        }
+    }
+}
+
+impl ToolUseEntries for ToolUseIndex {
+    fn tool_use_entry(&self, meta: &serde_json::Map<String, Json>) -> Option<String> {
+        let id = meta.get(TOOL_USE_ID_KEY)?.as_str()?;
+        self.0.lock().expect("tool-use index lock").get(id).cloned()
+    }
+}
+
 /// A running `claude -p` child
 pub struct ClaudeAgent {
     child: Child,
@@ -335,6 +383,7 @@ pub struct ClaudeAgent {
     stdin: Option<ChildStdin>,
     events: mpsc::UnboundedReceiver<StreamMessage>,
     stdout_task: Option<JoinHandle<()>>,
+    tool_uses: Arc<ToolUseIndex>,
     stderr: Option<JoinHandle<io::Result<Vec<u8>>>>,
     run_dir: PathBuf,
     live_projects: PathBuf,
@@ -523,6 +572,10 @@ impl AgentSession for ClaudeAgent {
         self.terminate(grace).await
     }
 
+    fn tool_use_entries(&self) -> Arc<dyn ToolUseEntries> {
+        Arc::clone(&self.tool_uses) as Arc<dyn ToolUseEntries>
+    }
+
     async fn take_stderr(&mut self) -> io::Result<Vec<u8>> {
         match self.stderr.take() {
             Some(handle) => handle.await.map_err(io::Error::other)?,
@@ -705,6 +758,34 @@ mod tests {
             settings["permissions"]["allow"],
             serde_json::json!(["mcp__gage__Query", "Agent"])
         );
+    }
+
+    #[test]
+    fn tool_use_index_maps_a_request_to_its_entry() {
+        let index = ToolUseIndex::default();
+        index.record(&serde_json::json!({
+            "type": "assistant", "uuid": "a1",
+            "message": { "content": [
+                { "type": "text", "text": "hi" },
+                { "type": "tool_use", "id": "toolu_1", "name": "x", "input": {} },
+                { "type": "tool_use", "id": "toolu_2", "name": "y", "input": {} },
+            ]}
+        }));
+        let meta = |id: &str| {
+            let mut m = serde_json::Map::new();
+            m.insert(TOOL_USE_ID_KEY.to_string(), Json::from(id));
+            m
+        };
+        assert_eq!(
+            index.tool_use_entry(&meta("toolu_1")).as_deref(),
+            Some("a1")
+        );
+        assert_eq!(
+            index.tool_use_entry(&meta("toolu_2")).as_deref(),
+            Some("a1")
+        );
+        assert_eq!(index.tool_use_entry(&meta("toolu_9")), None);
+        assert_eq!(index.tool_use_entry(&serde_json::Map::new()), None);
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! a turn ending with a result, and the process ending.
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -155,6 +156,15 @@ pub trait AgentSession: Send {
     /// after `grace`.
     async fn kill(&mut self, grace: Duration) -> io::Result<()>;
 
+    /// The index of the `tool_use` entries this session has made,
+    /// shared with the runtime's tool server. The server asks it as
+    /// each call arrives, while the session is being read for its
+    /// next event, so the index is a separate handle rather than a
+    /// method on the session. The default identifies no callers.
+    fn tool_use_entries(&self) -> Arc<dyn ToolUseEntries> {
+        Arc::new(NoToolUseEntries)
+    }
+
     /// The process's stderr, read to its end. Call after exit.
     async fn take_stderr(&mut self) -> io::Result<Vec<u8>>;
 
@@ -165,4 +175,21 @@ pub trait AgentSession: Send {
     /// Remove the harness's working files for this run. Call after
     /// the transcript has been stored.
     fn cleanup(&mut self) -> Result<(), DriverError>;
+}
+
+/// Maps a tool call to the transcript entry that made it.
+pub trait ToolUseEntries: Send + Sync {
+    /// The uuid of the `tool_use` entry that made the MCP request
+    /// whose `_meta` is `meta`, or `None` when the harness does not
+    /// identify callers. How a harness marks its requests is the
+    /// driver's; the core passes the slot through unread.
+    fn tool_use_entry(&self, meta: &serde_json::Map<String, serde_json::Value>) -> Option<String>;
+}
+
+struct NoToolUseEntries;
+
+impl ToolUseEntries for NoToolUseEntries {
+    fn tool_use_entry(&self, _meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+        None
+    }
 }

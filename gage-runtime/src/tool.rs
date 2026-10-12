@@ -27,7 +27,7 @@
 //! tools are consumed, not at `Tool::new`.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::error::Error;
 use crate::tool_meta::ToolMeta;
@@ -38,6 +38,7 @@ use gage_mcp::{
     IssueWriteConfig, IssueWriteInput, NoteWriteCallback, NoteWriteConfig, NoteWriteInput,
     QueryConfig, ToolAnnotations, ToolSpec,
 };
+use gage_session::ToolUseEntries;
 use gage_store::{IssueStatus, NoteValue};
 use rmcp_json::JsonObject;
 use rune::alloc::clone::TryClone;
@@ -686,10 +687,17 @@ impl Input {
 /// that task's output sink, so the handler's output and writes are
 /// attributed to the calling task. Each Gage tool's data is built
 /// from `ctx`.
+/// Where the agent's [`ToolUseEntries`] lands once the agent has
+/// started. The tool callbacks are built before the session exists
+/// and read the slot on each call; an empty slot identifies no
+/// callers.
+pub(crate) type ToolUseSlot = Arc<OnceLock<Arc<dyn ToolUseEntries>>>;
+
 pub(crate) async fn consume(
     tools: &[Tool],
     ctx: &ScanContext,
     sink: Option<&OutputSink>,
+    tool_uses: &ToolUseSlot,
 ) -> Result<(ToolSpec, Vec<String>), Error> {
     let mut spec = ToolSpec::default();
     let mut names: Vec<String> = Vec::with_capacity(tools.len());
@@ -707,7 +715,7 @@ pub(crate) async fn consume(
             return Err(Error::agent(format!("tool '{name}' is declared twice")));
         }
         match &tool.kind {
-            ToolKind::Scanner(t) => spec.custom.push(custom_def(t, ctx, sink)?),
+            ToolKind::Scanner(t) => spec.custom.push(custom_def(t, ctx, sink, tool_uses)?),
             ToolKind::Gage(GageConfig::Query(query)) => {
                 let context = ctx.query_tool_context(&query.scope).await?;
                 spec.gage.push(GageTool::Query(QueryConfig {
@@ -746,6 +754,7 @@ fn custom_def(
     tool: &ScannerTool,
     ctx: &ScanContext,
     sink: Option<&OutputSink>,
+    tool_uses: &ToolUseSlot,
 ) -> Result<CustomToolDef, Error> {
     for input in &tool.inputs {
         if let Some(method) = input.conflict {
@@ -771,7 +780,7 @@ fn custom_def(
         description: tool.description.clone(),
         input_schema: render_input_schema(&tool.inputs),
         annotations: tool.annotations.clone(),
-        callback: callback(tool, handler, ctx, sink),
+        callback: callback(tool, handler, ctx, sink, tool_uses),
     })
 }
 
@@ -840,6 +849,7 @@ fn callback(
     handler: Arc<SyncFunction>,
     ctx: &ScanContext,
     sink: Option<&OutputSink>,
+    tool_uses: &ToolUseSlot,
 ) -> CustomToolCallback {
     let mut ctx = ctx.clone();
     ctx.params = None;
@@ -847,6 +857,7 @@ fn callback(
     let declared = DeclaredInputs::new(&tool.inputs);
     let meta_arg = tool.meta_arg;
     let tool_name = tool.name.clone();
+    let tool_uses = Arc::clone(tool_uses);
     let parent = Span::current();
     Arc::new(move |args, meta| {
         let span = tracing::info_span!(parent: &parent, "tool", name = %tool_name);
@@ -854,6 +865,10 @@ fn callback(
         let ctx = ctx.clone();
         let sink = sink.clone();
         let scanner = ctx.scanner.clone();
+        let tool_use_entry = match (&meta, tool_uses.get()) {
+            (JsonValue::Object(map), Some(entries)) => entries.tool_use_entry(map),
+            _ => None,
+        };
         let log_sources = ctx.sources.clone();
         let tool_name = tool_name.clone();
         let args = declared.check(args);
@@ -865,7 +880,7 @@ fn callback(
             let inputs = InputsArg(args);
             let call = async move {
                 if meta_arg {
-                    let meta = ToolMeta::new(meta, scanner);
+                    let meta = ToolMeta::new(meta, scanner, tool_use_entry);
                     handler
                         .async_send_call::<HandlerOutcome>((inputs, meta))
                         .await
@@ -1245,8 +1260,21 @@ mod tests {
         Vm::new(rt, RuneArc::try_new(unit).unwrap())
     }
 
+    /// A slot no agent has filled: no caller is identified
+    fn no_tool_uses() -> ToolUseSlot {
+        Arc::new(OnceLock::new())
+    }
+
     async fn defs(tmp: &TempDir, script: &str) -> Result<Vec<CustomToolDef>, Error> {
-        consume(&tools(script), &scan_ctx(tmp), None)
+        defs_with(tmp, script, &no_tool_uses()).await
+    }
+
+    async fn defs_with(
+        tmp: &TempDir,
+        script: &str,
+        tool_uses: &ToolUseSlot,
+    ) -> Result<Vec<CustomToolDef>, Error> {
+        consume(&tools(script), &scan_ctx(tmp), None, tool_uses)
             .await
             .map(|(spec, _)| spec.custom)
     }
@@ -1516,26 +1544,45 @@ mod tests {
 
     #[tokio::test]
     async fn meta_arg_passes_the_request_meta_as_the_second_argument() {
+        /// Resolves any request carrying `call` to `entry-<call>`
+        struct ByCall;
+        impl ToolUseEntries for ByCall {
+            fn tool_use_entry(&self, meta: &serde_json::Map<String, JsonValue>) -> Option<String> {
+                meta.get("call")
+                    .and_then(JsonValue::as_str)
+                    .map(|c| format!("entry-{c}"))
+            }
+        }
         let tmp = tempfile::tempdir().unwrap();
-        let defs = defs(
-            &tmp,
-            r#"
+        let script = r#"
             use gage::Tool;
             pub fn main() {
                 [Tool::new("who", |inputs, meta| Ok(meta.agent_tool_use())).meta_arg(),
+                 Tool::new("entry", |inputs, meta| Ok(meta.tool_use_entry())).meta_arg(),
                  Tool::new("plain", |inputs| Ok("one arg"))]
             }
-            "#,
-        )
-        .await
-        .unwrap();
-        let meta = json!({"claudecode/toolUseId": "toolu_1"});
+            "#;
+        let slot: ToolUseSlot = Arc::new(OnceLock::new());
+        let defs = defs_with(&tmp, script, &slot).await.unwrap();
+        let meta = json!({"call": "1"});
+        // Before the agent starts, no caller is identified
+        assert_eq!(
+            call(&defs[1], json!({}), meta.clone()).await,
+            CustomToolOutcome::Success(JsonValue::Null)
+        );
+        slot.set(Arc::new(ByCall))
+            .ok()
+            .expect("the slot is set once in this test");
         assert_eq!(
             call(&defs[0], json!({}), meta.clone()).await,
-            CustomToolOutcome::Success(json!("agent:demo?call=toolu_1"))
+            CustomToolOutcome::Success(json!("agent:demo?entry=entry-1"))
         );
         assert_eq!(
-            call(&defs[1], json!({}), meta).await,
+            call(&defs[1], json!({}), meta.clone()).await,
+            CustomToolOutcome::Success(json!("entry-1"))
+        );
+        assert_eq!(
+            call(&defs[2], json!({}), meta).await,
             CustomToolOutcome::Success(json!("one arg"))
         );
     }
@@ -1567,6 +1614,7 @@ mod tests {
             ),
             &ctx,
             Some(&sink),
+            &no_tool_uses(),
         )
         .await
         .unwrap();
@@ -1669,6 +1717,7 @@ mod tests {
             ),
             &ctx,
             Some(&sink),
+            &no_tool_uses(),
         )
         .await
         .unwrap();
@@ -1741,6 +1790,7 @@ mod tests {
             ),
             &scan_ctx(&tmp),
             None,
+            &no_tool_uses(),
         )
         .await
         .unwrap();
@@ -1785,7 +1835,9 @@ mod tests {
             "#,
         );
         assert_eq!(builtin_names(&list).unwrap(), ["Agent", "WebSearch"]);
-        let (spec, names) = consume(&list, &scan_ctx(&tmp), None).await.unwrap();
+        let (spec, names) = consume(&list, &scan_ctx(&tmp), None, &no_tool_uses())
+            .await
+            .unwrap();
         assert_eq!(names, ["Query", "x"]);
         assert_eq!(spec.gage.len(), 1);
         assert_eq!(spec.custom.len(), 1);
@@ -1817,7 +1869,9 @@ mod tests {
         script: &str,
         sink: Option<&OutputSink>,
     ) -> (gage_mcp::IssueWriteConfig, Vec<String>) {
-        let (spec, names) = consume(&tools(script), &scan_ctx(tmp), sink).await.unwrap();
+        let (spec, names) = consume(&tools(script), &scan_ctx(tmp), sink, &no_tool_uses())
+            .await
+            .unwrap();
         let config = spec
             .gage
             .into_iter()
@@ -1897,7 +1951,9 @@ mod tests {
             task: "report".into(),
             tx,
         };
-        let (spec, _) = consume(&tools(script), ctx, Some(&sink)).await.unwrap();
+        let (spec, _) = consume(&tools(script), ctx, Some(&sink), &no_tool_uses())
+            .await
+            .unwrap();
         spec.gage
             .into_iter()
             .find_map(|t| match t {
@@ -1974,7 +2030,7 @@ mod tests {
             pub fn main() { [NoteWrite::new()] }
         "#;
         let mut ctx = scan_ctx(&tmp);
-        let err = match consume(&tools(script), &ctx, None).await {
+        let err = match consume(&tools(script), &ctx, None, &no_tool_uses()).await {
             Ok(_) => panic!("expected consumption to fail"),
             Err(e) => e.to_string(),
         };
