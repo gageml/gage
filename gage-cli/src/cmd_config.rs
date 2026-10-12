@@ -24,21 +24,21 @@ pub enum ConfigCommand {
     /// Show effective Gage configuration
     Show,
 
-    /// Edit a Gage config file in the system editor
+    /// Edit a config file in system editor
     Edit(EditArgs),
 }
 
 #[derive(Args)]
 pub struct EditArgs {
-    /// Edit the user config at `~/.gage/config.toml`
+    /// Edit user config, ~/.gage/config.toml
     #[arg(long, conflicts_with_all = ["project", "path"])]
     user: bool,
 
-    /// Edit the nearest project `.gage/config.toml`
+    /// Edit nearest project config, .gage/config.toml
     #[arg(long, conflicts_with_all = ["user", "path"])]
     project: bool,
 
-    /// Edit `<path>/.gage/config.toml`
+    /// Edit DIR/.gage/config.toml
     #[arg(long, conflicts_with_all = ["user", "project"], value_name = "DIR")]
     path: Option<PathBuf>,
 }

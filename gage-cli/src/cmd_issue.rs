@@ -88,44 +88,44 @@ pub struct IssueListArgs {
     #[arg(short, long)]
     closed: bool,
 
-    /// Show the full issue ID
+    /// Show full issue ID
     #[arg(long)]
     full_id: bool,
 }
 
 #[derive(Args)]
 pub struct IssueShowArgs {
-    /// Issue ID (or prefix)
+    /// Issue to show (ID or prefix)
     id: String,
 }
 
 #[derive(Args)]
 pub struct IssueAddArgs {
-    /// Title (prompted if omitted)
+    /// Issue title
     #[arg(short, long)]
     title: Option<String>,
 
-    /// Description (prompted if omitted)
+    /// Issue description
     #[arg(short, long, conflicts_with = "description_file")]
     description: Option<String>,
 
-    /// Read the description from a file
+    /// Read description from a file
     #[arg(long, value_name = "PATH")]
     description_file: Option<PathBuf>,
 
-    /// Issue name (default: "user-issue")
+    /// Issue name (default "user-issue")
     #[arg(short, long)]
     name: Option<String>,
 
-    /// Note cited as evidence, by ID (or prefix); repeatable
+    /// Note cited as evidence (ID or prefix; repeatable)
     #[arg(short, long, value_name = "NOTE")]
     evidence: Vec<String>,
 
-    /// Author username (default: $USER)
+    /// Author username (default $USER)
     #[arg(short, long)]
     user: Option<String>,
 
-    /// Add as 'pending' instead of the default 'open'
+    /// Add as pending instead of open
     #[arg(short, long)]
     pending: bool,
 
@@ -138,7 +138,7 @@ pub struct IssueAddArgs {
 
 #[derive(Args)]
 pub struct IssueDeleteArgs {
-    /// Issue IDs (or prefixes)
+    /// Issues to delete (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
@@ -149,15 +149,17 @@ pub struct IssueDeleteArgs {
 
 #[derive(Args)]
 pub struct IssueCloseArgs {
-    /// Issue IDs (or prefixes)
+    /// Issues to close (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
-    /// Close reason (default: completed)
-    #[arg(short, long, value_enum)]
+    /// Close reason (default completed)
+    ///
+    /// One of completed, wontfix, or duplicate
+    #[arg(short, long, value_enum, hide_possible_values = true)]
     reason: Option<CloseReason>,
 
-    /// The surviving issue a duplicate closes against (ID or prefix)
+    /// Surviving issue a duplicate closes against (ID or prefix)
     ///
     /// Requires --reason duplicate
     #[arg(long, value_name = "ISSUE")]
@@ -173,7 +175,7 @@ pub struct IssueCloseArgs {
 
 #[derive(Args)]
 pub struct IssueOpenArgs {
-    /// Issue IDs (or prefixes)
+    /// Issues to open (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
@@ -187,7 +189,7 @@ pub struct IssueOpenArgs {
 
 #[derive(Args)]
 pub struct IssueCommentArgs {
-    /// Issue IDs (or prefixes)
+    /// Issues to comment on (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
@@ -208,7 +210,7 @@ pub struct MessageArgs {
     #[arg(short, long, conflicts_with = "message_file")]
     message: Option<String>,
 
-    /// Read the message from a file
+    /// Read message from a file
     #[arg(long, value_name = "PATH")]
     message_file: Option<PathBuf>,
 }

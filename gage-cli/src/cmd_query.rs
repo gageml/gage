@@ -16,8 +16,16 @@ pub struct QueryArgs {
     /// `;` and `--` lines are comments
     sql: Vec<String>,
 
-    /// Output format
-    #[arg(short, long, default_value = "table")]
+    /// Output format (default table)
+    ///
+    /// One of table, csv, json, ndjson, or yaml
+    #[arg(
+        short,
+        long,
+        default_value = "table",
+        hide_default_value = true,
+        hide_possible_values = true
+    )]
     format: PrintFormat,
 
     /// Suppress non-result output
@@ -39,7 +47,7 @@ pub struct QueryArgs {
     #[arg(long)]
     system: bool,
 
-    /// Query within a scan
+    /// Query within scan (ID or prefix)
     ///
     /// Scan ID (or prefix). The session tables hold the scan's
     /// sessions at the versions it read, and the scan tables hold

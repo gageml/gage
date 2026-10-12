@@ -33,18 +33,18 @@ pub struct FetchArgs {
     /// stays in the store
     repository: String,
 
-    /// Objects to fetch
+    /// Objects to fetch (tag, ID, or prefix)
     ///
     /// Tag names, object IDs, or unique ID prefixes as the remote
     /// has them. Everything an object links is fetched with it. With
     /// none, every object and tag the remote has
     objects: Vec<String>,
 
-    /// Resolve conflicts on the named objects by keeping the local side
+    /// Keep local side on conflict
     #[arg(long, requires = "objects", conflicts_with = "theirs")]
     ours: bool,
 
-    /// Resolve conflicts on the named objects by taking the remote side
+    /// Take remote side on conflict
     #[arg(long, requires = "objects")]
     theirs: bool,
 }

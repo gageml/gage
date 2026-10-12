@@ -17,7 +17,7 @@ use crate::style;
 
 #[derive(Subcommand)]
 pub enum StoreCommand {
-    /// Create the Gage store
+    /// Create Gage store
     ///
     /// Creates a bare Git repository at `$GAGE_HOME/store.git`. Running
     /// it on an existing store is harmless.
@@ -33,7 +33,7 @@ pub enum StoreCommand {
     /// deletes it and builds it again from every ref.
     Index(IndexArgs),
 
-    /// Garbage collect the store
+    /// Garbage collect store
     ///
     /// Runs `git gc` in the store. Use `--prune <EXPIRE>` to control the
     /// pruning window; the value is passed to `git gc --prune=<EXPIRE>`.
@@ -48,7 +48,7 @@ pub enum StoreCommand {
     /// `<ref>:<path>`.
     Ls(LsArgs),
 
-    /// Dump the content of an object
+    /// Dump object content
     ///
     /// Runs `git cat-file -p <REF>`. `<REF>` is any git tree-ish or
     /// object sha.
@@ -63,7 +63,7 @@ pub enum StoreCommand {
     /// cannot read.
     Delete(DeleteArgs),
 
-    /// Browse the store's object graph
+    /// Browse store object graph
     ///
     /// Opens an interactive view of the object refs: refs listing
     /// on the left, per-commit detail (header, parents classified as
@@ -75,14 +75,14 @@ pub enum StoreCommand {
 
 #[derive(Args)]
 pub struct ViewArgs {
-    /// Object id prefix to select when the view opens
+    /// Object to select on open (ID or prefix)
     #[arg(value_name = "OBJECT")]
     object: Option<String>,
 }
 
 #[derive(Args)]
 pub struct DeleteArgs {
-    /// Object IDs (or prefixes)
+    /// Objects to delete (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
@@ -96,7 +96,7 @@ pub struct LsArgs {
     /// Git tree-ish
     reference: String,
 
-    /// Include the object sha column
+    /// Include object sha column
     #[arg(long)]
     sha: bool,
 }
@@ -109,14 +109,14 @@ pub struct CatArgs {
 
 #[derive(Args)]
 pub struct IndexArgs {
-    /// Delete the index and rebuild it from the store's refs
+    /// Delete and rebuild index from store refs
     #[arg(long)]
     rebuild: bool,
 }
 
 #[derive(Args)]
 pub struct StatusArgs {
-    /// Run `git fsck --strict` after showing status
+    /// Run git fsck --strict after showing status
     #[arg(long)]
     check: bool,
 }

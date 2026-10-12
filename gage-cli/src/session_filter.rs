@@ -1,7 +1,8 @@
-//! Shared session-selection surface for commands that operate on
-//! more than one native session at a time. `SessionSelectArgs`
-//! flattens into a subcommand's clap struct; `resolve` turns the
-//! parsed values into a concrete list of native session records.
+//! Shared session-filter surface for commands that operate on more
+//! than one native session at a time. `SessionFilterArgs` flattens
+//! into a subcommand's clap struct next to that command's own
+//! positional session list; `select_sessions` turns the two into a
+//! concrete list of native session records.
 //!
 //! The same struct is used by `session add`, `dataset add`, and
 //! `scan`.
@@ -17,23 +18,14 @@ use gage_query::ContextBuilder;
 use rand::seq::SliceRandom;
 
 /// Names of the arg fields on this struct, in the order the shared
-/// help layout shows them. Callers that need to enforce "at least
-/// one selection" pass this list into an `ArgGroup` on the wrapping
-/// args struct.
-pub const SELECT_ARG_NAMES: &[&str] = &[
-    "sessions", "limit", "sample", "days", "today", "all", "project",
-];
+/// help layout shows them. A wrapping args struct uses this list to
+/// make its positional session list conflict with every filter, and
+/// to build an `ArgGroup` when at least one selection is required.
+pub const FILTER_ARG_NAMES: &[&str] = &["limit", "sample", "days", "today", "all", "project"];
 
 #[derive(Args)]
-pub struct SessionSelectArgs {
-    /// Session IDs (or prefixes)
-    #[arg(
-        value_name = "SESSION",
-        conflicts_with_all = ["project", "limit", "sample", "days", "today", "all"]
-    )]
-    pub sessions: Vec<String>,
-
-    /// Select the latest N sessions
+pub struct SessionFilterArgs {
+    /// Select latest N sessions
     ///
     /// Combines with --days or --today to cap the sessions selected
     /// from the window.
@@ -52,7 +44,7 @@ pub struct SessionSelectArgs {
     #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     pub sample: Option<usize>,
 
-    /// Select sessions modified in the past N days
+    /// Select sessions modified in past N days
     #[arg(long, value_name = "N", conflicts_with = "all")]
     pub days: Option<u32>,
 
@@ -64,7 +56,7 @@ pub struct SessionSelectArgs {
     #[arg(short, long)]
     pub all: bool,
 
-    /// Limit sessions to a project
+    /// Limit sessions to project (path or name)
     ///
     /// PROJECT is a project directory path (absolute, relative, or
     /// ~-prefixed) or a project slug as shown by 'gage session list'.
@@ -72,7 +64,7 @@ pub struct SessionSelectArgs {
     pub project: Option<String>,
 }
 
-/// The failure modes of `SessionSelectArgs::resolve`.
+/// The failure modes of `select_sessions`.
 #[derive(Debug)]
 pub enum SessionSelectError {
     /// One or more positional `sessions` prefixes did not resolve.
@@ -106,44 +98,49 @@ impl fmt::Display for SessionSelectError {
 
 impl std::error::Error for SessionSelectError {}
 
-impl SessionSelectArgs {
-    /// True when the caller supplied no positional session and no
-    /// filter axis — every field holds its clap default.
+impl SessionFilterArgs {
+    /// True when the caller supplied no filter axis — every field
+    /// holds its clap default.
     pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
-            && self.project.is_none()
+        self.project.is_none()
             && self.limit.is_none()
             && self.sample.is_none()
             && self.days.is_none()
             && !self.today
             && !self.all
     }
+}
 
-    /// Resolve the parsed options to native session records.
-    ///
-    /// A non-empty positional `sessions` list is resolved through
-    /// `session::one_session` and returned as-is. Otherwise the
-    /// filter axes populate a `SessionListBuilder`; a missing window
-    /// defaults to the past 30 days, and a missing limit defaults to
-    /// 20 unless a window or `--project` was pinned (in which case
-    /// the full filtered set is returned).
-    pub async fn resolve(&self) -> Result<Vec<SessionInfo>, SessionSelectError> {
-        if !self.sessions.is_empty() {
-            let mut out = Vec::with_capacity(self.sessions.len());
-            let mut errors = Vec::new();
-            for prefix in &self.sessions {
-                match session::one_session(prefix) {
-                    Ok(s) => out.push(s),
-                    Err(e) => errors.push(e.to_string()),
-                }
+/// Resolve a command's positional session list and filter options to
+/// native session records.
+///
+/// A non-empty `sessions` list is resolved through
+/// `session::one_session` and returned as-is. Otherwise the filter
+/// axes populate a `SessionListBuilder`; a missing window defaults to
+/// the past 30 days, and a missing limit defaults to 20 unless a
+/// window or `--project` was pinned (in which case the full filtered
+/// set is returned).
+pub async fn select_sessions(
+    sessions: &[String],
+    filter: &SessionFilterArgs,
+) -> Result<Vec<SessionInfo>, SessionSelectError> {
+    if !sessions.is_empty() {
+        let mut out = Vec::with_capacity(sessions.len());
+        let mut errors = Vec::new();
+        for prefix in sessions {
+            match session::one_session(prefix) {
+                Ok(s) => out.push(s),
+                Err(e) => errors.push(e.to_string()),
             }
-            if !errors.is_empty() {
-                return Err(SessionSelectError::Lookup(errors));
-            }
-            return Ok(out);
         }
+        if !errors.is_empty() {
+            return Err(SessionSelectError::Lookup(errors));
+        }
+        return Ok(out);
+    }
 
-        let project_slug = match &self.project {
+    {
+        let project_slug = match &filter.project {
             Some(p) => {
                 let projects = known_projects()
                     .await
@@ -159,22 +156,22 @@ impl SessionSelectArgs {
             None => None,
         };
 
-        let since = if self.all {
+        let since = if filter.all {
             None
-        } else if self.today {
+        } else if filter.today {
             Some(since_local_midnight())
-        } else if let Some(days) = self.days {
+        } else if let Some(days) = filter.days {
             Some(Duration::from_secs(u64::from(days) * 86_400))
         } else {
             Some(Duration::from_secs(30 * 86_400))
         };
 
-        let window_pinned = self.all || self.today || self.days.is_some();
-        let limit = if self.all || self.sample.is_some() {
+        let window_pinned = filter.all || filter.today || filter.days.is_some();
+        let limit = if filter.all || filter.sample.is_some() {
             None
-        } else if let Some(n) = self.limit {
+        } else if let Some(n) = filter.limit {
             Some(n)
-        } else if window_pinned || self.project.is_some() {
+        } else if window_pinned || filter.project.is_some() {
             None
         } else {
             Some(20)
@@ -191,7 +188,7 @@ impl SessionSelectArgs {
             builder = builder.limit(n);
         }
         let mut sessions: Vec<SessionInfo> = builder.build().into_iter().collect();
-        if let Some(n) = self.sample {
+        if let Some(n) = filter.sample {
             sessions.shuffle(&mut rand::rng());
             sessions.truncate(n);
         }

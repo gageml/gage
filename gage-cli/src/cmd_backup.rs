@@ -15,7 +15,7 @@ use crate::dialog::{self, DialogError};
 
 #[derive(Args)]
 pub struct BackupArgs {
-    /// Backup remote or URL to send the store to
+    /// Backup remote or URL
     ///
     /// A remote added with `gage remote add --backup`, or any Git URL
     /// or path. Optional when exactly one backup remote exists

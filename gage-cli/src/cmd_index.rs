@@ -18,7 +18,7 @@ pub struct IndexArgs {
     #[arg(short, long, value_name = "SOURCE")]
     source: Option<String>,
 
-    /// Rebuild the index
+    /// Rebuild index
     #[arg(long)]
     rebuild: bool,
 

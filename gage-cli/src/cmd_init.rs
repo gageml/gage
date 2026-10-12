@@ -9,7 +9,7 @@ use crate::source::driver_registry;
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// Uninstall Gage from the harness
+    /// Remove Gage from Claude Code
     #[arg(short, long)]
     pub remove: bool,
 

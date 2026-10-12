@@ -46,12 +46,12 @@ pub struct TagAddArgs {
     /// grouped: 'garrett/baseline'.
     name: String,
 
-    /// Object to tag
+    /// Object to tag (tag, ID, or prefix)
     ///
     /// A tag name, an object ID, or a unique ID prefix.
     object: String,
 
-    /// Move the tag if it exists
+    /// Move tag if it exists
     #[arg(short, long)]
     force: bool,
 }
@@ -62,7 +62,7 @@ pub struct TagListArgs {
     #[arg(long)]
     dangling: bool,
 
-    /// Show the full object ID
+    /// Show full object ID
     #[arg(long)]
     full_id: bool,
 

@@ -63,7 +63,7 @@ use crate::dialog::{self, DialogError};
 use crate::human::{format_duration, format_elapsed_ms};
 use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
-use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
+use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::style as s;
 
 /// Install the `tracing` subscriber for a scan: warnings and above to
@@ -178,7 +178,7 @@ enum ScanCommand {
 
 #[derive(Args)]
 pub struct ScanRunArgs {
-    /// Scanner to run (repeatable)
+    /// Scanner to run (name or path; repeatable)
     ///
     /// A scanner name, or when no scanner has that name, a path: a
     /// directory holding a scanner.rn, or a scanner file. A `#{...}`
@@ -186,9 +186,13 @@ pub struct ScanRunArgs {
     #[arg(short, long = "scanner", value_name = "SCANNER")]
     scanners: Vec<String>,
 
-    /// Run the scanners in a group (repeatable)
+    /// Scanner group to run (repeatable)
     #[arg(short, long = "group", value_name = "NAME")]
     groups: Vec<String>,
+
+    /// Sessions to scan (ID or prefix)
+    #[arg(value_name = "SESSION", conflicts_with_all = FILTER_ARG_NAMES)]
+    sessions: Vec<String>,
 
     /// Dataset to scan (ID or prefix)
     ///
@@ -198,43 +202,50 @@ pub struct ScanRunArgs {
         short,
         long,
         value_name = "DATASET",
-        conflicts_with_all = SELECT_ARG_NAMES,
+        conflicts_with = "sessions",
+        conflicts_with_all = FILTER_ARG_NAMES,
     )]
     dataset: Option<String>,
 
     #[command(flatten)]
-    select: SessionSelectArgs,
+    filter: SessionFilterArgs,
 
-    /// Tasks to run at once
-    #[arg(short, long, value_name = "N", default_value_t = 10)]
+    /// Tasks to run at once (default 10)
+    #[arg(
+        short,
+        long,
+        value_name = "N",
+        default_value_t = 10,
+        hide_default_value = true
+    )]
     jobs: usize,
 
-    /// Agents to run at once
+    /// Agents to run at once (default 8)
     ///
     /// Bounds the agents running across every task of the scan. A task
     /// whose agents are all waiting for a slot shows as waiting.
-    #[arg(long, value_name = "N", default_value_t = 8)]
+    #[arg(long, value_name = "N", default_value_t = 8, hide_default_value = true)]
     agent_jobs: usize,
 
-    /// Tag the new scan run
+    /// Tag new scan run
     ///
     /// Follows git's ref naming rules. An existing tag is an error
     /// unless --force-tag is given.
     #[arg(long, value_name = "NAME")]
     tag: Option<String>,
 
-    /// Move the tag if it exists
+    /// Move tag if it exists
     #[arg(long, requires = "tag")]
     force_tag: bool,
 
-    /// Run the scan without a dataset
+    /// Run scan without a dataset
     ///
     /// No dataset is created or selected; scanners run with no
     /// sessions to read.
     #[arg(
         long,
-        conflicts_with = "dataset",
-        conflicts_with_all = SELECT_ARG_NAMES,
+        conflicts_with_all = ["dataset", "sessions"],
+        conflicts_with_all = FILTER_ARG_NAMES,
     )]
     no_dataset: bool,
 
@@ -272,20 +283,20 @@ pub struct ScanListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
-    /// Show the full scan run ID
+    /// Show full scan run ID
     #[arg(long)]
     full_id: bool,
 }
 
 #[derive(Args)]
 pub struct ScanViewArgs {
-    /// Scan run ID (or prefix)
+    /// Scan run to view (ID or prefix)
     scan: Option<String>,
 }
 
 #[derive(Args)]
 pub struct ScanDeleteArgs {
-    /// Scan run IDs (or prefixes)
+    /// Scan runs to delete (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
@@ -1531,7 +1542,7 @@ struct ScanPrep {
 /// A chosen session set for the scan: an existing dataset, a new
 /// dataset to be built from the resolved native sessions, or none.
 /// `Reuse` and `None` carry everything needed to preview the plan;
-/// `New` carries the sessions resolved from `SessionSelectArgs`
+/// `New` carries the sessions resolved from `select_sessions`
 /// before any dataset is written.
 enum DatasetPlan {
     Reuse {
@@ -1935,8 +1946,8 @@ fn preview_scanners(scanners: &[Scanner<'_>]) -> Result<(), DialogError> {
 
 /// Decide what the scan's dataset will be. Reuses `--dataset`,
 /// honors `--no-dataset`, otherwise prompts the session axis under
-/// an empty-and-not-`-y` call and runs `SessionSelectArgs::resolve`
-/// for the final native-session list.
+/// an empty-and-not-`-y` call and runs `select_sessions` for the
+/// final native-session list.
 async fn resolve_dataset_plan(
     args: &mut ScanRunArgs,
     store: &Store,
@@ -1958,18 +1969,16 @@ async fn resolve_dataset_plan(
         });
     }
 
-    if args.select.is_empty() && !args.yes {
-        prompt_session_axis(&mut args.select)?;
+    if args.sessions.is_empty() && args.filter.is_empty() && !args.yes {
+        prompt_session_axis(&mut args.filter)?;
     }
-    let selected = args
-        .select
-        .resolve()
+    let selected = select_sessions(&args.sessions, &args.filter)
         .await
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
     Ok(DatasetPlan::New { selected })
 }
 
-fn prompt_session_axis(select: &mut SessionSelectArgs) -> Result<(), DialogError> {
+fn prompt_session_axis(filter: &mut SessionFilterArgs) -> Result<(), DialogError> {
     let window = cli::select("Timeframe")
         .item(Window::Today, "Today", "")
         .item(Window::Days(7), "This week", "")
@@ -1978,12 +1987,12 @@ fn prompt_session_axis(select: &mut SessionSelectArgs) -> Result<(), DialogError
         .initial_value(Window::Days(30))
         .interact()?;
     match window {
-        Window::Today => select.today = true,
-        Window::Days(n) => select.days = Some(n),
+        Window::Today => filter.today = true,
+        Window::Days(n) => filter.days = Some(n),
         Window::All => {
             // "All available" implies no session cap; the limit
             // prompt is skipped.
-            select.all = true;
+            filter.all = true;
             return Ok(());
         }
     }
@@ -1994,7 +2003,7 @@ fn prompt_session_axis(select: &mut SessionSelectArgs) -> Result<(), DialogError
         .item(None, "All available", "")
         .initial_value(Some(20_usize))
         .interact()?;
-    select.limit = limit;
+    filter.limit = limit;
     Ok(())
 }
 

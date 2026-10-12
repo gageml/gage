@@ -41,7 +41,7 @@ pub struct RemoteAddArgs {
     /// Remote URL
     url: String,
 
-    /// Mark the remote as a backup target
+    /// Mark remote as a backup target
     ///
     /// `gage backup` sends the whole store to a backup target and
     /// refuses any other remote

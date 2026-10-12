@@ -44,6 +44,8 @@ mod cmd_status;
 mod cmd_store;
 mod cmd_tag;
 mod dialog;
+#[cfg(test)]
+mod help_lint;
 mod human;
 mod json;
 mod limit;
@@ -51,7 +53,7 @@ mod markdown;
 mod model_prompt;
 mod scanner_attach;
 mod scanner_spec;
-mod session_select;
+mod session_filter;
 mod source;
 mod style;
 mod target;
@@ -63,7 +65,9 @@ const VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 #[derive(Parser)]
 #[command(name = "gage", version = VERSION, about = "Gage CLI")]
 struct Cli {
-    /// Log level (trace, debug, info, warn, error)
+    /// Log level
+    ///
+    /// One of trace, debug, info, warn, or error
     #[arg(long, value_name = "LEVEL")]
     log: Option<String>,
 
@@ -94,7 +98,7 @@ const GAGE_LOG_TARGETS: &[&str] = &[
 
 #[derive(Subcommand)]
 enum Command {
-    /// Setup Gage (register with Claude Code)
+    /// Register Gage with Claude Code
     Init(cmd_init::InitArgs),
 
     /// Run scanners on sessions
@@ -122,7 +126,7 @@ enum Command {
         )]
         source: Option<String>,
 
-        /// Operate on sessions in the Gage store
+        /// Operate on stored sessions
         #[arg(
             short = 'S',
             long,
@@ -192,7 +196,7 @@ enum Command {
         command: cmd_config::ConfigCommand,
     },
 
-    /// Manage the Gage store
+    /// Manage Gage store
     Store {
         #[command(subcommand)]
         command: cmd_store::StoreCommand,
@@ -210,7 +214,7 @@ enum Command {
     /// and what they link. Reports what could not be merged.
     Fetch(cmd_fetch::FetchArgs),
 
-    /// Back up the whole store to a remote
+    /// Back up store to a remote
     ///
     /// Sends every object, tag, and key to a remote added with
     /// `--backup`. Restoring is `gage fetch`.
@@ -219,10 +223,10 @@ enum Command {
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
 
-    /// Update the Gage index
+    /// Update Gage index
     Index(cmd_index::IndexArgs),
 
-    /// Start the MCP server
+    /// Start MCP server
     Mcp,
 }
 

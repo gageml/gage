@@ -50,17 +50,17 @@ pub struct NoteListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
-    /// Show the full note ID
+    /// Show full note ID
     #[arg(long)]
     full_id: bool,
 }
 
 #[derive(Args)]
 pub struct NoteAddArgs {
-    /// Note text (prompted if omitted)
+    /// Note text
     text: Option<String>,
 
-    /// Note target
+    /// Note target (ID or prefix)
     ///
     /// An object ID (or unique prefix), optionally followed by '#' and
     /// a line selection such as '12', '12-20', or '12-20,31'. A line
@@ -69,15 +69,15 @@ pub struct NoteAddArgs {
     #[arg(short, long)]
     target: Option<String>,
 
-    /// Note name (default: "comment")
+    /// Note name (default "comment")
     #[arg(short, long)]
     name: Option<String>,
 
-    /// Author username (default: $USER)
+    /// Author username (default $USER)
     #[arg(short, long)]
     user: Option<String>,
 
-    /// Store the text as JSON
+    /// Store text as JSON
     #[arg(long)]
     json: bool,
 
@@ -94,7 +94,7 @@ pub struct NoteAddArgs {
 
 #[derive(Args)]
 pub struct NoteShowArgs {
-    /// Note ID (or prefix)
+    /// Note to show (ID or prefix)
     id: String,
 
     /// Show note docs
@@ -104,7 +104,7 @@ pub struct NoteShowArgs {
 
 #[derive(Args)]
 pub struct NoteEditArgs {
-    /// Note ID (or prefix)
+    /// Note to edit (ID or prefix)
     id: String,
 
     /// New note text
@@ -114,14 +114,14 @@ pub struct NoteEditArgs {
     #[arg(short, long)]
     name: Option<String>,
 
-    /// New note target
+    /// New note target (ID or prefix)
     ///
     /// An object ID (or unique prefix), optionally followed by '#' and
     /// a line selection
     #[arg(short, long)]
     target: Option<String>,
 
-    /// Store the text as JSON
+    /// Store text as JSON
     #[arg(long)]
     json: bool,
 
@@ -134,7 +134,7 @@ pub struct NoteEditArgs {
 
 #[derive(Args)]
 pub struct NoteDeleteArgs {
-    /// Note IDs (or prefixes)
+    /// Notes to delete (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 

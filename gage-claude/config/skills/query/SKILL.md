@@ -41,6 +41,13 @@ reopening it). An issue has at most one `wrote` link.
   will fail with "Physical plan does not support logical expression
   ScalarSubquery". Use a `ROW_NUMBER()` windowed CTE instead.
 
+- **Two or more correlated aggregate subqueries in one SELECT list fail.** A
+  query with both `(SELECT count(*) FROM scan_session x WHERE x.scan_id = s.id)`
+  and `(SELECT count(*) FROM scan_note y WHERE y.scan_id = s.id)` fails with
+  "Ambiguous reference to unqualified field". One such subquery works. Join a
+  `(SELECT scan_id, count(*) ... GROUP BY scan_id)` derived table per count
+  instead.
+
 - **No `any_value` aggregate.** To carry a representative value through a
   `GROUP BY` (e.g. a session title), add the column to the `GROUP BY` or use
   `min(...)` / `max(...)`.

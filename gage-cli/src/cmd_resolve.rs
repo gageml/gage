@@ -13,12 +13,12 @@ use crate::model_prompt::{self, DefaultModel};
 
 #[derive(Args)]
 pub struct ResolveArgs {
-    /// Issue IDs (or prefixes) to scope the session
+    /// Issues to resolve (ID or prefix)
     ///
     /// If omitted, all pending and open issues are in scope.
     ids: Vec<String>,
 
-    /// Model for the session
+    /// Model for session
     ///
     /// If omitted, the dialog prompts for a model.
     #[arg(short, long)]

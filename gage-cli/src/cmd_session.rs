@@ -33,7 +33,7 @@ use tabled::{
 
 use crate::cmd_dataset::{AddEvent, add_native_to_dataset};
 use crate::dialog::{self, DialogError};
-use crate::session_select::{SELECT_ARG_NAMES, SessionSelectArgs};
+use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::source;
 use crate::style::{self, IdKind, styled_id};
 
@@ -42,14 +42,14 @@ pub enum SessionCommand {
     /// List available sessions
     List(SessionListArgs),
 
-    /// Add native sessions to the store
+    /// Add sessions to store
     ///
     /// Each session is read from the selected source and written as a
     /// session object. Adding a session already in the store updates
     /// it when its content changed and is otherwise a no-op.
     Add(SessionAddArgs),
 
-    /// Remove stored sessions from the store or from a dataset
+    /// Remove sessions from store or from a dataset
     ///
     /// Without --dataset, each session is unlinked from every dataset
     /// that holds it, then marked removed in the store. With
@@ -81,7 +81,7 @@ pub struct SessionListArgs {
     #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
 
-    /// Filter by how long ago the session was modified
+    /// Show sessions modified within SINCE
     #[arg(long, value_parser = super::parse_duration)]
     pub since: Option<Duration>,
 
@@ -89,11 +89,11 @@ pub struct SessionListArgs {
     #[arg(long)]
     pub empty: bool,
 
-    /// Show the full session ID
+    /// Show full session ID
     #[arg(long)]
     pub full_id: bool,
 
-    /// List the sessions in a dataset
+    /// List sessions in dataset (ID or prefix)
     ///
     /// Dataset ID (or prefix). Implies --stored; rows are in dataset
     /// member order
@@ -106,9 +106,14 @@ pub struct SessionListArgs {
 #[command(group = ArgGroup::new("session_add_select")
     .required(true)
     .multiple(true)
-    .args(SELECT_ARG_NAMES))]
+    .arg("sessions")
+    .args(FILTER_ARG_NAMES))]
 pub struct SessionAddArgs {
-    /// Add the sessions to a dataset
+    /// Sessions to add (ID or prefix)
+    #[arg(value_name = "SESSION", conflicts_with_all = FILTER_ARG_NAMES)]
+    pub sessions: Vec<String>,
+
+    /// Add sessions to dataset (ID or prefix)
     ///
     /// Dataset ID (or prefix). Native sessions are added to the store
     /// and linked in one step; with --stored, sessions already in the
@@ -131,7 +136,7 @@ pub struct SessionAddArgs {
     pub force: bool,
 
     #[command(flatten)]
-    pub select: SessionSelectArgs,
+    pub filter: SessionFilterArgs,
 }
 
 pub(crate) fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
@@ -141,11 +146,11 @@ pub(crate) fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
 #[derive(Args)]
 #[command(next_display_order = 3)]
 pub struct SessionRemoveArgs {
-    /// Stored session IDs (or prefixes)
+    /// Stored sessions to remove (ID or prefix)
     #[arg(required = true)]
     pub ids: Vec<String>,
 
-    /// Remove the sessions from a dataset only
+    /// Remove sessions from dataset only (ID or prefix)
     ///
     /// Dataset ID (or prefix). The sessions stay in the store
     #[arg(short, long, value_name = "DATASET")]
@@ -155,10 +160,10 @@ pub struct SessionRemoveArgs {
 #[derive(Args)]
 #[command(next_display_order = 3)]
 pub struct SessionMoveArgs {
-    /// Session ID (or prefix)
+    /// Session to move (ID or prefix)
     pub session: String,
 
-    /// Destination project directory (must exist)
+    /// Destination project directory
     pub dir: PathBuf,
 
     /// Skip confirmation prompt
@@ -169,10 +174,10 @@ pub struct SessionMoveArgs {
 #[derive(Args)]
 #[command(next_display_order = 3)]
 pub struct SessionViewArgs {
-    /// Session ID (or prefix)
+    /// Session to view (ID or prefix)
     pub session: Option<String>,
 
-    /// View options (comma-separated)
+    /// Comma separated list of view options
     ///
     /// Options:
     ///   turns  - show model turns in outline
@@ -184,7 +189,7 @@ pub struct SessionViewArgs {
 #[derive(Args)]
 #[command(next_display_order = 3)]
 pub struct SessionDeleteArgs {
-    /// Session IDs (or prefix)
+    /// Sessions to delete (ID or prefix)
     #[arg(conflicts_with = "empty")]
     pub ids: Vec<String>,
 
@@ -670,7 +675,7 @@ pub async fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
     // --stored --dataset resolves stored session IDs, not the native
     // filter axes. Reject anything but positional session IDs here so
     // a filter given with --stored fails up front.
-    if stored && !only_positional_selected(&args.select) {
+    if stored && (args.sessions.is_empty() || !args.filter.is_empty()) {
         eprintln!(
             "gage session add: --stored --dataset takes stored session IDs; the selection flags apply to native sessions"
         );
@@ -707,14 +712,10 @@ async fn add_dialog(
     let mut view = DialogAddView::new(io::stdout().is_terminal());
     match dataset_id {
         Some(dataset_id) if stored => {
-            add_stored_to_dataset(&store, &dataset_id, &args.select.sessions, &mut |e| {
-                view.on(e)
-            })?
+            add_stored_to_dataset(&store, &dataset_id, &args.sessions, &mut |e| view.on(e))?
         }
         _ => {
-            let selected = args
-                .select
-                .resolve()
+            let selected = select_sessions(&args.sessions, &args.filter)
                 .await
                 .map_err(|e| DialogError::Failed(format!("{e}")))?;
             if selected.is_empty() {
@@ -782,19 +783,6 @@ impl DialogAddView {
     fn finish(self) -> String {
         self.done
     }
-}
-
-/// True when the shared selection was given only as a positional
-/// session list — the form `--stored --dataset` needs. Any filter
-/// axis being set means the caller asked for a native walk.
-fn only_positional_selected(select: &SessionSelectArgs) -> bool {
-    !select.sessions.is_empty()
-        && select.project.is_none()
-        && select.limit.is_none()
-        && select.sample.is_none()
-        && select.days.is_none()
-        && !select.today
-        && !select.all
 }
 
 /// Link sessions already in the store, given by Gage id or prefix, as

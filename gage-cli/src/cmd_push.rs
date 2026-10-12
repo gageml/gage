@@ -31,7 +31,7 @@ pub struct PushArgs {
     /// A remote name from `gage remote add`, or any Git URL or path
     repository: String,
 
-    /// Objects to push
+    /// Objects to push (tag, ID, or prefix)
     ///
     /// Tag names, object IDs, or unique ID prefixes. Everything an
     /// object links is pushed with it: a scan's dataset, sessions,
@@ -39,7 +39,7 @@ pub struct PushArgs {
     #[arg(required = true)]
     objects: Vec<String>,
 
-    /// Also push the notes that target the named objects
+    /// Also push notes targeting named objects
     #[arg(long)]
     with_notes: bool,
 

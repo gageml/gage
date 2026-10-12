@@ -24,7 +24,7 @@ use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, parse_byte_size, run_query};
 use crate::dialog::{self, DialogError};
 use crate::human::format_elapsed_ms;
-use crate::session_select::SessionSelectArgs;
+use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
@@ -68,7 +68,7 @@ pub struct DatasetAddArgs {
     #[arg(short, long, value_name = "SOURCE")]
     pub source: Option<String>,
 
-    /// Tag the new dataset
+    /// Tag new dataset
     ///
     /// Follows git's ref naming rules. An existing tag is an error
     /// unless --force-tag is given.
@@ -89,17 +89,21 @@ pub struct DatasetAddArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Move the tag if it exists
+    /// Move tag if it exists
     #[arg(long, requires = "tag")]
     pub force_tag: bool,
 
+    /// Sessions to add (ID or prefix)
+    #[arg(value_name = "SESSION", conflicts_with_all = FILTER_ARG_NAMES)]
+    pub sessions: Vec<String>,
+
     #[command(flatten)]
-    pub select: SessionSelectArgs,
+    pub filter: SessionFilterArgs,
 }
 
 #[derive(Args)]
 pub struct DatasetRefreshArgs {
-    /// Dataset ID (or prefix)
+    /// Dataset to refresh (ID or prefix)
     pub dataset: String,
 
     /// Session source
@@ -130,24 +134,24 @@ pub struct DatasetListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
-    /// Show the full dataset ID
+    /// Show full dataset ID
     #[arg(long)]
     full_id: bool,
 }
 
 #[derive(Args)]
 pub struct DatasetShowArgs {
-    /// Dataset ID (or prefix)
+    /// Dataset to show (ID or prefix)
     dataset: String,
 }
 
 #[derive(Args)]
 pub struct DatasetDeleteArgs {
-    /// Dataset IDs (or prefixes)
+    /// Datasets to delete (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
-    /// Also remove member sessions from the store
+    /// Also remove member sessions from store
     ///
     /// A session that another dataset holds is kept. Scan runs that
     /// used the dataset are not affected.
@@ -196,7 +200,7 @@ pub async fn add(args: DatasetAddArgs) {
         }
     }
 
-    if args.select.is_empty() {
+    if args.sessions.is_empty() && args.filter.is_empty() {
         return;
     }
 
@@ -216,7 +220,8 @@ pub async fn add(args: DatasetAddArgs) {
         &store,
         &dataset_id,
         args.source.as_deref(),
-        &args.select,
+        &args.sessions,
+        &args.filter,
         max_bytes,
     )
     .await;
@@ -312,10 +317,11 @@ pub(crate) async fn populate_dataset(
     store: &Store,
     dataset_id: &str,
     source: Option<&str>,
-    select: &SessionSelectArgs,
+    sessions: &[String],
+    filter: &SessionFilterArgs,
     max_bytes: Option<u64>,
 ) {
-    let selected = match select.resolve().await {
+    let selected = match select_sessions(sessions, filter).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{command}: {e}");

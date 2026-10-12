@@ -65,7 +65,7 @@ pub enum AttachmentCommand {
     /// Show an attachment and its files
     Show(AttachmentShowArgs),
 
-    /// Remove attachments from the store or from a dataset
+    /// Remove attachments from store or from a dataset
     ///
     /// Without --dataset, each attachment is removed from every
     /// dataset that holds it, then marked removed in the store. With
@@ -76,20 +76,20 @@ pub enum AttachmentCommand {
 
 #[derive(Args)]
 pub struct AttachmentAddArgs {
-    /// Files to include (path globs relative to the root)
+    /// Files to include (glob)
     ///
     /// At least one is required; `**/*` selects every file
     #[arg(required_unless_present_any = ["stored", "scanners"], value_name = "INCLUDE")]
     pub includes: Vec<String>,
 
-    /// Name the attachment
+    /// Attachment name
     ///
     /// Scanners select attachments by name. A name is letters,
     /// digits, `-`, `_`, and `.`
     #[arg(short, long, value_name = "NAME")]
     pub name: Option<String>,
 
-    /// Key the attachment
+    /// Attachment key
     ///
     /// A later add under the same key updates this attachment instead
     /// of creating one. Without --key, a named add is keyed by its
@@ -97,30 +97,30 @@ pub struct AttachmentAddArgs {
     #[arg(short, long, value_name = "KEY")]
     pub key: Option<String>,
 
-    /// Files to exclude (path glob relative to the root, repeatable)
+    /// Files to exclude (glob; repeatable)
     #[arg(short, long, value_name = "PATTERN")]
     pub exclude: Vec<String>,
 
-    /// Directory to select files under (default: current directory)
+    /// Directory to select files under (default current directory)
     ///
     /// Stored file paths are relative to it
     #[arg(short, long, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
-    /// Object the files are about (repeatable)
+    /// Target object (ID or prefix; repeatable)
     ///
     /// ID (or prefix) of any stored object, such as a session or note
     #[arg(short, long = "target", value_name = "OBJECT")]
     pub targets: Vec<String>,
 
-    /// Add the attachment to a dataset
+    /// Add attachment to dataset (ID or prefix)
     ///
     /// Dataset ID (or prefix). The attachment is stored and added to
     /// the dataset in one step
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
 
-    /// Add an attachment already in the store to a dataset
+    /// Add stored attachment to dataset (name, ID, or prefix)
     ///
     /// Attachment name, ID, or ID prefix. Takes the attachment from
     /// the store instead of the file system. Requires --dataset
@@ -133,7 +133,7 @@ pub struct AttachmentAddArgs {
     )]
     pub stored: Option<String>,
 
-    /// Run a scanner's attach tasks against a dataset (repeatable)
+    /// Run a scanner's attach tasks against a dataset (name or path; repeatable)
     ///
     /// A scanner name, or when no scanner has that name, a path: a
     /// directory holding a scanner.rn, or a scanner file. Each scanner
@@ -154,30 +154,30 @@ pub struct AttachmentListArgs {
     #[command(flatten)]
     pub limit: crate::limit::LimitArgs,
 
-    /// List the attachments in a dataset
+    /// List attachments in dataset (ID or prefix)
     ///
     /// Dataset ID (or prefix). Rows are in dataset order
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
 
-    /// Show the full attachment ID
+    /// Show full attachment ID
     #[arg(long)]
     pub full_id: bool,
 }
 
 #[derive(Args)]
 pub struct AttachmentShowArgs {
-    /// Attachment name, ID, or ID prefix
+    /// Attachment to show (name, ID, or prefix)
     pub attachment: String,
 }
 
 #[derive(Args)]
 pub struct AttachmentRemoveArgs {
-    /// Attachment names, IDs, or ID prefixes
+    /// Attachments to remove (name, ID, or prefix)
     #[arg(required = true)]
     pub attachments: Vec<String>,
 
-    /// Remove the attachments from a dataset only
+    /// Remove attachments from dataset only (ID or prefix)
     ///
     /// Dataset ID (or prefix). The attachments stay in the store
     #[arg(short, long, value_name = "DATASET")]
