@@ -88,7 +88,6 @@ const GAGE_LOG_TARGETS: &[&str] = &[
     "gage_claude",
     "gage_cli",
     "gage_core",
-    "gage_index",
     "gage_log",
     "gage_lsp",
     "gage_mcp",
