@@ -13,6 +13,7 @@ gage-registry = { path = "../gage-registry" }
 gage-runtime = { path = "../gage-runtime" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
+libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }

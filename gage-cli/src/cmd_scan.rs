@@ -23,6 +23,7 @@ use gage_query::{ContextBuilder, ScanScope};
 use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, scanner_source};
 use gage_runtime::{LOG_TARGET, Output, TaskOutput};
+use gage_scan::recover::{self, Recovered};
 use gage_scan::scan_dir::scans_dir;
 use gage_scan::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
 use gage_session::Driver;
@@ -304,11 +305,44 @@ pub struct ScanDeleteArgs {
 }
 
 pub async fn main(args: ScanArgs) {
+    recover_orphans();
     match args.command {
         Some(ScanCommand::List(a)) => list(a).await,
         Some(ScanCommand::View(a)) => view(a).await,
         Some(ScanCommand::Delete(a)) => delete(a),
         None => run_scan(args.run_args).await,
+    }
+}
+
+/// Apply the scan directories an interrupted run left behind before
+/// the command reads or writes scans. A directory a live run owns is
+/// left alone. Each recovery is reported on stderr; one that fails
+/// stays for the next command to retry.
+fn recover_orphans() {
+    let scans_dir = scans_dir();
+    let orphans = match recover::find_orphans(&scans_dir) {
+        Ok(orphans) => orphans,
+        Err(e) => {
+            eprintln!("gage scan: checking {}: {e}", scans_dir.display());
+            return;
+        }
+    };
+    if orphans.is_empty() {
+        return;
+    }
+    let store = open_store("gage scan");
+    for orphan in orphans {
+        let shown = short_uuid(orphan.id()).to_string();
+        match recover::recover(&store, orphan, crate::VERSION) {
+            Ok(Recovered::Applied { attrs, .. }) => eprintln!(
+                "gage scan: recovered an interrupted run. {}",
+                gage_scan::summary_line(&shown, &attrs)
+            ),
+            Ok(Recovered::Removed) => {
+                eprintln!("gage scan: removed the applied scan directory of {shown}")
+            }
+            Err(e) => eprintln!("gage scan: recovering scan {shown}: {e}"),
+        }
     }
 }
 

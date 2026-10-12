@@ -2340,6 +2340,7 @@ dependencies = [
  "gage-runtime",
  "gage-session",
  "gage-store",
+ "libc",
  "libtest-mimic",
  "rune",
  "serde",

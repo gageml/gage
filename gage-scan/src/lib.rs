@@ -18,6 +18,7 @@
 pub mod attach;
 pub mod error;
 pub mod plan;
+pub mod recover;
 pub mod scan_dir;
 pub mod test_runner;
 pub mod trace;
@@ -627,46 +628,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
         } else {
             State::Completed
         })?;
-        // Apply: the scan's notes become objects first, so the scan
-        // can link them
-        let notes = NoteStore::from(store);
-        let mut note_shas = Vec::new();
-        let mut note_commits: HashMap<String, String> = HashMap::new();
-        for dir in self.scan_dir.note_dirs()? {
-            let (id, sha) = notes.create_from_dir(&dir)?;
-            note_shas.push(sha.clone());
-            note_commits.insert(id, sha);
-        }
-        self.scan_dir.write_notes_link(&note_shas)?;
-        // A watermark on one of the scan's notes waited for its commit
-        for (id, key, mark) in self.scan_dir.note_watermarks()? {
-            let Some(commit) = note_commits.get(&id) else {
-                return Err(ScanError::ScanDir(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("note watermark names {id}, which the scan did not write"),
-                )));
-            };
-            self.scan_dir.write_watermark(&id, &key, commit, mark)?;
-        }
-        let carried = self.scan_dir.carried_notes()?;
-        self.scan_dir.write_notes_carried_link(&carried)?;
-        // Issues follow the notes they cite, so their evidence resolves
-        let issues = IssueStore::from(store);
-        let mut issue_shas = Vec::new();
-        for dir in self.scan_dir.issue_dirs()? {
-            let (_, sha) = issues.apply_from_dir(&dir)?;
-            issue_shas.push(sha);
-        }
-        self.scan_dir.write_issues_link(&issue_shas)?;
-        let commit_sha = ScanStore::from(store).create(&self.id, &self.scan_dir.object_dir())?;
-        tracing::info!(
-            notes = note_shas.len(),
-            issues = issue_shas.len(),
-            carried = carried.len(),
-            commit = %commit_sha,
-            "scan applied"
-        );
-        self.scan_dir.mark_applied()?;
+        let commit_sha = apply_scan_dir(store, &self.scan_dir)?;
         self.scan_dir.remove()?;
         Ok(ScanOutcome {
             id: self.id,
@@ -922,6 +884,52 @@ impl<F: FnMut(Event)> Run<'_, F> {
         (self.on_event)(Event::Scan(output));
         Ok(())
     }
+}
+
+/// Apply a scan directory in a terminal state to the store: its notes
+/// become objects first, so the scan can link them, then its issues,
+/// whose evidence cites the notes, then the scan itself. Returns the
+/// scan's commit SHA and marks the directory applied; the caller
+/// removes it.
+pub(crate) fn apply_scan_dir(store: &Store, scan_dir: &ScanDir) -> Result<String, ScanError> {
+    let notes = NoteStore::from(store);
+    let mut note_shas = Vec::new();
+    let mut note_commits: HashMap<String, String> = HashMap::new();
+    for dir in scan_dir.note_dirs()? {
+        let (id, sha) = notes.create_from_dir(&dir)?;
+        note_shas.push(sha.clone());
+        note_commits.insert(id, sha);
+    }
+    scan_dir.write_notes_link(&note_shas)?;
+    // A watermark on one of the scan's notes waited for its commit
+    for (id, key, mark) in scan_dir.note_watermarks()? {
+        let Some(commit) = note_commits.get(&id) else {
+            return Err(ScanError::ScanDir(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("note watermark names {id}, which the scan did not write"),
+            )));
+        };
+        scan_dir.write_watermark(&id, &key, commit, mark)?;
+    }
+    let carried = scan_dir.carried_notes()?;
+    scan_dir.write_notes_carried_link(&carried)?;
+    let issues = IssueStore::from(store);
+    let mut issue_shas = Vec::new();
+    for dir in scan_dir.issue_dirs()? {
+        let (_, sha) = issues.apply_from_dir(&dir)?;
+        issue_shas.push(sha);
+    }
+    scan_dir.write_issues_link(&issue_shas)?;
+    let commit_sha = ScanStore::from(store).create(scan_dir.id(), &scan_dir.object_dir())?;
+    tracing::info!(
+        notes = note_shas.len(),
+        issues = issue_shas.len(),
+        carried = carried.len(),
+        commit = %commit_sha,
+        "scan applied"
+    );
+    scan_dir.mark_applied()?;
+    Ok(commit_sha)
 }
 
 /// The scan's closing line: `Scan <shown id> completed: 3 tasks: 2

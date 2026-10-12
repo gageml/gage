@@ -32,16 +32,20 @@
 //! and a rename, so a crash never leaves a torn file. The logs are
 //! streams, appended through an open handle; a crash leaves a valid
 //! prefix. A directory left behind by a crash stays in `running` with
-//! a dead pid; recovery is not implemented yet.
+//! a dead pid, or in a terminal state without `applied`; `recover`
+//! finds and applies it.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use gage_core::datetime::{ms_to_iso8601, now_ms};
 use gage_runtime::Level;
 use gage_runtime::source::SourceFile;
-use gage_store::{ScanAttrs, ScanDirLayout, TaskAttrs, TaskStatus};
+use gage_store::{
+    DirFiles, ScanAttrs, ScanDirLayout, ScanTask, StoreError, TaskAttrs, TaskStatus, read_tasks,
+};
 use serde::Serialize;
 
 const STATE_FILE: &str = "state";
@@ -76,6 +80,28 @@ impl State {
             State::Running => "running",
             State::Completed => "completed",
             State::Canceled => "canceled",
+        }
+    }
+
+    /// True once the run has ended and the scan's `attrs.json` is
+    /// written.
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, State::Running)
+    }
+}
+
+impl FromStr for State {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> io::Result<Self> {
+        match s.trim() {
+            "running" => Ok(State::Running),
+            "completed" => Ok(State::Completed),
+            "canceled" => Ok(State::Canceled),
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("scan state is not running, completed, or canceled: {other:?}"),
+            )),
         }
     }
 }
@@ -135,6 +161,77 @@ impl ScanDir {
         }
         scan_dir.set_state(State::Running)?;
         Ok(scan_dir)
+    }
+
+    /// Open an existing scan directory at `root`, `scans/<scan_id>/`.
+    pub fn open(root: &Path) -> io::Result<ScanDir> {
+        if !root.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("scan directory {} does not exist", root.display()),
+            ));
+        }
+        Ok(ScanDir {
+            layout: ScanDirLayout::new(root),
+        })
+    }
+
+    /// The scan's id: the directory name.
+    pub fn id(&self) -> &str {
+        self.layout
+            .scan_id()
+            .expect("a scan directory is created under its id")
+    }
+
+    /// The state file's value, or `None` when the writer died before
+    /// writing it.
+    pub fn state(&self) -> io::Result<Option<State>> {
+        match fs::read_to_string(self.layout.root().join(STATE_FILE)) {
+            Ok(text) => text.parse().map(Some),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The writer's pid, or `None` when the file is absent.
+    pub fn pid(&self) -> io::Result<Option<u32>> {
+        match fs::read_to_string(self.layout.root().join(PID_FILE)) {
+            Ok(text) => text.trim().parse().map(Some).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("scan pid file is not a pid: {e}"),
+                )
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// True once `mark_applied` has run.
+    pub fn is_applied(&self) -> bool {
+        self.layout.root().join(APPLIED_FILE).exists()
+    }
+
+    /// When the directory was created, in UNIX time millis: the pid
+    /// file's mtime, the first file `create` writes.
+    pub fn created_ms(&self) -> io::Result<i64> {
+        let modified = fs::metadata(self.layout.root().join(PID_FILE))?.modified()?;
+        Ok(modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default())
+    }
+
+    /// The task records under `scan/tasks/`, in tree order.
+    pub fn tasks(&self) -> Result<Vec<ScanTask>, StoreError> {
+        read_tasks(&DirFiles::new(&self.object_dir()))
+    }
+
+    /// The scan's `attrs.json`, present once the run reached a
+    /// terminal state.
+    pub fn scan_attrs(&self) -> io::Result<ScanAttrs> {
+        let bytes = fs::read(self.object_dir().join(ATTRS_FILE))?;
+        serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Copy a scanner's source files to `scan/scanners/<name>/
