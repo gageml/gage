@@ -33,7 +33,6 @@ mod cmd_fetch;
 mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
-mod cmd_issue2;
 mod cmd_note;
 mod cmd_push;
 mod cmd_query;
@@ -159,12 +158,6 @@ enum Command {
     Issue {
         #[command(subcommand)]
         command: cmd_issue::IssueCommand,
-    },
-
-    /// Manage issues (new store)
-    Issue2 {
-        #[command(subcommand)]
-        command: cmd_issue2::Issue2Command,
     },
 
     /// Manage notes
@@ -343,18 +336,9 @@ async fn main() {
                 cmd_attachment::AttachmentCommand::Show(args) => cmd_attachment::show(args),
                 cmd_attachment::AttachmentCommand::Remove(args) => cmd_attachment::remove(args),
             },
-            Command::Issue2 { command } => match command {
-                cmd_issue2::Issue2Command::List(args) => cmd_issue2::list(args).await,
-                cmd_issue2::Issue2Command::Show(args) => cmd_issue2::show(args).await,
-                cmd_issue2::Issue2Command::Add(args) => cmd_issue2::add(args),
-                cmd_issue2::Issue2Command::Delete(args) => cmd_issue2::delete(args),
-                cmd_issue2::Issue2Command::Close(args) => cmd_issue2::close(args),
-                cmd_issue2::Issue2Command::Open(args) => cmd_issue2::open(args),
-                cmd_issue2::Issue2Command::Comment(args) => cmd_issue2::comment(args),
-            },
             Command::Issue { command } => match command {
-                cmd_issue::IssueCommand::List(args) => cmd_issue::list(args),
-                cmd_issue::IssueCommand::Show(args) => cmd_issue::show(args),
+                cmd_issue::IssueCommand::List(args) => cmd_issue::list(args).await,
+                cmd_issue::IssueCommand::Show(args) => cmd_issue::show(args).await,
                 cmd_issue::IssueCommand::Add(args) => cmd_issue::add(args),
                 cmd_issue::IssueCommand::Delete(args) => cmd_issue::delete(args),
                 cmd_issue::IssueCommand::Close(args) => cmd_issue::close(args),

@@ -7,7 +7,6 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisec
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
-use gage_db::note;
 use gage_query::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{NOTE_TYPE, NoteEdit, NoteInput, NoteStore, NoteValue, Store, url};
@@ -543,13 +542,6 @@ pub async fn show(args: NoteShowArgs) {
         table.modify(Cell::new(2, 1), style::tty(Color::FG_BRIGHT_CYAN));
     }
     println!("{table}");
-}
-
-pub(crate) fn format_value(value: &note::NoteValue) -> String {
-    match &value.0 {
-        serde_json::Value::String(s) => s.clone(),
-        _ => value.to_json(),
-    }
 }
 
 pub fn edit(args: NoteEditArgs) {

@@ -1,30 +1,38 @@
-use std::collections::HashMap;
+//! `gage issue`: issues in the Gage store.
+//!
+//! Listings and reads go through the query context (`issue`,
+//! `issue_event`, `issue_evidence`); writes go through
+//! [`IssueStore`]. An issue has no target; the sessions it concerns
+//! are reached through the notes it cites.
+
+use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use cliclack as cli;
-use gage_claude::home::ClaudeHome;
-use gage_claude::project::project_display;
-use gage_claude::session::{self, SessionInfo};
-use gage_core::text_resolve::TextResolver;
+use console::style;
+use datafusion::arrow::array::{Array, StringArray, TimestampMillisecondArray};
+use gage_core::config::Config;
 use gage_core::uuid::short_uuid;
-use gage_db::db;
-use gage_db::issue::{self, Issue, IssueFilters, IssueStatus, IssueStatusFilter, StatusReason};
-use gage_db::scan::{self, ScanError};
-use gage_registry::scanner::ScannerRegistry;
-use gage_registry::scheme::{ErrorScheme, ScannerScheme};
-
-use crate::dialog::{self, DialogError};
+use gage_query::ContextBuilder;
+use gage_registry::driver::DriverRegistry;
+use gage_store::{
+    ISSUE_TYPE, IssueFull, IssueInput, IssueStatus, IssueStore, NOTE_TYPE, StatusReason, Store,
+};
 use tabled::{
     Table,
     settings::{
         Color, Style, Width,
         object::{Columns, Object, Rows},
-        peaker::PriorityMax,
     },
 };
 
-use crate::style;
+use crate::author::resolve_author;
+use crate::cmd_note::{count_rows, target_cell, value_cell};
+use crate::cmd_session::{column, run_query};
+use crate::dialog::{self, DialogError};
+use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
 pub enum IssueCommand {
@@ -50,88 +58,21 @@ pub enum IssueCommand {
     Comment(IssueCommentArgs),
 }
 
-#[derive(Args)]
-pub struct IssueShowArgs {
-    /// Issue ID (or prefix)
-    id: String,
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CloseReason {
+    Completed,
+    Wontfix,
+    Duplicate,
 }
 
-#[derive(Args)]
-pub struct IssueAddArgs {
-    /// Title (prompted if omitted)
-    #[arg(short, long)]
-    title: Option<String>,
-
-    /// Description (prompted if omitted)
-    #[arg(short, long)]
-    description: Option<String>,
-    /// Issue name (default: user-issue)
-    #[arg(short, long, default_value = "user-issue")]
-    name: String,
-
-    /// Add as 'pending' instead of the default 'open'
-    #[arg(short, long)]
-    pending: bool,
-}
-
-#[derive(Args)]
-pub struct IssueDeleteArgs {
-    /// Issue IDs (or prefix)
-    ids: Vec<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct IssueOpenArgs {
-    /// Issue IDs (or prefix)
-    ids: Vec<String>,
-
-    /// Message explaining issue open
-    #[arg(short, long)]
-    message: Option<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct IssueCommentArgs {
-    /// Issue IDs (or prefix)
-    ids: Vec<String>,
-
-    /// Comment text (prompted if omitted)
-    #[arg(short, long)]
-    message: Option<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct IssueCloseArgs {
-    /// Issue IDs (or prefix)
-    ids: Vec<String>,
-
-    /// Close as 'wontfix' instead of the default 'completed'
-    #[arg(short, long)]
-    wontfix: bool,
-
-    /// Close as 'duplicate' instead of the default 'completed'
-    #[arg(short, long, conflicts_with = "wontfix")]
-    duplicate: bool,
-
-    /// Message explaining issue close
-    #[arg(short, long)]
-    message: Option<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
+impl From<CloseReason> for StatusReason {
+    fn from(reason: CloseReason) -> Self {
+        match reason {
+            CloseReason::Completed => StatusReason::Completed,
+            CloseReason::Wontfix => StatusReason::WontFix,
+            CloseReason::Duplicate => StatusReason::Duplicate,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -146,77 +87,240 @@ pub struct IssueListArgs {
     /// Show closed issues
     #[arg(short, long)]
     closed: bool,
+
+    /// Show the full issue ID
+    #[arg(long)]
+    full_id: bool,
 }
 
-pub fn list(args: IssueListArgs) {
-    let conn = db::open_db().unwrap();
-    let filter_only = IssueFilters {
-        status: if args.closed {
-            IssueStatusFilter::Closed
-        } else {
-            IssueStatusFilter::Unresolved
-        },
-        name: args.name,
-        limit: None,
-        offset: None,
-    };
-    let total = match issue::count(&conn, &filter_only) {
-        Ok(n) => n as usize,
+#[derive(Args)]
+pub struct IssueShowArgs {
+    /// Issue ID (or prefix)
+    id: String,
+}
+
+#[derive(Args)]
+pub struct IssueAddArgs {
+    /// Title (prompted if omitted)
+    #[arg(short, long)]
+    title: Option<String>,
+
+    /// Description (prompted if omitted)
+    #[arg(short, long, conflicts_with = "description_file")]
+    description: Option<String>,
+
+    /// Read the description from a file
+    #[arg(long, value_name = "PATH")]
+    description_file: Option<PathBuf>,
+
+    /// Issue name (default: "user-issue")
+    #[arg(short, long)]
+    name: Option<String>,
+
+    /// Note cited as evidence, by ID (or prefix); repeatable
+    #[arg(short, long, value_name = "NOTE")]
+    evidence: Vec<String>,
+
+    /// Author username (default: $USER)
+    #[arg(short, long)]
+    user: Option<String>,
+
+    /// Add as 'pending' instead of the default 'open'
+    #[arg(short, long)]
+    pending: bool,
+
+    /// Skip prompts
+    ///
+    /// Requires --title; other values take their defaults
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct IssueDeleteArgs {
+    /// Issue IDs (or prefixes)
+    #[arg(required = true)]
+    ids: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct IssueCloseArgs {
+    /// Issue IDs (or prefixes)
+    #[arg(required = true)]
+    ids: Vec<String>,
+
+    /// Close reason (default: completed)
+    #[arg(short, long, value_enum)]
+    reason: Option<CloseReason>,
+
+    /// The surviving issue a duplicate closes against (ID or prefix)
+    ///
+    /// Requires --reason duplicate
+    #[arg(long, value_name = "ISSUE")]
+    of: Option<String>,
+
+    #[command(flatten)]
+    message: MessageArgs,
+
+    /// Skip prompts
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct IssueOpenArgs {
+    /// Issue IDs (or prefixes)
+    #[arg(required = true)]
+    ids: Vec<String>,
+
+    #[command(flatten)]
+    message: MessageArgs,
+
+    /// Skip prompts
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct IssueCommentArgs {
+    /// Issue IDs (or prefixes)
+    #[arg(required = true)]
+    ids: Vec<String>,
+
+    #[command(flatten)]
+    message: MessageArgs,
+
+    /// Skip confirmation prompt
+    ///
+    /// Requires --message or --message-file
+    #[arg(short, long)]
+    yes: bool,
+}
+
+/// A message body given on the command line or read from a file.
+#[derive(Args)]
+pub struct MessageArgs {
+    /// Message text
+    #[arg(short, long, conflicts_with = "message_file")]
+    message: Option<String>,
+
+    /// Read the message from a file
+    #[arg(long, value_name = "PATH")]
+    message_file: Option<PathBuf>,
+}
+
+impl MessageArgs {
+    /// The message as given, or `None` when neither option was used.
+    fn resolve(&self, command: &str) -> Option<String> {
+        if let Some(text) = &self.message {
+            return Some(text.clone());
+        }
+        let path = self.message_file.as_ref()?;
+        Some(read_text_file(command, "--message-file", path))
+    }
+
+    fn given(&self) -> bool {
+        self.message.is_some() || self.message_file.is_some()
+    }
+}
+
+fn read_text_file(command: &str, option: &str, path: &PathBuf) -> String {
+    match fs::read_to_string(path) {
+        Ok(text) => text,
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("{command}: {option} {}: {e}", path.display());
             std::process::exit(1);
         }
+    }
+}
+
+fn open_store(command: &str) -> Store {
+    match Store::open(&gage_store::store_path()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn list(args: IssueListArgs) {
+    let store = open_store("gage issue list");
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
+    let mut clauses: Vec<String> = Vec::new();
+    if args.closed {
+        clauses.push("status = 'closed'".to_string());
+    } else {
+        clauses.push("status IN ('pending', 'open')".to_string());
+    }
+    if let Some(name) = &args.name {
+        clauses.push(format!("name = '{}'", sql_str(name)));
+    }
+    let where_clause = format!(" WHERE {}", clauses.join(" AND "));
+    let limit_clause = match args.limit.fetch_limit() {
+        Some(n) => format!(" LIMIT {n}"),
+        None => String::new(),
     };
+    let sql = format!(
+        "SELECT id, id_prefix, title, status, status_reason, name, scan, created \
+         FROM issue{where_clause} ORDER BY created DESC{limit_clause}"
+    );
+    let batches = run_query(&ctx, &sql).await;
+    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM issue{where_clause}")).await;
     if total == 0 {
         println!("No issues found");
         return;
     }
 
-    let show = args.limit.show_count(total);
-    let issues = match issue::find(
-        &conn,
-        &IssueFilters {
-            limit: Some(show as u32),
-            ..filter_only
-        },
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let highlighter = style::IdHighlighter::new(match issue::all_ids(&conn) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    });
-
     let header: Vec<String> = ["Id", "Name", "Title", "Scan", "Status", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-
-    let rows: Vec<Vec<String>> = issues
-        .iter()
-        .map(|t| {
-            vec![
-                highlighter.short(&t.id),
-                t.name.clone(),
-                t.title.clone(),
-                t.scan
-                    .as_deref()
-                    .map(short_uuid)
-                    .unwrap_or_default()
-                    .to_string(),
-                t.status.as_str().to_string(),
-                crate::human::format_elapsed_ms(t.created),
-            ]
-        })
-        .collect();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in &batches {
+        let ids = column::<StringArray>(batch, 0);
+        let prefixes = column::<StringArray>(batch, 1);
+        let titles = column::<StringArray>(batch, 2);
+        let statuses = column::<StringArray>(batch, 3);
+        let reasons = column::<StringArray>(batch, 4);
+        let names = column::<StringArray>(batch, 5);
+        let scans = column::<StringArray>(batch, 6);
+        let createds = column::<TimestampMillisecondArray>(batch, 7);
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let shown = if args.full_id { id } else { short_uuid(id) };
+            let status = if reasons.is_valid(i) {
+                format!("{} ({})", statuses.value(i), reasons.value(i))
+            } else {
+                statuses.value(i).to_string()
+            };
+            let scan = if scans.is_valid(i) {
+                short_uuid(scans.value(i)).to_string()
+            } else {
+                String::new()
+            };
+            let created = if createds.is_valid(i) {
+                crate::human::format_elapsed_ms(createds.value(i))
+            } else {
+                String::new()
+            };
+            rows.push(vec![
+                styled_id(shown, prefixes.value(i), IdKind::Gage),
+                names.value(i).to_string(),
+                titles.value(i).to_string(),
+                scan,
+                status,
+                created,
+            ]);
+        }
+    }
+    let shown = rows.len();
 
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
@@ -224,132 +328,130 @@ pub fn list(args: IssueListArgs) {
         .with(
             Width::truncate(term_width)
                 .suffix("…")
-                .priority(PriorityMax::left()),
+                .priority(style::IdAwarePriority::new(args.full_id)),
         )
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::one(2).not(Rows::first()),
+            style::tty(Color::FG_BRIGHT_CYAN),
+        )
         .modify(Columns::new(3..6).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
 
-    args.limit.print_summary(show, total, "issue");
+    args.limit.print_summary(shown, total, "issue");
 }
 
-pub fn show(args: IssueShowArgs) {
-    let conn = db::open_db().unwrap();
-    let issue = match issue::get(&conn, &args.id) {
-        Ok(t) => t,
+fn sql_str(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+pub async fn show(args: IssueShowArgs) {
+    let store = open_store("gage issue show");
+    // The prefix resolves through the store; the rows come from SQL
+    let id = match store.resolve_in(&args.id, Some(ISSUE_TYPE)) {
+        Ok(found) if found.deleted => {
+            eprintln!(
+                "gage issue show: issue {} is deleted",
+                short_uuid(&found.id)
+            );
+            std::process::exit(1);
+        }
+        Ok(found) => found.id,
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("gage issue show: {e}");
             std::process::exit(1);
         }
     };
-
-    let description_display = resolve_description(&issue);
-
-    let session_ids = match issue::issue_sessions(&conn, &issue.id) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
+    let sql = format!(
+        "SELECT name, title, status, status_reason, description, author, scan, \
+         created, modified FROM issue WHERE id = '{id}'"
+    );
+    let batches = run_query(&ctx, &sql).await;
+    let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+        eprintln!("gage issue show: issue {id} not found");
+        std::process::exit(1);
+    };
+    let text = |idx: usize| column::<StringArray>(batch, idx).value(0).to_string();
+    let opt_text = |idx: usize| {
+        let col = column::<StringArray>(batch, idx);
+        col.is_valid(0).then(|| col.value(0).to_string())
+    };
+    let iso = |idx: usize| {
+        let col = column::<TimestampMillisecondArray>(batch, idx);
+        if col.is_valid(0) {
+            gage_core::datetime::ms_to_iso8601(col.value(0))
+        } else {
+            String::new()
         }
     };
-    let mut displays = SessionDisplays::default();
-    let session_displays: Vec<_> = session_ids
-        .iter()
-        .map(|id| (id.as_str(), displays.resolve(id)))
-        .collect();
-
-    let scan_display = match issue.scan.as_deref() {
-        Some(scan_id) => {
-            let created = match scan::get_scan(&conn, scan_id) {
-                Ok(s) => crate::human::format_elapsed_ms(s.created),
-                Err(ScanError::NotFound(_)) => "(unavailable)".to_string(),
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-            };
-            format!("{} · {}", short_uuid(scan_id), created)
-        }
-        None => String::new(),
+    let status = match opt_text(3) {
+        Some(reason) => format!("{} ({reason})", text(2)),
+        None => text(2),
     };
-
     let attrs = vec![
-        ("id", issue.id.clone()),
-        ("name", issue.name.clone()),
-        ("title", issue.title.clone()),
-        (
-            "status",
-            match issue.status_reason {
-                Some(r) => format!("{} ({})", issue.status.as_str(), r.as_str()),
-                None => issue.status.as_str().to_string(),
-            },
-        ),
-        ("description", description_display),
-        (
-            "target",
-            issue
-                .target
-                .as_ref()
-                .map(|t| t.to_uri())
-                .unwrap_or_default(),
-        ),
-        // Placeholder — styled after value_width is known, like the
-        // evidence and events sections.
+        ("id", id.clone()),
+        ("name", text(0)),
+        ("title", text(1)),
+        ("status", status),
+        ("description", opt_text(4).unwrap_or_default()),
+        // Styled after value_width is known, like the evidence and
+        // events sections
         ("sessions", String::new()),
-        ("scan", scan_display),
-        ("author", issue.author.clone()),
-        ("created", gage_core::datetime::ms_to_iso8601(issue.created)),
+        ("author", text(5)),
         (
-            "modified",
-            issue
-                .modified
-                .map(gage_core::datetime::ms_to_iso8601)
+            "scan",
+            opt_text(6)
+                .map(|s| short_uuid(&s).to_string())
                 .unwrap_or_default(),
         ),
+        ("created", iso(7)),
+        ("modified", iso(8)),
     ];
 
-    let evidence = match issue::related_notes(&conn, &issue.id) {
-        Ok(r) => r,
+    let evidence_sql = format!(
+        "SELECT n.id, n.name, n.target, n.text, n.value \
+         FROM issue_evidence e JOIN note n ON n.id = e.note_id \
+         WHERE e.issue_id = '{id}' ORDER BY n.created"
+    );
+    let evidence = run_query(&ctx, &evidence_sql).await;
+    let events_sql = format!(
+        "SELECT event, author, timestamp, from_status, to_status, reason, \"of\", message \
+         FROM issue_event WHERE issue_id = '{id}' ORDER BY event_id"
+    );
+    let events = run_query(&ctx, &events_sql).await;
+    let sessions_sql = format!(
+        "SELECT s.id, s.project, s.driver, s.title \
+         FROM session_issue si JOIN session s ON s.id = si.session_id \
+         WHERE si.issue_id = '{id}' ORDER BY s.id"
+    );
+    let sessions = run_query(&ctx, &sessions_sql).await;
+    let threshold = match Config::load_user() {
+        Ok(config) => config.issues.related_threshold,
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("gage issue show: {e}");
             std::process::exit(1);
         }
     };
+    let related_sql = format!(
+        "SELECT r.related_id, i.status, i.title \
+         FROM related_issue('{id}') r JOIN issue i ON i.id = r.related_id \
+         WHERE r.score >= {threshold} ORDER BY r.score DESC"
+    );
+    let related = run_query(&ctx, &related_sql).await;
 
-    let events = match issue::issue_events_for(&conn, &issue.id) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let config = match gage_core::config::Config::load_user() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-    let related =
-        match gage_db::related::related_issues(&conn, &issue.id, config.issues.related_threshold) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        };
-
-    let related_label = "related";
     let evidence_label = "evidence";
+    let related_label = "related";
     let events_label = "events";
     let label_width = attrs
         .iter()
         .map(|(k, _)| k.len())
         .chain([
-            related_label.len(),
             evidence_label.len(),
+            related_label.len(),
             events_label.len(),
         ])
         .max()
@@ -360,21 +462,30 @@ pub fn show(args: IssueShowArgs) {
         .saturating_sub(label_width + 8)
         .max(20);
 
-    let sessions_display = session_displays
-        .iter()
-        .map(|(id, d)| {
-            let header = console::style(textwrap::fill(
-                &format!("{} · {}", short_uuid(id), d.project),
+    let registry = DriverRegistry::builtin();
+    let mut session_entries: Vec<String> = Vec::new();
+    for batch in &sessions {
+        let ids = column::<StringArray>(batch, 0);
+        let projects = column::<StringArray>(batch, 1);
+        let drivers = column::<StringArray>(batch, 2);
+        let titles = column::<StringArray>(batch, 3);
+        for i in 0..batch.num_rows() {
+            let project = project_display(&registry, drivers.value(i), projects, i);
+            let header = style(textwrap::fill(
+                &format!("{} · {project}", short_uuid(ids.value(i))),
                 value_width,
             ))
             .dim();
-            let title = console::style(textwrap::fill(&d.title, value_width))
-                .cyan()
-                .bright();
-            format!("{header}\n{title}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
+            let title = if titles.is_valid(i) {
+                titles.value(i)
+            } else {
+                ""
+            };
+            let title = style(textwrap::fill(title, value_width)).cyan().bright();
+            session_entries.push(format!("{header}\n{title}"));
+        }
+    }
+    let sessions_display = session_entries.join("\n\n");
 
     let mut rows: Vec<Vec<String>> = attrs
         .into_iter()
@@ -390,66 +501,90 @@ pub fn show(args: IssueShowArgs) {
         })
         .collect();
 
-    if !evidence.is_empty() {
-        let entries: Vec<String> = evidence
-            .iter()
-            .map(|n| {
-                let header = console::style(textwrap::fill(
-                    &format!("{} · {} · {}", short_uuid(&n.id), n.name, n.target.to_uri()),
-                    value_width,
-                ))
-                .dim();
-                let value_str = crate::cmd_note::format_value(&n.value);
-                let value = console::style(textwrap::fill(&value_str, value_width))
-                    .cyan()
-                    .bright();
-                format!("{header}\n{value}")
-            })
-            .collect();
-        rows.push(vec![evidence_label.to_string(), entries.join("\n\n")]);
+    let mut evidence_entries: Vec<String> = Vec::new();
+    for batch in &evidence {
+        let ids = column::<StringArray>(batch, 0);
+        let names = column::<StringArray>(batch, 1);
+        let targets = column::<StringArray>(batch, 2);
+        let texts = column::<StringArray>(batch, 3);
+        let values = column::<StringArray>(batch, 4);
+        for i in 0..batch.num_rows() {
+            let mut header = format!("{} · {}", short_uuid(ids.value(i)), names.value(i));
+            if targets.is_valid(i) {
+                header.push_str(" · ");
+                header.push_str(&target_cell(targets.value(i)));
+            }
+            let raw = if texts.is_valid(i) {
+                texts.value(i)
+            } else {
+                values.value(i)
+            };
+            let header = style(textwrap::fill(&header, value_width)).dim();
+            let value = style(textwrap::fill(&value_cell(raw), value_width))
+                .cyan()
+                .bright();
+            evidence_entries.push(format!("{header}\n{value}"));
+        }
+    }
+    if !evidence_entries.is_empty() {
+        rows.push(vec![
+            evidence_label.to_string(),
+            evidence_entries.join("\n\n"),
+        ]);
     }
 
-    if !related.is_empty() {
-        let entries: Vec<String> = related
-            .iter()
-            .map(|r| {
-                let rel = match issue::get(&conn, &r.id) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        std::process::exit(1);
-                    }
-                };
-                let prefix = format!("{} · {} · ", short_uuid(&rel.id), rel.status.as_str());
-                let wrapped = textwrap::fill(&format!("{prefix}{}", rel.title), value_width);
-                let dimmed = console::style(&prefix).dim().to_string();
-                wrapped.replacen(&prefix, &dimmed, 1)
-            })
-            .collect();
-        rows.push(vec![related_label.to_string(), entries.join("\n")]);
+    let mut related_entries: Vec<String> = Vec::new();
+    for batch in &related {
+        let ids = column::<StringArray>(batch, 0);
+        let statuses = column::<StringArray>(batch, 1);
+        let titles = column::<StringArray>(batch, 2);
+        for i in 0..batch.num_rows() {
+            let prefix = format!("{} · {} · ", short_uuid(ids.value(i)), statuses.value(i));
+            let wrapped = textwrap::fill(&format!("{prefix}{}", titles.value(i)), value_width);
+            let dimmed = style(&prefix).dim().to_string();
+            related_entries.push(wrapped.replacen(&prefix, &dimmed, 1));
+        }
+    }
+    if !related_entries.is_empty() {
+        rows.push(vec![related_label.to_string(), related_entries.join("\n")]);
     }
 
-    if !events.is_empty() {
-        let entries: Vec<String> = events
-            .iter()
-            .map(|ev| {
-                let header = console::style(textwrap::fill(
-                    &format!(
-                        "{} · {} · {}",
-                        ev.event.to_label(),
-                        ev.author,
-                        gage_core::datetime::ms_to_iso8601(ev.timestamp),
-                    ),
-                    value_width,
-                ))
-                .dim();
-                match ev.event.message() {
-                    Some(m) => format!("{}\n{}", header, textwrap::fill(m, value_width)),
-                    None => header.to_string(),
-                }
-            })
-            .collect();
-        rows.push(vec![events_label.to_string(), entries.join("\n\n")]);
+    let mut event_entries: Vec<String> = Vec::new();
+    for batch in &events {
+        let kinds = column::<StringArray>(batch, 0);
+        let authors = column::<StringArray>(batch, 1);
+        let timestamps = column::<TimestampMillisecondArray>(batch, 2);
+        let froms = column::<StringArray>(batch, 3);
+        let tos = column::<StringArray>(batch, 4);
+        let reasons = column::<StringArray>(batch, 5);
+        let ofs = column::<StringArray>(batch, 6);
+        let messages = column::<StringArray>(batch, 7);
+        for i in 0..batch.num_rows() {
+            let opt = |col: &StringArray| col.is_valid(i).then(|| col.value(i).to_string());
+            let label = event_label(
+                kinds.value(i),
+                opt(froms).as_deref(),
+                opt(tos).as_deref(),
+                opt(reasons).as_deref(),
+                opt(ofs).as_deref(),
+            );
+            let header = style(textwrap::fill(
+                &format!(
+                    "{label} · {} · {}",
+                    authors.value(i),
+                    gage_core::datetime::ms_to_iso8601(timestamps.value(i))
+                ),
+                value_width,
+            ))
+            .dim();
+            event_entries.push(match opt(messages) {
+                Some(m) => format!("{header}\n{}", textwrap::fill(&m, value_width)),
+                None => header.to_string(),
+            });
+        }
+    }
+    if !event_entries.is_empty() {
+        rows.push(vec![events_label.to_string(), event_entries.join("\n\n")]);
     }
 
     let table = Table::from_iter(rows)
@@ -459,71 +594,75 @@ pub fn show(args: IssueShowArgs) {
     println!("{table}");
 }
 
-pub fn add(args: IssueAddArgs) {
-    dialog::run("Add issue", || {
-        let title: String = match args.title {
-            Some(ref t) => t.clone(),
-            None => cli::input("Title").placeholder("Issue title").interact()?,
-        };
-        let description: String = match args.description {
-            Some(ref d) => d.clone(),
-            None => cli::input("Description")
-                .placeholder("Type a description")
-                .interact()?,
-        };
-        let description = if description.is_empty() {
-            None
-        } else {
-            Some(description)
-        };
-
-        let id = gage_core::uuid::new_uuid();
-        let author = crate::author::resolve_author(None);
-        let issue = Issue {
-            name: "general".to_string(),
-            id,
-            title,
-            description,
-            target: None,
-            metadata: None,
-            status: if args.pending {
-                IssueStatus::Pending
-            } else {
-                IssueStatus::Open
-            },
-            status_reason: None,
-            created: gage_core::datetime::now_ms(),
-            modified: None,
-            author,
-            scan: None,
-        };
-        let conn = db::open_db().unwrap();
-        issue::insert(&conn, &issue)
-            .map_err(|e| DialogError::Other(anyhow::Error::msg(e.to_string())))?;
-
-        cli::log::remark(format!("id: {}", issue.id))?;
-        Ok("Issue added".into())
-    });
+/// The project of a session row in the driver's display form; the
+/// raw name when the driver is unknown.
+fn project_display(
+    registry: &DriverRegistry,
+    driver: &str,
+    projects: &StringArray,
+    i: usize,
+) -> String {
+    if !projects.is_valid(i) {
+        return String::new();
+    }
+    let name = driver.split_once(' ').map_or(driver, |(name, _)| name);
+    match registry.for_name(name) {
+        Some(driver) => driver.format_project(projects.value(i), usize::MAX),
+        None => projects.value(i).to_string(),
+    }
 }
 
-pub fn delete(args: IssueDeleteArgs) {
-    if args.ids.is_empty() {
-        eprintln!(
-            "gage issue delete: provide one or more issue IDs\n\n\
-             Use 'gage issue list' to show issues"
-        );
+/// One line naming an event: `created pending`, `pending → open`,
+/// `open → closed (wontfix)`, `pending → closed (duplicate of
+/// 2jc5yz17)`, `comment`.
+pub(crate) fn event_label(
+    event: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    reason: Option<&str>,
+    of: Option<&str>,
+) -> String {
+    let mut label = match (event, from, to) {
+        ("create", _, Some(to)) => format!("created {to}"),
+        ("status", Some(from), Some(to)) => format!("{from} → {to}"),
+        (other, _, _) => other.to_string(),
+    };
+    match (reason, of) {
+        (Some(reason), Some(of)) => label.push_str(&format!(" ({reason} of {})", short_uuid(of))),
+        (Some(reason), None) => label.push_str(&format!(" ({reason})")),
+        (None, _) => {}
+    }
+    label
+}
+
+pub fn add(args: IssueAddArgs) {
+    if args.yes && args.title.is_none() {
+        eprintln!("gage issue add: --yes requires --title");
         std::process::exit(1);
     }
+    let store = open_store("gage issue add");
+    let issues = IssueStore::from(&store);
+    let file_description = args
+        .description_file
+        .as_ref()
+        .map(|path| read_text_file("gage issue add", "--description-file", path));
 
-    let conn = db::open_db().unwrap();
-
-    let mut issues: Vec<Issue> = Vec::new();
+    // Resolve every cited note before any prompt, so a bad argument
+    // fails first
+    let mut evidence: Vec<String> = Vec::with_capacity(args.evidence.len());
     let mut errors = 0;
-    for prefix in &args.ids {
-        match issue::get(&conn, prefix) {
-            Ok(i) => issues.push(i),
+    for prefix in &args.evidence {
+        match store.resolve_in(prefix, Some(NOTE_TYPE)) {
+            Ok(found) if found.deleted => {
+                eprintln!(
+                    "gage issue add: evidence {prefix}: note {} is deleted",
+                    short_uuid(&found.id)
+                );
+                errors += 1;
+            }
+            Ok(found) => evidence.push(found.id),
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("gage issue add: evidence {prefix}: {e}");
                 errors += 1;
             }
         }
@@ -532,65 +671,131 @@ pub fn delete(args: IssueDeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = issues.len();
-
-    dialog::run("Delete issues", || {
-        let listing = issues
-            .iter()
-            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let label = if count == 1 { "Issue" } else { "Issues" };
-        cli::log::step(format!("{label}\n{listing}"))?;
+    dialog::run("Add issue", || {
+        let title: String = match args.title {
+            Some(ref t) => {
+                cli::log::step(format!("Title\n{}", style(t).dim()))?;
+                t.clone()
+            }
+            None => cli::input("Title").placeholder("Issue title").interact()?,
+        };
+        let description: Option<String> = match (&args.description, &file_description) {
+            (Some(d), _) => {
+                cli::log::step(format!("Description\n{}", style(d).dim()))?;
+                Some(d.clone())
+            }
+            (None, Some(d)) => {
+                cli::log::step(format!(
+                    "Description\n{}",
+                    style(format!(
+                        "{} ({} bytes)",
+                        args.description_file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                        d.len()
+                    ))
+                    .dim()
+                ))?;
+                Some(d.clone())
+            }
+            (None, None) if args.yes => None,
+            (None, None) => Some(
+                cli::input("Description")
+                    .placeholder("Type a description (optional)")
+                    .required(false)
+                    .interact()?,
+            ),
+        };
+        let description = description.filter(|d| !d.trim().is_empty());
+        let name: String = match args.name {
+            Some(ref n) => n.clone(),
+            None if args.yes => "user-issue".to_string(),
+            None => cli::input("Name")
+                .default_input("user-issue")
+                .placeholder("user-issue")
+                .interact()?,
+        };
+        let username: String = match args.user.clone().or_else(env_user) {
+            Some(u) => u,
+            None if args.yes => {
+                return Err(DialogError::Failed(
+                    "--yes requires --user when $USER is not set".into(),
+                ));
+            }
+            None => cli::input("User")
+                .placeholder("your user name")
+                .interact()?,
+        };
+        if !evidence.is_empty() {
+            let listing = evidence
+                .iter()
+                .map(|id| short_uuid(id).to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            cli::log::step(format!("Evidence\n{}", style(listing).dim()))?;
+        }
+        let status = if args.pending {
+            IssueStatus::Pending
+        } else {
+            IssueStatus::Open
+        };
+        cli::log::step(format!("Status\n{}", style(status).dim()))?;
 
         if !args.yes {
-            let plural = if count == 1 { "issue" } else { "issues" };
-            let prompt = format!("Permanently delete {count} {plural}? This cannot be undone.");
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            let confirmed = cli::confirm("Add this issue?")
+                .initial_value(true)
+                .interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
         }
 
-        let mut deleted = 0;
-        for issue in &issues {
-            if let Err(e) = issue::delete(&conn, &issue.id) {
-                eprintln!("warning: failed to delete {}: {e}", short_uuid(&issue.id));
-            } else {
-                deleted += 1;
-            }
-        }
-
-        let plural = if deleted == 1 { "issue" } else { "issues" };
-        Ok(format!("Deleted {deleted} {plural}").into())
+        let author = resolve_author(Some(username));
+        let id = issues
+            .create(IssueInput {
+                name: &name,
+                title: &title,
+                description: description.as_deref(),
+                author: &author,
+                status,
+                evidence: &evidence,
+                key: None,
+            })
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Issue {} added", short_uuid(&id)).into())
     });
 }
 
-pub fn close(args: IssueCloseArgs) {
-    if args.ids.is_empty() {
-        eprintln!(
-            "gage issue close: provide one or more issue IDs\n\n\
-             Use 'gage issue list' to show issues"
-        );
-        std::process::exit(1);
-    }
+/// `$USER` when set and non-empty
+fn env_user() -> Option<String> {
+    std::env::var_os("USER")
+        .map(|u| u.to_string_lossy().into_owned())
+        .filter(|u| !u.is_empty())
+}
 
-    let conn = db::open_db().unwrap();
-
-    let mut issues: Vec<Issue> = Vec::new();
+/// Resolve every argument to an issue before writing anything, so one
+/// bad argument leaves the store untouched. `accept` rejects an issue
+/// whose current status does not fit the command.
+fn resolve_issues(
+    command: &str,
+    issues: &IssueStore,
+    prefixes: &[String],
+    accept: impl Fn(&IssueFull) -> Result<(), String>,
+) -> Vec<IssueFull> {
+    let mut out: Vec<IssueFull> = Vec::with_capacity(prefixes.len());
     let mut errors = 0;
-    for prefix in &args.ids {
-        match issue::get(&conn, prefix) {
-            Ok(i) => {
-                if i.status == IssueStatus::Closed {
-                    eprintln!("Issue {} is already closed", short_uuid(&i.id));
+    for prefix in prefixes {
+        match issues.get(prefix) {
+            Ok(issue) => match accept(&issue) {
+                Ok(()) => out.push(issue),
+                Err(reason) => {
+                    eprintln!("{command}: issue {}: {reason}", short_uuid(&issue.id));
                     errors += 1;
-                } else {
-                    issues.push(i);
                 }
-            }
+            },
             Err(e) => {
-                eprintln!("Error: {e}");
+                eprintln!("{command}: {e}");
                 errors += 1;
             }
         }
@@ -598,41 +803,96 @@ pub fn close(args: IssueCloseArgs) {
     if errors > 0 {
         std::process::exit(1);
     }
+    out
+}
 
-    let reason = if args.wontfix {
-        StatusReason::WontFix
-    } else if args.duplicate {
-        StatusReason::Duplicate
-    } else {
-        StatusReason::Completed
+fn issues_step(issues: &[IssueFull]) -> Result<(), std::io::Error> {
+    let listing = issues
+        .iter()
+        .map(|i| format!("{} {}", style(short_uuid(&i.id)).dim(), i.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let label = if issues.len() == 1 { "Issue" } else { "Issues" };
+    cli::log::step(format!("{label}\n{listing}"))
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "issue" } else { "issues" }
+}
+
+pub fn delete(args: IssueDeleteArgs) {
+    let store = open_store("gage issue delete");
+    let issues = IssueStore::from(&store);
+    let targets = resolve_issues("gage issue delete", &issues, &args.ids, |_| Ok(()));
+    let count = targets.len();
+
+    dialog::run("Delete issues", || {
+        issues_step(&targets)?;
+        if !args.yes {
+            let prompt = format!(
+                "Permanently delete {count} {}? This cannot be undone.",
+                plural(count)
+            );
+            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let mut deleted = 0;
+        for issue in &targets {
+            if let Err(e) = issues.delete(&issue.id) {
+                eprintln!("warning: failed to delete {}: {e}", short_uuid(&issue.id));
+            } else {
+                deleted += 1;
+            }
+        }
+        Ok(format!("Deleted {deleted} {}", plural(deleted)).into())
+    });
+}
+
+pub fn close(args: IssueCloseArgs) {
+    let store = open_store("gage issue close");
+    let issues = IssueStore::from(&store);
+    let targets = resolve_issues("gage issue close", &issues, &args.ids, |i| {
+        if i.status == IssueStatus::Closed {
+            Err("already closed".to_string())
+        } else {
+            Ok(())
+        }
+    });
+    let reason: StatusReason = args.reason.unwrap_or(CloseReason::Completed).into();
+    // A duplicate close names its survivor, and nothing else does
+    let survivor = match (reason, &args.of) {
+        (StatusReason::Duplicate, Some(of)) => match issues.get(of) {
+            Ok(survivor) => Some(survivor),
+            Err(e) => {
+                eprintln!("gage issue close: --of {of}: {e}");
+                std::process::exit(1);
+            }
+        },
+        (StatusReason::Duplicate, None) => {
+            eprintln!("gage issue close: --reason duplicate requires --of ISSUE");
+            std::process::exit(1);
+        }
+        (_, Some(_)) => {
+            eprintln!("gage issue close: --of applies to --reason duplicate");
+            std::process::exit(1);
+        }
+        (_, None) => None,
     };
-
-    let count = issues.len();
+    let given_message = args.message.resolve("gage issue close");
+    let count = targets.len();
 
     dialog::run("Close issues", || {
-        let listing = issues
-            .iter()
-            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let label = if count == 1 { "Issue" } else { "Issues" };
-        cli::log::step(format!("{label}\n{listing}"))?;
-        cli::log::step(format!("Reason\n{}", console::style(reason.as_str()).dim()))?;
-
-        let message: Option<String> = match args.message {
-            Some(ref m) => {
-                cli::log::step(format!("Message\n{}", console::style(m).dim()))?;
-                Some(m.clone())
-            }
-            None => {
-                let m: String = cli::input("Message")
-                    .placeholder("Type a message (optional)")
-                    .required(false)
-                    .interact()?;
-                if m.is_empty() { None } else { Some(m) }
-            }
-        };
-
+        issues_step(&targets)?;
+        cli::log::step(format!("Reason\n{}", style(reason).dim()))?;
+        if let Some(survivor) = &survivor {
+            cli::log::step(format!(
+                "Duplicate of\n{}",
+                style(format!("{} {}", short_uuid(&survivor.id), survivor.title)).dim()
+            ))?;
+        }
+        let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
         if !args.yes {
             let prompt = if count == 1 {
                 "Close this issue?".to_string()
@@ -644,73 +904,47 @@ pub fn close(args: IssueCloseArgs) {
                 return Err(DialogError::Canceled);
             }
         }
-
-        let author = crate::author::resolve_author(None);
+        let author = resolve_author(None);
         let mut closed = 0;
-        for issue in &issues {
-            if let Err(e) = issue::set_status(
-                &conn,
-                &issue.id,
-                IssueStatus::Closed,
-                Some(reason),
-                &author,
-                message.as_deref(),
-            ) {
+        for issue in &targets {
+            let result = match &survivor {
+                Some(survivor) => {
+                    issues.close_duplicate(&issue.id, &survivor.id, &author, message.as_deref())
+                }
+                None => issues.set_status(
+                    &issue.id,
+                    IssueStatus::Closed,
+                    Some(reason),
+                    &author,
+                    message.as_deref(),
+                ),
+            };
+            if let Err(e) = result {
                 eprintln!("warning: failed to close {}: {e}", short_uuid(&issue.id));
             } else {
                 closed += 1;
             }
         }
-
-        let plural = if closed == 1 { "issue" } else { "issues" };
-        Ok(format!("Closed {closed} {plural} ({})", reason.as_str()).into())
+        Ok(format!("Closed {closed} {} ({reason})", plural(closed)).into())
     });
 }
 
 pub fn open(args: IssueOpenArgs) {
-    if args.ids.is_empty() {
-        eprintln!(
-            "gage issue open: provide one or more issue IDs\n\n\
-             Use 'gage issue list' to show issues"
-        );
-        std::process::exit(1);
-    }
-
-    let conn = db::open_db().unwrap();
-
-    let mut issues: Vec<Issue> = Vec::new();
-    let mut errors = 0;
-    for prefix in &args.ids {
-        match issue::get(&conn, prefix) {
-            Ok(i) => {
-                if i.status == IssueStatus::Open {
-                    eprintln!("Issue {} is already open", short_uuid(&i.id));
-                    errors += 1;
-                } else {
-                    issues.push(i);
-                }
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                errors += 1;
-            }
+    let store = open_store("gage issue open");
+    let issues = IssueStore::from(&store);
+    let targets = resolve_issues("gage issue open", &issues, &args.ids, |i| {
+        if i.status == IssueStatus::Open {
+            Err("already open".to_string())
+        } else {
+            Ok(())
         }
-    }
-    if errors > 0 {
-        std::process::exit(1);
-    }
-
-    let count = issues.len();
+    });
+    let given_message = args.message.resolve("gage issue open");
+    let count = targets.len();
 
     dialog::run("Open issues", || {
-        let listing = issues
-            .iter()
-            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let label = if count == 1 { "Issue" } else { "Issues" };
-        cli::log::step(format!("{label}\n{listing}"))?;
-
+        issues_step(&targets)?;
+        let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
         if !args.yes {
             let prompt = if count == 1 {
                 "Open this issue?".to_string()
@@ -722,73 +956,50 @@ pub fn open(args: IssueOpenArgs) {
                 return Err(DialogError::Canceled);
             }
         }
-
-        let author = crate::author::resolve_author(None);
+        let author = resolve_author(None);
         let mut opened = 0;
-        for issue in &issues {
-            if let Err(e) = issue::set_status(
-                &conn,
+        for issue in &targets {
+            if let Err(e) = issues.set_status(
                 &issue.id,
                 IssueStatus::Open,
                 None,
                 &author,
-                args.message.as_deref(),
+                message.as_deref(),
             ) {
                 eprintln!("warning: failed to open {}: {e}", short_uuid(&issue.id));
             } else {
                 opened += 1;
             }
         }
-
-        let plural = if opened == 1 { "issue" } else { "issues" };
-        Ok(format!("Opened {opened} {plural}").into())
+        Ok(format!("Opened {opened} {}", plural(opened)).into())
     });
 }
 
 pub fn comment(args: IssueCommentArgs) {
-    if args.ids.is_empty() {
-        eprintln!(
-            "gage issue comment: provide one or more issue IDs\n\n\
-             Use 'gage issue list' to show issues"
-        );
+    if args.yes && !args.message.given() {
+        eprintln!("gage issue comment: --yes requires --message or --message-file");
         std::process::exit(1);
     }
-
-    let conn = db::open_db().unwrap();
-
-    let mut issues: Vec<Issue> = Vec::new();
-    let mut errors = 0;
-    for prefix in &args.ids {
-        match issue::get(&conn, prefix) {
-            Ok(i) => issues.push(i),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                errors += 1;
-            }
-        }
-    }
-    if errors > 0 {
-        std::process::exit(1);
-    }
-
-    let count = issues.len();
+    let store = open_store("gage issue comment");
+    let issues = IssueStore::from(&store);
+    let targets = resolve_issues("gage issue comment", &issues, &args.ids, |_| Ok(()));
+    let given_message = args.message.resolve("gage issue comment");
+    let count = targets.len();
 
     dialog::run("Comment on issues", || {
-        let listing = issues
-            .iter()
-            .map(|i| format!("{} {}", console::style(short_uuid(&i.id)).dim(), i.title))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let label = if count == 1 { "Issue" } else { "Issues" };
-        cli::log::step(format!("{label}\n{listing}"))?;
-
-        let message: String = match args.message {
-            Some(ref m) => m.clone(),
+        issues_step(&targets)?;
+        let message: String = match given_message {
+            Some(ref m) => {
+                cli::log::step(format!("Message\n{}", style(m.trim_end()).dim()))?;
+                m.clone()
+            }
             None => cli::input("Message")
                 .placeholder("Type a comment")
                 .interact()?,
         };
-
+        if message.trim().is_empty() {
+            return Err(DialogError::Failed("comment is empty".into()));
+        }
         if !args.yes {
             let prompt = if count == 1 {
                 "Add this comment?".to_string()
@@ -800,11 +1011,10 @@ pub fn comment(args: IssueCommentArgs) {
                 return Err(DialogError::Canceled);
             }
         }
-
-        let author = crate::author::resolve_author(None);
+        let author = resolve_author(None);
         let mut commented = 0;
-        for issue in &issues {
-            if let Err(e) = issue::comment(&conn, &issue.id, &author, &message) {
+        for issue in &targets {
+            if let Err(e) = issues.comment(&issue.id, &author, &message) {
                 eprintln!(
                     "warning: failed to comment on {}: {e}",
                     short_uuid(&issue.id)
@@ -813,115 +1023,29 @@ pub fn comment(args: IssueCommentArgs) {
                 commented += 1;
             }
         }
-
-        let plural = if commented == 1 { "issue" } else { "issues" };
-        Ok(format!("Commented on {commented} {plural}").into())
+        Ok(format!("Commented on {commented} {}", plural(commented)).into())
     });
 }
 
-fn resolve_description(issue: &Issue) -> String {
-    let Some(raw) = issue.description.as_deref() else {
-        return String::new();
-    };
-    let resolver = issue_text_resolver(issue);
-    match resolver.resolve(raw.to_string()) {
-        Ok(text) => text,
-        Err(e) => format!("(unresolved {raw}: {e})"),
-    }
-}
-
-fn issue_text_resolver(issue: &Issue) -> TextResolver {
-    let registry = ScannerRegistry::load();
-    let r = TextResolver::new();
-    match issue.author.strip_prefix("scanner:") {
-        Some(name) => match ScannerScheme::with_scanner_name(&registry, name) {
-            Ok(s) => r.with_scheme("scanner", s),
-            Err(e) => r.with_scheme("scanner", ErrorScheme::new(e.to_string())),
-        },
-        None => r.with_scheme("scanner", ScannerScheme::absolute_only()),
-    }
-}
-
-/// Session display fields per linked session, cached so each session
-/// resolves once.
-#[derive(Default)]
-pub struct SessionDisplays {
-    map: HashMap<String, SessionDisplay>,
-    /// Session walk from the last unknown id; sessions can appear
-    /// while a scan runs, so an id missing from it refreshes the walk
-    paths: HashMap<String, PathBuf>,
-    /// Resolved project display per encoded directory name
-    projects: HashMap<String, String>,
-}
-
-#[derive(Clone)]
-pub struct SessionDisplay {
-    pub project: String,
-    pub title: String,
-}
-
-impl SessionDisplays {
-    /// A session's display fields. Both fall back to a placeholder
-    /// when the session is not on disk.
-    pub fn resolve(&mut self, id: &str) -> SessionDisplay {
-        if let Some(display) = self.map.get(id) {
-            return display.clone();
+/// An optional message: the given one, shown; or a prompt unless
+/// `--yes`, in which case none.
+fn prompt_message(
+    given: Option<String>,
+    yes: bool,
+    placeholder: &str,
+) -> Result<Option<String>, DialogError> {
+    match given {
+        Some(m) => {
+            cli::log::step(format!("Message\n{}", style(m.trim_end()).dim()))?;
+            Ok(Some(m))
         }
-        if !self.paths.contains_key(id) {
-            self.paths = session::ls_sessions().into_iter().collect();
+        None if yes => Ok(None),
+        None => {
+            let m: String = cli::input("Message")
+                .placeholder(placeholder)
+                .required(false)
+                .interact()?;
+            Ok(if m.trim().is_empty() { None } else { Some(m) })
         }
-        let display = match stat_session(&self.paths, id) {
-            Some(info) => {
-                let encoded = info.project_name().into_owned();
-                let home = ClaudeHome::from_env().ok();
-                let project = self
-                    .projects
-                    .entry(encoded)
-                    .or_insert_with_key(|encoded| project_display(home.as_ref(), encoded))
-                    .clone();
-                let source = crate::source::open_source_or_exit("gage issue", "");
-                let store = crate::source::index_store_or_exit("gage issue", source.as_ref());
-                SessionDisplay {
-                    project,
-                    title: session_title(&store, &info),
-                }
-            }
-            None => SessionDisplay {
-                project: "(unavailable)".to_string(),
-                title: "(unavailable)".to_string(),
-            },
-        };
-        self.map.insert(id.to_string(), display.clone());
-        display
     }
-}
-
-fn stat_session(paths: &HashMap<String, PathBuf>, id: &str) -> Option<SessionInfo> {
-    let src = paths.get(id)?;
-    let meta = std::fs::metadata(src).ok()?;
-    Some(SessionInfo {
-        id: id.to_string(),
-        src: src.clone(),
-        mtime: meta.modified().unwrap(),
-        size: meta.len(),
-    })
-}
-
-fn session_title(store: &gage_claude::index::IndexStore, s: &SessionInfo) -> String {
-    let title = match store.session_summary(&s.id, s.mtime) {
-        Some(summary) => summary.title,
-        None => match gage_claude::index::derive_session(&s.id, &s.src) {
-            Ok(d) => {
-                if let Err(e) = store.put_session_summary(&s.id, &d.summary) {
-                    tracing::warn!(session_id = %s.id, "failed to write summary cache: {e}");
-                }
-                d.summary.title
-            }
-            Err(e) => {
-                tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
-                None
-            }
-        },
-    };
-    title.unwrap_or_else(|| s.project_name().into_owned())
 }

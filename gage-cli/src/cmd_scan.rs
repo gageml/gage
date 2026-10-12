@@ -56,7 +56,7 @@ use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 
 use crate::cmd_dataset::{self, AddEvent};
-use crate::cmd_issue2::event_label;
+use crate::cmd_issue::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
