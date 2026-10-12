@@ -25,7 +25,7 @@ use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, scanner_sourc
 use gage_runtime::{LOG_TARGET, Output, TaskOutput};
 use gage_scan::recover::{self, Recovered};
 use gage_scan::scan_dir::scans_dir;
-use gage_scan::{CompiledScanner, Event, ScanConfig, ScanOutput, summary_line};
+use gage_scan::{CompiledScanner, Event, ScanConfig, ScanError, ScanOutput, summary_line};
 use gage_session::Driver;
 use gage_store::ScanDirLayout;
 use gage_store::{
@@ -235,6 +235,14 @@ pub struct ScanRunArgs {
     /// and no notes from earlier scans are carried forward.
     #[arg(long)]
     invalidate: bool,
+
+    /// Run when a required attachment is missing
+    ///
+    /// A task that needs an attachment the dataset does not have runs
+    /// anyway and fails on its own. Without this option the scan does
+    /// not start.
+    #[arg(long)]
+    ignore_missing_attachments: bool,
 
     /// Tag new scan run
     #[arg(long, value_name = "NAME", long_help = format!("Tag new scan run\n\n{TAG_HELP}"))]
@@ -1563,6 +1571,7 @@ struct ScanPrep {
     jobs: usize,
     agent_jobs: usize,
     invalidate: bool,
+    ignore_missing_attachments: bool,
     /// The tag for the scan run, checked before the run starts
     tag: Option<String>,
     force_tag: bool,
@@ -1687,6 +1696,7 @@ async fn prepare_scan_dialog(
         jobs: args.jobs,
         agent_jobs: args.agent_jobs,
         invalidate: args.invalidate,
+        ignore_missing_attachments: args.ignore_missing_attachments,
         tag: args.tag,
         force_tag: args.force_tag,
         progress_ui: !args.no_progress && io::stdout().is_terminal(),
@@ -1737,6 +1747,7 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
         agent_jobs: prep.agent_jobs,
         driver,
         invalidate: prep.invalidate,
+        ignore_missing_attachments: prep.ignore_missing_attachments,
     };
     let result = if !prep.progress_ui {
         // Headless: task output and the scan's own lines go to the
@@ -1823,6 +1834,11 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
 
     let outcome = match result {
         Ok(outcome) => outcome,
+        Err(e @ ScanError::MissingAttachments(_)) => {
+            eprintln!("gage scan: {e}");
+            eprintln!("gage scan: use --ignore-missing-attachments to run anyway");
+            std::process::exit(1);
+        }
         Err(e) => {
             eprintln!("gage scan: {e}");
             std::process::exit(1);

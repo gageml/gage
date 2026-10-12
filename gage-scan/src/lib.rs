@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::render_task_error;
 use gage_core::datetime::now_ms;
+use gage_core::glob::glob_match;
 use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::{new_uuid, short_uuid};
 use gage_registry::scanner::{Scanner, TaskDef, TaskKind};
@@ -318,6 +319,17 @@ pub enum ScanError {
     ScanDir(io::Error),
     /// The scan could not be applied to the store
     Store(StoreError),
+    /// A planned task needs an attachment the dataset does not have
+    MissingAttachments(Vec<MissingAttachment>),
+}
+
+/// One `attachments.needs` pattern of a planned task that no
+/// attachment of the dataset matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingAttachment {
+    pub scanner: String,
+    pub task: String,
+    pub pattern: String,
 }
 
 impl fmt::Display for ScanError {
@@ -329,6 +341,13 @@ impl fmt::Display for ScanError {
             ScanError::Plan(e) => write!(f, "planning the scan: {e}"),
             ScanError::ScanDir(e) => write!(f, "writing scan directory: {e}"),
             ScanError::Store(e) => write!(f, "writing scan to the store: {e}"),
+            ScanError::MissingAttachments(missing) => {
+                let needs: Vec<String> = missing
+                    .iter()
+                    .map(|m| format!("{}:{} needs '{}'", m.scanner, m.task, m.pattern))
+                    .collect();
+                write!(f, "the dataset has no attachment for: {}", needs.join(", "))
+            }
         }
     }
 }
@@ -368,6 +387,10 @@ pub struct ScanConfig<'a> {
     /// Ignore prior work: every object's high-water mark is 0 and no
     /// notes are carried forward. Watermarks are still written.
     pub invalidate: bool,
+    /// Run when a task's `attachments.needs` pattern matches no
+    /// attachment of the dataset. The miss is a warning instead of
+    /// an error, and the task runs and fails on its own.
+    pub ignore_missing_attachments: bool,
 }
 
 /// What a finished scan wrote.
@@ -418,6 +441,7 @@ pub async fn scan(
         }),
         None => None,
     };
+    let attachment_warnings = check_attachments(store, config, scanners, &plan)?;
     let task_names: Vec<Vec<String>> = scanners
         .iter()
         .map(|s| {
@@ -475,6 +499,7 @@ pub async fn scan(
             .map(|s| (s.name.clone(), s.task_unit()))
             .collect(),
         plan: Arc::new(plan),
+        attachment_warnings,
         scan_dir,
         cancel,
         scope: scope.clone(),
@@ -495,6 +520,79 @@ fn check_unique_names(scanners: &[CompiledScanner]) -> Result<(), ScanError> {
     Ok(())
 }
 
+/// A warning about one planned task, raised before the task runs.
+struct TaskWarning {
+    scanner: String,
+    task: String,
+    message: String,
+}
+
+/// Match every planned task's declared attachments against the
+/// dataset's. A `needs` pattern no attachment matches fails the scan
+/// before anything is written, or warns when the config ignores
+/// misses; a `wants` pattern no attachment matches warns. A scan
+/// without a dataset has no attachments.
+fn check_attachments(
+    store: &Store,
+    config: &ScanConfig<'_>,
+    scanners: &[CompiledScanner],
+    plan: &Plan,
+) -> Result<Vec<TaskWarning>, ScanError> {
+    let names: Vec<String> = match config.dataset {
+        Some(sha) => DatasetStore::from(store)
+            .attachments_at(sha)?
+            .into_iter()
+            .filter_map(|a| a.attrs.name)
+            .collect(),
+        None => Vec::new(),
+    };
+    let present = |pattern: &str| names.iter().any(|name| glob_match(pattern, name));
+    let mut missing = Vec::new();
+    let mut warnings = Vec::new();
+    for t in &plan.tasks {
+        let Some(def) = scanners
+            .iter()
+            .find(|s| s.name == t.scanner)
+            .and_then(|s| s.tasks.get(&t.task))
+        else {
+            continue;
+        };
+        for pattern in &def.attachments.needs {
+            if present(pattern) {
+                continue;
+            }
+            if config.ignore_missing_attachments {
+                warnings.push(TaskWarning {
+                    scanner: t.scanner.clone(),
+                    task: t.task.clone(),
+                    message: format!(
+                        "needs attachment '{pattern}' but the dataset has none; running anyway"
+                    ),
+                });
+            } else {
+                missing.push(MissingAttachment {
+                    scanner: t.scanner.clone(),
+                    task: t.task.clone(),
+                    pattern: pattern.clone(),
+                });
+            }
+        }
+        for pattern in &def.attachments.wants {
+            if !present(pattern) {
+                warnings.push(TaskWarning {
+                    scanner: t.scanner.clone(),
+                    task: t.task.clone(),
+                    message: format!("wants attachment '{pattern}' but the dataset has none"),
+                });
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(ScanError::MissingAttachments(missing));
+    }
+    Ok(warnings)
+}
+
 /// One scan in progress.
 struct Run<'a, F: FnMut(Event)> {
     id: String,
@@ -502,6 +600,9 @@ struct Run<'a, F: FnMut(Event)> {
     /// Compiled artifacts by scanner name
     units: HashMap<String, TaskUnit>,
     plan: Arc<Plan>,
+    /// Attachment misses found before the run, logged and reported
+    /// once the scan has started
+    attachment_warnings: Vec<TaskWarning>,
     scan_dir: ScanDir,
     cancel: &'a CancellationToken,
     scope: LogScope,
@@ -589,6 +690,18 @@ impl<F: FnMut(Event)> Run<'_, F> {
                     message,
                 });
             }
+        }
+        for w in std::mem::take(&mut self.attachment_warnings) {
+            scan_logs.record(
+                Level::Warn,
+                &format!("{}:{}", w.scanner, w.task),
+                &w.message,
+            )?;
+            (self.on_event)(Event::Warning {
+                scanner: w.scanner,
+                task: w.task,
+                message: w.message,
+            });
         }
         let mut dispatch = Dispatch {
             deps: plan.deps.clone(),
@@ -1201,9 +1314,20 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(store, &config, scanners, cancel, |e| events.push(e)).await;
         (outcome, events)
+    }
+
+    fn warnings(events: &[Event]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Warning { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn outputs(events: &[Event]) -> Vec<&Output> {
@@ -1716,6 +1840,7 @@ mod tests {
             agent_jobs: 1,
             driver: driver.clone(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -1788,6 +1913,7 @@ mod tests {
             agent_jobs: 8,
             driver: driver.clone(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -1839,6 +1965,7 @@ mod tests {
             agent_jobs: 8,
             driver: driver.clone(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -1909,6 +2036,7 @@ mod tests {
             agent_jobs: 8,
             driver: Arc::new(ScriptedDriver::new()),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -1977,6 +2105,7 @@ mod tests {
             agent_jobs: 8,
             driver,
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -2106,6 +2235,7 @@ mod tests {
             agent_jobs: 8,
             driver,
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -2821,6 +2951,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -2916,6 +3047,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -2974,6 +3106,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -3227,6 +3360,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let mut events = Vec::new();
         let outcome = scan(
@@ -3453,6 +3587,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -3554,6 +3689,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -3739,6 +3875,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -3988,6 +4125,7 @@ mod tests {
                     agent_jobs: 8,
                     driver: claude_driver(),
                     invalidate: false,
+                    ignore_missing_attachments: false,
                 };
                 let outcome = scan(
                     store,
@@ -4237,6 +4375,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -4259,6 +4398,140 @@ mod tests {
                 &Output::Println("1".into()),
             ]
         );
+    }
+
+    const NEEDY_SCANNER: &str = r###"
+        pub const SCANNER = #{
+            name: "needy",
+            description: "Declares attachments",
+            tasks: #{
+                main: #{ attachments: #{ needs: ["claude-config"], wants: ["stack-*"] } },
+            },
+        };
+
+        pub async fn main() {
+            println!("ran");
+        }
+    "###;
+
+    /// A `needs` pattern no attachment of the dataset matches fails
+    /// the scan before its directory exists. Ignoring misses runs the
+    /// task with a warning for the need and one for the unmatched
+    /// want.
+    #[tokio::test]
+    async fn a_missing_needed_attachment_fails_the_scan_before_it_starts() {
+        let (tmp, store) = open_store();
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        let dataset_sha = datasets.get(&dataset).unwrap().commit_sha;
+        let (_dir, compiled) = compile_source(NEEDY_SCANNER);
+        let compiled = compiled.unwrap();
+        let scans_dir = tmp.path().join("scans");
+        let mut config = ScanConfig {
+            scans_dir: &scans_dir,
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 1,
+            agent_jobs: 1,
+            driver: claude_driver(),
+            invalidate: false,
+            ignore_missing_attachments: false,
+        };
+        let mut events = Vec::new();
+        let err = scan(
+            &store,
+            &config,
+            slice::from_ref(&compiled),
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the dataset has no attachment for: needy:main needs 'claude-config'"
+        );
+        assert!(!scans_dir.exists(), "nothing is written before the check");
+        assert!(events.is_empty(), "{events:?}");
+
+        config.ignore_missing_attachments = true;
+        let mut events = Vec::new();
+        let outcome = scan(
+            &store,
+            &config,
+            slice::from_ref(&compiled),
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.completed, 1);
+        assert_eq!(outputs(&events), [&Output::Println("ran".into())]);
+        assert_eq!(
+            warnings(&events),
+            [
+                "needs attachment 'claude-config' but the dataset has none; running anyway",
+                "wants attachment 'stack-*' but the dataset has none",
+            ]
+        );
+    }
+
+    /// Attachments the dataset has, matched by name or by pattern,
+    /// satisfy `needs` and `wants` without a warning.
+    #[tokio::test]
+    async fn present_attachments_satisfy_needs_and_wants() {
+        use gage_store::{AttachmentSpec, AttachmentStore};
+
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("files");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), "{}").unwrap();
+        let attachments = AttachmentStore::from(&store);
+        let pats = ["settings.json".to_string()];
+        let ids: Vec<String> = ["claude-config", "stack-files"]
+            .iter()
+            .map(|name| {
+                attachments
+                    .add(&AttachmentSpec {
+                        name: Some(name),
+                        key: None,
+                        targets: &[],
+                        root: &root,
+                        includes: &pats,
+                        excludes: &[],
+                    })
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        datasets.attachments_link(&dataset, &ids).unwrap();
+        let dataset_sha = datasets.get(&dataset).unwrap().commit_sha;
+
+        let (_dir, compiled) = compile_source(NEEDY_SCANNER);
+        let config = ScanConfig {
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 1,
+            agent_jobs: 1,
+            driver: claude_driver(),
+            invalidate: false,
+            ignore_missing_attachments: false,
+        };
+        let mut events = Vec::new();
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.completed, 1);
+        assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
     }
 
     /// `key(k).once()` writes once: a second scan finds the issue live
@@ -4313,6 +4586,7 @@ mod tests {
                     agent_jobs: 8,
                     driver: claude_driver(),
                     invalidate: false,
+                    ignore_missing_attachments: false,
                 };
                 let outcome = scan(
                     store,
@@ -4451,6 +4725,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -4670,6 +4945,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             store,
@@ -5393,6 +5669,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let outcome = scan(
             &store,
@@ -5474,6 +5751,7 @@ mod tests {
             agent_jobs: 8,
             driver: claude_driver(),
             invalidate: false,
+            ignore_missing_attachments: false,
         };
         let mut events = Vec::new();
         let outcome = scan(
